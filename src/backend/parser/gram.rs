@@ -9,6 +9,7 @@ use super::comments::{
 };
 use super::parsenodes::*;
 use crate::backend::executor::Value;
+use crate::backend::utils::misc::notices::push_notice;
 use crate::backend::utils::misc::stack_depth::{
     StackDepthGuard, check_parse_stack_depth, effective_default_max_stack_depth_kb,
 };
@@ -239,6 +240,9 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_alter_table_add_unnamed_constraint_statement(&sql, options)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_table_set_without_cluster_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_alter_table_cluster_on_statement(&sql)? {
@@ -1024,7 +1028,7 @@ fn try_parse_alter_table_multi_action_statement(
                 only = add_column.only;
                 table_name = Some(add_column.table_name.clone());
             }
-            columns.push(add_column.column);
+            columns.push(add_column);
         }
         return Ok(Some(Statement::AlterTableAddColumns(
             AlterTableAddColumnsStatement {
@@ -1223,7 +1227,36 @@ fn try_parse_alter_table_cluster_on_statement(sql: &str) -> Result<Option<Statem
         index_name: schema_name
             .map(|schema| format!("{schema}.{index_name}"))
             .unwrap_or(index_name),
+        mark_only: true,
     })))
+}
+
+fn try_parse_alter_table_set_without_cluster_statement(
+    sql: &str,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter table") {
+        return Ok(None);
+    }
+    let rest = consume_keyword(trimmed, "alter table").trim_start();
+    let (if_exists, only, table_name, rest) = parse_alter_table_target_sql(rest)?;
+    let rest = rest.trim_start();
+    let Some(rest) = consume_keywords(rest, &["set", "without", "cluster"]) else {
+        return Ok(None);
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE SET WITHOUT CLUSTER statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(Some(Statement::AlterTableSetWithoutCluster(
+        AlterTableSetWithoutClusterStatement {
+            if_exists,
+            only,
+            table_name,
+        },
+    )))
 }
 
 fn try_parse_alter_table_add_column_with_fdw_options(
@@ -6607,7 +6640,59 @@ fn try_parse_view_statement(sql: &str) -> Result<Option<Statement>, ParseError> 
         return build_alter_view_rename_statement(trimmed)
             .map(|stmt| Some(Statement::AlterViewRename(stmt)));
     }
+    if lowered.contains(" reset ") {
+        return build_alter_view_reset_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTableReset(stmt)));
+    }
     Ok(None)
+}
+
+fn build_alter_view_reset_statement(sql: &str) -> Result<AlterTableResetStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim(), "alter view").trim_start();
+    let if_exists = if keyword_at_start(rest, "if exists") {
+        rest = consume_keyword(rest, "if exists").trim_start();
+        true
+    } else {
+        false
+    };
+    let (parts, next) = parse_qualified_identifier_parts(rest)?;
+    let table_name = parts.join(".");
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "reset") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER VIEW RESET",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "reset").trim_start();
+    let Some(inner) = rest
+        .strip_prefix('(')
+        .and_then(|tail| tail.strip_suffix(')'))
+    else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RESET option list",
+            actual: rest.into(),
+        });
+    };
+    let options = split_comma_separated_sql(inner)?
+        .into_iter()
+        .map(|option| {
+            let (name, tail) = parse_sql_identifier(option)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "RESET option name",
+                    actual: tail.trim().into(),
+                });
+            }
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AlterTableResetStatement {
+        if_exists,
+        only: false,
+        table_name,
+        options,
+    })
 }
 
 fn try_parse_materialized_view_access_method_statement(
@@ -17795,6 +17880,22 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
     let collation_name = schema_name
         .map(|schema| format!("{schema}.{base_name}"))
         .unwrap_or(base_name);
+    let rest = rest.trim_start();
+    if rest.starts_with('(') {
+        let (options_sql, trailing) = take_parenthesized_segment(rest)?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: trailing.trim().into(),
+            });
+        }
+        return Ok(CreateCollationStatement {
+            collation_name,
+            kind: CreateCollationKind::Options {
+                options: parse_collation_option_assignments(&options_sql)?,
+            },
+        });
+    }
     let Some(rest) = consume_keyword_if_present(rest, "from") else {
         return Err(ParseError::UnexpectedToken {
             expected: "FROM",
@@ -17813,8 +17914,49 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
         .unwrap_or(source_base);
     Ok(CreateCollationStatement {
         collation_name,
-        source_collation,
+        kind: CreateCollationKind::From { source_collation },
     })
+}
+
+fn parse_collation_option_assignments(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    split_comma_separated_sql(input)?
+        .into_iter()
+        .map(|part| {
+            let (name_sql, value_sql) =
+                part.split_once('=')
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "collation option assignment",
+                        actual: part.trim().into(),
+                    })?;
+            let (name, tail) = parse_sql_identifier(name_sql)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "collation option name",
+                    actual: tail.trim().into(),
+                });
+            }
+            let value_sql = value_sql.trim();
+            let value = if let Some(literal_len) = scan_string_literal_token_len(value_sql) {
+                if !value_sql[literal_len..].trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "end of collation option",
+                        actual: value_sql[literal_len..].trim().into(),
+                    });
+                }
+                decode_string_literal(&value_sql[..literal_len])?
+            } else {
+                let (value, tail) = parse_sql_identifier(value_sql)?;
+                if !tail.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "collation option value",
+                        actual: tail.trim().into(),
+                    });
+                }
+                value
+            };
+            Ok(RelOption { name, value })
+        })
+        .collect()
 }
 
 fn build_drop_conversion_statement(sql: &str) -> Result<DropConversionStatement, ParseError> {
@@ -18469,6 +18611,7 @@ fn build_discard(pair: Pair<'_, Rule>) -> Result<DiscardStatement, ParseError> {
 }
 
 fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    let location = pair.as_span().start() + 1;
     let name = pair
         .into_inner()
         .find(|part| part.as_rule() == Rule::identifier)
@@ -18477,12 +18620,18 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
     Ok(SelectStatement {
         with: Vec::new(),
         with_recursive: false,
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
-        from: Some(FromItem::Table { name, only: false }),
+        from: Some(FromItem::Table {
+            name,
+            only: false,
+            location: Some(location),
+        }),
         targets: vec![SelectItem {
             expr: SqlExpr::Column("*".into()),
             output_name: "*".into(),
+            location: Some(location),
         }],
         where_clause: None,
         group_by: Vec::new(),
@@ -18490,9 +18639,13 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),
+        order_by_location: None,
         limit: None,
+        limit_location: None,
         offset: None,
+        offset_location: None,
         locking_clause: None,
+        locking_location: None,
         locking_targets: Vec::new(),
         locking_nowait: false,
         set_operation: None,
@@ -18837,6 +18990,7 @@ fn build_cluster(pair: Pair<'_, Rule>) -> Result<ClusterStatement, ParseError> {
     Ok(ClusterStatement {
         table_name: table_name.clone(),
         index_name: index_name.clone(),
+        mark_only: false,
     })
 }
 
@@ -19990,9 +20144,13 @@ fn build_simple_select_statement(
     let mut having = None;
     let mut window_clauses = Vec::new();
     let mut order_by = Vec::new();
+    let mut order_by_location = None;
     let mut limit = None;
+    let mut limit_location = None;
     let mut offset = None;
+    let mut offset_location = None;
     let mut locking_clause = None;
+    let mut locking_location = None;
     let mut locking_targets = Vec::new();
     let mut locking_nowait = false;
     for part in parts {
@@ -20023,10 +20181,20 @@ fn build_simple_select_statement(
                         }
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
                         Rule::window_clause => window_clauses = build_window_clause(inner)?,
-                        Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
-                        Rule::limit_clause => limit = build_limit_clause(inner)?,
-                        Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
+                        Rule::order_by_clause => {
+                            order_by_location = Some(inner.as_span().start() + 1);
+                            order_by = build_order_by_clause(inner)?;
+                        }
+                        Rule::limit_clause => {
+                            limit_location = Some(inner.as_span().start() + 1);
+                            limit = build_limit_clause(inner)?;
+                        }
+                        Rule::offset_clause => {
+                            offset_location = Some(inner.as_span().start() + 1);
+                            offset = Some(build_offset_clause(inner)?);
+                        }
                         Rule::locking_clause => {
+                            locking_location = Some(inner.as_span().start() + 1);
                             let (strength, targets, nowait) = build_locking_clause(inner)?;
                             locking_clause = Some(strength);
                             locking_targets = targets;
@@ -20046,10 +20214,20 @@ fn build_simple_select_statement(
             }
             Rule::having_clause => having = Some(build_having_clause(part)?),
             Rule::window_clause => window_clauses = build_window_clause(part)?,
-            Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = build_limit_clause(part)?,
-            Rule::offset_clause => offset = Some(build_offset_clause(part)?),
+            Rule::order_by_clause => {
+                order_by_location = Some(part.as_span().start() + 1);
+                order_by = build_order_by_clause(part)?;
+            }
+            Rule::limit_clause => {
+                limit_location = Some(part.as_span().start() + 1);
+                limit = build_limit_clause(part)?;
+            }
+            Rule::offset_clause => {
+                offset_location = Some(part.as_span().start() + 1);
+                offset = Some(build_offset_clause(part)?);
+            }
             Rule::locking_clause => {
+                locking_location = Some(part.as_span().start() + 1);
                 let (strength, targets, nowait) = build_locking_clause(part)?;
                 locking_clause = Some(strength);
                 locking_targets = targets;
@@ -20061,6 +20239,7 @@ fn build_simple_select_statement(
     Ok(SelectStatement {
         with_recursive,
         with,
+        with_from_recursive_union_outer: false,
         distinct,
         distinct_on,
         from,
@@ -20071,9 +20250,13 @@ fn build_simple_select_statement(
         having,
         window_clauses,
         order_by,
+        order_by_location,
         limit,
+        limit_location,
         offset,
+        offset_location,
         locking_clause,
+        locking_location,
         locking_targets,
         locking_nowait,
         set_operation: None,
@@ -20192,9 +20375,13 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     let mut with = Vec::new();
     let mut window_clauses = Vec::new();
     let mut order_by = Vec::new();
+    let mut order_by_location = None;
     let mut limit = None;
+    let mut limit_location = None;
     let mut offset = None;
+    let mut offset_location = None;
     let mut locking_clause = None;
+    let mut locking_location = None;
     let mut locking_targets = Vec::new();
     let mut locking_nowait = false;
     let mut operators = Vec::new();
@@ -20209,6 +20396,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             }
             Rule::set_operation_term => inputs.push(build_set_operation_term(part)?),
             Rule::set_operation_clause => {
+                let location = Some(part.as_span().start() + 1);
                 let raw = part.as_str().trim_start().to_ascii_lowercase();
                 let all = raw.split_ascii_whitespace().nth(1) == Some("all");
                 let op = if raw.starts_with("union") {
@@ -20218,13 +20406,23 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
                 } else {
                     SetOperator::Except { all }
                 };
-                operators.push(op);
+                operators.push((op, location));
             }
             Rule::window_clause => window_clauses = build_window_clause(part)?,
-            Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = build_limit_clause(part)?,
-            Rule::offset_clause => offset = Some(build_offset_clause(part)?),
+            Rule::order_by_clause => {
+                order_by_location = Some(part.as_span().start() + 1);
+                order_by = build_order_by_clause(part)?;
+            }
+            Rule::limit_clause => {
+                limit_location = Some(part.as_span().start() + 1);
+                limit = build_limit_clause(part)?;
+            }
+            Rule::offset_clause => {
+                offset_location = Some(part.as_span().start() + 1);
+                offset = Some(build_offset_clause(part)?);
+            }
             Rule::locking_clause => {
+                locking_location = Some(part.as_span().start() + 1);
                 let (strength, targets, nowait) = build_locking_clause(part)?;
                 locking_clause = Some(strength);
                 locking_targets = targets;
@@ -20246,6 +20444,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     Ok(SelectStatement {
         with_recursive,
         with,
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
         from: None,
@@ -20256,9 +20455,13 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         having: None,
         window_clauses,
         order_by,
+        order_by_location,
         limit,
+        limit_location,
         offset,
+        offset_location,
         locking_clause,
+        locking_location,
         locking_targets,
         locking_nowait,
         set_operation: Some(Box::new(nested_set_operation)),
@@ -20267,7 +20470,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
 
 fn build_set_operation_tree(
     inputs: Vec<SelectStatement>,
-    operators: Vec<SetOperator>,
+    operators: Vec<(SetOperator, Option<usize>)>,
 ) -> Result<SetOperationStatement, ParseError> {
     if inputs.len() != operators.len().saturating_add(1) {
         return Err(ParseError::UnexpectedToken {
@@ -20280,12 +20483,12 @@ fn build_set_operation_tree(
     let mut pending_ops = Vec::new();
     let mut current = inputs[0].clone();
 
-    for (op, next_input) in operators.into_iter().zip(inputs.into_iter().skip(1)) {
+    for ((op, location), next_input) in operators.into_iter().zip(inputs.into_iter().skip(1)) {
         if matches!(op, SetOperator::Intersect { .. }) {
-            current = select_statement_for_set_operation(op, current, next_input);
+            current = select_statement_for_set_operation(op, location, current, next_input);
         } else {
             pending_inputs.push(current);
-            pending_ops.push(op);
+            pending_ops.push((op, location));
             current = next_input;
         }
     }
@@ -20293,8 +20496,8 @@ fn build_set_operation_tree(
 
     let mut reduced_inputs = pending_inputs.into_iter();
     let mut nested = reduced_inputs.next().ok_or(ParseError::UnexpectedEof)?;
-    for (op, next_input) in pending_ops.into_iter().zip(reduced_inputs) {
-        nested = select_statement_for_set_operation(op, nested, next_input);
+    for ((op, location), next_input) in pending_ops.into_iter().zip(reduced_inputs) {
+        nested = select_statement_for_set_operation(op, location, nested, next_input);
     }
 
     nested
@@ -20305,12 +20508,14 @@ fn build_set_operation_tree(
 
 fn select_statement_for_set_operation(
     op: SetOperator,
+    op_location: Option<usize>,
     left: SelectStatement,
     right: SelectStatement,
 ) -> SelectStatement {
     SelectStatement {
         with_recursive: false,
         with: Vec::new(),
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
         from: None,
@@ -20321,14 +20526,19 @@ fn select_statement_for_set_operation(
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),
+        order_by_location: None,
         limit: None,
+        limit_location: None,
         offset: None,
+        offset_location: None,
         locking_clause: None,
+        locking_location: None,
         locking_targets: Vec::new(),
         locking_nowait: false,
         set_operation: Some(Box::new(SetOperationStatement {
             op,
             inputs: vec![left, right],
+            location: op_location,
         })),
     }
 }
@@ -20368,12 +20578,14 @@ pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
     SelectStatement {
         with_recursive: stmt.with_recursive,
         with: stmt.with,
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
         from: Some(FromItem::Values { rows: stmt.rows }),
         targets: vec![SelectItem {
             output_name: "*".into(),
             expr: SqlExpr::Column("*".into()),
+            location: None,
         }],
         where_clause: None,
         group_by: Vec::new(),
@@ -20381,9 +20593,13 @@ pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         having: None,
         window_clauses: Vec::new(),
         order_by: stmt.order_by,
+        order_by_location: None,
         limit: stmt.limit,
+        limit_location: None,
         offset: stmt.offset,
+        offset_location: None,
         locking_clause: None,
+        locking_location: None,
         locking_targets: Vec::new(),
         locking_nowait: false,
         set_operation: None,
@@ -20408,13 +20624,17 @@ fn build_cte_clause(pair: Pair<'_, Rule>) -> Result<(bool, Vec<CommonTableExpr>)
 
 fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, ParseError> {
     let mut name = None;
+    let mut location = None;
     let mut column_names = Vec::new();
     let mut body = None;
     let mut search = None;
     let mut cycle = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::identifier if name.is_none() => {
+                location = Some(part.as_span().start() + 1);
+                name = Some(build_identifier(part));
+            }
             Rule::cte_column_list => {
                 if let Some(list) = part
                     .into_inner()
@@ -20435,6 +20655,7 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
     }
     Ok(CommonTableExpr {
         name: name.ok_or(ParseError::UnexpectedEof)?,
+        location,
         column_names,
         body: body.ok_or(ParseError::UnexpectedEof)?,
         search,
@@ -20443,6 +20664,7 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
 }
 
 fn build_cte_search_clause(pair: Pair<'_, Rule>) -> Result<CteSearchClause, ParseError> {
+    let location = Some(pair.as_span().start() + 1);
     let mut breadth_first = None;
     let mut columns = Vec::new();
     let mut sequence_column = None;
@@ -20457,6 +20679,7 @@ fn build_cte_search_clause(pair: Pair<'_, Rule>) -> Result<CteSearchClause, Pars
         }
     }
     Ok(CteSearchClause {
+        location,
         breadth_first: breadth_first.ok_or(ParseError::UnexpectedEof)?,
         columns,
         sequence_column: sequence_column.ok_or(ParseError::UnexpectedEof)?,
@@ -20464,6 +20687,7 @@ fn build_cte_search_clause(pair: Pair<'_, Rule>) -> Result<CteSearchClause, Pars
 }
 
 fn build_cte_cycle_clause(pair: Pair<'_, Rule>) -> Result<CteCycleClause, ParseError> {
+    let location = Some(pair.as_span().start() + 1);
     let mut columns = Vec::new();
     let mut mark_column = None;
     let mut mark_value = None;
@@ -20485,6 +20709,7 @@ fn build_cte_cycle_clause(pair: Pair<'_, Rule>) -> Result<CteCycleClause, ParseE
         }
     }
     Ok(CteCycleClause {
+        location,
         columns,
         mark_column: mark_column.ok_or(ParseError::UnexpectedEof)?,
         mark_value,
@@ -20564,9 +20789,13 @@ fn split_leftmost_union(
     let outer_with_recursive = stmt.with_recursive;
     let outer_with = std::mem::take(&mut stmt.with);
     let outer_order_by = std::mem::take(&mut stmt.order_by);
+    let outer_order_by_location = stmt.order_by_location.take();
     let outer_limit = stmt.limit.take();
+    let outer_limit_location = stmt.limit_location.take();
     let outer_offset = stmt.offset.take();
+    let outer_offset_location = stmt.offset_location.take();
     let outer_locking_clause = stmt.locking_clause.take();
+    let outer_locking_location = stmt.locking_location.take();
     let outer_locking_targets = std::mem::take(&mut stmt.locking_targets);
     let outer_locking_nowait = stmt.locking_nowait;
     let set_operation = stmt.set_operation?;
@@ -20579,16 +20808,24 @@ fn split_leftmost_union(
 
     if left.set_operation.is_some() {
         let (all, _left_nested, anchor, recursive_tail) = split_leftmost_union(left)?;
-        let mut recursive =
-            select_statement_for_set_operation(set_operation.op, recursive_tail, right);
+        let mut recursive = select_statement_for_set_operation(
+            set_operation.op,
+            set_operation.location,
+            recursive_tail,
+            right,
+        );
         attach_cte_body_select_context(
             &mut recursive,
             outer_with_recursive,
             &outer_with,
             outer_order_by,
+            outer_order_by_location,
             outer_limit,
+            outer_limit_location,
             outer_offset,
+            outer_offset_location,
             outer_locking_clause,
+            outer_locking_location,
             outer_locking_targets,
             outer_locking_nowait,
         );
@@ -20607,6 +20844,10 @@ fn split_leftmost_union(
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
+                None,
                 Vec::new(),
                 false,
             );
@@ -20615,9 +20856,13 @@ fn split_leftmost_union(
                 outer_with_recursive,
                 &outer_with,
                 outer_order_by,
+                outer_order_by_location,
                 outer_limit,
+                outer_limit_location,
                 outer_offset,
+                outer_offset_location,
                 outer_locking_clause,
+                outer_locking_location,
                 outer_locking_targets,
                 outer_locking_nowait,
             );
@@ -20632,9 +20877,13 @@ fn attach_cte_body_select_context(
     with_recursive: bool,
     with: &[CommonTableExpr],
     order_by: Vec<OrderByItem>,
+    order_by_location: Option<usize>,
     limit: Option<usize>,
+    limit_location: Option<usize>,
     offset: Option<usize>,
+    offset_location: Option<usize>,
     locking_clause: Option<SelectLockingClause>,
+    locking_location: Option<usize>,
     locking_targets: Vec<String>,
     locking_nowait: bool,
 ) {
@@ -20645,18 +20894,23 @@ fn attach_cte_body_select_context(
         let mut local_with = std::mem::take(&mut stmt.with);
         local_with.extend_from_slice(with);
         stmt.with = local_with;
+        stmt.with_from_recursive_union_outer = true;
     }
     if !order_by.is_empty() {
         stmt.order_by = order_by;
+        stmt.order_by_location = order_by_location;
     }
     if limit.is_some() {
         stmt.limit = limit;
+        stmt.limit_location = limit_location;
     }
     if offset.is_some() {
         stmt.offset = offset;
+        stmt.offset_location = offset_location;
     }
     if locking_clause.is_some() {
         stmt.locking_clause = locking_clause;
+        stmt.locking_location = locking_location;
         stmt.locking_targets = locking_targets;
         stmt.locking_nowait = locking_nowait;
     }
@@ -20682,6 +20936,7 @@ fn wrapped_values_statement(stmt: &SelectStatement) -> Option<ValuesStatement> {
             Some(SelectItem {
                 output_name,
                 expr: SqlExpr::Column(name),
+                ..
             }) if output_name == "*" && name == "*"
         )
         || stmt.where_clause.is_some()
@@ -20834,12 +21089,16 @@ fn build_locking_clause(
 
 fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> {
     let mut expr = None;
+    let mut location = None;
     let mut descending = false;
     let mut nulls_first = None;
     let mut using_operator = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::expr => expr = Some(build_expr(part)?),
+            Rule::expr => {
+                location = Some(part.as_span().start() + 1);
+                expr = Some(build_expr(part)?);
+            }
             Rule::kw_desc => descending = true,
             Rule::kw_asc => descending = false,
             Rule::operator_token => using_operator = Some(part.as_str().to_string()),
@@ -20861,6 +21120,7 @@ fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> 
         .unwrap_or(descending);
     Ok(OrderByItem {
         expr: expr.ok_or(ParseError::UnexpectedEof)?,
+        location,
         descending,
         nulls_first,
         using_operator,
@@ -20950,6 +21210,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                             | Rule::rows_from_item
                             | Rule::json_table_from_item
                             | Rule::xml_table_from_item
+                            | Rule::scalar_expr_from_item
                             | Rule::srf_from_item
                             | Rule::derived_from_item
                             | Rule::parenthesized_from_item
@@ -21000,7 +21261,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 item = FromItem::Join {
                     left: Box::new(item),
                     right: Box::new(next?),
-                    kind: JoinKind::Cross,
+                    kind: JoinKind::Comma,
                     constraint: JoinConstraint::None,
                 };
             }
@@ -21040,6 +21301,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::rows_from_item
                     | Rule::json_table_from_item
                     | Rule::xml_table_from_item
+                    | Rule::scalar_expr_from_item
                     | Rule::parenthesized_table_from_item
                     | Rule::srf_from_item
                     | Rule::derived_from_item
@@ -21082,22 +21344,30 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
             build_from_item(inner)
         }
-        Rule::only_table_from_item => Ok(FromItem::Table {
-            name: build_identifier(
-                pair.into_inner()
-                    .find(|part| part.as_rule() == Rule::identifier)
-                    .ok_or(ParseError::UnexpectedEof)?,
-            ),
-            only: true,
-        }),
-        Rule::table_from_item | Rule::parenthesized_table_from_item => Ok(FromItem::Table {
-            name: build_identifier(
-                pair.into_inner()
-                    .find(|part| part.as_rule() == Rule::identifier)
-                    .ok_or(ParseError::UnexpectedEof)?,
-            ),
-            only: false,
-        }),
+        Rule::only_table_from_item => {
+            let identifier = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let location = identifier.as_span().start() + 1;
+            Ok(FromItem::Table {
+                name: build_identifier(identifier),
+                only: true,
+                location: Some(location),
+            })
+        }
+        Rule::table_from_item | Rule::parenthesized_table_from_item => {
+            let identifier = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let location = identifier.as_span().start() + 1;
+            Ok(FromItem::Table {
+                name: build_identifier(identifier),
+                only: false,
+                location: Some(location),
+            })
+        }
         Rule::values_from_item => Ok(FromItem::Values {
             rows: pair
                 .into_inner()
@@ -21105,6 +21375,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 .map(build_values_row)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        Rule::scalar_expr_from_item => build_scalar_expr_from_item(pair),
         Rule::rows_from_item => build_rows_from_item(pair),
         Rule::json_table_from_item => build_json_table_from_item(pair),
         Rule::xml_table_from_item => build_xml_table_from_item(pair),
@@ -21144,6 +21415,77 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             actual: raw,
         }),
     }
+}
+
+fn build_scalar_expr_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    if inner.as_rule() == Rule::collation_for_expr {
+        let arg = inner
+            .clone()
+            .into_inner()
+            .find(|part| part.as_rule() == Rule::expr)
+            .ok_or(ParseError::UnexpectedEof)?;
+        let display_sql = format!("COLLATION FOR ({})", arg.as_str().trim());
+        return Ok(FromItem::Expression {
+            // :HACK: PostgreSQL lowers COLLATION FOR to pg_collation_for(any).
+            // pgrust does not model expression collation yet, so keep the
+            // SQL-visible deparse spelling and use the default-collation result
+            // shape for the scalar RTE.
+            expr: SqlExpr::Const(Value::Text("default".into())),
+            display_sql: Some(display_sql),
+        });
+    }
+    let display_sql = scalar_expr_from_item_display(&inner);
+    Ok(FromItem::Expression {
+        expr: build_expr(inner)?,
+        display_sql,
+    })
+}
+
+fn scalar_expr_from_item_display(pair: &Pair<'_, Rule>) -> Option<String> {
+    match pair.as_rule() {
+        Rule::kw_current_date => Some("CURRENT_DATE".into()),
+        Rule::kw_current_catalog => Some("CURRENT_CATALOG".into()),
+        Rule::kw_current_schema => Some("CURRENT_SCHEMA".into()),
+        Rule::kw_current_user => Some("CURRENT_USER".into()),
+        Rule::kw_user_value => Some("USER".into()),
+        Rule::kw_session_user => Some("SESSION_USER".into()),
+        Rule::kw_system_user => Some("SYSTEM_USER".into()),
+        Rule::kw_current_role => Some("CURRENT_ROLE".into()),
+        Rule::kw_current_time => Some(uppercase_keyword_call("CURRENT_TIME", pair.as_str())),
+        Rule::kw_current_timestamp => {
+            Some(uppercase_keyword_call("CURRENT_TIMESTAMP", pair.as_str()))
+        }
+        Rule::kw_localtime => Some(uppercase_keyword_call("LOCALTIME", pair.as_str())),
+        Rule::kw_localtimestamp => Some(uppercase_keyword_call("LOCALTIMESTAMP", pair.as_str())),
+        Rule::cast_expr => Some(uppercase_cast_display(pair.as_str())),
+        _ => None,
+    }
+}
+
+fn uppercase_keyword_call(keyword: &str, raw: &str) -> String {
+    raw.find('(')
+        .map(|index| format!("{keyword}{}", &raw[index..]))
+        .unwrap_or_else(|| keyword.to_string())
+}
+
+fn uppercase_cast_display(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if raw[index..].to_ascii_lowercase().starts_with("cast") {
+            out.push_str("CAST");
+            index += 4;
+        } else if raw[index..].to_ascii_lowercase().starts_with(" as ") {
+            out.push_str(" AS ");
+            index += 4;
+        } else {
+            out.push(bytes[index] as char);
+            index += 1;
+        }
+    }
+    out
 }
 
 fn build_table_sample_clause(pair: Pair<'_, Rule>) -> Result<RawTableSampleClause, ParseError> {
@@ -21792,7 +22134,7 @@ fn build_join_clause(
     }
 
     match kind {
-        JoinKind::Cross => {
+        JoinKind::Comma | JoinKind::Cross => {
             if !matches!(constraint, JoinConstraint::None) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "CROSS JOIN without ON or USING",
@@ -21856,7 +22198,28 @@ fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
 fn default_alias_for_column_definition_source(item: &FromItem) -> Option<String> {
     match item {
         FromItem::FunctionCall { name, .. } => Some(name.clone()),
+        FromItem::Expression { expr, .. } => {
+            scalar_expr_default_column_name(expr).map(str::to_string)
+        }
         FromItem::Lateral(inner) => default_alias_for_column_definition_source(inner),
+        _ => None,
+    }
+}
+
+fn scalar_expr_default_column_name(expr: &SqlExpr) -> Option<&'static str> {
+    match expr {
+        SqlExpr::CurrentDate => Some("current_date"),
+        SqlExpr::CurrentCatalog => Some("current_catalog"),
+        SqlExpr::CurrentSchema => Some("current_schema"),
+        SqlExpr::CurrentUser => Some("current_user"),
+        SqlExpr::User => Some("user"),
+        SqlExpr::SessionUser => Some("session_user"),
+        SqlExpr::SystemUser => Some("system_user"),
+        SqlExpr::CurrentRole => Some("current_role"),
+        SqlExpr::CurrentTime { .. } => Some("current_time"),
+        SqlExpr::CurrentTimestamp { .. } => Some("current_timestamp"),
+        SqlExpr::LocalTime { .. } => Some("localtime"),
+        SqlExpr::LocalTimestamp { .. } => Some("localtimestamp"),
         _ => None,
     }
 }
@@ -22719,6 +23082,7 @@ fn build_recursive_view_query(
         vec![SelectItem {
             output_name: "*".into(),
             expr: SqlExpr::Column("*".into()),
+            location: None,
         }]
     } else {
         column_names
@@ -22726,6 +23090,7 @@ fn build_recursive_view_query(
             .map(|name| SelectItem {
                 output_name: name.clone(),
                 expr: SqlExpr::Column(name.clone()),
+                location: None,
             })
             .collect()
     };
@@ -22743,16 +23108,19 @@ fn build_recursive_view_query(
             with_recursive: true,
             with: vec![CommonTableExpr {
                 name: view_name.to_string(),
+                location: None,
                 column_names: column_names.to_vec(),
                 body: select_statement_as_cte_body(body_query),
                 search: None,
                 cycle: None,
             }],
+            with_from_recursive_union_outer: false,
             distinct: false,
             distinct_on: Vec::new(),
             from: Some(FromItem::Table {
                 name: view_name.to_string(),
                 only: false,
+                location: None,
             }),
             targets,
             where_clause: None,
@@ -22761,9 +23129,13 @@ fn build_recursive_view_query(
             having: None,
             window_clauses: Vec::new(),
             order_by: Vec::new(),
+            order_by_location: None,
             limit: None,
+            limit_location: None,
             offset: None,
+            offset_location: None,
             locking_clause: None,
+            locking_location: None,
             locking_targets: Vec::new(),
             locking_nowait: false,
             set_operation: None,
@@ -23279,12 +23651,14 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::exclusion_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
-            let (using_method, elements, include_columns) = build_exclusion_constraint_body(body)?;
+            let (using_method, elements, include_columns, predicate_sql) =
+                build_exclusion_constraint_body(body)?;
             Ok(TableConstraint::Exclusion {
                 attributes,
                 using_method,
                 elements,
                 include_columns,
+                predicate_sql,
             })
         }
         Rule::check_table_constraint => {
@@ -23356,10 +23730,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
 
 fn build_exclusion_constraint_body(
     pair: Pair<'_, Rule>,
-) -> Result<(String, Vec<ExclusionElement>, Vec<String>), ParseError> {
+) -> Result<(String, Vec<ExclusionElement>, Vec<String>, Option<String>), ParseError> {
     let mut using_method = None;
     let mut elements = Vec::new();
     let mut include_columns = Vec::new();
+    let mut predicate_sql = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier if using_method.is_none() => {
@@ -23410,6 +23785,13 @@ fn build_exclusion_constraint_body(
                         .flat_map(|inner| inner.into_inner().map(build_identifier)),
                 );
             }
+            Rule::create_index_where_clause => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                predicate_sql = Some(expr.as_str().trim().to_string());
+            }
             _ => {}
         }
     }
@@ -23420,6 +23802,7 @@ fn build_exclusion_constraint_body(
         using_method.unwrap_or_else(|| "gist".into()),
         elements,
         include_columns,
+        predicate_sql,
     ))
 }
 
@@ -25227,6 +25610,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         return Ok(vec![SelectItem {
             output_name: "*".into(),
             expr: SqlExpr::Column("*".into()),
+            location: Some(first.as_span().start() + 1),
         }]);
     }
 
@@ -25238,6 +25622,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
                 items.push(SelectItem {
                     output_name: "*".into(),
                     expr: SqlExpr::Column("*".into()),
+                    location: Some(first_part.as_span().start() + 1),
                 });
                 continue;
             }
@@ -25250,6 +25635,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
                 items.push(SelectItem {
                     output_name: "*".into(),
                     expr: SqlExpr::Column(format!("{relation}.*")),
+                    location: Some(first_part.as_span().start() + 1),
                 });
                 continue;
             }
@@ -25257,8 +25643,11 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
 
         let mut item_inner = item_pair.into_inner();
         let expr_pair = item_inner.next().ok_or(ParseError::UnexpectedEof)?;
+        let location = Some(expr_pair.as_span().start() + 1);
         let expr_is_extract = top_level_extract_expr(expr_pair.clone());
         let expr_is_power_operator = top_level_power_operator_expr(expr_pair.clone());
+        let expr_is_case_insensitive_regex_operator =
+            top_level_case_insensitive_regex_operator_expr(expr_pair.clone());
         let expr = build_expr(expr_pair)?;
         let output_name = if let Some(alias_pair) = item_inner.next() {
             let alias = alias_pair
@@ -25270,10 +25659,16 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
             "extract".into()
         } else if expr_is_power_operator {
             "?column?".into()
+        } else if expr_is_case_insensitive_regex_operator {
+            "?column?".into()
         } else {
             select_item_name(&expr, index)
         };
-        items.push(SelectItem { output_name, expr });
+        items.push(SelectItem {
+            output_name,
+            expr,
+            location,
+        });
     }
 
     Ok(items)
@@ -25439,6 +25834,42 @@ fn top_level_power_operator_expr(pair: Pair<'_, Rule>) -> bool {
     }
 }
 
+fn top_level_case_insensitive_regex_operator_expr(pair: Pair<'_, Rule>) -> bool {
+    match pair.as_rule() {
+        Rule::cmp_expr => {
+            let input = pair.as_str();
+            find_top_level_operator(input, b'~', Some(b'*')).is_some()
+                || find_top_level_operator(input, b'!', Some(b'~'))
+                    .is_some_and(|index| input.as_bytes().get(index + 2) == Some(&b'*'))
+        }
+        Rule::expr
+        | Rule::or_expr
+        | Rule::and_expr
+        | Rule::not_expr
+        | Rule::json_access_expr
+        | Rule::concat_expr
+        | Rule::add_expr
+        | Rule::bit_expr
+        | Rule::shift_expr
+        | Rule::mul_expr
+        | Rule::unary_expr
+        | Rule::positive_expr
+        | Rule::negated_expr
+        | Rule::postfix_expr
+        | Rule::primary_expr => {
+            let mut inner = pair.into_inner();
+            let Some(first) = inner.next() else {
+                return false;
+            };
+            if inner.next().is_some() {
+                return false;
+            }
+            top_level_case_insensitive_regex_operator_expr(first)
+        }
+        _ => false,
+    }
+}
+
 fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     let _ = index;
     match expr {
@@ -25469,7 +25900,9 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::CurrentCatalog => "current_catalog".to_string(),
         SqlExpr::CurrentSchema => "current_schema".to_string(),
         SqlExpr::CurrentUser => "current_user".to_string(),
+        SqlExpr::User => "user".to_string(),
         SqlExpr::SessionUser => "session_user".to_string(),
+        SqlExpr::SystemUser => "system_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
         SqlExpr::JsonQueryFunction(func) => match func.kind {
@@ -28114,14 +28547,32 @@ fn build_identifier(pair: Pair<'_, Rule>) -> String {
         }
     }
     let raw = pair.as_str();
-    if pair.as_rule() == Rule::unicode_quoted_identifier {
-        return decode_unicode_quoted_identifier(raw).unwrap_or_else(|_| raw.to_string());
-    }
-    if raw.starts_with('"') && raw.ends_with('"') {
+    let identifier = if pair.as_rule() == Rule::unicode_quoted_identifier {
+        decode_unicode_quoted_identifier(raw).unwrap_or_else(|_| raw.to_string())
+    } else if raw.starts_with('"') && raw.ends_with('"') {
         raw[1..raw.len() - 1].replace("\"\"", "\"")
     } else {
         raw.to_ascii_lowercase()
+    };
+    truncate_identifier_with_notice(identifier)
+}
+
+fn truncate_identifier_with_notice(identifier: String) -> String {
+    const MAX_IDENTIFIER_BYTES: usize = 63;
+    if identifier.len() <= MAX_IDENTIFIER_BYTES {
+        return identifier;
     }
+    let mut end = MAX_IDENTIFIER_BYTES;
+    while !identifier.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = identifier[..end].to_string();
+    push_notice(format!(
+        "identifier \"{}\" will be truncated to \"{}\"",
+        identifier.replace('"', "\"\""),
+        truncated.replace('"', "\"\"")
+    ));
+    truncated
 }
 
 pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
@@ -28434,6 +28885,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             op,
                             is_all,
                             subquery: Box::new(build_select(rhs)?),
+                        },
+                        Rule::values_stmt => SqlExpr::QuantifiedSubquery {
+                            left: Box::new(left),
+                            op,
+                            is_all,
+                            subquery: Box::new(wrap_values_as_select(build_values_statement(rhs)?)),
                         },
                         Rule::expr => SqlExpr::QuantifiedArray {
                             left: Box::new(left),
@@ -28811,8 +29268,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_catalog => Ok(SqlExpr::CurrentCatalog),
         Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
-        Rule::kw_current_user | Rule::kw_user_value => Ok(SqlExpr::CurrentUser),
+        Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
+        Rule::kw_user_value => Ok(SqlExpr::User),
         Rule::kw_session_user => Ok(SqlExpr::SessionUser),
+        Rule::kw_system_user => Ok(SqlExpr::SystemUser),
         Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
             precision: pair
@@ -30422,13 +30881,11 @@ fn fold_infix(
                 "#" => SqlExpr::BitXor(Box::new(expr), Box::new(rhs)),
                 _ => unreachable!(),
             },
-            Rule::pow_op => simple_func_call(
-                "power",
-                vec![
-                    SqlFunctionArg::positional(expr),
-                    SqlFunctionArg::positional(rhs),
-                ],
-            ),
+            Rule::pow_op => SqlExpr::BinaryOperator {
+                op: "^".into(),
+                left: Box::new(expr),
+                right: Box::new(rhs),
+            },
             Rule::shift_op => match op.as_str() {
                 "<<" => SqlExpr::Shl(Box::new(expr), Box::new(rhs)),
                 ">>" => SqlExpr::Shr(Box::new(expr), Box::new(rhs)),

@@ -11,15 +11,16 @@ use crate::backend::catalog::persistence::{
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
     access_method_depend_rows, aggregate_depend_rows, collation_depend_rows,
-    conversion_depend_rows, derived_pg_depend_rows, foreign_data_wrapper_depend_rows,
-    foreign_key_constraint_depend_rows, foreign_server_depend_rows,
-    index_backed_constraint_depend_rows, inheritance_depend_rows, language_depend_rows,
+    conversion_depend_rows, derived_index_depend_rows, derived_pg_depend_rows,
+    foreign_data_wrapper_depend_rows, foreign_key_constraint_depend_rows,
+    foreign_server_depend_rows, index_backed_constraint_depend_rows, language_depend_rows,
     opclass_depend_rows, operator_depend_rows, opfamily_depend_rows, policy_depend_rows,
     primary_key_owned_not_null_depend_rows, proc_depend_rows, publication_namespace_depend_rows,
-    publication_rel_depend_rows, relation_constraint_depend_rows, relation_rule_depend_rows,
-    sequence_owned_by_depend_row, sort_pg_depend_rows, statistic_ext_depend_rows,
-    trigger_depend_rows, ts_config_depend_rows, ts_config_map_depend_rows, ts_dict_depend_rows,
-    ts_parser_depend_rows, ts_template_depend_rows, view_rewrite_depend_rows,
+    publication_rel_depend_rows, relation_constraint_depend_rows, relation_inheritance_depend_rows,
+    relation_rule_depend_rows, sequence_owned_by_depend_row, sort_pg_depend_rows,
+    statistic_ext_depend_rows, trigger_depend_rows, ts_config_depend_rows,
+    ts_config_map_depend_rows, ts_dict_depend_rows, ts_parser_depend_rows, ts_template_depend_rows,
+    view_rewrite_depend_rows,
 };
 use crate::backend::catalog::rowcodec::{
     pg_cast_row_from_values, pg_description_row_from_values, pg_foreign_table_row_from_values,
@@ -4045,7 +4046,20 @@ impl CatalogStore {
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
         let child_class = class_row_by_oid_mvcc(self, ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let child_entry = catalog_entry_from_relation_row(&child_class, &child_relation);
+        let child_inherits_partitioned_table = parent_oids.iter().try_fold(
+            false,
+            |found, parent_oid| -> Result<bool, CatalogError> {
+                if found {
+                    return Ok(true);
+                }
+                Ok(class_row_by_oid_mvcc(self, ctx, *parent_oid)?
+                    .is_some_and(|row| row.relkind == 'p'))
+            },
+        )?;
+        let mut child_entry = catalog_entry_from_relation_row(&child_class, &child_relation);
+        if child_inherits_partitioned_table {
+            child_entry.relispartition = true;
+        }
         let old_child_rows = rows_for_existing_relation_mvcc(self, ctx, &child_entry)?;
 
         let mut rows_to_delete = PhysicalCatalogRows {
@@ -4070,7 +4084,7 @@ impl CatalogStore {
                 .cloned(),
         );
         child_depends.extend(derived_pg_depend_rows(&child_entry));
-        child_depends.extend(inheritance_depend_rows(relation_oid, parent_oids));
+        child_depends.extend(relation_inheritance_depend_rows(&child_entry, parent_oids));
         sort_pg_depend_rows(&mut child_depends);
         rows_to_insert.depends = child_depends;
         rows_to_insert.inherits = parent_oids
@@ -5309,6 +5323,7 @@ impl CatalogStore {
         let kinds = create_index_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
         let mut rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        rows.depends = derived_index_depend_rows(&entry, Some(&table.desc));
         let mut rows_to_delete = PhysicalCatalogRows::default();
         if let Some(old_class) = class_row_by_oid_mvcc(self, ctx, table.relation_oid)?
             && !old_class.relhasindex
@@ -5375,6 +5390,7 @@ impl CatalogStore {
         let kinds = create_index_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
         let mut rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        rows.depends = derived_index_depend_rows(&entry, Some(&table_entry.desc));
         let mut rows_to_delete = PhysicalCatalogRows::default();
         if let Some(old_class) = class_row_by_oid_mvcc(self, ctx, table_entry.relation_oid)?
             && !old_class.relhasindex
@@ -5441,6 +5457,7 @@ impl CatalogStore {
         let kinds = create_index_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
         let mut rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        rows.depends = derived_index_depend_rows(&entry, Some(&table_entry.desc));
         let mut rows_to_delete = PhysicalCatalogRows::default();
         if let Some(old_class) = class_row_by_oid_mvcc(self, ctx, relation_oid)?
             && !old_class.relhasindex
@@ -5685,8 +5702,13 @@ impl CatalogStore {
             }
             sort_pg_depend_rows(&mut depends);
         }
+        let old_index_auto_depends = index_auto_depend_rows_mvcc(self, ctx, index_oid)?;
 
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let old_rows = PhysicalCatalogRows {
+            depends: old_index_auto_depends,
+            ..PhysicalCatalogRows::default()
+        };
         let rows = PhysicalCatalogRows {
             constraints: vec![constraint.clone()],
             depends,
@@ -5696,6 +5718,7 @@ impl CatalogStore {
             BootstrapCatalogKind::PgConstraint,
             BootstrapCatalogKind::PgDepend,
         ];
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
@@ -5795,8 +5818,13 @@ impl CatalogStore {
             }
             sort_pg_depend_rows(&mut depends);
         }
+        let old_index_auto_depends = index_auto_depend_rows_mvcc(self, ctx, index.relation_oid)?;
 
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let old_rows = PhysicalCatalogRows {
+            depends: old_index_auto_depends,
+            ..PhysicalCatalogRows::default()
+        };
         let rows = PhysicalCatalogRows {
             constraints: vec![constraint.clone()],
             depends,
@@ -5806,6 +5834,7 @@ impl CatalogStore {
             BootstrapCatalogKind::PgConstraint,
             BootstrapCatalogKind::PgDepend,
         ];
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
@@ -6577,6 +6606,35 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn clear_column_not_null_primary_key_owned_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                entry.desc.columns[column_index].not_null_primary_key_owned = false;
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgConstraint,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn validate_not_null_constraint_mvcc(
         &mut self,
         relation_oid: u32,
@@ -6999,6 +7057,56 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn rename_index_backed_constraint_mvcc(
+        &mut self,
+        constraint_oid: u32,
+        new_constraint_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let new_constraint_name = new_constraint_name.to_ascii_lowercase();
+        let old_constraint = relation_constraint_row_by_oid_mvcc(self, ctx, constraint_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_oid.to_string()))?;
+        if relation_constraints_mvcc(self, ctx, old_constraint.conrelid)?
+            .into_iter()
+            .any(|row| {
+                row.oid != old_constraint.oid
+                    && row.conname.eq_ignore_ascii_case(&new_constraint_name)
+            })
+        {
+            return Err(CatalogError::TableAlreadyExists(new_constraint_name));
+        }
+
+        let mut new_constraint = old_constraint.clone();
+        new_constraint.conname = new_constraint_name;
+        let kinds = vec![BootstrapCatalogKind::PgConstraint];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![old_constraint.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![new_constraint.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, old_constraint.conrelid);
+        if old_constraint.conindid != 0 {
+            effect_record_oid(&mut effect.relation_oids, old_constraint.conindid);
+        }
+        Ok(effect)
+    }
+
     pub fn drop_relation_constraint_mvcc(
         &mut self,
         relation_oid: u32,
@@ -7349,6 +7457,54 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn clear_index_clustered_mvcc(
+        &mut self,
+        relation_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_indexes = index_rows_for_relation_mvcc(self, ctx, relation_oid)?;
+        let changed = old_indexes.iter().any(|row| row.indisclustered);
+        let mut new_indexes = old_indexes.clone();
+        for row in &mut new_indexes {
+            row.indisclustered = false;
+        }
+
+        if changed {
+            let control = self.control_state()?;
+            self.persist_control_values(control.next_oid, control.next_rel_number)?;
+            let kinds = vec![BootstrapCatalogKind::PgIndex];
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    indexes: old_indexes,
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &kinds,
+            )?;
+            insert_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    indexes: new_indexes.clone(),
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &kinds,
+            )?;
+            self.control = control;
+        }
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if !new_indexes.is_empty() {
+            effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgIndex]);
+        }
+        for row in new_indexes {
+            effect_record_oid(&mut effect.relation_oids, row.indexrelid);
+        }
+        Ok(effect)
+    }
+
     pub fn set_index_entry_ready_valid_mvcc(
         &mut self,
         old_entry: &CatalogEntry,
@@ -7587,6 +7743,48 @@ impl CatalogStore {
                     return Err(CatalogError::TableAlreadyExists(column.name.clone()));
                 }
                 entry.desc.columns.push(column);
+                allocate_relation_object_oids(&mut entry.desc, &mut control.next_oid);
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgDepend,
+                        BootstrapCatalogKind::PgAttrdef,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_table_add_columns_mvcc(
+        &mut self,
+        relation_oid: u32,
+        columns: Vec<ColumnDesc>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let mut new_names = BTreeSet::new();
+                for column in &columns {
+                    if entry
+                        .desc
+                        .columns
+                        .iter()
+                        .any(|existing| existing.name.eq_ignore_ascii_case(&column.name))
+                        || !new_names.insert(column.name.to_ascii_lowercase())
+                    {
+                        return Err(CatalogError::TableAlreadyExists(column.name.clone()));
+                    }
+                }
+                entry.desc.columns.extend(columns);
                 allocate_relation_object_oids(&mut entry.desc, &mut control.next_oid);
                 Ok((
                     (),
@@ -8677,7 +8875,10 @@ impl CatalogStore {
                 entry.relispartition = relispartition;
                 entry.relpartbound = relpartbound;
                 entry.partitioned_table = partitioned_table;
-                let mut kinds = vec![BootstrapCatalogKind::PgClass];
+                let mut kinds = vec![
+                    BootstrapCatalogKind::PgClass,
+                    BootstrapCatalogKind::PgDepend,
+                ];
                 if entry.partitioned_table.is_some() {
                     kinds.push(BootstrapCatalogKind::PgPartitionedTable);
                 }
@@ -10366,6 +10567,17 @@ where
         };
         rows_for_new_relation_entry(&type_lookup, &relation_name, &new_entry)?
     };
+    if kinds.contains(&BootstrapCatalogKind::PgDepend) {
+        let parent_oids = relation_inherits_mvcc(store, ctx, relation_oid)?
+            .into_iter()
+            .map(|row| row.inhparent)
+            .collect::<Vec<_>>();
+        new_rows
+            .depends
+            .extend(relation_inheritance_depend_rows(&new_entry, &parent_oids));
+        sort_pg_depend_rows(&mut new_rows.depends);
+        new_rows.depends.dedup();
+    }
     preserve_non_derived_relation_rows_mvcc(store, ctx, &old_entry, &kinds, &mut new_rows)?;
     delete_catalog_rows_subset_mvcc(ctx, &old_rows, store.scope_db_oid(), &kinds)?;
     insert_catalog_rows_subset_mvcc(ctx, &new_rows, store.scope_db_oid(), &kinds)?;
@@ -10574,6 +10786,18 @@ fn preserve_non_derived_relation_rows_mvcc(
     kinds: &[BootstrapCatalogKind],
     new_rows: &mut PhysicalCatalogRows,
 ) -> Result<(), CatalogError> {
+    if matches!(entry.relkind, 'i' | 'I')
+        && kinds.contains(&BootstrapCatalogKind::PgIndex)
+        && let Some(old_index) = index_row_by_index_oid_mvcc(store, ctx, entry.relation_oid)?
+        && let Some(new_index) = new_rows
+            .indexes
+            .iter_mut()
+            .find(|row| row.indexrelid == entry.relation_oid)
+    {
+        new_index.indisclustered = old_index.indisclustered;
+        new_index.indisreplident = old_index.indisreplident;
+    }
+
     if kinds.contains(&BootstrapCatalogKind::PgDepend) {
         for row in relation_rewrites_mvcc(store, ctx, entry.relation_oid)? {
             new_rows.depends.extend(depend_rows_for_object_mvcc(
@@ -10650,7 +10874,7 @@ fn rows_for_new_relation_entry(
                     attalign: column.storage.attalign,
                     attstorage: column.storage.attstorage,
                     attcompression: column.storage.attcompression,
-                    attstattarget: column.attstattarget,
+                    attstattarget: (column.attstattarget >= 0).then_some(column.attstattarget),
                     attinhcount: column.attinhcount,
                     attislocal: column.attislocal,
                     attidentity: column
@@ -12009,6 +12233,19 @@ fn depend_rows_referencing_object_mvcc(
         .collect())
 }
 
+fn index_auto_depend_rows_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    index_oid: u32,
+) -> Result<Vec<PgDependRow>, CatalogError> {
+    Ok(
+        depend_rows_for_object_mvcc(store, ctx, PG_CLASS_RELATION_OID, index_oid)?
+            .into_iter()
+            .filter(|row| row.deptype == DEPENDENCY_AUTO)
+            .collect(),
+    )
+}
+
 fn constraint_depend_rows_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
@@ -12236,7 +12473,7 @@ fn relation_desc_from_catalog_rows_mvcc(
         desc.storage.attalign = attr.attalign;
         desc.storage.attstorage = attr.attstorage;
         desc.storage.attcompression = attr.attcompression;
-        desc.attstattarget = attr.attstattarget;
+        desc.attstattarget = attr.attstattarget.unwrap_or(-1);
         desc.attinhcount = attr.attinhcount;
         desc.attislocal = attr.attislocal;
         desc.attacl = attr.attacl.clone();

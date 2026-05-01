@@ -130,7 +130,8 @@ pub(crate) use expr_txid::{
 pub(crate) use expr_xml::{render_xml_output_text, strip_xml_declaration, validate_xml_input};
 pub use fmgr::ScalarFunctionCallInfo;
 pub(crate) use nodes::{
-    pg_sql_sort_by, render_explain_expr, render_explain_join_expr, render_explain_join_expr_inner,
+    ensure_no_deferred_column_errors, pg_sql_sort_by, push_explain_datetime_config,
+    render_explain_expr, render_explain_join_expr, render_explain_join_expr_inner,
     render_explain_literal, render_explain_projection_expr_with_qualifier, render_index_order_by,
     render_index_scan_condition_with_key_names,
     render_index_scan_condition_with_key_names_and_runtime_renderer,
@@ -557,6 +558,7 @@ pub struct ExecutorContext {
     pub stats: std::sync::Arc<parking_lot::RwLock<DatabaseStatsStore>>,
     pub session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
     pub snapshot: Snapshot,
+    pub write_xid_override: Option<TransactionId>,
     pub transaction_state: Option<SharedExecutorTransactionState>,
     pub client_id: ClientId,
     pub current_database_name: String,
@@ -634,6 +636,15 @@ impl ExecutorContext {
             .and_then(|state| state.lock().xid)
     }
 
+    pub fn write_snapshot(&self) -> Snapshot {
+        let mut snapshot = self.snapshot.clone();
+        if let Some(xid) = self.write_xid_override {
+            snapshot.current_xid = xid;
+            snapshot.own_xids.insert(xid);
+        }
+        snapshot
+    }
+
     pub fn uses_transaction_snapshot(&self) -> bool {
         self.transaction_state
             .as_ref()
@@ -657,6 +668,9 @@ impl ExecutorContext {
     }
 
     pub fn ensure_write_xid(&mut self) -> Result<TransactionId, ExecError> {
+        if let Some(xid) = self.write_xid_override {
+            return Ok(xid);
+        }
         if self.snapshot.current_xid != INVALID_TRANSACTION_ID {
             return Ok(self.snapshot.current_xid);
         }

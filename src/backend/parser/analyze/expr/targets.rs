@@ -1412,7 +1412,7 @@ fn expand_star_targets(
         .map(|(index, column)| {
             TargetEntry::new(
                 column.output_name.clone(),
-                scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
+                scope_column_output_expr(scope, index, relation).unwrap_or_else(|| {
                     panic!("bound scope output_exprs missing star expansion column {index}")
                 }),
                 scope.desc.columns[index].sql_type,

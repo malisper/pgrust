@@ -1,3 +1,4 @@
+use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -12,9 +13,9 @@ use crate::include::nodes::primnodes::{
 };
 
 use super::{and_exprs, expr_relids, flatten_and_conjuncts, joininfo, relids_subset};
-use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind, SubqueryComparisonOp};
 
-pub(super) fn pull_up_sublinks(mut query: Query) -> Query {
+pub(super) fn pull_up_sublinks(mut query: Query, catalog: &dyn CatalogLookup) -> Query {
     hoist_inner_join_sublinks_to_where(&mut query);
 
     let Some(where_qual) = query.where_qual.take() else {
@@ -23,7 +24,7 @@ pub(super) fn pull_up_sublinks(mut query: Query) -> Query {
 
     let mut remaining_quals = Vec::new();
     for qual in flatten_and_conjuncts(&where_qual) {
-        if pull_up_sublinks_qual_recurse(&mut query, qual.clone(), 0) {
+        if pull_up_sublinks_qual_recurse(&mut query, qual.clone(), 0, catalog) {
             continue;
         }
         remaining_quals.push(qual);
@@ -87,15 +88,20 @@ fn hoist_inner_join_sublinks_recurse(
     *quals = and_exprs(remaining_quals).unwrap_or_else(|| Expr::Const(Value::Bool(true)));
 }
 
-fn pull_up_sublinks_qual_recurse(query: &mut Query, qual: Expr, levels_to_parent: usize) -> bool {
+fn pull_up_sublinks_qual_recurse(
+    query: &mut Query,
+    qual: Expr,
+    levels_to_parent: usize,
+    catalog: &dyn CatalogLookup,
+) -> bool {
     if let Some(sublink) = any_sublink(qual.clone()) {
-        return convert_any_sublink_to_join(query, sublink, levels_to_parent);
+        return convert_any_sublink_to_join(query, sublink, levels_to_parent, catalog);
     }
     if let Some(sublink) = exists_sublink(qual.clone()) {
-        return convert_exists_sublink_to_join(query, sublink, false, levels_to_parent);
+        return convert_exists_sublink_to_join(query, sublink, false, levels_to_parent, catalog);
     }
     if let Some(sublink) = not_exists_sublink(qual) {
-        return convert_exists_sublink_to_join(query, sublink, true, levels_to_parent);
+        return convert_exists_sublink_to_join(query, sublink, true, levels_to_parent, catalog);
     }
     false
 }
@@ -136,6 +142,7 @@ fn convert_any_sublink_to_join(
     query: &mut Query,
     sublink: SubLink,
     levels_to_parent: usize,
+    catalog: &dyn CatalogLookup,
 ) -> bool {
     let SubLinkType::AnySubLink(op) = sublink.sublink_type else {
         return false;
@@ -146,6 +153,11 @@ fn convert_any_sublink_to_join(
     let Some(op_kind) = subquery_comparison_op_expr_kind(op) else {
         return false;
     };
+    if sublink.comparison.as_ref().is_some_and(|comparison| {
+        comparison_uses_user_defined_operator(comparison.opfuncid, catalog)
+    }) {
+        return false;
+    }
     let mut subquery = *sublink.subselect;
     if !simple_any_query(&subquery) {
         return false;
@@ -168,7 +180,12 @@ fn convert_any_sublink_to_join(
     if let Some(where_qual) = subquery.where_qual.take() {
         let mut remaining = Vec::new();
         for qual in flatten_and_conjuncts(&where_qual) {
-            if pull_up_sublinks_qual_recurse(&mut working, qual.clone(), levels_to_parent + 1) {
+            if pull_up_sublinks_qual_recurse(
+                &mut working,
+                qual.clone(),
+                levels_to_parent + 1,
+                catalog,
+            ) {
                 continue;
             }
             remaining.push(qual);
@@ -193,11 +210,22 @@ fn convert_any_sublink_to_join(
     else {
         return false;
     };
-    let comparison_qual = Expr::op(
-        op_kind,
-        SqlType::new(SqlTypeKind::Bool),
-        vec![*testexpr, pulled_up_target],
-    );
+    let comparison_qual = if let Some(comparison) = sublink.comparison {
+        Expr::Op(Box::new(OpExpr {
+            opno: comparison.opno,
+            opfuncid: comparison.opfuncid,
+            op: comparison.op,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![*testexpr, pulled_up_target],
+            collation_oid: comparison.collation_oid,
+        }))
+    } else {
+        Expr::op(
+            op_kind,
+            SqlType::new(SqlTypeKind::Bool),
+            vec![*testexpr, pulled_up_target],
+        )
+    };
     let mut join_quals = working.where_qual.take().into_iter().collect::<Vec<_>>();
     join_quals.push(comparison_qual);
     let Some(join_quals) = and_exprs(join_quals) else {
@@ -208,6 +236,13 @@ fn convert_any_sublink_to_join(
     }
     *query = working;
     true
+}
+
+fn comparison_uses_user_defined_operator(opfuncid: u32, catalog: &dyn CatalogLookup) -> bool {
+    opfuncid != 0
+        && catalog
+            .proc_row_by_oid(opfuncid)
+            .is_some_and(|row| row.pronamespace != PG_CATALOG_NAMESPACE_OID)
 }
 
 fn subquery_comparison_op_expr_kind(op: SubqueryComparisonOp) -> Option<OpExprKind> {
@@ -226,9 +261,7 @@ fn subquery_comparison_op_expr_kind(op: SubqueryComparisonOp) -> Option<OpExprKi
         | SubqueryComparisonOp::ILike
         | SubqueryComparisonOp::NotILike
         | SubqueryComparisonOp::Similar
-        | SubqueryComparisonOp::NotSimilar
-        | SubqueryComparisonOp::RegexMatch
-        | SubqueryComparisonOp::NotRegexMatch => return None,
+        | SubqueryComparisonOp::NotSimilar => return None,
     })
 }
 
@@ -237,6 +270,7 @@ fn convert_exists_sublink_to_join(
     sublink: SubLink,
     under_not: bool,
     levels_to_parent: usize,
+    catalog: &dyn CatalogLookup,
 ) -> bool {
     if !matches!(sublink.sublink_type, SubLinkType::ExistsSubLink) || sublink.testexpr.is_some() {
         return false;
@@ -250,7 +284,12 @@ fn convert_exists_sublink_to_join(
     if let Some(where_qual) = subquery.where_qual.take() {
         let mut remaining = Vec::new();
         for qual in flatten_and_conjuncts(&where_qual) {
-            if pull_up_sublinks_qual_recurse(&mut working, qual.clone(), levels_to_parent + 1) {
+            if pull_up_sublinks_qual_recurse(
+                &mut working,
+                qual.clone(),
+                levels_to_parent + 1,
+                catalog,
+            ) {
                 continue;
             }
             remaining.push(qual);
@@ -262,6 +301,14 @@ fn convert_exists_sublink_to_join(
         .where_qual
         .as_ref()
         .is_some_and(expr_contains_sublink)
+    {
+        return false;
+    }
+    let Some(where_qual) = subquery.where_qual.as_ref() else {
+        return false;
+    };
+    if !where_qual_references_pullup_parent(&working, where_qual, levels_to_parent)
+        && !expr_contains_outer_var(where_qual)
     {
         return false;
     }
@@ -282,6 +329,29 @@ fn convert_exists_sublink_to_join(
     }
     *query = working;
     true
+}
+
+fn where_qual_references_pullup_parent(
+    query: &Query,
+    where_qual: &Expr,
+    levels_to_parent: usize,
+) -> bool {
+    let Some(parent_jointree) = query.jointree.as_ref() else {
+        return false;
+    };
+    let parent_relids = jointree_relids(parent_jointree);
+    if parent_relids.is_empty() {
+        return false;
+    }
+
+    let Some(adjusted_qual) =
+        adjust_expr_for_pullup(where_qual.clone(), query.rtable.len(), levels_to_parent)
+    else {
+        return false;
+    };
+    expr_relids(&adjusted_qual)
+        .into_iter()
+        .any(|relid| parent_relids.contains(&relid))
 }
 
 fn simple_exists_query(query: &Query) -> bool {
@@ -459,6 +529,7 @@ fn make_pulled_up_join(
     let joinleftcols = (1..=left_desc.columns.len()).collect::<Vec<_>>();
     query.rtable.push(RangeTblEntry {
         alias: None,
+        alias_is_user_defined: false,
         alias_preserves_source_names: false,
         eref: RangeTblEref {
             aliasname: "join".into(),
@@ -474,6 +545,7 @@ fn make_pulled_up_join(
         permission: None,
         kind: RangeTblEntryKind::Join {
             jointype: kind,
+            from_list: false,
             joinmergedcols: 0,
             joinaliasvars: left_alias_vars,
             joinleftcols,
@@ -542,12 +614,14 @@ fn adjust_rte_for_pullup(
     let kind = match rte.kind {
         RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars: joinaliasvars
                 .into_iter()
@@ -653,6 +727,7 @@ fn adjust_expr_for_pullup(expr: Expr, offset: usize, levels_to_parent: usize) ->
             testexpr: adjust_optional_box_expr(sublink.testexpr, offset, levels_to_parent)?,
             subselect: sublink.subselect,
             sublink_type: sublink.sublink_type,
+            comparison: sublink.comparison,
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(adjust_expr_for_pullup(
@@ -778,6 +853,8 @@ fn adjust_expr_for_pullup(expr: Expr, offset: usize, levels_to_parent: usize) ->
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -997,6 +1074,8 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1116,6 +1195,8 @@ fn expr_contains_outer_var(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1155,6 +1236,7 @@ fn jointree_output_exprs(query: &Query, node: &JoinTreeNode) -> Option<Vec<Expr>
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 })
             })
             .collect(),

@@ -768,6 +768,7 @@ pub struct NestedLoopJoinState {
     pub(crate) output_names: Vec<String>,
     pub(crate) right_rows: Option<Vec<MaterializedRow>>,
     pub(crate) right_matched: Option<Vec<bool>>,
+    pub(crate) lateral_right_cache: HashMap<Vec<Value>, LateralRightCacheEntry>,
     pub(crate) current_left: Option<MaterializedRow>,
     pub(crate) current_nest_param_saves: Option<Vec<(usize, Option<Value>)>>,
     pub(crate) current_left_matched: bool,
@@ -779,6 +780,12 @@ pub struct NestedLoopJoinState {
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct LateralRightCacheEntry {
+    pub(crate) rows: Vec<MaterializedRow>,
+    pub(crate) hash_index: HashMap<Value, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -986,6 +993,8 @@ pub struct AggregateState {
 pub struct WindowAggState {
     pub(crate) input: PlanState,
     pub(crate) clause: WindowClause,
+    pub(crate) run_condition: Option<Expr>,
+    pub(crate) top_qual: Option<Expr>,
     pub(crate) output_columns: Vec<String>,
     pub(crate) result_rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,

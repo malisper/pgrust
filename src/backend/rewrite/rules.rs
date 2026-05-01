@@ -503,6 +503,9 @@ fn format_rule_insert_statement(
     let target_types = target_columns
         .as_ref()
         .map(|columns| columns.iter().map(|(_, ty)| *ty).collect::<Vec<_>>());
+    let expr_ctx = RuleExprContext {
+        event_relation_name: Some(relation_name),
+    };
     match &stmt.source {
         InsertSource::Values(rows) => {
             if rows.len() == 1 {
@@ -522,12 +525,18 @@ fn format_rule_insert_statement(
                                 .iter()
                                 .enumerate()
                                 .map(|(index, expr)| {
-                                    render_rule_expr(
+                                    let rendered = render_rule_expr_with_context(
                                         expr,
                                         target_types
                                             .as_ref()
                                             .and_then(|types| types.get(index).copied()),
-                                    )
+                                        &expr_ctx,
+                                    );
+                                    if rule_insert_value_needs_parentheses(expr) {
+                                        format!("({rendered})")
+                                    } else {
+                                        rendered
+                                    }
                                 })
                                 .collect::<Vec<_>>()
                                 .join(separator)
@@ -1003,9 +1012,22 @@ fn render_rule_values_expr(expr: &SqlExpr) -> String {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct RuleExprContext<'a> {
+    event_relation_name: Option<&'a str>,
+}
+
 fn render_rule_expr(expr: &SqlExpr, target_type: Option<SqlType>) -> String {
+    render_rule_expr_with_context(expr, target_type, &RuleExprContext::default())
+}
+
+fn render_rule_expr_with_context(
+    expr: &SqlExpr,
+    target_type: Option<SqlType>,
+    ctx: &RuleExprContext<'_>,
+) -> String {
     match expr {
-        SqlExpr::Column(name) => name.clone(),
+        SqlExpr::Column(name) => render_rule_column(name, target_type, ctx),
         SqlExpr::Default => "DEFAULT".into(),
         SqlExpr::IntegerLiteral(value) | SqlExpr::NumericLiteral(value) => value.clone(),
         SqlExpr::Const(Value::Int16(value)) => value.to_string(),
@@ -1020,35 +1042,35 @@ fn render_rule_expr(expr: &SqlExpr, target_type: Option<SqlType>) -> String {
         SqlExpr::Cast(inner, ty) => {
             format!(
                 "{}::{}",
-                render_rule_expr(inner, None),
+                render_rule_expr_with_context(inner, None, ctx),
                 render_raw_type_name(ty)
             )
         }
-        SqlExpr::Add(left, right) => render_rule_binary_expr(left, "+", right),
-        SqlExpr::Sub(left, right) => render_rule_binary_expr(left, "-", right),
-        SqlExpr::Mul(left, right) => render_rule_binary_expr(left, "*", right),
-        SqlExpr::Div(left, right) => render_rule_binary_expr(left, "/", right),
-        SqlExpr::Eq(left, right) => render_rule_binary_expr(left, "=", right),
-        SqlExpr::NotEq(left, right) => render_rule_binary_expr(left, "<>", right),
-        SqlExpr::Lt(left, right) => render_rule_binary_expr(left, "<", right),
-        SqlExpr::LtEq(left, right) => render_rule_binary_expr(left, "<=", right),
-        SqlExpr::Gt(left, right) => render_rule_binary_expr(left, ">", right),
-        SqlExpr::GtEq(left, right) => render_rule_binary_expr(left, ">=", right),
+        SqlExpr::Add(left, right) => render_rule_binary_expr_with_context(left, "+", right, ctx),
+        SqlExpr::Sub(left, right) => render_rule_binary_expr_with_context(left, "-", right, ctx),
+        SqlExpr::Mul(left, right) => render_rule_binary_expr_with_context(left, "*", right, ctx),
+        SqlExpr::Div(left, right) => render_rule_binary_expr_with_context(left, "/", right, ctx),
+        SqlExpr::Eq(left, right) => render_rule_binary_expr_with_context(left, "=", right, ctx),
+        SqlExpr::NotEq(left, right) => render_rule_binary_expr_with_context(left, "<>", right, ctx),
+        SqlExpr::Lt(left, right) => render_rule_binary_expr_with_context(left, "<", right, ctx),
+        SqlExpr::LtEq(left, right) => render_rule_binary_expr_with_context(left, "<=", right, ctx),
+        SqlExpr::Gt(left, right) => render_rule_binary_expr_with_context(left, ">", right, ctx),
+        SqlExpr::GtEq(left, right) => render_rule_binary_expr_with_context(left, ">=", right, ctx),
         SqlExpr::And(left, right) => format!(
             "({} AND {})",
-            render_rule_expr(left, None),
-            render_rule_expr(right, None)
+            render_rule_expr_with_context(left, None, ctx),
+            render_rule_expr_with_context(right, None, ctx)
         ),
         SqlExpr::Or(left, right) => format!(
             "({} OR {})",
-            render_rule_expr(left, None),
-            render_rule_expr(right, None)
+            render_rule_expr_with_context(left, None, ctx),
+            render_rule_expr_with_context(right, None, ctx)
         ),
         SqlExpr::ArrayLiteral(elements) => format!(
             "ARRAY[{}]",
             elements
                 .iter()
-                .map(|element| render_rule_expr(element, None))
+                .map(|element| render_rule_expr_with_context(element, None, ctx))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -1056,25 +1078,35 @@ fn render_rule_expr(expr: &SqlExpr, target_type: Option<SqlType>) -> String {
             "ROW({})",
             fields
                 .iter()
-                .map(|field| render_rule_expr(field, None))
+                .map(|field| render_rule_expr_with_context(field, None, ctx))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        SqlExpr::FuncCall { name, args, .. } => render_rule_func_call(name, args),
+        SqlExpr::FuncCall { name, args, .. } => render_rule_func_call_with_context(name, args, ctx),
         SqlExpr::FieldSelect { expr, field } => {
-            format!("{}.{}", render_rule_expr(expr, None), field)
+            if let SqlExpr::Column(name) = expr.as_ref()
+                && matches!(name.as_str(), "old" | "new")
+            {
+                format!("{name}.{field}")
+            } else {
+                format!(
+                    "{}.{}",
+                    render_rule_expr_with_context(expr, None, ctx),
+                    field
+                )
+            }
         }
         SqlExpr::ArraySubscript { array, subscripts } => {
-            let mut out = render_rule_expr(array, None);
+            let mut out = render_rule_expr_with_context(array, None, ctx);
             for subscript in subscripts {
                 out.push('[');
                 if let Some(lower) = &subscript.lower {
-                    out.push_str(&render_rule_expr(lower, None));
+                    out.push_str(&render_rule_expr_with_context(lower, None, ctx));
                 }
                 if subscript.is_slice {
                     out.push(':');
                     if let Some(upper) = &subscript.upper {
-                        out.push_str(&render_rule_expr(upper, None));
+                        out.push_str(&render_rule_expr_with_context(upper, None, ctx));
                     }
                 }
                 out.push(']');
@@ -1085,12 +1117,51 @@ fn render_rule_expr(expr: &SqlExpr, target_type: Option<SqlType>) -> String {
     }
 }
 
+fn render_rule_column(
+    name: &str,
+    target_type: Option<SqlType>,
+    ctx: &RuleExprContext<'_>,
+) -> String {
+    if matches!(name, "old" | "new")
+        && let Some(relation_name) = ctx.event_relation_name
+        && target_type.is_none_or(|ty| {
+            !ty.is_array && matches!(ty.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+        })
+    {
+        return format!("{name}.*::{relation_name}");
+    }
+    name.to_string()
+}
+
 fn render_rule_binary_expr(left: &SqlExpr, op: &str, right: &SqlExpr) -> String {
+    render_rule_binary_expr_with_context(left, op, right, &RuleExprContext::default())
+}
+
+fn render_rule_binary_expr_with_context(
+    left: &SqlExpr,
+    op: &str,
+    right: &SqlExpr,
+    ctx: &RuleExprContext<'_>,
+) -> String {
     format!(
         "{} {} {}",
-        render_rule_expr(left, None),
+        render_rule_expr_with_context(left, None, ctx),
         op,
-        render_rule_expr(right, None)
+        render_rule_expr_with_context(right, None, ctx)
+    )
+}
+
+fn rule_insert_value_needs_parentheses(expr: &SqlExpr) -> bool {
+    matches!(
+        expr,
+        SqlExpr::Eq(left, right)
+            | SqlExpr::NotEq(left, right)
+            | SqlExpr::Lt(left, right)
+            | SqlExpr::LtEq(left, right)
+            | SqlExpr::Gt(left, right)
+            | SqlExpr::GtEq(left, right)
+            if matches!(left.as_ref(), SqlExpr::Row(_))
+                || matches!(right.as_ref(), SqlExpr::Row(_))
     )
 }
 
@@ -1107,6 +1178,14 @@ fn render_rule_string_literal(value: &str, target_type: Option<SqlType>) -> Stri
 }
 
 fn render_rule_func_call(name: &str, args: &SqlCallArgs) -> String {
+    render_rule_func_call_with_context(name, args, &RuleExprContext::default())
+}
+
+fn render_rule_func_call_with_context(
+    name: &str,
+    args: &SqlCallArgs,
+    ctx: &RuleExprContext<'_>,
+) -> String {
     if args.is_star() {
         return format!("{name}(*)");
     }
@@ -1116,7 +1195,7 @@ fn render_rule_func_call(name: &str, args: &SqlCallArgs) -> String {
         args.args()
             .iter()
             .map(|arg| {
-                let rendered = render_rule_expr(&arg.value, None);
+                let rendered = render_rule_expr_with_context(&arg.value, None, ctx);
                 if let Some(name) = &arg.name {
                     format!("{name} => {rendered}")
                 } else {

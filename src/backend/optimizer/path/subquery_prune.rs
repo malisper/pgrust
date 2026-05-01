@@ -108,6 +108,17 @@ pub(super) fn used_parent_attrs_for_rte(
                     collect_parent_expr_used_attrs(root, rtindex, width, expr, &mut used);
                 }
             }
+            RangeTblEntryKind::Subquery { query }
+                if query_contains_outer_ref_to_rte(query, rtindex, 1)
+                    || query_contains_outer_join_alias_ref_to_rte(&root.parse, query, rtindex) =>
+            {
+                // :HACK: PostgreSQL tracks these with PlaceHolderVars and
+                // nullable-rel metadata. Until pgrust has that full machinery,
+                // keep all outputs from an RTE that is referenced by a sibling
+                // LATERAL subquery so pruning cannot replace needed projection
+                // expressions with NULL.
+                used.extend(0..width);
+            }
             RangeTblEntryKind::Result
             | RangeTblEntryKind::Relation { .. }
             | RangeTblEntryKind::Join { .. }
@@ -117,6 +128,258 @@ pub(super) fn used_parent_attrs_for_rte(
         }
     }
     used
+}
+
+fn query_contains_outer_join_alias_ref_to_rte(
+    parent_query: &Query,
+    query: &Query,
+    rtindex: usize,
+) -> bool {
+    parent_query.rtable.iter().enumerate().any(|(index, rte)| {
+        let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
+            return false;
+        };
+        joinaliasvars
+            .iter()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, 0))
+            && query_contains_outer_ref_to_rte(query, index + 1, 1)
+    })
+}
+
+fn query_contains_outer_ref_to_rte(query: &Query, rtindex: usize, target_level: usize) -> bool {
+    query
+        .target_list
+        .iter()
+        .any(|target| expr_contains_outer_ref_to_rte(&target.expr, rtindex, target_level))
+        || query
+            .where_qual
+            .as_ref()
+            .is_some_and(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+        || query
+            .group_by
+            .iter()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+        || query.accumulators.iter().any(|accum| {
+            accum
+                .direct_args
+                .iter()
+                .chain(accum.args.iter())
+                .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+                || accum
+                    .order_by
+                    .iter()
+                    .any(|item| expr_contains_outer_ref_to_rte(&item.expr, rtindex, target_level))
+                || accum
+                    .filter
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+        })
+        || query
+            .having_qual
+            .as_ref()
+            .is_some_and(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+        || query
+            .sort_clause
+            .iter()
+            .any(|item| expr_contains_outer_ref_to_rte(&item.expr, rtindex, target_level))
+        || query
+            .distinct_on
+            .iter()
+            .any(|item| expr_contains_outer_ref_to_rte(&item.expr, rtindex, target_level))
+        || query.jointree.as_ref().is_some_and(|jointree| {
+            jointree_contains_outer_ref_to_rte(jointree, rtindex, target_level)
+        })
+        || query.rtable.iter().any(|rte| match &rte.kind {
+            RangeTblEntryKind::Values { rows, .. } => rows
+                .iter()
+                .flatten()
+                .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+            RangeTblEntryKind::Function { call } => set_returning_call_exprs(call)
+                .into_iter()
+                .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+            RangeTblEntryKind::Subquery { query } | RangeTblEntryKind::Cte { query, .. } => {
+                query_contains_outer_ref_to_rte(query, rtindex, target_level + 1)
+            }
+            RangeTblEntryKind::Result
+            | RangeTblEntryKind::Relation { .. }
+            | RangeTblEntryKind::Join { .. }
+            | RangeTblEntryKind::WorkTable { .. } => false,
+        })
+}
+
+fn jointree_contains_outer_ref_to_rte(
+    node: &JoinTreeNode,
+    rtindex: usize,
+    target_level: usize,
+) -> bool {
+    match node {
+        JoinTreeNode::RangeTblRef(_) => false,
+        JoinTreeNode::JoinExpr {
+            left, right, quals, ..
+        } => {
+            jointree_contains_outer_ref_to_rte(left, rtindex, target_level)
+                || jointree_contains_outer_ref_to_rte(right, rtindex, target_level)
+                || expr_contains_outer_ref_to_rte(quals, rtindex, target_level)
+        }
+    }
+}
+
+fn expr_contains_outer_ref_to_rte(expr: &Expr, rtindex: usize, target_level: usize) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == target_level && var.varno == rtindex,
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .chain(aggref.args.iter())
+                .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| expr_contains_outer_ref_to_rte(&item.expr, rtindex, target_level))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+        }
+        Expr::GroupingKey(grouping_key) => {
+            expr_contains_outer_ref_to_rte(&grouping_key.expr, rtindex, target_level)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+        Expr::WindowFunc(func) => {
+            func.args
+                .iter()
+                .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+                || match &func.kind {
+                    WindowFuncKind::Aggregate(aggref) => expr_contains_outer_ref_to_rte(
+                        &Expr::Aggref(Box::new(aggref.clone())),
+                        rtindex,
+                        target_level,
+                    ),
+                    WindowFuncKind::Builtin(_) => false,
+                }
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_outer_ref_to_rte(&arm.expr, rtindex, target_level)
+                        || expr_contains_outer_ref_to_rte(&arm.result, rtindex, target_level)
+                })
+                || expr_contains_outer_ref_to_rte(&case_expr.defresult, rtindex, target_level)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+        Expr::SetReturning(set_returning) => set_returning_call_exprs(&set_returning.call)
+            .into_iter()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+        Expr::SubLink(sublink) => {
+            sublink
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+                || query_contains_outer_ref_to_rte(&sublink.subselect, rtindex, target_level + 1)
+        }
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+                || subplan
+                    .args
+                    .iter()
+                    .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_outer_ref_to_rte(&saop.left, rtindex, target_level)
+                || expr_contains_outer_ref_to_rte(&saop.right, rtindex, target_level)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => {
+            expr_contains_outer_ref_to_rte(inner, rtindex, target_level)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_outer_ref_to_rte(expr, rtindex, target_level)
+                || expr_contains_outer_ref_to_rte(pattern, rtindex, target_level)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level))
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_outer_ref_to_rte(left, rtindex, target_level)
+                || expr_contains_outer_ref_to_rte(right, rtindex, target_level)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_outer_ref_to_rte(expr, rtindex, target_level)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_outer_ref_to_rte(array, rtindex, target_level)
+                || subscripts.iter().any(|subscript| {
+                    subscript.lower.as_ref().is_some_and(|expr| {
+                        expr_contains_outer_ref_to_rte(expr, rtindex, target_level)
+                    }) || subscript.upper.as_ref().is_some_and(|expr| {
+                        expr_contains_outer_ref_to_rte(expr, rtindex, target_level)
+                    })
+                })
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn collect_parent_jointree_used_attrs(
@@ -302,6 +565,8 @@ fn collect_expr_used_attrs(expr: &Expr, rtindex: usize, width: usize, used: &mut
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -488,6 +753,8 @@ fn expr_contains_prune_volatile(expr: &Expr, catalog: &dyn CatalogLookup) -> boo
         | Expr::CaseTest(_)
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema => false,

@@ -80,6 +80,8 @@ fn expr_is_leakproof(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
         | Expr::CaseTest(_)
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -945,6 +947,8 @@ fn collect_expr_relids_at_level(expr: &Expr, levelsup: usize, relids: &mut Vec<u
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -981,6 +985,7 @@ mod tests {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype: SqlType::new(SqlTypeKind::Int4),
+                    collation_oid: None,
                 }),
                 SqlType::new(SqlTypeKind::Int4),
                 1,
@@ -1011,6 +1016,7 @@ mod tests {
     fn base_rte() -> RangeTblEntry {
         RangeTblEntry {
             alias: None,
+            alias_is_user_defined: false,
             alias_preserves_source_names: false,
             eref: RangeTblEref {
                 aliasname: "result".into(),
@@ -1036,6 +1042,7 @@ mod tests {
             varattno: 1,
             varlevelsup,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     }
 
@@ -1066,6 +1073,7 @@ mod tests {
         Expr::SubLink(Box::new(SubLink {
             sublink_type: SubLinkType::ExprSubLink,
             testexpr: None,
+            comparison: None,
             subselect: Box::new(Query {
                 command_type: CommandType::Select,
                 depends_on_row_security: false,

@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::nodes::datum::{RecordDescriptor, Value};
-use crate::include::nodes::primnodes::{SubLink, SubLinkType, TargetEntry};
+use crate::include::nodes::primnodes::{SubLink, SubLinkType, SubqueryComparison, TargetEntry};
 
 fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
     let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
@@ -54,6 +54,143 @@ fn comparison_operator_for_quantified_array(op: SubqueryComparisonOp) -> Option<
         SubqueryComparisonOp::NotRegexMatch => Some("!~"),
         _ => None,
     }
+}
+
+fn scalar_subquery_comparison_op(
+    op: SubqueryComparisonOp,
+) -> Option<(&'static str, crate::include::nodes::primnodes::OpExprKind)> {
+    use crate::include::nodes::primnodes::OpExprKind;
+
+    Some(match op {
+        SubqueryComparisonOp::Eq => ("=", OpExprKind::Eq),
+        SubqueryComparisonOp::NotEq => ("<>", OpExprKind::NotEq),
+        SubqueryComparisonOp::Lt => ("<", OpExprKind::Lt),
+        SubqueryComparisonOp::LtEq => ("<=", OpExprKind::LtEq),
+        SubqueryComparisonOp::Gt => (">", OpExprKind::Gt),
+        SubqueryComparisonOp::GtEq => (">=", OpExprKind::GtEq),
+        SubqueryComparisonOp::Match
+        | SubqueryComparisonOp::RegexMatch
+        | SubqueryComparisonOp::NotRegexMatch
+        | SubqueryComparisonOp::Like
+        | SubqueryComparisonOp::NotLike
+        | SubqueryComparisonOp::ILike
+        | SubqueryComparisonOp::NotILike
+        | SubqueryComparisonOp::Similar
+        | SubqueryComparisonOp::NotSimilar => return None,
+    })
+}
+
+fn coerce_single_column_subquery_comparison(
+    left: Expr,
+    subquery: &mut Query,
+    op: SubqueryComparisonOp,
+    catalog: &dyn CatalogLookup,
+) -> Result<(Expr, Option<SubqueryComparison>), ParseError> {
+    let Some((op_text, op_kind)) = scalar_subquery_comparison_op(op) else {
+        return Ok((left, None));
+    };
+    let Some(target) = subquery.target_list.first_mut() else {
+        return Ok((left, None));
+    };
+    let raw_left_type = expr_sql_type_hint(&left).unwrap_or(SqlType::new(SqlTypeKind::Text));
+    let right_type = target.sql_type;
+    let comparison_left_type = if matches!(left, Expr::Const(Value::Null)) {
+        right_type
+    } else {
+        raw_left_type
+    };
+    let comparison_right_type = if matches!(target.expr, Expr::Const(Value::Null)) {
+        comparison_left_type
+    } else {
+        right_type
+    };
+    let comparison = bind_lowered_comparison_expr(
+        op_text,
+        op_kind,
+        left,
+        raw_left_type,
+        comparison_left_type,
+        target.expr.clone(),
+        right_type,
+        comparison_right_type,
+        None,
+        None,
+        catalog,
+    )?;
+    let Expr::Op(op_expr) = comparison else {
+        return Err(ParseError::DetailedError {
+            message: "failed to bind subquery comparison".into(),
+            detail: Some("comparison binding did not produce an operator expression".into()),
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    let collation_oid = op_expr.collation_oid;
+    let mut args = op_expr.args.into_iter();
+    let coerced_left = args.next().ok_or_else(|| ParseError::DetailedError {
+        message: "failed to bind subquery comparison".into(),
+        detail: Some("comparison operator did not include a left argument".into()),
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let coerced_right = args.next().ok_or_else(|| ParseError::DetailedError {
+        message: "failed to bind subquery comparison".into(),
+        detail: Some("comparison operator did not include a right argument".into()),
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let comparison = resolve_subquery_comparison_metadata(
+        catalog,
+        op_text,
+        op_kind,
+        &coerced_left,
+        &coerced_right,
+        collation_oid,
+    )?;
+    target.sql_type = expr_sql_type_hint(&coerced_right).unwrap_or(right_type);
+    target.expr = coerced_right;
+    Ok((coerced_left, Some(comparison)))
+}
+
+fn resolve_subquery_comparison_metadata(
+    catalog: &dyn CatalogLookup,
+    op_text: &'static str,
+    op_kind: crate::include::nodes::primnodes::OpExprKind,
+    left: &Expr,
+    right: &Expr,
+    collation_oid: Option<u32>,
+) -> Result<SubqueryComparison, ParseError> {
+    let left_type = expr_sql_type_hint(left).unwrap_or(SqlType::new(SqlTypeKind::Text));
+    let right_type = expr_sql_type_hint(right).unwrap_or(SqlType::new(SqlTypeKind::Text));
+    let left_oid = catalog
+        .type_oid_for_sql_type(left_type)
+        .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(left_type)))?;
+    let right_oid = catalog
+        .type_oid_for_sql_type(right_type)
+        .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(right_type)))?;
+    let left_lookup_oid = if matches!(left_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+    {
+        crate::include::catalog::RECORD_TYPE_OID
+    } else {
+        left_oid
+    };
+    let right_lookup_oid = if matches!(
+        right_type.kind,
+        SqlTypeKind::Composite | SqlTypeKind::Record
+    ) {
+        crate::include::catalog::RECORD_TYPE_OID
+    } else {
+        right_oid
+    };
+    let operator = catalog.operator_by_name_left_right(op_text, left_lookup_oid, right_lookup_oid);
+    Ok(SubqueryComparison {
+        opno: operator.as_ref().map(|row| row.oid).unwrap_or(0),
+        opfuncid: operator.as_ref().map(|row| row.oprcode).unwrap_or(0),
+        op: op_kind,
+        left_type,
+        right_type,
+        collation_oid,
+    })
 }
 
 fn quantified_array_literal_prefers_left_type(element: &SqlExpr) -> bool {
@@ -293,6 +430,7 @@ fn bind_single_column_sublink(
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type,
         testexpr: None,
+        comparison: None,
         subselect: Box::new(query),
     })))
 }
@@ -352,6 +490,7 @@ pub(super) fn bind_exists_subquery_expr(
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::ExistsSubLink,
         testexpr: None,
+        comparison: None,
         subselect: Box::new(exists_subquery_query({
             let child_visible_agg_scope = child_visible_aggregate_scope();
             bind_subquery_query(
@@ -397,6 +536,7 @@ pub(super) fn bind_row_compare_subquery_expr(
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::RowCompareSubLink(op),
         testexpr: Some(Box::new(left)),
+        comparison: None,
         subselect: Box::new(subquery),
     })))
 }
@@ -421,24 +561,35 @@ pub(super) fn bind_in_subquery_expr(
         ctes,
     )?;
     let subquery_width = subquery.columns().len();
-    let testexpr = if let SqlExpr::Row(items) = expr {
+    let (testexpr, comparison) = if let SqlExpr::Row(items) = expr {
         ensure_row_subquery_width(subquery_width, items.len())?;
-        bind_row_valued_in_testexpr(
-            expr,
-            &mut subquery,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?
+        (
+            bind_row_valued_in_testexpr(
+                expr,
+                &mut subquery,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            None,
+        )
     } else {
         ensure_single_column_subquery(subquery_width)?;
-        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
+        let bound =
+            bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        coerce_single_column_subquery_comparison(
+            bound,
+            &mut subquery,
+            SubqueryComparisonOp::Eq,
+            catalog,
+        )?
     };
     let any_expr = Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::AnySubLink(SubqueryComparisonOp::Eq),
         testexpr: Some(Box::new(testexpr)),
+        comparison,
         subselect: Box::new(subquery),
     }));
     if negated {
@@ -528,7 +679,7 @@ pub(super) fn bind_quantified_subquery_expr(
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     let child_visible_agg_scope = child_visible_aggregate_scope();
-    let subquery = bind_subquery_query(
+    let mut subquery = bind_subquery_query(
         subquery,
         scope,
         catalog,
@@ -545,14 +696,8 @@ pub(super) fn bind_quantified_subquery_expr(
     } else {
         ensure_single_column_subquery(subquery.columns().len())?;
     }
-    let left = Box::new(bind_expr_with_outer_and_ctes(
-        left,
-        scope,
-        catalog,
-        outer_scopes,
-        grouped_outer,
-        ctes,
-    )?);
+    let mut left =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     if row_width.is_none()
         && let Some(right_type) = subquery.columns().first().map(|column| column.sql_type)
         && right_type.is_array
@@ -565,13 +710,22 @@ pub(super) fn bind_quantified_subquery_expr(
             right_type: sql_type_name(right_type),
         });
     }
+    let comparison = if row_width.is_none() {
+        let (coerced_left, comparison) =
+            coerce_single_column_subquery_comparison(left, &mut subquery, op, catalog)?;
+        left = coerced_left;
+        comparison
+    } else {
+        None
+    };
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type: if is_all {
             SubLinkType::AllSubLink(op)
         } else {
             SubLinkType::AnySubLink(op)
         },
-        testexpr: Some(left),
+        testexpr: Some(Box::new(left)),
+        comparison,
         subselect: Box::new(subquery),
     })))
 }

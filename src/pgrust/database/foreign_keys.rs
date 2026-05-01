@@ -6,6 +6,7 @@ use crate::backend::access::index::unique::probe_unique_conflict;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::commands::tablecmds::{
     build_immediate_index_insert_context, collect_matching_rows_heap,
+    validate_deferred_exclusion_constraint_existing_rows,
 };
 use crate::backend::executor::{
     ConstraintTiming, DeferredForeignKeyTracker, ExecError, ExecutorContext,
@@ -24,7 +25,9 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::InterruptState;
-use crate::include::catalog::{CONSTRAINT_FOREIGN, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
+use crate::include::catalog::{
+    CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
+};
 
 use super::Database;
 
@@ -273,6 +276,7 @@ fn build_constraint_validation_context(
         stats: Arc::clone(&db.stats),
         session_stats: db.session_stats_state(client_id),
         snapshot,
+        write_xid_override: None,
         transaction_state: None,
         client_id,
         current_database_name: db.current_database_name(),
@@ -409,6 +413,48 @@ fn validate_foreign_key_constraints(
                 ctx,
             )?;
         }
+    }
+    Ok(())
+}
+
+fn validate_exclusion_constraints(
+    catalog: &LazyCatalogLookup,
+    constraint_oids: &BTreeSet<u32>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for &constraint_oid in constraint_oids {
+        let Some(row) = catalog.constraint_row_by_oid(constraint_oid) else {
+            continue;
+        };
+        if row.contype != CONSTRAINT_EXCLUSION {
+            continue;
+        }
+        let Some(relation) = catalog.lookup_relation_by_oid(row.conrelid) else {
+            continue;
+        };
+        let constraints =
+            bind_relation_constraints(None, relation.relation_oid, &relation.desc, catalog)
+                .map_err(ExecError::Parse)?;
+        let Some(constraint) = constraints
+            .exclusions
+            .iter()
+            .find(|constraint| constraint.constraint_oid == constraint_oid)
+        else {
+            continue;
+        };
+        let rows =
+            collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?;
+        let relation_name = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .map(|row| row.relname)
+            .unwrap_or_else(|| relation.relation_oid.to_string());
+        validate_deferred_exclusion_constraint_existing_rows(
+            &relation_name,
+            &relation.desc,
+            constraint,
+            &rows,
+            ctx,
+        )?;
     }
     Ok(())
 }
@@ -576,6 +622,7 @@ fn validate_constraint_target(
     validate_pending_foreign_key_checks(catalog, &foreign_key_checks, &mut ctx)?;
     validate_parent_foreign_key_checks(catalog, &parent_checks, &mut ctx)?;
     validate_foreign_key_constraints(catalog, &foreign_key_oids, &mut ctx)?;
+    validate_exclusion_constraints(catalog, &foreign_key_oids, &mut ctx)?;
     validate_unique_constraints(catalog, tracker, &unique_oids, &mut ctx)?;
     let child_foreign_key_oids = foreign_key_checks
         .iter()

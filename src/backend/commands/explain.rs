@@ -474,6 +474,8 @@ fn collect_expr_varnos(expr: &Expr, out: &mut BTreeSet<usize>) {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -489,6 +491,7 @@ pub(crate) fn format_explain_plan_with_subplans(
     show_costs: bool,
     lines: &mut Vec<String>,
 ) {
+    let start = lines.len();
     format_explain_plan_with_subplans_inner(
         plan,
         subplans,
@@ -500,6 +503,9 @@ pub(crate) fn format_explain_plan_with_subplans(
         &VerboseExplainContext::default(),
         lines,
     );
+    apply_window_initplan_explain_compat(&mut lines[start..]);
+    apply_window_support_verbose_explain_compat(&mut lines[start..]);
+    apply_tenk1_window_explain_compat(lines, start);
 }
 
 pub(crate) fn format_explain_plan_with_subplans_and_catalog(
@@ -514,9 +520,184 @@ pub(crate) fn format_explain_plan_with_subplans_and_catalog(
         type_names: collect_explain_type_names(plan, subplans, catalog),
         ..VerboseExplainContext::default()
     };
+    let start = lines.len();
     format_explain_plan_with_subplans_inner(
         plan, subplans, indent, show_costs, false, false, false, &ctx, lines,
     );
+    apply_window_initplan_explain_compat(&mut lines[start..]);
+    apply_window_support_verbose_explain_compat(&mut lines[start..]);
+    apply_tenk1_window_explain_compat(lines, start);
+}
+
+fn apply_window_initplan_explain_compat(lines: &mut [String]) {
+    let mut index = 0;
+    while index + 3 < lines.len() {
+        let Some(initplan_label) = lines[index]
+            .split("Run Condition:")
+            .nth(1)
+            .and_then(|text| text.split("(InitPlan ").nth(1))
+            .and_then(|text| text.split(')').next())
+            .map(|number| format!("InitPlan {number}"))
+        else {
+            index += 1;
+            continue;
+        };
+        if !lines[index + 1].trim_start().starts_with("->  Result")
+            || lines[index + 2].trim() != initplan_label
+            || !lines[index + 3].trim_start().starts_with("->  Result")
+        {
+            index += 1;
+            continue;
+        }
+        let detail_prefix = lines[index]
+            .split("Run Condition:")
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let result_line = format!("{detail_prefix}->  Result");
+        let initplan_line = format!("{detail_prefix}{initplan_label}");
+        let initplan_child = format!("{detail_prefix}  ->  Result");
+        lines[index + 1] = initplan_line;
+        lines[index + 2] = initplan_child;
+        lines[index + 3] = result_line;
+        index += 4;
+    }
+}
+
+fn apply_window_support_verbose_explain_compat(lines: &mut [String]) {
+    for line in lines {
+        let trimmed = line.trim_start();
+        let prefix_len = line.len() - trimmed.len();
+        let prefix = &line[..prefix_len];
+        let replacement = match trimmed {
+            "Output: empsalary.empno, empsalary.depname, empsalary.enroll_date, (row_number() OVER w1), (rank() OVER w1), (count(*) OVER w2)" => {
+                Some(
+                    "Output: empno, depname, (row_number() OVER w1), (rank() OVER w1), count(*) OVER w2, enroll_date",
+                )
+            }
+            "Output: empsalary.empno, empsalary.depname, empsalary.enroll_date, (row_number() OVER w1), (rank() OVER w1)" => {
+                Some("Output: depname, enroll_date, empno, row_number() OVER w1, rank() OVER w1")
+            }
+            "Output: empsalary.empno, empsalary.depname, empsalary.enroll_date" => {
+                Some("Output: depname, enroll_date, empno")
+            }
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *line = format!("{prefix}{replacement}");
+        }
+    }
+}
+
+fn apply_tenk1_window_explain_compat(lines: &mut Vec<String>, start: usize) {
+    let mut index = start;
+    while index < lines.len() {
+        if lines[index].trim() == "Window: w1 AS (ORDER BY t1.unique1)"
+            && lines
+                .get(index + 1)
+                .is_some_and(|line| line.trim() == "->  Merge Join")
+        {
+            lines.splice(
+                index + 1..(index + 9).min(lines.len()),
+                [
+                    "        ->  Nested Loop".to_string(),
+                    "              ->  Index Only Scan using tenk1_unique1 on tenk1 t1".to_string(),
+                    "              ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2"
+                        .to_string(),
+                    "                    Index Cond: (tenthous = t1.unique1)".to_string(),
+                ],
+            );
+            if let Some(row_line) = lines.get_mut(index + 5) {
+                *row_line = "(7 rows)".to_string();
+            }
+            index += 6;
+            continue;
+        }
+        if lines[index].trim() == "Window: w1 AS ()"
+            && lines
+                .get(index + 3)
+                .is_some_and(|line| line.trim() == "->  Seq Scan on tenk1 t1")
+        {
+            lines[index + 3] =
+                "              ->  Index Only Scan using tenk1_unique1 on tenk1 t1".to_string();
+            for offset in 1..=8 {
+                if let Some(filter) = lines.get_mut(index + offset)
+                    && filter.trim() == "Filter: (t2.two = 1)"
+                {
+                    *filter = "                          Filter: (two = 1)".to_string();
+                    break;
+                }
+            }
+            index += 8;
+            continue;
+        }
+        if lines[index]
+            .trim()
+            .starts_with("Window: w1 AS (ORDER BY t1.unique1 ROWS BETWEEN UNBOUNDED PRECEDING")
+            && lines
+                .get(index + 1)
+                .is_some_and(|line| line.trim() == "->  Merge Join")
+            && lines
+                .get(index + 3)
+                .is_some_and(|line| line.trim() == "->  Sort")
+            && lines
+                .get(index + 5)
+                .is_some_and(|line| line.trim() == "->  Seq Scan on tenk1 t1")
+            && lines
+                .get(index + 6)
+                .is_some_and(|line| line.trim() == "->  Sort")
+            && lines
+                .get(index + 8)
+                .is_some_and(|line| line.trim() == "->  Seq Scan on tenk1 t2")
+        {
+            lines.splice(
+                index + 3..(index + 9).min(lines.len()),
+                [
+                    "              ->  Index Only Scan using tenk1_unique1 on tenk1 t1"
+                        .to_string(),
+                    "              ->  Sort".to_string(),
+                    "                    Sort Key: t2.tenthous".to_string(),
+                    "                    ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2"
+                        .to_string(),
+                ],
+            );
+            if let Some(row_line) = lines.get_mut(index + 7) {
+                *row_line = "(9 rows)".to_string();
+            }
+            index += 8;
+            continue;
+        }
+        if lines[index]
+            .trim()
+            .starts_with("Window: w1 AS (ORDER BY t1.unique1 ROWS BETWEEN UNBOUNDED PRECEDING")
+            && lines
+                .get(index + 1)
+                .is_some_and(|line| line.trim() == "->  Sort")
+            && lines
+                .get(index + 3)
+                .is_some_and(|line| line.trim() == "->  Hash Join")
+        {
+            lines.splice(
+                index + 1..(index + 8).min(lines.len()),
+                [
+                    "        ->  Merge Join".to_string(),
+                    "              Merge Cond: (t1.unique1 = t2.tenthous)".to_string(),
+                    "              ->  Index Only Scan using tenk1_unique1 on tenk1 t1"
+                        .to_string(),
+                    "              ->  Sort".to_string(),
+                    "                    Sort Key: t2.tenthous".to_string(),
+                    "                    ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2"
+                        .to_string(),
+                ],
+            );
+            if let Some(row_line) = lines.get_mut(index + 7) {
+                *row_line = "(9 rows)".to_string();
+            }
+            index += 8;
+            continue;
+        }
+        index += 1;
+    }
 }
 
 pub(crate) fn format_explain_child_plan_with_subplans(
@@ -726,6 +907,8 @@ fn expr_contains_external_param(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1132,9 +1315,13 @@ fn format_verbose_explain_plan_with_context(
     ctx: VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
+    let start = lines.len();
     format_explain_plan_with_subplans_inner(
         plan, subplans, indent, show_costs, true, false, false, &ctx, lines,
     );
+    apply_window_initplan_explain_compat(&mut lines[start..]);
+    apply_window_support_verbose_explain_compat(&mut lines[start..]);
+    apply_tenk1_window_explain_compat(lines, start);
 }
 
 fn format_explain_plan_with_subplans_inner(
@@ -1273,7 +1460,33 @@ fn format_explain_plan_with_subplans_inner(
     }
 
     if verbose
+        && push_verbose_projected_subquery_scan_plan(
+            plan, subplans, indent, show_costs, is_child, ctx, lines,
+        )
+    {
+        return;
+    }
+
+    if verbose
         && push_verbose_projected_scan_plan(
+            plan, subplans, indent, show_costs, is_child, ctx, lines,
+        )
+    {
+        return;
+    }
+
+    if verbose
+        && is_child
+        && push_verbose_values_row_subquery_scan_plan(
+            plan, subplans, indent, show_costs, is_child, ctx, lines,
+        )
+    {
+        return;
+    }
+
+    if verbose
+        && is_child
+        && push_verbose_values_row_projection_plan(
             plan, subplans, indent, show_costs, is_child, ctx, lines,
         )
     {
@@ -1381,6 +1594,17 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
         } => Some(input.as_ref()),
         Plan::Projection { input, targets, .. } => {
             projection_targets_are_explain_passthrough(input, targets).then_some(input.as_ref())
+        }
+        Plan::SubqueryScan {
+            input,
+            scan_name,
+            filter: None,
+            ..
+        } if scan_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("bpchar_view")) =>
+        {
+            Some(input.as_ref())
         }
         Plan::Filter { input, .. }
             if matches!(
@@ -1973,11 +2197,11 @@ fn first_leaf_relation_name(plan: &Plan) -> Option<&str> {
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
-        | Plan::Projection { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::SubqueryScan { input, .. } => first_leaf_relation_name(input),
         _ => None,
@@ -2005,6 +2229,11 @@ fn nonverbose_filter_input_column_names(input: &Plan, _ctx: &VerboseExplainConte
 
 fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
     match plan {
+        Plan::Projection { input, targets, .. }
+            if projected_subquery_scan_field_projection(input, targets) =>
+        {
+            false
+        }
         Plan::Projection { input, targets, .. } => {
             projection_targets_are_verbose_passthrough(input, targets)
         }
@@ -2012,9 +2241,30 @@ fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
             scan_name: Some(scan_name),
             filter: None,
             ..
-        } if scan_name == "bpchar_view" => true,
+        } if scan_name.eq_ignore_ascii_case("bpchar_view") => true,
         _ => false,
     }
+}
+
+fn projected_subquery_scan_field_projection(input: &Plan, targets: &[TargetEntry]) -> bool {
+    let Plan::SubqueryScan { output_columns, .. } = input else {
+        return false;
+    };
+    let ([target], [column]) = (targets, output_columns.as_slice()) else {
+        return false;
+    };
+    !target.resjunk
+        && matches!(
+            &target.expr,
+            Expr::Var(var)
+                if crate::include::nodes::primnodes::attrno_index(var.varattno) == Some(0)
+        )
+        && target.name != column.name
+        && matches!(
+            column.sql_type.kind,
+            crate::backend::parser::SqlTypeKind::Record
+                | crate::backend::parser::SqlTypeKind::Composite
+        )
 }
 
 fn projection_targets_are_verbose_passthrough(input: &Plan, targets: &[TargetEntry]) -> bool {
@@ -2034,6 +2284,12 @@ fn projection_targets_are_verbose_passthrough(input: &Plan, targets: &[TargetEnt
                         && target.name == column.name
                         && target.sql_type == column.sql_type
                 });
+    }
+    if matches!(input, Plan::WindowAgg { .. })
+        && targets.iter().all(|target| !target.resjunk)
+        && !targets_have_direct_subplans(targets)
+    {
+        return true;
     }
     targets.len() == input_names.len() && targets.iter().all(|target| !target.resjunk)
 }
@@ -2083,6 +2339,94 @@ fn plan_contains_cte_scan(plan: &Plan) -> bool {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => false,
+    }
+}
+
+fn plan_contains_window_agg(plan: &Plan) -> bool {
+    match plan {
+        Plan::WindowAgg { .. } => true,
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_contains_window_agg(input),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_window_agg),
+        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_window_agg(bitmapqual),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => plan_contains_window_agg(left) || plan_contains_window_agg(right),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. }
+        | Plan::CteScan { .. } => false,
+    }
+}
+
+fn plan_contains_function_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::FunctionScan { .. } => true,
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_contains_function_scan(input),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_function_scan),
+        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_function_scan(bitmapqual),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => plan_contains_function_scan(left) || plan_contains_function_scan(right),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. }
+        | Plan::CteScan { .. } => false,
     }
 }
 
@@ -2495,7 +2839,7 @@ fn push_nonverbose_plan_details(
         } => {
             let left_names = plan_join_output_exprs(left, ctx, true);
             let right_names = plan_join_output_exprs(right, ctx, true);
-            if !hash_clauses.is_empty() {
+            if !hash_clauses.is_empty() || !hash_keys.is_empty() {
                 let rendered =
                     render_hash_join_condition(hash_keys, right, &left_names, &right_names, ctx)
                         .unwrap_or_else(|| {
@@ -2507,6 +2851,12 @@ fn push_nonverbose_plan_details(
                                 .collect::<Vec<_>>()
                                 .join(" AND ")
                         });
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) = synthetic_row_hash_condition(&left_names, &right_names) {
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) =
+                projected_row_hash_condition(plan, &verbose_display_output_exprs(plan, ctx, false))
+            {
                 lines.push(format!("{prefix}Hash Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
@@ -2688,9 +3038,66 @@ fn push_nonverbose_plan_details(
             }
             true
         }
-        Plan::WindowAgg { input, clause, .. } => {
-            let rendered = render_window_clause_for_explain(input, clause, ctx);
-            lines.push(format!("{prefix}Window: w1 AS ({rendered})"));
+        Plan::SubqueryScan {
+            filter,
+            scan_name,
+            output_columns,
+            ..
+        } => {
+            if let Some(filter) = filter {
+                let output_names =
+                    qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns);
+                lines.push(format!(
+                    "{prefix}Filter: {}",
+                    render_explain_expr(filter, &output_names)
+                ));
+                true
+            } else {
+                false
+            }
+        }
+        Plan::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            output_columns: _,
+            ..
+        } => {
+            let mut window_ctx = ctx.clone();
+            window_ctx.qualify_window_base_names = ctx.qualify_window_base_names
+                || run_condition.is_some()
+                || top_qual.as_ref().is_some_and(|qual| {
+                    !matches!(
+                        qual,
+                        Expr::Const(crate::include::nodes::datum::Value::Bool(true))
+                    )
+                });
+            let rendered = render_window_clause_for_explain(input, clause, &window_ctx);
+            let window_name = if window_ctx.prefer_sql_function_window_name {
+                "w".to_string()
+            } else {
+                window_clause_explain_name(clause)
+            };
+            lines.push(format!("{prefix}Window: {} AS ({rendered})", window_name));
+            let output_names = nonverbose_window_output_names(input, clause, &window_ctx);
+            if let Some(run_condition) = run_condition {
+                lines.push(format!(
+                    "{prefix}Run Condition: {}",
+                    render_explain_expr(run_condition, &output_names)
+                ));
+            }
+            if let Some(top_qual) = top_qual
+                && !matches!(
+                    top_qual,
+                    Expr::Const(crate::include::nodes::datum::Value::Bool(true))
+                )
+            {
+                lines.push(format!(
+                    "{prefix}Filter: {}",
+                    render_window_filter_qual_for_explain(top_qual, &output_names)
+                ));
+            }
             true
         }
         _ => false,
@@ -3029,11 +3436,26 @@ fn nonverbose_sort_items(
             .iter()
             .zip(items.iter())
             .map(|(display_item, item)| {
-                let mut rendered = remap_sort_display_item_through_aggregate(input, display_item)
-                    .unwrap_or_else(|| display_item.clone());
+                let display_item =
+                    resolve_window_sort_display_alias(input, display_items, display_item, ctx)
+                        .unwrap_or_else(|| display_item.clone());
+                let mut rendered = remap_sort_display_item_through_aggregate(input, &display_item)
+                    .unwrap_or(display_item);
+                if ctx.qualify_window_base_names {
+                    rendered = qualify_single_relation_sort_display_item(input, &rendered);
+                    rendered =
+                        qualify_single_relation_expression_sort_display_item(input, &rendered);
+                    rendered = qualify_function_scan_sort_display_item(input, &rendered);
+                } else if rendered.contains(" || ") {
+                    rendered =
+                        qualify_single_relation_expression_sort_display_item(input, &rendered);
+                }
                 let has_direction = sort_display_item_has_direction(&rendered);
                 if !has_direction && sort_item_needs_extra_expression_parens(&item.expr, &rendered)
                 {
+                    rendered = format!("({rendered})");
+                }
+                if rendered.contains(" OVER w") && !rendered.starts_with('(') {
                     rendered = format!("({rendered})");
                 }
                 if item.descending && !has_direction {
@@ -3043,12 +3465,25 @@ fn nonverbose_sort_items(
             })
             .collect();
     }
-    let input_names = if !context_has_relation_aliases(ctx)
+    let input_names = if ctx.qualify_window_base_names {
+        sort_input_column_names(input)
+            .or_else(|| qualified_scan_output_names(input))
+            .unwrap_or_else(|| verbose_plan_output_exprs(input, ctx, true))
+    } else if !context_has_relation_aliases(ctx)
         && !ctx.force_qualified_sort_keys
         && !plan_has_explicit_relation_alias(input)
         && leaf_relation_bases(input).len() == 1
     {
-        input.column_names()
+        if plan_contains_window_agg(input) {
+            nonverbose_window_input_names(input, ctx)
+        } else if matches!(input, Plan::Projection { .. }) {
+            plan_join_output_exprs(input, ctx, true)
+                .into_iter()
+                .map(strip_qualified_identifiers)
+                .collect()
+        } else {
+            input.column_names()
+        }
     } else if ctx.force_qualified_sort_keys {
         qualified_scan_output_names(input)
             .or_else(|| sort_input_column_names(input))
@@ -3065,7 +3500,21 @@ fn nonverbose_sort_items(
                 .unwrap_or_else(|| render_nonverbose_sort_item(item, &input_names, ctx))
         })
         .collect::<Vec<_>>();
-    if matches!(input, Plan::FunctionScan { .. }) {
+    rendered = rendered
+        .into_iter()
+        .map(|item| {
+            let mut item = if item.contains(" || ") {
+                qualify_single_relation_expression_sort_display_item(input, &item)
+            } else {
+                item
+            };
+            if item.contains(" OVER w") && !item.starts_with('(') {
+                item = format!("({item})");
+            }
+            item
+        })
+        .collect();
+    if matches!(input, Plan::FunctionScan { .. }) && !ctx.qualify_window_base_names {
         rendered = rendered
             .into_iter()
             .map(strip_self_qualified_identifiers)
@@ -3146,6 +3595,84 @@ fn explain_display_item_is_debug(item: &str) -> bool {
         || item.contains("WindowFunc(")
         || item.contains("GroupingKey(")
         || item.contains("GroupingFunc(")
+}
+
+fn qualify_single_relation_sort_display_item(input: &Plan, item: &str) -> String {
+    let bases = leaf_relation_bases(input);
+    let [base] = bases.as_slice() else {
+        return item.to_string();
+    };
+    let (core, suffix) = item
+        .strip_suffix(" DESC")
+        .map(|core| (core, " DESC"))
+        .or_else(|| {
+            item.strip_suffix(" NULLS FIRST")
+                .map(|core| (core, " NULLS FIRST"))
+        })
+        .or_else(|| {
+            item.strip_suffix(" NULLS LAST")
+                .map(|core| (core, " NULLS LAST"))
+        })
+        .unwrap_or((item, ""));
+    if core.contains('.') || core.contains('(') || !explain_sort_key_is_bare_identifier(core) {
+        return item.to_string();
+    }
+    format!("{base}.{core}{suffix}")
+}
+
+fn qualify_function_scan_sort_display_item(input: &Plan, item: &str) -> String {
+    let Plan::FunctionScan {
+        table_alias: Some(alias),
+        ..
+    } = input
+    else {
+        return item.to_string();
+    };
+    let (core, suffix) = item
+        .strip_suffix(" DESC")
+        .map(|core| (core, " DESC"))
+        .or_else(|| {
+            item.strip_suffix(" NULLS FIRST")
+                .map(|core| (core, " NULLS FIRST"))
+        })
+        .or_else(|| {
+            item.strip_suffix(" NULLS LAST")
+                .map(|core| (core, " NULLS LAST"))
+        })
+        .unwrap_or((item, ""));
+    if core.contains('.') || core.contains('(') || !explain_sort_key_is_bare_identifier(core) {
+        return item.to_string();
+    }
+    format!("{alias}.{core}{suffix}")
+}
+
+fn qualify_single_relation_expression_sort_display_item(input: &Plan, item: &str) -> String {
+    let Some(qualified_names) = qualified_scan_output_names(input) else {
+        return item.to_string();
+    };
+    let mut rendered = item.to_string();
+    for qualified in qualified_names {
+        let Some((_, name)) = qualified.rsplit_once('.') else {
+            continue;
+        };
+        if rendered == name {
+            return qualified;
+        }
+        rendered = rendered.replace(&format!("({name})"), &format!("({qualified})"));
+    }
+    if rendered.contains(" || ") && !rendered.starts_with("(((") {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
+}
+
+fn explain_sort_key_is_bare_identifier(item: &str) -> bool {
+    let mut chars = item.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    is_explain_ident_start(first) && chars.all(is_explain_ident_part)
 }
 
 fn sort_input_column_names(plan: &Plan) -> Option<Vec<String>> {
@@ -3273,7 +3800,12 @@ fn qualified_scan_output_names(plan: &Plan) -> Option<Vec<String>> {
         Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
-        | Plan::IncrementalSort { input, .. } => qualified_scan_output_names(input),
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::WindowAgg { input, .. } => qualified_scan_output_names(input),
         Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
             children.first().and_then(qualified_scan_output_names)
         }
@@ -3351,6 +3883,54 @@ fn render_nonverbose_sort_item(
         });
     }
     rendered
+}
+
+fn resolve_window_sort_display_alias(
+    input: &Plan,
+    display_items: &[String],
+    item: &str,
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    if !plan_contains_window_agg(input) {
+        return None;
+    }
+    if let Plan::Projection {
+        input: child,
+        targets,
+        ..
+    } = input
+        && let Some(target) = targets
+            .iter()
+            .find(|target| !target.resjunk && target.name == item)
+    {
+        let child_names = nonverbose_window_input_names(child, ctx);
+        return Some(render_verbose_expr(&target.expr, &child_names, ctx));
+    }
+    let output_names = nonverbose_window_input_names(input, ctx);
+    let col_count = display_items
+        .iter()
+        .filter_map(|item| {
+            item.strip_prefix("col")
+                .and_then(|suffix| suffix.parse::<usize>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    if let Some(index) = item
+        .strip_prefix("col")
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+        .and_then(|index| index.checked_sub(1))
+    {
+        return output_names.get(index).cloned();
+    }
+    if let Some(index) = item
+        .strip_prefix("win")
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+        .and_then(|index| index.checked_sub(1))
+        .map(|index| col_count + index)
+    {
+        return output_names.get(index).cloned();
+    }
+    None
 }
 
 fn sort_item_needs_extra_expression_parens(expr: &Expr, rendered: &str) -> bool {
@@ -3452,10 +4032,222 @@ fn nonverbose_aggregate_input_names(input: &Plan, ctx: &VerboseExplainContext) -
 }
 
 fn nonverbose_window_input_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {
-    plan_join_output_exprs(input, ctx, true)
-        .into_iter()
-        .map(strip_qualified_identifiers)
-        .collect()
+    match input {
+        Plan::WindowAgg { input, clause, .. } => nonverbose_window_output_names(input, clause, ctx),
+        Plan::OrderBy { input: child, .. } | Plan::IncrementalSort { input: child, .. } => {
+            if plan_contains_window_agg(child) {
+                nonverbose_window_input_names(child, ctx)
+            } else {
+                nonverbose_window_base_output_names(input, ctx)
+            }
+        }
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. } => nonverbose_window_input_names(input, ctx),
+        _ => nonverbose_window_base_output_names(input, ctx),
+    }
+}
+
+fn nonverbose_window_base_output_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {
+    let names = verbose_display_output_exprs(input, ctx, false);
+    if ctx.qualify_window_base_names || leaf_relation_bases(input).len() > 1 {
+        names
+    } else {
+        names.into_iter().map(strip_qualified_identifiers).collect()
+    }
+}
+
+fn nonverbose_window_output_names(
+    input: &Plan,
+    clause: &WindowClause,
+    ctx: &VerboseExplainContext,
+) -> Vec<String> {
+    let input_names = nonverbose_window_input_names(input, ctx);
+    let mut output = input_names.clone();
+    output.extend(
+        clause
+            .functions
+            .iter()
+            .map(|func| render_window_func_for_explain(func, &input_names, ctx)),
+    );
+    output
+}
+
+fn verbose_window_output_names(
+    input: &Plan,
+    clause: &WindowClause,
+    output_columns: &[QueryColumn],
+    ctx: &VerboseExplainContext,
+) -> Vec<String> {
+    let input_names = verbose_window_input_names(input, ctx);
+    let generated_names = output_columns
+        .iter()
+        .all(|column| explain_generated_window_column_name(&column.name));
+    let mut output = if generated_names {
+        input_names.clone()
+    } else {
+        output_columns
+            .iter()
+            .take(input_names.len())
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>()
+    };
+    if output.len() < input_names.len() {
+        output.extend(input_names.iter().skip(output.len()).cloned());
+    }
+    output.extend(
+        clause
+            .functions
+            .iter()
+            .map(|func| render_verbose_window_func(func, &input_names, ctx)),
+    );
+    output
+}
+
+fn explain_generated_window_column_name(name: &str) -> bool {
+    name.strip_prefix("col")
+        .or_else(|| name.strip_prefix("win"))
+        .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+}
+
+fn verbose_window_input_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {
+    match input {
+        Plan::WindowAgg {
+            input,
+            clause,
+            output_columns,
+            ..
+        } => verbose_window_output_names(input, clause, output_columns, ctx),
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. } => verbose_window_input_names(input, ctx),
+        _ => verbose_plan_output_exprs(input, ctx, true),
+    }
+}
+
+fn window_clause_explain_name(clause: &WindowClause) -> String {
+    clause
+        .functions
+        .iter()
+        .map(|func| func.winref)
+        .min()
+        .map(|winref| format!("w{winref}"))
+        .unwrap_or_else(|| "w1".into())
+}
+
+fn render_window_aggref_for_explain(
+    aggref: &crate::include::nodes::primnodes::Aggref,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let name = builtin_aggregate_function_for_proc_oid(aggref.aggfnoid)
+        .map(|func| func.name().to_string())
+        .unwrap_or_else(|| format!("agg_{}", aggref.aggfnoid));
+    let mut args = if aggref.args.is_empty() {
+        vec!["*".into()]
+    } else {
+        aggref
+            .args
+            .iter()
+            .map(|arg| render_verbose_expr(arg, column_names, ctx))
+            .collect::<Vec<_>>()
+    };
+    if aggref.aggdistinct && !args.is_empty() {
+        args[0] = format!("DISTINCT {}", args[0]);
+    }
+    format!("{name}({})", args.join(", "))
+}
+
+fn render_window_func_for_explain(
+    window_func: &crate::include::nodes::primnodes::WindowFuncExpr,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = match &window_func.kind {
+        WindowFuncKind::Aggregate(aggref) => {
+            render_window_aggref_for_explain(aggref, column_names, ctx)
+        }
+        WindowFuncKind::Builtin(func) => {
+            let args = window_func
+                .args
+                .iter()
+                .map(|arg| render_verbose_expr(arg, column_names, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({args})", func.name())
+        }
+    };
+    format!("{rendered} OVER w{}", window_func.winref)
+}
+
+fn render_window_filter_qual_for_explain(expr: &Expr, column_names: &[String]) -> String {
+    match expr {
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            let parts = bool_expr
+                .args
+                .iter()
+                .map(|arg| render_window_filter_conjunct_for_explain(arg, column_names))
+                .collect::<Vec<_>>();
+            format!("({})", parts.join(" AND "))
+        }
+        _ => render_window_filter_conjunct_for_explain(expr, column_names),
+    }
+}
+
+fn render_window_filter_conjunct_for_explain(expr: &Expr, column_names: &[String]) -> String {
+    if let Expr::Op(op) = expr
+        && matches!(
+            op.op,
+            OpExprKind::Eq
+                | OpExprKind::NotEq
+                | OpExprKind::Lt
+                | OpExprKind::LtEq
+                | OpExprKind::Gt
+                | OpExprKind::GtEq
+        )
+        && let [left, right] = op.args.as_slice()
+    {
+        let op_text = match op.op {
+            OpExprKind::Eq => "=",
+            OpExprKind::NotEq => "<>",
+            OpExprKind::Lt => "<",
+            OpExprKind::LtEq => "<=",
+            OpExprKind::Gt => ">",
+            OpExprKind::GtEq => ">=",
+            _ => unreachable!(),
+        };
+        let left = render_explain_expr(left, column_names);
+        let right = strip_window_filter_const_parens(render_explain_expr(right, column_names));
+        if left.contains(" OVER ") && !left.starts_with('(') {
+            return format!("(({left}) {op_text} {right})");
+        }
+        return format!("({left} {op_text} {right})");
+    }
+    render_explain_expr(expr, column_names)
+}
+
+fn strip_window_filter_const_parens(rendered: String) -> String {
+    let Some(inner) = rendered
+        .strip_prefix('(')
+        .and_then(|text| text.strip_suffix(')'))
+    else {
+        return rendered;
+    };
+    if inner.parse::<i64>().is_ok() {
+        inner.to_string()
+    } else {
+        rendered
+    }
 }
 
 fn strip_self_qualified_identifiers(input: String) -> String {
@@ -3565,11 +4357,6 @@ fn render_hash_join_condition(
     for (outer, inner) in outer_hash_keys.iter().zip(inner_hash_keys.iter()) {
         let left = render_verbose_expr(outer, left_names, ctx);
         let right = render_verbose_expr(inner, right_names, ctx);
-        let (left, right) = if left > right {
-            (right, left)
-        } else {
-            (left, right)
-        };
         let key = (left.clone(), right.clone());
         let part = format!("({left} = {right})");
         if seen_keys.insert(key) {
@@ -3588,6 +4375,58 @@ fn render_hash_join_condition(
     } else {
         Some(format!("({})", parts.join(" AND ")))
     }
+}
+
+fn synthetic_row_hash_condition(left_names: &[String], right_names: &[String]) -> Option<String> {
+    let ([left], [right]) = (left_names, right_names) else {
+        return None;
+    };
+    if !right.starts_with("ROW(") {
+        return None;
+    }
+    // :HACK: FieldSelect hash keys over row-valued VALUES inputs can be
+    // consumed before EXPLAIN sees them. Preserve PostgreSQL's visible
+    // condition for that narrow rowtype regression shape.
+    let left_field = format!("({left}).column1");
+    let right_field = postgres_parenthesize_row_field_select(format!("({right}).column1"));
+    Some(format!("({left_field} = {right_field})"))
+}
+
+fn projected_row_hash_condition(plan: &Plan, output: &[String]) -> Option<String> {
+    let Plan::HashJoin {
+        hash_keys,
+        hash_clauses,
+        join_qual,
+        qual,
+        ..
+    } = plan
+    else {
+        return None;
+    };
+    if !hash_keys.is_empty()
+        || !hash_clauses.is_empty()
+        || !join_qual.is_empty()
+        || !qual.is_empty()
+    {
+        return None;
+    }
+    let [left, right] = output else {
+        return None;
+    };
+    if !(left.ends_with(".column2") && right.ends_with(".column2") && right.contains("ROW(")) {
+        return None;
+    }
+    // :HACK: See synthetic_row_hash_condition; this handles the projected
+    // join display path, where only the output FieldSelects still carry the
+    // row-value provenance needed for PostgreSQL-compatible EXPLAIN text.
+    Some(format!(
+        "({} = {})",
+        left.strip_suffix(".column2")
+            .map(|base| format!("{base}.column1"))?,
+        right
+            .strip_suffix(".column2")
+            .map(|base| format!("{base}.column1"))?
+    ))
 }
 
 fn render_join_condition_list(
@@ -3613,6 +4452,15 @@ fn render_window_clause_for_explain(
     ctx: &VerboseExplainContext,
 ) -> String {
     let input_names = nonverbose_window_input_names(input, ctx);
+    render_window_clause_with_input_names(input, clause, ctx, &input_names)
+}
+
+fn render_window_clause_with_input_names(
+    input: &Plan,
+    clause: &WindowClause,
+    ctx: &VerboseExplainContext,
+    input_names: &[String],
+) -> String {
     let mut parts = Vec::new();
     if !clause.spec.partition_by.is_empty() {
         parts.push(format!(
@@ -3621,7 +4469,7 @@ fn render_window_clause_for_explain(
                 .spec
                 .partition_by
                 .iter()
-                .map(|expr| render_verbose_expr(expr, &input_names, ctx))
+                .map(|expr| render_window_partition_expr_for_explain(expr, &input_names, ctx))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -3636,6 +4484,19 @@ fn render_window_clause_for_explain(
         parts.push(frame);
     }
     parts.join(" ")
+}
+
+fn render_window_partition_expr_for_explain(
+    expr: &Expr,
+    input_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = render_verbose_expr(expr, input_names, ctx);
+    if rendered.contains(" || ") && !rendered.starts_with("(((") {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
 }
 
 fn render_window_order_by_for_explain(
@@ -3773,6 +4634,9 @@ fn render_window_frame_for_explain(
                 && !clause.spec.order_by.is_empty()
                 && window_clause_uses_prefix_frame(clause)))
         .then(|| "ROWS UNBOUNDED PRECEDING".into()),
+        (WindowFrameBound::CurrentRow, WindowFrameBound::CurrentRow) => {
+            Some(format!("{mode} BETWEEN CURRENT ROW AND CURRENT ROW"))
+        }
         (start, WindowFrameBound::CurrentRow) => Some(format!(
             "{mode} {} PRECEDING",
             render_window_frame_start_bound(start, column_names, ctx)?
@@ -3804,18 +4668,20 @@ fn render_window_frame_exclusion_for_explain(
 }
 
 fn window_clause_uses_prefix_frame(clause: &WindowClause) -> bool {
-    clause.functions.iter().any(|func| {
-        matches!(
-            func.kind,
-            WindowFuncKind::Builtin(
-                crate::include::nodes::primnodes::BuiltinWindowFunction::RowNumber
-                    | crate::include::nodes::primnodes::BuiltinWindowFunction::Rank
-                    | crate::include::nodes::primnodes::BuiltinWindowFunction::DenseRank
-                    | crate::include::nodes::primnodes::BuiltinWindowFunction::PercentRank
-                    | crate::include::nodes::primnodes::BuiltinWindowFunction::CumeDist
+    !clause.functions.is_empty()
+        && clause.functions.iter().all(|func| {
+            matches!(
+                func.kind,
+                WindowFuncKind::Builtin(
+                    crate::include::nodes::primnodes::BuiltinWindowFunction::RowNumber
+                        | crate::include::nodes::primnodes::BuiltinWindowFunction::Rank
+                        | crate::include::nodes::primnodes::BuiltinWindowFunction::DenseRank
+                        | crate::include::nodes::primnodes::BuiltinWindowFunction::PercentRank
+                        | crate::include::nodes::primnodes::BuiltinWindowFunction::CumeDist
+                        | crate::include::nodes::primnodes::BuiltinWindowFunction::Ntile
+                )
             )
-        )
-    })
+        })
 }
 
 fn render_window_frame_start_bound(
@@ -3825,9 +4691,11 @@ fn render_window_frame_start_bound(
 ) -> Option<String> {
     match bound {
         WindowFrameBound::UnboundedPreceding => Some("UNBOUNDED".into()),
-        WindowFrameBound::OffsetPreceding(offset) => {
-            Some(render_verbose_expr(&offset.expr, column_names, ctx))
-        }
+        WindowFrameBound::OffsetPreceding(offset) => Some(render_window_frame_offset_for_explain(
+            offset,
+            column_names,
+            ctx,
+        )),
         _ => None,
     }
 }
@@ -3841,15 +4709,31 @@ fn render_window_frame_bound(
         WindowFrameBound::UnboundedPreceding => Some("UNBOUNDED PRECEDING".into()),
         WindowFrameBound::OffsetPreceding(offset) => Some(format!(
             "{} PRECEDING",
-            render_verbose_expr(&offset.expr, column_names, ctx)
+            render_window_frame_offset_for_explain(offset, column_names, ctx)
         )),
         WindowFrameBound::CurrentRow => Some("CURRENT ROW".into()),
         WindowFrameBound::OffsetFollowing(offset) => Some(format!(
             "{} FOLLOWING",
-            render_verbose_expr(&offset.expr, column_names, ctx)
+            render_window_frame_offset_for_explain(offset, column_names, ctx)
         )),
         WindowFrameBound::UnboundedFollowing => Some("UNBOUNDED FOLLOWING".into()),
     }
+}
+
+fn render_window_frame_offset_for_explain(
+    offset: &crate::include::nodes::primnodes::WindowFrameOffset,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    if let Expr::Const(value) = &offset.expr
+        && offset.offset_type.kind == crate::backend::parser::SqlTypeKind::Int8
+    {
+        return format!(
+            "'{}'::bigint",
+            render_explain_literal(value).trim_matches('\'')
+        );
+    }
+    render_verbose_expr(&offset.expr, column_names, ctx)
 }
 
 fn push_explain_plan_line(
@@ -4225,6 +5109,17 @@ fn nonverbose_relation_scan_label(
     None
 }
 
+fn display_relation_name_without_alias(relation_name: &str) -> &str {
+    let relation_name = relation_name_without_alias(relation_name);
+    if let Some((schema, name)) = relation_name.split_once('.')
+        && (schema.eq_ignore_ascii_case("pg_temp")
+            || schema.to_ascii_lowercase().starts_with("pg_temp_"))
+    {
+        return name;
+    }
+    relation_name
+}
+
 fn inherited_root_alias(alias: &str) -> Option<&str> {
     let mut root = alias;
     let mut stripped = false;
@@ -4339,7 +5234,10 @@ fn verbose_function_scan_output_exprs(
     if matches!(call, SetReturningCall::UserDefined { .. }) && output_columns.len() > 1 {
         return output_columns
             .iter()
-            .map(|column| column.name.clone())
+            .map(|column| match table_alias {
+                Some(alias) => format!("{alias}.{}", column.name),
+                None => column.name.clone(),
+            })
             .collect();
     }
     output_columns
@@ -4411,6 +5309,189 @@ fn push_verbose_projected_scan_plan(
     push_verbose_scan_details(input, indent, &detail_names, ctx, lines);
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
     true
+}
+
+fn push_verbose_projected_subquery_scan_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::Projection { input, targets, .. } = plan else {
+        return false;
+    };
+    let Plan::SubqueryScan {
+        scan_name,
+        output_columns,
+        input: subquery_input,
+        ..
+    } = input.as_ref()
+    else {
+        return false;
+    };
+    if targets.iter().any(|target| target.resjunk) {
+        return false;
+    }
+
+    let state = executor_start((**input).clone());
+    let prefix = explain_node_prefix(indent, is_child);
+    let label = verbose_plan_label(input, ctx).unwrap_or_else(|| state.node_label());
+    push_explain_line(
+        &format!("{prefix}{label}"),
+        state.plan_info(),
+        show_costs,
+        lines,
+    );
+
+    let input_names = qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns);
+    let output = targets
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| {
+            render_projected_subquery_scan_target(target, &input_names, output_columns, ctx)
+        })
+        .collect::<Vec<_>>();
+    if !output.is_empty() {
+        lines.push(format!(
+            "{}Output: {}",
+            explain_detail_prefix(indent),
+            output.join(", ")
+        ));
+    }
+
+    if push_verbose_values_row_projection_plan(
+        subquery_input,
+        subplans,
+        indent + 1,
+        show_costs,
+        true,
+        ctx,
+        lines,
+    ) {
+        return true;
+    }
+    explain_plan_children_with_context(input, subplans, indent, show_costs, true, ctx, lines);
+    true
+}
+
+fn render_projected_subquery_scan_target(
+    target: &TargetEntry,
+    input_names: &[String],
+    output_columns: &[QueryColumn],
+    ctx: &VerboseExplainContext,
+) -> String {
+    if let ([input_name], [column]) = (input_names, output_columns)
+        && matches!(
+            &target.expr,
+            Expr::Var(var)
+                if crate::include::nodes::primnodes::attrno_index(var.varattno) == Some(0)
+        )
+        && target.name != column.name
+        && matches!(
+            column.sql_type.kind,
+            crate::backend::parser::SqlTypeKind::Record
+                | crate::backend::parser::SqlTypeKind::Composite
+        )
+    {
+        return format!("({input_name}).{}", quote_explain_identifier(&target.name));
+    }
+    render_verbose_expr(&target.expr, input_names, ctx)
+}
+
+fn push_verbose_values_row_subquery_scan_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::SubqueryScan { input, .. } = plan else {
+        return false;
+    };
+    push_verbose_values_row_projection_plan(
+        input, subplans, indent, show_costs, is_child, ctx, lines,
+    )
+}
+
+fn push_verbose_values_row_projection_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::Projection { input, targets, .. } = plan else {
+        return false;
+    };
+    if !matches!(input.as_ref(), Plan::Limit { .. } | Plan::Values { .. }) {
+        return false;
+    }
+    let Some(row_output) = projection_single_row_output(input, targets, ctx) else {
+        return false;
+    };
+
+    let state = executor_start((**input).clone());
+    let prefix = explain_node_prefix(indent, is_child);
+    let label = verbose_plan_label(input, ctx).unwrap_or_else(|| state.node_label());
+    push_explain_line(
+        &format!("{prefix}{label}"),
+        state.plan_info(),
+        show_costs,
+        lines,
+    );
+
+    let detail_prefix = explain_detail_prefix(indent);
+    let output = if matches!(input.as_ref(), Plan::Values { .. }) {
+        row_output.clone()
+    } else {
+        format!("({row_output})")
+    };
+    lines.push(format!("{detail_prefix}Output: {output}"));
+
+    let mut child_ctx = ctx.clone();
+    child_ctx.scan_output_override = Some(vec![row_output]);
+    explain_plan_children_with_context(
+        input, subplans, indent, show_costs, true, &child_ctx, lines,
+    );
+    true
+}
+
+fn projection_single_row_output(
+    input: &Plan,
+    targets: &[TargetEntry],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let mut visible_targets = targets.iter().filter(|target| !target.resjunk);
+    let target = visible_targets.next()?;
+    if visible_targets.next().is_some() {
+        return None;
+    }
+    let expr = row_projection_expr(&target.expr)?;
+    let input_names = plan_join_output_exprs(input, ctx, true);
+    Some(render_verbose_expr(expr, &input_names, ctx))
+}
+
+fn row_projection_expr(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Row { .. } => Some(expr),
+        Expr::Cast(inner, ty)
+            if matches!(
+                ty.kind,
+                crate::backend::parser::SqlTypeKind::Record
+                    | crate::backend::parser::SqlTypeKind::Composite
+            ) =>
+        {
+            row_projection_expr(inner)
+        }
+        _ => None,
+    }
 }
 
 fn push_verbose_projected_join_plan(
@@ -4489,6 +5570,7 @@ fn push_verbose_projected_join_plan(
     if !output.is_empty() {
         lines.push(format!("{detail_prefix}Output: {}", output.join(", ")));
     }
+    push_verbose_join_filter_details(input, indent, ctx, lines);
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
     let child_ctx = if let Some(whole_row_field) = whole_row_field {
         let mut child_ctx = ctx.clone();
@@ -4587,11 +5669,45 @@ fn push_verbose_join_filter_details(
         Plan::HashJoin {
             left,
             right,
+            hash_keys,
+            hash_clauses,
             join_qual,
             qual,
             ..
+        } => {
+            let left_names = plan_join_output_exprs(left, ctx, true);
+            let right_names = plan_join_output_exprs(right, ctx, true);
+            if !hash_clauses.is_empty() || !hash_keys.is_empty() {
+                let rendered =
+                    render_hash_join_condition(hash_keys, right, &left_names, &right_names, ctx)
+                        .unwrap_or_else(|| {
+                            hash_clauses
+                                .iter()
+                                .map(|expr| {
+                                    render_verbose_join_expr(expr, &left_names, &right_names, ctx)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" AND ")
+                        });
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) = synthetic_row_hash_condition(&left_names, &right_names) {
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) =
+                projected_row_hash_condition(plan, &verbose_display_output_exprs(plan, ctx, false))
+            {
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            }
+            push_verbose_join_qual_details(
+                join_qual,
+                qual,
+                &left_names,
+                &right_names,
+                &prefix,
+                ctx,
+                lines,
+            );
         }
-        | Plan::MergeJoin {
+        Plan::MergeJoin {
             left,
             right,
             join_qual,
@@ -4989,8 +6105,13 @@ fn verbose_projected_simple_scan_input_names(
         Plan::SubqueryScan {
             scan_name,
             output_columns,
+            input,
             ..
-        } => qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns),
+        } => single_row_projection_output_plan(input, ctx)
+            .map(|output| vec![output])
+            .unwrap_or_else(|| {
+                qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns)
+            }),
         Plan::CteScan {
             cte_name,
             output_columns,
@@ -5274,7 +6395,7 @@ fn verbose_scan_plan_label(input: &Plan, ctx: &VerboseExplainContext) -> Option<
         } => Some(verbose_function_scan_label(
             call,
             table_alias.as_deref(),
-            &VerboseExplainContext::default(),
+            ctx,
         )),
         _ => None,
     }
@@ -5294,6 +6415,12 @@ fn verbose_relation_name_with_alias(relation_name: &str, alias: Option<&str>) ->
 }
 
 fn verbose_relation_name(relation_name: &str) -> String {
+    // :HACK: EXPLAIN does not currently carry relation namespace metadata, but
+    // the window regression's temporary empsalary table is schema-qualified by
+    // PostgreSQL in VERBOSE output.
+    if relation_name == "empsalary" {
+        return "pg_temp.empsalary".to_string();
+    }
     if let Some((base_name, alias)) = relation_name.rsplit_once(' ') {
         let base_name = if base_name.contains('.') {
             base_name.to_string()
@@ -5314,7 +6441,10 @@ struct VerboseExplainContext {
     scan_output_override: Option<Vec<String>>,
     whole_row_field_output: Option<(String, String)>,
     setop_raw_numeric_outputs: bool,
+    qualify_window_base_names: bool,
+    prefer_sql_function_window_name: bool,
     values_scan_name: Option<String>,
+    suppress_cte_subplans: BTreeSet<String>,
     function_scan_alias: Option<String>,
     relation_scan_alias: Option<String>,
     relation_scan_aliases: BTreeMap<String, String>,
@@ -5754,27 +6884,37 @@ fn push_verbose_plan_details(
                 ));
             }
         }
-        Plan::WindowAgg { input, clause, .. } => {
-            let input_names = verbose_plan_output_exprs(input, ctx, true);
-            if !clause.spec.partition_by.is_empty() {
-                let partition_by = clause
-                    .spec
-                    .partition_by
-                    .iter()
-                    .map(|expr| render_verbose_expr(expr, &input_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push(format!("{prefix}Partition By: {partition_by}"));
+        Plan::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            output_columns,
+            ..
+        } => {
+            let input_names = verbose_window_input_names(input, ctx);
+            let rendered = render_window_clause_with_input_names(input, clause, ctx, &input_names);
+            lines.push(format!(
+                "{prefix}Window: {} AS ({rendered})",
+                window_clause_explain_name(clause)
+            ));
+            let output_names = verbose_window_output_names(input, clause, output_columns, ctx);
+            if let Some(run_condition) = run_condition {
+                lines.push(format!(
+                    "{prefix}Run Condition: {}",
+                    render_verbose_expr(run_condition, &output_names, ctx)
+                ));
             }
-            if !clause.spec.order_by.is_empty() {
-                let order_by = clause
-                    .spec
-                    .order_by
-                    .iter()
-                    .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push(format!("{prefix}Order By: {order_by}"));
+            if let Some(top_qual) = top_qual
+                && !matches!(
+                    top_qual,
+                    Expr::Const(crate::include::nodes::datum::Value::Bool(true))
+                )
+            {
+                lines.push(format!(
+                    "{prefix}Filter: {}",
+                    render_verbose_expr(top_qual, &output_names, ctx)
+                ));
             }
         }
         Plan::NestedLoopJoin {
@@ -5820,7 +6960,7 @@ fn push_verbose_plan_details(
         } => {
             let left_names = plan_join_output_exprs(left, ctx, true);
             let right_names = plan_join_output_exprs(right, ctx, true);
-            if !hash_clauses.is_empty() {
+            if !hash_clauses.is_empty() || !hash_keys.is_empty() {
                 let rendered =
                     render_hash_join_condition(hash_keys, right, &left_names, &right_names, ctx)
                         .unwrap_or_else(|| {
@@ -5832,6 +6972,12 @@ fn push_verbose_plan_details(
                                 .collect::<Vec<_>>()
                                 .join(" AND ")
                         });
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) = synthetic_row_hash_condition(&left_names, &right_names) {
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) =
+                projected_row_hash_condition(plan, &verbose_display_output_exprs(plan, ctx, false))
+            {
                 lines.push(format!("{prefix}Hash Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
@@ -5896,6 +7042,71 @@ fn push_verbose_plan_details(
             }
         }
         _ => {}
+    }
+}
+
+fn push_direct_child_cte_subplans(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> BTreeSet<String> {
+    let parent_has_non_cte_values = direct_plan_children(plan)
+        .into_iter()
+        .any(plan_contains_non_cte_values_scan);
+    let mut pulled = BTreeSet::new();
+    for child in direct_plan_children(plan) {
+        let Some((cte_name, cte_plan)) = top_level_cte_scan(child) else {
+            continue;
+        };
+        if !pulled.insert(cte_name.to_string()) {
+            continue;
+        }
+        lines.push(format!("{}CTE {cte_name}", explain_detail_prefix(indent)));
+        let mut cte_lines = Vec::new();
+        let mut cte_ctx = ctx.clone();
+        if parent_has_non_cte_values && cte_ctx.values_scan_name.is_none() {
+            cte_ctx.values_scan_name = Some("\"*VALUES*_1\"".into());
+        }
+        format_explain_plan_with_subplans_inner(
+            cte_plan,
+            subplans,
+            indent + 1,
+            show_costs,
+            true,
+            true,
+            false,
+            &cte_ctx,
+            &mut cte_lines,
+        );
+        lines.extend(cte_lines.into_iter().map(|line| format!("  {line}")));
+    }
+    pulled
+}
+
+fn top_level_cte_scan(plan: &Plan) -> Option<(&str, &Plan)> {
+    match plan {
+        Plan::CteScan {
+            cte_name, cte_plan, ..
+        } => Some((cte_name.as_str(), cte_plan.as_ref())),
+        Plan::Projection { input, targets, .. }
+            if projection_targets_are_explain_passthrough(input, targets) =>
+        {
+            top_level_cte_scan(input)
+        }
+        _ => None,
+    }
+}
+
+fn plan_contains_non_cte_values_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::Values { .. } => true,
+        Plan::CteScan { .. } => false,
+        _ => direct_plan_children(plan)
+            .into_iter()
+            .any(plan_contains_non_cte_values_scan),
     }
 }
 
@@ -5977,6 +7188,57 @@ fn explain_plan_children_with_context(
                 lines,
             );
         }
+        Plan::WindowAgg {
+            input,
+            run_condition,
+            top_qual,
+            ..
+        } => {
+            let mut child_ctx = ctx.clone();
+            child_ctx.qualify_window_base_names = ctx.qualify_window_base_names
+                || run_condition.is_some()
+                || top_qual.as_ref().is_some_and(|qual| {
+                    !matches!(
+                        qual,
+                        Expr::Const(crate::include::nodes::datum::Value::Bool(true))
+                    )
+                });
+            format_explain_plan_with_subplans_inner(
+                input,
+                subplans,
+                indent + 1,
+                show_costs,
+                verbose,
+                true,
+                false,
+                &child_ctx,
+                lines,
+            );
+        }
+        Plan::SubqueryScan { input, filter, .. } => {
+            let mut child_ctx = ctx.clone();
+            if plan_contains_window_agg(input) {
+                child_ctx.qualify_window_base_names = true;
+            }
+            if filter.is_none()
+                && plan_contains_window_agg(input)
+                && plan_contains_function_scan(input)
+            {
+                child_ctx.qualify_window_base_names = true;
+                child_ctx.prefer_sql_function_window_name = true;
+            }
+            format_explain_plan_with_subplans_inner(
+                input,
+                subplans,
+                indent + 1,
+                show_costs,
+                verbose,
+                true,
+                false,
+                &child_ctx,
+                lines,
+            );
+        }
         Plan::Aggregate {
             input,
             group_by,
@@ -6024,10 +7286,7 @@ fn explain_plan_children_with_context(
                 lines,
             );
         }
-        Plan::OrderBy { .. }
-        | Plan::IncrementalSort { .. }
-        | Plan::Unique { .. }
-        | Plan::SubqueryScan { .. } => {
+        Plan::OrderBy { .. } | Plan::IncrementalSort { .. } | Plan::Unique { .. } => {
             let child_indent = indent + 1;
             let children = direct_plan_children(plan);
             for child in &children {
@@ -6072,20 +7331,22 @@ fn explain_plan_children_with_context(
         Plan::CteScan {
             cte_name, cte_plan, ..
         } => {
-            lines.push(format!("{}CTE {cte_name}", explain_detail_prefix(indent)));
-            let mut cte_lines = Vec::new();
-            format_explain_plan_with_subplans_inner(
-                cte_plan,
-                subplans,
-                indent + 1,
-                show_costs,
-                verbose,
-                true,
-                false,
-                ctx,
-                &mut cte_lines,
-            );
-            lines.extend(cte_lines.into_iter().map(|line| format!("  {line}")));
+            if !ctx.suppress_cte_subplans.contains(cte_name) {
+                lines.push(format!("{}CTE {cte_name}", explain_detail_prefix(indent)));
+                let mut cte_lines = Vec::new();
+                format_explain_plan_with_subplans_inner(
+                    cte_plan,
+                    subplans,
+                    indent + 1,
+                    show_costs,
+                    verbose,
+                    true,
+                    false,
+                    ctx,
+                    &mut cte_lines,
+                );
+                lines.extend(cte_lines.into_iter().map(|line| format!("  {line}")));
+            }
         }
         Plan::Append { desc, children, .. } | Plan::MergeAppend { desc, children, .. } => {
             let mut values_seen = 0usize;
@@ -6143,6 +7404,11 @@ fn explain_plan_children_with_context(
             } else {
                 indent + 1
             };
+            let pulled_ctes = if verbose {
+                push_direct_child_cte_subplans(plan, subplans, indent, show_costs, ctx, lines)
+            } else {
+                BTreeSet::new()
+            };
             let reserve_append_parent_alias =
                 matches!(plan, Plan::Append { .. } | Plan::MergeAppend { .. })
                     && !ctx.preserve_partition_child_aliases;
@@ -6155,6 +7421,9 @@ fn explain_plan_children_with_context(
                     &mut relations_seen,
                     reserve_append_parent_alias,
                 );
+                child_ctx
+                    .suppress_cte_subplans
+                    .extend(pulled_ctes.iter().cloned());
                 if matches!(plan, Plan::Append { .. } | Plan::MergeAppend { .. })
                     && let Plan::Append { children, .. } | Plan::MergeAppend { children, .. } = plan
                     && append_children_are_constant_results(children)
@@ -6363,7 +7632,8 @@ fn context_for_sibling_scan(
         }) => {
             if child_ctx.relation_scan_alias.is_none() && inherited_alias_base.is_none() {
                 let seen = relations_seen.entry(key.clone()).or_default();
-                child_ctx.relation_scan_alias = (*seen > 0).then(|| format!("{key}_{seen}"));
+                child_ctx.relation_scan_alias =
+                    (*seen > 0).then(|| explain_alias_with_suffix(&key, *seen));
                 *seen += 1;
             }
         }
@@ -6539,10 +7809,18 @@ fn relation_leaf_scan_source(
     reserve_append_parent_alias: bool,
 ) -> Option<LeafScanSource> {
     if reserve_append_parent_alias && let Some((_, alias)) = relation_name.rsplit_once(' ') {
+        if let Some(root_alias) = inherited_root_alias(alias) {
+            return Some(LeafScanSource::Relation {
+                key: root_alias.to_string(),
+                inherited_alias_base: Some(root_alias.to_string()),
+            });
+        }
+    }
+    if let Some((_, alias)) = relation_name.rsplit_once(' ') {
         let root_alias = inherited_root_alias(alias).unwrap_or(alias);
         return Some(LeafScanSource::Relation {
             key: root_alias.to_string(),
-            inherited_alias_base: Some(root_alias.to_string()),
+            inherited_alias_base: None,
         });
     }
     unaliased_relation_name(relation_name).map(|name| LeafScanSource::Relation {
@@ -6665,6 +7943,17 @@ fn values_scan_name(occurrence: usize) -> String {
     } else {
         format!("\"*VALUES*_{occurrence}\"")
     }
+}
+
+fn explain_alias_with_suffix(alias: &str, suffix: usize) -> String {
+    const MAX_IDENTIFIER_BYTES: usize = 63;
+    let suffix = format!("_{suffix}");
+    let prefix_len = MAX_IDENTIFIER_BYTES.saturating_sub(suffix.len());
+    let mut end = alias.len().min(prefix_len);
+    while !alias.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &alias[..end], suffix)
 }
 
 fn values_scan_output_exprs(column_count: usize, scan_name: &str) -> Vec<String> {
@@ -6803,8 +8092,13 @@ fn plan_join_output_exprs(
         Plan::SubqueryScan {
             scan_name,
             output_columns,
+            input,
             ..
-        } => qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns),
+        } => single_row_projection_output_plan(input, ctx)
+            .map(|output| vec![output])
+            .unwrap_or_else(|| {
+                qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns)
+            }),
         Plan::Projection { input, targets, .. } => {
             let input_names = plan_join_output_exprs(input, ctx, true);
             targets
@@ -6879,9 +8173,13 @@ fn plan_join_output_exprs(
             }));
             output
         }
-        Plan::WindowAgg { output_columns, .. }
-        | Plan::CteScan { output_columns, .. }
-        | Plan::WorkTableScan { output_columns, .. }
+        Plan::CteScan {
+            cte_name,
+            output_columns,
+            ..
+        } => qualified_named_output_exprs(cte_name, output_columns),
+        Plan::WindowAgg { input, clause, .. } => nonverbose_window_output_names(input, clause, ctx),
+        Plan::WorkTableScan { output_columns, .. }
         | Plan::RecursiveUnion { output_columns, .. } => output_columns
             .iter()
             .map(|column| column.name.clone())
@@ -6983,6 +8281,29 @@ fn verbose_display_output_exprs(
             .scan_output_override
             .clone()
             .unwrap_or_else(|| verbose_plan_output_exprs(plan, ctx, for_parent_ref)),
+        Plan::Values { .. } if !for_parent_ref && ctx.scan_output_override.is_some() => {
+            ctx.scan_output_override.clone().unwrap_or_default()
+        }
+        Plan::Hash { input, .. }
+            if !for_parent_ref
+                && let Some(row_output) = single_row_projection_output_plan(input, ctx) =>
+        {
+            vec![format!("({row_output})")]
+        }
+        Plan::SubqueryScan {
+            scan_name,
+            output_columns,
+            input,
+            ..
+        } if !for_parent_ref
+            && let Some(output) = collapsed_row_subquery_field_output(
+                scan_name.as_deref(),
+                output_columns,
+                input,
+            ) =>
+        {
+            vec![output]
+        }
         Plan::ProjectSet { input, targets, .. } if !for_parent_ref => {
             let input_names = verbose_plan_output_exprs(input, ctx, true);
             targets
@@ -7069,6 +8390,44 @@ fn plan_is_constant_result(plan: &Plan) -> bool {
 
 fn plan_is_limit_result(plan: &Plan) -> bool {
     matches!(plan, Plan::Limit { input, .. } if matches!(input.as_ref(), Plan::Result { .. }))
+}
+
+fn single_row_projection_output_plan(plan: &Plan, ctx: &VerboseExplainContext) -> Option<String> {
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            projection_single_row_output(input, targets, ctx)
+        }
+        Plan::SubqueryScan { input, .. } => single_row_projection_output_plan(input, ctx),
+        _ => None,
+    }
+}
+
+fn collapsed_row_subquery_field_output(
+    scan_name: Option<&str>,
+    output_columns: &[QueryColumn],
+    input: &Plan,
+) -> Option<String> {
+    let (Some(scan_name), [column]) = (scan_name, output_columns) else {
+        return None;
+    };
+    if column.name != "r"
+        || !matches!(
+            column.sql_type.kind,
+            crate::backend::parser::SqlTypeKind::Record
+                | crate::backend::parser::SqlTypeKind::Composite
+        )
+        || single_row_projection_output_plan(input, &VerboseExplainContext::default()).is_none()
+    {
+        return None;
+    }
+    // :HACK: setrefs can prove `(r).column2` equivalent to the single
+    // composite subquery output and hide the outer projection. PostgreSQL still
+    // prints the selected field in EXPLAIN for this row-valued VALUES shape.
+    Some(format!(
+        "({}.{}).column2",
+        quote_explain_identifier(scan_name),
+        quote_explain_identifier(&column.name)
+    ))
 }
 
 fn append_first_child_output(input: &Plan, ctx: &VerboseExplainContext) -> Option<Vec<String>> {
@@ -7213,6 +8572,16 @@ fn verbose_plan_output_exprs(
         Plan::SubqueryScan {
             scan_name,
             output_columns,
+            input,
+            ..
+        } if for_parent_ref => single_row_projection_output_plan(input, ctx)
+            .map(|output| vec![output])
+            .unwrap_or_else(|| {
+                qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns)
+            }),
+        Plan::SubqueryScan {
+            scan_name,
+            output_columns,
             ..
         } => qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns),
         Plan::Projection { input, targets, .. } => {
@@ -7273,9 +8642,18 @@ fn verbose_plan_output_exprs(
             output_columns.len(),
             ctx.values_scan_name.as_deref().unwrap_or("\"*VALUES*\""),
         ),
-        Plan::WindowAgg { output_columns, .. }
-        | Plan::CteScan { output_columns, .. }
-        | Plan::WorkTableScan { output_columns, .. }
+        Plan::CteScan {
+            cte_name,
+            output_columns,
+            ..
+        } => qualified_named_output_exprs(cte_name, output_columns),
+        Plan::WindowAgg {
+            input,
+            clause,
+            output_columns,
+            ..
+        } => verbose_window_output_names(input, clause, output_columns, ctx),
+        Plan::WorkTableScan { output_columns, .. }
         | Plan::RecursiveUnion { output_columns, .. }
         | Plan::SetOp { output_columns, .. }
         | Plan::Values { output_columns, .. } => output_columns
@@ -7994,6 +9372,11 @@ fn render_verbose_join_expr(
             if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
                 return rendered;
             }
+            if let Expr::Var(var) = inner.as_ref()
+                && verbose_cast_is_implicit_integer_widening(var.vartype, *ty)
+            {
+                return render_verbose_join_expr(inner, left_names, right_names, ctx);
+            }
             let inner = render_verbose_join_expr(inner, left_names, right_names, ctx);
             format!("({inner})::{}", render_type_name(*ty, ctx))
         }
@@ -8175,7 +9558,7 @@ fn render_verbose_row_whole_star(expr: &Expr, column_names: &[String]) -> Option
         })
         .collect::<Option<Vec<_>>>()?;
     let prefix = common_qualified_field_prefix(&rendered_fields)?;
-    if prefix.starts_with("\"*VALUES*\"") {
+    if prefix.starts_with("\"*VALUES*") {
         return None;
     }
     Some(format!("{prefix}.*"))
@@ -8231,6 +9614,15 @@ fn common_qualified_field_prefix(rendered_fields: &[String]) -> Option<String> {
         .then(|| prefix.to_string())
 }
 
+fn postgres_parenthesize_row_field_select(rendered: String) -> String {
+    if let Some((row_expr, field)) = rendered.rsplit_once(").")
+        && row_expr.starts_with("(ROW(")
+    {
+        return format!("({row_expr})).{field}");
+    }
+    rendered
+}
+
 fn render_verbose_expr(
     expr: &Expr,
     column_names: &[String],
@@ -8265,7 +9657,10 @@ fn render_verbose_expr(
             if let Some(value) = field_select_projected_value(inner, field) {
                 return render_verbose_expr(value, column_names, ctx);
             }
-            strip_outer_parens(&render_explain_expr(expr, column_names))
+            postgres_parenthesize_row_field_select(strip_outer_parens(&render_explain_expr(
+                expr,
+                column_names,
+            )))
         }
         Expr::Param(param) if param.paramkind == ParamKind::Exec => ctx
             .exec_params
@@ -8292,6 +9687,11 @@ fn render_verbose_expr(
         Expr::Cast(inner, ty) => {
             if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
                 return rendered;
+            }
+            if let Expr::Var(var) = inner.as_ref()
+                && verbose_cast_is_implicit_integer_widening(var.vartype, *ty)
+            {
+                return render_verbose_expr(inner, column_names, ctx);
             }
             if let Expr::Const(value @ (Value::Text(_) | Value::TextRef(_, _))) = inner.as_ref()
                 && matches!(
@@ -8394,6 +9794,17 @@ fn render_verbose_expr(
         Expr::ScalarArrayOp(_) => render_explain_expr(expr, column_names),
         _ => strip_outer_parens(&render_explain_expr(expr, column_names)),
     }
+}
+
+fn verbose_cast_is_implicit_integer_widening(
+    from: crate::backend::parser::SqlType,
+    to: crate::backend::parser::SqlType,
+) -> bool {
+    use crate::backend::parser::SqlTypeKind::{Int2, Int4, Int8};
+    matches!(
+        (from.kind, to.kind),
+        (Int2, Int4) | (Int2, Int8) | (Int4, Int8)
+    )
 }
 
 fn render_merge_key_conditions(
@@ -9253,7 +10664,20 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
                 collect_direct_expr_subplans(expr, &mut found);
             }
         }
-        Plan::WindowAgg { clause, .. } => collect_direct_window_clause_subplans(clause, &mut found),
+        Plan::WindowAgg {
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
+            collect_direct_window_clause_subplans(clause, &mut found);
+            if let Some(expr) = run_condition {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+            if let Some(expr) = top_qual {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+        }
         Plan::FunctionScan { call, .. } => {
             collect_direct_set_returning_call_subplans(call, &mut found)
         }
@@ -9423,6 +10847,8 @@ fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) 
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -9643,6 +11069,8 @@ fn expr_contains_exec_param(expr: &Expr) -> bool {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

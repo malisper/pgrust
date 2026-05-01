@@ -368,6 +368,8 @@ fn single_local_varno(expr: &Expr) -> Option<usize> {
             | Expr::CurrentSchema
             | Expr::CurrentUser
             | Expr::SessionUser
+            | Expr::User
+            | Expr::SystemUser
             | Expr::CurrentRole
             | Expr::CurrentTime { .. }
             | Expr::CurrentTimestamp { .. }
@@ -458,6 +460,8 @@ pub(crate) fn expr_uses_ctid(expr: &Expr) -> bool {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -478,6 +482,7 @@ mod tests {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Name),
+            collation_oid: None,
         })
     }
 
@@ -519,6 +524,7 @@ mod tests {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     }
 
@@ -528,6 +534,7 @@ mod tests {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int8),
+            collation_oid: None,
         })
     }
 

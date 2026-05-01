@@ -714,6 +714,7 @@ pub enum BuiltinScalarFunction {
     RegexpSplitToArray,
     SimilarSubstring,
     Initcap,
+    Casefold,
     TextCat,
     Concat,
     ConcatWs,
@@ -1562,6 +1563,7 @@ pub enum RowsFromSource {
     Project {
         output_exprs: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
+        display_sql: Option<String>,
     },
 }
 
@@ -1760,12 +1762,14 @@ impl SetReturningCall {
                             RowsFromSource::Project {
                                 output_exprs,
                                 output_columns,
+                                display_sql,
                             } => RowsFromSource::Project {
                                 output_exprs: output_exprs
                                     .into_iter()
                                     .map(|expr| map(expr))
                                     .collect(),
                                 output_columns,
+                                display_sql,
                             },
                         },
                         column_definitions: item.column_definitions,
@@ -2015,12 +2019,14 @@ impl SetReturningCall {
                                 RowsFromSource::Project {
                                     output_exprs,
                                     output_columns,
+                                    display_sql,
                                 } => RowsFromSource::Project {
                                     output_exprs: output_exprs
                                         .into_iter()
                                         .map(|expr| map(expr))
                                         .collect::<Result<Vec<_>, E>>()?,
                                     output_columns,
+                                    display_sql,
                                 },
                             },
                             column_definitions: item.column_definitions,
@@ -2718,6 +2724,7 @@ pub struct Var {
     pub varattno: AttrNumber,
     pub varlevelsup: usize,
     pub vartype: SqlType,
+    pub collation_oid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2808,6 +2815,7 @@ pub struct FuncExpr {
     pub funcresulttype: Option<SqlType>,
     pub funcvariadic: bool,
     pub implementation: ScalarFunctionImpl,
+    pub collation_oid: Option<u32>,
     pub display_args: Option<Vec<FuncCallDisplayArg>>,
     pub args: Vec<Expr>,
 }
@@ -2834,10 +2842,21 @@ pub enum SubLinkType {
     ArraySubLink,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubqueryComparison {
+    pub opno: u32,
+    pub opfuncid: u32,
+    pub op: OpExprKind,
+    pub left_type: SqlType,
+    pub right_type: SqlType,
+    pub collation_oid: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubLink {
     pub sublink_type: SubLinkType,
     pub testexpr: Option<Box<Expr>>,
+    pub comparison: Option<SubqueryComparison>,
     pub subselect: Box<Query>,
 }
 
@@ -2845,6 +2864,7 @@ pub struct SubLink {
 pub struct SubPlan {
     pub sublink_type: SubLinkType,
     pub testexpr: Option<Box<Expr>>,
+    pub comparison: Option<SubqueryComparison>,
     pub first_col_type: Option<SqlType>,
     pub target_width: usize,
     pub target_attnos: Vec<Option<usize>>,
@@ -2966,7 +2986,9 @@ pub enum Expr {
     },
     Random,
     CurrentUser,
+    User,
     SessionUser,
+    SystemUser,
     CurrentRole,
     CurrentCatalog,
     CurrentSchema,
@@ -3086,12 +3108,14 @@ impl Expr {
         implementation: ScalarFunctionImpl,
         args: Vec<Expr>,
     ) -> Self {
+        let collation_oid = scalar_function_collation_oid(implementation, &args);
         Expr::Func(Box::new(FuncExpr {
             funcid,
             funcname: None,
             funcresulttype,
             funcvariadic,
             implementation,
+            collation_oid,
             display_args: None,
             args,
         }))
@@ -3302,9 +3326,11 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::ArrayLiteral { array_type, .. } => Some(*array_type),
         Expr::Row { descriptor, .. } => Some(descriptor.sql_type()),
         Expr::FieldSelect { field_type, .. } => Some(*field_type),
-        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => {
-            Some(SqlType::new(SqlTypeKind::Name))
-        }
+        Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole => Some(SqlType::new(SqlTypeKind::Name)),
         Expr::CurrentCatalog | Expr::CurrentSchema => Some(SqlType::new(SqlTypeKind::Text)),
         Expr::Xml(xml) => Some(match xml.op {
             XmlExprOp::Serialize => xml.target_type.unwrap_or(SqlType::new(SqlTypeKind::Text)),
@@ -3384,6 +3410,59 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => None,
     }
+}
+
+fn expr_collation_oid_hint(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::Var(var) => var.collation_oid,
+        Expr::Collate { collation_oid, .. } => Some(*collation_oid),
+        Expr::Cast(inner, _) => expr_collation_oid_hint(inner),
+        Expr::Func(func) => func.collation_oid,
+        Expr::Op(op) => op.collation_oid,
+        Expr::Coalesce(left, right) => {
+            expr_collation_oid_hint(left).or_else(|| expr_collation_oid_hint(right))
+        }
+        Expr::Case(case_expr) => case_expr
+            .arg
+            .as_deref()
+            .and_then(expr_collation_oid_hint)
+            .or_else(|| {
+                case_expr
+                    .args
+                    .iter()
+                    .find_map(|when| expr_collation_oid_hint(&when.result))
+            })
+            .or_else(|| expr_collation_oid_hint(&case_expr.defresult)),
+        _ => None,
+    }
+}
+
+fn scalar_function_collation_oid(implementation: ScalarFunctionImpl, args: &[Expr]) -> Option<u32> {
+    let ScalarFunctionImpl::Builtin(func) = implementation else {
+        return None;
+    };
+    if !matches!(
+        func,
+        BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Upper
+            | BuiltinScalarFunction::Initcap
+            | BuiltinScalarFunction::Casefold
+            | BuiltinScalarFunction::RegexpLike
+    ) {
+        return None;
+    }
+    args.iter().find_map(expr_collation_oid_hint).or_else(|| {
+        args.iter()
+            .any(|arg| {
+                expr_sql_type_hint(arg).is_some_and(|ty| {
+                    matches!(
+                        ty.element_type().kind,
+                        SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char
+                    )
+                })
+            })
+            .then_some(crate::include::catalog::DEFAULT_COLLATION_OID)
+    })
 }
 
 pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
@@ -3593,7 +3672,9 @@ pub fn expr_contains_set_returning(expr: &Expr) -> bool {
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentUser
+        | Expr::User
         | Expr::SessionUser
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema

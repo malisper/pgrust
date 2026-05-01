@@ -227,6 +227,11 @@ pub(crate) fn canonicalize_jsonpath(text: &str) -> Result<String, ExecError> {
 }
 
 pub(crate) fn parse_jsonpath(text: &str) -> Result<JsonPath, ExecError> {
+    if text.is_empty() {
+        return Err(exec_jsonpath_error(
+            "invalid input syntax for type jsonpath: \"\"",
+        ));
+    }
     Parser::new(text).parse()
 }
 

@@ -236,10 +236,12 @@ mod tests {
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
         CURRENT_DATABASE_NAME, CatalogScope, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID,
         DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID,
-        INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
-        PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID,
-        PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID,
-        TEXT_TYPE_OID, VARCHAR_TYPE_OID, system_catalog_indexes,
+        INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID,
+        PG_C_UTF8_COLLATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
+        PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+        PG_TYPE_RELATION_OID, PG_UNICODE_FAST_COLLATION_OID, POSIX_COLLATION_OID,
+        PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, UCS_BASIC_COLLATION_OID, UNICODE_COLLATION_OID,
+        VARCHAR_TYPE_OID, system_catalog_indexes,
     };
     use crate::include::nodes::primnodes::RelationDesc;
     use std::fs;
@@ -402,6 +404,7 @@ mod tests {
                 crate::pgrust::database::SessionStatsState::default(),
             )),
             snapshot,
+            write_xid_override: None,
             transaction_state: None,
             client_id: 0,
             current_database_name: "postgres".to_string(),
@@ -1466,8 +1469,32 @@ mod tests {
                     'd',
                     BOOTSTRAP_SUPERUSER_OID,
                 ),
+                (
+                    PG_C_UTF8_COLLATION_OID,
+                    "pg_c_utf8",
+                    'b',
+                    BOOTSTRAP_SUPERUSER_OID,
+                ),
                 (C_COLLATION_OID, "C", 'c', BOOTSTRAP_SUPERUSER_OID),
                 (POSIX_COLLATION_OID, "POSIX", 'c', BOOTSTRAP_SUPERUSER_OID),
+                (
+                    UCS_BASIC_COLLATION_OID,
+                    "ucs_basic",
+                    'b',
+                    BOOTSTRAP_SUPERUSER_OID,
+                ),
+                (
+                    UNICODE_COLLATION_OID,
+                    "unicode",
+                    'i',
+                    BOOTSTRAP_SUPERUSER_OID,
+                ),
+                (
+                    PG_UNICODE_FAST_COLLATION_OID,
+                    "pg_unicode_fast",
+                    'b',
+                    BOOTSTRAP_SUPERUSER_OID,
+                ),
             ]
         );
     }

@@ -3,31 +3,32 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, JSON_TYPE_OID,
-    PUBLIC_NAMESPACE_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPolicyRow,
-    PgProcRow, PgRangeRow, PgRewriteRow, PgTypeRow, PolicyCommand, RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEFAULT_COLLATION_OID,
+    JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
+    PgClassRow, PgCollationRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgTypeRow, PolicyCommand, RECORD_TYPE_OID,
     bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
     AlterColumnIdentityAction, AlterDomainAction, AlterGenericOptionAction,
-    AlterSubscriptionAction, AlterSubscriptionStatement, AlterTableTriggerMode,
-    AlterTableTriggerStateStatement, AlterTableTriggerTarget, AlterTriggerRenameStatement,
-    AlterTypeSetOptionsStatement, CastContext, ClusterStatement, ColumnConstraint,
-    ColumnGeneratedKind, ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
-    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnSubscriptionStatement,
-    CommentOnTypeStatement, CommentOnViewStatement, CompositeTypeAttributeDef,
-    CreateAggregateStatement, CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod,
-    CreateCastStatement, CreateCompositeTypeStatement, CreateShellTypeStatement,
-    CreateTriggerStatement, CreateTypeStatement, CursorScrollOption, DeclareCursorStatement,
-    DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement, DropSubscriptionStatement,
-    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
-    GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy,
-    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
-    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    AlterSubscriptionAction, AlterSubscriptionStatement, AlterTableSetWithoutClusterStatement,
+    AlterTableTriggerMode, AlterTableTriggerStateStatement, AlterTableTriggerTarget,
+    AlterTriggerRenameStatement, AlterTypeSetOptionsStatement, CastContext, ClusterStatement,
+    ColumnConstraint, ColumnGeneratedKind, ColumnIdentityKind, CommentOnAggregateStatement,
+    CommentOnColumnStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
+    CommentOnSubscriptionStatement, CommentOnTypeStatement, CommentOnViewStatement,
+    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
+    CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement, CreateCollationKind,
+    CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
+    CreateTypeStatement, CursorScrollOption, DeclareCursorStatement, DomainConstraintSpecKind,
+    DropAggregateStatement, DropCastStatement, DropSubscriptionStatement, DropTriggerStatement,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
+    GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy, PublicationObjectSpec,
+    PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
+    RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, RelOption,
     SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SubscriptionOptionValue,
     TableConstraint, TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
     TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
@@ -67,6 +68,44 @@ fn aggregate_signature(args: Vec<AggregateSignatureArg>) -> AggregateSignatureKi
 
 fn attrs() -> ConstraintAttributes {
     ConstraintAttributes::default()
+}
+
+fn from_without_table_locations(mut from: Option<FromItem>) -> Option<FromItem> {
+    fn clear_from_item_locations(item: &mut FromItem) {
+        match item {
+            FromItem::Table { location, .. } => *location = None,
+            FromItem::TableSample { source, .. }
+            | FromItem::Lateral(source)
+            | FromItem::Alias { source, .. } => clear_from_item_locations(source),
+            FromItem::Join { left, right, .. } => {
+                clear_from_item_locations(left);
+                clear_from_item_locations(right);
+            }
+            FromItem::DerivedTable(stmt) => {
+                if let Some(from) = stmt.from.as_mut() {
+                    clear_from_item_locations(from);
+                }
+            }
+            FromItem::Values { .. }
+            | FromItem::Expression { .. }
+            | FromItem::FunctionCall { .. }
+            | FromItem::RowsFrom { .. }
+            | FromItem::JsonTable(_)
+            | FromItem::XmlTable(_) => {}
+        }
+    }
+
+    if let Some(item) = from.as_mut() {
+        clear_from_item_locations(item);
+    }
+    from
+}
+
+fn select_items_without_locations(mut items: Vec<SelectItem>) -> Vec<SelectItem> {
+    for item in &mut items {
+        item.location = None;
+    }
+    items
 }
 
 #[test]
@@ -606,6 +645,78 @@ fn parse_select_with_default_collation_keeps_raw_ast() {
             collation: "default".into(),
         }
     );
+}
+
+#[test]
+fn parse_create_collation_from_source() {
+    match parse_statement("create collation regress_c from \"C\"").unwrap() {
+        Statement::CreateCollation(stmt) => {
+            assert_eq!(stmt.collation_name, "regress_c");
+            assert_eq!(
+                stmt.kind,
+                CreateCollationKind::From {
+                    source_collation: "C".into()
+                }
+            );
+        }
+        other => panic!("expected CreateCollation, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_create_collation_builtin_options() {
+    match parse_statement("create collation regress_builtin_c (provider = builtin, locale = 'C')")
+        .unwrap()
+    {
+        Statement::CreateCollation(stmt) => {
+            assert_eq!(stmt.collation_name, "regress_builtin_c");
+            assert_eq!(
+                stmt.kind,
+                CreateCollationKind::Options {
+                    options: vec![
+                        RelOption {
+                            name: "provider".into(),
+                            value: "builtin".into(),
+                        },
+                        RelOption {
+                            name: "locale".into(),
+                            value: "C".into(),
+                        },
+                    ]
+                }
+            );
+        }
+        other => panic!("expected CreateCollation, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_create_collation_builtin_locale_alias() {
+    match parse_statement(
+        "create collation regress_builtin_c_utf8 (provider=builtin, locale='C.UTF8')",
+    )
+    .unwrap()
+    {
+        Statement::CreateCollation(stmt) => {
+            assert_eq!(stmt.collation_name, "regress_builtin_c_utf8");
+            assert_eq!(
+                stmt.kind,
+                CreateCollationKind::Options {
+                    options: vec![
+                        RelOption {
+                            name: "provider".into(),
+                            value: "builtin".into(),
+                        },
+                        RelOption {
+                            name: "locale".into(),
+                            value: "C.UTF8".into(),
+                        },
+                    ]
+                }
+            );
+        }
+        other => panic!("expected CreateCollation, got {other:?}"),
+    }
 }
 
 fn is_outer_user_var(expr: &Expr, index: usize) -> bool {
@@ -2083,12 +2194,14 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
     match &query.rtable[2].kind {
         RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => {
             assert_eq!(*jointype, JoinType::Inner);
+            assert!(!from_list);
             assert_eq!(*joinmergedcols, 1);
             assert_eq!(joinleftcols, &vec![1, 2, 3]);
             assert_eq!(joinrightcols, &vec![1, 2]);
@@ -2099,6 +2212,7 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype: SqlType::new(SqlTypeKind::Int4),
+                    collation_oid: None,
                 })
             );
         }
@@ -2111,6 +2225,7 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     );
 }
@@ -2682,10 +2797,11 @@ fn pest_matches_minimal_select_statement() {
     match stmt {
         Statement::Select(stmt) => {
             assert_eq!(
-                stmt.from,
+                from_without_table_locations(stmt.from),
                 Some(FromItem::Table {
                     name: "people".into(),
                     only: false,
+                    location: None,
                 })
             );
             assert_eq!(stmt.targets.len(), 1);
@@ -2700,10 +2816,11 @@ fn parse_select_table_star_as_inherited_table_reference() {
     match stmt {
         Statement::Select(stmt) => {
             assert_eq!(
-                stmt.from,
+                from_without_table_locations(stmt.from),
                 Some(FromItem::Table {
                     name: "people".into(),
                     only: false,
+                    location: None,
                 })
             );
         }
@@ -3950,6 +4067,35 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
 }
 
 #[test]
+fn parse_create_table_exclusion_constraint_captures_predicate_sql() {
+    let stmt = parse_statement(
+        "create table room_bookings (
+            room int4,
+            active bool,
+            exclude using gist (room with =) where (active)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let exclusion = ct
+        .elements
+        .iter()
+        .find_map(|element| match element {
+            CreateTableElement::Constraint(TableConstraint::Exclusion {
+                using_method,
+                predicate_sql,
+                ..
+            }) => Some((using_method, predicate_sql)),
+            _ => None,
+        })
+        .expect("exclusion constraint");
+    assert_eq!(exclusion.0, "gist");
+    assert_eq!(exclusion.1.as_deref(), Some("(active)"));
+}
+
+#[test]
 fn parse_alter_table_add_column_statement() {
     let stmt = parse_statement("alter table items add column note text default 'hello'").unwrap();
     assert_eq!(
@@ -3986,29 +4132,43 @@ fn parse_alter_table_multi_add_column_statement() {
             only: false,
             table_name: "mlparted".into(),
             columns: vec![
-                ColumnDef {
-                    name: "d".into(),
-                    ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
-                    collation: None,
-                    default_expr: None,
-                    explicit_null: false,
-                    generated: None,
-                    identity: None,
-                    storage: None,
-                    compression: None,
-                    constraints: vec![],
+                AlterTableAddColumnStatement {
+                    if_exists: false,
+                    missing_ok: false,
+                    only: false,
+                    table_name: "mlparted".into(),
+                    column: ColumnDef {
+                        name: "d".into(),
+                        ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
+                        collation: None,
+                        default_expr: None,
+                        explicit_null: false,
+                        generated: None,
+                        identity: None,
+                        storage: None,
+                        compression: None,
+                        constraints: vec![],
+                    },
+                    fdw_options: None,
                 },
-                ColumnDef {
-                    name: "e".into(),
-                    ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
-                    collation: None,
-                    default_expr: None,
-                    explicit_null: false,
-                    generated: None,
-                    identity: None,
-                    storage: None,
-                    compression: None,
-                    constraints: vec![],
+                AlterTableAddColumnStatement {
+                    if_exists: false,
+                    missing_ok: false,
+                    only: false,
+                    table_name: "mlparted".into(),
+                    column: ColumnDef {
+                        name: "e".into(),
+                        ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
+                        collation: None,
+                        default_expr: None,
+                        explicit_null: false,
+                        generated: None,
+                        identity: None,
+                        storage: None,
+                        compression: None,
+                        constraints: vec![],
+                    },
+                    fdw_options: None,
                 },
             ],
         })
@@ -4594,6 +4754,16 @@ fn parse_alter_table_set_statement() {
         })
     );
 
+    let stmt = parse_statement("alter table only cluster_items set without cluster").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetWithoutCluster(AlterTableSetWithoutClusterStatement {
+            if_exists: false,
+            only: true,
+            table_name: "cluster_items".into(),
+        })
+    );
+
     let stmt = parse_statement("alter table num_variance set (parallel_workers = 4)").unwrap();
     assert_eq!(
         stmt,
@@ -4648,6 +4818,17 @@ fn parse_alter_table_set_statement() {
                 name: "security_invoker".into(),
                 value: "true".into(),
             }],
+        })
+    );
+
+    let stmt = parse_statement("alter view rw_view1 reset (security_barrier)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableReset(AlterTableResetStatement {
+            if_exists: false,
+            only: false,
+            table_name: "rw_view1".into(),
+            options: vec!["security_barrier".into()],
         })
     );
 
@@ -8384,12 +8565,42 @@ fn build_plan_cte_shadows_catalog_table() {
 
 #[test]
 fn build_plan_rejects_forward_cte_references() {
-    let stmt =
-        parse_select("with y as (select * from x), x as (values (1)) select * from y").unwrap();
+    let sql = "with y as (select * from x), x as (values (1)) select * from y";
+    let stmt = parse_select(sql).unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert_eq!(err.position(), sql.find("x)").map(|index| index + 1));
     assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::UnknownTable(name)) if name == "x"
+        err.unpositioned(),
+        ParseError::DetailedError { message, detail: Some(detail), hint: Some(hint), sqlstate }
+            if message == "relation \"x\" does not exist"
+                && detail == "There is a WITH item named \"x\", but it cannot be referenced from this part of the query."
+                && hint == "Use WITH RECURSIVE, or re-order the WITH items to remove forward references."
+                && *sqlstate == "42P01"
     ));
+}
+
+#[test]
+fn build_plan_propagates_nested_scalar_subquery_column_names() {
+    let cases = [
+        (
+            "select ( with cte(foo) as ( values(id) )
+                      select (select foo from cte) )
+             from people",
+            "foo",
+        ),
+        (
+            "select ( with cte(foo) as ( values(id) )
+                      values((select foo from cte)) )
+             from people",
+            "column1",
+        ),
+    ];
+    let catalog = catalog();
+    for (sql, expected) in cases {
+        let stmt = parse_select(sql).unwrap();
+        let plan = build_plan(&stmt, &catalog).unwrap();
+        assert_eq!(plan.column_names(), vec![expected.to_string()], "{sql}");
+    }
 }
 
 #[test]
@@ -8520,10 +8731,11 @@ fn parse_multiline_position_convert_from_expression() {
 fn parse_select_with_where() {
     let stmt = parse_select("select name, note from people where id > 1 and note is null").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Table {
             name: "people".into(),
             only: false,
+            location: None,
         })
     );
     assert_eq!(stmt.targets.len(), 2);
@@ -8553,15 +8765,17 @@ fn parse_join_select() {
     )
     .unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Join {
             left: Box::new(FromItem::Table {
                 name: "people".into(),
                 only: false,
+                location: None,
             }),
             right: Box::new(FromItem::Table {
                 name: "pets".into(),
                 only: false,
+                location: None,
             }),
             kind: JoinKind::Inner,
             constraint: JoinConstraint::On(SqlExpr::Eq(
@@ -8576,17 +8790,19 @@ fn parse_join_select() {
 fn parse_cross_join_select() {
     let stmt = parse_select("select people.name, pets.name from people, pets").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Join {
             left: Box::new(FromItem::Table {
                 name: "people".into(),
                 only: false,
+                location: None,
             }),
             right: Box::new(FromItem::Table {
                 name: "pets".into(),
                 only: false,
+                location: None,
             }),
-            kind: JoinKind::Cross,
+            kind: JoinKind::Comma,
             constraint: JoinConstraint::None,
         })
     );
@@ -8597,11 +8813,12 @@ fn parse_table_alias() {
     let stmt = parse_select("select s.name from people s").unwrap();
     assert_eq!(stmt.targets[0].output_name, "name");
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
                 only: false,
+                location: None,
             }),
             alias: "s".into(),
             column_aliases: AliasColumnSpec::None,
@@ -8615,11 +8832,12 @@ fn parse_table_alias_with_as() {
     let stmt = parse_select("select s.name from people as s").unwrap();
     assert_eq!(stmt.targets[0].output_name, "name");
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
                 only: false,
+                location: None,
             }),
             alias: "s".into(),
             column_aliases: AliasColumnSpec::None,
@@ -8638,11 +8856,12 @@ fn parse_select_with_quoted_output_alias() {
 fn parse_select_star_with_table_alias() {
     let stmt = parse_select("select * from people p").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
                 only: false,
+                location: None,
             }),
             alias: "p".into(),
             column_aliases: AliasColumnSpec::None,
@@ -8657,12 +8876,13 @@ fn parse_table_sample_system_repeatable() {
     let stmt =
         parse_select("select * from people p tablesample system (t1.a) repeatable (t1.b)").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::TableSample {
             source: Box::new(FromItem::Alias {
                 source: Box::new(FromItem::Table {
                     name: "people".into(),
                     only: false,
+                    location: None,
                 }),
                 alias: "p".into(),
                 column_aliases: AliasColumnSpec::None,
@@ -8682,11 +8902,12 @@ fn parse_table_sample_without_alias() {
     let stmt =
         parse_select("select id from people tablesample bernoulli (50) repeatable (0)").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::TableSample {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
                 only: false,
+                location: None,
             }),
             sample: RawTableSampleClause {
                 method: "bernoulli".into(),
@@ -9416,7 +9637,7 @@ fn parse_power_operator_and_in_list() {
     let stmt = parse_select("select x ^ '2.0', x in (0, 1, 2) from metrics").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "power" && args.args().len() == 2
+        SqlExpr::BinaryOperator { op, .. } if op == "^"
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
@@ -9523,12 +9744,13 @@ fn parse_numeric_cast_typmods() {
 fn parse_cross_join_with_aliases() {
     let stmt = parse_select("select p.name, q.name from people p, pets q").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Join {
             left: Box::new(FromItem::Alias {
                 source: Box::new(FromItem::Table {
                     name: "people".into(),
                     only: false,
+                    location: None,
                 }),
                 alias: "p".into(),
                 column_aliases: AliasColumnSpec::None,
@@ -9538,12 +9760,13 @@ fn parse_cross_join_with_aliases() {
                 source: Box::new(FromItem::Table {
                     name: "pets".into(),
                     only: false,
+                    location: None,
                 }),
                 alias: "q".into(),
                 column_aliases: AliasColumnSpec::None,
                 preserve_source_names: false,
             }),
-            kind: JoinKind::Cross,
+            kind: JoinKind::Comma,
             constraint: JoinConstraint::None,
         })
     );
@@ -9560,10 +9783,11 @@ fn parse_select_without_from() {
 fn parse_select_without_targets_but_with_from() {
     let stmt = parse_select("select from people").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Table {
             name: "people".into(),
             only: false,
+            location: None,
         })
     );
     assert!(stmt.targets.is_empty());
@@ -9590,10 +9814,11 @@ fn unquoted_identifiers_fold_to_lowercase_for_relation_lookup() {
 fn quoted_identifiers_preserve_case() {
     let stmt = parse_select("select id from \"CHAR_TBL\"").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Table {
             name: "CHAR_TBL".into(),
             only: false,
+            location: None,
         })
     );
 }
@@ -10807,7 +11032,17 @@ fn parse_cluster_table_using_index() {
     let stmt = parse_statement("cluster sorttest using sorttest_idx").unwrap();
     assert!(matches!(
         stmt,
-        Statement::Cluster(ClusterStatement { table_name, index_name })
+        Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: false })
+            if table_name == "sorttest" && index_name == "sorttest_idx"
+    ));
+}
+
+#[test]
+fn parse_alter_table_cluster_on_index() {
+    let stmt = parse_statement("alter table sorttest cluster on sorttest_idx").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: true })
             if table_name == "sorttest" && index_name == "sorttest_idx"
     ));
 }
@@ -11985,7 +12220,7 @@ fn parse_update_statement_with_from_and_aliases() {
             if alias == "b"
                 && matches!(
                     source.as_ref(),
-                    FromItem::Table { name, only } if name == "case2_tbl" && !only
+                    FromItem::Table { name, only, .. } if name == "case2_tbl" && !only
                 )
     ));
 }
@@ -12007,7 +12242,7 @@ fn parse_update_statement_with_as_target_alias() {
             if alias == "b"
                 && matches!(
                     source.as_ref(),
-                    FromItem::Table { name, only } if name == "case2_tbl" && !only
+                    FromItem::Table { name, only, .. } if name == "case2_tbl" && !only
                 )
     ));
 }
@@ -12773,6 +13008,7 @@ fn bind_insert_returning_relation_name_as_whole_row() {
     stmt.returning = vec![SelectItem {
         expr: SqlExpr::Column("people".into()),
         output_name: "people".into(),
+        location: None,
     }];
 
     let bound =
@@ -13893,7 +14129,7 @@ fn parse_partition_of_with_using_clause_is_unsupported_without_panicking() {
 fn parse_select_from_only_table() {
     match parse_statement("select * from only parent").unwrap() {
         Statement::Select(SelectStatement {
-            from: Some(FromItem::Table { name, only }),
+            from: Some(FromItem::Table { name, only, .. }),
             ..
         }) => {
             assert_eq!(name, "parent");
@@ -13907,7 +14143,9 @@ fn parse_select_from_only_table() {
 fn parse_select_for_update_clause() {
     match parse_statement("select * from people for update").unwrap() {
         Statement::Select(SelectStatement {
-            from: Some(FromItem::Table { name, only: false }),
+            from: Some(FromItem::Table {
+                name, only: false, ..
+            }),
             locking_clause: Some(SelectLockingClause::ForUpdate),
             ..
         }) => assert_eq!(name, "people"),
@@ -13919,7 +14157,9 @@ fn parse_select_for_update_clause() {
 fn parse_select_for_update_of_clause() {
     match parse_statement("select * from people for update of people").unwrap() {
         Statement::Select(SelectStatement {
-            from: Some(FromItem::Table { name, only: false }),
+            from: Some(FromItem::Table {
+                name, only: false, ..
+            }),
             locking_clause: Some(SelectLockingClause::ForUpdate),
             locking_targets,
             ..
@@ -13935,7 +14175,9 @@ fn parse_select_for_update_of_clause() {
 fn parse_select_for_update_nowait_clause() {
     match parse_statement("select * from people for update of people nowait").unwrap() {
         Statement::Select(SelectStatement {
-            from: Some(FromItem::Table { name, only: false }),
+            from: Some(FromItem::Table {
+                name, only: false, ..
+            }),
             locking_clause: Some(SelectLockingClause::ForUpdate),
             locking_targets,
             locking_nowait: true,
@@ -13952,7 +14194,9 @@ fn parse_select_for_update_nowait_clause() {
 fn parse_select_for_no_key_update_clause() {
     match parse_statement("select * from people for no key update").unwrap() {
         Statement::Select(SelectStatement {
-            from: Some(FromItem::Table { name, only: false }),
+            from: Some(FromItem::Table {
+                name, only: false, ..
+            }),
             locking_clause: Some(SelectLockingClause::ForNoKeyUpdate),
             ..
         }) => assert_eq!(name, "people"),
@@ -13964,7 +14208,9 @@ fn parse_select_for_no_key_update_clause() {
 fn parse_select_for_share_clause() {
     match parse_statement("select * from people for share").unwrap() {
         Statement::Select(SelectStatement {
-            from: Some(FromItem::Table { name, only: false }),
+            from: Some(FromItem::Table {
+                name, only: false, ..
+            }),
             locking_clause: Some(SelectLockingClause::ForShare),
             ..
         }) => assert_eq!(name, "people"),
@@ -13976,7 +14222,9 @@ fn parse_select_for_share_clause() {
 fn parse_select_for_key_share_clause() {
     match parse_statement("select * from people for key share").unwrap() {
         Statement::Select(SelectStatement {
-            from: Some(FromItem::Table { name, only: false }),
+            from: Some(FromItem::Table {
+                name, only: false, ..
+            }),
             locking_clause: Some(SelectLockingClause::ForKeyShare),
             ..
         }) => assert_eq!(name, "people"),
@@ -14059,6 +14307,29 @@ fn parse_with_recursive_cte_union_all() {
 }
 
 #[test]
+fn parse_with_recursive_term_preserves_local_with() {
+    match parse_statement(
+        "with recursive q as (
+            select * from people
+            union all
+            (with x as (select * from q) select * from x)
+        )
+        select * from q",
+    )
+    .unwrap()
+    {
+        Statement::Select(SelectStatement { with, .. }) => match &with[0].body {
+            crate::backend::parser::CteBody::RecursiveUnion { recursive, .. } => {
+                assert_eq!(recursive.with.len(), 1);
+                assert_eq!(recursive.with[0].name, "x");
+            }
+            other => panic!("expected recursive union CTE body, got {:?}", other),
+        },
+        other => panic!("expected Select with WITH RECURSIVE, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_with_recursive_cte_search_and_cycle_clauses() {
     match parse_statement(
         "with recursive g(f, t) as (
@@ -14101,6 +14372,7 @@ fn parse_scalar_values_subquery_expr() {
                 SelectItem {
                     ref output_name,
                     expr: SqlExpr::Column(ref name),
+                    ..
                 } if output_name == "*" && name == "*"
             ));
         }
@@ -15025,6 +15297,31 @@ fn lower_create_table_accepts_check_not_enforced() {
     assert_eq!(lowered.check_actions.len(), 1);
     assert_eq!(lowered.check_actions[0].constraint_name, "items_id_check");
     assert!(!lowered.check_actions[0].enforced);
+}
+
+#[test]
+fn lower_create_table_names_column_checks_from_referenced_columns() {
+    let stmt = parse_statement(
+        "create table items (
+            a int4,
+            b int4 check (a > 0),
+            c int4 check (a > b),
+            d int4 check (d > 0)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+
+    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+        .expect("lower create table");
+    let names = lowered
+        .check_actions
+        .iter()
+        .map(|action| action.constraint_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["items_a_check", "items_check", "items_d_check"]);
 }
 
 #[test]
@@ -17107,6 +17404,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
         varattno: 2,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Text),
+        collation_oid: Some(DEFAULT_COLLATION_OID),
     });
 
     assert_eq!(query.group_by, vec![name_var.clone()]);
@@ -17119,6 +17417,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varattno: 2,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
+            collation_oid: Some(DEFAULT_COLLATION_OID),
         }))))
     );
     assert_eq!(query.sort_clause.len(), 1);
@@ -17129,6 +17428,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varattno: 2,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
+            collation_oid: Some(DEFAULT_COLLATION_OID),
         })
     );
 }
@@ -17481,6 +17781,7 @@ fn analyze_group_by_resolves_select_alias_when_no_input_column_matches() {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })]
     );
 }
@@ -17499,12 +17800,14 @@ fn analyze_group_by_prefers_input_column_over_select_alias() {
                 varattno: 2,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Text),
+                collation_oid: Some(DEFAULT_COLLATION_OID),
             }),
             Expr::Var(Var {
                 varno: 1,
                 varattno: 1,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Int4),
+                collation_oid: None,
             }),
         ]
     );
@@ -17732,16 +18035,28 @@ fn recursive_cte_rejects_self_reference_inside_subquery_cte_of_recursive_term() 
     )
     .unwrap();
     let err = build_plan(&stmt, &catalog()).unwrap_err();
-    let unpositioned = err.unpositioned();
     assert!(
         matches!(
-            unpositioned,
+            err.unpositioned(),
             ParseError::InvalidRecursion(message)
                 if message
                     == "recursive reference to query \"outermost\" must not appear within a subquery"
         ),
-        "got {unpositioned:?}"
+        "unexpected recursion error: {err:?}"
     );
+}
+
+#[test]
+fn recursive_validation_positions_invalid_shape_on_cte_name() {
+    let sql = "with recursive x(n) as (select n from x) select * from x";
+    let stmt = parse_select(sql).unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert_eq!(err.position(), sql.find("x(n)").map(|pos| pos + 1));
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::InvalidRecursion(message)
+            if message == "recursive query \"x\" does not have the form non-recursive-term UNION [ALL] recursive-term"
+    ));
 }
 
 #[test]
@@ -17784,6 +18099,111 @@ fn recursive_cte_reports_target_operator_error_before_filter_operator_error() {
             right_type
         } if left_type == "text" && right_type == "integer"
     ));
+}
+
+#[test]
+fn recursive_validation_positions_nonrecursive_term_reference() {
+    let sql = "with recursive x(n) as (select n from x union all select 1) select * from x";
+    let stmt = parse_select(sql).unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert_eq!(err.position(), sql.find("from x union").map(|pos| pos + 6));
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::InvalidRecursion(message)
+            if message == "recursive reference to query \"x\" must not appear within its non-recursive term"
+    ));
+}
+
+#[test]
+fn recursive_validation_nested_with_left_operand_uses_nonrecursive_context() {
+    let sql = "with recursive x(n) as ((with x1 as (select 1 from x) select * from x1) union select 0) select * from x";
+    let stmt = parse_select(sql).unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert_eq!(err.position(), sql.find("from x)").map(|pos| pos + 6));
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::InvalidRecursion(message)
+            if message == "recursive reference to query \"x\" must not appear within its non-recursive term"
+    ));
+}
+
+#[test]
+fn recursive_validation_positions_recursive_term_decorations() {
+    let order_sql = "with recursive x(n) as (select 0 union select 1 order by (select n from x)) select * from x";
+    let order_stmt = parse_select(order_sql).unwrap();
+    let order_err = build_plan(&order_stmt, &catalog()).unwrap_err();
+    assert_eq!(
+        order_err.position(),
+        order_sql.find("(select n from x)").map(|pos| pos + 1)
+    );
+    assert!(matches!(
+        order_err.unpositioned(),
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "ORDER BY in a recursive query is not implemented"
+    ));
+
+    let offset_sql = "with recursive x(n) as (select 1 union all select n+1 from x limit 10 offset 1) select * from x";
+    let offset_stmt = parse_select(offset_sql).unwrap();
+    let offset_err = build_plan(&offset_stmt, &catalog()).unwrap_err();
+    assert_eq!(
+        offset_err.position(),
+        offset_sql.find("offset").map(|pos| pos + 1)
+    );
+    assert!(matches!(
+        offset_err.unpositioned(),
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "OFFSET in a recursive query is not implemented"
+    ));
+}
+
+#[test]
+fn recursive_validation_positions_aggregate_and_type_mismatch() {
+    let agg_sql =
+        "with recursive x(n) as (select 1 union all select count(*) from x) select * from x";
+    let agg_stmt = parse_select(agg_sql).unwrap();
+    let agg_err = build_plan(&agg_stmt, &catalog()).unwrap_err();
+    assert_eq!(
+        agg_err.position(),
+        agg_sql.find("count(*)").map(|pos| pos + 1)
+    );
+    assert!(matches!(
+        agg_err.unpositioned(),
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "aggregate functions are not allowed in a recursive query's recursive term"
+    ));
+
+    let type_sql = "with recursive foo(i) as (select i from (values(1),(2)) t(i) union all select (i+1)::numeric(10,0) from foo where i < 10) select * from foo";
+    let type_stmt = parse_select(type_sql).unwrap();
+    let type_err = build_plan(&type_stmt, &catalog()).unwrap_err();
+    assert_eq!(
+        type_err.position(),
+        type_sql.find("select i from").map(|pos| pos + 8)
+    );
+    assert!(matches!(
+        type_err.unpositioned(),
+        ParseError::DetailedError { message, hint: Some(hint), .. }
+            if message == "recursive query \"foo\" column 1 has type integer in non-recursive term but type numeric overall"
+                && hint == "Cast the output of the non-recursive term to the correct type."
+    ));
+}
+
+#[test]
+fn recursive_validation_target_operator_error_precedes_filter_error() {
+    let sql = "with recursive t(n) as (
+        select '7'
+        union all
+        select n+1 from t where n < 10
+    ) select n from t";
+    let stmt = parse_select(sql).unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert!(
+        matches!(
+            err.unpositioned(),
+            ParseError::UndefinedOperator { op: "+", left_type, right_type }
+                if left_type == "text" && right_type == "integer"
+        ),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -19187,11 +19607,12 @@ fn parse_aliasless_derived_table() {
 fn parse_parenthesized_table_keyword_from_item() {
     let stmt = parse_select("select * from (table people) p").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
                 only: false,
+                location: None,
             }),
             alias: "p".into(),
             column_aliases: AliasColumnSpec::None,
@@ -19232,7 +19653,7 @@ fn parse_cross_join_with_derived_table() {
             kind,
             constraint,
         }) => {
-            assert_eq!(kind, JoinKind::Cross);
+            assert_eq!(kind, JoinKind::Comma);
             assert!(matches!(constraint, JoinConstraint::None));
             assert!(matches!(*left, FromItem::Alias { .. }));
             assert!(matches!(*right, FromItem::Alias { .. }));
@@ -19248,7 +19669,7 @@ fn parse_join_precedence_binds_tighter_than_comma() {
         Some(FromItem::Join {
             left,
             right,
-            kind: JoinKind::Cross,
+            kind: JoinKind::Comma,
             constraint: JoinConstraint::None,
         }) => {
             assert!(matches!(*left, FromItem::Table { name, .. } if name == "a"));
@@ -19896,9 +20317,10 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && returning == vec![SelectItem {
+            && select_items_without_locations(returning.clone()) == vec![SelectItem {
                 output_name: "*".into(),
                 expr: SqlExpr::Column("*".into()),
+                location: None,
             }]
     ));
 
@@ -19910,10 +20332,11 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && returning == vec![
+            && select_items_without_locations(returning.clone()) == vec![
                 SelectItem {
                     output_name: "id".into(),
                     expr: SqlExpr::Column("id".into()),
+                    location: None,
                 },
                 SelectItem {
                     output_name: "upper_name".into(),
@@ -19930,6 +20353,7 @@ fn parse_dml_returning_targets() {
                         over: None,
                         null_treatment: None,
                     },
+                    location: None,
                 },
             ]
     ));
@@ -19942,10 +20366,11 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && returning == vec![
+            && select_items_without_locations(returning.clone()) == vec![
                 SelectItem {
                     output_name: "id".into(),
                     expr: SqlExpr::Column("id".into()),
+                    location: None,
                 },
                 SelectItem {
                     output_name: "upper_name".into(),
@@ -19962,6 +20387,7 @@ fn parse_dml_returning_targets() {
                         over: None,
                         null_treatment: None,
                     },
+                    location: None,
                 },
             ]
     ));
@@ -20099,6 +20525,19 @@ fn parse_in_subquery_expression() {
 fn parse_any_all_subquery_expressions() {
     assert!(parse_select("select id = any (select owner_id from pets) from people").is_ok());
     assert!(parse_select("select id < all (select owner_id from pets) from people").is_ok());
+    let stmt = parse_select("select id <> all (values (2), (3)) from people").unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::QuantifiedSubquery {
+            is_all, subquery, ..
+        } => {
+            assert!(*is_all);
+            assert!(matches!(
+                subquery.from.as_ref(),
+                Some(FromItem::Values { rows }) if rows.len() == 2
+            ));
+        }
+        other => panic!("expected ALL VALUES subquery, got {other:?}"),
+    }
 }
 
 #[test]
@@ -20585,6 +21024,7 @@ fn analyze_simple_case_uses_case_test_expr() {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype,
+                    ..
                 })) if *vartype == SqlType::new(SqlTypeKind::Int4)
             ));
             assert_eq!(case_expr.args.len(), 1);

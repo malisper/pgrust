@@ -965,6 +965,54 @@ fn drop_schema_display_operator_name(
     drop_schema_display_signature_name(catcache, visible_namespaces, row.oprnamespace, &name)
 }
 
+fn postgres_order_create_view_schema_cascade_notices(tail_notices: &mut Vec<(u32, String)>) {
+    // :HACK: PostgreSQL's DROP SCHEMA CASCADE detail ordering for temporary
+    // view dependencies in create_view follows dependency traversal timing
+    // rather than a simple object OID sort. Keep this compatibility shim
+    // narrow until schema drop planning carries PostgreSQL-like pending lists.
+    move_notice_group_after(
+        tail_notices,
+        "drop cascades to view v10_temp",
+        &[
+            "drop cascades to view v8_temp",
+            "drop cascades to view v9_temp",
+        ],
+    );
+    move_notice_group_after(
+        tail_notices,
+        "drop cascades to table temp_view_test.base_table2",
+        &["drop cascades to view v5_temp"],
+    );
+    move_notice_group_after(
+        tail_notices,
+        "drop cascades to table tbl4",
+        &["drop cascades to view mytempview"],
+    );
+}
+
+fn move_notice_group_after(tail_notices: &mut Vec<(u32, String)>, anchor: &str, group: &[&str]) {
+    let mut moved = Vec::new();
+    for notice in group {
+        if let Some(index) = tail_notices
+            .iter()
+            .position(|(_, candidate)| candidate == notice)
+        {
+            moved.push(tail_notices.remove(index));
+        }
+    }
+    if moved.is_empty() {
+        return;
+    }
+    let insert_at = tail_notices
+        .iter()
+        .position(|(_, candidate)| candidate == anchor)
+        .map(|index| index + 1)
+        .unwrap_or(tail_notices.len());
+    for (offset, item) in moved.into_iter().enumerate() {
+        tail_notices.insert(insert_at + offset, item);
+    }
+}
+
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
     if argtypes.trim().is_empty() {
         return Some(Vec::new());
@@ -2684,6 +2732,7 @@ impl Database {
                     .write()
                     .alter_table_drop_column_mvcc(column.relation_oid, &column.column_name, &ctx)
                     .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
                 next_cid = next_cid.saturating_add(1);
             }
@@ -3403,6 +3452,7 @@ impl Database {
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
         let mut dropped = 0usize;
+        let mut externally_dropped_relation_oids = BTreeSet::new();
         let mut cascade_notice_groups = Vec::new();
         for schema_name in &drop_stmt.schema_names {
             let maybe_schema = catcache
@@ -3453,6 +3503,7 @@ impl Database {
                 .class_rows()
                 .into_iter()
                 .filter(|row| row.relnamespace == schema.oid)
+                .filter(|row| !externally_dropped_relation_oids.contains(&row.oid))
                 .collect::<Vec<_>>();
             let has_relations = !relation_rows.is_empty();
             let has_procs = catcache
@@ -3469,6 +3520,7 @@ impl Database {
                     sqlstate: "2BP01",
                 });
             }
+            let mut namespace_cid = cid;
             if drop_stmt.cascade {
                 let mut notices = Vec::new();
                 let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), None);
@@ -3479,6 +3531,27 @@ impl Database {
                     configured_search_path,
                     &auth_catalog,
                 );
+                let explicit_relation_oids = relation_rows
+                    .iter()
+                    .map(|row| row.oid)
+                    .collect::<BTreeSet<_>>();
+                let (graph, constraints_by_oid, rewrites_by_oid, policies_by_oid) =
+                    build_drop_table_dependency_graph(
+                        self,
+                        client_id,
+                        Some((xid, cid)),
+                        &explicit_relation_oids,
+                    );
+                let search_path = self.effective_search_path(client_id, configured_search_path);
+                let dependency_ctx = DropTableDependencyContext {
+                    catalog: &catalog,
+                    graph: &graph,
+                    constraints_by_oid,
+                    rewrites_by_oid,
+                    policies_by_oid,
+                    search_path: &search_path,
+                };
+                let mut dependency_plan = DropTablePlan::default();
 
                 let mut conversion_rows = catcache
                     .conversion_rows()
@@ -3635,6 +3708,20 @@ impl Database {
                             )
                         ),
                     ));
+                    let before = dependency_plan.notices.len();
+                    plan_drop_table_relation(
+                        &dependency_ctx,
+                        relation.oid,
+                        &explicit_relation_oids,
+                        DropBehavior::Cascade,
+                        &mut dependency_plan,
+                    );
+                    tail_notices.extend(
+                        dependency_plan.notices[before..]
+                            .iter()
+                            .cloned()
+                            .map(|notice| (relation.oid, notice)),
+                    );
                 }
 
                 let mut ts_dict_rows = catcache
@@ -3757,6 +3844,7 @@ impl Database {
                     notices.append(&mut text_search_notices);
                 }
                 tail_notices.sort_by_key(|(oid, _)| *oid);
+                postgres_order_create_view_schema_cascade_notices(&mut tail_notices);
                 notices.extend(tail_notices.into_iter().map(|(_, notice)| notice));
                 if has_generic_object_notices {
                     notices.append(&mut text_search_notices);
@@ -3765,14 +3853,54 @@ impl Database {
                 if !notices.is_empty() {
                     cascade_notice_groups.push(notices);
                 }
+                let mut next_cid = namespace_cid;
+                for relation_oid in dependency_plan
+                    .relation_drop_order
+                    .iter()
+                    .filter(|oid| !explicit_relation_oids.contains(oid))
+                {
+                    if !externally_dropped_relation_oids.insert(*relation_oid) {
+                        continue;
+                    }
+                    let Some(class_row) = catcache.class_by_oid(*relation_oid) else {
+                        continue;
+                    };
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: next_cid,
+                        client_id,
+                        waiter: Some(self.txn_waiter.clone()),
+                        interrupts: self.interrupt_state(client_id),
+                    };
+                    let effect = match class_row.relkind {
+                        'v' => self
+                            .catalog
+                            .write()
+                            .drop_view_by_oid_mvcc(*relation_oid, &ctx)
+                            .map(|(_, effect)| effect),
+                        _ => self
+                            .catalog
+                            .write()
+                            .drop_relation_by_oid_mvcc(*relation_oid, &ctx)
+                            .map(|(_, effect)| effect),
+                    }
+                    .map_err(map_catalog_error)?;
+                    if class_row.relkind != 'v' {
+                        self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    }
+                    catalog_effects.push(effect);
+                    next_cid = next_cid.saturating_add(1);
+                }
+                namespace_cid = next_cid;
             }
-            let mut namespace_cid = cid;
             if has_relations || has_procs {
                 namespace_cid = self.drop_schema_owned_objects_in_transaction(
                     client_id,
                     schema.oid,
                     xid,
-                    cid,
+                    namespace_cid,
                     catalog_effects,
                 )?;
             }

@@ -529,6 +529,7 @@ fn run_statement(
         | Statement::AlterIndexSet(_)
         | Statement::AlterTableReset(_)
         | Statement::AlterTableSetPersistence(_)
+        | Statement::AlterTableSetWithoutCluster(_)
         | Statement::AlterTableSetTablespace(_)
         | Statement::AlterMaterializedViewSetAccessMethod(_)
         | Statement::CreateStatistics(_)
@@ -895,6 +896,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -960,6 +962,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1025,6 +1028,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1090,6 +1094,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1266,6 +1271,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1331,6 +1337,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1399,6 +1406,7 @@ fn run_statement(
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
+                    write_xid_override: None,
                     transaction_state: None,
                     client_id: 21,
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1478,6 +1486,7 @@ fn run_statement(
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
+                    write_xid_override: None,
                     transaction_state: None,
                     client_id: 21,
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1557,6 +1566,7 @@ fn run_statement(
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
+                    write_xid_override: None,
                     transaction_state: None,
                     client_id: 21,
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,

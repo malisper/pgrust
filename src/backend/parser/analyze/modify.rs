@@ -406,7 +406,9 @@ fn collect_local_selected_columns(expr: &Expr, selected: &mut Vec<usize>) {
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentUser
+        | Expr::User
         | Expr::SessionUser
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1570,6 +1572,9 @@ fn bind_returning_targets(
     if targets.is_empty() {
         return Ok(Vec::new());
     }
+    for target in targets {
+        reject_window_clause(&target.expr, "RETURNING")?;
+    }
     match bind_select_targets(targets, scope, catalog, outer_scopes, None, local_ctes)? {
         BoundSelectTargets::Plain(targets)
             if targets
@@ -1594,6 +1599,7 @@ fn returning_pseudo_output_exprs(desc: &RelationDesc, varno: usize) -> Vec<Expr>
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -1645,6 +1651,7 @@ fn scope_with_hidden_invalid_relation(
             hidden: true,
             qualified_only: true,
             relation_names: Vec::new(),
+            relation_output_exprs: vec![],
             hidden_invalid_relation_names: vec![relation_name.to_string()],
             hidden_missing_relation_names: Vec::new(),
             source_relation_oid: None,
@@ -1708,6 +1715,7 @@ fn scope_with_returning_pseudo_row_exprs(
                 hidden: true,
                 qualified_only: true,
                 relation_names: vec![relation_name.to_string()],
+                relation_output_exprs: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
                 source_relation_oid: relation_oid,
@@ -1735,6 +1743,7 @@ fn projected_output_exprs(desc: &RelationDesc, start_index: usize) -> Vec<Expr> 
                 varattno: user_attrno(start_index + index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -1755,6 +1764,7 @@ fn projected_output_exprs_with_width(
                 varattno: user_attrno(start_index + index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -1779,6 +1789,7 @@ fn with_merge_target_identity(
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Tid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Tid),
             ctid_resno,
@@ -1794,6 +1805,7 @@ fn with_merge_target_identity(
                 varattno: TABLE_OID_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Oid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Oid),
             tableoid_resno,
@@ -1822,6 +1834,7 @@ fn with_update_target_identity(
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Tid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Tid),
             ctid_resno,
@@ -1837,6 +1850,7 @@ fn with_update_target_identity(
                 varattno: TABLE_OID_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Oid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Oid),
             tableoid_resno,
@@ -1919,6 +1933,21 @@ fn update_from_projection_targets(
         .with_input_resno(tableoid_index + 1),
     );
     targets
+}
+
+fn align_relation_outputs_to_projected_slots(mut scope: BoundScope) -> BoundScope {
+    for (index, column) in scope.columns.iter_mut().enumerate() {
+        if column.relation_output_exprs.is_empty() {
+            continue;
+        }
+        let Some(expr) = scope.output_exprs.get(index).cloned() else {
+            continue;
+        };
+        for (_, relation_expr) in &mut column.relation_output_exprs {
+            *relation_expr = expr.clone();
+        }
+    }
+    scope
 }
 
 fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>) -> Query {
@@ -2187,21 +2216,22 @@ const MERGE_ACTION_RETURNING_COLUMN: &str = "__pgrust_merge_action";
 
 fn scope_with_merge_action_column(mut scope: BoundScope, merge_action_index: usize) -> BoundScope {
     let sql_type = SqlType::new(SqlTypeKind::Text);
-    scope
-        .desc
-        .columns
-        .push(column_desc(MERGE_ACTION_RETURNING_COLUMN, sql_type, true));
+    let merge_action_column = column_desc(MERGE_ACTION_RETURNING_COLUMN, sql_type, true);
+    let collation_oid = Some(merge_action_column.collation_oid);
+    scope.desc.columns.push(merge_action_column);
     scope.output_exprs.push(Expr::Var(Var {
         varno: 1,
         varattno: user_attrno(merge_action_index),
         varlevelsup: 0,
         vartype: sql_type,
+        collation_oid,
     }));
     scope.columns.push(ScopeColumn {
         output_name: MERGE_ACTION_RETURNING_COLUMN.into(),
         hidden: false,
         qualified_only: false,
         relation_names: Vec::new(),
+        relation_output_exprs: vec![],
         hidden_invalid_relation_names: Vec::new(),
         hidden_missing_relation_names: Vec::new(),
         source_relation_oid: None,
@@ -2219,6 +2249,7 @@ fn rewrite_merge_action_select_item(
         crate::include::nodes::parsenodes::SelectItem {
             output_name: item.output_name.clone(),
             expr,
+            location: item.location,
         },
         changed,
     )
@@ -2229,6 +2260,7 @@ fn rewrite_merge_action_order_by(item: &OrderByItem) -> (OrderByItem, bool) {
     (
         OrderByItem {
             expr,
+            location: item.location,
             descending: item.descending,
             nulls_first: item.nulls_first,
             using_operator: item.using_operator.clone(),
@@ -2281,6 +2313,7 @@ fn rewrite_merge_action_select(stmt: &SelectStatement) -> (SelectStatement, bool
         SelectStatement {
             with_recursive: stmt.with_recursive,
             with: stmt.with.clone(),
+            with_from_recursive_union_outer: stmt.with_from_recursive_union_outer,
             distinct: stmt.distinct,
             distinct_on,
             from: stmt.from.clone(),
@@ -2291,9 +2324,13 @@ fn rewrite_merge_action_select(stmt: &SelectStatement) -> (SelectStatement, bool
             having,
             window_clauses: stmt.window_clauses.clone(),
             order_by,
+            order_by_location: stmt.order_by_location,
             limit: stmt.limit,
+            limit_location: stmt.limit_location,
             offset: stmt.offset,
+            offset_location: stmt.offset_location,
             locking_clause: stmt.locking_clause,
+            locking_location: stmt.locking_location,
             locking_nowait: stmt.locking_nowait,
             locking_targets: stmt.locking_targets.clone(),
             set_operation: stmt.set_operation.clone(),
@@ -2541,6 +2578,7 @@ fn bind_merge_returning_targets(
                         varattno: user_attrno(merge_action_index),
                         varlevelsup: 0,
                         vartype: SqlType::new(SqlTypeKind::Text),
+                        collation_oid: None,
                     }),
                     SqlType::new(SqlTypeKind::Text),
                     entries.len() + 1,
@@ -2877,6 +2915,7 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
         target_from,
         source_from,
         merge_join_type(&stmt.when_clauses),
+        false,
         join_condition,
         None,
     );
@@ -3636,6 +3675,7 @@ fn update_input_identity_expr(index: usize, input_columns: &[QueryColumn]) -> Ex
             .get(index)
             .map(|column| column.sql_type)
             .unwrap_or_else(|| SqlType::new(SqlTypeKind::AnyElement)),
+        collation_oid: None,
     })
 }
 
@@ -4015,6 +4055,8 @@ fn rewrite_auto_view_scan_plan(
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => Plan::WindowAgg {
             plan_info,
@@ -4026,6 +4068,8 @@ fn rewrite_auto_view_scan_plan(
                 resolved,
             )),
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         },
         Plan::SubqueryScan {
@@ -4122,6 +4166,7 @@ fn scope_for_pseudo_relation(relation_name: &str, desc: &RelationDesc, varno: us
                 hidden: column.dropped,
                 qualified_only: false,
                 relation_names: vec![relation_name.to_string()],
+                relation_output_exprs: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
                 source_relation_oid: None,
@@ -5901,6 +5946,7 @@ fn bind_simple_update(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, local_ctes)
         })
         .transpose()?;
@@ -6082,6 +6128,7 @@ fn bind_update_from(
         target_from,
         source_from,
         JoinType::Cross,
+        false,
         Expr::Const(Value::Bool(true)),
         None,
     );
@@ -6092,6 +6139,7 @@ fn bind_update_from(
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+    let eval_scope = align_relation_outputs_to_projected_slots(eval_scope);
     let returning_scope = scope_with_returning_pseudo_rows_with_generated(
         eval_scope.clone(),
         &entry.desc,
@@ -6112,6 +6160,7 @@ fn bind_update_from(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(
                 expr,
                 &eval_scope,
@@ -6428,6 +6477,7 @@ pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &visible_ctes)
         })
         .transpose()?;
@@ -6537,6 +6587,7 @@ fn bind_delete_using(
         target_from,
         source_from,
         JoinType::Cross,
+        false,
         Expr::Const(Value::Bool(true)),
         None,
     );
@@ -6547,6 +6598,7 @@ fn bind_delete_using(
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+    let eval_scope = align_relation_outputs_to_projected_slots(eval_scope);
     let returning_scope = scope_with_returning_pseudo_rows_with_generated(
         eval_scope.clone(),
         &entry.desc,
@@ -6567,6 +6619,7 @@ fn bind_delete_using(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(
                 expr,
                 &eval_scope,

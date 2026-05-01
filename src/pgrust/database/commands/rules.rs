@@ -946,7 +946,7 @@ pub(crate) fn execute_bound_insert_with_rules(
             };
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
-        let mut query_columns = None;
+        let mut query_columns: Option<Vec<QueryColumn>> = None;
         let mut query_column_names = Vec::new();
         let mut query_rows = Vec::new();
         let null_old = vec![Value::Null; stmt.desc.columns.len()];
@@ -982,6 +982,12 @@ pub(crate) fn execute_bound_insert_with_rules(
                         &outcome.returning_rows,
                         ctx,
                     )?);
+                } else if let Some(columns) = outcome.query_columns {
+                    if query_columns.is_none() {
+                        query_columns = Some(columns);
+                        query_column_names = outcome.query_column_names;
+                    }
+                    query_rows.extend(outcome.query_rows);
                 }
                 if outcome.matched_actions {
                     affected_rows += 1;
@@ -1039,13 +1045,14 @@ pub(crate) fn execute_bound_insert_with_rules(
         }
         if stmt.returning.is_empty() {
             if let Some(columns) = query_columns {
-                return Ok(StatementResult::Query {
+                Ok(StatementResult::Query {
                     columns,
                     column_names: query_column_names,
                     rows: query_rows,
-                });
+                })
+            } else {
+                Ok(StatementResult::AffectedRows(affected_rows))
             }
-            Ok(StatementResult::AffectedRows(affected_rows))
         } else {
             Ok(build_statement_returning_result(
                 &stmt.returning,
@@ -1370,6 +1377,43 @@ pub(crate) fn execute_bound_delete_with_rules(
         let mut query_column_names = Vec::new();
         let mut query_rows = Vec::new();
         if stmt.input_plan.is_some() && stmt.targets.iter().all(|target| target.relkind != 'v') {
+            if stmt.targets.len() == 1 {
+                let target = &stmt.targets[0];
+                let rules = load_prepared_rules(
+                    target.relation_oid,
+                    RuleEvent::Delete,
+                    &target.desc,
+                    catalog,
+                    ctx.session_replication_role,
+                )?;
+                if let Some(outcome) = execute_statement_level_instead_rules(
+                    &rules,
+                    target.desc.columns.len(),
+                    catalog,
+                    ctx,
+                    xid,
+                    0,
+                    waiter,
+                    !stmt.returning.is_empty(),
+                )? {
+                    affected_rows += append_statement_level_instead_result(
+                        RuleEvent::Delete,
+                        &target.relation_name,
+                        &stmt.returning,
+                        outcome,
+                        ctx,
+                        &mut returned_rows,
+                    )?;
+                    return if stmt.returning.is_empty() {
+                        Ok(StatementResult::AffectedRows(affected_rows))
+                    } else {
+                        Ok(build_statement_returning_result(
+                            &stmt.returning,
+                            returned_rows,
+                        ))
+                    };
+                }
+            }
             for event in materialize_delete_row_events(&stmt, ctx)? {
                 let target = event.target;
                 let rules = load_prepared_rules(
@@ -2568,12 +2612,14 @@ fn substitute_rule_rte(
                 .map(|sample| substitute_rule_table_sample(sample, old_values, new_values)),
         },
         RangeTblEntryKind::Join {
+            from_list,
             jointype,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => RangeTblEntryKind::Join {
+            from_list,
             jointype,
             joinmergedcols,
             joinaliasvars: joinaliasvars
@@ -3231,11 +3277,16 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => Plan::WindowAgg {
             plan_info,
             input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
             clause: substitute_rule_window_clause(clause, old_values, new_values),
+            run_condition: run_condition
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+            top_qual: top_qual.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
             output_columns,
         },
         Plan::FunctionScan {
@@ -3953,16 +4004,19 @@ fn materialize_view_rows(
         .map(|column| SelectItem {
             output_name: column.name.clone(),
             expr: crate::backend::parser::SqlExpr::Column(column.name.clone()),
+            location: None,
         })
         .collect();
     let select = SelectStatement {
         with_recursive: false,
         with: Vec::new(),
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
         from: Some(FromItem::Table {
             name: relation_name.to_string(),
             only: false,
+            location: None,
         }),
         targets: visible_columns,
         where_clause: None,
@@ -3971,9 +4025,13 @@ fn materialize_view_rows(
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),
+        order_by_location: None,
         limit: None,
+        limit_location: None,
         offset: None,
+        offset_location: None,
         locking_clause: None,
+        locking_location: None,
         locking_targets: Vec::new(),
         locking_nowait: false,
         set_operation: None,

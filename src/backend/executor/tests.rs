@@ -32,6 +32,7 @@ fn local_var(index: usize) -> Expr {
         varattno: user_attrno(index),
         varlevelsup: 0,
         vartype: crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+        collation_oid: None,
     })
 }
 
@@ -918,6 +919,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
             crate::pgrust::database::SessionStatsState::default(),
         )),
         snapshot,
+        write_xid_override: None,
         transaction_state: None,
         client_id: 1,
         current_database_name: "postgres".to_string(),
@@ -1001,6 +1003,7 @@ fn run_plan(
             crate::pgrust::database::SessionStatsState::default(),
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+        write_xid_override: None,
         transaction_state: None,
         client_id: 42,
         current_database_name: "postgres".to_string(),
@@ -1120,6 +1123,7 @@ fn first_tuple_slot_kind_for_sql(
                 crate::pgrust::database::SessionStatsState::default(),
             )),
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+            write_xid_override: None,
             transaction_state: None,
             client_id: 77,
             current_database_name: "postgres".to_string(),
@@ -1221,6 +1225,7 @@ fn first_tuple_slot_kind_for_plan(
                 crate::pgrust::database::SessionStatsState::default(),
             )),
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+            write_xid_override: None,
             transaction_state: None,
             client_id: 77,
             current_database_name: "postgres".to_string(),
@@ -1336,6 +1341,7 @@ fn run_sql_with_catalog(
                 crate::pgrust::database::SessionStatsState::default(),
             )),
             snapshot: txns.snapshot(xid).unwrap(),
+            write_xid_override: None,
             transaction_state: None,
             client_id: 77,
             current_database_name: "postgres".to_string(),
@@ -1708,6 +1714,7 @@ fn pg_column_compression_reports_compressed_heap_values() {
             vartype: crate::backend::parser::SqlType::new(
                 crate::backend::parser::SqlTypeKind::Text,
             ),
+            collation_oid: None,
         })],
     );
 
@@ -3724,6 +3731,48 @@ fn on_conflict_do_update_where_false_skips_row() {
 }
 
 #[test]
+fn on_conflict_update_skips_row_already_touched_by_writable_cte() {
+    let base = temp_dir("upsert_writable_cte_same_row");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table people (id int primary key, name text, note text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into people (id, name, note) values (2, 'seed', 'old')",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "with simpletup as (
+               select 2 id, 'green' name
+             ),
+             upsert_cte as (
+               insert into people (id, name) values (2, 'blue')
+               on conflict (id) do update
+               set name = (select name from simpletup where simpletup.id = people.id)
+               returning id, name
+             )
+             insert into people (id, name) values (2, 'red')
+             on conflict (id) do update
+             set name = (select name from upsert_cte where upsert_cte.id = people.id)
+             returning id, name",
+        )
+        .unwrap(),
+        Vec::new(),
+    );
+
+    assert_query_rows(
+        db.execute(1, "select id, name from people").unwrap(),
+        vec![vec![Value::Int32(2), Value::Text("green".into())]],
+    );
+}
+
+#[test]
 fn on_conflict_do_update_rejects_duplicate_input_rows() {
     let mut harness = SeededSqlHarness::new(
         "upsert_duplicate_input_rows",
@@ -4633,10 +4682,12 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(2),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::SubPlan(Box::new(SubPlan {
                     sublink_type: SubLinkType::ExprSubLink,
                     testexpr: None,
+                    comparison: None,
                     first_col_type: Some(int4),
                     target_width: 1,
                     target_attnos: vec![Some(0)],
@@ -4655,6 +4706,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(4),
                     varlevelsup: 0,
                     vartype: text,
+                    collation_oid: None,
                 })],
             ),
             Expr::binary_op(
@@ -4665,6 +4717,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: text,
+                    collation_oid: None,
                 }),
                 Expr::CurrentUser,
             ),
@@ -4710,6 +4763,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(1)),
             ),
@@ -4721,6 +4775,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(3)),
             ),
@@ -4746,12 +4801,14 @@ fn explain_expr_matches_postgres_filter_formatting() {
         varattno: user_attrno(0),
         varlevelsup: 0,
         vartype: int4,
+        collation_oid: None,
     });
     let b = Expr::Var(Var {
         varno: 1,
         varattno: user_attrno(1),
         varlevelsup: 0,
         vartype: text,
+        collation_oid: None,
     });
     let modulo = Expr::binary_op(
         OpExprKind::Mod,
@@ -4807,6 +4864,7 @@ fn explain_expr_matches_postgres_filter_formatting() {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Jsonb),
+            collation_oid: None,
         }),
         Expr::Const(Value::JsonPath(r#"($."wait" == null)"#.into())),
     );
@@ -4824,6 +4882,7 @@ fn explain_expr_matches_postgres_filter_formatting() {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: ts,
+            collation_oid: None,
         }),
         Expr::LocalTimestamp { precision: None },
     );
@@ -4902,6 +4961,7 @@ fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
             varattno: user_attrno(1),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Char),
+            collation_oid: None,
         }),
         Expr::ArrayLiteral {
             elements: vec![Expr::Const(Value::Text("ab".into()))],
@@ -4934,6 +4994,7 @@ fn explain_join_expr_renders_function_args_with_join_vars() {
                 varattno: user_attrno(2),
                 varlevelsup: 0,
                 vartype: text,
+                collation_oid: None,
             }),
             Expr::Const(Value::Int32(3)),
         ],
@@ -4973,6 +5034,7 @@ fn explain_expr_renders_varchar_scalar_array_with_nonconst_element() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: varchar,
+                collation_oid: None,
             })),
             text,
         )),
@@ -5025,6 +5087,7 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: polygon_ty,
+                collation_oid: None,
             }),
             Expr::Const(Value::Polygon(GeoPolygon {
                 bound_box: GeoBox {
@@ -5060,6 +5123,7 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: circle_ty,
+                collation_oid: None,
             }),
             Expr::Const(Value::Circle(GeoCircle {
                 center: GeoPoint { x: 500.0, y: 500.0 },
@@ -5093,6 +5157,7 @@ fn explain_sort_key_renders_box_coordinate_subscripts() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Box),
+                collation_oid: None,
             })],
         )],
     );
@@ -5157,6 +5222,7 @@ fn explain_const_false_and_scan_filter_uses_one_time_filter() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(1000)),
             ),
@@ -11121,6 +11187,22 @@ fn xmlforest_constructs_xml() {
 }
 
 #[test]
+fn xmlforest_date_values_report_unsupported_xml_feature() {
+    let base = temp_dir("xmlforest_date_unsupported");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select xmlforest('2013-02-21'::date as c3)",
+    )
+    .unwrap_err();
+
+    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+}
+
+#[test]
 fn oidvector_text_values_support_array_functions() {
     let base = temp_dir("oidvector_array_functions");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -12319,6 +12401,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
             crate::pgrust::database::SessionStatsState::default(),
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+        write_xid_override: None,
         transaction_state: None,
         client_id: 77,
         current_database_name: "postgres".to_string(),
@@ -13207,6 +13290,191 @@ fn nested_join_rhs_lateral_can_reference_prior_from_item() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn lateral_join_output_expr_uses_own_outer_relation() {
+    let base = temp_dir("lateral_join_output_expr_own_outer");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table t1(q1 int8, q2 int8)").unwrap();
+    db.execute(1, "create table t2(q1 int8, q2 int8)").unwrap();
+    db.execute(1, "create table t3(q1 int8, q2 int8)").unwrap();
+    db.execute(1, "insert into t1 values (100, 1)").unwrap();
+    db.execute(1, "insert into t2 values (10, 1)").unwrap();
+    db.execute(1, "insert into t3 values (1, 1)").unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select t1.q1, x
+             from t1 left join
+               (t2 left join lateral
+                (select t2.q1 + t3.q1 as x, t3.q2 from t3) ss on t2.q2 = ss.q2)
+             on t1.q2 = t2.q2",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(100), Value::Int64(11)]],
+    );
+}
+
+#[test]
+fn lateral_join_output_expr_reuses_parameter_cache_by_join_key() {
+    let base = temp_dir("lateral_join_output_expr_cache_join_key");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table lo(ten int4, unique1 int4)")
+        .unwrap();
+    db.execute(1, "create table li(ten int4, fivethous int4)")
+        .unwrap();
+    db.execute(1, "insert into lo values (1, 10), (1, 20), (2, 10)")
+        .unwrap();
+    db.execute(1, "insert into li values (3, 10), (4, 20)")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select lo.ten, sum(x)
+             from lo left join lateral (
+               select lo.ten + li.ten as x, li.fivethous from li
+             ) ss on lo.unique1 = ss.fivethous
+             group by lo.ten
+             order by lo.ten",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int64(9)],
+            vec![Value::Int32(2), Value::Int64(5)],
+        ],
+    );
+}
+
+#[test]
+fn lateral_subquery_output_expr_survives_sibling_lateral_pruning() {
+    let base = temp_dir("lateral_subquery_output_expr_pruning");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table t1(q1 int8, q2 int8)").unwrap();
+    db.execute(1, "create table t2(q1 int8, q2 int8)").unwrap();
+    db.execute(1, "create table t3(q1 int8, q2 int8)").unwrap();
+    db.execute(1, "create table t4(q1 int8, q2 int8)").unwrap();
+    db.execute(1, "insert into t1 values (100, 7)").unwrap();
+    db.execute(1, "insert into t2 values (5, 7)").unwrap();
+    db.execute(1, "insert into t3 values (42, 5)").unwrap();
+    db.execute(1, "insert into t4 values (7, 8)").unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select ss2.y, ss2.q1, ss2.q2
+             from t1 left join
+               (t2 left join
+                (select coalesce(q1) as x, * from t3) ss1 on t2.q1 = ss1.q2
+                inner join lateral
+                (select ss1.x as y, * from t4) ss2 on t2.q2 = ss2.q1)
+             on t1.q2 = ss2.q1",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(42), Value::Int64(7), Value::Int64(8)]],
+    );
+}
+
+#[test]
+fn recursive_cte_nested_cte_can_reference_worktable_twice() {
+    let base = temp_dir("recursive_cte_nested_cte_worktable_twice");
+    let db = Database::open(&base, 16).unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "with recursive x(a) as
+              ((values ('a'), ('b'))
+               union all
+               (with z as not materialized (select * from x)
+                select z.a || z1.a as a from z cross join z as z1
+                where length(z.a || z1.a) < 5))
+             select * from x",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+            vec![Value::Text("aa".into())],
+            vec![Value::Text("ab".into())],
+            vec![Value::Text("ba".into())],
+            vec![Value::Text("bb".into())],
+            vec![Value::Text("aaaa".into())],
+            vec![Value::Text("aaab".into())],
+            vec![Value::Text("aaba".into())],
+            vec![Value::Text("aabb".into())],
+            vec![Value::Text("abaa".into())],
+            vec![Value::Text("abab".into())],
+            vec![Value::Text("abba".into())],
+            vec![Value::Text("abbb".into())],
+            vec![Value::Text("baaa".into())],
+            vec![Value::Text("baab".into())],
+            vec![Value::Text("baba".into())],
+            vec![Value::Text("babb".into())],
+            vec![Value::Text("bbaa".into())],
+            vec![Value::Text("bbab".into())],
+            vec![Value::Text("bbba".into())],
+            vec![Value::Text("bbbb".into())],
+        ],
+    );
+}
+
+#[test]
+fn recursive_cte_nested_single_cte_can_reference_worktable() {
+    let base = temp_dir("recursive_cte_nested_single_cte_worktable");
+    let db = Database::open(&base, 16).unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "with recursive x(a) as
+              ((values ('a'), ('b'))
+               union all
+               (with z as not materialized (select * from x)
+                select z.a || z.a as a from z
+                where length(z.a || z.a) < 5))
+             select * from x",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+            vec![Value::Text("aa".into())],
+            vec![Value::Text("bb".into())],
+            vec![Value::Text("aaaa".into())],
+            vec![Value::Text("bbbb".into())],
+        ],
+    );
+}
+
+#[test]
+fn lateral_recursive_cte_rescans_per_outer_row() {
+    let base = temp_dir("lateral_recursive_cte_rescans_per_outer_row");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table onek(four int4, ten int4)")
+        .unwrap();
+    db.execute(1, "insert into onek values (0, 1), (1, 1), (2, 0)")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select sum(o.four), sum(ss.a) from
+               onek o cross join lateral (
+                 with recursive x(a) as
+                   (select o.four as a
+                    union
+                    select a + 1 from x
+                    where a < 10)
+                 select * from x
+               ) ss
+             where o.ten = 1",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(10), Value::Int64(110)]],
+    );
 }
 
 #[test]
@@ -18114,6 +18382,93 @@ fn window_rows_range_and_groups_frames_are_respected() {
                         Value::Int32(1),
                         Value::Int32(4),
                     ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_groups_preceding_end_underflow_is_empty() {
+    let base = temp_dir("window_groups_preceding_end_underflow");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'x'),
+            (4, 'dave', 'y')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) over (order by note groups between 2 preceding and 1 preceding)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Null],
+                    vec![Value::Int32(2), Value::Null],
+                    vec![Value::Int32(3), Value::Null],
+                    vec![Value::Int32(4), Value::Int64(6)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_aggregate_filter_applies_to_rows_frames() {
+    let base = temp_dir("window_aggregate_filter_applies_to_rows_frames");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'yes'),
+            (2, 'bob', 'no'),
+            (3, 'carol', 'yes')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) filter (where note = 'yes')
+                    over (order by id rows between 1 preceding and current row)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(1)],
+                    vec![Value::Int32(2), Value::Int64(1)],
+                    vec![Value::Int32(3), Value::Int64(3)],
                 ]
             );
         }
@@ -23046,6 +23401,7 @@ fn jsonpath_remaining_regression_cases_work() {
     }
 
     for (input, expected) in [
+        ("", "invalid input syntax for type jsonpath: \"\""),
         ("last", "LAST is allowed only in array subscripts"),
         ("$ ? (last > 0)", "LAST is allowed only in array subscripts"),
         ("@ + 1", "@ is not allowed in root expressions"),
@@ -24560,6 +24916,92 @@ fn distinct_on_subquery_in_predicate_is_accepted() {
 }
 
 #[test]
+fn scalar_in_subquery_coerces_comparison_types() {
+    let db = Database::open(temp_dir("scalar_in_subquery_type_coercion"), 16).unwrap();
+    db.execute(1, "create temp table numeric_table (num_col numeric)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into numeric_table values (1), (1.000000000000000000001), (2), (3)",
+    )
+    .unwrap();
+    db.execute(1, "create temp table float_table (float_col float8)")
+        .unwrap();
+    db.execute(1, "insert into float_table values (1), (2), (3)")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select * from float_table
+             where float_col in (select num_col from numeric_table)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Float64(1.0)],
+            vec![Value::Float64(2.0)],
+            vec![Value::Float64(3.0)],
+        ],
+    );
+    assert_query_rows(
+        db.execute(
+            1,
+            "select * from numeric_table
+             where num_col in (select float_col from float_table)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Numeric("1".into())],
+            vec![Value::Numeric("1.000000000000000000001".into())],
+            vec![Value::Numeric("2".into())],
+            vec![Value::Numeric("3".into())],
+        ],
+    );
+
+    db.execute(1, "create temp table inner_text (c1 text)")
+        .unwrap();
+    db.execute(1, "create temp table outer_int8 (q1 int8)")
+        .unwrap();
+    db.execute(1, "insert into inner_text values ('123'), ('nope')")
+        .unwrap();
+    db.execute(1, "insert into outer_int8 values (123), (456)")
+        .unwrap();
+    let err = db
+        .execute(
+            1,
+            "select * from outer_int8 where q1 in (select c1 from inner_text)",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UndefinedOperator { op, left_type, right_type })
+            if op == "=" && left_type == "bigint" && right_type == "text"
+    ));
+
+    db.execute(
+        1,
+        "create function bogus_int8_text_eq(int8, text) returns boolean
+         language sql as 'select $1::text = $2'",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator = (procedure=bogus_int8_text_eq, leftarg=int8, rightarg=text)",
+    )
+    .unwrap();
+    assert_query_rows(
+        db.execute(
+            1,
+            "select q1 from outer_int8
+             where q1 in (select c1 from inner_text)
+             order by q1",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(123)]],
+    );
+}
+
+#[test]
 fn alter_function_signature_accepts_argument_names() {
     let db = Database::open(temp_dir("alter_function_named_args"), 16).unwrap();
     db.execute(
@@ -25076,6 +25518,43 @@ fn aggregate_subquery_can_reference_outer_visible_cte() {
         )
         .unwrap(),
         vec![vec![Value::Int64(3)]],
+    );
+}
+
+#[test]
+fn join_using_qualified_star_keeps_null_extended_side() {
+    let mut harness = SeededSqlHarness::new("join_using_qualified_star", Catalog::default());
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "with recursive
+                   x(id) as (
+                     values (1)
+                     union all
+                     select id + 1 from x where id < 5
+                   ),
+                   y(id) as (
+                     values (1)
+                     union all
+                     select id + 1 from y where id < 10
+                   )
+                 select y.*, x.* from y left join x using (id)",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Int32(2)],
+            vec![Value::Int32(3), Value::Int32(3)],
+            vec![Value::Int32(4), Value::Int32(4)],
+            vec![Value::Int32(5), Value::Int32(5)],
+            vec![Value::Int32(6), Value::Null],
+            vec![Value::Int32(7), Value::Null],
+            vec![Value::Int32(8), Value::Null],
+            vec![Value::Int32(9), Value::Null],
+            vec![Value::Int32(10), Value::Null],
+        ],
     );
 }
 
@@ -26247,6 +26726,81 @@ select count(*) from segments
     assert_query_rows(
         run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
         vec![vec![Value::Int64(31)]],
+    );
+}
+
+#[test]
+fn recursive_cte_resets_worktable_dependent_nested_ctes_each_iteration() {
+    let base = temp_dir("recursive_nested_cte_iteration_reset");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+with recursive
+  tab(id_key, link) as (values (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)),
+  iter(id_key, row_type, link) as (
+      select 0, 'base', 17
+    union all (
+      with remaining(id_key, row_type, link, min) as (
+        select tab.id_key, 'true'::text, iter.link, min(tab.id_key) over ()
+        from tab inner join iter using (link)
+        where tab.id_key > iter.id_key
+      ),
+      first_remaining as (
+        select id_key, row_type, link
+        from remaining
+        where id_key = min
+      ),
+      effect as (
+        select tab.id_key, 'new'::text, tab.link
+        from first_remaining e inner join tab on e.id_key = tab.id_key
+        where e.row_type = 'false'
+      )
+      select * from first_remaining
+      union all select * from effect
+    )
+  )
+select * from iter
+limit 7
+"#;
+
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
+        vec![
+            vec![
+                Value::Int32(0),
+                Value::Text("base".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(4),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(5),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(6),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+        ],
     );
 }
 

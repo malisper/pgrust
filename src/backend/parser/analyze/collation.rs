@@ -30,9 +30,6 @@ pub(crate) fn consumer_for_subquery_comparison_op(
         SubqueryComparisonOp::Similar | SubqueryComparisonOp::NotSimilar => {
             CollationConsumer::Similar
         }
-        SubqueryComparisonOp::RegexMatch | SubqueryComparisonOp::NotRegexMatch => {
-            CollationConsumer::Similar
-        }
         SubqueryComparisonOp::Match => return None,
     })
 }

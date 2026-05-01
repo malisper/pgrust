@@ -62,6 +62,7 @@ fn var(varno: usize, attno: usize) -> crate::include::nodes::primnodes::Expr {
         varattno: attno as AttrNumber,
         varlevelsup: 0,
         vartype: int4(),
+        collation_oid: None,
     })
 }
 
@@ -75,6 +76,7 @@ fn typed_var(
         varattno: attno as AttrNumber,
         varlevelsup: 0,
         vartype,
+        collation_oid: None,
     })
 }
 
@@ -86,6 +88,7 @@ fn text_substr_partition_key() -> Expr {
         funcresulttype: Some(SqlType::new(SqlTypeKind::Text)),
         funcvariadic: false,
         implementation: ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Substring),
+        collation_oid: None,
         display_args: None,
         args: vec![
             typed_var(1, 1, SqlType::new(SqlTypeKind::Text)),
@@ -332,6 +335,7 @@ fn project_set_pathtarget(
                         varattno: user_attrno(index),
                         varlevelsup: 0,
                         vartype: *sql_type,
+                        collation_oid: None,
                     })
                 }
             })
@@ -649,7 +653,7 @@ fn planner_info_for_sql(sql: &str) -> PlannerInfo {
     let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
         .expect("analyze");
     let query = super::root::prepare_query_for_planning(query, &catalog);
-    let query = super::pull_up_sublinks(query);
+    let query = super::pull_up_sublinks(query, &catalog);
     let aggregate_layout = super::groupby_rewrite::build_aggregate_layout(&query, &catalog);
     PlannerInfo::new(query, aggregate_layout)
 }
@@ -723,7 +727,7 @@ fn aggregate_layout_for_sql_with_catalog(
     let (query, _) = analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[])
         .expect("analyze");
     let query = super::root::prepare_query_for_planning(query, catalog);
-    let query = super::pull_up_sublinks(query);
+    let query = super::pull_up_sublinks(query, catalog);
     super::groupby_rewrite::build_aggregate_layout(&query, catalog)
 }
 
@@ -3873,6 +3877,34 @@ fn planner_rewrites_simple_min_aggregate_into_forward_index_only_subplan() {
 }
 
 #[test]
+fn planner_keeps_uncorrelated_not_exists_out_of_minmax_join_pullup() {
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select min(id) from items as a \
+         where not exists (select 1 from items as b where b.id = 10000)",
+        &catalog,
+    );
+
+    let pulled_into_join = plan_contains(&planned.plan_tree, |plan| {
+        matches!(
+            plan,
+            Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
+        )
+    }) || planned.subplans.iter().any(|subplan| {
+        plan_contains(subplan, |plan| {
+            matches!(
+                plan,
+                Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
+            )
+        })
+    });
+    assert!(
+        !pulled_into_join,
+        "uncorrelated NOT EXISTS should stay as a subplan, not a pulled-up join"
+    );
+}
+
+#[test]
 fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
     let catalog = catalog_with_indexed_items();
     let stmt = parse_select("select max(id) from items where id < 42").expect("parse");
@@ -4233,6 +4265,28 @@ fn planner_keeps_index_scan_when_index_is_not_covering() {
     assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
         Plan::IndexOnlyScan { .. }
+    )));
+}
+
+#[test]
+fn planner_prefers_bitmap_heap_for_unordered_btree_range_window_input() {
+    let catalog = catalog_with_noncovering_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select sum(id) over (order by payload range between current row and unbounded following), id, payload from items where id < 42",
+        &catalog,
+        PlannerConfig {
+            enable_seqscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::BitmapHeapScan { .. }
+    )));
+    assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexScan { .. }
     )));
 }
 

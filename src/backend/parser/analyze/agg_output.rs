@@ -167,6 +167,9 @@ pub(super) fn reject_nested_local_ctes_in_raw_agg_expr(expr: &SqlExpr) -> Result
     let Some(context) = current_grouped_agg_cte_context() else {
         return Ok(());
     };
+    if let Some(cte_name) = raw_expr_nested_cte_declaration(expr) {
+        return Err(ParseError::OuterLevelAggregateNestedCte(cte_name));
+    }
     if let Some(cte_name) = context
         .local_ctes
         .values()
@@ -175,6 +178,38 @@ pub(super) fn reject_nested_local_ctes_in_raw_agg_expr(expr: &SqlExpr) -> Result
         return Err(ParseError::OuterLevelAggregateNestedCte(cte_name.clone()));
     }
     Ok(())
+}
+
+fn raw_expr_nested_cte_declaration(expr: &SqlExpr) -> Option<String> {
+    match expr {
+        SqlExpr::ScalarSubquery(select)
+        | SqlExpr::ArraySubquery(select)
+        | SqlExpr::Exists(select) => select_nested_cte_declaration(select),
+        SqlExpr::InSubquery { expr, subquery, .. } => raw_expr_nested_cte_declaration(expr)
+            .or_else(|| select_nested_cte_declaration(subquery)),
+        SqlExpr::QuantifiedSubquery { left, subquery, .. } => raw_expr_nested_cte_declaration(left)
+            .or_else(|| select_nested_cte_declaration(subquery)),
+        SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
+        | SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::FieldSelect { expr: inner, .. } => raw_expr_nested_cte_declaration(inner),
+        _ => None,
+    }
+}
+
+fn select_nested_cte_declaration(select: &SelectStatement) -> Option<String> {
+    select.with.first().map(|cte| cte.name.clone()).or_else(|| {
+        select
+            .set_operation
+            .as_ref()
+            .and_then(|setop| setop.inputs.iter().find_map(select_nested_cte_declaration))
+    })
 }
 
 fn set_returning_not_allowed_error(context: &'static str) -> ParseError {
@@ -195,6 +230,8 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -4096,7 +4133,9 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::CurrentCatalog => Ok(Expr::CurrentCatalog),
         SqlExpr::CurrentSchema => Ok(Expr::CurrentSchema),
         SqlExpr::CurrentUser => Ok(Expr::CurrentUser),
+        SqlExpr::User => Ok(Expr::User),
         SqlExpr::SessionUser => Ok(Expr::SessionUser),
+        SqlExpr::SystemUser => Ok(Expr::SystemUser),
         SqlExpr::CurrentRole => Ok(Expr::CurrentRole),
         SqlExpr::CurrentTime { precision } => Ok(Expr::CurrentTime {
             precision: *precision,

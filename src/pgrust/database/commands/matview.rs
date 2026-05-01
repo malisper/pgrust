@@ -566,6 +566,7 @@ impl Database {
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot: self.txns.read().snapshot_for_command(xid, cid)?,
+            write_xid_override: None,
             transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),

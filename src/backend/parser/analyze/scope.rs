@@ -33,6 +33,7 @@ pub(crate) struct ScopeColumn {
     pub(crate) hidden: bool,
     pub(crate) qualified_only: bool,
     pub(crate) relation_names: Vec<String>,
+    pub(crate) relation_output_exprs: Vec<(String, Expr)>,
     pub(crate) hidden_invalid_relation_names: Vec<String>,
     pub(crate) hidden_missing_relation_names: Vec<String>,
     pub(crate) source_relation_oid: Option<u32>,
@@ -143,15 +144,28 @@ fn default_scope_output_exprs(varno: usize, desc: &RelationDesc) -> Vec<Expr> {
     desc.columns
         .iter()
         .enumerate()
-        .map(|(index, column)| {
-            Expr::Var(Var {
-                varno,
-                varattno: user_attrno(index),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            })
-        })
+        .map(|(index, column)| scope_column_var_expr(varno, index, column))
         .collect()
+}
+
+fn scope_column_var_expr(varno: usize, index: usize, column: &ColumnDesc) -> Expr {
+    Expr::Var(Var {
+        varno,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+        collation_oid: (column.collation_oid != 0).then_some(column.collation_oid),
+    })
+}
+
+fn scope_query_column_var_expr(varno: usize, index: usize, column: &QueryColumn) -> Expr {
+    Expr::Var(Var {
+        varno,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+        collation_oid: None,
+    })
 }
 
 pub(super) fn bind_values_rows(
@@ -282,6 +296,62 @@ pub(super) fn bind_values_rows(
         AnalyzedFrom::values(bound_rows, output_columns),
         scope_for_relation(None, &desc),
     ))
+}
+
+fn bind_scalar_expression_from_item_with_ctes(
+    expr: &SqlExpr,
+    display_sql: Option<&str>,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    let call_scope = empty_scope();
+    let bound = bind_expr_with_outer_and_ctes(
+        expr,
+        &call_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let sql_type = expr_sql_type_hint(&bound).unwrap_or(SqlType::new(SqlTypeKind::Text));
+    let column_name = scalar_expression_rte_column_name(expr);
+    let output_columns = vec![QueryColumn {
+        name: column_name.clone(),
+        sql_type,
+        wire_type_oid: None,
+    }];
+    let plan = AnalyzedFrom::project_function(
+        vec![bound],
+        output_columns,
+        display_sql.map(str::to_string),
+        Some(column_name.clone()),
+    );
+    let scope = scope_with_output_exprs(
+        scope_for_relation(Some(&column_name), &plan.desc()),
+        &plan.output_exprs,
+    );
+    Ok((plan, scope))
+}
+
+fn scalar_expression_rte_column_name(expr: &SqlExpr) -> String {
+    match expr {
+        SqlExpr::CurrentDate => "current_date",
+        SqlExpr::CurrentCatalog => "current_catalog",
+        SqlExpr::CurrentSchema => "current_schema",
+        SqlExpr::CurrentUser => "current_user",
+        SqlExpr::User => "user",
+        SqlExpr::SessionUser => "session_user",
+        SqlExpr::SystemUser => "system_user",
+        SqlExpr::CurrentRole => "current_role",
+        SqlExpr::CurrentTime { .. } => "current_time",
+        SqlExpr::CurrentTimestamp { .. } => "current_timestamp",
+        SqlExpr::LocalTime { .. } => "localtime",
+        SqlExpr::LocalTimestamp { .. } => "localtimestamp",
+        _ => "?column?",
+    }
+    .to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -458,6 +528,28 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
         return Err(ParseError::AmbiguousColumn(name.to_string()));
     }
     Ok(first.0)
+}
+
+fn relation_specific_output_expr(column: &ScopeColumn, relation: Option<&str>) -> Option<Expr> {
+    let relation = relation?;
+    column
+        .relation_output_exprs
+        .iter()
+        .find_map(|(visible_relation, expr)| {
+            relation_name_matches(visible_relation, relation).then(|| expr.clone())
+        })
+}
+
+pub(super) fn scope_column_output_expr(
+    scope: &BoundScope,
+    index: usize,
+    relation: Option<&str>,
+) -> Option<Expr> {
+    scope
+        .columns
+        .get(index)
+        .and_then(|column| relation_specific_output_expr(column, relation))
+        .or_else(|| scope.output_exprs.get(index).cloned())
 }
 
 fn resolve_system_column_in_scope(
@@ -741,8 +833,8 @@ fn resolve_relation_row_expr_in_scope(
     let fields = scope
         .columns
         .iter()
-        .zip(scope.output_exprs.iter())
-        .filter_map(|(column, expr)| {
+        .enumerate()
+        .filter_map(|(index, column)| {
             if (column.hidden && !column.qualified_only)
                 || !column
                     .relation_names
@@ -752,7 +844,10 @@ fn resolve_relation_row_expr_in_scope(
                 return None;
             }
             matched = true;
-            Some((column.output_name.clone(), expr.clone()))
+            Some((
+                column.output_name.clone(),
+                scope_column_output_expr(scope, index, Some(name))?,
+            ))
         })
         .collect::<Vec<_>>();
     (matched || relation_exists).then_some(ResolvedRelationRowExpr {
@@ -773,6 +868,7 @@ fn relation_name_matches(visible_relation: &str, requested_relation: &str) -> bo
 fn from_item_is_lateral(item: &FromItem) -> bool {
     match item {
         FromItem::Lateral(_) => true,
+        FromItem::Expression { .. } => true,
         FromItem::FunctionCall { .. } => true,
         FromItem::RowsFrom { .. } => true,
         FromItem::JsonTable(_) => true,
@@ -881,6 +977,29 @@ fn is_physical_pg_type_relation_name(name: &str) -> bool {
 }
 
 fn passthrough_cte_target<'a>(cte: &'a BoundCte, ctes: &'a [BoundCte]) -> Option<&'a BoundCte> {
+    if cte.plan.command_type != crate::include::executor::execdesc::CommandType::Select
+        || cte.plan.depends_on_row_security
+        || cte.plan.distinct
+        || !cte.plan.distinct_on.is_empty()
+        || cte.plan.where_qual.is_some()
+        || !cte.plan.group_by.is_empty()
+        || !cte.plan.group_by_refs.is_empty()
+        || !cte.plan.grouping_sets.is_empty()
+        || !cte.plan.accumulators.is_empty()
+        || !cte.plan.window_clauses.is_empty()
+        || cte.plan.having_qual.is_some()
+        || !cte.plan.sort_clause.is_empty()
+        || cte.plan.limit_count.is_some()
+        || cte.plan.limit_offset.is_some()
+        || cte.plan.locking_clause.is_some()
+        || !cte.plan.locking_targets.is_empty()
+        || !cte.plan.row_marks.is_empty()
+        || cte.plan.has_target_srfs
+        || cte.plan.recursive_union.is_some()
+        || cte.plan.set_operation.is_some()
+    {
+        return None;
+    }
     let [rte] = cte.plan.rtable.as_slice() else {
         return None;
     };
@@ -918,7 +1037,7 @@ pub(super) fn bind_from_item_with_ctes(
     expanded_views: &[u32],
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
     match stmt {
-        FromItem::Table { name, only } => {
+        FromItem::Table { name, only, .. } => {
             if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
                 if cte.self_reference {
                     let output_columns = cte
@@ -975,6 +1094,14 @@ pub(super) fn bind_from_item_with_ctes(
         FromItem::Values { rows } => {
             bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer, ctes)
         }
+        FromItem::Expression { expr, display_sql } => bind_scalar_expression_from_item_with_ctes(
+            expr,
+            display_sql.as_deref(),
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
         FromItem::FunctionCall {
             name,
             args,
@@ -1157,8 +1284,14 @@ pub(super) fn bind_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             )?;
-            let plan =
-                AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info);
+            let plan = AnalyzedFrom::join(
+                left_plan,
+                right_plan,
+                plan_join_type(*kind),
+                matches!(kind, JoinKind::Comma),
+                on,
+                alias_info,
+            );
             let scope = scope_with_output_exprs(scope.unwrap_or(raw_scope), &plan.output_exprs);
             Ok((plan, scope))
         }
@@ -1264,7 +1397,14 @@ pub(super) fn bind_from_item_with_ctes(
                         ctes,
                         expanded_views,
                     )?;
-                    (plan, scope, false)
+                    let scalar_expression_source = match source.as_ref() {
+                        FromItem::Expression { .. } => true,
+                        FromItem::Lateral(inner) => {
+                            matches!(inner.as_ref(), FromItem::Expression { .. })
+                        }
+                        _ => false,
+                    };
+                    (plan, scope, scalar_expression_source)
                 };
             if *preserve_source_names
                 && column_aliases.is_empty()
@@ -1409,6 +1549,7 @@ fn bind_rows_from_item_with_ctes(
                         .map(|target| target.expr.clone())
                         .collect(),
                     output_columns: plan.output_columns.clone(),
+                    display_sql: None,
                 },
                 _ => {
                     return Err(ParseError::UnexpectedToken {
@@ -2186,6 +2327,8 @@ fn sql_expr_contains_set_returning_call(
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -3789,7 +3932,12 @@ fn bind_function_from_item_with_ctes(
                             output_columns.len(),
                         ));
                     }
-                    let plan = AnalyzedFrom::result().with_projection(targets);
+                    let plan = AnalyzedFrom::project_function(
+                        targets.iter().map(|target| target.expr.clone()).collect(),
+                        output_columns.clone(),
+                        None,
+                        Some(other.to_string()),
+                    );
                     let desc = RelationDesc {
                         columns: output_columns
                             .iter()
@@ -3802,26 +3950,28 @@ fn bind_function_from_item_with_ctes(
                     );
                     return Ok((plan, scope, false));
                 }
-                let mut plan = AnalyzedFrom::result().with_projection(vec![TargetEntry::new(
-                    other.to_string(),
-                    typed.expr,
-                    typed.sql_type,
-                    1,
-                )]);
+                let mut output_columns = vec![QueryColumn {
+                    name: other.to_string(),
+                    sql_type: typed.sql_type,
+                    wire_type_oid: None,
+                }];
+                let mut output_exprs = vec![typed.expr];
                 let alias_single_function_output = true;
                 if with_ordinality {
-                    let base_expr = plan.output_exprs[0].clone();
                     let ordinality_type = SqlType::new(SqlTypeKind::Int8);
-                    plan = plan.with_projection(vec![
-                        TargetEntry::new(other.to_string(), base_expr, typed.sql_type, 1),
-                        TargetEntry::new(
-                            "ordinality",
-                            Expr::Const(Value::Int64(1)),
-                            ordinality_type,
-                            2,
-                        ),
-                    ]);
+                    output_columns.push(QueryColumn {
+                        name: "ordinality".into(),
+                        sql_type: ordinality_type,
+                        wire_type_oid: None,
+                    });
+                    output_exprs.push(Expr::Const(Value::Int64(1)));
                 }
+                let plan = AnalyzedFrom::project_function(
+                    output_exprs,
+                    output_columns,
+                    None,
+                    Some(other.to_string()),
+                );
                 let desc = plan.desc();
                 let scope = scope_with_output_exprs(
                     scope_for_relation(Some(other), &desc),
@@ -4812,14 +4962,7 @@ fn retarget_analyzed_from_output_columns(
     plan.output_exprs = output_columns
         .iter()
         .enumerate()
-        .map(|(index, column)| {
-            Expr::Var(Var {
-                varno: rtindex,
-                varattno: user_attrno(index),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            })
-        })
+        .map(|(index, column)| scope_query_column_var_expr(rtindex, index, column))
         .collect();
     plan.output_columns = output_columns;
 }
@@ -5396,6 +5539,7 @@ pub(crate) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
                 hidden: column.dropped,
                 qualified_only: false,
                 relation_names: relation_name.into_iter().map(str::to_string).collect(),
+                relation_output_exprs: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
                 source_relation_oid: None,
@@ -5467,6 +5611,11 @@ pub(crate) fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> Bou
         .into_iter()
         .map(|expr| shift_expr_rtindexes(expr, offset))
         .collect();
+    for column in &mut scope.columns {
+        for (_, expr) in &mut column.relation_output_exprs {
+            *expr = shift_expr_rtindexes(expr.clone(), offset);
+        }
+    }
     for relation in &mut scope.relations {
         if let Some(varno) = relation.system_varno.as_mut() {
             *varno += offset;
@@ -5494,6 +5643,7 @@ pub(super) fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScop
 
 fn plan_join_type(kind: JoinKind) -> JoinType {
     match kind {
+        JoinKind::Comma => JoinType::Cross,
         JoinKind::Inner => JoinType::Inner,
         JoinKind::Cross => JoinType::Cross,
         JoinKind::Left => JoinType::Left,
@@ -5518,7 +5668,7 @@ fn bind_join_constraint_with_ctes(
 ) -> Result<JoinBinding, ParseError> {
     match constraint {
         JoinConstraint::None => {
-            if !matches!(kind, JoinKind::Cross) {
+            if !matches!(kind, JoinKind::Comma | JoinKind::Cross) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "valid join clause",
                     actual: format!("{kind:?}"),
@@ -5526,18 +5676,21 @@ fn bind_join_constraint_with_ctes(
             }
             Ok((Expr::Const(Value::Bool(true)), None, None))
         }
-        JoinConstraint::On(on) => Ok((
-            bind_expr_with_outer_and_ctes(
-                on,
-                raw_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?,
-            None,
-            None,
-        )),
+        JoinConstraint::On(on) => {
+            reject_window_clause(on, "JOIN conditions")?;
+            Ok((
+                bind_expr_with_outer_and_ctes(
+                    on,
+                    raw_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                None,
+                None,
+            ))
+        }
         JoinConstraint::Using(columns) => {
             bind_join_using_projection(kind, columns, left_scope, right_scope)
         }
@@ -5601,6 +5754,32 @@ fn join_using_relation_names(left: &ScopeColumn, right: &ScopeColumn) -> Vec<Str
     names
 }
 
+fn join_using_relation_output_exprs(
+    left: &ScopeColumn,
+    left_expr: &Expr,
+    right: &ScopeColumn,
+    right_expr: &Expr,
+) -> Vec<(String, Expr)> {
+    let mut out = Vec::new();
+    for name in &left.relation_names {
+        if !out
+            .iter()
+            .any(|(existing, _): &(String, Expr)| existing.eq_ignore_ascii_case(name))
+        {
+            out.push((name.clone(), left_expr.clone()));
+        }
+    }
+    for name in &right.relation_names {
+        if !out
+            .iter()
+            .any(|(existing, _): &(String, Expr)| existing.eq_ignore_ascii_case(name))
+        {
+            out.push((name.clone(), right_expr.clone()));
+        }
+    }
+    out
+}
+
 fn bind_join_using_projection(
     kind: &JoinKind,
     columns: &[String],
@@ -5646,26 +5825,53 @@ fn bind_join_using_projection(
         used_left[*left_index] = true;
         used_right[*right_index] = true;
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
+        let right_ty = right_scope.desc.columns[*right_index].sql_type;
+        let output_ty = resolve_common_scalar_type(left_ty, right_ty).ok_or_else(|| {
+            ParseError::UnexpectedToken {
+                expected: "JOIN/USING columns with a common type",
+                actual: format!("{} and {}", sql_type_name(left_ty), sql_type_name(right_ty)),
+            }
+        })?;
         let left_expr = left_scope.output_exprs[*left_index].clone();
         let right_expr = right_scope.output_exprs[*right_index].clone();
+        let left_expr = coerce_bound_expr(left_expr, left_ty, output_ty);
+        let right_expr = coerce_bound_expr(right_expr, right_ty, output_ty);
         alias_exprs.push(match kind {
             JoinKind::Full => Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
             JoinKind::Right => right_expr,
-            _ => left_expr,
+            JoinKind::Inner | JoinKind::Comma | JoinKind::Cross => {
+                if matches!(&left_expr, Expr::Var(_)) {
+                    left_expr
+                } else if matches!(&right_expr, Expr::Var(_)) {
+                    right_expr
+                } else {
+                    left_expr
+                }
+            }
+            JoinKind::Left => left_expr,
         });
         output_columns.push(QueryColumn {
             name: name.clone(),
-            sql_type: left_ty,
+            sql_type: output_ty,
             wire_type_oid: None,
         });
         joinleftcols.push(*left_index + 1);
         joinrightcols.push(*right_index + 1);
-        desc_columns.push(column_desc(name.clone(), left_ty, true));
+        desc_columns.push(column_desc(name.clone(), output_ty, true));
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
             hidden: false,
             qualified_only: false,
-            relation_names: Vec::new(),
+            relation_names: join_using_relation_names(
+                &left_scope.columns[*left_index],
+                &right_scope.columns[*right_index],
+            ),
+            relation_output_exprs: join_using_relation_output_exprs(
+                &left_scope.columns[*left_index],
+                &left_scope.output_exprs[*left_index],
+                &right_scope.columns[*right_index],
+                &right_scope.output_exprs[*right_index],
+            ),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: None,
@@ -5690,7 +5896,8 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: true,
             qualified_only: true,
-            relation_names: left_scope.columns[*left_index].relation_names.clone(),
+            relation_names: Vec::new(),
+            relation_output_exprs: Vec::new(),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: left_scope.columns[*left_index].source_relation_oid,
@@ -5710,7 +5917,8 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: true,
             qualified_only: true,
-            relation_names: right_scope.columns[*right_index].relation_names.clone(),
+            relation_names: Vec::new(),
+            relation_output_exprs: Vec::new(),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: right_scope.columns[*right_index].source_relation_oid,
@@ -5791,6 +5999,7 @@ fn apply_function_rte_alias(plan: &mut AnalyzedFrom, alias: &str, desc: &Relatio
         })
         .collect::<Vec<_>>();
     rte.alias = Some(alias.to_string());
+    rte.alias_is_user_defined = true;
     rte.alias_preserves_source_names = false;
     rte.eref.aliasname = alias.to_string();
     rte.eref.colnames = output_columns
@@ -5836,6 +6045,7 @@ fn apply_join_using_alias(
         && matches!(rte.kind, RangeTblEntryKind::Join { .. })
     {
         rte.alias = Some(alias.to_string());
+        rte.alias_is_user_defined = true;
         rte.alias_preserves_source_names = true;
         rte.eref.aliasname = alias.to_string();
     }
@@ -5905,6 +6115,7 @@ fn apply_relation_alias(
     if let Some(rte) = plan.rtable.last_mut() {
         let preserve_rte_name = rte.alias_preserves_source_names;
         rte.alias = Some(alias.to_string());
+        rte.alias_is_user_defined = true;
         rte.alias_preserves_source_names = preserve_source_names;
         if !preserve_rte_name {
             rte.eref.aliasname = alias.to_string();

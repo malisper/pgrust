@@ -13,18 +13,19 @@ use crate::backend::parser::{
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
     CreateEnumTypeStatement, CreateRangeTypeStatement, CreateShellTypeStatement,
     CreateTypeStatement, DropDomainStatement, DropTypeStatement, ParseError, SqlType, SqlTypeKind,
-    bind_expr_with_outer_and_ctes, parse_expr, parse_type_name, resolve_raw_type_name,
-    scope_for_relation, sql_type_name,
+    bind_check_constraint_expr, bind_expr_with_outer_and_ctes, parse_expr, parse_type_name,
+    resolve_raw_type_name, scope_for_relation, sql_type_name,
 };
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail, push_warning};
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    CSTRING_TYPE_OID, DEPENDENCY_INTERNAL, FLOAT8_TYPE_OID, PG_CLASS_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgProcRow, PgTypeRow, UNKNOWN_TYPE_OID,
-    builtin_range_specs,
+    CONSTRAINT_CHECK, CSTRING_TYPE_OID, DEPENDENCY_INTERNAL, FLOAT8_TYPE_OID,
+    PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgProcRow, PgTypeRow,
+    UNKNOWN_TYPE_OID, builtin_range_specs,
 };
+use crate::include::nodes::primnodes::{Expr, WindowFuncKind, expr_sql_type_hint};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, format_sql_type_name, is_system_column_name, map_catalog_error,
     reject_type_with_dependents,
@@ -905,6 +906,23 @@ impl Database {
                 &type_row.typname,
             )?;
         }
+        let check_dependencies = composite_drop_attribute_check_dependencies(
+            &catalog,
+            type_row.oid,
+            type_relation.relation_oid,
+            &stmt.actions,
+        )?;
+        if let Some(dependency) = check_dependencies
+            .iter()
+            .find(|dependency| !dependency.cascade)
+        {
+            return Err(composite_table_field_dependency_error(
+                &type_row.typname,
+                &dependency.field_name,
+                &dependency.relation_name,
+                &dependency.constraint_name,
+            ));
+        }
 
         let original_type_desc = type_relation.desc.clone();
         let mut type_desc = original_type_desc.clone();
@@ -927,6 +945,32 @@ impl Database {
             &type_desc,
             &stmt.actions,
         )?;
+
+        if !check_dependencies.is_empty() {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            for dependency in check_dependencies {
+                let effect = self
+                    .catalog
+                    .write()
+                    .drop_relation_constraint_mvcc(
+                        dependency.relation_oid,
+                        &dependency.constraint_name,
+                        &ctx,
+                    )
+                    .map(|(_, effect)| effect)
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
+        }
 
         let mut table_updates = Vec::new();
         for relation_oid in typed_table_oids {
@@ -1627,6 +1671,337 @@ fn remap_composite_domain_check_error(
         left_type: left_type.clone(),
         right_type: sql_type_name(original_type),
     })
+}
+
+struct CompositeCheckDependency {
+    relation_oid: u32,
+    relation_name: String,
+    constraint_name: String,
+    field_name: String,
+    cascade: bool,
+}
+
+fn composite_drop_attribute_check_dependencies(
+    catalog: &dyn CatalogLookup,
+    composite_type_oid: u32,
+    composite_relation_oid: u32,
+    actions: &[AlterCompositeTypeAction],
+) -> Result<Vec<CompositeCheckDependency>, ExecError> {
+    let dropped_fields = actions
+        .iter()
+        .filter_map(|action| {
+            let AlterCompositeTypeAction::DropAttribute { name, cascade, .. } = action else {
+                return None;
+            };
+            Some((name.as_str(), *cascade))
+        })
+        .collect::<Vec<_>>();
+    if dropped_fields.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut dependencies = Vec::new();
+    for class_row in catalog.class_rows().into_iter().filter(|row| {
+        row.oid != composite_relation_oid && !matches!(row.relkind, 'i' | 'I' | 'S' | 't')
+    }) {
+        let Some(relation) = catalog.lookup_relation_by_oid(class_row.oid) else {
+            continue;
+        };
+        if !relation.desc.columns.iter().any(|column| {
+            !column.dropped
+                && sql_type_references_composite_type(column.sql_type, composite_type_oid)
+        }) {
+            continue;
+        }
+        let relation_name =
+            relation_name_for_alter_type_dependency(catalog, &relation, &class_row.relname);
+        for constraint in catalog
+            .constraint_rows_for_relation(relation.relation_oid)
+            .into_iter()
+            .filter(|row| row.contype == CONSTRAINT_CHECK)
+        {
+            let Some(expr_sql) = constraint.conbin.as_deref() else {
+                continue;
+            };
+            let expr =
+                bind_check_constraint_expr(expr_sql, Some(&relation_name), &relation.desc, catalog)
+                    .map_err(ExecError::Parse)?;
+            for (field_name, cascade) in &dropped_fields {
+                if expr_uses_composite_field(
+                    &expr,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                ) && !dependencies
+                    .iter()
+                    .any(|dependency: &CompositeCheckDependency| {
+                        dependency.relation_oid == relation.relation_oid
+                            && dependency
+                                .constraint_name
+                                .eq_ignore_ascii_case(&constraint.conname)
+                    })
+                {
+                    dependencies.push(CompositeCheckDependency {
+                        relation_oid: relation.relation_oid,
+                        relation_name: relation_name.clone(),
+                        constraint_name: constraint.conname.clone(),
+                        field_name: (*field_name).to_string(),
+                        cascade: *cascade,
+                    });
+                }
+            }
+        }
+    }
+    Ok(dependencies)
+}
+
+fn expr_uses_composite_field(
+    expr: &Expr,
+    composite_type_oid: u32,
+    composite_relation_oid: u32,
+    field_name: &str,
+) -> bool {
+    match expr {
+        Expr::FieldSelect { expr, field, .. } => {
+            if field.eq_ignore_ascii_case(field_name)
+                && expr_sql_type_hint(expr).is_some_and(|sql_type| {
+                    let base = if sql_type.is_array {
+                        sql_type.element_type()
+                    } else {
+                        sql_type
+                    };
+                    matches!(base.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+                        && (base.type_oid == composite_type_oid
+                            || base.typrelid == composite_relation_oid)
+                })
+            {
+                return true;
+            }
+            expr_uses_composite_field(expr, composite_type_oid, composite_relation_oid, field_name)
+        }
+        Expr::Aggref(agg) => {
+            agg.direct_args.iter().any(|arg| {
+                expr_uses_composite_field(
+                    arg,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+            }) || agg.args.iter().any(|arg| {
+                expr_uses_composite_field(
+                    arg,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+            }) || agg.aggfilter.as_ref().is_some_and(|arg| {
+                expr_uses_composite_field(
+                    arg,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+            })
+        }
+        Expr::GroupingKey(grouping_key) => expr_uses_composite_field(
+            &grouping_key.expr,
+            composite_type_oid,
+            composite_relation_oid,
+            field_name,
+        ),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(|arg| {
+            expr_uses_composite_field(arg, composite_type_oid, composite_relation_oid, field_name)
+        }),
+        Expr::WindowFunc(window_func) => {
+            window_func.args.iter().any(|arg| {
+                expr_uses_composite_field(
+                    arg,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+            }) || match &window_func.kind {
+                WindowFuncKind::Aggregate(agg) => agg.args.iter().any(|arg| {
+                    expr_uses_composite_field(
+                        arg,
+                        composite_type_oid,
+                        composite_relation_oid,
+                        field_name,
+                    )
+                }),
+                WindowFuncKind::Builtin(_) => false,
+            }
+        }
+        Expr::Op(op) => op.args.iter().any(|arg| {
+            expr_uses_composite_field(arg, composite_type_oid, composite_relation_oid, field_name)
+        }),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(|arg| {
+            expr_uses_composite_field(arg, composite_type_oid, composite_relation_oid, field_name)
+        }),
+        Expr::Case(case_expr) => {
+            case_expr.arg.as_ref().is_some_and(|arg| {
+                expr_uses_composite_field(
+                    arg,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+            }) || case_expr.args.iter().any(|when| {
+                expr_uses_composite_field(
+                    &when.expr,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                ) || expr_uses_composite_field(
+                    &when.result,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+            }) || expr_uses_composite_field(
+                &case_expr.defresult,
+                composite_type_oid,
+                composite_relation_oid,
+                field_name,
+            )
+        }
+        Expr::Func(func) => func.args.iter().any(|arg| {
+            expr_uses_composite_field(arg, composite_type_oid, composite_relation_oid, field_name)
+        }),
+        Expr::SubLink(sub_link) => sub_link.testexpr.as_ref().is_some_and(|arg| {
+            expr_uses_composite_field(arg, composite_type_oid, composite_relation_oid, field_name)
+        }),
+        Expr::SubPlan(sub_plan) => {
+            sub_plan.testexpr.as_ref().is_some_and(|arg| {
+                expr_uses_composite_field(
+                    arg,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+            }) || sub_plan.args.iter().any(|arg| {
+                expr_uses_composite_field(
+                    arg,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+            })
+        }
+        Expr::ScalarArrayOp(array_op) => {
+            expr_uses_composite_field(
+                &array_op.left,
+                composite_type_oid,
+                composite_relation_oid,
+                field_name,
+            ) || expr_uses_composite_field(
+                &array_op.right,
+                composite_type_oid,
+                composite_relation_oid,
+                field_name,
+            )
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(|arg| {
+            expr_uses_composite_field(arg, composite_type_oid, composite_relation_oid, field_name)
+        }),
+        Expr::Cast(expr, _)
+        | Expr::Collate { expr, .. }
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr) => {
+            expr_uses_composite_field(expr, composite_type_oid, composite_relation_oid, field_name)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_uses_composite_field(expr, composite_type_oid, composite_relation_oid, field_name)
+                || expr_uses_composite_field(
+                    pattern,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+                || escape.as_ref().is_some_and(|expr| {
+                    expr_uses_composite_field(
+                        expr,
+                        composite_type_oid,
+                        composite_relation_oid,
+                        field_name,
+                    )
+                })
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_uses_composite_field(left, composite_type_oid, composite_relation_oid, field_name)
+                || expr_uses_composite_field(
+                    right,
+                    composite_type_oid,
+                    composite_relation_oid,
+                    field_name,
+                )
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(|arg| {
+            expr_uses_composite_field(arg, composite_type_oid, composite_relation_oid, field_name)
+        }),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, arg)| {
+            expr_uses_composite_field(arg, composite_type_oid, composite_relation_oid, field_name)
+        }),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_composite_field(
+                array,
+                composite_type_oid,
+                composite_relation_oid,
+                field_name,
+            ) || subscripts.iter().any(|subscript| {
+                subscript.lower.as_ref().is_some_and(|expr| {
+                    expr_uses_composite_field(
+                        expr,
+                        composite_type_oid,
+                        composite_relation_oid,
+                        field_name,
+                    )
+                }) || subscript.upper.as_ref().is_some_and(|expr| {
+                    expr_uses_composite_field(
+                        expr,
+                        composite_type_oid,
+                        composite_relation_oid,
+                        field_name,
+                    )
+                })
+            })
+        }
+        Expr::SqlJsonQueryFunction(json) => json.child_exprs().iter().any(|arg| {
+            expr_uses_composite_field(arg, composite_type_oid, composite_relation_oid, field_name)
+        }),
+        _ => false,
+    }
+}
+
+fn composite_table_field_dependency_error(
+    composite_type_name: &str,
+    field: &str,
+    relation_name: &str,
+    constraint_name: &str,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot drop column {field} of composite type {composite_type_name} because other objects depend on it"
+        ),
+        detail: Some(format!(
+            "constraint {constraint_name} on table {relation_name} depends on column {field} of composite type {composite_type_name}"
+        )),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    }
 }
 
 fn composite_domain_field_dependency_error(

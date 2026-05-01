@@ -227,6 +227,13 @@ pub(super) fn resolve_numeric_binary_type(
             right_type: sql_type_name(right),
         });
     }
+    if !is_numeric_family(left) || !is_numeric_family(right) {
+        return Err(ParseError::UndefinedOperator {
+            op: op.into(),
+            left_type: sql_type_name(left),
+            right_type: sql_type_name(right),
+        });
+    }
     if matches!(left.kind, Float8) || matches!(right.kind, Float8) {
         return Ok(SqlType::new(Float8));
     }

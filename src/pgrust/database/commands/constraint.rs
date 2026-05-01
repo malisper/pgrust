@@ -4,7 +4,8 @@ use crate::backend::commands::tablecmds::collect_matching_rows_heap;
 use crate::backend::executor::{ExecutorContext, eval_expr};
 use crate::backend::parser::{
     BoundCheckConstraint, BoundExclusionConstraint, BoundForeignKeyConstraint,
-    BoundTemporalConstraint, ForeignKeyConstraintAction,
+    BoundTemporalConstraint, ForeignKeyConstraintAction, bind_index_predicate_sql_expr,
+    bind_relation_expr,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{
@@ -346,6 +347,7 @@ fn ddl_executor_context(
         stats: std::sync::Arc::clone(&db.stats),
         session_stats: db.session_stats_state(client_id),
         snapshot,
+        write_xid_override: None,
         transaction_state: None,
         client_id,
         current_database_name: db.current_database_name(),
@@ -450,6 +452,7 @@ pub(super) fn validate_check_rows<C: CatalogLookup + Clone + 'static>(
         constraint_name: constraint_name.to_string(),
         expr,
         enforced: true,
+        validated: true,
     };
     let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
     let mut ctx = ddl_executor_context(
@@ -546,27 +549,53 @@ fn bound_exclusion_constraint_from_action(
     operator_oids: Vec<u32>,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundExclusionConstraint, ExecError> {
-    let mut column_names = Vec::with_capacity(action.columns.len());
-    let mut column_indexes = Vec::with_capacity(action.columns.len());
-    for column_name in &action.columns {
+    let key_defs = if action.index_columns.is_empty() {
+        action
+            .columns
+            .iter()
+            .cloned()
+            .map(crate::backend::parser::IndexColumnDef::from)
+            .collect::<Vec<_>>()
+    } else {
+        action.index_columns.clone()
+    };
+    let relation_name = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname);
+    let mut column_names = Vec::with_capacity(key_defs.len());
+    let mut column_indexes = Vec::new();
+    let mut key_columns = Vec::with_capacity(key_defs.len());
+    let mut key_exprs = Vec::with_capacity(key_defs.len());
+    for key in &key_defs {
+        if let Some(expr_sql) = key.expr_sql.as_deref() {
+            let expr =
+                bind_relation_expr(expr_sql, relation_name.as_deref(), &relation.desc, catalog)
+                    .map_err(ExecError::Parse)?;
+            column_names.push(expr_sql.to_string());
+            key_columns.push(None);
+            key_exprs.push(Some(expr));
+            continue;
+        }
         let index = relation
             .desc
             .columns
             .iter()
             .enumerate()
             .find_map(|(index, column)| {
-                (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+                (!column.dropped && column.name.eq_ignore_ascii_case(&key.name)).then_some(index)
             })
-            .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))?;
+            .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(key.name.clone())))?;
         column_names.push(relation.desc.columns[index].name.clone());
         column_indexes.push(index);
+        key_columns.push(Some(index));
+        key_exprs.push(None);
     }
-    if column_indexes.len() != operator_oids.len() {
+    if key_columns.len() != operator_oids.len() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "one exclusion operator per key column",
             actual: format!(
-                "{} columns and {} operators",
-                column_indexes.len(),
+                "{} keys and {} operators",
+                key_columns.len(),
                 operator_oids.len()
             ),
         }));
@@ -585,16 +614,35 @@ fn bound_exclusion_constraint_from_action(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let predicate = action
+        .predicate_sql
+        .as_deref()
+        .map(|predicate_sql| {
+            bind_index_predicate_sql_expr(
+                predicate_sql,
+                relation_name.as_deref(),
+                &relation.desc,
+                catalog,
+            )
+        })
+        .transpose()
+        .map_err(ExecError::Parse)?;
     Ok(BoundExclusionConstraint {
         constraint_oid: 0,
         constraint_name: action
             .constraint_name
             .clone()
             .expect("normalized exclusion constraint name"),
+        relation_oid: relation.relation_oid,
         column_names,
         column_indexes,
+        key_columns,
+        key_exprs,
         operator_oids,
         operator_proc_oids,
+        predicate,
+        deferrable: action.deferrable,
+        initially_deferred: action.initially_deferred,
         enforced: true,
     })
 }
@@ -2576,6 +2624,29 @@ impl Database {
                 }
             }
             crate::backend::parser::NormalizedAlterTableConstraint::Check(action) => {
+                if relation.relkind == 'p' && action.no_inherit {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot add NO INHERIT constraint to partitioned table \"{}\"",
+                            table_name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
+                if alter_stmt.only
+                    && !action.no_inherit
+                    && !direct_inheritance_children(&catalog, relation.relation_oid)?.is_empty()
+                {
+                    return Err(ExecError::DetailedError {
+                        message: "constraint must be added to child tables too".into(),
+                        detail: None,
+                        hint: (relation.relkind == 'p')
+                            .then_some("Do not specify the ONLY keyword.".into()),
+                        sqlstate: "42P16",
+                    });
+                }
                 crate::backend::parser::bind_check_constraint_expr(
                     &action.expr_sql,
                     Some(&table_name),
@@ -3001,9 +3072,7 @@ impl Database {
                         std::sync::Arc::clone(&interrupts),
                     )?;
                 }
-                if let Some(operator_oids) = exclusion_operator_oids.clone()
-                    && index_columns.iter().all(|column| column.expr_sql.is_none())
-                {
+                if let Some(operator_oids) = exclusion_operator_oids.clone() {
                     let exclusion = bound_exclusion_constraint_from_action(
                         &relation,
                         &action,
@@ -3021,11 +3090,6 @@ impl Database {
                         index_cid,
                         std::sync::Arc::clone(&interrupts),
                     )?;
-                } else if action.exclusion {
-                    // :HACK: Expression exclusion constraints are needed for PostgreSQL
-                    // compatibility in inherit regression DDL. The existing exclusion
-                    // validator is column-oriented, so column exclusions keep full
-                    // validation while expression enforcement is deferred.
                 }
                 let (access_method_oid, access_method_handler, build_options) = if action.exclusion
                 {
@@ -3064,7 +3128,7 @@ impl Database {
                     &index_name,
                     Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     &storage_columns,
-                    None,
+                    action.predicate_sql.as_deref(),
                     !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,
@@ -3858,12 +3922,26 @@ impl Database {
                             std::sync::Arc::clone(&interrupts),
                         )?;
                     }
+                    let mut used_names = catalog
+                        .constraint_rows_for_relation(target.relation_oid)
+                        .into_iter()
+                        .map(|row| row.conname.to_ascii_lowercase())
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let constraint_name =
+                        if used_names.insert(parent_constraint.conname.to_ascii_lowercase()) {
+                            parent_constraint.conname.clone()
+                        } else {
+                            choose_partition_clone_constraint_name(
+                                &parent_constraint.conname,
+                                &mut used_names,
+                            )
+                        };
                     let (constraint_row, effect) = self
                         .catalog
                         .write()
                         .create_foreign_key_constraint_mvcc(
                             target.relation_oid,
-                            parent_constraint.conname.clone(),
+                            constraint_name,
                             parent_constraint.condeferrable,
                             parent_constraint.condeferred,
                             parent_constraint.conenforced,
@@ -4689,6 +4767,73 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn localize_not_null_constraint_in_direct_inheritors(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_relation: &crate::backend::parser::BoundRelation,
+        parent_constraint: &PgConstraintRow,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let parent_attnum = *attnums_from_constraint(parent_constraint)?
+            .first()
+            .expect("not null attnum");
+        let parent_column_index = column_index_for_attnum(parent_relation, parent_attnum)?;
+        let parent_column_name = parent_relation.desc.columns[parent_column_index]
+            .name
+            .clone();
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        for child_relation in direct_inheritance_children(&catalog, parent_relation.relation_oid)? {
+            let child_column_index =
+                relation_column_index_by_name(&child_relation, &parent_column_name)?;
+            let child_column_name = child_relation.desc.columns[child_column_index].name.clone();
+            let Some(child_constraint) =
+                not_null_constraint_for_column(&catalog, &child_relation, &child_column_name)?
+            else {
+                continue;
+            };
+            if child_constraint.coninhcount == 0 {
+                continue;
+            }
+
+            let next_inhcount = child_constraint.coninhcount.saturating_sub(1);
+            let constraint_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(catalog_effects.len() as u32),
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_not_null_constraint_state_by_attnum_mvcc(
+                    child_relation.relation_oid,
+                    (child_column_index + 1) as i16,
+                    child_constraint.oid,
+                    &child_constraint.conname,
+                    None,
+                    Some(if child_constraint.conislocal {
+                        child_constraint.connoinherit
+                    } else {
+                        false
+                    }),
+                    Some(child_constraint.conislocal || next_inhcount == 0),
+                    Some(next_inhcount),
+                    &constraint_ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        Ok(())
+    }
+
     pub(crate) fn execute_alter_table_drop_constraint_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -4843,7 +4988,7 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
-                if row.contype == CONSTRAINT_CHECK && !row.connoinherit {
+                if row.contype == CONSTRAINT_CHECK && !row.connoinherit && !drop_stmt.only {
                     self.drop_check_constraint_from_inheritors(
                         client_id,
                         xid,
@@ -4901,7 +5046,17 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
-                if !row.connoinherit {
+                if !row.connoinherit && drop_stmt.only {
+                    self.localize_not_null_constraint_in_direct_inheritors(
+                        client_id,
+                        xid,
+                        cid.saturating_add(1),
+                        &relation,
+                        &row,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                } else if !row.connoinherit {
                     self.drop_not_null_constraint_from_inheritors(
                         client_id,
                         xid,
@@ -4990,7 +5145,7 @@ impl Database {
                             let effect = self
                                 .catalog
                                 .write()
-                                .drop_column_not_null_mvcc(
+                                .clear_column_not_null_primary_key_owned_mvcc(
                                     relation.relation_oid,
                                     &relation.desc.columns[column_index].name,
                                     &ctx,
@@ -5429,15 +5584,27 @@ impl Database {
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
-        self.drop_not_null_constraint_from_inheritors(
-            client_id,
-            xid,
-            cid.saturating_add(1),
-            &relation,
-            &existing_not_null,
-            configured_search_path,
-            catalog_effects,
-        )?;
+        if alter_stmt.only {
+            self.localize_not_null_constraint_in_direct_inheritors(
+                client_id,
+                xid,
+                cid.saturating_add(1),
+                &relation,
+                &existing_not_null,
+                configured_search_path,
+                catalog_effects,
+            )?;
+        } else {
+            self.drop_not_null_constraint_from_inheritors(
+                client_id,
+                xid,
+                cid.saturating_add(1),
+                &relation,
+                &existing_not_null,
+                configured_search_path,
+                catalog_effects,
+            )?;
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 

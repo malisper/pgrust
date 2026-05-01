@@ -160,6 +160,8 @@ fn expr_is_volatile_for_dedup(expr: &Expr) -> bool {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole => false,
         Expr::Random
         | Expr::CurrentDate
@@ -226,6 +228,7 @@ fn lower_sublink_to_subplan(
     Expr::SubPlan(Box::new(SubPlan {
         sublink_type: sublink.sublink_type,
         testexpr,
+        comparison: sublink.comparison,
         first_col_type,
         target_width,
         target_attnos,
@@ -260,6 +263,8 @@ pub(super) fn finalize_expr_subqueries(
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -567,12 +572,14 @@ fn finalize_set_returning_call(
                         RowsFromSource::Project {
                             output_exprs,
                             output_columns,
+                            display_sql,
                         } => RowsFromSource::Project {
                             output_exprs: output_exprs
                                 .into_iter()
                                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                                 .collect(),
                             output_columns,
+                            display_sql,
                         },
                     },
                     column_definitions: item.column_definitions,
@@ -870,6 +877,8 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -1018,6 +1027,7 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
             target_attnos: subplan.target_attnos,
             plan_id: subplan.plan_id + base,
             sublink_type: subplan.sublink_type,
+            comparison: subplan.comparison,
             par_param: subplan.par_param,
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
@@ -1160,12 +1170,14 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                         RowsFromSource::Project {
                             output_exprs,
                             output_columns,
+                            display_sql,
                         } => RowsFromSource::Project {
                             output_exprs: output_exprs
                                 .into_iter()
                                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                                 .collect(),
                             output_columns,
+                            display_sql,
                         },
                     },
                     column_definitions: item.column_definitions,
@@ -1997,11 +2009,15 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => Plan::WindowAgg {
             plan_info,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             clause: rebase_window_clause_subplan_ids(clause, base),
+            run_condition: run_condition.map(|expr| rebase_expr_subplan_ids(expr, base)),
+            top_qual: top_qual.map(|expr| rebase_expr_subplan_ids(expr, base)),
             output_columns,
         },
         Plan::FunctionScan {
@@ -2586,6 +2602,8 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => {
             Plan::WindowAgg {
@@ -2659,6 +2677,9 @@ pub(super) fn finalize_plan_subqueries(
                                 })
                                 .collect(),
                     },
+                run_condition: run_condition
+                    .map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+                top_qual: top_qual.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
                 output_columns,
             }
         }

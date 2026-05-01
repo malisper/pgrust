@@ -1,6 +1,8 @@
 use super::super::*;
 use crate::backend::executor::StatementResult;
-use crate::backend::parser::{CreateCollationStatement, DropCollationStatement};
+use crate::backend::parser::{
+    CreateCollationKind, CreateCollationStatement, DropCollationStatement, RelOption,
+};
 use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, PgCollationRow};
 
 impl Database {
@@ -55,31 +57,46 @@ impl Database {
                 sqlstate: "42710",
             });
         }
-        let source = resolve_collation_row(
-            self,
-            client_id,
-            Some((xid, cid)),
-            &stmt.source_collation,
-            configured_search_path,
-        )?
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!(
-                "collation \"{}\" for encoding \"UTF8\" does not exist",
-                stmt.source_collation
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "42704",
-        })?;
         let current_user_oid = self.auth_state(client_id).current_user_oid();
-        let row = PgCollationRow {
-            oid: 0,
-            collname: object_name,
-            collnamespace: namespace_oid,
-            collowner: current_user_oid,
-            collprovider: source.collprovider,
-            collisdeterministic: source.collisdeterministic,
-            collencoding: source.collencoding,
+        let row = match &stmt.kind {
+            CreateCollationKind::From { source_collation } => {
+                let source = resolve_collation_row(
+                    self,
+                    client_id,
+                    Some((xid, cid)),
+                    source_collation,
+                    configured_search_path,
+                )?
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "collation \"{}\" for encoding \"UTF8\" does not exist",
+                        source_collation
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?;
+                PgCollationRow {
+                    oid: 0,
+                    collname: object_name,
+                    collnamespace: namespace_oid,
+                    collowner: current_user_oid,
+                    collprovider: source.collprovider,
+                    collisdeterministic: source.collisdeterministic,
+                    collencoding: source.collencoding,
+                    collcollate: source.collcollate,
+                    collctype: source.collctype,
+                    colllocale: source.colllocale,
+                    collicurules: source.collicurules,
+                    collversion: source.collversion,
+                }
+            }
+            CreateCollationKind::Options { options } => create_collation_row_from_options(
+                object_name,
+                namespace_oid,
+                current_user_oid,
+                options,
+            )?,
         };
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -197,6 +214,71 @@ impl Database {
         self.invalidate_backend_cache_state(client_id);
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
+    }
+}
+
+fn create_collation_row_from_options(
+    collname: String,
+    collnamespace: u32,
+    collowner: u32,
+    options: &[RelOption],
+) -> Result<PgCollationRow, ExecError> {
+    let provider = collation_option_value(options, "provider");
+    if !provider
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("builtin"))
+    {
+        return Err(ExecError::DetailedError {
+            message: "only builtin collation provider is supported".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+
+    let Some(locale) = collation_option_value(options, "locale") else {
+        return Err(ExecError::DetailedError {
+            message: "parameter \"locale\" must be specified".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    };
+    let (canonical_locale, collencoding) = validate_builtin_collation_locale(&locale)?;
+    Ok(PgCollationRow {
+        oid: 0,
+        collname,
+        collnamespace,
+        collowner,
+        collprovider: 'b',
+        collisdeterministic: true,
+        collencoding,
+        collcollate: None,
+        collctype: None,
+        colllocale: Some(canonical_locale.into()),
+        collicurules: None,
+        collversion: Some("1".into()),
+    })
+}
+
+fn collation_option_value(options: &[RelOption], name: &str) -> Option<String> {
+    options
+        .iter()
+        .find(|option| option.name.eq_ignore_ascii_case(name))
+        .map(|option| option.value.clone())
+}
+
+fn validate_builtin_collation_locale(locale: &str) -> Result<(&'static str, i32), ExecError> {
+    match locale {
+        "C" => Ok(("C", -1)),
+        "C.UTF8" | "C.UTF-8" => Ok(("C.UTF-8", 6)),
+        "PG_UNICODE_FAST" => Ok(("PG_UNICODE_FAST", 6)),
+        _ => Err(ExecError::DetailedError {
+            message: format!("invalid locale name \"{}\" for builtin provider", locale).into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        }),
     }
 }
 

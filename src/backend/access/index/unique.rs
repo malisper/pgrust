@@ -101,6 +101,40 @@ pub(crate) enum UniqueCandidateResult {
     WaitFor(TransactionId),
 }
 
+fn tid_reachable_from_same_transaction_update_chain(
+    ctx: &IndexInsertContext,
+    target_tid: ItemPointerData,
+) -> Result<bool, CatalogError> {
+    if !item_pointer_is_valid(ctx.heap_tid) || !item_pointer_is_valid(target_tid) {
+        return Ok(false);
+    }
+
+    let mut current_tid = ctx.heap_tid;
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..1024 {
+        if !item_pointer_is_valid(current_tid) {
+            return Ok(false);
+        }
+        if !seen.insert(current_tid) {
+            return Ok(false);
+        }
+        let tuple = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, current_tid)
+            .map_err(|err| CatalogError::Io(format!("heap unique chain probe failed: {err:?}")))?;
+        if tuple.header.xmax != ctx.snapshot.current_xid || tuple.header.ctid == current_tid {
+            return Ok(false);
+        }
+        if tuple.header.ctid == target_tid {
+            return Ok(true);
+        }
+        current_tid = tuple.header.ctid;
+    }
+    Ok(false)
+}
+
+fn item_pointer_is_valid(tid: ItemPointerData) -> bool {
+    tid.offset_number != 0 && tid.block_number != u32::MAX
+}
+
 pub(crate) fn classify_unique_candidate(
     ctx: &IndexInsertContext,
     tid: ItemPointerData,
@@ -115,6 +149,11 @@ pub(crate) fn classify_unique_candidate(
     let xmax = tuple.header.xmax;
 
     if xmin == INVALID_TRANSACTION_ID {
+        return Ok(UniqueCandidateResult::NoConflict);
+    }
+    if xmin == ctx.snapshot.current_xid
+        && tid_reachable_from_same_transaction_update_chain(ctx, tid)?
+    {
         return Ok(UniqueCandidateResult::NoConflict);
     }
     if xmin != ctx.snapshot.current_xid {

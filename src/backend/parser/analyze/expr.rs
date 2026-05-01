@@ -18,10 +18,10 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, CaseExpr as BoundCaseExpr,
-    CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind,
-    Param, ParamKind, ScalarFunctionImpl, SqlJsonQueryFunction, SqlJsonQueryFunctionKind,
-    SqlJsonTableBehavior, SqlJsonTablePassingArg, SqlJsonTableQuotes, SqlJsonTableWrapper,
-    WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
+    CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, FuncExpr,
+    OpExprKind, Param, ParamKind, ScalarFunctionImpl, SqlJsonQueryFunction,
+    SqlJsonQueryFunctionKind, SqlJsonTableBehavior, SqlJsonTablePassingArg, SqlJsonTableQuotes,
+    SqlJsonTableWrapper, WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
 };
 
 mod func;
@@ -608,6 +608,8 @@ fn raw_sql_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bo
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -1373,6 +1375,115 @@ fn overlaps_end_expr(
         SqlExpr::Add(Box::new(start.clone()), Box::new(end_or_interval.clone()))
     } else {
         end_or_interval.clone()
+    }
+}
+
+fn bind_power_operator_expr(
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let resolved_left_type =
+        coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let resolved_right_type =
+        coerce_unknown_string_literal_type(right, raw_right_type, resolved_left_type);
+    if !is_numeric_family(resolved_left_type) || !is_numeric_family(resolved_right_type) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "numeric arguments",
+            actual: format!(
+                "power({}, {})",
+                sql_type_name(resolved_left_type),
+                sql_type_name(resolved_right_type)
+            ),
+        });
+    }
+
+    let target = power_operator_result_type(
+        left,
+        resolved_left_type,
+        right,
+        resolved_right_type,
+        catalog,
+    );
+    let left_bound =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let right_bound =
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+
+    Ok(Expr::Func(Box::new(FuncExpr {
+        funcid: 0,
+        funcname: Some("power".into()),
+        funcresulttype: Some(target),
+        funcvariadic: false,
+        implementation: ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Power),
+        collation_oid: None,
+        display_args: None,
+        args: vec![
+            coerce_bound_expr(left_bound, raw_left_type, target),
+            coerce_bound_expr(right_bound, raw_right_type, target),
+        ],
+    })))
+}
+
+pub(super) fn power_operator_result_type(
+    left: &SqlExpr,
+    left_type: SqlType,
+    right: &SqlExpr,
+    right_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> SqlType {
+    if matches!(
+        left_type.element_type().kind,
+        SqlTypeKind::Float4 | SqlTypeKind::Float8
+    ) || matches!(
+        right_type.element_type().kind,
+        SqlTypeKind::Float4 | SqlTypeKind::Float8
+    ) {
+        return SqlType::new(SqlTypeKind::Float8);
+    }
+    if power_operator_arg_uses_numeric_operator(left, left_type, catalog)
+        || power_operator_arg_uses_numeric_operator(right, right_type, catalog)
+    {
+        SqlType::new(SqlTypeKind::Numeric)
+    } else {
+        SqlType::new(SqlTypeKind::Float8)
+    }
+}
+
+fn power_operator_arg_uses_numeric_operator(
+    arg: &SqlExpr,
+    arg_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    explicit_numeric_power_arg(arg, catalog)
+        || (matches!(arg_type.kind, SqlTypeKind::Numeric)
+            && !power_operator_arg_is_uncast_literal(arg))
+}
+
+fn explicit_numeric_power_arg(arg: &SqlExpr, catalog: &dyn CatalogLookup) -> bool {
+    matches!(
+        arg,
+        SqlExpr::Cast(_, raw_type)
+            if resolve_raw_type_name(raw_type, catalog)
+                .is_ok_and(|ty| matches!(ty.kind, SqlTypeKind::Numeric))
+    )
+}
+
+fn power_operator_arg_is_uncast_literal(arg: &SqlExpr) -> bool {
+    match arg {
+        SqlExpr::IntegerLiteral(_) | SqlExpr::NumericLiteral(_) => true,
+        SqlExpr::UnaryPlus(inner) | SqlExpr::Negate(inner) => {
+            power_operator_arg_is_uncast_literal(inner)
+        }
+        _ => false,
     }
 }
 
@@ -2649,6 +2760,7 @@ fn bind_window_func_call(
     args: &[SqlFunctionArg],
     func_variadic: bool,
     null_treatment: Option<WindowNullTreatment>,
+    filter: Option<&SqlExpr>,
     over: &RawWindowSpec,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
@@ -2756,7 +2868,7 @@ fn bind_window_func_call(
                 &[],
                 false,
                 resolved.func_variadic,
-                None,
+                filter,
                 over,
                 scope,
                 catalog,
@@ -2772,7 +2884,7 @@ fn bind_window_func_call(
             &[],
             false,
             func_variadic,
-            None,
+            filter,
             over,
             scope,
             catalog,
@@ -3082,16 +3194,26 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     varattno: system_column.varattno,
                     varlevelsup: system_column.varlevelsup,
                     vartype: system_column.sql_type,
+                    collation_oid: None,
                 })
             } else {
                 match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
-                    Ok(ResolvedColumn::Local(index)) => scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
+                    Ok(ResolvedColumn::Local(index)) => scope_column_output_expr(
+                        scope,
+                        index,
+                        name.rsplit_once('.').map(|(relation, _)| relation),
+                    ).unwrap_or_else(|| {
                         panic!("bound scope output_exprs missing local column {index} for {name}")
                     }),
                     Ok(ResolvedColumn::Outer { depth, index }) => outer_scopes
                         .get(depth)
-                        .and_then(|scope| scope.output_exprs.get(index))
-                        .cloned()
+                        .and_then(|scope| {
+                            scope_column_output_expr(
+                                scope,
+                                index,
+                                name.rsplit_once('.').map(|(relation, _)| relation),
+                            )
+                        })
                         .map(|expr| raise_expr_varlevels(expr, depth + 1))
                         .unwrap_or_else(|| {
                             panic!(
@@ -3223,6 +3345,15 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             );
         }
         SqlExpr::BinaryOperator { op, left, right } => match op.as_str() {
+            "^" => bind_power_operator_expr(
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
             "@@" => bind_overloaded_binary_expr(
                 "@@",
                 left,
@@ -4076,29 +4207,34 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     domain.as_ref(),
                 ));
             }
-            if target_type.kind == SqlTypeKind::RegRole
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegRole
                 && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regrole);
             }
-            if target_type.kind == SqlTypeKind::RegClass
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegClass
                 && let Some(bound_regclass) =
                     bind_regclass_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regclass);
             }
-            if target_type.kind == SqlTypeKind::RegOperator
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegOperator
                 && let Some(bound_regoperator) =
                     bind_regoperator_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regoperator);
             }
-            if target_type.kind == SqlTypeKind::RegType
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegType
                 && let Some(bound_regtype) = bind_regtype_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regtype);
             }
-            if target_type.kind == SqlTypeKind::RegProcedure
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegProcedure
                 && let Some(bound_regprocedure) =
                     bind_regprocedure_literal_cast(inner, target_type, catalog)?
             {
@@ -5644,6 +5780,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     args_list,
                     *func_variadic,
                     *null_treatment,
+                    filter.as_deref(),
                     raw_over,
                     scope,
                     catalog,
@@ -6343,7 +6480,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::CurrentCatalog => Expr::CurrentCatalog,
         SqlExpr::CurrentSchema => Expr::CurrentSchema,
         SqlExpr::CurrentUser => Expr::CurrentUser,
+        SqlExpr::User => Expr::User,
         SqlExpr::SessionUser => Expr::SessionUser,
+        SqlExpr::SystemUser => Expr::SystemUser,
         SqlExpr::CurrentRole => Expr::CurrentRole,
         SqlExpr::CurrentTime { precision } => Expr::CurrentTime {
             precision: *precision,

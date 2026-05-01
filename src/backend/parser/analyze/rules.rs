@@ -30,6 +30,7 @@ fn scope_for_special_rule_tuple(
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 })
             })
             .collect(),
@@ -41,6 +42,7 @@ fn scope_for_special_rule_tuple(
                 hidden: column.dropped,
                 qualified_only,
                 relation_names: relation_name.into_iter().map(str::to_string).collect(),
+                relation_output_exprs: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
                 source_relation_oid: None,

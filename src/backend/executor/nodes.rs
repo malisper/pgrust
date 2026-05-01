@@ -28,6 +28,7 @@ use crate::backend::executor::window::execute_window_clause;
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::libpq::pqformat::format_float8_text;
 use crate::backend::optimizer::partition_prune::partition_may_satisfy_filter_with_runtime_values;
+use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::backend::storage::lmgr::RowLockMode;
 use crate::backend::storage::page::bufpage::{
@@ -54,8 +55,8 @@ use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapAndState, BitmapHeapScanState, BitmapIndexScanState,
     BitmapOrState, BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState,
-    GatherState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState,
-    LockRowsState, MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState,
+    GatherState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LateralRightCacheEntry,
+    LimitState, LockRowsState, MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState,
     MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
     ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
     SlotKind, SubqueryScanState, SystemVarBinding, TableSampleMethod, TableSampleState,
@@ -68,7 +69,7 @@ use crate::include::nodes::plannodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, CaseExpr, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType,
-    OUTER_VAR, OrderByEntry, ParamKind, RelationDesc, SELF_ITEM_POINTER_ATTR_NO,
+    OUTER_VAR, OpExprKind, OrderByEntry, ParamKind, RelationDesc, SELF_ITEM_POINTER_ATTR_NO,
     ScalarFunctionImpl, SetReturningCall, SubLinkType, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO,
     XMIN_ATTR_NO, attrno_index, is_special_varno,
 };
@@ -78,6 +79,31 @@ use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
 const EMPTY_GROUPING_REFS: [usize; 0] = [];
+
+thread_local! {
+    static EXPLAIN_DATETIME_CONFIG: RefCell<Vec<DateTimeConfig>> = RefCell::new(Vec::new());
+}
+
+pub(crate) struct ExplainDateTimeConfigGuard;
+
+pub(crate) fn push_explain_datetime_config(config: &DateTimeConfig) -> ExplainDateTimeConfigGuard {
+    EXPLAIN_DATETIME_CONFIG.with(|stack| stack.borrow_mut().push(config.clone()));
+    ExplainDateTimeConfigGuard
+}
+
+impl Drop for ExplainDateTimeConfigGuard {
+    fn drop(&mut self) {
+        EXPLAIN_DATETIME_CONFIG.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+fn current_explain_datetime_config() -> DateTimeConfig {
+    EXPLAIN_DATETIME_CONFIG
+        .with(|stack| stack.borrow().last().cloned())
+        .unwrap_or_default()
+}
 
 fn set_active_grouping_refs(ctx: &mut ExecutorContext, refs: &[usize]) {
     ctx.active_grouping_refs.clear();
@@ -273,7 +299,10 @@ fn normalize_jsonb_group_key(value: JsonbValue) -> JsonbValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{pg_sql_sort_by, render_explain_const, render_explain_datetime_cast_literal};
+    use super::{
+        pg_sql_sort_by, postgres_explain_datetime_config, push_explain_datetime_config,
+        render_explain_const, render_explain_datetime_cast_literal,
+    };
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::time::datetime::days_from_ymd;
     use crate::include::nodes::datetime::DateADT;
@@ -347,6 +376,8 @@ mod tests {
             "'01-01-1997'::date"
         );
 
+        let config = postgres_explain_datetime_config();
+        let _guard = push_explain_datetime_config(&config);
         let expr = Expr::Const(Value::Text("1997-01-01".into()));
         assert_eq!(
             render_explain_datetime_cast_literal(&expr, SqlType::new(SqlTypeKind::Date)),
@@ -4856,8 +4887,10 @@ fn render_explain_expr_inner_with_qualifier(
             render_explain_sql_datetime_keyword("LOCALTIMESTAMP", *precision)
         }
         Expr::CurrentUser => "CURRENT_USER".into(),
+        Expr::User => "USER".into(),
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),
+        Expr::SystemUser => "SYSTEM_USER".into(),
         Expr::Random => "random()".into(),
         Expr::Like {
             expr,
@@ -6228,6 +6261,8 @@ fn comparison_display_type(
 ) -> Option<SqlType> {
     if expr_has_bpchar_display_type(left) || expr_has_bpchar_display_type(right) {
         Some(SqlType::new(SqlTypeKind::Char))
+    } else if expr_has_varchar_display_type(left) || expr_has_varchar_display_type(right) {
+        Some(SqlType::new(SqlTypeKind::Text))
     } else if collation_oid == Some(POSIX_COLLATION_OID)
         && (expr_sql_type_hint_is(left, SqlTypeKind::Text)
             || expr_sql_type_hint_is(right, SqlTypeKind::Text))
@@ -6854,6 +6889,11 @@ fn render_explain_cast(
     qualifier: Option<&str>,
     column_names: &[String],
 ) -> String {
+    if let Expr::Var(var) = expr
+        && explain_cast_is_implicit_integer_widening(var.vartype, ty)
+    {
+        return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    }
     if let Some(rendered) = render_explain_datetime_cast_literal(expr, ty) {
         return rendered;
     }
@@ -6885,31 +6925,47 @@ fn render_explain_cast(
     format!("({inner})::{}", render_explain_sql_type_name(ty))
 }
 
+fn explain_cast_is_implicit_integer_widening(from: SqlType, to: SqlType) -> bool {
+    use SqlTypeKind::{Int2, Int4, Int8};
+    matches!(
+        (from.kind, to.kind),
+        (Int2, Int4) | (Int2, Int8) | (Int4, Int8)
+    )
+}
+
 fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
     let Expr::Const(value) = expr else {
         return None;
     };
     let text = value.as_text()?;
-    let config = postgres_utc_datetime_config();
     match ty.kind {
-        SqlTypeKind::Date => parse_date_text(text, &config).ok().map(|date| {
-            format!(
-                "'{}'::date",
-                format_date_text(date, &postgres_explain_datetime_config()).replace('\'', "''")
-            )
-        }),
-        SqlTypeKind::Timestamp => parse_timestamp_text(text, &config).ok().map(|timestamp| {
-            format!(
-                "'{}'::timestamp without time zone",
-                format_timestamp_text(timestamp, &config).replace('\'', "''")
-            )
-        }),
-        SqlTypeKind::TimestampTz => parse_timestamptz_text(text, &config).ok().map(|timestamp| {
-            format!(
-                "'{}'::timestamp with time zone",
-                format_timestamptz_text(timestamp, &config).replace('\'', "''")
-            )
-        }),
+        SqlTypeKind::Date => {
+            let config = current_explain_datetime_config();
+            parse_date_text(text, &config).ok().map(|date| {
+                format!(
+                    "'{}'::date",
+                    format_date_text(date, &config).replace('\'', "''")
+                )
+            })
+        }
+        SqlTypeKind::Timestamp => {
+            let config = postgres_utc_datetime_config();
+            parse_timestamp_text(text, &config).ok().map(|timestamp| {
+                format!(
+                    "'{}'::timestamp without time zone",
+                    format_timestamp_text(timestamp, &config).replace('\'', "''")
+                )
+            })
+        }
+        SqlTypeKind::TimestampTz => {
+            let config = postgres_utc_datetime_config();
+            parse_timestamptz_text(text, &config).ok().map(|timestamp| {
+                format!(
+                    "'{}'::timestamp with time zone",
+                    format_timestamptz_text(timestamp, &config).replace('\'', "''")
+                )
+            })
+        }
         _ => None,
     }
 }
@@ -6992,7 +7048,10 @@ pub(crate) fn render_explain_literal(value: &Value) -> String {
             format!("'{}'", rendered.replace('\'', "''"))
         }
         Value::Date(date) => {
-            format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
+            format!(
+                "'{}'",
+                format_date_text(*date, &current_explain_datetime_config())
+            )
         }
         Value::Inet(value) => format!("'{}'", value.render_inet()),
         Value::Cidr(value) => format!("'{}'", value.render_cidr()),
@@ -7618,6 +7677,7 @@ fn memoize_prepare_scan(
     }
 
     state.memoize_stats.misses += 1;
+    reset_plan_ctes(ctx, &state.input_plan);
     state.input = executor_start(state.input_plan.clone());
     let mut rows = Vec::new();
     while state.input.exec_proc_node(ctx)?.is_some() {
@@ -8169,23 +8229,23 @@ fn exec_lateral_join<'a>(
                         &mut state.current_left.as_mut().unwrap().slot,
                         ctx,
                     )?;
-                    if matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. })) {
-                        state.right.rescan(ctx)?;
+                    if let Some(rows) = prepare_indexed_lateral_right_rows(state, ctx)? {
+                        state.right_rows = Some(rows);
                     } else {
-                        state.right = super::executor_start(
-                            state
-                                .right_plan
-                                .as_ref()
-                                .expect("lateral right plan")
-                                .clone(),
-                        );
+                        if matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. })) {
+                            state.right.rescan(ctx)?;
+                        } else {
+                            let right_plan = state.right_plan.as_ref().expect("lateral right plan");
+                            reset_plan_ctes(ctx, right_plan);
+                            state.right = super::executor_start(right_plan.clone());
+                        }
+                        let mut rows = Vec::new();
+                        while state.right.exec_proc_node(ctx)?.is_some() {
+                            ctx.check_for_interrupts()?;
+                            rows.push(state.right.materialize_current_row()?);
+                        }
+                        state.right_rows = Some(rows);
                     }
-                    let mut rows = Vec::new();
-                    while state.right.exec_proc_node(ctx)?.is_some() {
-                        ctx.check_for_interrupts()?;
-                        rows.push(state.right.materialize_current_row()?);
-                    }
-                    state.right_rows = Some(rows);
                     state.right_matched = Some(vec![
                         false;
                         state
@@ -8330,6 +8390,222 @@ fn exec_lateral_join<'a>(
         state.right_rows = None;
         state.right_matched = None;
         state.current_left = None;
+    }
+}
+
+fn prepare_indexed_lateral_right_rows(
+    state: &mut NestedLoopJoinState,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<MaterializedRow>>, ExecError> {
+    if !matches!(
+        state.kind,
+        JoinType::Inner | JoinType::Left | JoinType::Semi | JoinType::Anti
+    ) || !matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. }))
+    {
+        return Ok(None);
+    }
+    let Some(cache_key) = lateral_right_cache_key(state, ctx) else {
+        return Ok(None);
+    };
+    let Some((left_key_expr, right_key_expr)) = lateral_join_hash_key_exprs(&state.join_qual)
+    else {
+        return Ok(None);
+    };
+    let left = state
+        .current_left
+        .as_ref()
+        .expect("lateral left row")
+        .clone();
+    let left_key = eval_lateral_join_key_expr(state, &left_key_expr, &left, None, ctx)?;
+    if matches!(left_key, Value::Null) {
+        return Ok(None);
+    }
+
+    if let Some(entry) = state.lateral_right_cache.get(&cache_key) {
+        return Ok(Some(lateral_right_cache_candidates(entry, &left_key)));
+    }
+
+    // :HACK: PostgreSQL pulls up simple LATERAL subquery projection expressions
+    // and can hash join on the non-lateral join key. Until pgrust has full
+    // PlaceHolderVar-style pull-up, cache Memoize-backed lateral rows by their
+    // parameter key and add a small hash table over the right-side join key.
+    state.right.rescan(ctx)?;
+    let mut rows = Vec::new();
+    while state.right.exec_proc_node(ctx)?.is_some() {
+        ctx.check_for_interrupts()?;
+        rows.push(state.right.materialize_current_row()?);
+    }
+    let hash_index = build_lateral_right_hash_index(state, &left, &right_key_expr, &rows, ctx)?;
+    state.lateral_right_cache.insert(
+        cache_key.clone(),
+        LateralRightCacheEntry { rows, hash_index },
+    );
+    let entry = state
+        .lateral_right_cache
+        .get(&cache_key)
+        .expect("inserted lateral right cache entry");
+    Ok(Some(lateral_right_cache_candidates(entry, &left_key)))
+}
+
+fn lateral_right_cache_key(
+    state: &NestedLoopJoinState,
+    ctx: &ExecutorContext,
+) -> Option<Vec<Value>> {
+    if state.nest_params.is_empty() {
+        return None;
+    }
+    state
+        .nest_params
+        .iter()
+        .map(|param| ctx.expr_bindings.exec_params.get(&param.paramid).cloned())
+        .collect()
+}
+
+fn lateral_right_cache_candidates(
+    entry: &LateralRightCacheEntry,
+    left_key: &Value,
+) -> Vec<MaterializedRow> {
+    entry
+        .hash_index
+        .get(left_key)
+        .map(|indexes| {
+            indexes
+                .iter()
+                .filter_map(|index| entry.rows.get(*index).cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn build_lateral_right_hash_index(
+    state: &mut NestedLoopJoinState,
+    left: &MaterializedRow,
+    right_key_expr: &Expr,
+    rows: &[MaterializedRow],
+    ctx: &mut ExecutorContext,
+) -> Result<HashMap<Value, Vec<usize>>, ExecError> {
+    let mut hash_index: HashMap<Value, Vec<usize>> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let key = eval_lateral_join_key_expr(state, right_key_expr, left, Some(row), ctx)?;
+        if matches!(key, Value::Null) {
+            continue;
+        }
+        hash_index.entry(key).or_default().push(index);
+    }
+    Ok(hash_index)
+}
+
+fn eval_lateral_join_key_expr(
+    state: &mut NestedLoopJoinState,
+    expr: &Expr,
+    left: &MaterializedRow,
+    right: Option<&MaterializedRow>,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let mut combined_values = left.slot.tts_values.clone();
+    let mut bindings = left.system_bindings.clone();
+    if let Some(right) = right {
+        combined_values.extend(right.slot.tts_values.iter().cloned());
+        bindings = merge_system_bindings(&bindings, &right.system_bindings);
+        set_inner_expr_bindings(ctx, right.slot.tts_values.clone(), &right.system_bindings);
+    } else {
+        clear_inner_expr_bindings(ctx);
+    }
+    state.slot.tts_values = combined_values;
+    state.slot.tts_nvalid = state.slot.tts_values.len();
+    state.slot.kind = SlotKind::Virtual;
+    state.slot.virtual_tid = None;
+    state.slot.decode_offset = 0;
+    state.current_bindings = bindings;
+    set_active_system_bindings(ctx, &state.current_bindings);
+    set_outer_expr_bindings(ctx, left.slot.tts_values.clone(), &left.system_bindings);
+    eval_expr(expr, &mut state.slot, ctx)
+}
+
+fn lateral_join_hash_key_exprs(join_qual: &[Expr]) -> Option<(Expr, Expr)> {
+    join_qual.iter().find_map(|expr| {
+        let Expr::Op(op) = expr else {
+            return None;
+        };
+        if op.op != OpExprKind::Eq || op.args.len() != 2 {
+            return None;
+        }
+        let left = &op.args[0];
+        let right = &op.args[1];
+        if expr_uses_executor_var(left, OUTER_VAR)
+            && !expr_uses_executor_var(left, INNER_VAR)
+            && expr_uses_executor_var(right, INNER_VAR)
+            && !expr_uses_executor_var(right, OUTER_VAR)
+        {
+            return Some((left.clone(), right.clone()));
+        }
+        if expr_uses_executor_var(right, OUTER_VAR)
+            && !expr_uses_executor_var(right, INNER_VAR)
+            && expr_uses_executor_var(left, INNER_VAR)
+            && !expr_uses_executor_var(left, OUTER_VAR)
+        {
+            return Some((right.clone(), left.clone()));
+        }
+        None
+    })
+}
+
+fn expr_uses_executor_var(expr: &Expr, varno: usize) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 0 && var.varno == varno,
+        Expr::Op(op) => op.args.iter().any(|arg| expr_uses_executor_var(arg, varno)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_uses_executor_var(arg, varno)),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_uses_executor_var(arg, varno)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_uses_executor_var(inner, varno),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_uses_executor_var(left, varno) || expr_uses_executor_var(right, varno)
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(|arg| expr_uses_executor_var(arg, varno))
+                || case_expr.args.iter().any(|arm| {
+                    expr_uses_executor_var(&arm.expr, varno)
+                        || expr_uses_executor_var(&arm.result, varno)
+                })
+                || expr_uses_executor_var(&case_expr.defresult, varno)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_executor_var(&saop.left, varno) || expr_uses_executor_var(&saop.right, varno)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_uses_executor_var(expr, varno)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_uses_executor_var(expr, varno)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_executor_var(array, varno)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_uses_executor_var(expr, varno))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_uses_executor_var(expr, varno))
+                })
+        }
+        _ => false,
     }
 }
 
@@ -8522,22 +8798,24 @@ fn materialize_ordered_current_row(
 
 fn sort_keyed_materialized_rows(
     items: &[OrderByEntry],
-    keyed_rows: &mut [(Vec<Value>, MaterializedRow)],
+    keyed_rows: &mut [(usize, Vec<Value>, MaterializedRow)],
 ) -> Result<(), ExecError> {
     let mut sort_error = None;
-    keyed_rows.sort_by(
-        |(left_keys, left_row), (right_keys, right_row)| match compare_order_by_keys(
-            items, left_keys, right_keys,
-        ) {
-            Ok(std::cmp::Ordering::Equal) => {
-                geometry_circle_distance_order_tie_break(left_keys, right_keys, left_row, right_row)
-            }
-            Ok(ordering) => ordering,
-            Err(err) => {
-                if sort_error.is_none() {
-                    sort_error = Some(err);
+    pg_sql_sort_by(
+        keyed_rows,
+        |(left_ordinal, left_keys, left_row), (right_ordinal, right_keys, right_row)| {
+            match compare_order_by_keys(items, left_keys, right_keys) {
+                Ok(std::cmp::Ordering::Equal) => geometry_circle_distance_order_tie_break(
+                    left_keys, right_keys, left_row, right_row,
+                )
+                .then_with(|| right_ordinal.cmp(left_ordinal)),
+                Ok(ordering) => ordering,
+                Err(err) => {
+                    if sort_error.is_none() {
+                        sort_error = Some(err);
+                    }
+                    std::cmp::Ordering::Equal
                 }
-                std::cmp::Ordering::Equal
             }
         },
     );
@@ -8581,7 +8859,9 @@ impl IncrementalSortState {
             return Ok(false);
         };
 
-        let mut keyed_rows = vec![(first_keys.clone(), first_row)];
+        let mut next_ordinal = 0usize;
+        let mut keyed_rows = vec![(next_ordinal, first_keys.clone(), first_row)];
+        next_ordinal += 1;
         loop {
             ctx.check_for_interrupts()?;
             if self.input.exec_proc_node(ctx)?.is_none() {
@@ -8589,7 +8869,8 @@ impl IncrementalSortState {
             }
             let (keys, row) = materialize_ordered_current_row(&mut self.input, &self.items, ctx)?;
             if presorted_keys_equal(&self.items, self.presorted_count, &first_keys, &keys)? {
-                keyed_rows.push((keys, row));
+                keyed_rows.push((next_ordinal, keys, row));
+                next_ordinal += 1;
             } else {
                 self.lookahead = Some((keys, row));
                 break;
@@ -8597,7 +8878,7 @@ impl IncrementalSortState {
         }
 
         sort_keyed_materialized_rows(&self.items, &mut keyed_rows)?;
-        self.rows = keyed_rows.into_iter().map(|(_, row)| row).collect();
+        self.rows = keyed_rows.into_iter().map(|(_, _, row)| row).collect();
         self.next_index = 0;
         Ok(true)
     }
@@ -9112,6 +9393,8 @@ fn expr_is_plain_aggregate_safe(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -10070,7 +10353,45 @@ impl PlanNode for WindowAggState {
                 ctx.check_for_interrupts()?;
                 input_rows.push(self.input.materialize_current_row()?);
             }
-            self.result_rows = Some(execute_window_clause(ctx, &self.clause, input_rows)?);
+            let mut rows = execute_window_clause(ctx, &self.clause, input_rows)?;
+            if self.run_condition.is_some() || self.top_qual.is_some() {
+                let run_condition = self.run_condition.clone();
+                let top_qual = self.top_qual.clone();
+                let mut filtered = Vec::with_capacity(rows.len());
+                for mut row in rows {
+                    ctx.check_for_interrupts()?;
+                    set_active_system_bindings(ctx, &row.system_bindings);
+                    set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
+                    clear_inner_expr_bindings(ctx);
+                    let pass_through_run_condition =
+                        matches!(top_qual.as_ref(), Some(Expr::Const(Value::Bool(true))));
+                    let run_ok = if pass_through_run_condition {
+                        true
+                    } else {
+                        run_condition
+                            .as_ref()
+                            .map(|qual| eval_bool_qual(qual, &mut row.slot, ctx))
+                            .transpose()?
+                            .unwrap_or(true)
+                    };
+                    let top_ok = if pass_through_run_condition {
+                        true
+                    } else {
+                        top_qual
+                            .as_ref()
+                            .map(|qual| eval_bool_qual(qual, &mut row.slot, ctx))
+                            .transpose()?
+                            .unwrap_or(true)
+                    };
+                    if run_ok && top_ok {
+                        filtered.push(row);
+                    } else {
+                        note_filtered_row(&mut self.stats);
+                    }
+                }
+                rows = filtered;
+            }
+            self.result_rows = Some(rows);
         }
 
         let rows = self.result_rows.as_mut().unwrap();
@@ -10151,6 +10472,20 @@ impl PlanNode for WindowAggState {
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("{prefix}Order By: {order_by}"));
+        }
+        if let Some(run_condition) = &self.run_condition {
+            lines.push(format!(
+                "{prefix}Run Condition: {}",
+                render_explain_expr(run_condition, self.output_columns.as_slice())
+            ));
+        }
+        if let Some(top_qual) = &self.top_qual
+            && !matches!(top_qual, Expr::Const(Value::Bool(true)))
+        {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(top_qual, self.output_columns.as_slice())
+            ));
         }
     }
 
@@ -10686,11 +11021,13 @@ impl PlanNode for RecursiveUnionState {
                 return Ok(Some(&mut self.slot));
             } else {
                 if self.intermediate_rows.is_empty() {
+                    reset_recursive_union_iteration_ctes(self, ctx);
                     ctx.recursive_worktables.remove(&self.worktable_id);
                     finish_eof(&mut self.stats, start, ctx);
                     return Ok(None);
                 }
                 if !self.recursive_references_worktable {
+                    reset_recursive_union_iteration_ctes(self, ctx);
                     ctx.recursive_worktables.remove(&self.worktable_id);
                     finish_eof(&mut self.stats, start, ctx);
                     return Ok(None);
@@ -10761,6 +11098,72 @@ impl PlanNode for RecursiveUnionState {
                 lines,
             );
         }
+    }
+}
+
+fn reset_plan_ctes(ctx: &mut ExecutorContext, plan: &Plan) {
+    let mut cte_ids = std::collections::BTreeSet::new();
+    collect_plan_cte_ids(plan, &mut cte_ids);
+    for cte_id in cte_ids {
+        ctx.cte_tables.remove(&cte_id);
+        ctx.cte_producers.remove(&cte_id);
+    }
+}
+
+fn collect_plan_cte_ids(plan: &Plan, cte_ids: &mut std::collections::BTreeSet<usize>) {
+    match plan {
+        Plan::CteScan {
+            cte_id, cte_plan, ..
+        } => {
+            cte_ids.insert(*cte_id);
+            collect_plan_cte_ids(cte_plan, cte_ids);
+        }
+        Plan::Projection { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. } => collect_plan_cte_ids(input, cte_ids),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            collect_plan_cte_ids(left, cte_ids);
+            collect_plan_cte_ids(right, cte_ids);
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => {
+            for child in children {
+                collect_plan_cte_ids(child, cte_ids);
+            }
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => collect_plan_cte_ids(bitmapqual, cte_ids),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_plan_cte_ids(anchor, cte_ids);
+            collect_plan_cte_ids(recursive, cte_ids);
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => {}
     }
 }
 
@@ -11108,4 +11511,37 @@ impl TupleSlot {
         Value::materialize_all(&mut self.tts_values);
         Ok(self.tts_values)
     }
+}
+
+pub(crate) fn ensure_no_deferred_column_errors(values: &[Value]) -> Result<(), ExecError> {
+    for value in values {
+        match value {
+            Value::DroppedColumn(attnum) => {
+                return Err(ExecError::DetailedError {
+                    message: format!("attribute {attnum} of type record has been dropped"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42703",
+                });
+            }
+            Value::WrongTypeColumn {
+                attnum,
+                table_type,
+                query_type,
+            } => {
+                return Err(ExecError::DetailedError {
+                    message: format!("attribute {attnum} of type record has wrong type"),
+                    detail: Some(format!(
+                        "Table has type {}, but query expects {}.",
+                        sql_type_name(*table_type),
+                        sql_type_name(*query_type)
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

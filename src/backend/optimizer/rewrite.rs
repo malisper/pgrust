@@ -20,6 +20,7 @@ fn projection_slot_var(
         varattno: attno,
         varlevelsup: 0,
         vartype,
+        collation_oid: None,
     })
 }
 

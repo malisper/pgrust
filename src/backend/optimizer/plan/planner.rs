@@ -15,10 +15,10 @@ use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, PlanEstimate, PlannedStmt,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind,
-    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TABLE_OID_ATTR_NO,
-    TargetEntry, WindowClause, attrno_index, expr_contains_set_returning, set_returning_call_exprs,
-    user_attrno,
+    AggAccum, AggFunc, BoolExprType, BuiltinScalarFunction, BuiltinWindowFunction, Expr, JoinType,
+    OpExprKind, ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TABLE_OID_ATTR_NO,
+    TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncKind, attrno_index,
+    expr_contains_set_returning, set_returning_call_exprs, user_attrno,
 };
 
 use super::super::bestpath;
@@ -2029,6 +2029,291 @@ fn window_pathkeys(clause: &WindowClause) -> Vec<PathKey> {
     pathkeys
 }
 
+fn window_clause_sort_key(clause: &WindowClause) -> Vec<PathKey> {
+    let mut keys = Vec::with_capacity(clause.spec.partition_by.len() + clause.spec.order_by.len());
+    for expr in &clause.spec.partition_by {
+        keys.push(PathKey {
+            expr: expr.clone(),
+            ressortgroupref: 0,
+            descending: false,
+            nulls_first: None,
+            collation_oid: None,
+        });
+    }
+    for item in &clause.spec.order_by {
+        if clause
+            .spec
+            .partition_by
+            .iter()
+            .any(|expr| *expr == item.expr)
+        {
+            continue;
+        }
+        keys.push(PathKey {
+            expr: item.expr.clone(),
+            ressortgroupref: item.ressortgroupref,
+            descending: item.descending,
+            nulls_first: item.nulls_first,
+            collation_oid: item.collation_oid,
+        });
+    }
+    keys
+}
+
+fn window_query_order_prefix_len(keys: &[PathKey], query_pathkeys: &[PathKey]) -> usize {
+    keys.iter()
+        .zip(query_pathkeys.iter())
+        .take_while(|(left, right)| window_pathkeys_equivalent(left, right))
+        .count()
+}
+
+fn window_pathkeys_equivalent(left: &PathKey, right: &PathKey) -> bool {
+    let same_identity = if left.ressortgroupref != 0 && right.ressortgroupref != 0 {
+        left.ressortgroupref == right.ressortgroupref
+    } else {
+        left.expr == right.expr
+    };
+    same_identity
+        && left.descending == right.descending
+        && left.nulls_first.unwrap_or(left.descending)
+            == right.nulls_first.unwrap_or(right.descending)
+}
+
+fn compare_window_clause_sort_keys(
+    left: &[PathKey],
+    right: &[PathKey],
+    query_pathkeys: &[PathKey],
+) -> Ordering {
+    for (left_key, right_key) in left.iter().zip(right.iter()) {
+        if left_key.expr != right_key.expr {
+            let left_prefix = window_query_order_prefix_len(left, query_pathkeys);
+            let right_prefix = window_query_order_prefix_len(right, query_pathkeys);
+            match left_prefix.cmp(&right_prefix) {
+                Ordering::Equal => match window_pathkey_expr_fallback_cmp(left_key, right_key) {
+                    Ordering::Equal => {}
+                    ordering => return ordering,
+                },
+                ordering => return ordering,
+            }
+        }
+        match right_key.ressortgroupref.cmp(&left_key.ressortgroupref) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        match right_key.descending.cmp(&left_key.descending) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        match right_key.nulls_first.cmp(&left_key.nulls_first) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        match right_key.collation_oid.cmp(&left_key.collation_oid) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    right.len().cmp(&left.len())
+}
+
+fn window_pathkey_expr_fallback_cmp(left: &PathKey, right: &PathKey) -> Ordering {
+    match window_pathkey_expr_rank(&left.expr).cmp(&window_pathkey_expr_rank(&right.expr)) {
+        Ordering::Equal => {}
+        ordering => return ordering,
+    }
+    match (
+        window_pathkey_core_expr(&left.expr),
+        window_pathkey_core_expr(&right.expr),
+    ) {
+        (Expr::Var(left_var), Expr::Var(right_var))
+            if left_var.varno == right_var.varno
+                && left_var.varlevelsup == right_var.varlevelsup =>
+        {
+            left_var.varattno.cmp(&right_var.varattno)
+        }
+        (Expr::Op(left_op), Expr::Op(right_op))
+            if left_op.op == OpExprKind::Concat
+                && right_op.op == OpExprKind::Concat
+                && left_op.args.len() == 2
+                && right_op.args.len() == 2 =>
+        {
+            concat_const_side_rank(&left_op.args).cmp(&concat_const_side_rank(&right_op.args))
+        }
+        _ => Ordering::Equal,
+    }
+}
+
+fn window_pathkey_expr_rank(expr: &Expr) -> usize {
+    match window_pathkey_core_expr(expr) {
+        Expr::Op(op) if op.op == OpExprKind::Concat && op.args.len() == 2 => {
+            concat_const_side_rank(&op.args)
+        }
+        _ => 1,
+    }
+}
+
+fn window_pathkey_core_expr(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => window_pathkey_core_expr(inner),
+        other => other,
+    }
+}
+
+fn concat_const_side_rank(args: &[Expr]) -> usize {
+    if args.first().and_then(expr_const_value).is_some() {
+        0
+    } else if args.get(1).and_then(expr_const_value).is_some() {
+        2
+    } else {
+        1
+    }
+}
+
+fn builtin_window_optimized_frame(func: BuiltinWindowFunction) -> Option<WindowFrame> {
+    match func {
+        BuiltinWindowFunction::RowNumber
+        | BuiltinWindowFunction::Rank
+        | BuiltinWindowFunction::DenseRank
+        | BuiltinWindowFunction::PercentRank
+        | BuiltinWindowFunction::CumeDist
+        | BuiltinWindowFunction::Ntile => Some(WindowFrame {
+            mode: crate::include::nodes::parsenodes::WindowFrameMode::Rows,
+            start_bound: WindowFrameBound::UnboundedPreceding,
+            end_bound: WindowFrameBound::CurrentRow,
+            exclusion: crate::include::nodes::parsenodes::WindowFrameExclusion::NoOthers,
+        }),
+        _ => None,
+    }
+}
+
+fn optimized_window_clause_frame(clause: &WindowClause) -> Option<WindowFrame> {
+    let mut optimized = None;
+    for func in &clause.functions {
+        let WindowFuncKind::Builtin(kind) = func.kind else {
+            return None;
+        };
+        let Some(frame) = builtin_window_optimized_frame(kind) else {
+            return None;
+        };
+        match &optimized {
+            Some(existing) if existing != &frame => return None,
+            Some(_) => {}
+            None => optimized = Some(frame),
+        }
+    }
+    optimized
+}
+
+fn optimize_window_clause_frame(
+    mut clause: WindowClause,
+    all_clauses: &[WindowClause],
+) -> WindowClause {
+    if all_clauses
+        .iter()
+        .any(|peer| peer.spec == clause.spec && optimized_window_clause_frame(peer).is_none())
+    {
+        return clause;
+    }
+    if let Some(frame) = optimized_window_clause_frame(&clause) {
+        clause.spec.frame = frame;
+    }
+    clause
+}
+
+fn merge_equivalent_window_clauses(clauses: Vec<WindowClause>) -> Vec<WindowClause> {
+    let mut merged: Vec<WindowClause> = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| existing.spec == clause.spec)
+        {
+            for func in clause.functions {
+                if !existing.functions.contains(&func) {
+                    existing.functions.push(func);
+                }
+            }
+        } else {
+            merged.push(clause);
+        }
+    }
+    merged
+}
+
+fn optimize_window_clauses(clauses: Vec<WindowClause>) -> Vec<WindowClause> {
+    merge_equivalent_window_clauses(
+        clauses
+            .iter()
+            .cloned()
+            .map(|clause| optimize_window_clause_frame(clause, &clauses))
+            .collect(),
+    )
+}
+
+fn window_partition_expr_single_valued(root: &PlannerInfo, expr: &Expr) -> bool {
+    if matches!(expr, Expr::Const(_)) {
+        return true;
+    }
+    let Some(where_qual) = root.parse.where_qual.as_ref() else {
+        return false;
+    };
+    let expr = normalized_equivalence_expr(root, expr);
+    flatten_and_conjuncts(where_qual)
+        .into_iter()
+        .filter_map(equality_const_expr)
+        .any(|(candidate, _)| normalized_equivalence_expr(root, candidate) == expr)
+}
+
+fn prune_single_valued_window_partition_keys(
+    root: &PlannerInfo,
+    mut clause: WindowClause,
+) -> WindowClause {
+    clause
+        .spec
+        .partition_by
+        .retain(|expr| !window_partition_expr_single_valued(root, expr));
+    clause
+}
+
+fn active_window_clauses(root: &PlannerInfo, mut clauses: Vec<WindowClause>) -> Vec<WindowClause> {
+    clauses = merge_equivalent_window_clauses(
+        clauses
+            .into_iter()
+            .map(|clause| prune_single_valued_window_partition_keys(root, clause))
+            .collect(),
+    );
+    clauses.sort_by(|left, right| {
+        compare_window_clause_sort_keys(
+            &window_clause_sort_key(left),
+            &window_clause_sort_key(right),
+            &root.query_pathkeys,
+        )
+    });
+    for (index, clause) in clauses.iter_mut().enumerate() {
+        for func in &mut clause.functions {
+            func.winref = index + 1;
+        }
+    }
+    clauses
+}
+
+fn path_contains_explicit_sort(path: &Path) -> bool {
+    match path {
+        Path::OrderBy { .. } | Path::IncrementalSort { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_explicit_sort(input),
+        _ => false,
+    }
+}
+
+fn path_satisfies_without_explicit_sort(path: &Path, required_pathkeys: &[PathKey]) -> bool {
+    bestpath::pathkeys_satisfy(&path.pathkeys(), required_pathkeys)
+        && !path_contains_explicit_sort(path)
+}
+
 fn make_window_rel(
     root: &mut PlannerInfo,
     input_rel: RelOptInfo,
@@ -2090,30 +2375,59 @@ fn make_window_rel(
             );
         }
     }
-    let has_ordered_input_path = !ordered_input_paths.is_empty();
+    let has_native_ordered_input_path = !ordered_input_paths.is_empty()
+        || input_rel
+            .pathlist
+            .iter()
+            .any(|path| path_satisfies_without_explicit_sort(path, &required_pathkeys));
     // When an index can deliver the required window order, keep that native
     // ordering instead of adding a cheaper explicit sort on an unordered path.
     for path in input_rel
         .pathlist
         .into_iter()
         .filter(|path| {
-            !has_ordered_input_path
-                || bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)
+            !has_native_ordered_input_path
+                || path_satisfies_without_explicit_sort(path, &required_pathkeys)
         })
         .chain(ordered_input_paths.into_iter())
     {
         let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
-            optimize_path_with_config(
-                Path::OrderBy {
-                    plan_info: PlanEstimate::default(),
-                    pathtarget: path.semantic_output_target(),
-                    items: pathkeys_to_order_items(&required_pathkeys),
-                    display_items: Vec::new(),
-                    input: Box::new(path),
-                },
-                catalog,
-                root.config,
-            )
+            let presorted_count = common_presorted_prefix_len(&path.pathkeys(), &required_pathkeys);
+            let display_items = sort_key_display_items(root, &required_pathkeys, catalog);
+            if presorted_count > 0 && presorted_count < required_pathkeys.len() {
+                let mut presorted_display_pathkeys = required_pathkeys[..presorted_count].to_vec();
+                for key in &mut presorted_display_pathkeys {
+                    key.descending = false;
+                    key.nulls_first = None;
+                }
+                let presorted_display_items =
+                    sort_key_display_items(root, &presorted_display_pathkeys, catalog);
+                optimize_path_with_config(
+                    Path::IncrementalSort {
+                        plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
+                        items: pathkeys_to_order_items(&required_pathkeys),
+                        presorted_count,
+                        display_items,
+                        presorted_display_items,
+                        input: Box::new(path),
+                    },
+                    catalog,
+                    root.config,
+                )
+            } else {
+                optimize_path_with_config(
+                    Path::OrderBy {
+                        plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
+                        items: pathkeys_to_order_items(&required_pathkeys),
+                        display_items,
+                        input: Box::new(path),
+                    },
+                    catalog,
+                    root.config,
+                )
+            }
         } else {
             path
         };
@@ -2125,6 +2439,8 @@ fn make_window_rel(
                 output_columns: window_output_columns(&path, &clause),
                 input: Box::new(path),
                 clause: clause.clone(),
+                run_condition: None,
+                top_qual: None,
             },
             catalog,
             root.config,
@@ -2350,6 +2666,8 @@ fn expr_srf_depth(expr: &Expr) -> usize {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -2505,6 +2823,8 @@ fn collect_srfs_at_depth(expr: &Expr, depth: usize, out: &mut Vec<Expr>) {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -3177,6 +3497,7 @@ fn subquery_display_expr_for_key(path: &Path, key: &PathKey) -> Option<Expr> {
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: key.collation_oid,
             }))
         }
         Path::Projection { input, .. }
@@ -3298,8 +3619,18 @@ fn equality_const_expr<'a>(expr: &'a Expr) -> Option<(&'a Expr, &'a Value)> {
         return None;
     }
     match (&op.args[0], &op.args[1]) {
-        (left, Expr::Const(value)) => Some((left, value)),
-        (Expr::Const(value), right) => Some((right, value)),
+        (left, right) if expr_const_value(right).is_some() => {
+            Some((left, expr_const_value(right)?))
+        }
+        (left, right) if expr_const_value(left).is_some() => Some((right, expr_const_value(left)?)),
+        _ => None,
+    }
+}
+
+fn expr_const_value(expr: &Expr) -> Option<&Value> {
+    match expr {
+        Expr::Const(value) => Some(value),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_const_value(inner),
         _ => None,
     }
 }
@@ -3803,7 +4134,7 @@ fn sort_key_display_items(
         let dedupe_expr = expand_join_rte_vars(root, display_expr.clone());
         if display_exprs
             .iter()
-            .any(|existing| inner_join_equates_exprs(root, existing, &dedupe_expr))
+            .any(|existing| sort_display_exprs_equivalent(root, existing, &dedupe_expr))
         {
             continue;
         }
@@ -3941,6 +4272,58 @@ fn set_sort_display_items(path: &mut Path, display_items: &[String]) -> bool {
 
 fn sort_input_is_index_scan(path: &Path) -> bool {
     matches!(path, Path::IndexOnlyScan { .. } | Path::IndexScan { .. })
+}
+
+fn normalized_equivalence_expr(root: &PlannerInfo, expr: &Expr) -> Expr {
+    strip_equivalence_casts(&strip_binary_coercible_casts(&flatten_join_alias_vars(
+        root,
+        expand_join_rte_vars(root, expr.clone()),
+    )))
+}
+
+fn strip_equivalence_casts(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Cast(inner, target_type)
+            if integer_widening_cast(expr_sql_type(inner), *target_type) =>
+        {
+            strip_equivalence_casts(inner)
+        }
+        other => other.clone(),
+    }
+}
+
+fn integer_widening_cast(source_type: SqlType, target_type: SqlType) -> bool {
+    use SqlTypeKind::{Int2, Int4, Int8};
+    matches!(
+        (source_type.kind, target_type.kind),
+        (Int2, Int4) | (Int2, Int8) | (Int4, Int8)
+    )
+}
+
+fn where_qual_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
+    let Some(where_qual) = root.parse.where_qual.as_ref() else {
+        return false;
+    };
+    let left = normalized_equivalence_expr(root, left);
+    let right = normalized_equivalence_expr(root, right);
+    flatten_and_conjuncts(where_qual).into_iter().any(|clause| {
+        let Expr::Op(op) = clause else {
+            return false;
+        };
+        if op.op != OpExprKind::Eq {
+            return false;
+        }
+        let [op_left, op_right] = op.args.as_slice() else {
+            return false;
+        };
+        let op_left = normalized_equivalence_expr(root, op_left);
+        let op_right = normalized_equivalence_expr(root, op_right);
+        (op_left == left && op_right == right) || (op_left == right && op_right == left)
+    })
+}
+
+fn sort_display_exprs_equivalent(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
+    inner_join_equates_exprs(root, left, right) || where_qual_equates_exprs(root, left, right)
 }
 
 fn inner_join_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
@@ -4465,7 +4848,10 @@ pub(super) fn grouping_planner(
                 false,
             );
         }
-        for clause in root.parse.window_clauses.clone() {
+        for clause in active_window_clauses(
+            root,
+            optimize_window_clauses(root.parse.window_clauses.clone()),
+        ) {
             current_rel = make_window_rel(root, current_rel, &clause, catalog);
         }
     }
@@ -4577,7 +4963,7 @@ fn standard_planner_with_param_base(
 ) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     let mut glob = PlannerGlobal::new();
     let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?, catalog);
-    let query = pull_up_sublinks(query);
+    let query = pull_up_sublinks(query, catalog);
     let relation_privileges = collect_query_relation_privileges(&query);
     let aggregate_layout = groupby_rewrite::build_aggregate_layout(&query, catalog);
     let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);

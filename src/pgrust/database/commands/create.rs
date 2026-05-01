@@ -6,8 +6,9 @@ use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::analyze::{
     ResolvedFunctionCall, bind_delete, bind_insert, bind_scalar_expr_in_scope, bind_update,
-    is_binary_coercible_type, is_collatable_type, pg_plan_query_with_outer,
-    pg_plan_values_query_with_outer, plan_merge, resolve_function_call, with_external_param_types,
+    is_binary_coercible_type, is_collatable_type, pg_plan_query_with_sql_function_args,
+    pg_plan_values_query_with_sql_function_args, plan_merge, resolve_function_call,
+    with_external_param_types,
 };
 use crate::backend::parser::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
@@ -789,6 +790,8 @@ fn collect_expr_rule_dependencies(
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
@@ -2415,9 +2418,9 @@ fn validate_sql_function_body_on_create(
         .enumerate()
         .map(|(index, (_, ty, _))| (index + 1, *ty))
         .collect::<Vec<_>>();
-    let outer_columns = input_args
+    let outer_args = input_args
         .iter()
-        .filter_map(|(name, ty, _)| name.as_ref().map(|name| (name.clone(), *ty)))
+        .map(|(name, ty, _)| (name.clone(), *ty))
         .collect::<Vec<_>>();
     let final_statement = normalize_sql_function_validation_statement(final_statement);
     let stmt = parse_statement(final_statement.as_ref()).map_err(|err| {
@@ -2459,7 +2462,7 @@ fn validate_sql_function_body_on_create(
         }
     }
     let columns = match with_external_param_types(&external_param_types, || {
-        sql_function_final_statement_columns(&stmt, catalog, &outer_columns, prorettype)
+        sql_function_final_statement_columns(&stmt, catalog, &outer_args, prorettype)
     }) {
         Ok(columns) => Some(columns),
         Err(err)
@@ -2493,15 +2496,18 @@ fn validate_sql_function_body_on_create(
 fn sql_function_final_statement_columns(
     stmt: &Statement,
     catalog: &dyn CatalogLookup,
-    outer_columns: &[(String, SqlType)],
+    outer_args: &[(Option<String>, SqlType)],
     prorettype: u32,
 ) -> Result<Vec<QueryColumn>, ParseError> {
     match stmt {
         Statement::Select(select) => {
-            pg_plan_query_with_outer(select, catalog, outer_columns).map(|planned| planned.columns())
+            pg_plan_query_with_sql_function_args(select, catalog, outer_args)
+                .map(|planned| planned.columns())
         }
-        Statement::Values(values) => pg_plan_values_query_with_outer(values, catalog, outer_columns)
-            .map(|planned| planned.columns()),
+        Statement::Values(values) => {
+            pg_plan_values_query_with_sql_function_args(values, catalog, outer_args)
+                .map(|planned| planned.columns())
+        }
         Statement::Insert(insert) if !insert.returning.is_empty() => {
             bind_insert(insert, catalog).map(|bound| target_entries_to_query_columns(&bound.returning))
         }
@@ -3487,6 +3493,7 @@ fn from_item_requires_original_view_sql(item: &FromItem) -> bool {
         }
         FromItem::Table { .. }
         | FromItem::Values { .. }
+        | FromItem::Expression { .. }
         | FromItem::JsonTable(_)
         | FromItem::XmlTable(_) => false,
     }
@@ -3827,7 +3834,7 @@ impl Database {
                     &index_name,
                     Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     &storage_columns,
-                    None,
+                    action.predicate_sql.as_deref(),
                     !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,
@@ -4243,10 +4250,9 @@ impl Database {
 
         let sequence_oid = match persistence {
             TablePersistence::Permanent | TablePersistence::Unlogged => {
-                let relpersistence = if persistence == TablePersistence::Unlogged {
-                    'u'
-                } else {
-                    'p'
+                let relpersistence = match persistence {
+                    TablePersistence::Unlogged => 'u',
+                    _ => 'p',
                 };
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
@@ -6998,13 +7004,16 @@ impl Database {
         let mut desc = create_view_relation_desc_from_query(&stored_query);
         apply_create_view_column_names(&mut desc, &create_stmt.column_names)?;
         let reloptions = create_view_reloptions(&create_stmt.options)?;
-        let mut referenced_relation_oids = std::collections::BTreeSet::new();
-        collect_direct_relation_oids_from_select(
-            &create_stmt.query,
-            &catalog,
-            &mut Vec::new(),
-            &mut referenced_relation_oids,
-        );
+        let mut rule_dependencies = crate::backend::catalog::store::RuleDependencies {
+            constraint_oids,
+            ..Default::default()
+        };
+        collect_rule_dependencies_from_query(&analyzed_query, &catalog, &mut rule_dependencies);
+        let referenced_relation_oids = rule_dependencies
+            .relation_oids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
         let references_temporary_relation = referenced_relation_oids.iter().any(|oid| {
             catalog
                 .relation_by_oid(*oid)
@@ -7163,12 +7172,9 @@ impl Database {
             cid: cid.saturating_add(2),
             ..rule_drop_ctx
         };
-        let mut rule_dependencies = crate::backend::catalog::store::RuleDependencies {
-            relation_oids: referenced_relation_oids.into_iter().collect::<Vec<_>>(),
-            constraint_oids,
-            ..Default::default()
-        };
-        collect_rule_dependencies_from_query(&analyzed_query, &catalog, &mut rule_dependencies);
+        rule_dependencies
+            .relation_oids
+            .extend(referenced_relation_oids.into_iter());
         let rule_result = self.catalog.write().create_rule_mvcc_with_dependencies(
             relation_oid,
             "_RETURN",
@@ -7305,6 +7311,7 @@ impl Database {
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
+            write_xid_override: None,
             transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),
@@ -7544,6 +7551,7 @@ impl Database {
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
+            write_xid_override: None,
             transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),
