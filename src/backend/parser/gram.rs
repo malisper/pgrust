@@ -412,16 +412,13 @@ fn disallowed_select_into_position(input: &str) -> Option<usize> {
     }
 
     if keyword_at_start(input, "insert") {
-        let select = find_keyword_any_depth(input, "select", 0)?;
-        return select_into_position_after(input, select);
+        return select_into_position_after(input, 0);
     }
 
     if keyword_at_start(input, "select") || keyword_at_start(input, "with") {
         let mut start = 0usize;
         while let Some(into) = find_keyword_any_depth(input, "into", start) {
-            if nesting_depth_at(input, into) > 0
-                && select_before_at_same_depth(input, into).is_some()
-            {
+            if nesting_depth_at(input, into) > 0 && is_select_into_marker(input, into) {
                 return Some(into);
             }
             start = into + "into".len();
@@ -432,11 +429,9 @@ fn disallowed_select_into_position(input: &str) -> Option<usize> {
 }
 
 fn select_into_position_after(input: &str, start: usize) -> Option<usize> {
-    let select = find_keyword_any_depth(input, "select", start)?;
-    let select_depth = nesting_depth_at(input, select);
-    let mut cursor = select + "select".len();
+    let mut cursor = start;
     while let Some(into) = find_keyword_any_depth(input, "into", cursor) {
-        if nesting_depth_at(input, into) == select_depth {
+        if is_select_into_marker(input, into) {
             return Some(into);
         }
         cursor = into + "into".len();
@@ -444,15 +439,69 @@ fn select_into_position_after(input: &str, start: usize) -> Option<usize> {
     None
 }
 
-fn select_before_at_same_depth(input: &str, position: usize) -> Option<usize> {
+fn is_select_into_marker(input: &str, position: usize) -> bool {
+    same_depth_clause_keyword_before(input, position) == Some("select")
+}
+
+fn same_depth_clause_keyword_before(input: &str, position: usize) -> Option<&'static str> {
+    const CLAUSE_KEYWORDS: &[&str] = &[
+        "select",
+        "insert",
+        "update",
+        "delete",
+        "merge",
+        "values",
+        "with",
+        "from",
+        "where",
+        "group",
+        "having",
+        "window",
+        "order",
+        "limit",
+        "offset",
+        "fetch",
+        "for",
+        "returning",
+        "union",
+        "except",
+        "intersect",
+    ];
+
     let target_depth = nesting_depth_at(input, position);
-    let mut cursor = 0usize;
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
     let mut found = None;
-    while let Some(select) = find_keyword_any_depth_before(input, "select", cursor, position) {
-        if nesting_depth_at(input, select) == target_depth {
-            found = Some(select);
+    while index < bytes.len() && index < position {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            _ => {
+                if depth == target_depth {
+                    found = CLAUSE_KEYWORDS
+                        .iter()
+                        .copied()
+                        .find(|keyword| keyword_at_boundary(input, index, keyword))
+                        .or(found);
+                }
+            }
         }
-        cursor = select + "select".len();
+        index += 1;
     }
     found
 }
