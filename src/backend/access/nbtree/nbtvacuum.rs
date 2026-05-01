@@ -6,6 +6,7 @@ use crate::backend::access::transam::xlog::{
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::fsm::{finalize_pending_index_pages, record_free_index_page};
+use crate::backend::storage::page::bufpage::{PageError, page_header};
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::include::access::amapi::{
     IndexBulkDeleteCallback, IndexBulkDeleteResult, IndexVacuumContext,
@@ -34,6 +35,18 @@ fn relation_nblocks(
 ) -> Result<u32, CatalogError> {
     pool.with_storage_mut(|storage| storage.smgr.nblocks(rel, ForkNumber::Main))
         .map_err(|err| CatalogError::Io(err.to_string()))
+}
+
+fn bt_page_is_new(
+    page: &[u8; crate::backend::storage::smgr::BLCKSZ],
+) -> Result<bool, CatalogError> {
+    match page_header(page) {
+        Ok(_) => Ok(false),
+        Err(PageError::NotInitialized) => Ok(true),
+        Err(err) => Err(CatalogError::Io(format!(
+            "btree page header read failed: {err:?}"
+        ))),
+    }
 }
 
 fn write_cleanup_info(ctx: &IndexVacuumContext, deleted_pages: u32) -> Result<(), CatalogError> {
@@ -340,6 +353,7 @@ pub fn btbulkdelete(
     stats: Option<IndexBulkDeleteResult>,
 ) -> Result<IndexBulkDeleteResult, CatalogError> {
     let mut stats = stats.unwrap_or_default();
+    let oldest_active_xid = ctx.txns.read().oldest_active_xid();
     let nblocks = relation_nblocks(&ctx.pool, ctx.index_relation)?;
     for block in 1..nblocks {
         let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
@@ -348,9 +362,26 @@ pub fn btbulkdelete(
             .lock_buffer_exclusive(pin.buffer_id())
             .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
         let mut page = *guard;
+        if bt_page_is_new(&page)? {
+            record_free_index_page(&ctx.pool, ctx.index_relation, block)
+                .map_err(CatalogError::Io)?;
+            stats.num_deleted_pages += 1;
+            continue;
+        }
         let opaque = bt_page_get_opaque(&page)
             .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
-        if opaque.is_meta() || !opaque.is_leaf() || opaque.btpo_flags & BTP_DELETED != 0 {
+        if opaque.is_meta() {
+            continue;
+        }
+        if bt_page_is_recyclable(&page, oldest_active_xid)
+            .map_err(|err| CatalogError::Io(format!("btree recyclable check failed: {err:?}")))?
+        {
+            record_free_index_page(&ctx.pool, ctx.index_relation, block)
+                .map_err(CatalogError::Io)?;
+            stats.num_deleted_pages += 1;
+            continue;
+        }
+        if !opaque.is_leaf() || opaque.btpo_flags & BTP_DELETED != 0 {
             continue;
         }
         let items = bt_page_data_items(&page)
@@ -425,25 +456,32 @@ pub fn btvacuumcleanup(
     ctx: &IndexVacuumContext,
     stats: Option<IndexBulkDeleteResult>,
 ) -> Result<IndexBulkDeleteResult, CatalogError> {
+    let scanned_by_bulkdelete = stats.is_some();
     let mut stats = stats.unwrap_or_default();
     let oldest_active_xid = ctx.txns.read().oldest_active_xid();
-    let nblocks = relation_nblocks(&ctx.pool, ctx.index_relation)?;
-    let mut recyclable = Vec::new();
-    for block in 1..nblocks {
-        let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
-        let guard = ctx
-            .pool
-            .lock_buffer_shared(pin.buffer_id())
-            .map_err(|err| CatalogError::Io(format!("btree shared lock failed: {err:?}")))?;
-        if bt_page_is_recyclable(&guard, oldest_active_xid)
-            .map_err(|err| CatalogError::Io(format!("btree recyclable check failed: {err:?}")))?
-        {
-            recyclable.push(block);
+    let mut cleanup_deleted_pages = 0;
+    if !scanned_by_bulkdelete {
+        let nblocks = relation_nblocks(&ctx.pool, ctx.index_relation)?;
+        let mut recyclable = Vec::new();
+        for block in 1..nblocks {
+            let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
+            let guard = ctx
+                .pool
+                .lock_buffer_shared(pin.buffer_id())
+                .map_err(|err| CatalogError::Io(format!("btree shared lock failed: {err:?}")))?;
+            if bt_page_is_new(&guard)?
+                || bt_page_is_recyclable(&guard, oldest_active_xid).map_err(|err| {
+                    CatalogError::Io(format!("btree recyclable check failed: {err:?}"))
+                })?
+            {
+                recyclable.push(block);
+            }
         }
+        finalize_pending_index_pages(&ctx.pool, ctx.index_relation, &recyclable)
+            .map_err(CatalogError::Io)?;
+        stats.num_deleted_pages += recyclable.len() as u64;
+        cleanup_deleted_pages = recyclable.len() as u32;
     }
-    finalize_pending_index_pages(&ctx.pool, ctx.index_relation, &recyclable)
-        .map_err(CatalogError::Io)?;
-    stats.num_deleted_pages += recyclable.len() as u64;
-    write_cleanup_info(ctx, recyclable.len() as u32)?;
+    write_cleanup_info(ctx, cleanup_deleted_pages)?;
     Ok(stats)
 }

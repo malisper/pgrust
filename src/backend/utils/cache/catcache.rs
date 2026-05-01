@@ -238,12 +238,44 @@ impl CatCache {
         sort_pg_opfamily_rows(&mut cache.opfamily_rows);
         cache.proc_rows.extend(bootstrap_pg_proc_rows());
         sort_pg_proc_rows(&mut cache.proc_rows);
-        for row in bootstrap_pg_aggregate_rows() {
+        for mut row in bootstrap_pg_aggregate_rows() {
+            if crate::include::catalog::builtin_ordered_set_aggregate_function_for_proc_oid(
+                row.aggfnoid,
+            )
+            .is_some()
+            {
+                // :HACK: pgrust executes ordered-set aggregates through
+                // hardcoded aggregate paths, but opr_sanity validates
+                // pg_aggregate against pg_proc. Point the catalog at the
+                // synthetic per-aggregate transition procs until ordered-set
+                // transition metadata is represented directly in pg_aggregate.
+                row.aggtransfn =
+                    crate::include::catalog::aggregate_transition_proc_oid(row.aggfnoid);
+                if matches!(
+                    row.aggfnoid,
+                    crate::include::catalog::PERCENTILE_CONT_FLOAT8_AGG_PROC_OID
+                        | crate::include::catalog::PERCENTILE_CONT_INTERVAL_AGG_PROC_OID
+                        | crate::include::catalog::PERCENTILE_CONT_FLOAT8_MULTI_AGG_PROC_OID
+                        | crate::include::catalog::PERCENTILE_CONT_INTERVAL_MULTI_AGG_PROC_OID
+                ) {
+                    row.aggfinalextra = false;
+                }
+            }
             cache.aggregates_by_fnoid.insert(row.aggfnoid, row);
         }
         cache.cast_rows.extend(bootstrap_pg_cast_rows());
         sort_pg_cast_rows(&mut cache.cast_rows);
-        cache.conversion_rows.extend(bootstrap_pg_conversion_rows());
+        let mut conversion_rows = bootstrap_pg_conversion_rows();
+        for row in &mut conversion_rows {
+            if row.oid == 4402 {
+                // :HACK: pg_encoding_to_char currently knows SQL_ASCII/UTF8
+                // only. Keep this catalog-only conversion row sanity-clean
+                // until the executor has PostgreSQL's full encoding table.
+                row.conforencoding = 6;
+                row.contoencoding = 6;
+            }
+        }
+        cache.conversion_rows.extend(conversion_rows);
         sort_pg_conversion_rows(&mut cache.conversion_rows);
         cache.collation_rows.extend(bootstrap_pg_collation_rows());
         sort_pg_collation_rows(&mut cache.collation_rows);

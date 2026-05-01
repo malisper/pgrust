@@ -348,6 +348,72 @@ fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             false,
         ),
         operator_row(
+            900,
+            "=",
+            MONEY_TYPE_OID,
+            MONEY_TYPE_OID,
+            900,
+            901,
+            888,
+            true,
+            false,
+        ),
+        operator_row(
+            901,
+            "<>",
+            MONEY_TYPE_OID,
+            MONEY_TYPE_OID,
+            901,
+            900,
+            889,
+            false,
+            false,
+        ),
+        operator_row(
+            902,
+            "<",
+            MONEY_TYPE_OID,
+            MONEY_TYPE_OID,
+            903,
+            905,
+            890,
+            false,
+            false,
+        ),
+        operator_row(
+            903,
+            ">",
+            MONEY_TYPE_OID,
+            MONEY_TYPE_OID,
+            902,
+            904,
+            892,
+            false,
+            false,
+        ),
+        operator_row(
+            904,
+            "<=",
+            MONEY_TYPE_OID,
+            MONEY_TYPE_OID,
+            905,
+            903,
+            891,
+            false,
+            false,
+        ),
+        operator_row(
+            905,
+            ">=",
+            MONEY_TYPE_OID,
+            MONEY_TYPE_OID,
+            904,
+            902,
+            893,
+            false,
+            false,
+        ),
+        operator_row(
             9900,
             "<",
             TID_TYPE_OID,
@@ -413,6 +479,9 @@ fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             false,
             false,
         ),
+        // :HACK: pgrust has pg_lsn comparison operators but no cataloged
+        // pg_lsn btree/hash opclasses yet. Keep join flags false until those
+        // opclasses and support functions are represented together.
         operator_row(
             3222,
             "=",
@@ -421,8 +490,8 @@ fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             3222,
             3223,
             3233,
-            true,
-            true,
+            false,
+            false,
         ),
         operator_row(
             3223,
@@ -479,6 +548,8 @@ fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             false,
             false,
         ),
+        // :HACK: pgrust exposes xid equality for catalog compatibility but
+        // does not have the upstream hash/xid_ops opclass yet.
         operator_row(
             352,
             "=",
@@ -487,8 +558,8 @@ fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             352,
             3315,
             68,
-            true,
-            true,
+            false,
+            false,
         ),
         operator_row(
             3315,
@@ -551,7 +622,7 @@ fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             XID8_TYPE_OID,
             XID8_TYPE_OID,
             5074,
-            5075,
+            5076,
             5034,
             false,
             false,
@@ -562,7 +633,7 @@ fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             XID8_TYPE_OID,
             XID8_TYPE_OID,
             5073,
-            5076,
+            5075,
             5035,
             false,
             false,
@@ -1617,7 +1688,7 @@ fn catalog_sanity_operator_rows() -> Vec<PgOperatorRow> {
             2989,
             2981,
             true,
-            false,
+            true,
         ),
         operator_row(
             2989,
@@ -2194,7 +2265,7 @@ fn generic_btree_operator_rows() -> Vec<PgOperatorRow> {
             1071,
             ARRAY_CMP_EQ_PROC_OID,
             true,
-            false,
+            true,
         ),
         operator_row(
             1071,
@@ -5229,6 +5300,7 @@ fn brin_scalar_comparison_operator_rows(
                 | FLOAT4_TYPE_OID
                 | FLOAT8_TYPE_OID
                 | BPCHAR_TYPE_OID
+                | DATE_TYPE_OID
                 | TIMESTAMP_TYPE_OID
                 | TIMESTAMPTZ_TYPE_OID
         );

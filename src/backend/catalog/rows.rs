@@ -354,11 +354,13 @@ pub(crate) fn add_builtin_description_rows(
 fn documented_operator_proc_description(oid: u32) -> Option<String> {
     Some(
         match oid {
+            212 => "implementation of - operator",
             378 => "append element onto end of array",
             379 => "prepend element onto front of array",
             1035 => "add/update ACL item",
             1036 => "remove ACL item",
             1037 => "contains",
+            2747 => "implementation of && operator",
             3217 => "get value from jsonb with path elements",
             3940 => "get value from jsonb as text with path elements",
             3951 => "get value from json with path elements",
