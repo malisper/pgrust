@@ -16340,6 +16340,18 @@ fn information_schema_view_metadata_tracks_updatable_views() {
     session
         .execute(
             &db,
+            "create view ro_view8 as select a, b from base_tbl order by a offset 1",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view ro_view9 as select a, b from base_tbl order by a limit 1",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
             "create view rw_view14 as select ctid, a, b from base_tbl",
         )
         .unwrap();
@@ -16367,6 +16379,8 @@ fn information_schema_view_metadata_tracks_updatable_views() {
         ),
         vec![
             vec![Value::Text("ro_view1".into()), Value::Text("NO".into())],
+            vec![Value::Text("ro_view8".into()), Value::Text("NO".into())],
+            vec![Value::Text("ro_view9".into()), Value::Text("NO".into())],
             vec![Value::Text("rw_view14".into()), Value::Text("YES".into())],
             vec![Value::Text("rw_view15".into()), Value::Text("YES".into())],
             vec![Value::Text("rw_view16".into()), Value::Text("YES".into())],
@@ -16385,6 +16399,16 @@ fn information_schema_view_metadata_tracks_updatable_views() {
         vec![
             vec![
                 Value::Text("ro_view1".into()),
+                Value::Text("NO".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view8".into()),
+                Value::Text("NO".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view9".into()),
                 Value::Text("NO".into()),
                 Value::Text("NO".into()),
             ],
@@ -16423,6 +16447,26 @@ fn information_schema_view_metadata_tracks_updatable_views() {
             ],
             vec![
                 Value::Text("ro_view1".into()),
+                Value::Text("b".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view8".into()),
+                Value::Text("a".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view8".into()),
+                Value::Text("b".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view9".into()),
+                Value::Text("a".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view9".into()),
                 Value::Text("b".into()),
                 Value::Text("NO".into()),
             ],
@@ -22563,11 +22607,13 @@ fn insert_on_conflict_works_for_auto_updatable_views() {
 }
 
 #[test]
-fn nested_views_with_user_rules_are_not_auto_updatable() {
-    let base = temp_dir("auto_view_nested_rule_reject");
+fn nested_views_with_unconditional_user_rules_route_through_rule() {
+    let base = temp_dir("auto_view_nested_rule_update");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into base_items values (1, 'alpha')")
         .unwrap();
     db.execute(
         1,
@@ -22585,12 +22631,14 @@ fn nested_views_with_user_rules_are_not_auto_updatable() {
     )
     .unwrap();
 
-    assert_view_dml_error(
+    assert_eq!(
         db.execute(1, "update outer_view set name = 'beta' where id = 1")
-            .unwrap_err(),
-        "cannot update view \"outer_view\"",
-        "nested view \"inner_view\"",
-        "ON UPDATE DO INSTEAD rule",
+            .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items order by id"),
+        vec![vec![Value::Int32(1), Value::Text("beta".into())]]
     );
 }
 

@@ -157,6 +157,25 @@ pub(super) fn resolve_arbiters(
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundOnConflictArbiters, ParseError> {
+    let inference_scope = scope_for_relation(Some(relation_name), desc);
+    resolve_arbiters_with_inference_scope(
+        clause,
+        relation_name,
+        relation_oid,
+        desc,
+        &inference_scope,
+        catalog,
+    )
+}
+
+pub(super) fn resolve_arbiters_with_inference_scope(
+    clause: &OnConflictClause,
+    relation_name: &str,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    inference_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundOnConflictArbiters, ParseError> {
     match clause.target.as_ref() {
         None => {
             let indexes = inferable_unique_indexes(&catalog.index_relations_for_heap(relation_oid));
@@ -170,17 +189,23 @@ pub(super) fn resolve_arbiters(
             })
         }
         Some(OnConflictTarget::Inference(spec)) => {
-            let scope = scope_for_relation(Some(relation_name), desc);
             let requested = spec
                 .elements
                 .iter()
-                .map(|element| bind_inference_element(element, &scope, catalog))
+                .map(|element| bind_inference_element(element, inference_scope, catalog))
                 .collect::<Result<Vec<_>, _>>()?;
             let requested_predicate = spec
                 .predicate
                 .as_ref()
                 .map(|predicate| {
-                    bind_expr_with_outer_and_ctes(predicate, &scope, catalog, &[], None, &[])
+                    bind_expr_with_outer_and_ctes(
+                        predicate,
+                        inference_scope,
+                        catalog,
+                        &[],
+                        None,
+                        &[],
+                    )
                 })
                 .transpose()?;
             let mut seen = HashSet::new();

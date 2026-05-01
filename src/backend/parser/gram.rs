@@ -18428,6 +18428,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
             build_alter_table_alter_column_default(inner)?,
         )),
+        Rule::alter_view_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
+            build_alter_table_alter_column_default(inner)?,
+        )),
         Rule::alter_table_alter_column_compression_stmt => {
             Ok(Statement::AlterTableAlterColumnCompression(
                 build_alter_table_alter_column_compression(inner)?,
@@ -18466,6 +18469,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             build_alter_relation_set_schema(inner)?,
         )),
         Rule::alter_view_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
+        Rule::alter_view_reset_stmt => {
+            Ok(Statement::AlterTableReset(build_alter_table_reset(inner)?))
+        }
         Rule::alter_materialized_view_set_schema_stmt => Ok(
             Statement::AlterMaterializedViewSetSchema(build_alter_relation_set_schema(inner)?),
         ),
@@ -24497,6 +24503,12 @@ fn build_alter_table_reset(pair: Pair<'_, Rule>) -> Result<AlterTableResetStatem
                 only = parsed_only;
                 table_name = Some(parsed_table_name);
             }
+            Rule::alter_view_target => {
+                let (parsed_if_exists, parsed_table_name) = build_alter_view_target(part)?;
+                if_exists = parsed_if_exists;
+                only = false;
+                table_name = Some(parsed_table_name);
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::reset_reloption => options.push(build_reset_reloption_name(part)?),
             _ => {}
@@ -27411,6 +27423,12 @@ fn build_alter_table_alter_column_type(
                 only = parsed_only;
                 table_name = Some(parsed_table_name);
             }
+            Rule::alter_view_target => {
+                let (parsed_if_exists, parsed_table_name) = build_alter_view_target(part)?;
+                if_exists = parsed_if_exists;
+                only = false;
+                table_name = Some(parsed_table_name);
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
             Rule::alter_table_column_type_action => {
@@ -27465,6 +27483,12 @@ fn build_alter_table_alter_column_default(
                     build_alter_table_target(part)?;
                 if_exists = parsed_if_exists;
                 only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::alter_view_target => {
+                let (parsed_if_exists, parsed_table_name) = build_alter_view_target(part)?;
+                if_exists = parsed_if_exists;
+                only = false;
                 table_name = Some(parsed_table_name);
             }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
@@ -28614,17 +28638,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::subscript_suffix => {
                         let subscript = build_array_subscript(suffix)?;
                         expr = match expr {
-                            SqlExpr::ArraySubscript {
-                                array,
-                                mut subscripts,
-                            } => {
-                                subscripts.push(subscript);
-                                SqlExpr::ArraySubscript { array, subscripts }
+                            SqlExpr::Negate(inner) => {
+                                SqlExpr::Negate(Box::new(append_array_subscript(*inner, subscript)))
                             }
-                            other => SqlExpr::ArraySubscript {
-                                array: Box::new(other),
-                                subscripts: vec![subscript],
-                            },
+                            other => append_array_subscript(other, subscript),
                         };
                     }
                     Rule::field_select_suffix => {
@@ -29305,6 +29322,22 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             expected: "expression",
             actual: pair.as_str().into(),
         }),
+    }
+}
+
+fn append_array_subscript(expr: SqlExpr, subscript: ArraySubscript) -> SqlExpr {
+    match expr {
+        SqlExpr::ArraySubscript {
+            array,
+            mut subscripts,
+        } => {
+            subscripts.push(subscript);
+            SqlExpr::ArraySubscript { array, subscripts }
+        }
+        other => SqlExpr::ArraySubscript {
+            array: Box::new(other),
+            subscripts: vec![subscript],
+        },
     }
 }
 

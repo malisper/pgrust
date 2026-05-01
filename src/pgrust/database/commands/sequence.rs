@@ -1,16 +1,23 @@
 use super::super::*;
 use crate::backend::executor::expr_reg::format_regprocedure_oid_optional;
 use crate::backend::parser::{BoundRelation, CatalogLookup, SequenceOwnedByClause};
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, INT8_TYPE_OID, PG_CLASS_RELATION_OID,
-    PG_PROC_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID,
 };
 use crate::pgrust::database::ddl::{ensure_relation_owner, relation_kind_name};
 use crate::pgrust::database::sequences::{
     apply_sequence_option_patch, initial_sequence_state, pg_sequence_row,
     resolve_sequence_options_spec, sequence_type_oid_for_raw_type,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DependentSequenceView {
+    relation_oid: u32,
+    display_name: String,
+}
 
 fn lookup_sequence_relation_for_ddl(
     catalog: &dyn CatalogLookup,
@@ -49,6 +56,42 @@ fn push_missing_sequence_notice(catalog: &dyn CatalogLookup, sequence_name: &str
         "sequence \"{}\" does not exist, skipping",
         sequence_name.rsplit('.').next().unwrap_or(sequence_name)
     ));
+}
+
+fn dependent_views_for_sequence(
+    catalog: &dyn CatalogLookup,
+    sequence_oid: u32,
+) -> Vec<DependentSequenceView> {
+    let rewrite_rows = catalog
+        .rewrite_rows()
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    let mut views = Vec::new();
+    for row in catalog.depend_rows_referencing(PG_CLASS_RELATION_OID, sequence_oid, None) {
+        if row.classid != PG_REWRITE_RELATION_OID
+            || row.objsubid != 0
+            || row.deptype != DEPENDENCY_NORMAL
+        {
+            continue;
+        }
+        let Some(rewrite) = rewrite_rows.get(&row.objid) else {
+            continue;
+        };
+        let Some(class_row) = catalog.class_row_by_oid(rewrite.ev_class) else {
+            continue;
+        };
+        if !matches!(class_row.relkind, 'v' | 'm') || !seen.insert(class_row.oid) {
+            continue;
+        }
+        views.push(DependentSequenceView {
+            relation_oid: class_row.oid,
+            display_name: class_row.relname,
+        });
+    }
+    views.sort_by_key(|view| view.relation_oid);
+    views
 }
 
 fn resolve_owned_by_clause(
@@ -664,7 +707,11 @@ impl Database {
             let type_refs = find_sequence_type_relation_refs(&catalog, relation.relation_oid);
             let function_dependents =
                 find_sequence_function_dependents(&catalog, relation.relation_oid);
-            if (!refs.is_empty() || !type_refs.is_empty() || !function_dependents.is_empty())
+            let dependent_views = dependent_views_for_sequence(&catalog, relation.relation_oid);
+            if (!refs.is_empty()
+                || !type_refs.is_empty()
+                || !function_dependents.is_empty()
+                || !dependent_views.is_empty())
                 && !drop_stmt.cascade
             {
                 let mut dependents = refs
@@ -683,6 +730,12 @@ impl Database {
                 dependents.extend(function_dependents.iter().filter_map(|oid| {
                     format_regprocedure_oid_optional(*oid, Some(&catalog))
                         .map(|name| format!("function {name}"))
+                }));
+                dependents.extend(dependent_views.iter().map(|view| {
+                    format!(
+                        "view {} depends on sequence {}",
+                        view.display_name, sequence_name
+                    )
                 }));
                 result = Err(ExecError::DetailedError {
                     message: format!(
@@ -796,6 +849,26 @@ impl Database {
                         .write()
                         .note_function_drop(proc_oid, &self.stats);
                     next_cid = next_cid.saturating_add(1);
+                }
+                for view in dependent_views {
+                    let effect = match self
+                        .catalog
+                        .write()
+                        .drop_view_by_oid_mvcc(view.relation_oid, &ctx)
+                    {
+                        Ok((_, effect)) => effect,
+                        Err(CatalogError::UnknownTable(_)) => continue,
+                        Err(err) => {
+                            result = Err(map_catalog_error(err));
+                            break;
+                        }
+                    };
+                    push_notice(format!("drop cascades to view {}", view.display_name));
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                }
+                if result.is_err() {
+                    break;
                 }
             }
 

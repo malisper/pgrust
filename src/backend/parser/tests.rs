@@ -4603,6 +4603,35 @@ fn parse_alter_table_constraint_statements() {
             default_expr_sql: None,
         })
     );
+
+    let stmt = parse_statement(
+        "alter view if exists items_v alter column note set default 'view default'",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement {
+            if_exists: true,
+            only: false,
+            table_name: "items_v".into(),
+            column_name: "note".into(),
+            default_expr: Some(SqlExpr::Const(Value::Text("view default".into()))),
+            default_expr_sql: Some("'view default'".into()),
+        })
+    );
+
+    let stmt = parse_statement("alter view items_v alter note drop default").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items_v".into(),
+            column_name: "note".into(),
+            default_expr: None,
+            default_expr_sql: None,
+        })
+    );
 }
 
 #[test]
@@ -9877,6 +9906,13 @@ fn parse_array_subscript_expressions_and_targets() {
         stmt.targets[3].expr,
         SqlExpr::ArraySubscript { ref subscripts, .. }
             if subscripts[0].is_slice && subscripts[0].lower.is_some() && subscripts[0].upper.is_none()
+    ));
+
+    let stmt = parse_select("select -b[2] from widgets").unwrap();
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::Negate(ref inner)
+            if matches!(**inner, SqlExpr::ArraySubscript { .. })
     ));
 
     match parse_statement("update widgets set a[1] = 1, b[1:2] = array[1,2]").unwrap() {

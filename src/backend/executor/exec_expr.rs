@@ -8467,6 +8467,72 @@ fn eval_pg_relation_is_publishable(
     }
 }
 
+pub(crate) fn eval_pg_relation_is_updatable(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [relation, Value::Bool(include_triggers)] => {
+            let relation_oid = oid_arg_to_u32(relation, "pg_relation_is_updatable")?;
+            let catalog = executor_catalog(ctx)?;
+            Ok(Value::Int32(
+                crate::backend::parser::analyze::pg_relation_is_updatable_events(
+                    &*catalog,
+                    relation_oid,
+                    *include_triggers,
+                ),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_relation_is_updatable(regclass, boolean)",
+            actual: format!("PgRelationIsUpdatable({} args)", values.len()),
+        })),
+    }
+}
+
+pub(crate) fn eval_pg_column_is_updatable(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [relation, attnum, Value::Bool(include_triggers)] => {
+            let relation_oid = oid_arg_to_u32(relation, "pg_column_is_updatable")?;
+            let attnum = match attnum {
+                Value::Int16(value) => *value,
+                Value::Int32(value) => {
+                    i16::try_from(*value).map_err(|_| ExecError::TypeMismatch {
+                        op: "pg_column_is_updatable",
+                        left: attnum.clone(),
+                        right: Value::Int16(0),
+                    })?
+                }
+                _ => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "pg_column_is_updatable",
+                        left: attnum.clone(),
+                        right: Value::Int16(0),
+                    });
+                }
+            };
+            let catalog = executor_catalog(ctx)?;
+            Ok(Value::Bool(
+                crate::backend::parser::analyze::pg_column_is_updatable(
+                    &*catalog,
+                    relation_oid,
+                    attnum,
+                    *include_triggers,
+                ),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_column_is_updatable(regclass, smallint, boolean)",
+            actual: format!("PgColumnIsUpdatable({} args)", values.len()),
+        })),
+    }
+}
+
 fn eval_pg_partition_root(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     match values {
         [Value::Null] => Ok(Value::Null),
@@ -11887,6 +11953,8 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::BrinSummarizeNewValues
         | BuiltinScalarFunction::BrinSummarizeRange
         | BuiltinScalarFunction::BrinDesummarizeRange
+        | BuiltinScalarFunction::PgRelationIsUpdatable
+        | BuiltinScalarFunction::PgColumnIsUpdatable
         | BuiltinScalarFunction::PgTablespaceLocation => Err(ExecError::DetailedError {
             message: "catalog helper requires executor context".into(),
             detail: None,
@@ -12231,6 +12299,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::Exp
         | BuiltinScalarFunction::Ln
         | BuiltinScalarFunction::Sin
+        | BuiltinScalarFunction::Cos
         | BuiltinScalarFunction::Sinh
         | BuiltinScalarFunction::Cosh
         | BuiltinScalarFunction::Tanh
@@ -13455,6 +13524,8 @@ pub(crate) fn eval_native_builtin_scalar_typed_value_call(
             eval_pg_identify_object_as_address(values, ctx)
         }
         BuiltinScalarFunction::PgGetObjectAddress => eval_pg_get_object_address(values, ctx),
+        BuiltinScalarFunction::PgRelationIsUpdatable => eval_pg_relation_is_updatable(values, ctx),
+        BuiltinScalarFunction::PgColumnIsUpdatable => eval_pg_column_is_updatable(values, ctx),
         BuiltinScalarFunction::PgStatGetBackendWal => {
             Ok(pg_stat_get_backend_wal_value(values, ctx))
         }
@@ -14475,6 +14546,8 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgRelationIsPublishable => {
             eval_pg_relation_is_publishable(&values, ctx)
         }
+        BuiltinScalarFunction::PgRelationIsUpdatable => eval_pg_relation_is_updatable(&values, ctx),
+        BuiltinScalarFunction::PgColumnIsUpdatable => eval_pg_column_is_updatable(&values, ctx),
         BuiltinScalarFunction::PgIndexAmHasProperty => eval_pg_indexam_has_property(&values),
         BuiltinScalarFunction::PgIndexHasProperty => eval_pg_index_has_property(&values, ctx),
         BuiltinScalarFunction::PgIndexColumnHasProperty => {
@@ -14508,6 +14581,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Exp => eval_exp_function(&values),
         BuiltinScalarFunction::Ln => eval_ln_function(&values),
         BuiltinScalarFunction::Sin => eval_unary_float_function("sin", &values, |v| Ok(v.sin())),
+        BuiltinScalarFunction::Cos => eval_unary_float_function("cos", &values, |v| Ok(v.cos())),
         BuiltinScalarFunction::Sinh => eval_unary_float_function("sinh", &values, |v| Ok(v.sinh())),
         BuiltinScalarFunction::Cosh => eval_unary_float_function("cosh", &values, |v| Ok(v.cosh())),
         BuiltinScalarFunction::Tanh => eval_unary_float_function("tanh", &values, |v| Ok(v.tanh())),

@@ -500,17 +500,20 @@ fn simplify_base_restrictinfo(root: &mut PlannerInfo) {
     }
 }
 
-fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
-    super::super::and_exprs(ordered_base_restrict_exprs(rel))
+fn base_filter_expr(rel: &RelOptInfo, catalog: &dyn CatalogLookup) -> Option<Expr> {
+    super::super::and_exprs(ordered_base_restrict_exprs(rel, catalog))
 }
 
-pub(super) fn ordered_base_restrict_exprs(rel: &RelOptInfo) -> Vec<Expr> {
+pub(super) fn ordered_base_restrict_exprs(
+    rel: &RelOptInfo,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Expr> {
     let mut items = rel
         .baserestrictinfo
         .iter()
         .enumerate()
         .map(|(index, restrict)| {
-            let cost = qual_order_cost(&restrict.clause) * CPU_OPERATOR_COST;
+            let cost = qual_order_cost(&restrict.clause, catalog) * CPU_OPERATOR_COST;
             let security_level = if restrict.leakproof && cost < 10.0 * CPU_OPERATOR_COST {
                 0
             } else {
@@ -528,15 +531,51 @@ pub(super) fn ordered_base_restrict_exprs(rel: &RelOptInfo) -> Vec<Expr> {
     items.into_iter().map(|(_, _, _, clause)| clause).collect()
 }
 
-fn qual_order_cost(expr: &Expr) -> f64 {
+fn qual_order_cost(expr: &Expr, catalog: &dyn CatalogLookup) -> f64 {
     match expr {
-        Expr::Op(op) => 1.0 + op.args.iter().map(qual_order_cost).sum::<f64>(),
-        Expr::Func(func) => 10.0 + func.args.iter().map(qual_order_cost).sum::<f64>(),
-        Expr::Bool(bool_expr) => 1.0 + bool_expr.args.iter().map(qual_order_cost).sum::<f64>(),
-        Expr::Coalesce(left, right) => 1.0 + qual_order_cost(left) + qual_order_cost(right),
-        Expr::IsNull(inner) | Expr::IsNotNull(inner) => 1.0 + qual_order_cost(inner),
+        Expr::Op(op) => {
+            let proc_oid = if op.opfuncid != 0 {
+                Some(op.opfuncid)
+            } else {
+                catalog
+                    .operator_by_oid(op.opno)
+                    .map(|operator| operator.oprcode)
+            };
+            proc_order_cost(proc_oid, 1.0, catalog)
+                + op.args
+                    .iter()
+                    .map(|arg| qual_order_cost(arg, catalog))
+                    .sum::<f64>()
+        }
+        Expr::Func(func) => {
+            proc_order_cost(Some(func.funcid), 10.0, catalog)
+                + func
+                    .args
+                    .iter()
+                    .map(|arg| qual_order_cost(arg, catalog))
+                    .sum::<f64>()
+        }
+        Expr::Bool(bool_expr) => {
+            1.0 + bool_expr
+                .args
+                .iter()
+                .map(|arg| qual_order_cost(arg, catalog))
+                .sum::<f64>()
+        }
+        Expr::Coalesce(left, right) => {
+            1.0 + qual_order_cost(left, catalog) + qual_order_cost(right, catalog)
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => 1.0 + qual_order_cost(inner, catalog),
         _ => predicate_cost(expr),
     }
+}
+
+fn proc_order_cost(proc_oid: Option<u32>, fallback: f64, catalog: &dyn CatalogLookup) -> f64 {
+    proc_oid
+        .filter(|oid| *oid != 0)
+        .and_then(|oid| catalog.proc_row_by_oid(oid))
+        .map(|row| row.procost)
+        .unwrap_or(fallback)
 }
 
 fn scalar_array_null_filter(expr: &Expr) -> bool {
@@ -2629,7 +2668,7 @@ pub(super) fn relation_ordered_index_paths(
             toast,
             tablesample,
         } if *relkind == 'r' && tablesample.is_none() => {
-            let filter = base_filter_expr(rel);
+            let filter = base_filter_expr(rel, catalog);
             let required_index_only_attrs = collect_required_index_only_attrs_for_root(
                 root,
                 rtindex,
@@ -2660,7 +2699,7 @@ pub(super) fn relation_ordered_index_paths(
             rtindex,
             *relation_oid,
             rte.desc.clone(),
-            base_filter_expr(rel),
+            base_filter_expr(rel, catalog),
             &order_items,
             pathkeys,
             catalog,
@@ -3696,7 +3735,8 @@ fn simple_subquery_where_qual_is_contradictory(query: &Query) -> bool {
 }
 
 fn subquery_filter_pushdown_is_safe(query: &Query) -> bool {
-    !query.distinct
+    !query.depends_on_row_security
+        && !query.distinct
         && query.group_by.is_empty()
         && query.accumulators.is_empty()
         && query.window_clauses.is_empty()
@@ -3769,7 +3809,7 @@ fn push_subquery_filter(
         return (query, Some(filter));
     };
     query.where_qual = Some(match query.where_qual.take() {
-        Some(existing) => Expr::and(existing, pushed),
+        Some(existing) => Expr::and(pushed, existing),
         None => pushed,
     });
     (query, None)
@@ -5114,7 +5154,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         .simple_rel_array
         .get(rtindex)
         .and_then(Option::as_ref)
-        .and_then(base_filter_expr);
+        .and_then(|rel| base_filter_expr(rel, catalog));
     if let RangeTblEntryKind::Relation { relation_oid, .. } = rte.kind.clone()
         && {
             let is_declarative_partition = catalog
@@ -5525,7 +5565,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         .simple_rel_array
         .get(rtindex)
         .and_then(Option::as_ref)
-        .and_then(base_filter_expr);
+        .and_then(|rel| base_filter_expr(rel, catalog));
     let required_index_only_attrs = collect_required_index_only_attrs_for_root(
         root,
         rtindex,
@@ -5604,7 +5644,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 root.config,
             );
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
-            if let Some(filter) = base_filter_expr(rel) {
+            if let Some(filter) = base_filter_expr(rel, catalog) {
                 path = optimize_path_with_config(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
@@ -5633,7 +5673,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 root.config,
             );
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
-            if let Some(filter) = base_filter_expr(rel) {
+            if let Some(filter) = base_filter_expr(rel, catalog) {
                 path = optimize_path_with_config(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
@@ -5681,7 +5721,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 root.config,
             );
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
-            if let Some(filter) = base_filter_expr(rel) {
+            if let Some(filter) = base_filter_expr(rel, catalog) {
                 path = optimize_path_with_config(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
@@ -5706,7 +5746,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 root.config,
             );
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
-            if let Some(filter) = base_filter_expr(rel) {
+            if let Some(filter) = base_filter_expr(rel, catalog) {
                 path = optimize_path_with_config(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
@@ -5721,7 +5761,8 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rel.add_path(path);
         }
         RangeTblEntryKind::Subquery { query } => {
-            let (query, filter) = push_subquery_filter(rtindex, *query, base_filter_expr(rel));
+            let (query, filter) =
+                push_subquery_filter(rtindex, *query, base_filter_expr(rel, catalog));
             let mut path = build_subquery_scan_path(
                 rtindex,
                 query,

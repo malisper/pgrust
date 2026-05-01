@@ -2359,7 +2359,7 @@ pub(super) fn validate_scalar_function_arity(
                 matches!(args.len(), 2 | 3)
             }
             BuiltinScalarFunction::Pi => args.is_empty(),
-            BuiltinScalarFunction::Sin => args.len() == 1,
+            BuiltinScalarFunction::Sin | BuiltinScalarFunction::Cos => args.len() == 1,
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
             }
@@ -2546,6 +2546,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
             | BuiltinScalarFunction::PgStatisticsObjIsVisible => args.len() == 1,
+            BuiltinScalarFunction::PgRelationIsUpdatable => args.len() == 2,
+            BuiltinScalarFunction::PgColumnIsUpdatable => args.len() == 3,
             BuiltinScalarFunction::PgRelationIsPublishable => args.len() == 1,
             BuiltinScalarFunction::PgIndexAmHasProperty => args.len() == 2,
             BuiltinScalarFunction::PgIndexHasProperty => args.len() == 2,
@@ -3648,6 +3650,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("dpi", BuiltinScalarFunction::Pi),
         ("sin", BuiltinScalarFunction::Sin),
         ("dsin", BuiltinScalarFunction::Sin),
+        ("cos", BuiltinScalarFunction::Cos),
+        ("dcos", BuiltinScalarFunction::Cos),
         ("uuid_in", BuiltinScalarFunction::UuidIn),
         ("uuid_out", BuiltinScalarFunction::UuidOut),
         ("uuid_recv", BuiltinScalarFunction::UuidRecv),
@@ -4355,6 +4359,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_relation_is_publishable",
             BuiltinScalarFunction::PgRelationIsPublishable,
+        ),
+        (
+            "pg_relation_is_updatable",
+            BuiltinScalarFunction::PgRelationIsUpdatable,
+        ),
+        (
+            "pg_column_is_updatable",
+            BuiltinScalarFunction::PgColumnIsUpdatable,
         ),
         (
             "pg_indexam_has_property",
@@ -5207,6 +5219,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("numeric_ln", BuiltinScalarFunction::Ln),
         ("sin", BuiltinScalarFunction::Sin),
         ("dsin", BuiltinScalarFunction::Sin),
+        ("cos", BuiltinScalarFunction::Cos),
+        ("dcos", BuiltinScalarFunction::Cos),
         ("sinh", BuiltinScalarFunction::Sinh),
         ("cosh", BuiltinScalarFunction::Cosh),
         ("tanh", BuiltinScalarFunction::Tanh),
@@ -5621,6 +5635,24 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         }
         if by_func
             .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgRelationIsUpdatable)
+        {
+            by_func.push((
+                BuiltinScalarFunction::PgRelationIsUpdatable,
+                SqlType::new(SqlTypeKind::Int4),
+            ));
+        }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgColumnIsUpdatable)
+        {
+            by_func.push((
+                BuiltinScalarFunction::PgColumnIsUpdatable,
+                SqlType::new(SqlTypeKind::Bool),
+            ));
+        }
+        if by_func
+            .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgColumnSize)
         {
             by_func.push((
@@ -5832,6 +5864,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
             | BuiltinScalarFunction::PgStatisticsObjIsVisible
             | BuiltinScalarFunction::PgFunctionIsVisible
+            | BuiltinScalarFunction::PgRelationIsUpdatable
+            | BuiltinScalarFunction::PgColumnIsUpdatable
             | BuiltinScalarFunction::RowSecurityActive
             | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationSize

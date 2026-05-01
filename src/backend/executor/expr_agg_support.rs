@@ -1,8 +1,9 @@
 use super::agg::{AccumState, AggregateRuntime, CustomAggregateRuntime};
 use super::exec_expr::append_array_value;
 use super::exec_expr::{
-    ensure_builtin_side_effects_allowed, eval_pg_describe_object, eval_pg_get_object_address,
-    eval_pg_identify_object, eval_pg_identify_object_as_address,
+    ensure_builtin_side_effects_allowed, eval_pg_column_is_updatable, eval_pg_describe_object,
+    eval_pg_get_object_address, eval_pg_identify_object, eval_pg_identify_object_as_address,
+    eval_pg_relation_is_updatable,
 };
 use super::expr_casts::cast_value_with_source_type_catalog_and_config;
 use super::expr_math::eval_abs_function;
@@ -366,6 +367,12 @@ pub(crate) fn execute_scalar_function_value_call_with_arg_types(
             }
             BuiltinScalarFunction::PgGetObjectAddress => {
                 return eval_pg_get_object_address(arg_values, ctx);
+            }
+            BuiltinScalarFunction::PgRelationIsUpdatable => {
+                return eval_pg_relation_is_updatable(arg_values, ctx);
+            }
+            BuiltinScalarFunction::PgColumnIsUpdatable => {
+                return eval_pg_column_is_updatable(arg_values, ctx);
             }
             _ => {}
         }

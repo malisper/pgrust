@@ -5,14 +5,17 @@ use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table,
-    lookup_table_or_partitioned_table_for_alter_table, validate_alter_table_alter_column_options,
+    validate_alter_table_alter_column_options,
 };
 
 fn normalize_view_reloption(
     option: &crate::backend::parser::RelOption,
 ) -> Result<String, ExecError> {
     let name = option.name.to_ascii_lowercase();
-    if !matches!(name.as_str(), "security_barrier" | "security_invoker") {
+    if !matches!(
+        name.as_str(),
+        "security_barrier" | "security_invoker" | "check_option"
+    ) {
         return Err(ExecError::DetailedError {
             message: format!("unrecognized parameter \"{}\"", option.name),
             detail: None,
@@ -20,22 +23,57 @@ fn normalize_view_reloption(
             sqlstate: "22023",
         });
     }
-    let value = match option.value.to_ascii_lowercase().as_str() {
-        "true" | "on" => "true",
-        "false" | "off" => "false",
-        _ => {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "invalid value for boolean option \"{name}\": {}",
-                    option.value
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "22023",
-            });
+    let value = if name == "check_option" {
+        match option.value.to_ascii_lowercase().as_str() {
+            "local" => "local",
+            "cascaded" => "cascaded",
+            _ => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "invalid value for enum option \"check_option\": {}",
+                        option.value
+                    ),
+                    detail: Some("Valid values are \"local\" and \"cascaded\".".into()),
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
+        }
+    } else {
+        match option.value.to_ascii_lowercase().as_str() {
+            "true" | "on" => "true",
+            "false" | "off" => "false",
+            _ => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "invalid value for boolean option \"{name}\": {}",
+                        option.value
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
         }
     };
     Ok(format!("{name}={value}"))
+}
+
+fn normalize_view_reset_reloption(option: &str) -> Result<String, ExecError> {
+    let name = option.to_ascii_lowercase();
+    if matches!(
+        name.as_str(),
+        "security_barrier" | "security_invoker" | "check_option"
+    ) {
+        Ok(name)
+    } else {
+        Err(ExecError::DetailedError {
+            message: format!("unrecognized parameter \"{option}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        })
+    }
 }
 
 fn set_view_reloptions(
@@ -66,18 +104,18 @@ fn reset_view_reloptions(
     current: Option<Vec<String>>,
     options: &[String],
 ) -> Result<Option<Vec<String>>, ExecError> {
-    for option in options {
-        let name = option.to_ascii_lowercase();
-        if !matches!(name.as_str(), "security_barrier" | "security_invoker") {
-            return Err(ExecError::DetailedError {
-                message: format!("unrecognized parameter \"{option}\""),
-                detail: None,
-                hint: None,
-                sqlstate: "22023",
-            });
-        }
+    let resets = options
+        .iter()
+        .map(|option| normalize_view_reset_reloption(option))
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    let reloptions = reset_reloptions(current, &resets).unwrap_or_default();
+    if resets
+        .iter()
+        .any(|option| option.eq_ignore_ascii_case("check_option"))
+    {
+        return Ok(Some(reloptions));
     }
-    Ok(reset_reloptions(current, options))
+    Ok((!reloptions.is_empty()).then_some(reloptions))
 }
 
 impl Database {
@@ -292,13 +330,26 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
-            &catalog,
-            &alter_stmt.table_name,
-            alter_stmt.if_exists,
-        )?
-        else {
-            return Ok(StatementResult::AffectedRows(0));
+        let relation = match catalog.lookup_any_relation(&alter_stmt.table_name) {
+            Some(relation) if matches!(relation.relkind, 'r' | 'p' | 'f' | 'v') => relation,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: alter_stmt.table_name.clone(),
+                    expected: "table",
+                }));
+            }
+            None if alter_stmt.if_exists => {
+                push_notice(format!(
+                    r#"relation "{}" does not exist, skipping"#,
+                    alter_stmt.table_name
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            None => {
+                return Err(ExecError::Parse(ParseError::UnknownTable(
+                    alter_stmt.table_name.clone(),
+                )));
+            }
         };
         self.table_locks.lock_table_interruptible(
             relation.rel,
@@ -333,13 +384,26 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
-            &catalog,
-            &alter_stmt.table_name,
-            alter_stmt.if_exists,
-        )?
-        else {
-            return Ok(StatementResult::AffectedRows(0));
+        let relation = match catalog.lookup_any_relation(&alter_stmt.table_name) {
+            Some(relation) if matches!(relation.relkind, 'r' | 'p' | 'f' | 'v') => relation,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: alter_stmt.table_name.clone(),
+                    expected: "table",
+                }));
+            }
+            None if alter_stmt.if_exists => {
+                push_notice(format!(
+                    r#"relation "{}" does not exist, skipping"#,
+                    alter_stmt.table_name
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            None => {
+                return Err(ExecError::Parse(ParseError::UnknownTable(
+                    alter_stmt.table_name.clone(),
+                )));
+            }
         };
         if relation.namespace_oid == PG_CATALOG_NAMESPACE_OID {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -348,6 +412,29 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
+        if relation.relkind == 'v' {
+            let current = catalog
+                .class_row_by_oid(relation.relation_oid)
+                .and_then(|row| row.reloptions);
+            let reloptions = reset_view_reloptions(current, &alter_stmt.options)?;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_relation_reloptions_mvcc(relation.relation_oid, reloptions, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            return Ok(StatementResult::AffectedRows(0));
+        }
         let resets = split_table_reloption_resets(&alter_stmt.options)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),

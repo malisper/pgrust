@@ -30,8 +30,11 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
 }
 
 #[cfg(test)]
-pub(super) fn ordered_base_restrict_exprs(rel: &RelOptInfo) -> Vec<Expr> {
-    allpaths::ordered_base_restrict_exprs(rel)
+pub(super) fn ordered_base_restrict_exprs(
+    rel: &RelOptInfo,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Expr> {
+    allpaths::ordered_base_restrict_exprs(rel, catalog)
 }
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {

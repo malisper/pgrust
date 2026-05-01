@@ -39,7 +39,7 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     AliasColumnSpec, ForeignKeyAction, ForeignKeyMatchType, FromItem, GroupByItem, Query,
-    RangeTblEntryKind, SelectStatement,
+    RangeTblEntryKind, SelectStatement, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     Expr, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl, SetReturningCall,
@@ -1183,8 +1183,16 @@ fn collation_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
         .unwrap_or_else(|| oid.to_string())
 }
 
-fn create_view_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, ExecError> {
+fn create_view_reloptions(
+    options: &[RelOption],
+    check_option: ViewCheckOption,
+) -> Result<Option<Vec<String>>, ExecError> {
     let mut reloptions = Vec::new();
+    match check_option {
+        ViewCheckOption::None => {}
+        ViewCheckOption::Local => reloptions.push("check_option=local".into()),
+        ViewCheckOption::Cascaded => reloptions.push("check_option=cascaded".into()),
+    }
     for option in options {
         let name = option.name.to_ascii_lowercase();
         if !matches!(name.as_str(), "security_barrier" | "security_invoker") {
@@ -7003,7 +7011,7 @@ impl Database {
         let canonical_query_sql = append_view_check_option(canonical_sql, create_stmt.check_option);
         let mut desc = create_view_relation_desc_from_query(&stored_query);
         apply_create_view_column_names(&mut desc, &create_stmt.column_names)?;
-        let reloptions = create_view_reloptions(&create_stmt.options)?;
+        let reloptions = create_view_reloptions(&create_stmt.options, create_stmt.check_option)?;
         let mut rule_dependencies = crate::backend::catalog::store::RuleDependencies {
             constraint_oids,
             ..Default::default()

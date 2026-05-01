@@ -14,8 +14,8 @@ use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail}
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_POLICY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PgCastRow, PgConstraintRow, PgPolicyRow,
-    PgProcRow, PgRewriteRow,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgCastRow,
+    PgConstraintRow, PgPolicyRow, PgProcRow, PgRewriteRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -44,6 +44,12 @@ struct DropPolicyPlan {
     policy_oid: u32,
     relation_oid: u32,
     policy_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct DropProcPlan {
+    oid: u32,
+    signature: String,
 }
 
 #[derive(Debug, Clone)]
@@ -444,9 +450,8 @@ enum DropTableDependency {
         relation_display_name: String,
         policy: DropPolicyPlan,
     },
-    Function {
-        proc_oid: u32,
-        display_name: String,
+    Proc {
+        proc: DropProcPlan,
     },
 }
 
@@ -486,9 +491,10 @@ impl DropTableDependency {
                 "policy {} on table {relation_display_name} depends on {referenced_kind} {referenced_name}",
                 policy.policy_name
             ),
-            Self::Function { display_name, .. } => {
-                format!("function {display_name} depends on {referenced_kind} {referenced_name}")
-            }
+            Self::Proc { proc } => format!(
+                "function {} depends on {referenced_kind} {referenced_name}",
+                proc.signature
+            ),
         }
     }
 
@@ -527,9 +533,7 @@ impl DropTableDependency {
                 "drop cascades to policy {} on table {relation_display_name}",
                 policy.policy_name
             ),
-            Self::Function { display_name, .. } => {
-                format!("drop cascades to function {display_name}")
-            }
+            Self::Proc { proc } => format!("drop cascades to function {}", proc.signature),
         }
     }
 
@@ -568,10 +572,7 @@ impl DropTableDependency {
                 0,
                 format!("{relation_display_name}:{}", policy.policy_name),
             ),
-            Self::Function {
-                proc_oid,
-                display_name,
-            } => (4, *proc_oid, display_name.clone()),
+            Self::Proc { proc } => (4, proc.oid, proc.signature.clone()),
         }
     }
 }
@@ -587,7 +588,7 @@ struct DropTablePlan {
     policy_drop_oids: BTreeSet<u32>,
     policy_drops: Vec<DropPolicyPlan>,
     proc_drop_oids: BTreeSet<u32>,
-    proc_drops: Vec<u32>,
+    proc_drops: Vec<DropProcPlan>,
     blocker_details: Vec<String>,
     blocker_source: Option<(char, String)>,
     notices: Vec<String>,
@@ -599,6 +600,7 @@ struct DropTableDependencyContext<'a> {
     constraints_by_oid: BTreeMap<u32, PgConstraintRow>,
     rewrites_by_oid: BTreeMap<u32, PgRewriteRow>,
     policies_by_oid: BTreeMap<u32, PgPolicyRow>,
+    procs_by_oid: BTreeMap<u32, PgProcRow>,
     search_path: &'a [String],
 }
 
@@ -801,6 +803,27 @@ fn drop_policy_row_by_oid(
     })
 }
 
+fn drop_proc_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    oid: u32,
+) -> Option<PgProcRow> {
+    SearchSysCache1(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PROCOID,
+        drop_oid_key(oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Proc(row) => Some(row),
+        _ => None,
+    })
+}
+
 fn build_drop_table_dependency_graph(
     db: &Database,
     client_id: ClientId,
@@ -811,6 +834,7 @@ fn build_drop_table_dependency_graph(
     BTreeMap<u32, PgConstraintRow>,
     BTreeMap<u32, PgRewriteRow>,
     BTreeMap<u32, PgPolicyRow>,
+    BTreeMap<u32, PgProcRow>,
 ) {
     let mut queue = relation_oids
         .iter()
@@ -823,6 +847,7 @@ fn build_drop_table_dependency_graph(
     let mut constraints_by_oid = BTreeMap::new();
     let mut rewrites_by_oid = BTreeMap::new();
     let mut policies_by_oid = BTreeMap::new();
+    let mut procs_by_oid = BTreeMap::new();
 
     while let Some(address) = queue.pop() {
         if !visited.insert(address) {
@@ -855,6 +880,15 @@ fn build_drop_table_dependency_graph(
                 && let Some(policy) = drop_policy_row_by_oid(db, client_id, txn_ctx, row.objid)
             {
                 entry.insert(policy);
+            } else if row.classid == PG_TYPE_RELATION_OID {
+                queue.push(ObjectAddress::new(PG_TYPE_RELATION_OID, row.objid, 0));
+            } else if row.classid == PG_PROC_RELATION_OID {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    procs_by_oid.entry(row.objid)
+                    && let Some(proc_row) = drop_proc_row_by_oid(db, client_id, txn_ctx, row.objid)
+                {
+                    entry.insert(proc_row);
+                }
             }
             depend_rows.push(row);
         }
@@ -872,6 +906,7 @@ fn build_drop_table_dependency_graph(
         constraints_by_oid,
         rewrites_by_oid,
         policies_by_oid,
+        procs_by_oid,
     )
 }
 
@@ -1260,6 +1295,7 @@ fn drop_table_direct_dependencies(
     let mut constraint_oids = BTreeSet::new();
     let mut rule_oids = BTreeSet::new();
     let mut policy_oids = BTreeSet::new();
+    let mut proc_oids = BTreeSet::new();
     let mut deps = Vec::new();
 
     if let Some(relation) = ctx
@@ -1403,16 +1439,41 @@ fn drop_table_direct_dependencies(
                     },
                 });
             }
-            PG_PROC_RELATION_OID if row.deptype == DEPENDENCY_NORMAL && row.objsubid == 0 => {
-                let Some(proc_row) = ctx.catalog.proc_row_by_oid(row.objid) else {
+            PG_TYPE_RELATION_OID => {
+                for type_dep in
+                    ctx.graph
+                        .dependents(ObjectAddress::new(PG_TYPE_RELATION_OID, row.objid, 0))
+                {
+                    if type_dep.classid != PG_PROC_RELATION_OID
+                        || type_dep.objsubid != 0
+                        || type_dep.deptype != DEPENDENCY_NORMAL
+                        || !proc_oids.insert(type_dep.objid)
+                    {
+                        continue;
+                    }
+                    let Some(proc_row) = ctx.procs_by_oid.get(&type_dep.objid) else {
+                        continue;
+                    };
+                    deps.push(DropTableDependency::Proc {
+                        proc: DropProcPlan {
+                            oid: proc_row.oid,
+                            signature: drop_proc_signature_text(proc_row, ctx.catalog),
+                        },
+                    });
+                }
+            }
+            PG_PROC_RELATION_OID if row.deptype == DEPENDENCY_NORMAL => {
+                if !proc_oids.insert(row.objid) {
+                    continue;
+                }
+                let Some(proc_row) = ctx.procs_by_oid.get(&row.objid) else {
                     continue;
                 };
-                let display_name =
-                    format_regprocedure_oid_optional(proc_row.oid, Some(ctx.catalog))
-                        .unwrap_or_else(|| format!("{}()", proc_row.proname));
-                deps.push(DropTableDependency::Function {
-                    proc_oid: proc_row.oid,
-                    display_name,
+                deps.push(DropTableDependency::Proc {
+                    proc: DropProcPlan {
+                        oid: proc_row.oid,
+                        signature: drop_proc_signature_text(proc_row, ctx.catalog),
+                    },
                 });
             }
             _ => {}
@@ -1592,7 +1653,7 @@ fn collect_drop_table_restrict_blockers(
                     dep.blocker_detail(referenced_kind, &source_name),
                 );
             }
-            DropTableDependency::Function { .. } => {
+            DropTableDependency::Proc { .. } => {
                 record_drop_table_blocker(
                     plan,
                     source_relkind,
@@ -1744,13 +1805,13 @@ fn plan_drop_table_relation(
                     );
                 }
             }
-            DropTableDependency::Function { proc_oid, .. } => {
-                if !plan.proc_drop_oids.insert(proc_oid) {
+            DropTableDependency::Proc { ref proc } => {
+                if !plan.proc_drop_oids.insert(proc.oid) {
                     continue;
                 }
                 if behavior.is_cascade() {
                     plan.notices.push(dep.cascade_notice());
-                    plan.proc_drops.push(proc_oid);
+                    plan.proc_drops.push(proc.clone());
                 } else {
                     record_drop_table_blocker(
                         plan,
@@ -2947,7 +3008,7 @@ impl Database {
         )?;
 
         let result = (|| {
-            let (graph, constraints_by_oid, rewrites_by_oid, policies_by_oid) =
+            let (graph, constraints_by_oid, rewrites_by_oid, policies_by_oid, procs_by_oid) =
                 build_drop_table_dependency_graph(
                     self,
                     client_id,
@@ -2961,6 +3022,7 @@ impl Database {
                 constraints_by_oid,
                 rewrites_by_oid,
                 policies_by_oid,
+                procs_by_oid,
                 search_path: &search_path,
             };
             let mut plan = DropTablePlan::default();
@@ -3064,7 +3126,7 @@ impl Database {
                 next_cid = next_cid.saturating_add(1);
             }
 
-            for proc_oid in &plan.proc_drops {
+            for proc in &plan.proc_drops {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -3077,13 +3139,13 @@ impl Database {
                 let effect = self
                     .catalog
                     .write()
-                    .drop_proc_by_oid_mvcc(*proc_oid, &ctx)
+                    .drop_proc_by_oid_mvcc(proc.oid, &ctx)
                     .map(|(_, effect)| effect)
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
                 self.session_stats_state(client_id)
                     .write()
-                    .note_function_drop(*proc_oid, &self.stats);
+                    .note_function_drop(proc.oid, &self.stats);
                 next_cid = next_cid.saturating_add(1);
             }
 
@@ -3535,7 +3597,7 @@ impl Database {
                     .iter()
                     .map(|row| row.oid)
                     .collect::<BTreeSet<_>>();
-                let (graph, constraints_by_oid, rewrites_by_oid, policies_by_oid) =
+                let (graph, constraints_by_oid, rewrites_by_oid, policies_by_oid, procs_by_oid) =
                     build_drop_table_dependency_graph(
                         self,
                         client_id,
@@ -3549,6 +3611,7 @@ impl Database {
                     constraints_by_oid,
                     rewrites_by_oid,
                     policies_by_oid,
+                    procs_by_oid,
                     search_path: &search_path,
                 };
                 let mut dependency_plan = DropTablePlan::default();
@@ -4233,6 +4296,11 @@ impl Database {
                     .into_iter()
                     .map(|row| (row.oid, row))
                     .collect(),
+                procs_by_oid: catcache
+                    .proc_rows()
+                    .into_iter()
+                    .map(|row| (row.oid, row))
+                    .collect(),
                 search_path: &search_path,
             };
             let mut plan = DropTablePlan::default();
@@ -4309,6 +4377,29 @@ impl Database {
                     .drop_rule_mvcc(rule.rewrite_oid, &ctx)
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
+
+            for proc in &plan.proc_drops {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .drop_proc_by_oid_mvcc(proc.oid, &ctx)
+                    .map(|(_, effect)| effect)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                self.session_stats_state(client_id)
+                    .write()
+                    .note_function_drop(proc.oid, &self.stats);
                 next_cid = next_cid.saturating_add(1);
             }
 
