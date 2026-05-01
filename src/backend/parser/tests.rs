@@ -9557,7 +9557,7 @@ fn parse_power_operator_and_in_list() {
     let stmt = parse_select("select x ^ '2.0', x in (0, 1, 2) from metrics").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "power" && args.args().len() == 2
+        SqlExpr::BinaryOperator { op, .. } if op == "^"
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
@@ -20281,6 +20281,19 @@ fn parse_in_subquery_expression() {
 fn parse_any_all_subquery_expressions() {
     assert!(parse_select("select id = any (select owner_id from pets) from people").is_ok());
     assert!(parse_select("select id < all (select owner_id from pets) from people").is_ok());
+    let stmt = parse_select("select id <> all (values (2), (3)) from people").unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::QuantifiedSubquery {
+            is_all, subquery, ..
+        } => {
+            assert!(*is_all);
+            assert!(matches!(
+                subquery.from.as_ref(),
+                Some(FromItem::Values { rows }) if rows.len() == 2
+            ));
+        }
+        other => panic!("expected ALL VALUES subquery, got {other:?}"),
+    }
 }
 
 #[test]

@@ -558,6 +558,7 @@ pub struct ExecutorContext {
     pub stats: std::sync::Arc<parking_lot::RwLock<DatabaseStatsStore>>,
     pub session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
     pub snapshot: Snapshot,
+    pub write_xid_override: Option<TransactionId>,
     pub transaction_state: Option<SharedExecutorTransactionState>,
     pub client_id: ClientId,
     pub current_database_name: String,
@@ -624,6 +625,15 @@ impl ExecutorContext {
             .and_then(|state| state.lock().xid)
     }
 
+    pub fn write_snapshot(&self) -> Snapshot {
+        let mut snapshot = self.snapshot.clone();
+        if let Some(xid) = self.write_xid_override {
+            snapshot.current_xid = xid;
+            snapshot.own_xids.insert(xid);
+        }
+        snapshot
+    }
+
     pub fn uses_transaction_snapshot(&self) -> bool {
         self.transaction_state
             .as_ref()
@@ -647,6 +657,9 @@ impl ExecutorContext {
     }
 
     pub fn ensure_write_xid(&mut self) -> Result<TransactionId, ExecError> {
+        if let Some(xid) = self.write_xid_override {
+            return Ok(xid);
+        }
         if self.snapshot.current_xid != INVALID_TRANSACTION_ID {
             return Ok(self.snapshot.current_xid);
         }

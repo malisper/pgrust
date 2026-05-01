@@ -5,7 +5,7 @@ use crate::include::nodes::parsenodes::{
     SetOperationQuery, TableSampleClause,
 };
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
+    AggAccum, Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
     RelationPrivilegeMask, RelationPrivilegeRequirement, RowsFromItem, RowsFromSource,
     ScalarArrayOpExpr, SetReturningExpr, SubLink, SubPlan, WindowClause, WindowFrame,
     WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec, attrno_index, is_special_varno,
@@ -400,11 +400,18 @@ impl AnalyzedFrom {
         if offset == 0 {
             return self;
         }
+        let shift_nested_outer_refs = !matches!(
+            self.rtable.as_slice(),
+            [RangeTblEntry {
+                kind: RangeTblEntryKind::Subquery { .. },
+                ..
+            }]
+        );
         Self {
             rtable: self
                 .rtable
                 .into_iter()
-                .map(|entry| shift_rte_rtindexes(entry, offset))
+                .map(|entry| shift_rte_rtindexes(entry, offset, shift_nested_outer_refs))
                 .collect(),
             jointree: self
                 .jointree
@@ -479,7 +486,11 @@ fn shift_jointree_rtindexes(node: JoinTreeNode, offset: usize) -> JoinTreeNode {
     }
 }
 
-fn shift_rte_rtindexes(entry: RangeTblEntry, offset: usize) -> RangeTblEntry {
+fn shift_rte_rtindexes(
+    entry: RangeTblEntry,
+    offset: usize,
+    shift_nested_outer_refs: bool,
+) -> RangeTblEntry {
     if offset == 0 {
         return entry;
     }
@@ -509,9 +520,451 @@ fn shift_rte_rtindexes(entry: RangeTblEntry, offset: usize) -> RangeTblEntry {
                 joinleftcols,
                 joinrightcols,
             },
+            RangeTblEntryKind::Subquery { query } if shift_nested_outer_refs => {
+                RangeTblEntryKind::Subquery {
+                    query: Box::new(shift_query_outer_rtindexes(*query, offset, 1)),
+                }
+            }
+            RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery { query },
             other => other,
         },
         ..entry
+    }
+}
+
+fn shift_query_outer_rtindexes(mut query: Query, offset: usize, varlevelsup: usize) -> Query {
+    query.target_list = query
+        .target_list
+        .into_iter()
+        .map(|target| TargetEntry {
+            expr: shift_outer_expr_rtindexes(target.expr, offset, varlevelsup),
+            ..target
+        })
+        .collect();
+    query.where_qual = query
+        .where_qual
+        .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup));
+    query.group_by = query
+        .group_by
+        .into_iter()
+        .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup))
+        .collect();
+    query.accumulators = query
+        .accumulators
+        .into_iter()
+        .map(|accum| AggAccum {
+            direct_args: accum
+                .direct_args
+                .into_iter()
+                .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup))
+                .collect(),
+            args: accum
+                .args
+                .into_iter()
+                .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup))
+                .collect(),
+            order_by: accum
+                .order_by
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: shift_outer_expr_rtindexes(item.expr, offset, varlevelsup),
+                    ..item
+                })
+                .collect(),
+            filter: accum
+                .filter
+                .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup)),
+            ..accum
+        })
+        .collect();
+    query.window_clauses = query
+        .window_clauses
+        .into_iter()
+        .map(|clause| WindowClause {
+            spec: WindowSpec {
+                partition_by: clause
+                    .spec
+                    .partition_by
+                    .into_iter()
+                    .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup))
+                    .collect(),
+                order_by: clause
+                    .spec
+                    .order_by
+                    .into_iter()
+                    .map(|item| OrderByEntry {
+                        expr: shift_outer_expr_rtindexes(item.expr, offset, varlevelsup),
+                        ..item
+                    })
+                    .collect(),
+                ..clause.spec
+            },
+            functions: clause
+                .functions
+                .into_iter()
+                .map(|func| shift_outer_window_func_rtindexes(func, offset, varlevelsup))
+                .collect(),
+        })
+        .collect();
+    query.having_qual = query
+        .having_qual
+        .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup));
+    query.sort_clause = query
+        .sort_clause
+        .into_iter()
+        .map(|item| crate::include::nodes::primnodes::SortGroupClause {
+            expr: shift_outer_expr_rtindexes(item.expr, offset, varlevelsup),
+            ..item
+        })
+        .collect();
+    query.jointree = query
+        .jointree
+        .map(|node| shift_jointree_outer_rtindexes(node, offset, varlevelsup));
+    query.rtable = query
+        .rtable
+        .into_iter()
+        .map(|entry| shift_rte_outer_rtindexes(entry, offset, varlevelsup + 1))
+        .collect();
+    query
+}
+
+fn shift_rte_outer_rtindexes(
+    entry: RangeTblEntry,
+    offset: usize,
+    varlevelsup: usize,
+) -> RangeTblEntry {
+    let security_quals = entry
+        .security_quals
+        .into_iter()
+        .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup))
+        .collect();
+    RangeTblEntry {
+        security_quals,
+        kind: match entry.kind {
+            RangeTblEntryKind::Join {
+                jointype,
+                from_list,
+                joinmergedcols,
+                joinaliasvars,
+                joinleftcols,
+                joinrightcols,
+            } => RangeTblEntryKind::Join {
+                jointype,
+                from_list,
+                joinmergedcols,
+                joinaliasvars: joinaliasvars
+                    .into_iter()
+                    .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup))
+                    .collect(),
+                joinleftcols,
+                joinrightcols,
+            },
+            RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery {
+                query: Box::new(shift_query_outer_rtindexes(*query, offset, varlevelsup + 1)),
+            },
+            other => other,
+        },
+        ..entry
+    }
+}
+
+fn shift_jointree_outer_rtindexes(
+    node: JoinTreeNode,
+    offset: usize,
+    varlevelsup: usize,
+) -> JoinTreeNode {
+    match node {
+        JoinTreeNode::RangeTblRef(rtindex) => JoinTreeNode::RangeTblRef(rtindex),
+        JoinTreeNode::JoinExpr {
+            left,
+            right,
+            kind,
+            quals,
+            rtindex,
+        } => JoinTreeNode::JoinExpr {
+            left: Box::new(shift_jointree_outer_rtindexes(*left, offset, varlevelsup)),
+            right: Box::new(shift_jointree_outer_rtindexes(*right, offset, varlevelsup)),
+            kind,
+            quals: shift_outer_expr_rtindexes(quals, offset, varlevelsup),
+            rtindex,
+        },
+    }
+}
+
+fn shift_outer_window_func_rtindexes(
+    window_func: WindowFuncExpr,
+    offset: usize,
+    varlevelsup: usize,
+) -> WindowFuncExpr {
+    WindowFuncExpr {
+        kind: match window_func.kind {
+            WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(
+                match shift_outer_expr_rtindexes(
+                    Expr::Aggref(Box::new(aggref)),
+                    offset,
+                    varlevelsup,
+                ) {
+                    Expr::Aggref(aggref) => *aggref,
+                    other => unreachable!("window aggregate shift returned non-Aggref: {other:?}"),
+                },
+            ),
+            WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+        },
+        args: window_func
+            .args
+            .into_iter()
+            .map(|arg| shift_outer_expr_rtindexes(arg, offset, varlevelsup))
+            .collect(),
+        ..window_func
+    }
+}
+
+fn shift_outer_expr_rtindexes(expr: Expr, offset: usize, varlevelsup: usize) -> Expr {
+    match expr {
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| shift_outer_expr_rtindexes(arg, offset, varlevelsup))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| shift_outer_expr_rtindexes(arg, offset, varlevelsup))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| shift_outer_expr_rtindexes(arg, offset, varlevelsup))
+                .collect(),
+            ..*func
+        })),
+        Expr::SqlJsonQueryFunction(func) => Expr::SqlJsonQueryFunction(Box::new(
+            (*func).map_exprs(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup)),
+        )),
+        Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
+            call: srf
+                .call
+                .map_exprs(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup)),
+            ..*srf
+        })),
+        Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| shift_outer_expr_rtindexes(arg, offset, varlevelsup))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| shift_outer_expr_rtindexes(arg, offset, varlevelsup))
+                .collect(),
+            ..*xml
+        })),
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| shift_outer_expr_rtindexes(arg, offset, varlevelsup))
+                .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: shift_outer_expr_rtindexes(item.expr, offset, varlevelsup),
+                    ..item
+                })
+                .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup)),
+            ..*aggref
+        })),
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(GroupingKeyExpr {
+            expr: Box::new(shift_outer_expr_rtindexes(
+                *grouping_key.expr,
+                offset,
+                varlevelsup,
+            )),
+            ..*grouping_key
+        })),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+            args: grouping_func
+                .args
+                .into_iter()
+                .map(|arg| shift_outer_expr_rtindexes(arg, offset, varlevelsup))
+                .collect(),
+            ..*grouping_func
+        })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(
+            shift_outer_window_func_rtindexes(*window_func, offset, varlevelsup),
+        )),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(shift_outer_expr_rtindexes(*saop.left, offset, varlevelsup)),
+            right: Box::new(shift_outer_expr_rtindexes(*saop.right, offset, varlevelsup)),
+            ..*saop
+        })),
+        Expr::Var(mut var) => {
+            if var.varlevelsup == varlevelsup && !is_special_varno(var.varno) {
+                var.varno += offset;
+            }
+            Expr::Var(var)
+        }
+        expr @ (Expr::Param(_) | Expr::Const(_) | Expr::Random) => expr,
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(shift_outer_expr_rtindexes(*inner, offset, varlevelsup)),
+            ty,
+        ),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(shift_outer_expr_rtindexes(*expr, offset, varlevelsup)),
+            collation_oid,
+        },
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+            collation_oid,
+        } => Expr::Like {
+            expr: Box::new(shift_outer_expr_rtindexes(*expr, offset, varlevelsup)),
+            pattern: Box::new(shift_outer_expr_rtindexes(*pattern, offset, varlevelsup)),
+            escape: escape
+                .map(|expr| Box::new(shift_outer_expr_rtindexes(*expr, offset, varlevelsup))),
+            case_insensitive,
+            negated,
+            collation_oid,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+            collation_oid,
+        } => Expr::Similar {
+            expr: Box::new(shift_outer_expr_rtindexes(*expr, offset, varlevelsup)),
+            pattern: Box::new(shift_outer_expr_rtindexes(*pattern, offset, varlevelsup)),
+            escape: escape
+                .map(|expr| Box::new(shift_outer_expr_rtindexes(*expr, offset, varlevelsup))),
+            negated,
+            collation_oid,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(shift_outer_expr_rtindexes(
+            *inner,
+            offset,
+            varlevelsup,
+        ))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(shift_outer_expr_rtindexes(
+            *inner,
+            offset,
+            varlevelsup,
+        ))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(shift_outer_expr_rtindexes(*left, offset, varlevelsup)),
+            Box::new(shift_outer_expr_rtindexes(*right, offset, varlevelsup)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(shift_outer_expr_rtindexes(*left, offset, varlevelsup)),
+            Box::new(shift_outer_expr_rtindexes(*right, offset, varlevelsup)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup))
+                .collect(),
+            array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, shift_outer_expr_rtindexes(expr, offset, varlevelsup)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(shift_outer_expr_rtindexes(*expr, offset, varlevelsup)),
+            field,
+            field_type,
+        },
+        Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
+            testexpr: sublink
+                .testexpr
+                .map(|expr| Box::new(shift_outer_expr_rtindexes(*expr, offset, varlevelsup))),
+            subselect: Box::new(shift_query_outer_rtindexes(
+                *sublink.subselect,
+                offset,
+                varlevelsup + 1,
+            )),
+            ..*sublink
+        })),
+        Expr::SubPlan(_) => unreachable!("semantic analyze should not shift planned subqueries"),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(shift_outer_expr_rtindexes(*left, offset, varlevelsup)),
+            Box::new(shift_outer_expr_rtindexes(*right, offset, varlevelsup)),
+        ),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(shift_outer_expr_rtindexes(*arg, offset, varlevelsup))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: shift_outer_expr_rtindexes(arm.expr, offset, varlevelsup),
+                    result: shift_outer_expr_rtindexes(arm.result, offset, varlevelsup),
+                })
+                .collect(),
+            defresult: Box::new(shift_outer_expr_rtindexes(
+                *case_expr.defresult,
+                offset,
+                varlevelsup,
+            )),
+            ..*case_expr
+        })),
+        Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(shift_outer_expr_rtindexes(*array, offset, varlevelsup)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| shift_outer_expr_rtindexes(expr, offset, varlevelsup)),
+                })
+                .collect(),
+        },
+        expr @ (Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. }) => expr,
     }
 }
 
@@ -1147,6 +1600,7 @@ fn rewrite_local_vars_for_output_exprs_impl(
                 source_varlevelsup + 1,
             )),
             sublink_type: sublink.sublink_type,
+            comparison: sublink.comparison,
         })),
         Expr::SubPlan(subplan) if allow_planned_subqueries => Expr::SubPlan(Box::new(SubPlan {
             testexpr: subplan.testexpr.map(|expr| {

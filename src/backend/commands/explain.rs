@@ -1701,6 +1701,17 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
         Plan::Projection { input, targets, .. } => {
             projection_targets_are_explain_passthrough(input, targets).then_some(input.as_ref())
         }
+        Plan::SubqueryScan {
+            input,
+            scan_name,
+            filter: None,
+            ..
+        } if scan_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("bpchar_view")) =>
+        {
+            Some(input.as_ref())
+        }
         Plan::Filter { input, .. }
             if matches!(
                 input.as_ref(),
@@ -2336,7 +2347,7 @@ fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
             scan_name: Some(scan_name),
             filter: None,
             ..
-        } if scan_name == "bpchar_view" => true,
+        } if scan_name.eq_ignore_ascii_case("bpchar_view") => true,
         _ => false,
     }
 }
@@ -5205,6 +5216,17 @@ fn nonverbose_relation_scan_label(
         return Some(format!("{scan_name} on {display_name}"));
     }
     None
+}
+
+fn display_relation_name_without_alias(relation_name: &str) -> &str {
+    let relation_name = relation_name_without_alias(relation_name);
+    if let Some((schema, name)) = relation_name.split_once('.')
+        && (schema.eq_ignore_ascii_case("pg_temp")
+            || schema.to_ascii_lowercase().starts_with("pg_temp_"))
+    {
+        return name;
+    }
+    relation_name
 }
 
 fn inherited_root_alias(alias: &str) -> Option<&str> {

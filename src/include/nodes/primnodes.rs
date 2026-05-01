@@ -2831,10 +2831,21 @@ pub enum SubLinkType {
     ArraySubLink,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubqueryComparison {
+    pub opno: u32,
+    pub opfuncid: u32,
+    pub op: OpExprKind,
+    pub left_type: SqlType,
+    pub right_type: SqlType,
+    pub collation_oid: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubLink {
     pub sublink_type: SubLinkType,
     pub testexpr: Option<Box<Expr>>,
+    pub comparison: Option<SubqueryComparison>,
     pub subselect: Box<Query>,
 }
 
@@ -2842,6 +2853,7 @@ pub struct SubLink {
 pub struct SubPlan {
     pub sublink_type: SubLinkType,
     pub testexpr: Option<Box<Expr>>,
+    pub comparison: Option<SubqueryComparison>,
     pub first_col_type: Option<SqlType>,
     pub target_width: usize,
     pub plan_id: usize,

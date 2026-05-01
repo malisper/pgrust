@@ -851,12 +851,7 @@ fn build_join_tlist(
                         )
                     }
                 }
-                (None, None) => (
-                    logical_index,
-                    expr_sql_type(semantic_expr),
-                    expr_collation_oid(semantic_expr),
-                    vec![semantic_expr.clone()],
-                ),
+                (None, None) => continue,
             };
 
         if let Some(output_expr) = output_target.exprs.get(physical_index) {
@@ -3683,6 +3678,7 @@ fn lower_sublink(
         testexpr: sublink
             .testexpr
             .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
+        comparison: sublink.comparison,
         first_col_type,
         target_width,
         plan_id,
@@ -3811,6 +3807,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             testexpr: subplan
                 .testexpr
                 .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
+            comparison: subplan.comparison,
             first_col_type: subplan.first_col_type,
             target_width: subplan.target_width,
             plan_id: subplan.plan_id,
@@ -6368,6 +6365,7 @@ fn lower_partition_prune_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr 
             testexpr: subplan
                 .testexpr
                 .map(|expr| Box::new(lower_partition_prune_expr(ctx, *expr))),
+            comparison: subplan.comparison,
             first_col_type: subplan.first_col_type,
             target_width: subplan.target_width,
             plan_id: subplan.plan_id,

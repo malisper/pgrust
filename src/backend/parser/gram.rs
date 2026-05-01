@@ -30712,13 +30712,11 @@ fn fold_infix(
                 "#" => SqlExpr::BitXor(Box::new(expr), Box::new(rhs)),
                 _ => unreachable!(),
             },
-            Rule::pow_op => simple_func_call(
-                "power",
-                vec![
-                    SqlFunctionArg::positional(expr),
-                    SqlFunctionArg::positional(rhs),
-                ],
-            ),
+            Rule::pow_op => SqlExpr::BinaryOperator {
+                op: "^".into(),
+                left: Box::new(expr),
+                right: Box::new(rhs),
+            },
             Rule::shift_op => match op.as_str() {
                 "<<" => SqlExpr::Shl(Box::new(expr), Box::new(rhs)),
                 ">>" => SqlExpr::Shr(Box::new(expr), Box::new(rhs)),

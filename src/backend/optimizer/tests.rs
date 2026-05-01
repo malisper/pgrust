@@ -653,7 +653,7 @@ fn planner_info_for_sql(sql: &str) -> PlannerInfo {
     let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
         .expect("analyze");
     let query = super::root::prepare_query_for_planning(query, &catalog);
-    let query = super::pull_up_sublinks(query);
+    let query = super::pull_up_sublinks(query, &catalog);
     let aggregate_layout = super::groupby_rewrite::build_aggregate_layout(&query, &catalog);
     PlannerInfo::new(query, aggregate_layout)
 }
@@ -727,7 +727,7 @@ fn aggregate_layout_for_sql_with_catalog(
     let (query, _) = analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[])
         .expect("analyze");
     let query = super::root::prepare_query_for_planning(query, catalog);
-    let query = super::pull_up_sublinks(query);
+    let query = super::pull_up_sublinks(query, catalog);
     super::groupby_rewrite::build_aggregate_layout(&query, catalog)
 }
 
@@ -3912,6 +3912,34 @@ fn planner_rewrites_simple_min_aggregate_into_forward_index_only_subplan() {
         plan,
         Plan::Aggregate { .. } | Plan::Filter { .. } | Plan::OrderBy { .. }
     )));
+}
+
+#[test]
+fn planner_keeps_uncorrelated_not_exists_out_of_minmax_join_pullup() {
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select min(id) from items as a \
+         where not exists (select 1 from items as b where b.id = 10000)",
+        &catalog,
+    );
+
+    let pulled_into_join = plan_contains(&planned.plan_tree, |plan| {
+        matches!(
+            plan,
+            Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
+        )
+    }) || planned.subplans.iter().any(|subplan| {
+        plan_contains(subplan, |plan| {
+            matches!(
+                plan,
+                Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
+            )
+        })
+    });
+    assert!(
+        !pulled_into_join,
+        "uncorrelated NOT EXISTS should stay as a subplan, not a pulled-up join"
+    );
 }
 
 #[test]

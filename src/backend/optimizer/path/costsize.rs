@@ -1313,7 +1313,10 @@ fn try_optimize_access_subtree(
             index,
             config.retain_partial_index_filters,
         ) else {
-            if !config.enable_seqscan && order_items.is_none() {
+            if !config.enable_seqscan
+                && order_items.is_none()
+                && access_method_supports_full_index_scan(index.index_meta.am_oid)
+            {
                 let candidate = estimate_index_candidate(
                     source_id,
                     rel,
@@ -1365,6 +1368,10 @@ fn try_optimize_access_subtree(
 
 fn relation_uses_virtual_scan(relation_oid: u32) -> bool {
     relation_oid == PG_LARGEOBJECT_METADATA_RELATION_OID
+}
+
+fn access_method_supports_full_index_scan(am_oid: u32) -> bool {
+    am_oid != HASH_AM_OID
 }
 
 pub(super) fn relation_stats(

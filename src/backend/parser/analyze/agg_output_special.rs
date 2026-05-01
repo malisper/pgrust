@@ -100,6 +100,7 @@ fn bind_grouped_single_column_sublink(
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type,
         testexpr: None,
+        comparison: None,
         subselect: Box::new(query),
     })))
 }
@@ -114,6 +115,7 @@ pub(super) fn bind_grouped_exists_subquery(
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::ExistsSubLink,
         testexpr: None,
+        comparison: None,
         subselect: Box::new(exists_subquery_query(build_grouped_subquery_plan(
             select,
             group_by_exprs,
@@ -153,6 +155,7 @@ pub(super) fn bind_grouped_in_subquery(
             agg_list,
             n_keys,
         )?)),
+        comparison: None,
         subselect: Box::new(subquery),
     }));
     if negated {
@@ -200,6 +203,7 @@ pub(super) fn bind_grouped_quantified_subquery(
             SubLinkType::AnySubLink(op)
         },
         testexpr: Some(left),
+        comparison: None,
         subselect: Box::new(subquery),
     })))
 }
