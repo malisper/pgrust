@@ -43,7 +43,9 @@ use crate::include::nodes::parsenodes::{
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RestrictInfo,
 };
-use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanEstimate};
+use crate::include::nodes::plannodes::{
+    IndexScanKey, IndexScanKeyArgument, PartitionPruneChildDomain, PartitionPrunePlan, PlanEstimate,
+};
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExprKind,
     OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl,
@@ -52,6 +54,7 @@ use crate::include::nodes::primnodes::{
 };
 
 use super::super::joininfo;
+use super::super::partition_cache;
 use super::super::pathnodes::{expr_sql_type, rte_slot_id, rte_slot_varno, slot_output_target};
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
@@ -2828,6 +2831,26 @@ pub(super) fn build_join_paths_with_root(
     )
 }
 
+fn planner_query_is_dml_row_source(root: &PlannerInfo) -> bool {
+    // :HACK: UPDATE/DELETE row-source SELECTs carry hidden target columns in
+    // pgrust instead of a dedicated planner rel role.  Detect those row
+    // sources here until target relids are represented explicitly in join
+    // planning.
+    matches!(
+        root.parse.command_type,
+        crate::include::executor::execdesc::CommandType::Update
+            | crate::include::executor::execdesc::CommandType::Delete
+    ) || root.parse.target_list.iter().any(|target| {
+        matches!(
+            target.name.as_str(),
+            "__update_target_ctid"
+                | "__update_target_tableoid"
+                | "__delete_target_ctid"
+                | "__delete_target_tableoid"
+        )
+    })
+}
+
 fn build_join_paths_internal(
     config_override: Option<PlannerConfig>,
     root: Option<&PlannerInfo>,
@@ -2860,11 +2883,17 @@ fn build_join_paths_internal(
         && !lateral_orientation_locked
         && path_relids(&left).len() == 1
         && path_relids(&right).len() == 1;
-    let allow_swapped_orientation = matches!(kind, JoinType::Inner)
-        && !query_is_merge_input(root)
-        && !right_depends_on_left
-        && (!right_uses_immediate_outer || !lateral_orientation_locked)
-        || allow_base_cross_swap;
+    let dml_target_outer_locked = root.is_some_and(|root| {
+        planner_query_is_dml_row_source(root)
+            && left_relids.contains(&1)
+            && !right_relids.contains(&1)
+    });
+    let allow_swapped_orientation = !dml_target_outer_locked
+        && ((matches!(kind, JoinType::Inner)
+            && !query_is_merge_input(root)
+            && !right_depends_on_left
+            && (!right_uses_immediate_outer || !lateral_orientation_locked))
+            || allow_base_cross_swap);
     let config = config_override
         .or_else(|| root.map(|root| root.config))
         .unwrap_or_default();
@@ -2883,8 +2912,9 @@ fn build_join_paths_internal(
     });
     let mut paths = Vec::new();
     let mut disabled_paths = Vec::new();
-    let allow_parameterized_default_orientation =
-        !whole_row_targeted && !matches!(kind, JoinType::Right | JoinType::Full);
+    let allow_parameterized_default_orientation = !dml_target_outer_locked
+        && !whole_row_targeted
+        && !matches!(kind, JoinType::Right | JoinType::Full);
 
     if allow_default_orientation {
         push_join_path(
@@ -2997,7 +3027,8 @@ fn build_join_paths_internal(
         }
     }
 
-    if !lateral_orientation_locked
+    if !dml_target_outer_locked
+        && !lateral_orientation_locked
         && !matches!(kind, JoinType::Cross)
         && !recursive_worktable_join
         && !small_full_join_prefers_merge(kind, &left, &right)
@@ -3026,7 +3057,8 @@ fn build_join_paths_internal(
         );
     }
 
-    if !lateral_orientation_locked
+    if !dml_target_outer_locked
+        && !lateral_orientation_locked
         && !matches!(kind, JoinType::Cross)
         && let Some(merge_join) =
             extract_merge_join_clauses(&restrict_clauses, left_relids, right_relids)
@@ -3053,7 +3085,8 @@ fn build_join_paths_internal(
         );
     }
 
-    if !lateral_orientation_locked
+    if !dml_target_outer_locked
+        && !lateral_orientation_locked
         && matches!(kind, JoinType::Inner)
         && !recursive_worktable_join
         && !small_window_inner_join_prefers_merge(root, kind, &right, &left)
@@ -3081,7 +3114,8 @@ fn build_join_paths_internal(
         );
     }
 
-    if !lateral_orientation_locked
+    if !dml_target_outer_locked
+        && !lateral_orientation_locked
         && matches!(kind, JoinType::Inner)
         && let Some(merge_join) =
             extract_merge_join_clauses(&restrict_clauses, right_relids, left_relids)
@@ -3527,6 +3561,97 @@ fn row_type_targets_rel(root: &PlannerInfo, typrelid: u32, relids: &[usize]) -> 
         })
 }
 
+fn relation_oid_for_source_id(root: &PlannerInfo, source_id: usize) -> Option<u32> {
+    root.parse
+        .rtable
+        .get(source_id.checked_sub(1)?)
+        .and_then(|rte| match rte.kind {
+            RangeTblEntryKind::Relation { relation_oid, .. } => Some(relation_oid),
+            _ => None,
+        })
+}
+
+fn path_base_relation_oid(root: &PlannerInfo, path: &Path) -> Option<u32> {
+    match path {
+        Path::Append { source_id, .. } | Path::MergeAppend { source_id, .. } => {
+            relation_oid_for_source_id(root, *source_id)
+        }
+        Path::SeqScan { relation_oid, .. }
+        | Path::IndexOnlyScan { relation_oid, .. }
+        | Path::IndexScan { relation_oid, .. }
+        | Path::BitmapIndexScan { relation_oid, .. }
+        | Path::BitmapHeapScan { relation_oid, .. } => Some(*relation_oid),
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. } => path_base_relation_oid(root, input),
+        Path::CteScan { cte_plan, .. } => path_base_relation_oid(root, cte_plan),
+        _ => None,
+    }
+}
+
+fn parameterized_append_partition_prune_plan(
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+    source_id: usize,
+    filter: &Expr,
+    children: &[Path],
+) -> Option<PartitionPrunePlan> {
+    if !root.config.enable_partition_pruning {
+        return None;
+    }
+    let parent_oid = relation_oid_for_source_id(root, source_id)?;
+    let spec = partition_cache::partition_spec(root, catalog, parent_oid)?;
+    let partition_child_bounds = partition_cache::partition_child_bounds(root, catalog, parent_oid);
+    if partition_child_bounds.is_empty() {
+        return None;
+    }
+    let sibling_bounds = partition_child_bounds
+        .iter()
+        .filter_map(|child| child.bound.clone())
+        .collect::<Vec<_>>();
+    let child_bounds = children
+        .iter()
+        .map(|child| {
+            let child_oid = path_base_relation_oid(root, child)?;
+            partition_child_bounds
+                .iter()
+                .find(|bound| bound.row.inhrelid == child_oid)
+                .map(|bound| bound.bound.clone())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if child_bounds.is_empty() || child_bounds.iter().all(Option::is_none) {
+        return None;
+    }
+    // :HACK: PostgreSQL builds parameterized partition pruning steps for
+    // nested-loop inner Appends. Until pgrust has path-level prune steps,
+    // attach the parameterized join filter to the existing child domains.
+    Some(PartitionPrunePlan {
+        spec: spec.clone(),
+        sibling_bounds: sibling_bounds.clone(),
+        filter: filter.clone(),
+        child_bounds: child_bounds.clone(),
+        child_domains: child_bounds
+            .iter()
+            .map(|bound| {
+                vec![PartitionPruneChildDomain {
+                    spec: spec.clone(),
+                    sibling_bounds: sibling_bounds.clone(),
+                    bound: bound.clone(),
+                }]
+            })
+            .collect(),
+        subplans_removed: 0,
+    })
+}
+
 fn parameterized_inner_index_path(
     root: Option<&PlannerInfo>,
     catalog: Option<&dyn CatalogLookup>,
@@ -3576,6 +3701,9 @@ fn parameterized_inner_index_path(
         children,
     } = inner
     {
+        let parameterized_clauses =
+            collect_parameterized_inner_clauses(restrict_clauses, outer_relids, inner_relids).0;
+        let parameterized_filter = and_exprs(parameterized_clauses);
         let mut parameterized_children = Vec::with_capacity(children.len());
         let mut remaining: Option<Vec<RestrictInfo>> = None;
         for (index, child) in children.iter().enumerate() {
@@ -3605,6 +3733,19 @@ fn parameterized_inner_index_path(
             }
             parameterized_children.push(child_path);
         }
+        let runtime_partition_prune = (partition_prune.is_none())
+            .then(|| {
+                parameterized_filter.as_ref().and_then(|filter| {
+                    parameterized_append_partition_prune_plan(
+                        root,
+                        catalog,
+                        *source_id,
+                        filter,
+                        &parameterized_children,
+                    )
+                })
+            })
+            .flatten();
         return Some((
             Path::Append {
                 plan_info: *plan_info,
@@ -3614,7 +3755,7 @@ fn parameterized_inner_index_path(
                 source_id: *source_id,
                 desc: desc.clone(),
                 child_roots: child_roots.clone(),
-                partition_prune: partition_prune.clone(),
+                partition_prune: partition_prune.clone().or(runtime_partition_prune),
                 children: parameterized_children,
             },
             remaining.unwrap_or_default(),

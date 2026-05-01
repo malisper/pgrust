@@ -13045,14 +13045,18 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
     };
     for item in split_top_level_items(input, ',')? {
         let Some(eq_idx) = item.find('=') else {
-            if item.trim().eq_ignore_ascii_case("hypothetical") {
-                parsed.hypothetical = true;
-                continue;
+            match item.trim().to_ascii_lowercase().as_str() {
+                "hypothetical" => parsed.hypothetical = true,
+                "finalfunc_extra" => parsed.finalfunc_extra = true,
+                "mfinalfunc_extra" => parsed.mfinalfunc_extra = true,
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "aggregate option assignment",
+                        actual: item,
+                    });
+                }
             }
-            return Err(ParseError::UnexpectedToken {
-                expected: "aggregate option assignment",
-                actual: item,
-            });
+            continue;
         };
         let raw_key = item[..eq_idx].trim();
         if raw_key.starts_with('"') {
@@ -13271,13 +13275,36 @@ fn parse_legacy_aggregate_basetype(input: &str) -> Result<AggregateSignatureKind
 
 fn parse_aggregate_proc_name(input: &str) -> Result<String, ParseError> {
     let (parts, rest) = parse_qualified_identifier_parts(input)?;
+    let name = parts.join(".");
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return Ok(name);
+    }
+    if rest.starts_with('(') {
+        let (signature_sql, suffix) = take_parenthesized_segment(rest)?;
+        if suffix.trim().is_empty() {
+            let arg_sql = if signature_sql.trim().is_empty() {
+                String::new()
+            } else {
+                split_top_level_items(&signature_sql, ',')?
+                    .into_iter()
+                    .map(|arg| {
+                        parse_type_name(arg.trim())?;
+                        Ok(arg.trim().to_string())
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?
+                    .join(", ")
+            };
+            return Ok(format!("{name}({arg_sql})"));
+        }
+    }
     if !rest.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "function name",
             actual: input.into(),
         });
     }
-    Ok(parts.join("."))
+    Ok(name)
 }
 
 fn parse_aggregate_option_text(input: &str) -> Result<String, ParseError> {

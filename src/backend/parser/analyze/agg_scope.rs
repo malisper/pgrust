@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AggregateClauseKind {
@@ -50,7 +51,7 @@ pub(crate) struct VisibleAggregateScope {
 
 #[derive(Debug, Clone, Default)]
 struct AggregateExprInfo {
-    min_varlevel: Option<usize>,
+    varlevels: BTreeSet<usize>,
     agg_refs: Vec<AggregateRefUsage>,
 }
 
@@ -97,10 +98,11 @@ impl AggregateClauseKind {
 
 impl AggregateExprInfo {
     fn note_varlevel(&mut self, level: usize) {
-        match self.min_varlevel {
-            Some(existing) if existing <= level => {}
-            _ => self.min_varlevel = Some(level),
-        }
+        self.varlevels.insert(level);
+    }
+
+    fn min_varlevel(&self) -> Option<usize> {
+        self.varlevels.iter().next().copied()
     }
 
     fn min_agglevel(&self) -> Option<usize> {
@@ -108,7 +110,7 @@ impl AggregateExprInfo {
     }
 
     fn merge(&mut self, other: Self) {
-        if let Some(level) = other.min_varlevel {
+        for level in other.varlevels {
             self.note_varlevel(level);
         }
         for agg_ref in other.agg_refs {
@@ -120,8 +122,10 @@ impl AggregateExprInfo {
 
     fn translated_from_child(self) -> Self {
         let mut translated = Self::default();
-        if let Some(level) = self.min_varlevel.and_then(|level| level.checked_sub(1)) {
-            translated.note_varlevel(level);
+        for level in self.varlevels {
+            if let Some(level) = level.checked_sub(1) {
+                translated.note_varlevel(level);
+            }
         }
         for agg_ref in self.agg_refs {
             let Some(levelsup) = agg_ref.levelsup().checked_sub(1) else {
@@ -934,8 +938,10 @@ fn analyze_expr_internal(
                 && aggregate_call_matches_catalog(catalog, name, args, within_group.as_deref());
             let aggregate_grouped_outer = if is_aggregate { None } else { grouped_outer };
             let direct_grouped_outer = grouped_outer;
+            let mut ownership_info = AggregateExprInfo::default();
+            let mut direct_arg_info = AggregateExprInfo::default();
             for arg in args.args() {
-                info.merge(analyze_expr_internal(
+                let arg_info = analyze_expr_internal(
                     &arg.value,
                     AggregateClauseKind::Other,
                     scope,
@@ -948,10 +954,16 @@ fn analyze_expr_internal(
                     },
                     ctes,
                     expanded_views,
-                )?);
+                )?;
+                if is_aggregate && within_group.is_none() {
+                    ownership_info.merge(arg_info.clone());
+                } else if is_aggregate {
+                    direct_arg_info.merge(arg_info.clone());
+                }
+                info.merge(arg_info);
             }
             for item in order_by {
-                info.merge(analyze_expr_internal(
+                let item_info = analyze_expr_internal(
                     &item.expr,
                     AggregateClauseKind::OrderBy,
                     scope,
@@ -960,11 +972,15 @@ fn analyze_expr_internal(
                     aggregate_grouped_outer,
                     ctes,
                     expanded_views,
-                )?);
+                )?;
+                if is_aggregate {
+                    ownership_info.merge(item_info.clone());
+                }
+                info.merge(item_info);
             }
             if let Some(items) = within_group.as_deref() {
                 for item in items {
-                    info.merge(analyze_expr_internal(
+                    let item_info = analyze_expr_internal(
                         &item.expr,
                         AggregateClauseKind::OrderBy,
                         scope,
@@ -973,11 +989,15 @@ fn analyze_expr_internal(
                         aggregate_grouped_outer,
                         ctes,
                         expanded_views,
-                    )?);
+                    )?;
+                    if is_aggregate {
+                        ownership_info.merge(item_info.clone());
+                    }
+                    info.merge(item_info);
                 }
             }
             if let Some(filter) = filter.as_deref() {
-                info.merge(analyze_expr_internal(
+                let filter_info = analyze_expr_internal(
                     filter,
                     AggregateClauseKind::Filter,
                     scope,
@@ -986,12 +1006,16 @@ fn analyze_expr_internal(
                     aggregate_grouped_outer,
                     ctes,
                     expanded_views,
-                )?);
+                )?;
+                if is_aggregate {
+                    ownership_info.merge(filter_info.clone());
+                }
+                info.merge(filter_info);
             }
 
             if is_aggregate {
-                let min_agglevel = info.min_agglevel();
-                let ownership_level = match (info.min_varlevel, min_agglevel) {
+                let min_agglevel = ownership_info.min_agglevel();
+                let ownership_level = match (ownership_info.min_varlevel(), min_agglevel) {
                     (Some(var_level), Some(agg_level)) => var_level.min(agg_level),
                     (Some(var_level), None) => var_level,
                     (None, Some(agg_level)) => agg_level,
@@ -1020,6 +1044,30 @@ fn analyze_expr_internal(
                         hint: None,
                         sqlstate: "42803",
                     });
+                }
+                if within_group.is_some() {
+                    if direct_arg_info
+                        .min_varlevel()
+                        .is_some_and(|var_level| var_level < ownership_level)
+                    {
+                        return Err(ParseError::DetailedError {
+                            message: "outer-level aggregate cannot contain a lower-level variable in its direct arguments".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42803",
+                        });
+                    }
+                    if direct_arg_info
+                        .min_agglevel()
+                        .is_some_and(|agg_level| agg_level <= ownership_level)
+                    {
+                        return Err(ParseError::DetailedError {
+                            message: "aggregate function calls cannot be nested".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42803",
+                        });
+                    }
                 }
                 let usage = AggregateRefUsage {
                     agg: CollectedAggregate {

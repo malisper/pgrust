@@ -2,9 +2,12 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, INTERNAL_TYPE_OID, ORDERED_SET_TRANSITION_PROC_OID,
-    PERCENTILE_DISC_FINAL_PROC_OID, TEXT_TYPE_OID, aggregate_transition_proc_oid,
-    bootstrap_pg_proc_rows, builtin_hypothetical_aggregate_function_for_proc_oid,
+    BOOL_TYPE_OID, INTERNAL_TYPE_OID, MODE_FINAL_PROC_OID, ORDERED_SET_TRANSITION_PROC_OID,
+    PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID, PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID,
+    PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID, PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID,
+    PERCENTILE_DISC_FINAL_PROC_OID, PERCENTILE_DISC_MULTI_FINAL_PROC_OID, TEXT_TYPE_OID,
+    aggregate_transition_proc_oid, bootstrap_pg_proc_rows,
+    builtin_hypothetical_aggregate_function_for_proc_oid,
     builtin_ordered_set_aggregate_function_for_proc_oid,
 };
 
@@ -90,7 +93,13 @@ pub fn bootstrap_pg_aggregate_rows() -> Vec<PgAggregateRow> {
                 } else {
                     'n'
                 },
-                aggnumdirectargs: if ordered_set || hypothetical { 1 } else { 0 },
+                aggnumdirectargs: if ordered_set {
+                    ordered_set_direct_arg_count(row.oid)
+                } else if hypothetical {
+                    1
+                } else {
+                    0
+                },
                 // Builtin aggregates still execute through the existing fast path.
                 // Use catalog-only transition functions so opr_sanity can validate
                 // PostgreSQL-shaped aggregate metadata without changing execution.
@@ -100,7 +109,7 @@ pub fn bootstrap_pg_aggregate_rows() -> Vec<PgAggregateRow> {
                     aggregate_transition_proc_oid(row.oid)
                 },
                 aggfinalfn: if ordered_set {
-                    PERCENTILE_DISC_FINAL_PROC_OID
+                    ordered_set_final_proc_oid(row.oid)
                 } else {
                     0
                 },
@@ -128,6 +137,37 @@ pub fn bootstrap_pg_aggregate_rows() -> Vec<PgAggregateRow> {
             }
         })
         .collect()
+}
+
+fn ordered_set_direct_arg_count(proc_oid: u32) -> i16 {
+    if proc_oid == crate::include::catalog::MODE_AGG_PROC_OID {
+        0
+    } else {
+        1
+    }
+}
+
+fn ordered_set_final_proc_oid(proc_oid: u32) -> u32 {
+    match proc_oid {
+        crate::include::catalog::PERCENTILE_DISC_AGG_PROC_OID => PERCENTILE_DISC_FINAL_PROC_OID,
+        crate::include::catalog::PERCENTILE_DISC_MULTI_AGG_PROC_OID => {
+            PERCENTILE_DISC_MULTI_FINAL_PROC_OID
+        }
+        crate::include::catalog::PERCENTILE_CONT_FLOAT8_AGG_PROC_OID => {
+            PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID
+        }
+        crate::include::catalog::PERCENTILE_CONT_INTERVAL_AGG_PROC_OID => {
+            PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID
+        }
+        crate::include::catalog::PERCENTILE_CONT_FLOAT8_MULTI_AGG_PROC_OID => {
+            PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID
+        }
+        crate::include::catalog::PERCENTILE_CONT_INTERVAL_MULTI_AGG_PROC_OID => {
+            PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID
+        }
+        crate::include::catalog::MODE_AGG_PROC_OID => MODE_FINAL_PROC_OID,
+        _ => 0,
+    }
 }
 
 fn aggregate_sort_operator_oid(proname: &str, proargtypes: &str) -> u32 {

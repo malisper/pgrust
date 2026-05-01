@@ -1,10 +1,12 @@
 use super::render_bit_text;
 use super::{
-    compare_order_values, parse_numeric_text, render_datetime_value_text, render_interval_text,
-    render_macaddr_text, render_macaddr8_text,
+    cast_value_with_source_type_catalog_and_config, compare_order_values, parse_numeric_text,
+    render_datetime_value_text, render_interval_text, render_macaddr_text, render_macaddr8_text,
 };
 use crate::backend::executor::ExecError;
-use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
+use crate::backend::executor::exec_expr::{
+    cast_record_value_for_target, expect_float8_arg, float8_regr_accum_state,
+};
 use crate::backend::executor::expr_agg_support::execute_scalar_function_value_call_with_arg_types;
 use crate::backend::executor::expr_ops::{
     bitwise_and_values, bitwise_or_values, bitwise_xor_values, compare_order_by_keys,
@@ -12,6 +14,8 @@ use crate::backend::executor::expr_ops::{
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::utils::cache::catcache::sql_type_oid;
+use crate::include::catalog::{FLOAT8_TYPE_OID, INTERVAL_TYPE_OID};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, IntervalValue, NumericValue, Value,
 };
@@ -37,6 +41,8 @@ pub(crate) type AggTransitionFn = fn(&mut AccumState, &[Value]) -> Result<(), Ex
 pub(crate) struct CustomAggregateRuntime {
     pub(crate) transfn_oid: u32,
     pub(crate) transfn_strict: bool,
+    pub(crate) combinefn_oid: Option<u32>,
+    pub(crate) combinefn_strict: bool,
     pub(crate) finalfn_oid: Option<u32>,
     pub(crate) finalfn_strict: bool,
     pub(crate) mtransfn_oid: Option<u32>,
@@ -48,6 +54,7 @@ pub(crate) struct CustomAggregateRuntime {
     pub(crate) transtype: SqlType,
     pub(crate) mtranstype: SqlType,
     pub(crate) transfn_arg_types: Vec<SqlType>,
+    pub(crate) combinefn_arg_types: Vec<SqlType>,
     pub(crate) finalfn_arg_types: Vec<SqlType>,
     pub(crate) mtransfn_arg_types: Vec<SqlType>,
     pub(crate) minvtransfn_arg_types: Vec<SqlType>,
@@ -1138,6 +1145,16 @@ impl AccumState {
 }
 
 impl AggregateRuntime {
+    pub(crate) fn supports_custom_combine(&self) -> bool {
+        matches!(
+            self,
+            AggregateRuntime::Custom(CustomAggregateRuntime {
+                combinefn_oid: Some(_),
+                ..
+            })
+        )
+    }
+
     pub(crate) fn initialize_state(&self, accum: &AggAccum) -> AccumState {
         match self {
             AggregateRuntime::Builtin { func, .. } => {
@@ -1209,7 +1226,11 @@ impl AggregateRuntime {
                 CustomTransitionCall {
                     proc_oid: custom.transfn_oid,
                     strict: custom.transfn_strict,
-                    init_from_first_arg: true,
+                    init_from_first_arg: custom.init_value.is_none()
+                        && custom
+                            .transfn_arg_types
+                            .get(1)
+                            .is_some_and(|arg_type| *arg_type == custom.transtype),
                     state_type: custom.transtype,
                     arg_types: &custom.transfn_arg_types,
                 },
@@ -1235,7 +1256,11 @@ impl AggregateRuntime {
                     CustomTransitionCall {
                         proc_oid,
                         strict: custom.mtransfn_strict,
-                        init_from_first_arg: true,
+                        init_from_first_arg: custom.minit_value.is_none()
+                            && custom
+                                .mtransfn_arg_types
+                                .get(1)
+                                .is_some_and(|arg_type| *arg_type == custom.mtranstype),
                         state_type: custom.mtranstype,
                         arg_types: &custom.mtransfn_arg_types,
                     },
@@ -1271,7 +1296,8 @@ impl AggregateRuntime {
                 if matches!(value, Value::Null) {
                     return Ok(false);
                 }
-                *state = AccumState::custom(super::cast_value(value, custom.mtranstype)?);
+                *state =
+                    AccumState::custom(cast_custom_aggregate_value(value, custom.mtranstype, ctx)?);
                 Ok(true)
             }
             _ => Ok(false),
@@ -1422,6 +1448,31 @@ impl AggregateRuntime {
             | AggregateRuntime::Builtin {
                 func: AggFunc::Max, ..
             } => self.transition(state, std::slice::from_ref(partial), ctx),
+            AggregateRuntime::Custom(custom) => {
+                let Some(proc_oid) = custom.combinefn_oid else {
+                    return Err(ExecError::DetailedError {
+                        message: "custom aggregate does not have a combine function".into(),
+                        detail: Some(format!("aggregate oid {}", accum.aggfnoid)),
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                };
+                let value = custom_transition_value(
+                    state,
+                    std::slice::from_ref(partial),
+                    ctx,
+                    CustomTransitionCall {
+                        proc_oid,
+                        strict: custom.combinefn_strict,
+                        init_from_first_arg: false,
+                        state_type: custom.transtype,
+                        arg_types: &custom.combinefn_arg_types,
+                    },
+                )?;
+                *state =
+                    AccumState::custom(cast_custom_aggregate_value(value, custom.transtype, ctx)?);
+                Ok(())
+            }
             _ => Err(ExecError::DetailedError {
                 message: "only builtin aggregates support partial aggregation".into(),
                 detail: Some(format!("aggregate oid {}", accum.aggfnoid)),
@@ -1445,7 +1496,7 @@ impl AggregateRuntime {
                 finalize_hypothetical_aggregate(*func, accum, ordered_inputs, direct_arg_values)
             }
             AggregateRuntime::OrderedSet { func } => {
-                finalize_ordered_set_aggregate(*func, ordered_inputs, direct_arg_values)
+                finalize_ordered_set_aggregate(*func, accum, ordered_inputs, direct_arg_values)
             }
             AggregateRuntime::Custom(custom) => {
                 let state_value = match state {
@@ -1463,14 +1514,21 @@ impl AggregateRuntime {
                     if custom.finalfn_strict && matches!(state_value, Value::Null) {
                         return Ok(Value::Null);
                     }
+                    let mut final_args = Vec::with_capacity(custom.finalfn_arg_types.len());
+                    final_args.push(state_value);
+                    final_args.extend(std::iter::repeat_n(
+                        Value::Null,
+                        custom.finalfn_arg_types.len() - 1,
+                    ));
                     execute_scalar_function_value_call_with_arg_types(
                         finalfn_oid,
-                        &[state_value],
+                        &final_args,
                         Some(&custom.finalfn_arg_types),
                         ctx,
                     )
+                    .map(|value| value.to_owned_value())
                 } else {
-                    Ok(state_value)
+                    Ok(state_value.to_owned_value())
                 }
             }
         }
@@ -1498,14 +1556,21 @@ impl AggregateRuntime {
                     if custom.mfinalfn_strict && matches!(state_value, Value::Null) {
                         return Ok(Value::Null);
                     }
+                    let mut final_args = Vec::with_capacity(custom.mfinalfn_arg_types.len());
+                    final_args.push(state_value);
+                    final_args.extend(std::iter::repeat_n(
+                        Value::Null,
+                        custom.mfinalfn_arg_types.len() - 1,
+                    ));
                     execute_scalar_function_value_call_with_arg_types(
                         finalfn_oid,
-                        &[state_value],
+                        &final_args,
                         Some(&custom.mfinalfn_arg_types),
                         ctx,
                     )
+                    .map(|value| value.to_owned_value())
                 } else {
-                    Ok(state_value)
+                    Ok(state_value.to_owned_value())
                 }
             }
             _ => Ok(state.finalize()),
@@ -1529,7 +1594,7 @@ fn custom_transition(
     call: CustomTransitionCall<'_>,
 ) -> Result<(), ExecError> {
     let value = custom_transition_value(state, arg_values, ctx, call)?;
-    *state = AccumState::custom(super::cast_value(value, call.state_type)?);
+    *state = AccumState::custom(cast_custom_aggregate_value(value, call.state_type, ctx)?);
     Ok(())
 }
 
@@ -1557,7 +1622,7 @@ fn custom_transition_value(
         if call.init_from_first_arg
             && let [first] = arg_values
         {
-            return super::cast_value(first.clone(), call.state_type);
+            return cast_custom_aggregate_value(first.clone(), call.state_type, ctx);
         }
         return Ok(Value::Null);
     }
@@ -1575,6 +1640,23 @@ fn custom_transition_value(
         &call_args,
         Some(call.arg_types),
         ctx,
+    )
+}
+
+fn cast_custom_aggregate_value(
+    value: Value,
+    target_type: SqlType,
+    ctx: &crate::backend::executor::ExecutorContext,
+) -> Result<Value, ExecError> {
+    if let Value::Record(record) = value {
+        return cast_record_value_for_target(record, target_type, ctx);
+    }
+    cast_value_with_source_type_catalog_and_config(
+        value,
+        None,
+        target_type,
+        ctx.catalog.as_deref(),
+        &ctx.datetime_config,
     )
 }
 
@@ -1650,11 +1732,12 @@ fn finalize_hypothetical_aggregate(
 
 fn finalize_ordered_set_aggregate(
     func: OrderedSetAggFunc,
+    accum: &AggAccum,
     ordered_inputs: &[OrderedAggInput],
     direct_arg_values: &[Value],
 ) -> Result<Value, ExecError> {
     match func {
-        OrderedSetAggFunc::PercentileDisc => {
+        OrderedSetAggFunc::PercentileDisc | OrderedSetAggFunc::PercentileDiscMulti => {
             let Some(percentile) = direct_arg_values.first() else {
                 return Err(ExecError::DetailedError {
                     message: "ordered-set aggregate direct-argument count mismatch".into(),
@@ -1663,33 +1746,238 @@ fn finalize_ordered_set_aggregate(
                     sqlstate: "XX000",
                 });
             };
-            if matches!(percentile, Value::Null) {
-                return Ok(Value::Null);
-            }
-            let percentile = expect_float8_arg("percentile_disc", percentile)?;
-            if !(0.0..=1.0).contains(&percentile) || percentile.is_nan() {
-                return Err(ExecError::DetailedError {
-                    message: format!("percentile value {percentile} is not between 0 and 1"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "22003",
-                });
-            }
-
             let values = ordered_inputs
                 .iter()
                 .filter_map(|input| input.arg_values.first())
                 .filter(|value| !matches!(value, Value::Null))
                 .collect::<Vec<_>>();
-            if values.is_empty() {
-                return Ok(Value::Null);
+            if matches!(func, OrderedSetAggFunc::PercentileDiscMulti) {
+                return finalize_percentile_disc_multi(accum, percentile, &values);
             }
+            let Some(percentile) = checked_percentile_value("percentile_disc", percentile)? else {
+                return Ok(Value::Null);
+            };
+            Ok(percentile_disc_value(percentile, &values).unwrap_or(Value::Null))
+        }
+        OrderedSetAggFunc::PercentileCont | OrderedSetAggFunc::PercentileContMulti => {
+            let Some(percentile) = direct_arg_values.first() else {
+                return Err(ExecError::DetailedError {
+                    message: "ordered-set aggregate direct-argument count mismatch".into(),
+                    detail: Some("percentile_cont expects one percentile argument".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                });
+            };
+            let values = ordered_inputs
+                .iter()
+                .filter_map(|input| input.arg_values.first())
+                .filter(|value| !matches!(value, Value::Null))
+                .collect::<Vec<_>>();
+            if matches!(func, OrderedSetAggFunc::PercentileContMulti) {
+                return finalize_percentile_cont_multi(accum, percentile, &values);
+            }
+            let Some(percentile) = checked_percentile_value("percentile_cont", percentile)? else {
+                return Ok(Value::Null);
+            };
+            percentile_cont_value(percentile, &values)
+        }
+        OrderedSetAggFunc::Mode => finalize_mode_aggregate(ordered_inputs),
+    }
+}
 
-            let rank = (percentile * values.len() as f64).ceil() as usize;
-            let index = rank.saturating_sub(1).min(values.len() - 1);
-            Ok(values[index].clone())
+fn checked_percentile_value(op: &'static str, value: &Value) -> Result<Option<f64>, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    let percentile = expect_float8_arg(op, value)?;
+    if !(0.0..=1.0).contains(&percentile) || percentile.is_nan() {
+        return Err(ExecError::DetailedError {
+            message: format!("percentile value {percentile} is not between 0 and 1"),
+            detail: None,
+            hint: None,
+            sqlstate: "22003",
+        });
+    }
+    Ok(Some(percentile))
+}
+
+fn percentile_array_arg(
+    op: &'static str,
+    value: &Value,
+) -> Result<Option<(Vec<ArrayDimension>, Vec<Value>)>, ExecError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::PgArray(array) => Ok(Some((array.dimensions.clone(), array.elements.clone()))),
+        Value::Array(elements) => Ok(Some((
+            vec![ArrayDimension {
+                lower_bound: 1,
+                length: elements.len(),
+            }],
+            elements.clone(),
+        ))),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::PgArray(ArrayValue::empty()),
+        }),
+    }
+}
+
+fn finalize_percentile_disc_multi(
+    accum: &AggAccum,
+    percentile_arg: &Value,
+    values: &[&Value],
+) -> Result<Value, ExecError> {
+    let Some((dimensions, percentiles)) = percentile_array_arg("percentile_disc", percentile_arg)?
+    else {
+        return Ok(Value::Null);
+    };
+    let elements = percentiles
+        .iter()
+        .map(|percentile| {
+            let Some(percentile) = checked_percentile_value("percentile_disc", percentile)? else {
+                return Ok(Value::Null);
+            };
+            Ok(percentile_disc_value(percentile, values).unwrap_or(Value::Null))
+        })
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    let mut array = ArrayValue::from_dimensions(dimensions, elements);
+    if let Some(element_type_oid) = accum
+        .args
+        .first()
+        .and_then(expr_sql_type_hint)
+        .map(|ty| sql_type_oid(ty.element_type()))
+        .filter(|oid| *oid != 0)
+    {
+        array = array.with_element_type_oid(element_type_oid);
+    }
+    Ok(Value::PgArray(array))
+}
+
+fn percentile_disc_value(percentile: f64, values: &[&Value]) -> Option<Value> {
+    if values.is_empty() {
+        return None;
+    }
+    let rank = (percentile * values.len() as f64).ceil() as usize;
+    let index = rank.saturating_sub(1).min(values.len() - 1);
+    Some(values[index].to_owned_value())
+}
+
+fn finalize_percentile_cont_multi(
+    _accum: &AggAccum,
+    percentile_arg: &Value,
+    values: &[&Value],
+) -> Result<Value, ExecError> {
+    let Some((dimensions, percentiles)) = percentile_array_arg("percentile_cont", percentile_arg)?
+    else {
+        return Ok(Value::Null);
+    };
+    let elements = percentiles
+        .iter()
+        .map(|percentile| {
+            let Some(percentile) = checked_percentile_value("percentile_cont", percentile)? else {
+                return Ok(Value::Null);
+            };
+            percentile_cont_value(percentile, values)
+        })
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    let mut array = ArrayValue::from_dimensions(dimensions, elements);
+    if values
+        .first()
+        .is_some_and(|value| matches!(value, Value::Interval(_)))
+    {
+        array = array.with_element_type_oid(INTERVAL_TYPE_OID);
+    } else {
+        array = array.with_element_type_oid(FLOAT8_TYPE_OID);
+    }
+    Ok(Value::PgArray(array))
+}
+
+fn percentile_cont_value(percentile: f64, values: &[&Value]) -> Result<Value, ExecError> {
+    if values.is_empty() {
+        return Ok(Value::Null);
+    }
+    let pos = percentile * (values.len() - 1) as f64;
+    let lower_index = pos.floor() as usize;
+    let upper_index = pos.ceil() as usize;
+    let fraction = pos - lower_index as f64;
+    let lower = values[lower_index];
+    let upper = values[upper_index];
+    if lower_index == upper_index || fraction == 0.0 {
+        return Ok(lower.to_owned_value());
+    }
+    match (lower, upper) {
+        (Value::Interval(lower), Value::Interval(upper)) => {
+            let delta = upper
+                .checked_sub(*lower)
+                .ok_or_else(ordered_set_interval_out_of_range)?;
+            let scaled = scale_interval_for_percentile(delta, fraction)?;
+            Ok(Value::Interval(
+                lower
+                    .checked_add(scaled)
+                    .ok_or_else(ordered_set_interval_out_of_range)?,
+            ))
+        }
+        _ => {
+            let lower = expect_float8_arg("percentile_cont", lower)?;
+            let upper = expect_float8_arg("percentile_cont", upper)?;
+            Ok(Value::Float64(lower + (upper - lower) * fraction))
         }
     }
+}
+
+fn scale_interval_for_percentile(
+    interval: IntervalValue,
+    factor: f64,
+) -> Result<IntervalValue, ExecError> {
+    if factor == 0.0 {
+        return Ok(IntervalValue::zero());
+    }
+    interval_div_float(interval, 1.0 / factor).ok_or_else(ordered_set_interval_out_of_range)
+}
+
+fn ordered_set_interval_out_of_range() -> ExecError {
+    ExecError::DetailedError {
+        message: "interval out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn finalize_mode_aggregate(ordered_inputs: &[OrderedAggInput]) -> Result<Value, ExecError> {
+    let mut best_value = Value::Null;
+    let mut best_count = 0usize;
+    let mut current_value: Option<Value> = None;
+    let mut current_count = 0usize;
+
+    for value in ordered_inputs
+        .iter()
+        .filter_map(|input| input.arg_values.first())
+        .filter(|value| !matches!(value, Value::Null))
+    {
+        let same_group = current_value
+            .as_ref()
+            .is_some_and(|current| current == value);
+        if same_group {
+            current_count += 1;
+            continue;
+        }
+        if current_count > best_count
+            && let Some(current) = current_value.take()
+        {
+            best_value = current;
+            best_count = current_count;
+        }
+        current_value = Some(value.to_owned_value());
+        current_count = 1;
+    }
+    if current_count > best_count
+        && let Some(current) = current_value
+    {
+        best_value = current;
+    }
+    Ok(best_value)
 }
 
 fn finalize_regr_stats(
@@ -2466,6 +2754,9 @@ pub(crate) struct AggGroup {
     pub(crate) key_values: Vec<Value>,
     pub(crate) passthrough_values: Vec<Value>,
     pub(crate) accum_states: Vec<AccumState>,
+    pub(crate) custom_combine_states: Vec<Option<AccumState>>,
+    pub(crate) custom_combine_state_has_rows: Vec<bool>,
+    pub(crate) input_row_index: usize,
     pub(crate) distinct_inputs: Vec<Option<Vec<Vec<Value>>>>,
     pub(crate) direct_arg_values: Vec<Option<Vec<Value>>>,
     pub(crate) ordered_inputs: Vec<Vec<OrderedAggInput>>,

@@ -439,7 +439,7 @@ pub(super) fn bind_user_defined_scalar_function_call_from_typed_args(
     Expr::user_defined_func(proc_oid, funcname, Some(result_type), false, coerced_args)
 }
 
-pub(super) fn bind_user_defined_scalar_function_call_from_resolved_typed_args(
+pub(in crate::backend::parser::analyze) fn bind_user_defined_scalar_function_call_from_resolved_typed_args(
     resolved: &ResolvedFunctionCall,
     args: &[SqlExpr],
     bound_args_with_types: Vec<TypedExpr>,

@@ -52,6 +52,42 @@ No local failures in the attached CI repro set.
 ---
 
 Goal:
+Fix PR #426 cargo-test CI failure in
+`aggregate_regress_minmax_unique2_backward_index`, where CI returned `NULL`
+instead of `4095` for `select distinct max(unique2)`.
+
+Key decisions:
+The failing plan used the min/max rewrite plus a backward index-only scan over
+`tenk1(unique2)`. Index-only tuple decoding was placing values by heap attnum
+only; when the scan descriptor was projected to the index column, heap column 2
+was out of range and decoded as `NULL`. Keep index-only decoding aware of
+projected descriptors by matching index output columns when heap attnums do not
+fit the scan slot. Also carry simple SubPlan target attnos so a scalar subquery
+can project the intended target if a wider relation-shaped row reaches the
+subquery output path.
+
+Files touched:
+src/backend/executor/exec_expr/subquery.rs
+src/backend/executor/nodes.rs
+src/backend/executor/tests.rs
+src/backend/optimizer/plan/subselect.rs
+src/backend/optimizer/setrefs.rs
+src/include/nodes/primnodes.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet aggregate_regress_minmax_unique2_backward_index -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet aggregate_regress
+scripts/cargo_isolated.sh test --lib --quiet index_only_scan_uses_virtual_slot_and_falls_back_when_visibility_bit_cleared
+git diff --check
+
+Remaining:
+Local `CARGO_PROFILE_TEST_OPT_LEVEL=3` run was stopped after spending several
+minutes in test-binary linking; CI will rerun that profile on push.
+
+---
+
+Goal:
 Fix cargo-test CI failures from returning-diffs PR logs
 `cargo-test-run__1_2__73857809546.log` and
 `cargo-test-run__2_2__73857809586.log`.

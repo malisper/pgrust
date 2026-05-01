@@ -60,7 +60,8 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
-    apply_runtime_pruning_for_explain_plan, format_buffer_usage, format_explain_analyze_json,
+    apply_runtime_pruning_for_explain_plan, begin_explain_analyze_initplan_capture,
+    end_explain_analyze_initplan_capture, format_buffer_usage, format_explain_analyze_json,
     format_explain_child_plan_with_subplans, format_explain_lines_with_costs,
     format_explain_lines_with_options, format_explain_plan_with_subplans,
     format_explain_plan_with_subplans_and_catalog, format_modify_expr_subplans,
@@ -548,7 +549,17 @@ pub(crate) fn execute_explain(
     let _explain_datetime_guard =
         crate::backend::executor::push_explain_datetime_config(&ctx.datetime_config);
     let statement = *statement;
-    if !analyze && explain_statement_has_writable_ctes(&statement) {
+    if !analyze
+        && explain_statement_has_writable_ctes(&statement)
+        && !matches!(
+            &statement,
+            Statement::Insert(insert)
+                if insert
+                    .with
+                    .iter()
+                    .any(|cte| matches!(cte.body, CteBody::Merge(_)))
+        )
+    {
         return execute_explain_writable_ctes(
             statement,
             costs,
@@ -710,6 +721,7 @@ pub(crate) fn execute_explain(
         }
         ctx.pool.reset_usage_stats();
         ctx.timed = timing;
+        begin_explain_analyze_initplan_capture(costs, timing);
         let saved_subplans =
             std::mem::replace(&mut ctx.subplans, query_desc.planned_stmt.subplans.clone());
         let exec_result: Result<(_, _, _), ExecError> = (|| {
@@ -730,11 +742,19 @@ pub(crate) fn execute_explain(
         ctx.subplans = saved_subplans;
         ctx.timed = false;
         let execution_buffer_stats = ctx.pool.usage_stats();
-        let (state, row_count, elapsed) = exec_result?;
+        let (state, row_count, elapsed) = match exec_result {
+            Ok(result) => result,
+            Err(err) => {
+                end_explain_analyze_initplan_capture();
+                return Err(err);
+            }
+        };
         if matches!(format, ExplainFormat::Json) {
+            end_explain_analyze_initplan_capture();
             lines.push(format_explain_analyze_json(state.as_ref()));
         } else {
             format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
+            end_explain_analyze_initplan_capture();
             if !buffers {
                 lines.retain(|line| !line.trim_start().starts_with("Buffers:"));
             }
@@ -1281,14 +1301,17 @@ fn apply_update_constraint_exclusion(
     catalog: &dyn CatalogLookup,
     planner_config: PlannerConfig,
 ) -> BoundUpdateStatement {
-    let has_multiple_targets = stmt.targets.len() > 1;
+    let inherited_target_count = stmt
+        .targets
+        .iter()
+        .filter(|target| target.partition_update_root_oid.is_none())
+        .count();
     for target in &mut stmt.targets {
         let should_check = if target.partition_update_root_oid.is_some() {
             planner_config.enable_partition_pruning
-        } else if has_multiple_targets
-            && relation_participates_in_regular_inheritance(catalog, target.relation_oid)
-        {
-            planner_config.constraint_exclusion_partition
+        } else if relation_participates_in_regular_inheritance(catalog, target.relation_oid) {
+            planner_config.constraint_exclusion_on
+                || (planner_config.constraint_exclusion_partition && inherited_target_count > 1)
         } else {
             planner_config.constraint_exclusion_on
         };
@@ -1317,14 +1340,17 @@ fn apply_delete_constraint_exclusion(
     catalog: &dyn CatalogLookup,
     planner_config: PlannerConfig,
 ) -> BoundDeleteStatement {
-    let has_multiple_targets = stmt.targets.len() > 1;
+    let inherited_target_count = stmt
+        .targets
+        .iter()
+        .filter(|target| target.partition_delete_root_oid.is_none())
+        .count();
     for target in &mut stmt.targets {
         let should_check = if target.partition_delete_root_oid.is_some() {
             planner_config.enable_partition_pruning
-        } else if has_multiple_targets
-            && relation_participates_in_regular_inheritance(catalog, target.relation_oid)
-        {
-            planner_config.constraint_exclusion_partition
+        } else if relation_participates_in_regular_inheritance(catalog, target.relation_oid) {
+            planner_config.constraint_exclusion_on
+                || (planner_config.constraint_exclusion_partition && inherited_target_count > 1)
         } else {
             planner_config.constraint_exclusion_on
         };

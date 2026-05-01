@@ -39,24 +39,65 @@ pub(super) fn aggregate_call_matches_catalog(
     args: &SqlCallArgs,
     within_group: Option<&[OrderByItem]>,
 ) -> bool {
-    if within_group.is_some() {
-        return resolve_builtin_hypothetical_aggregate(name).is_some()
-            || resolve_builtin_ordered_set_aggregate(name).is_some();
-    }
-    if let Some(func) = resolve_builtin_aggregate(name) {
-        return builtin_aggregate_accepts_call(func, args);
-    }
+    aggregate_call_kind_matches_catalog(catalog, name, args, within_group).is_some()
+}
 
-    catalog.proc_rows_by_name(name).into_iter().any(|row| {
-        row.prokind == 'a'
-            && if args.is_star() {
-                row.pronargs == 0
-            } else if row.provariadic == 0 {
-                row.pronargs as usize == args.args().len()
+pub(super) fn aggregate_call_kind_matches_catalog(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    args: &SqlCallArgs,
+    within_group: Option<&[OrderByItem]>,
+) -> Option<char> {
+    if within_group.is_some() {
+        if resolve_builtin_hypothetical_aggregate(name).is_some() {
+            return Some('h');
+        }
+        if resolve_builtin_ordered_set_aggregate(name).is_some() {
+            return Some('o');
+        }
+        let direct_arg_count = args.args().len();
+        let total_arg_count = direct_arg_count + within_group.map_or(0, <[OrderByItem]>::len);
+        return catalog.proc_rows_by_name(name).into_iter().find_map(|row| {
+            if row.prokind != 'a' {
+                return None;
+            }
+            let aggregate = catalog.aggregate_by_fnoid(row.oid)?;
+            if !matches!(aggregate.aggkind, 'o' | 'h') {
+                return None;
+            }
+            if aggregate.aggnumdirectargs as usize != direct_arg_count {
+                return None;
+            }
+            let matches_arity = if row.provariadic == 0 {
+                row.pronargs as usize == total_arg_count
             } else {
                 let fixed = row.pronargs.saturating_sub(1) as usize;
-                args.args().len() >= fixed
-            }
+                total_arg_count >= fixed
+            };
+            matches_arity.then_some(aggregate.aggkind)
+        });
+    }
+    if let Some(func) = resolve_builtin_aggregate(name) {
+        return builtin_aggregate_accepts_call(func, args).then_some('n');
+    }
+
+    catalog.proc_rows_by_name(name).into_iter().find_map(|row| {
+        if row.prokind != 'a' {
+            return None;
+        }
+        let aggregate = catalog.aggregate_by_fnoid(row.oid)?;
+        if aggregate.aggkind != 'n' {
+            return None;
+        }
+        let matches_arity = if args.is_star() {
+            row.pronargs == 0
+        } else if row.provariadic == 0 {
+            row.pronargs as usize == args.args().len()
+        } else {
+            let fixed = row.pronargs.saturating_sub(1) as usize;
+            args.args().len() >= fixed
+        };
+        matches_arity.then_some(aggregate.aggkind)
     })
 }
 
@@ -836,6 +877,23 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
             unreachable!("fixed aggregate return types handled above")
         }
         AggFunc::RangeIntersectAgg => arg_type.unwrap_or(SqlType::new(Text)),
+    }
+}
+
+pub(super) fn aggregate_arg_type_for_coercion(
+    func: Option<AggFunc>,
+    actual_type: SqlType,
+    declared_type: SqlType,
+) -> SqlType {
+    if matches!(
+        func,
+        Some(AggFunc::BitAnd | AggFunc::BitOr | AggFunc::BitXor)
+    ) && matches!(actual_type.kind, SqlTypeKind::Bit | SqlTypeKind::VarBit)
+        && matches!(declared_type.kind, SqlTypeKind::Bit | SqlTypeKind::VarBit)
+    {
+        actual_type
+    } else {
+        declared_type
     }
 }
 

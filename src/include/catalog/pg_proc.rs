@@ -14,6 +14,19 @@ const INTERNAL_TYPE_OID: u32 = 2281;
 pub const ORDERED_SET_TRANSITION_PROC_OID: u32 = 3970;
 pub const PERCENTILE_DISC_AGG_PROC_OID: u32 = 3972;
 pub const PERCENTILE_DISC_FINAL_PROC_OID: u32 = 3973;
+pub const PERCENTILE_CONT_FLOAT8_AGG_PROC_OID: u32 = 3974;
+pub const PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID: u32 = 3975;
+pub const PERCENTILE_CONT_INTERVAL_AGG_PROC_OID: u32 = 3976;
+pub const PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID: u32 = 3977;
+pub const PERCENTILE_DISC_MULTI_AGG_PROC_OID: u32 = 3978;
+pub const PERCENTILE_DISC_MULTI_FINAL_PROC_OID: u32 = 3979;
+pub const PERCENTILE_CONT_FLOAT8_MULTI_AGG_PROC_OID: u32 = 3980;
+pub const PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID: u32 = 3981;
+pub const PERCENTILE_CONT_INTERVAL_MULTI_AGG_PROC_OID: u32 = 3982;
+pub const PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID: u32 = 3983;
+pub const MODE_AGG_PROC_OID: u32 = 3984;
+pub const MODE_FINAL_PROC_OID: u32 = 3985;
+pub const HYPOTHETICAL_RANK_FINAL_PROC_OID: u32 = 3987;
 
 pub const CAST_PROC_INT4_INT2_OID: u32 = 313;
 pub const CAST_PROC_INT8_INT2_OID: u32 = 754;
@@ -7146,6 +7159,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            1841,
+            "int4_sum",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID, INT4_TYPE_OID]),
+            "int4_sum",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
             7005,
             "int8inc",
             INT8_TYPE_OID,
@@ -10382,6 +10407,150 @@ fn aggregate_support_proc_rows() -> Vec<PgProcRow> {
             'f',
             'i',
         ),
+        proc_row(
+            PERCENTILE_CONT_FLOAT8_AGG_PROC_OID,
+            "percentile_cont",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
+            "aggregate_dummy",
+            2,
+            false,
+            false,
+            'a',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID,
+            "percentile_cont_float8_final",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, FLOAT8_TYPE_OID]),
+            "percentile_cont_float8_final",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_CONT_INTERVAL_AGG_PROC_OID,
+            "percentile_cont",
+            INTERVAL_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID, INTERVAL_TYPE_OID]),
+            "aggregate_dummy",
+            2,
+            false,
+            false,
+            'a',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID,
+            "percentile_cont_interval_final",
+            INTERVAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, FLOAT8_TYPE_OID]),
+            "percentile_cont_interval_final",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_DISC_MULTI_AGG_PROC_OID,
+            "percentile_disc",
+            ANYARRAYOID,
+            &oid_argtypes(&[FLOAT8_ARRAY_TYPE_OID, ANYELEMENTOID]),
+            "aggregate_dummy",
+            2,
+            false,
+            false,
+            'a',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_DISC_MULTI_FINAL_PROC_OID,
+            "percentile_disc_multi_final",
+            ANYARRAYOID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, ANYELEMENTOID]),
+            "percentile_disc_multi_final",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_CONT_FLOAT8_MULTI_AGG_PROC_OID,
+            "percentile_cont",
+            FLOAT8_ARRAY_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID]),
+            "aggregate_dummy",
+            2,
+            false,
+            false,
+            'a',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID,
+            "percentile_cont_float8_multi_final",
+            FLOAT8_ARRAY_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, FLOAT8_ARRAY_TYPE_OID]),
+            "percentile_cont_float8_multi_final",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_CONT_INTERVAL_MULTI_AGG_PROC_OID,
+            "percentile_cont",
+            INTERVAL_ARRAY_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_ARRAY_TYPE_OID, INTERVAL_TYPE_OID]),
+            "aggregate_dummy",
+            2,
+            false,
+            false,
+            'a',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID,
+            "percentile_cont_interval_multi_final",
+            INTERVAL_ARRAY_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, FLOAT8_ARRAY_TYPE_OID]),
+            "percentile_cont_interval_multi_final",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MODE_AGG_PROC_OID,
+            "mode",
+            ANYELEMENTOID,
+            &oid_argtypes(&[ANYELEMENTOID]),
+            "aggregate_dummy",
+            1,
+            false,
+            false,
+            'a',
+            'i',
+        ),
+        proc_row(
+            MODE_FINAL_PROC_OID,
+            "mode_final",
+            ANYELEMENTOID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, ANYELEMENTOID]),
+            "mode_final",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
     ];
     rows.push(variadic_proc_row(
         3971,
@@ -10397,7 +10566,7 @@ fn aggregate_support_proc_rows() -> Vec<PgProcRow> {
         'i',
     ));
     rows.push(variadic_proc_row(
-        3987,
+        HYPOTHETICAL_RANK_FINAL_PROC_OID,
         "rank_final",
         INT8_TYPE_OID,
         &oid_argtypes(&[INTERNAL_TYPE_OID, ANYOID]),
@@ -12035,12 +12204,27 @@ pub fn proc_oid_for_builtin_hypothetical_aggregate_function(
 }
 
 pub fn builtin_ordered_set_aggregate_function_for_proc_oid(oid: u32) -> Option<OrderedSetAggFunc> {
-    (oid == PERCENTILE_DISC_AGG_PROC_OID).then_some(OrderedSetAggFunc::PercentileDisc)
+    match oid {
+        PERCENTILE_DISC_AGG_PROC_OID => Some(OrderedSetAggFunc::PercentileDisc),
+        PERCENTILE_DISC_MULTI_AGG_PROC_OID => Some(OrderedSetAggFunc::PercentileDiscMulti),
+        PERCENTILE_CONT_FLOAT8_AGG_PROC_OID | PERCENTILE_CONT_INTERVAL_AGG_PROC_OID => {
+            Some(OrderedSetAggFunc::PercentileCont)
+        }
+        PERCENTILE_CONT_FLOAT8_MULTI_AGG_PROC_OID | PERCENTILE_CONT_INTERVAL_MULTI_AGG_PROC_OID => {
+            Some(OrderedSetAggFunc::PercentileContMulti)
+        }
+        MODE_AGG_PROC_OID => Some(OrderedSetAggFunc::Mode),
+        _ => None,
+    }
 }
 
 pub fn proc_oid_for_builtin_ordered_set_aggregate_function(func: OrderedSetAggFunc) -> Option<u32> {
     match func {
         OrderedSetAggFunc::PercentileDisc => Some(PERCENTILE_DISC_AGG_PROC_OID),
+        OrderedSetAggFunc::PercentileDiscMulti => Some(PERCENTILE_DISC_MULTI_AGG_PROC_OID),
+        OrderedSetAggFunc::PercentileCont => Some(PERCENTILE_CONT_FLOAT8_AGG_PROC_OID),
+        OrderedSetAggFunc::PercentileContMulti => Some(PERCENTILE_CONT_FLOAT8_MULTI_AGG_PROC_OID),
+        OrderedSetAggFunc::Mode => Some(MODE_AGG_PROC_OID),
     }
 }
 
@@ -13689,6 +13873,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("int4smaller", BuiltinScalarFunction::Int4Smaller),
         ("int4mi", BuiltinScalarFunction::Int4Mi),
         ("int4pl", BuiltinScalarFunction::Int4Pl),
+        ("int4_sum", BuiltinScalarFunction::Int4Sum),
         ("int8inc", BuiltinScalarFunction::Int8Inc),
         ("int8inc_any", BuiltinScalarFunction::Int8IncAny),
         ("int4_avg_accum", BuiltinScalarFunction::Int4AvgAccum),

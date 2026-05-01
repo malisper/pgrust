@@ -4690,6 +4690,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     comparison: None,
                     first_col_type: Some(int4),
                     target_width: 1,
+                    target_attnos: vec![Some(0)],
                     plan_id: 0,
                     par_param: Vec::new(),
                     args: Vec::new(),
@@ -4902,6 +4903,62 @@ fn explain_expr_matches_postgres_filter_formatting() {
     assert_eq!(
         render_explain_expr(&to_char, &[]),
         "to_char(125, '999'::text)"
+    );
+}
+
+#[test]
+fn explain_expr_strips_redundant_bpchar_key_casts() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::OpExprKind;
+
+    let bpchar = SqlType::new(SqlTypeKind::Char);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let casted_key = Expr::Cast(
+        Box::new(Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(0),
+            varlevelsup: 0,
+            vartype: bpchar,
+            collation_oid: None,
+        })),
+        bpchar,
+    );
+    let expr = Expr::binary_op(
+        OpExprKind::Eq,
+        bool_ty,
+        casted_key,
+        Expr::Const(Value::Text("a".into())),
+    );
+
+    assert_eq!(
+        render_explain_expr(&expr, &["a".into()]),
+        "(a = 'a'::bpchar)"
+    );
+}
+
+#[test]
+fn explain_expr_renders_varchar_comparison_as_text_operator() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::OpExprKind;
+
+    let varchar = SqlType::new(SqlTypeKind::Varchar);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let expr = Expr::binary_op(
+        OpExprKind::Eq,
+        bool_ty,
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(1),
+            varlevelsup: 0,
+            vartype: varchar,
+            collation_oid: None,
+        }),
+        Expr::Const(Value::Text("ab".into())),
+    );
+
+    assert_eq!(
+        render_explain_expr(&expr, &["a".into(), "b".into()]),
+        "((b)::text = 'ab'::text)"
     );
 }
 
@@ -5239,6 +5296,45 @@ fn explain_const_false_and_scan_filter_uses_one_time_filter() {
     assert_eq!(
         rendered,
         vec!["Result".to_string(), "  One-Time Filter: false".to_string()]
+    );
+}
+
+#[test]
+fn explain_filter_over_single_values_row_uses_one_time_result() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::OpExprKind;
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let plan = Plan::Filter {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(Plan::Values {
+            plan_info: PlanEstimate::default(),
+            rows: vec![vec![
+                Expr::Const(Value::Int32(10)),
+                Expr::Const(Value::Int32(5)),
+            ]],
+            output_columns: vec![QueryColumn::text("column1"), QueryColumn::text("column2")],
+        }),
+        predicate: Expr::binary_op(
+            OpExprKind::Eq,
+            SqlType::new(SqlTypeKind::Bool),
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(1),
+                varlevelsup: 0,
+                vartype: int4,
+                collation_oid: None,
+            }),
+            Expr::Const(Value::Int32(5)),
+        ),
+    };
+
+    assert_eq!(
+        explain_lines(plan),
+        vec![
+            "Result  (cost=0.00..0.00 rows=0 width=0)".to_string(),
+            "  One-Time Filter: (5 = 5)".to_string()
+        ]
     );
 }
 
@@ -9723,6 +9819,36 @@ fn unnest_single_and_multi_arg_work() {
                 vec![
                     vec![Value::Int32(1), Value::Text("x".into())],
                     vec![Value::Int32(2), Value::Null]
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn unnest_multidimensional_array_flattens_storage_order() {
+    let base = temp_dir("unnest_multidimensional_array");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from unnest(ARRAY[[1, 2], [3, 4]]) as u(x)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["x"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)],
+                    vec![Value::Int32(4)],
                 ]
             );
         }

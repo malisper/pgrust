@@ -578,8 +578,10 @@ pub(super) fn preferred_parameterized_index_nested_loop(path: &Path) -> bool {
         } => {
             // :HACK: pgrust does not yet model parameterized index-scan startup
             // and uniqueness as precisely as PostgreSQL. Prefer the PostgreSQL
-            // shape when a small outer path can drive runtime index probes.
-            left.plan_info().plan_rows.as_f64() <= 100.0 && path_has_runtime_index_scan(right)
+            // shape when a small outer path or partitioned inner Append can
+            // drive runtime index probes.
+            (left.plan_info().plan_rows.as_f64() <= 100.0 || path_is_append_like(right))
+                && path_has_runtime_index_scan(right)
         }
         _ => false,
     }

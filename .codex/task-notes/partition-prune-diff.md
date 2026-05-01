@@ -1,25 +1,33 @@
 Goal:
-Make progress on /tmp/diffs/partition_prune.diff without expected-file edits.
+Fix non-parallel partition_prune regression mismatches without changing expected output.
 
 Key decisions:
-- Kept PostgreSQL regression output as authoritative.
-- Added prepared UPDATE support, but view UPDATE still needs automatically-updatable view handling.
-- Added array hash, enum, and record/composite partition-key support exposed by the regression.
-- Backed out a PL/pgSQL dynamic EXPLAIN EXECUTE bridge because it made the regression hit the 60s file timeout.
+Do not globally fold contradictory Var equality conjuncts to false in constfold; leave contradiction detection to pruning/constraint-exclusion code.
+Remove the relaxed OR-arm fallback in static partition pruning so each OR arm is analyzed exactly.
+Accept typmod/text-family compatible partition-key casts for pruning.
+Treat stable time expressions as startup-prune-evaluable.
+Skip top-level Memoize around lateral Aggregate-over-partitioned-Append shapes.
+Use constraint_exclusion=on, not constraint_exclusion=partition, for ordinary inheritance/direct-relation constraint pruning outside partitioned DML roots.
+Normalize contextual scalar-array EXPLAIN rendering by omitting redundant outer array casts for dynamic ARRAY expressions.
+Avoid linker-wrapper here-strings so local builds do not require temp space on the nearly-full system volume.
 
 Files touched:
-- Partition/catalog/type work: src/include/catalog/pg_opclass.rs, pg_opfamily.rs, pg_amop.rs, pg_amproc.rs, src/backend/parser/analyze/partition.rs, src/backend/executor/expr_casts.rs, src/backend/parser/analyze/expr.rs, src/backend/parser/analyze/expr/ops.rs.
-- Prepared statement work: crates/pgrust_sql_grammar/src/gram.pest, src/include/nodes/parsenodes.rs, src/backend/parser/gram.rs, src/backend/parser/tests.rs, src/pgrust/session.rs.
-- Earlier slices also touched planner/pruning/explain/PLpgSQL files.
+.codex/task-notes/partition-prune-diff.md
+scripts/macos-rust-lld-linker.sh
+src/backend/commands/tablecmds.rs
+src/backend/executor/nodes.rs
+src/backend/optimizer/constfold.rs
+src/backend/optimizer/partition_prune.rs
+src/backend/optimizer/path/allpaths.rs
+src/backend/optimizer/setrefs.rs
 
 Tests run:
-- cargo fmt
-- scripts/cargo_isolated.sh test --lib --quiet partition_prune
-- scripts/cargo_isolated.sh test --lib --quiet parse_prepare_and_execute_statements
-- scripts/cargo_isolated.sh test --lib --quiet sql_prepare_execute_substitutes_parameters
-- scripts/cargo_isolated.sh test --lib --quiet sql_prepare_execute_supports_update_returning
-- scripts/run_regression.sh --test partition_prune --jobs 1 --port 55941 --results-dir /tmp/diffs/partition_prune.after-slice41
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet partition_prune (with TMPDIR on external volume): passed, 21 tests.
+bash -n scripts/macos-rust-lld-linker.sh: passed.
+git diff --check: passed.
+scripts/run_regression.sh --test partition_prune --port 56544 was attempted but stopped during Cargo build after several minutes of build contention; no usable regression diff was produced.
 
 Remaining:
-- Latest regression: 638/750 queries matched, 2573 diff lines, no timeout.
-- Remaining notable failures: PL/pgSQL dynamic EXPLAIN EXECUTE prepared SELECTs, EXPLAIN ANALYZE UPDATE, scalar subquery column-shape bug, automatically updatable view UPDATE, later MERGE/JOIN grammar/forms, plus many plan-shape/rendering mismatches.
+Run the target regression when the local build queue is clear and inspect remaining non-parallel hunks.
+Likely remaining larger items: InitPlan/startup-pruning EXPLAIN display, parameterized nested-loop/index paths for partitioned inners, MergeAppend/index path selection, and timestamp/range canonical rendering.
