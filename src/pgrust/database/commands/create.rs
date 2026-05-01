@@ -3477,6 +3477,42 @@ fn select_query_requires_original_view_sql(query: &SelectStatement) -> bool {
         })
 }
 
+fn select_query_references_pg_stat_all_tables(query: &SelectStatement) -> bool {
+    query
+        .from
+        .as_ref()
+        .is_some_and(from_item_references_pg_stat_all_tables)
+        || query.set_operation.as_ref().is_some_and(|setop| {
+            setop
+                .inputs
+                .iter()
+                .any(select_query_references_pg_stat_all_tables)
+        })
+}
+
+fn from_item_references_pg_stat_all_tables(item: &FromItem) -> bool {
+    match item {
+        FromItem::Table { name, .. } => matches!(
+            name.to_ascii_lowercase().as_str(),
+            "pg_stat_all_tables" | "pg_catalog.pg_stat_all_tables"
+        ),
+        FromItem::Alias { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::TableSample { source, .. } => from_item_references_pg_stat_all_tables(source),
+        FromItem::DerivedTable(query) => select_query_references_pg_stat_all_tables(query),
+        FromItem::Join { left, right, .. } => {
+            from_item_references_pg_stat_all_tables(left)
+                || from_item_references_pg_stat_all_tables(right)
+        }
+        FromItem::Values { .. }
+        | FromItem::Expression { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_) => false,
+    }
+}
+
 fn from_item_requires_original_view_sql(item: &FromItem) -> bool {
     match item {
         FromItem::FunctionCall {
@@ -3499,8 +3535,11 @@ fn from_item_requires_original_view_sql(item: &FromItem) -> bool {
             from_item_requires_original_view_sql(left)
                 || from_item_requires_original_view_sql(right)
         }
-        FromItem::Table { .. }
-        | FromItem::Values { .. }
+        // :HACK: Deparsing synthetic statistics views can expand into an
+        // oversized pg_rewrite row; store the original view SQL until rewrite
+        // storage can toast large ev_action values.
+        FromItem::Table { .. } => from_item_references_pg_stat_all_tables(item),
+        FromItem::Values { .. }
         | FromItem::Expression { .. }
         | FromItem::JsonTable(_)
         | FromItem::XmlTable(_) => false,
@@ -6995,6 +7034,8 @@ impl Database {
         let constraint_oids = analyzed_query.constraint_deps.clone();
         let mut stored_query = analyzed_query.clone();
         apply_create_view_column_names_to_query(&mut stored_query, &create_stmt.column_names);
+        let reparse_view_sql_at_runtime =
+            select_query_references_pg_stat_all_tables(&create_stmt.query);
         let canonical_sql = if select_query_requires_original_view_sql(&create_stmt.query) {
             // :HACK: The analyzed `Query` does not yet retain enough CTE
             // and table-function alias structure to deparse every stored view
@@ -7192,7 +7233,7 @@ impl Database {
             canonical_query_sql,
             rule_dependencies,
             crate::backend::catalog::store::RuleOwnerDependency::Internal,
-            Some(stored_query.clone()),
+            (!reparse_view_sql_at_runtime).then_some(stored_query.clone()),
             &rule_ctx,
         );
         let rule_effect = match rule_result {
