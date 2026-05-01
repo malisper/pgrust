@@ -4347,6 +4347,8 @@ fn reject_unsupported_relation_predicate_expr(
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

@@ -1365,6 +1365,9 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
+            Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => {
+                buf.extend_from_slice(&(-1_i32).to_be_bytes());
+            }
         }
     }
 

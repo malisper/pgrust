@@ -2027,6 +2027,8 @@ fn collect_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -4410,6 +4412,8 @@ fn expr_contains_outer_var(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -4626,6 +4630,8 @@ fn rewrite_filter_for_subquery(
         Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -6469,6 +6475,12 @@ fn path_dominates(left: &Path, right: &Path) -> bool {
         return false;
     }
     if bestpath::preferred_unqualified_left_join_above_nulltest(left, right) {
+        return true;
+    }
+    if bestpath::preferred_field_select_hash_join(right, left) {
+        return false;
+    }
+    if bestpath::preferred_field_select_hash_join(left, right) {
         return true;
     }
     if preferred_plain_values_join_order(right, left) {

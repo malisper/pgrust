@@ -1216,9 +1216,11 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::Const(value) => value_sql_type_hint(value),
         Expr::Random => SqlType::new(SqlTypeKind::Float8),
         Expr::CurrentDate => SqlType::new(SqlTypeKind::Date),
-        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => {
-            SqlType::new(SqlTypeKind::Name)
-        }
+        Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole => SqlType::new(SqlTypeKind::Name),
         Expr::CurrentCatalog | Expr::CurrentSchema => SqlType::new(SqlTypeKind::Text),
         Expr::CurrentTime { .. } => SqlType::new(SqlTypeKind::TimeTz),
         Expr::CurrentTimestamp { .. } => SqlType::new(SqlTypeKind::TimestampTz),

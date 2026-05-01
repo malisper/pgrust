@@ -160,6 +160,8 @@ fn expr_is_volatile_for_dedup(expr: &Expr) -> bool {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole => false,
         Expr::Random
         | Expr::CurrentDate
@@ -248,6 +250,8 @@ pub(super) fn finalize_expr_subqueries(
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -555,12 +559,14 @@ fn finalize_set_returning_call(
                         RowsFromSource::Project {
                             output_exprs,
                             output_columns,
+                            display_sql,
                         } => RowsFromSource::Project {
                             output_exprs: output_exprs
                                 .into_iter()
                                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                                 .collect(),
                             output_columns,
+                            display_sql,
                         },
                     },
                     column_definitions: item.column_definitions,
@@ -858,6 +864,8 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -1147,12 +1155,14 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                         RowsFromSource::Project {
                             output_exprs,
                             output_columns,
+                            display_sql,
                         } => RowsFromSource::Project {
                             output_exprs: output_exprs
                                 .into_iter()
                                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                                 .collect(),
                             output_columns,
+                            display_sql,
                         },
                     },
                     column_definitions: item.column_definitions,

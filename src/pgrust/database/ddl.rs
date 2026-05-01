@@ -848,6 +848,8 @@ fn expr_references_relation_column(
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
