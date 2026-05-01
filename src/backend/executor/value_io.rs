@@ -34,6 +34,7 @@ use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::primnodes::ColumnDesc;
 use crate::pgrust::compact_string::CompactString;
+use num_bigint::BigInt;
 
 mod array;
 
@@ -86,6 +87,11 @@ const INTERNAL_VALUE_TAG_MACADDR: u8 = 39;
 const INTERNAL_VALUE_TAG_MACADDR8: u8 = 40;
 const INTERNAL_VALUE_TAG_ENUM: u8 = 41;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
+const NUMERIC_STORAGE_BINARY_MAGIC: &[u8] = b"\xffPGRNUM1";
+const NUMERIC_STORAGE_NAN: u8 = 0;
+const NUMERIC_STORAGE_POS_INF: u8 = 1;
+const NUMERIC_STORAGE_NEG_INF: u8 = 2;
+const NUMERIC_STORAGE_FINITE: u8 = 3;
 
 pub fn render_uuid_text(value: &[u8; 16]) -> String {
     let mut out = String::with_capacity(36);
@@ -429,6 +435,96 @@ fn decode_internal_text<'a>(bytes: &'a [u8], offset: &mut usize) -> Result<&'a [
     let slice = &bytes[*offset..*offset + len];
     *offset += len;
     Ok(slice)
+}
+
+pub(crate) fn encode_numeric_storage_bytes(numeric: &NumericValue) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(NUMERIC_STORAGE_BINARY_MAGIC);
+    match numeric {
+        NumericValue::NaN => out.push(NUMERIC_STORAGE_NAN),
+        NumericValue::PosInf => out.push(NUMERIC_STORAGE_POS_INF),
+        NumericValue::NegInf => out.push(NUMERIC_STORAGE_NEG_INF),
+        NumericValue::Finite {
+            coeff,
+            scale,
+            dscale,
+        } => {
+            out.push(NUMERIC_STORAGE_FINITE);
+            out.extend_from_slice(&scale.to_le_bytes());
+            out.extend_from_slice(&dscale.to_le_bytes());
+            let coeff_bytes = coeff.to_signed_bytes_le();
+            out.extend_from_slice(&(coeff_bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(&coeff_bytes);
+        }
+    }
+    out
+}
+
+pub(crate) fn decode_numeric_storage_bytes(
+    column: impl Into<String>,
+    bytes: &[u8],
+) -> Result<NumericValue, ExecError> {
+    let column = column.into();
+    if bytes.starts_with(NUMERIC_STORAGE_BINARY_MAGIC) {
+        return decode_binary_numeric_storage_bytes(column, bytes);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| ExecError::InvalidStorageValue {
+        column: column.clone(),
+        details: "invalid numeric text".into(),
+    })?;
+    parse_numeric_text(text).ok_or_else(|| ExecError::InvalidStorageValue {
+        column,
+        details: "invalid numeric text".into(),
+    })
+}
+
+fn decode_binary_numeric_storage_bytes(
+    column: String,
+    bytes: &[u8],
+) -> Result<NumericValue, ExecError> {
+    let mut offset = NUMERIC_STORAGE_BINARY_MAGIC.len();
+    let Some(kind) = bytes.get(offset).copied() else {
+        return Err(invalid_numeric_storage(column));
+    };
+    offset += 1;
+    match kind {
+        NUMERIC_STORAGE_NAN if offset == bytes.len() => Ok(NumericValue::NaN),
+        NUMERIC_STORAGE_POS_INF if offset == bytes.len() => Ok(NumericValue::PosInf),
+        NUMERIC_STORAGE_NEG_INF if offset == bytes.len() => Ok(NumericValue::NegInf),
+        NUMERIC_STORAGE_FINITE => {
+            let scale = read_numeric_storage_u32(bytes, &mut offset)
+                .ok_or_else(|| invalid_numeric_storage(column.clone()))?;
+            let dscale = read_numeric_storage_u32(bytes, &mut offset)
+                .ok_or_else(|| invalid_numeric_storage(column.clone()))?;
+            let coeff_len = read_numeric_storage_u32(bytes, &mut offset)
+                .ok_or_else(|| invalid_numeric_storage(column.clone()))?
+                as usize;
+            let Some(end) = offset.checked_add(coeff_len) else {
+                return Err(invalid_numeric_storage(column));
+            };
+            if end != bytes.len() {
+                return Err(invalid_numeric_storage(column));
+            }
+            let coeff = BigInt::from_signed_bytes_le(&bytes[offset..end]);
+            Ok(NumericValue::finite(coeff, scale)
+                .with_dscale(dscale)
+                .normalize())
+        }
+        _ => Err(invalid_numeric_storage(column)),
+    }
+}
+
+fn read_numeric_storage_u32(bytes: &[u8], offset: &mut usize) -> Option<u32> {
+    let value = u32::from_le_bytes(bytes.get(*offset..*offset + 4)?.try_into().ok()?);
+    *offset += 4;
+    Some(value)
+}
+
+fn invalid_numeric_storage(column: impl Into<String>) -> ExecError {
+    ExecError::InvalidStorageValue {
+        column: column.into(),
+        details: "invalid numeric storage".into(),
+    }
 }
 
 fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
@@ -1047,7 +1143,7 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
         }
         Value::Numeric(v) => {
             out.push(INTERNAL_VALUE_TAG_NUMERIC);
-            encode_internal_text(v.render().as_bytes(), &mut out);
+            encode_internal_text(&encode_numeric_storage_bytes(&v), &mut out);
         }
         Value::Json(v) => {
             out.push(INTERNAL_VALUE_TAG_JSON);
@@ -1407,13 +1503,11 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
             })?))
         }
         INTERNAL_VALUE_TAG_NUMERIC => {
-            Value::Numeric(crate::include::nodes::datum::NumericValue::from(
-                std::str::from_utf8({
-                    let mut offset = 0usize;
-                    decode_internal_text(rest, &mut offset)?
-                })
-                .unwrap_or_default(),
-            ))
+            let mut offset = 0usize;
+            Value::Numeric(decode_numeric_storage_bytes(
+                "<record>",
+                decode_internal_text(rest, &mut offset)?,
+            )?)
         }
         INTERNAL_VALUE_TAG_JSON => Value::Json(CompactString::new(
             std::str::from_utf8({
@@ -1657,7 +1751,7 @@ pub(crate) fn encode_value_with_config(
         }
         (ScalarType::Money, Value::Money(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Numeric, Value::Numeric(numeric)) => {
-            Ok(TupleValue::Bytes(numeric.render().into_bytes()))
+            Ok(TupleValue::Bytes(encode_numeric_storage_bytes(&numeric)))
         }
         (ScalarType::Json, Value::Json(text)) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
         (ScalarType::Jsonb, Value::Jsonb(bytes)) => Ok(TupleValue::Bytes(bytes)),
@@ -2428,14 +2522,10 @@ pub(crate) fn decode_value_with_toast(
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            Ok(Value::Numeric(
-                parse_numeric_text(unsafe { std::str::from_utf8_unchecked(bytes) }).ok_or_else(
-                    || ExecError::InvalidStorageValue {
-                        column: column.name.clone(),
-                        details: "invalid numeric text".into(),
-                    },
-                )?,
-            ))
+            Ok(Value::Numeric(decode_numeric_storage_bytes(
+                column.name.clone(),
+                bytes,
+            )?))
         }
         ScalarType::Json => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -2585,7 +2675,9 @@ mod tests {
     use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
     use crate::backend::utils::time::timestamp::parse_timestamp_text;
     use crate::include::catalog::{INT4_TYPE_OID, INT4RANGE_TYPE_OID};
-    use crate::include::nodes::datum::{ArrayDimension, RecordDescriptor, RecordValue};
+    use crate::include::nodes::datum::{
+        ArrayDimension, NumericValue, RecordDescriptor, RecordValue,
+    };
 
     #[test]
     fn anyarray_value_roundtrips_through_tuple_storage() {
@@ -2612,6 +2704,24 @@ mod tests {
         let decoded = decode_anyarray_bytes(&bytes).unwrap();
 
         assert_eq!(decoded, Value::PgArray(array));
+    }
+
+    #[test]
+    fn numeric_storage_uses_binary_format_with_text_fallback() {
+        let numeric = NumericValue::from("12345.6700");
+        let bytes = encode_numeric_storage_bytes(&numeric);
+
+        assert!(bytes.starts_with(NUMERIC_STORAGE_BINARY_MAGIC));
+        assert_eq!(
+            decode_numeric_storage_bytes("n", &bytes).unwrap().render(),
+            "12345.6700"
+        );
+        assert_eq!(
+            decode_numeric_storage_bytes("n", b"12345.6700")
+                .unwrap()
+                .render(),
+            "12345.6700"
+        );
     }
 
     #[test]
