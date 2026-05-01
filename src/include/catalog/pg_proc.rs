@@ -3310,7 +3310,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "lo_import",
             OID_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID]),
-            "lo_import",
+            "be_lo_import",
             1,
             false,
             true,
@@ -3322,7 +3322,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "lo_import",
             OID_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID, OID_TYPE_OID]),
-            "lo_import",
+            "be_lo_import_with_oid",
             2,
             false,
             true,
@@ -3490,7 +3490,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "lo_get",
             BYTEA_TYPE_OID,
             &oid_argtypes(&[OID_TYPE_OID]),
-            "lo_get",
+            "be_lo_get",
             1,
             false,
             true,
@@ -3502,7 +3502,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "lo_get",
             BYTEA_TYPE_OID,
             &oid_argtypes(&[OID_TYPE_OID, INT8_TYPE_OID, INT4_TYPE_OID]),
-            "lo_get",
+            "be_lo_get_fragment",
             3,
             false,
             true,
@@ -3933,7 +3933,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "pg_relation_size",
             INT8_TYPE_OID,
             &oid_argtypes(&[REGCLASS_TYPE_OID]),
-            "pg_relation_size",
+            "pg_relation_size_regclass",
             1,
             false,
             false,
@@ -5215,7 +5215,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "pg_stat_reset_slru",
             VOID_TYPE_OID,
             "",
-            "pg_stat_reset_slru",
+            "pg_stat_reset_slru_all",
             0,
             false,
             false,
@@ -5786,7 +5786,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "octet_length",
             INT4_TYPE_OID,
             &oid_argtypes(&[BYTEA_TYPE_OID]),
-            "octet_length",
+            "byteaoctetlen",
             1,
             false,
             true,
@@ -5798,7 +5798,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "octet_length",
             INT4_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID]),
-            "octet_length",
+            "textoctetlen",
             1,
             false,
             true,
@@ -5810,7 +5810,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "octet_length",
             INT4_TYPE_OID,
             &oid_argtypes(&[BPCHAR_TYPE_OID]),
-            "octet_length",
+            "bpcharoctetlen",
             1,
             false,
             true,
@@ -5822,7 +5822,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "octet_length",
             INT4_TYPE_OID,
             &oid_argtypes(&[BIT_TYPE_OID]),
-            "octet_length",
+            "bitoctetlength",
             1,
             false,
             true,
@@ -5834,7 +5834,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "bit_length",
             INT4_TYPE_OID,
             &oid_argtypes(&[BYTEA_TYPE_OID]),
-            "bit_length",
+            "bytea_bit_length",
             1,
             false,
             true,
@@ -5846,7 +5846,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "bit_length",
             INT4_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID]),
-            "bit_length",
+            "text_bit_length",
             1,
             false,
             true,
@@ -5858,7 +5858,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "bit_length",
             INT4_TYPE_OID,
             &oid_argtypes(&[BIT_TYPE_OID]),
-            "bit_length",
+            "bit_bit_length",
             1,
             false,
             true,
@@ -11956,12 +11956,30 @@ fn aggregate_transition_proc_rows(rows: &[PgProcRow]) -> Vec<PgProcRow> {
     rows.iter()
         .filter(|row| row.prokind == 'a')
         .filter_map(|row| {
-            let mut argtypes = vec![row.prorettype];
-            argtypes.extend(parse_proc_argtype_oids(&row.proargtypes)?);
+            let proc_argtypes = parse_proc_argtype_oids(&row.proargtypes)?;
+            let argtypes = if builtin_ordered_set_aggregate_function_for_proc_oid(row.oid).is_some()
+            {
+                // :HACK: Ordered-set aggregates execute through hardcoded
+                // aggregate paths today. Give opr_sanity an internal
+                // transition signature matching the catalog's direct-argument
+                // checks until pg_aggregate owns per-aggregate transition rows.
+                vec![
+                    INTERNAL_TYPE_OID,
+                    proc_argtypes.first().copied().unwrap_or(ANYOID),
+                ]
+            } else {
+                let mut argtypes = vec![row.prorettype];
+                argtypes.extend(proc_argtypes);
+                argtypes
+            };
             Some(proc_row(
                 aggregate_transition_proc_oid(row.oid),
                 &format!("pgrust_agg_trans_{}", row.oid),
-                row.prorettype,
+                if builtin_ordered_set_aggregate_function_for_proc_oid(row.oid).is_some() {
+                    INTERNAL_TYPE_OID
+                } else {
+                    row.prorettype
+                },
                 &oid_argtypes(&argtypes),
                 &format!("pgrust_agg_trans_{}", row.oid),
                 argtypes.len() as i16,

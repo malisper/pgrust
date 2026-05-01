@@ -27,6 +27,7 @@ const PG_TYPE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TYPE_TYPNAME_NSP_INDEX_KEYS: [i16; 2] = [2, 3];
 const PG_PROC_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_PROC_PRONAME_ARGS_NSP_INDEX_KEYS: [i16; 3] = [2, 20, 3];
+const PG_PROC_PROLANG_PROSRC_INDEX_KEYS: [i16; 2] = [5, 25];
 const PG_DEFAULT_ACL_ROLE_NSP_OBJ_INDEX_KEYS: [i16; 3] = [2, 3, 4];
 const PG_DEFAULT_ACL_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_AGGREGATE_FNOID_INDEX_KEYS: [i16; 1] = [1];
@@ -151,6 +152,7 @@ const NAME_OIDVECTOR_OID_OPCLASS_3: [u32; 3] = [
     OIDVECTOR_BTREE_OPCLASS_OID,
     OID_BTREE_OPCLASS_OID,
 ];
+const OID_TEXT_OPCLASS_2: [u32; 2] = [OID_BTREE_OPCLASS_OID, TEXT_BTREE_OPCLASS_OID];
 const NAME_OID_OID_OID_OPCLASS_4: [u32; 4] = [
     NAME_BTREE_OPCLASS_OID,
     OID_BTREE_OPCLASS_OID,
@@ -203,7 +205,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 109] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 110] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -307,6 +309,19 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 109] = [
         unique: true,
         key_attnums: &PG_PROC_PRONAME_ARGS_NSP_INDEX_KEYS,
         opclass_oids: &NAME_OIDVECTOR_OID_OPCLASS_3,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 15000,
+        // :HACK: pgrust's executor still handles the opr_sanity pg_proc
+        // self-join expensively. This pgrust-only catalog index matches the
+        // prolang constant plus prosrc join key until planner/runtime joins
+        // catch up. Keep this below FirstNormalObjectId so bootstrap indexes
+        // do not advance user-object OID allocation.
+        relation_name: "pg_proc_prolang_prosrc_index",
+        heap_kind: BootstrapCatalogKind::PgProc,
+        unique: false,
+        key_attnums: &PG_PROC_PROLANG_PROSRC_INDEX_KEYS,
+        opclass_oids: &OID_TEXT_OPCLASS_2,
     },
     CatalogIndexDescriptor {
         relation_oid: 827,

@@ -2516,7 +2516,7 @@ fn cross_join_with_where_equality_predicate_can_choose_hash_or_merge_join() {
 }
 
 #[test]
-fn pg_proc_alias_sanity_self_join_can_choose_hash_or_merge_join() {
+fn pg_proc_alias_sanity_self_join_can_choose_fast_join_path() {
     let catalog = Catalog::default();
     let planned = planned_stmt_for_sql_with_catalog(
         "select distinct p1.prorettype::regtype, p2.prorettype::regtype \
@@ -2534,12 +2534,25 @@ fn pg_proc_alias_sanity_self_join_can_choose_hash_or_merge_join() {
         &catalog,
     );
 
+    fn uses_pg_proc_prolang_prosrc_index(plan: &Plan) -> bool {
+        plan_contains(plan, |plan| {
+            matches!(
+                plan,
+                Plan::IndexOnlyScan { index_name, .. }
+                    | Plan::IndexScan { index_name, .. }
+                    | Plan::BitmapIndexScan { index_name, .. }
+                    if index_name == "pg_proc_prolang_prosrc_index"
+            )
+        })
+    }
+
     assert!(
-        plan_contains(&planned.plan_tree, |plan| matches!(
-            plan,
-            Plan::HashJoin { .. } | Plan::MergeJoin { .. }
-        )),
-        "expected pg_proc alias sanity self-join to choose hash or merge join, got {:?}",
+        plan_contains(&planned.plan_tree, |plan| {
+            matches!(plan, Plan::HashJoin { .. } | Plan::MergeJoin { .. })
+                || matches!(plan, Plan::NestedLoopJoin { .. })
+                    && uses_pg_proc_prolang_prosrc_index(plan)
+        }),
+        "expected pg_proc alias sanity self-join to choose hash/merge join or indexed nested loop, got {:?}",
         planned.plan_tree
     );
 }

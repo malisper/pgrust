@@ -1,6 +1,7 @@
 use crate::backend::storage::page::bufpage::{
-    OffsetNumber, PageError, page_add_item, page_get_item, page_get_max_offset_number, page_init,
-    page_special, page_special_mut,
+    OffsetNumber, PageError, PageHeaderData, SIZE_OF_PAGE_HEADER_DATA, max_align, page_add_item,
+    page_get_item, page_get_max_offset_number, page_header, page_init, page_special,
+    page_special_mut,
 };
 use crate::backend::storage::smgr::BLCKSZ;
 use crate::include::access::itemptr::ItemPointerData;
@@ -417,13 +418,13 @@ pub fn gin_metapage_init(
 ) -> Result<(), GinPageError> {
     gin_page_init(page, GIN_META)?;
     let meta = GinMetaPageData::new(options);
-    page[24..24 + GinMetaPageData::SIZE].copy_from_slice(&meta.encode());
-    Ok(())
+    gin_metapage_set_data(page, &meta)
 }
 
 pub fn gin_metapage_data(page: &[u8; BLCKSZ]) -> Result<GinMetaPageData, GinPageError> {
+    let meta_start = max_align(SIZE_OF_PAGE_HEADER_DATA);
     GinMetaPageData::decode(
-        page.get(24..24 + GinMetaPageData::SIZE)
+        page.get(meta_start..meta_start + GinMetaPageData::SIZE)
             .ok_or(GinPageError::Corrupt("gin metapage truncated"))?,
     )
 }
@@ -432,8 +433,24 @@ pub fn gin_metapage_set_data(
     page: &mut [u8; BLCKSZ],
     meta: &GinMetaPageData,
 ) -> Result<(), GinPageError> {
-    page[24..24 + GinMetaPageData::SIZE].copy_from_slice(&meta.encode());
+    let meta_start = max_align(SIZE_OF_PAGE_HEADER_DATA);
+    let meta_end = meta_start + GinMetaPageData::SIZE;
+    page[meta_start..meta_end].copy_from_slice(&meta.encode());
+    let mut header = page_header(page)?;
+    header.pd_lower = meta_end as u16;
+    gin_write_page_header(page, header);
     Ok(())
+}
+
+fn gin_write_page_header(page: &mut [u8; BLCKSZ], header: PageHeaderData) {
+    page[0..8].copy_from_slice(&header.pd_lsn.to_le_bytes());
+    page[8..10].copy_from_slice(&header.pd_checksum.to_le_bytes());
+    page[10..12].copy_from_slice(&header.pd_flags.to_le_bytes());
+    page[12..14].copy_from_slice(&header.pd_lower.to_le_bytes());
+    page[14..16].copy_from_slice(&header.pd_upper.to_le_bytes());
+    page[16..18].copy_from_slice(&header.pd_special.to_le_bytes());
+    page[18..20].copy_from_slice(&header.pd_pagesize_version.to_le_bytes());
+    page[20..24].copy_from_slice(&header.pd_prune_xid.to_le_bytes());
 }
 
 pub fn gin_page_append_item(

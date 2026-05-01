@@ -29,8 +29,8 @@ use crate::backend::executor::value_io::{
 };
 use crate::backend::storage::fsm::get_free_index_page;
 use crate::backend::storage::page::bufpage::{
-    ITEM_ID_SIZE, MAX_HEAP_TUPLE_SIZE, PageHeaderData, SIZE_OF_PAGE_HEADER_DATA, max_align,
-    page_header,
+    ITEM_ID_SIZE, MAX_HEAP_TUPLE_SIZE, PageError, PageHeaderData, SIZE_OF_PAGE_HEADER_DATA,
+    max_align, page_header,
 };
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
@@ -2192,6 +2192,15 @@ fn allocate_btree_block(ctx: &IndexInsertContext) -> Result<u32, CatalogError> {
             continue;
         }
         let page = read_page(&ctx.pool, ctx.index_relation, block)?;
+        match page_header(&page) {
+            Ok(_) => {}
+            Err(PageError::NotInitialized) => return Ok(block),
+            Err(err) => {
+                return Err(CatalogError::Io(format!(
+                    "btree page header read failed: {err:?}"
+                )));
+            }
+        }
         let opaque = bt_page_get_opaque(&page)
             .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
         if opaque.is_meta() || opaque.is_root() || opaque.btpo_flags & BTP_DELETED == 0 {

@@ -54,6 +54,9 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
             VARBIT_TYPE_OID,
             VARBIT_CMP_EQ_PROC_OID,
         ),
+        (BTREE_DATETIME_FAMILY_OID, DATE_TYPE_OID, 1092),
+        (BTREE_MONEY_FAMILY_OID, MONEY_TYPE_OID, 377),
+        (BTREE_INTEGER_FAMILY_OID, XID8_TYPE_OID, 5096),
         (
             BTREE_BYTEA_FAMILY_OID,
             BYTEA_TYPE_OID,
@@ -116,6 +119,21 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         (
             BTREE_INTEGER_FAMILY_OID,
             INT8_TYPE_OID,
+            BTEQUALIMAGE_PROC_OID,
+        ),
+        (
+            BTREE_INTEGER_FAMILY_OID,
+            XID8_TYPE_OID,
+            BTEQUALIMAGE_PROC_OID,
+        ),
+        (
+            BTREE_DATETIME_FAMILY_OID,
+            DATE_TYPE_OID,
+            BTEQUALIMAGE_PROC_OID,
+        ),
+        (
+            BTREE_MONEY_FAMILY_OID,
+            MONEY_TYPE_OID,
             BTEQUALIMAGE_PROC_OID,
         ),
         (BTREE_BIT_FAMILY_OID, BIT_TYPE_OID, BTEQUALIMAGE_PROC_OID),
@@ -649,6 +667,7 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         (HASH_INTEGER_FAMILY_OID, INT2_TYPE_OID, HASH_INT2_PROC_OID),
         (HASH_INTEGER_FAMILY_OID, INT4_TYPE_OID, HASH_INT4_PROC_OID),
         (HASH_INTEGER_FAMILY_OID, INT8_TYPE_OID, HASH_INT8_PROC_OID),
+        (HASH_INTEGER_FAMILY_OID, XID8_TYPE_OID, HASH_INT8_PROC_OID),
         (HASH_OID_FAMILY_OID, OID_TYPE_OID, HASH_OID_PROC_OID),
         (HASH_ENUM_FAMILY_OID, ANYENUMOID, HASH_ENUM_PROC_OID),
         (

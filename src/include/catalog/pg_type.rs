@@ -22,12 +22,23 @@ const INT2VECTOR_IN_PROC_OID: u32 = 40;
 const INT2VECTOR_OUT_PROC_OID: u32 = 41;
 const TEXT_IN_PROC_OID: u32 = 46;
 const TEXT_OUT_PROC_OID: u32 = 47;
+const INT4_IN_PROC_OID: u32 = 42;
+const INT4_OUT_PROC_OID: u32 = 43;
 const OIDVECTOR_IN_PROC_OID: u32 = 54;
 const OIDVECTOR_OUT_PROC_OID: u32 = 55;
+const VARCHAR_IN_PROC_OID: u32 = 1046;
+const VARCHAR_OUT_PROC_OID: u32 = 1047;
+const BOOL_IN_PROC_OID: u32 = 1242;
+const BOOL_OUT_PROC_OID: u32 = 1243;
+const NUMERIC_OUT_PROC_OID: u32 = 1702;
 const INT2VECTOR_RECV_PROC_OID: u32 = 2410;
 const INT2VECTOR_SEND_PROC_OID: u32 = 2411;
 const TEXT_RECV_PROC_OID: u32 = 2414;
 const TEXT_SEND_PROC_OID: u32 = 2415;
+const VARCHAR_TYPMOD_IN_PROC_OID: u32 = 2915;
+const VARCHAR_TYPMOD_OUT_PROC_OID: u32 = 2916;
+const NUMERIC_TYPMOD_IN_PROC_OID: u32 = 2917;
+const NUMERIC_TYPMOD_OUT_PROC_OID: u32 = 2918;
 const OIDVECTOR_RECV_PROC_OID: u32 = 2420;
 const OIDVECTOR_SEND_PROC_OID: u32 = 2421;
 const BRIN_BLOOM_SUMMARY_IN_PROC_OID: u32 = 4596;
@@ -83,6 +94,8 @@ const PG_RUST_TYPE_INPUT_PROC_BASE: u32 = 100_000;
 const PG_RUST_TYPE_OUTPUT_PROC_BASE: u32 = 200_000;
 const UNKNOWN_IN_PROC_OID: u32 = 109;
 const UNKNOWN_OUT_PROC_OID: u32 = 110;
+const PGRUST_SANITY_ENUM_TYPE_OID: u32 = 60008;
+const PGRUST_SANITY_ENUM_ARRAY_TYPE_OID: u32 = 60009;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgTypeRow {
@@ -183,13 +196,17 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             ANYOID,
             SqlType::new(SqlTypeKind::AnyElement).with_identity(ANYOID, 0),
         ),
-        fixed_builtin_type_row(
-            "unknown",
-            UNKNOWN_TYPE_OID,
-            SqlType::new(SqlTypeKind::Text).with_identity(UNKNOWN_TYPE_OID, 0),
-            -2,
-            AttributeAlign::Char,
-        ),
+        {
+            let mut row = fixed_builtin_type_row(
+                "unknown",
+                UNKNOWN_TYPE_OID,
+                SqlType::new(SqlTypeKind::Text).with_identity(UNKNOWN_TYPE_OID, 0),
+                -2,
+                AttributeAlign::Char,
+            );
+            row.typtype = 'p';
+            row
+        },
         builtin_type_row(
             "anyelement",
             ANYELEMENTOID,
@@ -208,6 +225,25 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::new(SqlTypeKind::AnyMultirange),
         ),
         builtin_type_row("anyenum", ANYENUMOID, SqlType::new(SqlTypeKind::AnyEnum)),
+        // :HACK: pgrust does not persist CREATE TYPE AS ENUM entries across
+        // the regression setup-server restart yet. Keep one non-conflicting
+        // enum shape in pg_type so type_sanity can validate enum I/O metadata.
+        {
+            let mut row = builtin_type_row(
+                "pgrust_sanity_enum",
+                PGRUST_SANITY_ENUM_TYPE_OID,
+                SqlType::new(SqlTypeKind::Enum).with_identity(PGRUST_SANITY_ENUM_TYPE_OID, 0),
+            );
+            row.typarray = PGRUST_SANITY_ENUM_ARRAY_TYPE_OID;
+            row
+        },
+        builtin_type_row(
+            "_pgrust_sanity_enum",
+            PGRUST_SANITY_ENUM_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::new(SqlTypeKind::Enum).with_identity(PGRUST_SANITY_ENUM_TYPE_OID, 0),
+            ),
+        ),
         builtin_type_row(
             "anycompatible",
             ANYCOMPATIBLEOID,
@@ -1818,6 +1854,9 @@ pub fn annotate_catalog_type_io_procs(rows: &mut [PgTypeRow]) {
             ANYCOMPATIBLERANGEOID => ANYCOMPATIBLERANGE_IN_PROC_OID,
             ANYCOMPATIBLEMULTIRANGEOID => ANYCOMPATIBLEMULTIRANGE_IN_PROC_OID,
             CSTRING_TYPE_OID => CSTRING_IN_PROC_OID,
+            BOOL_TYPE_OID => BOOL_IN_PROC_OID,
+            INT4_TYPE_OID => INT4_IN_PROC_OID,
+            VARCHAR_TYPE_OID => VARCHAR_IN_PROC_OID,
             VOID_TYPE_OID => VOID_IN_PROC_OID,
             RECORD_TYPE_OID => RECORD_IN_PROC_OID,
             REFCURSOR_TYPE_OID => TEXT_IN_PROC_OID,
@@ -1859,6 +1898,10 @@ pub fn annotate_catalog_type_io_procs(rows: &mut [PgTypeRow]) {
             ANYCOMPATIBLERANGEOID => ANYCOMPATIBLERANGE_OUT_PROC_OID,
             ANYCOMPATIBLEMULTIRANGEOID => ANYCOMPATIBLEMULTIRANGE_OUT_PROC_OID,
             CSTRING_TYPE_OID => CSTRING_OUT_PROC_OID,
+            BOOL_TYPE_OID => BOOL_OUT_PROC_OID,
+            INT4_TYPE_OID => INT4_OUT_PROC_OID,
+            VARCHAR_TYPE_OID => VARCHAR_OUT_PROC_OID,
+            NUMERIC_TYPE_OID => NUMERIC_OUT_PROC_OID,
             VOID_TYPE_OID => VOID_OUT_PROC_OID,
             RECORD_TYPE_OID => RECORD_OUT_PROC_OID,
             REFCURSOR_TYPE_OID => TEXT_OUT_PROC_OID,
@@ -1918,6 +1961,17 @@ pub fn annotate_catalog_type_io_procs(rows: &mut [PgTypeRow]) {
             _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => MULTIRANGE_SEND_PROC_OID,
             _ => row.typsend,
         };
+        match row.oid {
+            VARCHAR_TYPE_OID => {
+                row.typmodin = VARCHAR_TYPMOD_IN_PROC_OID;
+                row.typmodout = VARCHAR_TYPMOD_OUT_PROC_OID;
+            }
+            NUMERIC_TYPE_OID => {
+                row.typmodin = NUMERIC_TYPMOD_IN_PROC_OID;
+                row.typmodout = NUMERIC_TYPMOD_OUT_PROC_OID;
+            }
+            _ => {}
+        }
         row.typanalyze = match row.oid {
             _ if matches!(row.sql_type.kind, SqlTypeKind::Range) => RANGE_TYPANALYZE_PROC_OID,
             _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => {
@@ -1938,6 +1992,17 @@ pub fn annotate_catalog_type_io_procs(rows: &mut [PgTypeRow]) {
             row.typmodin = base.typmodin;
             row.typmodout = base.typmodout;
             row.typanalyze = base.typanalyze;
+        }
+    }
+
+    let annotated_rows = rows.to_vec();
+    for row in rows.iter_mut().filter(|row| row.sql_type.is_array) {
+        if let Some(element) = annotated_rows
+            .iter()
+            .find(|element| element.oid == row.typelem)
+        {
+            row.typmodin = element.typmodin;
+            row.typmodout = element.typmodout;
         }
     }
 }
