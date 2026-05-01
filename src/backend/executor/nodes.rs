@@ -1501,6 +1501,7 @@ impl AppendState {
             if let Some(slot) = self.children[child_index].exec_proc_node(ctx)? {
                 let child_bindings = ctx.system_bindings.clone();
                 let mut values = slot.values()?.to_vec();
+                let raw_attrs = tuple_slot_raw_attrs_owned(slot, values.len())?;
                 Value::materialize_all(&mut values);
                 self.current_bindings = child_bindings
                     .first()
@@ -1518,7 +1519,12 @@ impl AppendState {
                     .current_bindings
                     .first()
                     .map(|binding| binding.table_oid);
-                self.slot.store_virtual_row(values, slot.tid(), table_oid);
+                self.slot.store_virtual_row_with_raw_attrs(
+                    values,
+                    raw_attrs,
+                    slot.tid(),
+                    table_oid,
+                );
                 set_active_system_bindings(ctx, &self.current_bindings);
                 finish_row(&mut self.stats, start);
                 return Ok(Some(&mut self.slot));
@@ -1528,6 +1534,61 @@ impl AppendState {
         finish_eof(&mut self.stats, start, ctx);
         Ok(None)
     }
+}
+
+fn tuple_slot_raw_attrs_owned(
+    slot: &TupleSlot,
+    nattrs: usize,
+) -> Result<Vec<Option<Vec<u8>>>, ExecError> {
+    match &slot.kind {
+        SlotKind::BufferHeapTuple {
+            attr_descs,
+            tuple_ptr,
+            tuple_len,
+            ..
+        } => {
+            let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
+            let raw = crate::include::access::htup::deform_raw(bytes, attr_descs)?;
+            Ok((0..nattrs)
+                .map(|index| {
+                    raw.get(index)
+                        .copied()
+                        .flatten()
+                        .and_then(raw_attr_sidecar_bytes)
+                })
+                .collect())
+        }
+        SlotKind::HeapTuple {
+            attr_descs, tuple, ..
+        } => {
+            let raw = tuple.deform(attr_descs)?;
+            Ok((0..nattrs)
+                .map(|index| {
+                    raw.get(index)
+                        .copied()
+                        .flatten()
+                        .and_then(raw_attr_sidecar_bytes)
+                })
+                .collect())
+        }
+        SlotKind::Virtual => {
+            let mut raw_attrs = slot
+                .raw_attrs
+                .iter()
+                .take(nattrs)
+                .cloned()
+                .collect::<Vec<_>>();
+            raw_attrs.resize_with(nattrs, || None);
+            Ok(raw_attrs)
+        }
+        SlotKind::Empty => Ok(vec![None; nattrs]),
+    }
+}
+
+fn raw_attr_sidecar_bytes(raw: &[u8]) -> Option<Vec<u8>> {
+    (crate::include::varatt::is_compressed_inline_datum(raw)
+        || crate::include::varatt::is_ondisk_toast_pointer(raw))
+    .then(|| raw.to_vec())
 }
 
 fn append_child_index(

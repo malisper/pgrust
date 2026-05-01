@@ -326,10 +326,7 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
                     .as_ref()
                     .map(|row| row.typalign)
                     .unwrap_or(column.storage.attalign),
-                attstorage: type_row
-                    .as_ref()
-                    .map(|row| row.typstorage)
-                    .unwrap_or(column.storage.attstorage),
+                attstorage: column.storage.attstorage,
                 attcompression: column.storage.attcompression,
                 attstattarget: (column.attstattarget >= 0).then_some(column.attstattarget),
                 attinhcount: column.attinhcount,

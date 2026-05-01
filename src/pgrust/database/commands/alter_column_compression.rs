@@ -1,9 +1,29 @@
 use super::super::*;
+use crate::backend::parser::{BoundRelation, CatalogLookup};
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
-    ensure_relation_owner, lookup_heap_relation_for_alter_table,
-    validate_alter_table_alter_column_compression,
+    ensure_relation_owner, validate_alter_table_alter_column_compression,
 };
+
+fn lookup_relation_for_alter_column_compression(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'f' | 'm') => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table or materialized view",
+        })),
+        None if if_exists => {
+            push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
+            Ok(None)
+        }
+        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
+    }
+}
 
 impl Database {
     pub(crate) fn execute_alter_table_alter_column_compression_stmt_with_search_path(
@@ -14,7 +34,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_relation_for_alter_column_compression(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -57,7 +77,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_relation_for_alter_column_compression(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,

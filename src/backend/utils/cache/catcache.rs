@@ -394,9 +394,7 @@ impl CatCache {
                         attalign: type_row
                             .map(|row| row.typalign)
                             .unwrap_or(column.storage.attalign),
-                        attstorage: type_row
-                            .map(|row| row.typstorage)
-                            .unwrap_or(column.storage.attstorage),
+                        attstorage: column.storage.attstorage,
                         attcompression: column.storage.attcompression,
                         attstattarget: (column.attstattarget >= 0).then_some(column.attstattarget),
                         attinhcount: column.attinhcount,

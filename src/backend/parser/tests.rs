@@ -4969,6 +4969,33 @@ fn parse_alter_table_set_statement() {
         })
     );
 
+    let stmt =
+        parse_statement("alter materialized view compressmv alter column x set compression pglz")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnCompression(AlterTableAlterColumnCompressionStatement {
+            if_exists: false,
+            only: false,
+            table_name: "compressmv".into(),
+            column_name: "x".into(),
+            compression: AttributeCompression::Pglz,
+        })
+    );
+
+    assert!(matches!(
+        parse_statement("alter table attmp alter note set compression I_Do_Not_Exist_Compression"),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "invalid compression method \"i_do_not_exist_compression\""
+                && sqlstate == "22023"
+    ));
+    assert!(matches!(
+        parse_statement("create table badcompresstbl (a text compression I_Do_Not_Exist_Compression)"),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "invalid compression method \"i_do_not_exist_compression\""
+                && sqlstate == "22023"
+    ));
+
     let stmt = parse_statement("alter table attmp alter column note set storage external").unwrap();
     assert_eq!(
         stmt,
