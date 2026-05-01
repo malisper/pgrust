@@ -31,6 +31,7 @@ pub(crate) fn clear_subquery_eval_cache() {
 #[derive(Clone)]
 struct QuantifiedMembershipCache {
     values: HashSet<Value>,
+    integer_values: HashSet<i64>,
     saw_row: bool,
     saw_null: bool,
 }
@@ -406,7 +407,7 @@ fn build_exists_membership_set(
             ctx.expr_bindings.outer_system_bindings = row.system_bindings.clone();
             let value = eval_expr(local_expr, &mut row.slot, ctx)?;
             if !matches!(value, Value::Null) {
-                values.insert(value.to_owned_value());
+                values.insert(membership_cache_key(value.to_owned_value()));
             }
         }
         Ok(values)
@@ -464,7 +465,15 @@ fn scalar_lookup_cache_key(value: Value, bpchar_key: bool) -> Value {
     if bpchar_key && let Some(text) = value.as_text() {
         return Value::Text(text.trim_end_matches(' ').into());
     }
-    value
+    membership_cache_key(value)
+}
+
+fn membership_cache_key(value: Value) -> Value {
+    match value {
+        Value::Int16(value) => Value::Int64(i64::from(value)),
+        Value::Int32(value) => Value::Int64(i64::from(value)),
+        other => other,
+    }
 }
 
 fn eval_scalar_lookup_fast_path(
@@ -538,7 +547,7 @@ fn eval_exists_membership_fast_path(
     if matches!(param_value, Value::Null) {
         return Ok(Some(Value::Bool(false)));
     }
-    let param_value = param_value.to_owned_value();
+    let param_value = membership_cache_key(param_value.to_owned_value());
     if let Some(result) = EXISTS_MEMBERSHIP_CACHE.with(|cache| {
         cache
             .borrow()
@@ -924,6 +933,7 @@ fn eval_cached_any_eq_subquery(
             bind_subplan_params(subplan, slot, ctx)?;
             let mut state = executor_start(plan.clone());
             let mut values = HashSet::new();
+            let mut integer_values = HashSet::new();
             let mut saw_row = false;
             let mut saw_null = false;
             while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
@@ -933,11 +943,15 @@ fn eval_cached_any_eq_subquery(
                 if matches!(value, Value::Null) {
                     saw_null = true;
                 } else {
+                    if let Some(key) = quantified_membership_integer_key(&value) {
+                        integer_values.insert(key);
+                    }
                     values.insert(value.to_owned_value());
                 }
             }
             Ok(QuantifiedMembershipCache {
                 values,
+                integer_values,
                 saw_row,
                 saw_null,
             })
@@ -954,12 +968,24 @@ fn eval_cached_any_eq_subquery(
     if matches!(left_value, Value::Null) {
         return Ok(Value::Null);
     }
-    if cache.values.contains(left_value) {
+    if cache.values.contains(left_value)
+        || quantified_membership_integer_key(left_value)
+            .is_some_and(|key| cache.integer_values.contains(&key))
+    {
         Ok(Value::Bool(true))
     } else if cache.saw_null {
         Ok(Value::Null)
     } else {
         Ok(Value::Bool(false))
+    }
+}
+
+fn quantified_membership_integer_key(value: &Value) -> Option<i64> {
+    match value {
+        Value::Int16(value) => Some(i64::from(*value)),
+        Value::Int32(value) => Some(i64::from(*value)),
+        Value::Int64(value) => Some(*value),
+        _ => None,
     }
 }
 

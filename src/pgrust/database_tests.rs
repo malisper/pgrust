@@ -1018,6 +1018,69 @@ fn repeatable_read_streaming_uses_transaction_snapshot() {
 }
 
 #[test]
+fn streaming_select_clears_subquery_membership_cache_between_statements() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table stream_cache_parent (id int primary key) partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table stream_cache_child partition of stream_cache_parent for values from (0) to (10)",
+        )
+        .unwrap();
+    assert_eq!(
+        streaming_query_rows(
+            &mut session,
+            &db,
+            "select cr.relname \
+               from pg_class cr \
+              where cr.oid in (select relid from pg_partition_tree('stream_cache_parent')) \
+              order by cr.relname",
+        ),
+        vec![
+            vec![Value::Text("stream_cache_child".into())],
+            vec![Value::Text("stream_cache_parent".into())],
+        ]
+    );
+
+    session
+        .execute(&db, "drop table stream_cache_parent")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table stream_live_parent (id int primary key) partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table stream_live_child partition of stream_live_parent for values from (0) to (10)",
+        )
+        .unwrap();
+    assert_eq!(
+        streaming_query_rows(
+            &mut session,
+            &db,
+            "select cr.relname \
+               from pg_class cr \
+              where cr.oid in (select relid from pg_partition_tree('stream_live_parent')) \
+              order by cr.relname",
+        ),
+        vec![
+            vec![Value::Text("stream_live_child".into())],
+            vec![Value::Text("stream_live_parent".into())],
+        ]
+    );
+}
+
+#[test]
 fn read_committed_uses_fresh_statement_snapshots() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut reader = Session::new(1);
@@ -3643,6 +3706,25 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+fn streaming_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Vec<Value>> {
+    let stmt = crate::backend::parser::parse_select(sql).unwrap();
+    let mut guard = session.execute_streaming(db, &stmt).unwrap();
+    let mut rows = Vec::new();
+    while let Some(slot) =
+        crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx).unwrap()
+    {
+        let mut values = slot
+            .values()
+            .unwrap()
+            .iter()
+            .map(Value::to_owned_value)
+            .collect::<Vec<_>>();
+        Value::materialize_all(&mut values);
+        rows.push(values);
+    }
+    rows
 }
 
 fn query_text_column(session: &mut Session, db: &Database, sql: &str) -> Vec<String> {
@@ -34359,6 +34441,262 @@ fn self_referencing_partitioned_foreign_key_adds_referenced_clones() {
             ],
         ]
     );
+}
+
+#[test]
+fn self_referencing_partitioned_foreign_key_matches_pg_catalog_rows() {
+    let base = temp_dir("foreign_key_self_partition_catalog_rows");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parted_self_fk ( \
+            id bigint not null primary key, \
+            id_abc bigint, \
+            foreign key (id_abc) references parted_self_fk(id) \
+         ) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part1_self_fk (id bigint not null primary key, id_abc bigint)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table parted_self_fk attach partition part1_self_fk for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part2_self_fk partition of parted_self_fk for values from (10) to (20)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part3_self_fk (id bigint not null primary key, id_abc bigint) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part32_self_fk partition of part3_self_fk for values from (20) to (30)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table parted_self_fk attach partition part3_self_fk for values from (20) to (40)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part33_self_fk (id bigint not null primary key, id_abc bigint)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table part3_self_fk attach partition part33_self_fk for values from (30) to (40)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select cr.relname, co.conname, co.convalidated, \
+                    coalesce(p.conname, ''), coalesce(cf.relname, '') \
+               from pg_constraint co \
+               join pg_class cr on cr.oid = co.conrelid \
+               left join pg_class cf on cf.oid = co.confrelid \
+               left join pg_constraint p on p.oid = co.conparentid \
+              where co.contype = 'f' \
+                and cr.oid in (select relid from pg_partition_tree('parted_self_fk')) \
+              order by cr.relname, co.conname, p.conname",
+        ),
+        vec![
+            vec![
+                Value::Text("part1_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Text("parted_self_fk".into()),
+            ],
+            vec![
+                Value::Text("part2_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Text("parted_self_fk".into()),
+            ],
+            vec![
+                Value::Text("part32_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Text("parted_self_fk".into()),
+            ],
+            vec![
+                Value::Text("part33_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Text("parted_self_fk".into()),
+            ],
+            vec![
+                Value::Text("part3_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Text("parted_self_fk".into()),
+            ],
+            vec![
+                Value::Text("parted_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Bool(true),
+                Value::Text("".into()),
+                Value::Text("parted_self_fk".into()),
+            ],
+            vec![
+                Value::Text("parted_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey_1".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Text("part1_self_fk".into()),
+            ],
+            vec![
+                Value::Text("parted_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey_2".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Text("part2_self_fk".into()),
+            ],
+            vec![
+                Value::Text("parted_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey_3".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Text("part3_self_fk".into()),
+            ],
+            vec![
+                Value::Text("parted_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey_3_1".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey_3".into()),
+                Value::Text("part33_self_fk".into()),
+            ],
+            vec![
+                Value::Text("parted_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey_4".into()),
+                Value::Bool(true),
+                Value::Text("parted_self_fk_id_abc_fkey_3".into()),
+                Value::Text("part32_self_fk".into()),
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "insert into parted_self_fk values (1, null), (2, null), (10, 2)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table parted_self_fk detach partition part2_self_fk",
+    )
+    .unwrap();
+    match db.execute(1, "delete from parted_self_fk where id = 2") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey_5");
+        }
+        other => panic!("expected detached partition foreign key violation, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter table parted_self_fk attach partition part2_self_fk for values from (10) to (20)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint \
+              where contype = 'f' \
+                and conrelid in (select relid from pg_partition_tree('parted_self_fk'))",
+        ),
+        vec![vec![Value::Int64(11)]]
+    );
+}
+
+#[test]
+fn partitioned_foreign_key_drop_dependency_uses_root_constraint_name() {
+    let base = temp_dir("foreign_key_partition_drop_dependency_names");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table droppk (a int primary key) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table droppk1 partition of droppk for values from (0) to (1000)",
+    )
+    .unwrap();
+    db.execute(1, "create table droppk_d partition of droppk default")
+        .unwrap();
+    db.execute(
+        1,
+        "create table droppk2 partition of droppk for values from (1000) to (2000) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table droppk21 partition of droppk2 for values from (1000) to (1400)",
+    )
+    .unwrap();
+    db.execute(1, "create table droppk2_d partition of droppk2 default")
+        .unwrap();
+    db.execute(1, "create table dropfk (a int references droppk)")
+        .unwrap();
+
+    match db.execute(1, "drop table droppk_d") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot drop table droppk_d because other objects depend on it"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("constraint dropfk_a_fkey on table dropfk depends on table droppk_d")
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use DROP ... CASCADE to drop the dependent objects too.")
+            );
+        }
+        other => panic!("expected droppk_d dependency error, got {other:?}"),
+    }
+
+    match db.execute(1, "drop table droppk2") {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot drop table droppk2 because other objects depend on it"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("constraint dropfk_a_fkey on table dropfk depends on table droppk2")
+            );
+        }
+        other => panic!("expected droppk2 dependency error, got {other:?}"),
+    }
 }
 
 #[test]

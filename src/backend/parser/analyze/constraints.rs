@@ -3282,6 +3282,9 @@ fn inbound_foreign_key_display_names(
     catalog: &dyn super::CatalogLookup,
 ) -> (String, String) {
     let default_child_name = relation_display_name(catalog, child_relation.relation_oid, "<child>");
+    if is_referenced_side_foreign_key_clone(row, catalog) {
+        return (row.conname.clone(), default_child_name);
+    }
     let Some(parent_row) = (row.conparentid != 0)
         .then(|| catalog.constraint_row_by_oid(row.conparentid))
         .flatten()

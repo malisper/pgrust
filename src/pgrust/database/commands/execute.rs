@@ -4641,8 +4641,10 @@ impl Database {
         random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     ) -> Result<SelectGuard, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
+        use crate::backend::executor::exec_expr::clear_subquery_eval_cache;
         use crate::backend::executor::executor_start;
 
+        clear_subquery_eval_cache();
         let visible_catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
         let visible_catalog_snapshot = Some(crate::backend::executor::executor_catalog(
             visible_catalog.clone(),
