@@ -883,6 +883,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if is_jsonpath_sql_surface(sql)
                 && (message == "invalid input syntax for type jsonpath"
+                    || message == "unsupported Unicode escape sequence"
                     || is_jsonpath_parse_error(message))
                 && let Some(position) = find_jsonpath_literal_position(sql)
                     .or_else(|| find_first_string_literal_start_position(sql))
@@ -2737,6 +2738,8 @@ fn is_jsonpath_parse_error(message: &str) -> bool {
         || message.starts_with("trailing junk after numeric literal at or near ")
             && message.ends_with(" of jsonpath input")
         || message.starts_with("invalid numeric literal at or near ")
+            && message.ends_with(" of jsonpath input")
+        || message.starts_with("invalid Unicode escape sequence at or near ")
             && message.ends_with(" of jsonpath input")
 }
 
