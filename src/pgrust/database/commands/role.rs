@@ -505,18 +505,15 @@ impl Database {
                 &[existing.oid],
             )?;
             if !owned_objects.is_empty() || !shared_dependency_details.is_empty() {
-                let mut detail_lines = owned_objects
+                let owner_detail_lines = owned_objects
                     .iter()
                     .filter(|object| object.kind != OwnedObjectKind::Index)
                     .map(OwnedObject::drop_detail)
                     .collect::<Vec<_>>();
-                detail_lines.extend(shared_dependency_details);
-                detail_lines.sort_by(|left, right| {
-                    role_drop_detail_priority(left)
-                        .cmp(&role_drop_detail_priority(right))
-                        .then_with(|| left.cmp(right))
-                });
-                detail_lines.dedup();
+                let detail_lines = role_drop_dependency_detail_lines(
+                    owner_detail_lines,
+                    shared_dependency_details,
+                );
                 let detail = detail_lines.join("\n");
                 return Err(ExecError::DetailedError {
                     message: format!(
@@ -1783,6 +1780,32 @@ fn role_drop_detail_priority(detail: &str) -> u8 {
     } else {
         1
     }
+}
+
+fn role_drop_dependency_detail_lines(
+    owner_detail_lines: Vec<String>,
+    shared_dependency_details: Vec<String>,
+) -> Vec<String> {
+    let mut detail_lines = shared_dependency_details
+        .iter()
+        .filter(|detail| role_drop_detail_priority(detail) == 0)
+        .cloned()
+        .collect::<Vec<_>>();
+    detail_lines.extend(owner_detail_lines);
+    detail_lines.extend(
+        shared_dependency_details
+            .into_iter()
+            .filter(|detail| role_drop_detail_priority(detail) != 0),
+    );
+    dedup_preserving_order(detail_lines)
+}
+
+fn dedup_preserving_order(lines: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    lines
+        .into_iter()
+        .filter(|line| seen.insert(line.clone()))
+        .collect()
 }
 
 fn acl_item_depends_on_role(item: &str, role_names: &BTreeSet<&str>) -> bool {
