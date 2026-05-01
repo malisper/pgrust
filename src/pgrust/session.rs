@@ -23425,7 +23425,7 @@ fn copy_field_is_null(
     force_null: bool,
 ) -> bool {
     match options.format {
-        CopyFormat::Text => raw == COPY_TEXT_NULL_SENTINEL,
+        CopyFormat::Text => raw == COPY_TEXT_NULL_SENTINEL || raw == options.null_marker,
         CopyFormat::Csv => {
             (raw == COPY_TEXT_NULL_SENTINEL && !force_not_null)
                 || (raw == COPY_CSV_QUOTED_NULL_SENTINEL && force_null)
