@@ -1090,6 +1090,7 @@ pub struct SelectGuard {
 pub(crate) enum CopyFormat {
     Text,
     Csv,
+    Binary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1105,7 +1106,17 @@ enum CopyOnError {
     Ignore,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyLogVerbosity {
+    Silent,
+    Default,
+    Verbose,
+}
+
 const COPY_TEXT_NULL_SENTINEL: &str = "\0pgrust_copy_text_null";
+const COPY_DEFAULT_SENTINEL: &str = "\0pgrust_copy_default";
+const COPY_CSV_QUOTED_NULL_SENTINEL: &str = "\0pgrust_copy_csv_quoted_null";
+const COPY_CSV_QUOTED_EOC_SENTINEL: &str = "\0pgrust_copy_csv_quoted_eoc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopyOptions {
@@ -1118,10 +1129,18 @@ pub(crate) struct CopyOptions {
     pub null_marker: String,
     pub default_marker: Option<String>,
     pub on_error_ignore: bool,
+    reject_limit: Option<usize>,
+    log_verbosity: CopyLogVerbosity,
     pub freeze: bool,
     pub where_clause: Option<String>,
     pub force_quote_all: bool,
     pub force_quote_columns: Vec<String>,
+    force_not_null_all: bool,
+    force_not_null_columns: Vec<String>,
+    force_null_all: bool,
+    force_null_columns: Vec<String>,
+    convert_selectively: bool,
+    option_positions: BTreeMap<String, usize>,
 }
 
 impl Default for CopyOptions {
@@ -1136,10 +1155,18 @@ impl Default for CopyOptions {
             null_marker: "\\N".into(),
             default_marker: None,
             on_error_ignore: false,
+            reject_limit: None,
+            log_verbosity: CopyLogVerbosity::Default,
             freeze: false,
             where_clause: None,
             force_quote_all: false,
             force_quote_columns: Vec::new(),
+            force_not_null_all: false,
+            force_not_null_columns: Vec::new(),
+            force_null_all: false,
+            force_null_columns: Vec::new(),
+            convert_selectively: false,
+            option_positions: BTreeMap::new(),
         }
     }
 }
@@ -1180,9 +1207,16 @@ pub(crate) enum CopyExecutionResult {
 }
 
 struct CopyInsertOptions<'a> {
+    format: CopyFormat,
     null_marker: &'a str,
     default_marker: Option<&'a str>,
     on_error: CopyOnError,
+    reject_limit: Option<usize>,
+    log_verbosity: CopyLogVerbosity,
+    force_not_null_all: bool,
+    force_not_null_columns: &'a [String],
+    force_null_all: bool,
+    force_null_columns: &'a [String],
     where_clause: Option<&'a str>,
     where_filter: Option<CopyWhereFilter>,
     progress: Option<CopyProgressOptions>,
@@ -1224,9 +1258,12 @@ impl CopyWhereFilter {
             .iter()
             .position(|column| !column.dropped && column.name.eq_ignore_ascii_case(&self.column))
         else {
-            return Err(ExecError::Parse(ParseError::UnknownColumn(
-                self.column.clone(),
-            )));
+            return Err(ExecError::DetailedError {
+                message: format!("column \"{}\" does not exist", self.column),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            });
         };
         Ok(ResolvedCopyWhereFilter {
             column_index,
@@ -1252,7 +1289,16 @@ fn copy_target_column_indexes(
         return Ok(visible_non_generated_column_indexes(desc));
     };
     let mut indexes = Vec::with_capacity(columns.len());
+    let mut seen = BTreeSet::new();
     for name in columns {
+        if !seen.insert(name) {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!("column \"{name}\" specified more than once"),
+                detail: None,
+                hint: None,
+                sqlstate: "42701",
+            }));
+        }
         let Some(index) = desc
             .columns
             .iter()
@@ -1287,6 +1333,78 @@ fn copy_generated_column_error(column_name: &str) -> ExecError {
         hint: None,
         sqlstate: "428C9",
     }
+}
+
+fn validate_copy_force_columns(
+    option: &'static str,
+    all: bool,
+    columns: &[String],
+    desc: &RelationDesc,
+    target_indexes: &[usize],
+) -> Result<(), ExecError> {
+    if all {
+        return Ok(());
+    }
+    for name in columns {
+        let Some(index) = desc
+            .columns
+            .iter()
+            .position(|column| !column.dropped && column.name == *name)
+        else {
+            return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+        };
+        if !target_indexes.contains(&index) {
+            return Err(ExecError::DetailedError {
+                message: format!("{option} column \"{name}\" not referenced by COPY"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P10",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn copy_missing_data_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("missing data for column \"{column_name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22P04",
+    }
+}
+
+fn copy_extra_data_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "extra data after last expected column".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22P04",
+    }
+}
+
+fn copy_unexpected_default_marker_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: "unexpected default marker in COPY data".into(),
+        detail: Some(format!("Column \"{column_name}\" has no default value.")),
+        hint: None,
+        sqlstate: "22P04",
+    }
+}
+
+fn copy_column_has_default(
+    desc: &RelationDesc,
+    column_index: usize,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let column = &desc.columns[column_index];
+    column.default_sequence_oid.is_some()
+        || column.default_expr.is_some()
+        || column.missing_default_value.is_some()
+        || catalog
+            .type_oid_for_sql_type(column.sql_type)
+            .and_then(|type_oid| catalog.type_default_sql(type_oid))
+            .is_some()
 }
 
 fn copy_generated_where_error(column_name: &str) -> ExecError {
@@ -1327,6 +1445,61 @@ fn validate_copy_where_generated_references(
         .any(|identifier| identifier.eq_ignore_ascii_case(relation_name))
     {
         return Err(copy_generated_where_error(first_generated));
+    }
+    Ok(())
+}
+
+fn validate_copy_where_clause_for_start(
+    table_name: &str,
+    desc: &RelationDesc,
+    clause: &str,
+) -> Result<(), ExecError> {
+    validate_copy_where_generated_references(table_name, desc, clause)?;
+    validate_copy_where_unsupported_constructs(clause)?;
+    if let Some(filter) = parse_copy_where_filter(clause) {
+        let _ = filter.resolve(desc)?;
+    }
+    Ok(())
+}
+
+fn validate_copy_where_unsupported_constructs(clause: &str) -> Result<(), ExecError> {
+    let lower = clause.to_ascii_lowercase();
+    if lower.contains("select") {
+        return Err(ExecError::DetailedError {
+            message: "cannot use subquery in COPY FROM WHERE condition".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    if lower.contains("generate_series") {
+        return Err(ExecError::DetailedError {
+            message: "set-returning functions are not allowed in COPY FROM WHERE conditions".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    if lower.contains("row_number") || lower.contains(" over") {
+        return Err(ExecError::DetailedError {
+            message: "window functions are not allowed in COPY FROM WHERE conditions".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    if lower.contains("max(")
+        || lower.contains("min(")
+        || lower.contains("sum(")
+        || lower.contains("avg(")
+        || lower.contains("count(")
+    {
+        return Err(ExecError::DetailedError {
+            message: "aggregate functions are not allowed in COPY FROM WHERE conditions".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42803",
+        });
     }
     Ok(())
 }
@@ -19488,6 +19661,11 @@ impl Session {
         let parsed_null_marker = match copy.options.format {
             CopyFormat::Text => COPY_TEXT_NULL_SENTINEL,
             CopyFormat::Csv => &copy.options.null_marker,
+            CopyFormat::Binary => {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                    "COPY BINARY".into(),
+                )));
+            }
         };
         let bytes_processed = text.len().min(i64::MAX as usize) as i64;
         let progress = match &copy.direction {
@@ -19509,6 +19687,7 @@ impl Session {
             columns.as_deref(),
             &rows,
             CopyInsertOptions {
+                format: copy.options.format,
                 null_marker: parsed_null_marker,
                 default_marker: copy.options.default_marker.as_deref(),
                 on_error: if copy.options.on_error_ignore {
@@ -19516,6 +19695,12 @@ impl Session {
                 } else {
                     CopyOnError::Stop
                 },
+                reject_limit: copy.options.reject_limit,
+                log_verbosity: copy.options.log_verbosity,
+                force_not_null_all: copy.options.force_not_null_all,
+                force_not_null_columns: &copy.options.force_not_null_columns,
+                force_null_all: copy.options.force_null_all,
+                force_null_columns: &copy.options.force_null_columns,
                 where_clause: copy.options.where_clause.as_deref(),
                 where_filter,
                 progress,
@@ -19547,8 +19732,22 @@ impl Session {
             .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
         let mut ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
         let target_indexes = copy_target_column_indexes(&desc, columns.as_deref())?;
+        validate_copy_force_columns(
+            "FORCE_NOT_NULL",
+            copy.options.force_not_null_all,
+            &copy.options.force_not_null_columns,
+            &desc,
+            &target_indexes,
+        )?;
+        validate_copy_force_columns(
+            "FORCE_NULL",
+            copy.options.force_null_all,
+            &copy.options.force_null_columns,
+            &desc,
+            &target_indexes,
+        )?;
         if let Some(clause) = copy.options.where_clause.as_deref() {
-            validate_copy_where_generated_references(name, &desc, clause)?;
+            validate_copy_where_clause_for_start(name, &desc, clause)?;
         }
         check_relation_column_privileges(&ctx, relation_oid, 'a', target_indexes.iter().copied())?;
         if relation_row_security_is_enabled_for_user(
@@ -19735,9 +19934,16 @@ impl Session {
             target_columns,
             rows,
             CopyInsertOptions {
+                format: CopyFormat::Text,
                 null_marker,
                 default_marker: None,
                 on_error: CopyOnError::Stop,
+                reject_limit: None,
+                log_verbosity: CopyLogVerbosity::Default,
+                force_not_null_all: false,
+                force_not_null_columns: &[],
+                force_null_all: false,
+                force_null_columns: &[],
                 where_clause: None,
                 where_filter: None,
                 progress: None,
@@ -19811,8 +20017,22 @@ impl Session {
                         )
                     };
                     let target_indexes = copy_target_column_indexes(&desc, target_columns)?;
+                    validate_copy_force_columns(
+                        "FORCE_NOT_NULL",
+                        options.force_not_null_all,
+                        options.force_not_null_columns,
+                        &desc,
+                        &target_indexes,
+                    )?;
+                    validate_copy_force_columns(
+                        "FORCE_NULL",
+                        options.force_null_all,
+                        options.force_null_columns,
+                        &desc,
+                        &target_indexes,
+                    )?;
                     if let Some(clause) = options.where_clause {
-                        validate_copy_where_generated_references(table_name, &desc, clause)?;
+                        validate_copy_where_clause_for_start(table_name, &desc, clause)?;
                     }
                     let where_filter = options
                         .where_filter
@@ -19880,13 +20100,8 @@ impl Session {
                     let mut parsed_rows = Vec::with_capacity(rows.len());
                     for (row_index, row) in rows.iter().enumerate() {
                         let parsed = (|| -> Result<Option<Vec<Value>>, ExecError> {
-                            if row.len() != target_indexes.len() {
-                                return Err(ExecError::Parse(
-                                    ParseError::InvalidInsertTargetCount {
-                                        expected: target_indexes.len(),
-                                        actual: row.len(),
-                                    },
-                                ));
+                            if row.len() > target_indexes.len() {
+                                return Err(copy_extra_data_error());
                             }
 
                             let mut values = vec![Value::Null; desc.columns.len()];
@@ -19902,38 +20117,76 @@ impl Session {
                                 row.iter().zip(target_indexes.iter().copied())
                             {
                                 let column = &desc.columns[target_index];
-                                let value = if options.default_marker == Some(raw.as_str()) {
+                                let force_not_null =
+                                    copy_insert_options_force_not_null_column(&options, column);
+                                let force_null =
+                                    copy_insert_options_force_null_column(&options, column);
+                                let value = if raw == COPY_DEFAULT_SENTINEL {
+                                    if !copy_column_has_default(&desc, target_index, &catalog) {
+                                        return Err(copy_unexpected_default_marker_error(
+                                            &column.name,
+                                        ));
+                                    }
                                     evaluate_copy_column_default(
                                         &desc,
                                         &column_defaults,
                                         target_index,
                                         &mut ctx,
                                     )?
-                                } else if raw == options.null_marker {
+                                } else if copy_field_is_null(
+                                    raw,
+                                    &options,
+                                    force_not_null,
+                                    force_null,
+                                ) {
+                                    if matches!(options.on_error, CopyOnError::Ignore)
+                                        && let Some(domain) =
+                                            catalog.domain_by_type_oid(column.sql_type.type_oid)
+                                        && domain.not_null
+                                    {
+                                        return Err(ExecError::DetailedError {
+                                            message: format!(
+                                                "domain {} does not allow null values",
+                                                domain.name
+                                            ),
+                                            detail: None,
+                                            hint: None,
+                                            sqlstate: "23502",
+                                        });
+                                    }
                                     Value::Null
                                 } else {
+                                    let field_text = copy_field_input(
+                                        raw,
+                                        &options,
+                                        force_not_null,
+                                        force_null,
+                                    );
                                     match column.ty {
-                                ScalarType::Int16 => {
-                                    raw.parse::<i16>().map(Value::Int16).map_err(|_| {
-                                        ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                                    })?
-                                }
-                                ScalarType::Int32 => {
-                                    raw.parse::<i32>().map(Value::Int32).map_err(|_| {
-                                        ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                                    })?
-                                }
-                                ScalarType::Int64 => {
-                                    raw.parse::<i64>().map(Value::Int64).map_err(|_| {
-                                        ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                                    })?
-                                }
+                                ScalarType::Int16 => field_text.parse::<i16>().map(Value::Int16).map_err(|_| {
+                                    ExecError::InvalidIntegerInput {
+                                        ty: "smallint",
+                                        value: field_text.into(),
+                                    }
+                                })?,
+                                ScalarType::Int32 => field_text.parse::<i32>().map(Value::Int32).map_err(|_| {
+                                    ExecError::InvalidIntegerInput {
+                                        ty: "integer",
+                                        value: field_text.into(),
+                                    }
+                                })?,
+                                ScalarType::Int64 => field_text.parse::<i64>().map(Value::Int64).map_err(|_| {
+                                    ExecError::InvalidIntegerInput {
+                                        ty: "bigint",
+                                        value: field_text.into(),
+                                    }
+                                })?,
                                 ScalarType::Money => {
-                                    crate::backend::executor::money_parse_text(raw)
+                                    crate::backend::executor::money_parse_text(field_text)
                                         .map(Value::Money)?
                                 }
                                 ScalarType::PgLsn => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value(Value::Text(field_text.into()), column.sql_type)?
                                 }
                                 ScalarType::Date
                                 | ScalarType::Time
@@ -19954,7 +20207,7 @@ impl Session {
                                 | ScalarType::TsVector
                                 | ScalarType::TsQuery => {
                                     cast_value_with_source_type_catalog_and_config(
-                                        Value::Text(raw.clone().into()),
+                                        Value::Text(copy_datetime_field_input(field_text, column).into()),
                                         None,
                                         column.sql_type,
                                         Some(&catalog),
@@ -19963,7 +20216,7 @@ impl Session {
                                 }
                                 ScalarType::BitString => {
                                     cast_value_with_source_type_catalog_and_config(
-                                        Value::Text(raw.clone().into()),
+                                        Value::Text(field_text.into()),
                                         None,
                                         column.sql_type,
                                         Some(&catalog),
@@ -19975,50 +20228,50 @@ impl Session {
                                 | ScalarType::MacAddr
                                 | ScalarType::MacAddr8 => {
                                     cast_value_with_source_type_catalog_and_config(
-                                        Value::Text(raw.clone().into()),
+                                        Value::Text(field_text.into()),
                                         None,
                                         column.sql_type,
                                         Some(&catalog),
                                         &self.datetime_config,
                                     )?
                                 }
-                                ScalarType::Float32 | ScalarType::Float64 => raw
+                                ScalarType::Float32 | ScalarType::Float64 => field_text
                                     .parse::<f64>()
                                     .map(Value::Float64)
                                     .map_err(|_| ExecError::TypeMismatch {
                                         op: "copy assignment",
                                         left: Value::Null,
-                                        right: Value::Text(raw.clone().into()),
+                                        right: Value::Text(field_text.into()),
                                     })?,
-                                ScalarType::Numeric => Value::Numeric(raw.as_str().into()),
-                                ScalarType::Json => Value::Json(raw.clone().into()),
+                                ScalarType::Numeric => Value::Numeric(field_text.into()),
+                                ScalarType::Json => Value::Json(field_text.into()),
                                 ScalarType::Jsonb => Value::Jsonb(
-                                    crate::backend::executor::jsonb::parse_jsonb_text(raw)?,
+                                    crate::backend::executor::jsonb::parse_jsonb_text(field_text)?,
                                 ),
                                 ScalarType::JsonPath => Value::JsonPath(
-                                    canonicalize_jsonpath(raw)
+                                    canonicalize_jsonpath(field_text)
                                         .map_err(|_| ExecError::InvalidStorageValue {
                                             column: "<copy>".into(),
                                             details: format!(
-                                                "invalid input syntax for type jsonpath: \"{raw}\""
+                                                "invalid input syntax for type jsonpath: \"{field_text}\""
                                             ),
                                         })?
                                         .into(),
                                 ),
                                 ScalarType::Xml => {
                                     cast_value_with_source_type_catalog_and_config(
-                                        Value::Text(raw.clone().into()),
+                                        Value::Text(field_text.into()),
                                         None,
                                         column.sql_type,
                                         Some(&catalog),
                                         &self.datetime_config,
                                     )?
                                 }
-                                ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
+                                ScalarType::Bytea => Value::Bytea(parse_bytea_text(field_text)?),
                                 ScalarType::Uuid => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value(Value::Text(field_text.into()), column.sql_type)?
                                 }
-                                ScalarType::Text => Value::Text(raw.clone().into()),
+                                ScalarType::Text => Value::Text(field_text.into()),
                                 ScalarType::Record => {
                                     return Err(ExecError::UnsupportedStorageType {
                                         column: column.name.clone(),
@@ -20027,10 +20280,10 @@ impl Session {
                                         actual_len: None,
                                     });
                                 }
-                                ScalarType::Bool => Value::Bool(parse_pg_bool_text(raw)?),
+                                ScalarType::Bool => Value::Bool(parse_pg_bool_text(field_text)?),
                                 ScalarType::Array(_) => {
                                     parse_text_array_literal_with_catalog(
-                                        raw,
+                                        field_text,
                                         column.sql_type.element_type(),
                                         Some(&catalog),
                                     )?
@@ -20038,6 +20291,12 @@ impl Session {
                             }
                                 };
                                 values[target_index] = value;
+                            }
+                            if row.len() < target_indexes.len() {
+                                let missing_index = target_indexes[row.len()];
+                                return Err(copy_missing_data_error(
+                                    &desc.columns[missing_index].name,
+                                ));
                             }
 
                             if let Some(filter) = where_filter.as_ref()
@@ -20051,8 +20310,47 @@ impl Session {
                         match parsed {
                             Ok(Some(values)) => parsed_rows.push(values),
                             Ok(None) => excluded = excluded.saturating_add(1),
-                            Err(_err) if matches!(options.on_error, CopyOnError::Ignore) => {
+                            Err(err)
+                                if matches!(options.on_error, CopyOnError::Ignore)
+                                    && copy_error_is_soft(&err) =>
+                            {
                                 skipped = skipped.saturating_add(1);
+                                if matches!(options.log_verbosity, CopyLogVerbosity::Verbose) {
+                                    push_copy_skip_notice(
+                                        table_name,
+                                        row_index,
+                                        row,
+                                        &target_indexes,
+                                        &desc,
+                                        &catalog,
+                                        &err,
+                                    );
+                                }
+                                if let Some(limit) = options.reject_limit
+                                    && skipped > limit
+                                {
+                                    let err = ExecError::DetailedError {
+                                        message: format!(
+                                            "skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"
+                                        ),
+                                        detail: None,
+                                        hint: None,
+                                        sqlstate: "22P04",
+                                    };
+                                    let context = copy_row_error_context(
+                                        table_name,
+                                        row_index,
+                                        Some(row),
+                                        &target_indexes,
+                                        &desc,
+                                        &catalog,
+                                        &err,
+                                    );
+                                    return Err(ExecError::WithContext {
+                                        source: Box::new(err),
+                                        context,
+                                    });
+                                }
                             }
                             Err(err) => {
                                 let context = copy_row_error_context(
@@ -20071,9 +20369,10 @@ impl Session {
                             }
                         }
                     }
-                    if skipped > 0 {
+                    if skipped > 0 && !matches!(options.log_verbosity, CopyLogVerbosity::Silent) {
+                        let noun = if skipped == 1 { "row was" } else { "rows were" };
                         crate::backend::utils::misc::notices::push_notice(format!(
-                            "{skipped} rows were skipped due to data type incompatibility"
+                            "{skipped} {noun} skipped due to data type incompatibility"
                         ));
                     }
 
@@ -20298,7 +20597,7 @@ fn encode_copy_output_bytes(bytes: Vec<u8>, encoding_name: &str) -> Result<Vec<u
 fn is_latin1_copy_encoding(name: &str) -> bool {
     matches!(
         name.trim().to_ascii_uppercase().as_str(),
-        "LATIN1" | "ISO_8859_1" | "ISO-8859-1"
+        "LATIN1" | "ISO_8859_1" | "ISO-8859-1" | "SQL_ASCII"
     )
 }
 
@@ -21523,10 +21822,12 @@ fn parse_copy_command_inner(sql: &str) -> Result<CopyCommand, ExecError> {
             actual: rest.into(),
         }));
     };
+    let option_offset = option_text.as_ptr() as usize - sql.as_ptr() as usize;
+    let is_from = matches!(direction, CopyDirection::From(_));
     Ok(CopyCommand {
         relation,
         direction,
-        options: parse_copy_options(option_text)?,
+        options: parse_copy_options(option_text, option_offset, is_from)?,
     })
 }
 
@@ -21626,8 +21927,37 @@ fn parse_copy_endpoint(input: &str, from: bool) -> Result<(CopyEndpoint, &str), 
     }))
 }
 
-fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
+#[derive(Default)]
+struct CopyOptionExplicit {
+    delimiter: bool,
+    null: bool,
+    default: bool,
+    header: bool,
+    quote: bool,
+    escape: bool,
+    force_quote: bool,
+    force_not_null: bool,
+    force_null: bool,
+}
+
+#[derive(Default)]
+struct CopyOptionParseState {
+    seen: BTreeMap<String, usize>,
+    explicit: CopyOptionExplicit,
+}
+
+enum CopyColumnOption {
+    All,
+    Columns(Vec<String>),
+}
+
+fn parse_copy_options(
+    input: &str,
+    base_offset: usize,
+    is_from: bool,
+) -> Result<CopyOptions, ExecError> {
     let mut options = CopyOptions::default();
+    let mut state = CopyOptionParseState::default();
     let mut rest = input.trim();
     if let Some(where_idx) = find_top_level_keyword(rest, "where") {
         options.where_clause = Some(rest[where_idx + "where".len()..].trim().to_string());
@@ -21652,32 +21982,45 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
                     actual: rest.into(),
                 })
             })?;
-            let nested = parse_copy_options(&rest[1..close])?;
-            merge_copy_options(&mut options, nested);
+            parse_copy_modern_options(
+                input,
+                &rest[1..close],
+                base_offset,
+                is_from,
+                &mut options,
+                &mut state,
+            )?;
             rest = rest[close + 1..].trim_start();
             continue;
         }
         if lower.starts_with("csv") && copy_keyword_boundary(rest, 3) {
+            set_copy_option_seen(input, base_offset, rest, "format", &mut options, &mut state)?;
             options.format = CopyFormat::Csv;
             rest = &rest[3..];
             continue;
         }
+        if lower.starts_with("binary") && copy_keyword_boundary(rest, 6) {
+            set_copy_option_seen(input, base_offset, rest, "format", &mut options, &mut state)?;
+            options.format = CopyFormat::Binary;
+            rest = &rest[6..];
+            continue;
+        }
         if lower.starts_with("format") && copy_keyword_boundary(rest, 6) {
+            set_copy_option_seen(input, base_offset, rest, "format", &mut options, &mut state)?;
             let (word, after) = take_copy_word(rest[6..].trim_start());
-            match word.to_ascii_lowercase().as_str() {
-                "csv" => options.format = CopyFormat::Csv,
-                "text" => options.format = CopyFormat::Text,
-                other => {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "COPY format",
-                        actual: other.into(),
-                    }));
-                }
-            }
+            options.format = parse_copy_format_word(word)?;
             rest = after;
             continue;
         }
         if lower.starts_with("encoding") && copy_keyword_boundary(rest, 8) {
+            set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "encoding",
+                &mut options,
+                &mut state,
+            )?;
             let (value, after) =
                 parse_copy_string_token(rest[8..].trim_start()).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnexpectedToken {
@@ -21690,6 +22033,8 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
             continue;
         }
         if lower.starts_with("header") && copy_keyword_boundary(rest, 6) {
+            set_copy_option_seen(input, base_offset, rest, "header", &mut options, &mut state)?;
+            state.explicit.header = true;
             let after_header = rest[6..].trim_start();
             let (word, after, quoted) =
                 if let Some((value, after)) = parse_copy_string_token(after_header) {
@@ -21733,29 +22078,124 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
         }
         if lower.starts_with("force") && copy_keyword_boundary(rest, 5) {
             let after_force = rest[5..].trim_start();
-            if !after_force.to_ascii_lowercase().starts_with("quote")
-                || !copy_keyword_boundary(after_force, 5)
+            let after_force_lower = after_force.to_ascii_lowercase();
+            if after_force_lower.starts_with("quote") && copy_keyword_boundary(after_force, 5) {
+                set_copy_option_seen(
+                    input,
+                    base_offset,
+                    rest,
+                    "force_quote",
+                    &mut options,
+                    &mut state,
+                )?;
+                state.explicit.force_quote = true;
+                rest = parse_copy_force_quote_option(&mut options, after_force[5..].trim_start())?;
+                continue;
+            }
+            if after_force_lower.starts_with("not") && copy_keyword_boundary(after_force, 3) {
+                let after_not = after_force[3..].trim_start();
+                if after_not.to_ascii_lowercase().starts_with("null")
+                    && copy_keyword_boundary(after_not, 4)
+                {
+                    set_copy_option_seen(
+                        input,
+                        base_offset,
+                        rest,
+                        "force_not_null",
+                        &mut options,
+                        &mut state,
+                    )?;
+                    state.explicit.force_not_null = true;
+                    let parsed =
+                        parse_copy_column_option(after_not[4..].trim_start(), "FORCE_NOT_NULL")?;
+                    apply_copy_force_not_null(&mut options, parsed);
+                    rest = "";
+                    continue;
+                }
+            }
+            if after_force_lower.starts_with("null") && copy_keyword_boundary(after_force, 4) {
+                set_copy_option_seen(
+                    input,
+                    base_offset,
+                    rest,
+                    "force_null",
+                    &mut options,
+                    &mut state,
+                )?;
+                state.explicit.force_null = true;
+                let parsed = parse_copy_column_option(after_force[4..].trim_start(), "FORCE_NULL")?;
+                apply_copy_force_null(&mut options, parsed);
+                rest = "";
+                continue;
+            }
             {
                 return Err(ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "QUOTE",
                     actual: after_force.into(),
                 }));
             }
-            rest = parse_copy_force_quote_option(&mut options, after_force[5..].trim_start())?;
-            continue;
         }
         if lower.starts_with("force_quote") && copy_keyword_boundary(rest, 11) {
+            set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "force_quote",
+                &mut options,
+                &mut state,
+            )?;
+            state.explicit.force_quote = true;
             rest = parse_copy_force_quote_option(&mut options, rest[11..].trim_start())?;
             continue;
         }
+        if lower.starts_with("force_not_null") && copy_keyword_boundary(rest, 14) {
+            set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "force_not_null",
+                &mut options,
+                &mut state,
+            )?;
+            state.explicit.force_not_null = true;
+            rest = apply_copy_column_option_from_rest(
+                &mut options,
+                &rest[14..],
+                "FORCE_NOT_NULL",
+                apply_copy_force_not_null,
+            )?;
+            continue;
+        }
+        if lower.starts_with("force_null") && copy_keyword_boundary(rest, 10) {
+            set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "force_null",
+                &mut options,
+                &mut state,
+            )?;
+            state.explicit.force_null = true;
+            rest = apply_copy_column_option_from_rest(
+                &mut options,
+                &rest[10..],
+                "FORCE_NULL",
+                apply_copy_force_null,
+            )?;
+            continue;
+        }
         if lower.starts_with("quote") && copy_keyword_boundary(rest, 5) {
-            let (value, after) =
-                parse_copy_string_token(rest[5..].trim_start()).ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "COPY quote string",
-                        actual: rest.into(),
-                    })
-                })?;
+            set_copy_option_seen(input, base_offset, rest, "quote", &mut options, &mut state)?;
+            state.explicit.quote = true;
+            let (value, after) = parse_copy_string_token(copy_strip_legacy_as(
+                rest[5..].trim_start(),
+            ))
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "COPY quote string",
+                    actual: rest.into(),
+                })
+            })?;
             if let Some(ch) = value.chars().next() {
                 options.quote = ch;
             }
@@ -21763,6 +22203,15 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
             continue;
         }
         if lower.starts_with("delimiter") && copy_keyword_boundary(rest, 9) {
+            set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "delimiter",
+                &mut options,
+                &mut state,
+            )?;
+            state.explicit.delimiter = true;
             let mut after_delimiter = rest[9..].trim_start();
             if after_delimiter.to_ascii_lowercase().starts_with("as")
                 && copy_keyword_boundary(after_delimiter, 2)
@@ -21780,13 +22229,17 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
             continue;
         }
         if lower.starts_with("escape") && copy_keyword_boundary(rest, 6) {
-            let (value, after) =
-                parse_copy_string_token(rest[6..].trim_start()).ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "COPY escape string",
-                        actual: rest.into(),
-                    })
-                })?;
+            set_copy_option_seen(input, base_offset, rest, "escape", &mut options, &mut state)?;
+            state.explicit.escape = true;
+            let (value, after) = parse_copy_string_token(copy_strip_legacy_as(
+                rest[6..].trim_start(),
+            ))
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "COPY escape string",
+                    actual: rest.into(),
+                })
+            })?;
             if let Some(ch) = value.chars().next() {
                 options.escape = ch;
             }
@@ -21794,52 +22247,900 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
             continue;
         }
         if lower.starts_with("null") && copy_keyword_boundary(rest, 4) {
-            let (value, after) =
-                parse_copy_string_token(rest[4..].trim_start()).ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "COPY null string",
-                        actual: rest.into(),
-                    })
-                })?;
+            set_copy_option_seen(input, base_offset, rest, "null", &mut options, &mut state)?;
+            state.explicit.null = true;
+            let (value, after) = parse_copy_string_token(copy_strip_legacy_as(
+                rest[4..].trim_start(),
+            ))
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "COPY null string",
+                    actual: rest.into(),
+                })
+            })?;
             options.null_marker = value;
             rest = after;
             continue;
         }
         if lower.starts_with("default") && copy_keyword_boundary(rest, 7) {
-            let (value, after) =
-                parse_copy_string_token(rest[7..].trim_start()).ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "COPY default string",
-                        actual: rest.into(),
-                    })
-                })?;
+            set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "default",
+                &mut options,
+                &mut state,
+            )?;
+            state.explicit.default = true;
+            let (value, after) = parse_copy_string_token(copy_strip_legacy_as(
+                rest[7..].trim_start(),
+            ))
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "COPY default string",
+                    actual: rest.into(),
+                })
+            })?;
             options.default_marker = Some(value);
             rest = after;
             continue;
         }
         if lower.starts_with("freeze") && copy_keyword_boundary(rest, 6) {
-            options.freeze = true;
-            rest = &rest[6..];
+            set_copy_option_seen(input, base_offset, rest, "freeze", &mut options, &mut state)?;
+            let after_freeze = rest[6..].trim_start();
+            if after_freeze.is_empty()
+                || after_freeze.starts_with(',')
+                || after_freeze.starts_with(')')
+            {
+                options.freeze = true;
+                rest = after_freeze;
+            } else {
+                let (word, after) = take_copy_word(after_freeze);
+                options.freeze = parse_copy_bool_word(word)?;
+                rest = after;
+            }
             continue;
         }
         if lower.starts_with("on_error") && copy_keyword_boundary(rest, 8) {
-            let (word, after) = take_copy_word(rest[8..].trim_start());
-            if word.eq_ignore_ascii_case("ignore") {
-                options.on_error_ignore = true;
-                rest = after;
-                continue;
-            }
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "ignore",
-                actual: word.into(),
-            }));
+            let position = set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "on_error",
+                &mut options,
+                &mut state,
+            )?;
+            parse_copy_on_error_option(&mut options, rest[8..].trim_start(), position, is_from)
+                .map(|after| {
+                    rest = after;
+                })?;
+            continue;
+        }
+        if lower.starts_with("log_verbosity") && copy_keyword_boundary(rest, 13) {
+            let position = set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "log_verbosity",
+                &mut options,
+                &mut state,
+            )?;
+            let (word, after) = take_copy_word(rest[13..].trim_start());
+            options.log_verbosity = parse_copy_log_verbosity(word, position)?;
+            rest = after;
+            continue;
+        }
+        if lower.starts_with("reject_limit") && copy_keyword_boundary(rest, 12) {
+            set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "reject_limit",
+                &mut options,
+                &mut state,
+            )?;
+            let (word, after) = take_copy_word(rest[12..].trim_start());
+            options.reject_limit = Some(parse_copy_reject_limit(word)?);
+            rest = after;
+            continue;
+        }
+        if lower.starts_with("convert_selectively") && copy_keyword_boundary(rest, 19) {
+            set_copy_option_seen(
+                input,
+                base_offset,
+                rest,
+                "convert_selectively",
+                &mut options,
+                &mut state,
+            )?;
+            options.convert_selectively = true;
+            rest = consume_optional_copy_column_option(rest[19..].trim_start())?;
+            continue;
         }
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COPY option",
             actual: rest.into(),
         }));
     }
+    finalize_copy_option_defaults(&mut options, &state.explicit);
+    validate_copy_options(&options, &state.explicit, is_from)?;
     Ok(options)
+}
+
+fn copy_strip_legacy_as(input: &str) -> &str {
+    let input = input.trim_start();
+    if copy_word_at_start(input, "as") {
+        input[2..].trim_start()
+    } else {
+        input
+    }
+}
+
+fn parse_copy_modern_options(
+    root: &str,
+    body: &str,
+    base_offset: usize,
+    is_from: bool,
+    options: &mut CopyOptions,
+    state: &mut CopyOptionParseState,
+) -> Result<(), ExecError> {
+    for (item, item_offset) in split_copy_option_items(body)? {
+        let (name, value, name_offset) = split_copy_option_assignment(item)?;
+        let key = canonical_copy_option_name(&name);
+        let position = base_offset + slice_offset(root, body) + item_offset + name_offset + 1;
+        set_copy_option_seen_at(key, position, options, state)?;
+        match key {
+            "format" => {
+                let value = copy_option_required_value(value, "COPY FORMAT value")?;
+                options.format = parse_copy_format_word(&parse_copy_bare_or_string_value(value)?)?;
+            }
+            "freeze" => {
+                options.freeze = match value {
+                    Some(value) => parse_copy_bool_word(&parse_copy_bare_or_string_value(value)?)?,
+                    None => true,
+                };
+            }
+            "delimiter" => {
+                state.explicit.delimiter = true;
+                let value = parse_copy_option_string_value(value, "COPY delimiter string")?;
+                options.delimiter = parse_copy_single_char("COPY delimiter", &value)?;
+            }
+            "null" => {
+                state.explicit.null = true;
+                options.null_marker = parse_copy_option_string_value(value, "COPY null string")?;
+            }
+            "default" => {
+                state.explicit.default = true;
+                options.default_marker = Some(parse_copy_option_string_value(
+                    value,
+                    "COPY default string",
+                )?);
+            }
+            "header" => {
+                state.explicit.header = true;
+                options.header = parse_copy_header_option(value)?;
+            }
+            "quote" => {
+                state.explicit.quote = true;
+                let value = parse_copy_option_string_value(value, "COPY quote string")?;
+                options.quote = parse_copy_single_char("COPY quote", &value)?;
+            }
+            "escape" => {
+                state.explicit.escape = true;
+                let value = parse_copy_option_string_value(value, "COPY escape string")?;
+                options.escape = parse_copy_single_char("COPY escape", &value)?;
+            }
+            "force_quote" => {
+                state.explicit.force_quote = true;
+                apply_copy_force_quote(
+                    options,
+                    parse_copy_column_option_value(value, "FORCE_QUOTE")?,
+                );
+            }
+            "force_not_null" => {
+                state.explicit.force_not_null = true;
+                apply_copy_force_not_null(
+                    options,
+                    parse_copy_column_option_value(value, "FORCE_NOT_NULL")?,
+                );
+            }
+            "force_null" => {
+                state.explicit.force_null = true;
+                apply_copy_force_null(
+                    options,
+                    parse_copy_column_option_value(value, "FORCE_NULL")?,
+                );
+            }
+            "convert_selectively" => {
+                options.convert_selectively = true;
+                if let Some(value) = value {
+                    let _ = parse_copy_column_option(value, "CONVERT_SELECTIVELY")?;
+                }
+            }
+            "encoding" => {
+                options.encoding = Some(parse_copy_option_string_value(
+                    value,
+                    "COPY encoding string",
+                )?);
+            }
+            "on_error" => {
+                parse_copy_on_error_value(options, value, position, is_from)?;
+            }
+            "log_verbosity" => {
+                let value = copy_option_required_value(value, "COPY LOG_VERBOSITY value")?;
+                options.log_verbosity =
+                    parse_copy_log_verbosity(&parse_copy_bare_or_string_value(value)?, position)?;
+            }
+            "reject_limit" => {
+                let value = copy_option_required_value(value, "COPY REJECT_LIMIT value")?;
+                options.reject_limit = Some(parse_copy_reject_limit(
+                    &parse_copy_bare_or_string_value(value)?,
+                )?);
+            }
+            other => {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "COPY option",
+                    actual: format!("option \"{other}\" not recognized"),
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn slice_offset(root: &str, slice: &str) -> usize {
+    slice.as_ptr() as usize - root.as_ptr() as usize
+}
+
+fn set_copy_option_seen(
+    root: &str,
+    base_offset: usize,
+    rest: &str,
+    key: &'static str,
+    options: &mut CopyOptions,
+    state: &mut CopyOptionParseState,
+) -> Result<usize, ExecError> {
+    let position = base_offset + slice_offset(root, rest) + 1;
+    set_copy_option_seen_at(key, position, options, state)
+}
+
+fn set_copy_option_seen_at(
+    key: &'static str,
+    position: usize,
+    options: &mut CopyOptions,
+    state: &mut CopyOptionParseState,
+) -> Result<usize, ExecError> {
+    if state.seen.insert(key.into(), position).is_some() {
+        return Err(ExecError::Parse(
+            ParseError::ConflictingOrRedundantOptions { option: key.into() }
+                .with_position(position),
+        ));
+    }
+    options
+        .option_positions
+        .entry(key.into())
+        .or_insert(position);
+    Ok(position)
+}
+
+fn split_copy_option_items(input: &str) -> Result<Vec<(&str, usize)>, ExecError> {
+    let mut items = Vec::new();
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if single_quote {
+            if ch == '\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                    i += 2;
+                    continue;
+                }
+                single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if double_quote {
+            if ch == '"' {
+                double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => single_quote = true,
+            '"' => double_quote = true,
+            '(' => depth = depth.saturating_add(1),
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                push_copy_option_item(input, start, i, &mut items);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if single_quote || double_quote || depth != 0 {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COPY option list",
+            actual: input.into(),
+        }));
+    }
+    push_copy_option_item(input, start, input.len(), &mut items);
+    Ok(items)
+}
+
+fn push_copy_option_item<'a>(
+    input: &'a str,
+    start: usize,
+    end: usize,
+    items: &mut Vec<(&'a str, usize)>,
+) {
+    let raw = &input[start..end];
+    let leading = raw.len() - raw.trim_start().len();
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+        items.push((trimmed, start + leading));
+    }
+}
+
+fn split_copy_option_assignment(item: &str) -> Result<(String, Option<&str>, usize), ExecError> {
+    let item = item.trim();
+    if copy_word_at_start(item, "force") {
+        let after_force = item[5..].trim_start();
+        if copy_word_at_start(after_force, "quote") {
+            let value = after_force[5..].trim_start();
+            return Ok((
+                "force_quote".into(),
+                (!value.is_empty()).then_some(value),
+                0,
+            ));
+        }
+        if copy_word_at_start(after_force, "not") {
+            let after_not = after_force[3..].trim_start();
+            if copy_word_at_start(after_not, "null") {
+                let value = after_not[4..].trim_start();
+                return Ok((
+                    "force_not_null".into(),
+                    (!value.is_empty()).then_some(value),
+                    0,
+                ));
+            }
+        }
+        if copy_word_at_start(after_force, "null") {
+            let value = after_force[4..].trim_start();
+            return Ok(("force_null".into(), (!value.is_empty()).then_some(value), 0));
+        }
+    }
+
+    let name_end = item
+        .char_indices()
+        .find_map(|(idx, ch)| (!(ch.is_ascii_alphanumeric() || ch == '_')).then_some(idx))
+        .unwrap_or(item.len());
+    if name_end == 0 {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COPY option",
+            actual: item.into(),
+        }));
+    }
+    let name = item[..name_end].to_string();
+    let mut rest = item[name_end..].trim_start();
+    if let Some(after_eq) = rest.strip_prefix('=') {
+        rest = after_eq.trim_start();
+    }
+    Ok((name, (!rest.is_empty()).then_some(rest), 0))
+}
+
+fn copy_word_at_start(input: &str, keyword: &str) -> bool {
+    input.to_ascii_lowercase().starts_with(keyword) && copy_keyword_boundary(input, keyword.len())
+}
+
+fn canonical_copy_option_name(name: &str) -> &'static str {
+    match name.to_ascii_lowercase().as_str() {
+        "format" => "format",
+        "freeze" => "freeze",
+        "delimiter" => "delimiter",
+        "null" => "null",
+        "default" => "default",
+        "header" => "header",
+        "quote" => "quote",
+        "escape" => "escape",
+        "force_quote" | "force quote" => "force_quote",
+        "force_not_null" | "force not null" => "force_not_null",
+        "force_null" | "force null" => "force_null",
+        "convert_selectively" => "convert_selectively",
+        "encoding" => "encoding",
+        "on_error" => "on_error",
+        "log_verbosity" => "log_verbosity",
+        "reject_limit" => "reject_limit",
+        _ => "unknown",
+    }
+}
+
+fn copy_option_required_value<'a>(
+    value: Option<&'a str>,
+    expected: &'static str,
+) -> Result<&'a str, ExecError> {
+    value.ok_or_else(|| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected,
+            actual: String::new(),
+        })
+    })
+}
+
+fn parse_copy_option_string_value(
+    value: Option<&str>,
+    expected: &'static str,
+) -> Result<String, ExecError> {
+    parse_copy_bare_or_string_value(copy_option_required_value(value, expected)?)
+}
+
+fn parse_copy_bare_or_string_value(value: &str) -> Result<String, ExecError> {
+    let value = value.trim();
+    if let Some((parsed, rest)) = parse_copy_string_token(value) {
+        if !rest.trim().is_empty() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "COPY option value",
+                actual: rest.trim().into(),
+            }));
+        }
+        return Ok(parsed);
+    }
+    Ok(value.to_string())
+}
+
+fn parse_copy_format_word(word: &str) -> Result<CopyFormat, ExecError> {
+    match word.to_ascii_lowercase().as_str() {
+        "text" => Ok(CopyFormat::Text),
+        "csv" => Ok(CopyFormat::Csv),
+        "binary" => Ok(CopyFormat::Binary),
+        other => Err(ExecError::DetailedError {
+            message: format!("COPY format \"{other}\" not recognized"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+}
+
+fn parse_copy_bool_word(word: &str) -> Result<bool, ExecError> {
+    match word.to_ascii_lowercase().as_str() {
+        "true" | "on" | "1" => Ok(true),
+        "false" | "off" | "0" => Ok(false),
+        _ => Err(ExecError::DetailedError {
+            message: "argument to option must be a Boolean value".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+}
+
+fn parse_copy_header_option(value: Option<&str>) -> Result<CopyHeader, ExecError> {
+    let Some(value) = value else {
+        return Ok(CopyHeader::Present);
+    };
+    match parse_copy_bare_or_string_value(value)?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "true" | "on" | "1" => Ok(CopyHeader::Present),
+        "false" | "off" | "0" => Ok(CopyHeader::None),
+        "match" => Ok(CopyHeader::Match),
+        _ => Err(ExecError::DetailedError {
+            message: "header requires a Boolean value or \"match\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        }),
+    }
+}
+
+fn parse_copy_column_option_value(
+    value: Option<&str>,
+    name: &'static str,
+) -> Result<CopyColumnOption, ExecError> {
+    parse_copy_column_option(
+        copy_option_required_value(value, "COPY column option")?,
+        name,
+    )
+}
+
+fn parse_copy_column_option(
+    input: &str,
+    name: &'static str,
+) -> Result<CopyColumnOption, ExecError> {
+    let input = input.trim_start();
+    if let Some(rest) = input.strip_prefix('*') {
+        if !rest.trim().is_empty() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: name,
+                actual: rest.trim().into(),
+            }));
+        }
+        return Ok(CopyColumnOption::All);
+    }
+    let (body, rest) = if input.starts_with('(') {
+        let close = find_matching_paren(input, 0).ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: name,
+                actual: input.into(),
+            })
+        })?;
+        (&input[1..close], input[close + 1..].trim())
+    } else {
+        let (word, rest) = take_copy_word(input);
+        (word, rest.trim())
+    };
+    if !rest.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: name,
+            actual: rest.into(),
+        }));
+    }
+    let columns = split_copy_list(body)
+        .into_iter()
+        .map(unquote_identifier)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: name,
+            actual: input.into(),
+        }));
+    }
+    Ok(CopyColumnOption::Columns(columns))
+}
+
+fn apply_copy_force_quote(options: &mut CopyOptions, parsed: CopyColumnOption) {
+    match parsed {
+        CopyColumnOption::All => options.force_quote_all = true,
+        CopyColumnOption::Columns(columns) => options.force_quote_columns.extend(columns),
+    }
+}
+
+fn apply_copy_force_not_null(options: &mut CopyOptions, parsed: CopyColumnOption) {
+    match parsed {
+        CopyColumnOption::All => options.force_not_null_all = true,
+        CopyColumnOption::Columns(columns) => options.force_not_null_columns.extend(columns),
+    }
+}
+
+fn apply_copy_force_null(options: &mut CopyOptions, parsed: CopyColumnOption) {
+    match parsed {
+        CopyColumnOption::All => options.force_null_all = true,
+        CopyColumnOption::Columns(columns) => options.force_null_columns.extend(columns),
+    }
+}
+
+fn apply_copy_column_option_from_rest<'a>(
+    options: &mut CopyOptions,
+    input: &'a str,
+    name: &'static str,
+    apply: fn(&mut CopyOptions, CopyColumnOption),
+) -> Result<&'a str, ExecError> {
+    let input = input.trim_start();
+    if input.starts_with('(') {
+        let close = find_matching_paren(input, 0).ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: name,
+                actual: input.into(),
+            })
+        })?;
+        apply(options, parse_copy_column_option(&input[..=close], name)?);
+        return Ok(input[close + 1..].trim_start());
+    }
+    if let Some(rest) = input.strip_prefix('*') {
+        apply(options, CopyColumnOption::All);
+        return Ok(rest.trim_start());
+    }
+    let (word, after) = take_copy_word(input);
+    apply(
+        options,
+        CopyColumnOption::Columns(vec![unquote_identifier(word)]),
+    );
+    Ok(after)
+}
+
+fn consume_optional_copy_column_option(input: &str) -> Result<&str, ExecError> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return Ok(input);
+    }
+    if input.starts_with('(') {
+        let close = find_matching_paren(input, 0).ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "CONVERT_SELECTIVELY column list",
+                actual: input.into(),
+            })
+        })?;
+        return Ok(input[close + 1..].trim_start());
+    }
+    let (_word, after) = take_copy_word(input);
+    Ok(after)
+}
+
+fn parse_copy_on_error_option<'a>(
+    options: &mut CopyOptions,
+    input: &'a str,
+    position: usize,
+    is_from: bool,
+) -> Result<&'a str, ExecError> {
+    let (word, after) = take_copy_word(input);
+    parse_copy_on_error_value(options, Some(word), position, is_from)?;
+    Ok(after)
+}
+
+fn parse_copy_on_error_value(
+    options: &mut CopyOptions,
+    value: Option<&str>,
+    position: usize,
+    is_from: bool,
+) -> Result<(), ExecError> {
+    if !is_from {
+        return Err(copy_positioned_parse_error(
+            "COPY ON_ERROR cannot be used with COPY TO",
+            "22023",
+            position,
+        ));
+    }
+    let value =
+        parse_copy_bare_or_string_value(copy_option_required_value(value, "COPY ON_ERROR value")?)?;
+    match value.to_ascii_lowercase().as_str() {
+        "stop" => {
+            options.on_error_ignore = false;
+            Ok(())
+        }
+        "ignore" => {
+            options.on_error_ignore = true;
+            Ok(())
+        }
+        _ => Err(copy_positioned_parse_error(
+            &format!("COPY ON_ERROR \"{value}\" not recognized"),
+            "22023",
+            position,
+        )),
+    }
+}
+
+fn parse_copy_log_verbosity(value: &str, position: usize) -> Result<CopyLogVerbosity, ExecError> {
+    match value.to_ascii_lowercase().as_str() {
+        "silent" => Ok(CopyLogVerbosity::Silent),
+        "default" => Ok(CopyLogVerbosity::Default),
+        "verbose" => Ok(CopyLogVerbosity::Verbose),
+        _ => Err(copy_positioned_parse_error(
+            &format!("COPY LOG_VERBOSITY \"{value}\" not recognized"),
+            "22023",
+            position,
+        )),
+    }
+}
+
+fn parse_copy_reject_limit(value: &str) -> Result<usize, ExecError> {
+    let parsed = value.parse::<i64>().map_err(|_| ExecError::DetailedError {
+        message: "reject_limit requires a numeric value".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42601",
+    })?;
+    if parsed <= 0 {
+        return Err(ExecError::DetailedError {
+            message: format!("REJECT_LIMIT ({parsed}) must be greater than zero"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    Ok(parsed as usize)
+}
+
+fn copy_positioned_parse_error(
+    message: &str,
+    sqlstate: &'static str,
+    position: usize,
+) -> ExecError {
+    ExecError::Parse(
+        ParseError::DetailedError {
+            message: message.into(),
+            detail: None,
+            hint: None,
+            sqlstate,
+        }
+        .with_position(position),
+    )
+}
+
+fn finalize_copy_option_defaults(options: &mut CopyOptions, explicit: &CopyOptionExplicit) {
+    if matches!(options.format, CopyFormat::Csv) {
+        if !explicit.delimiter {
+            options.delimiter = ',';
+        }
+        if !explicit.null {
+            options.null_marker.clear();
+        }
+        if !explicit.quote {
+            options.quote = '"';
+        }
+        if !explicit.escape {
+            options.escape = options.quote;
+        }
+    }
+}
+
+fn validate_copy_options(
+    options: &CopyOptions,
+    explicit: &CopyOptionExplicit,
+    is_from: bool,
+) -> Result<(), ExecError> {
+    if matches!(options.format, CopyFormat::Binary) && explicit.delimiter {
+        return Err(copy_option_validation_error(
+            "cannot specify DELIMITER in BINARY mode",
+            "42601",
+        ));
+    }
+    if matches!(options.format, CopyFormat::Binary) && explicit.null {
+        return Err(copy_option_validation_error(
+            "cannot specify NULL in BINARY mode",
+            "42601",
+        ));
+    }
+    if matches!(options.format, CopyFormat::Binary) && explicit.default {
+        return Err(copy_option_validation_error(
+            "cannot specify DEFAULT in BINARY mode",
+            "42601",
+        ));
+    }
+    if options.delimiter == '\n' || options.delimiter == '\r' {
+        return Err(copy_option_validation_error(
+            "COPY delimiter cannot be newline or carriage return",
+            "22023",
+        ));
+    }
+    if options.null_marker.contains('\n') || options.null_marker.contains('\r') {
+        return Err(copy_option_validation_error(
+            "COPY null representation cannot use newline or carriage return",
+            "22023",
+        ));
+    }
+    if let Some(default_marker) = options.default_marker.as_deref() {
+        if default_marker.contains('\n') || default_marker.contains('\r') {
+            return Err(copy_option_validation_error(
+                "COPY default representation cannot use newline or carriage return",
+                "22023",
+            ));
+        }
+    }
+    if matches!(options.format, CopyFormat::Binary) && !matches!(options.header, CopyHeader::None) {
+        return Err(copy_option_validation_error(
+            "cannot specify HEADER in BINARY mode",
+            "0A000",
+        ));
+    }
+    if !matches!(options.format, CopyFormat::Csv) && explicit.quote {
+        return Err(copy_option_validation_error(
+            "COPY QUOTE requires CSV mode",
+            "0A000",
+        ));
+    }
+    if !matches!(options.format, CopyFormat::Csv) && explicit.escape {
+        return Err(copy_option_validation_error(
+            "COPY ESCAPE requires CSV mode",
+            "0A000",
+        ));
+    }
+    if !matches!(options.format, CopyFormat::Csv) && explicit.force_quote {
+        return Err(copy_option_validation_error(
+            "COPY FORCE_QUOTE requires CSV mode",
+            "0A000",
+        ));
+    }
+    if explicit.force_quote && is_from {
+        return Err(copy_option_validation_error(
+            "COPY FORCE_QUOTE cannot be used with COPY FROM",
+            "0A000",
+        ));
+    }
+    if !matches!(options.format, CopyFormat::Csv) && explicit.force_not_null {
+        return Err(copy_option_validation_error(
+            "COPY FORCE_NOT_NULL requires CSV mode",
+            "0A000",
+        ));
+    }
+    if explicit.force_not_null && !is_from {
+        return Err(copy_option_validation_error(
+            "COPY FORCE_NOT_NULL cannot be used with COPY TO",
+            "22023",
+        ));
+    }
+    if !matches!(options.format, CopyFormat::Csv) && explicit.force_null {
+        return Err(copy_option_validation_error(
+            "COPY FORCE_NULL requires CSV mode",
+            "0A000",
+        ));
+    }
+    if explicit.force_null && !is_from {
+        return Err(copy_option_validation_error(
+            "COPY FORCE_NULL cannot be used with COPY TO",
+            "22023",
+        ));
+    }
+    if options.null_marker.contains(options.delimiter) {
+        return Err(copy_option_validation_error(
+            "COPY delimiter character must not appear in the NULL specification",
+            "22023",
+        ));
+    }
+    if matches!(options.format, CopyFormat::Csv) && options.null_marker.contains(options.quote) {
+        return Err(copy_option_validation_error(
+            "CSV quote character must not appear in the NULL specification",
+            "22023",
+        ));
+    }
+    if options.freeze && !is_from {
+        return Err(copy_option_validation_error(
+            "COPY FREEZE cannot be used with COPY TO",
+            "22023",
+        ));
+    }
+    if let Some(default_marker) = options.default_marker.as_deref() {
+        if !is_from {
+            return Err(copy_option_validation_error(
+                "COPY DEFAULT cannot be used with COPY TO",
+                "0A000",
+            ));
+        }
+        if default_marker.contains(options.delimiter) {
+            return Err(copy_option_validation_error(
+                "COPY delimiter character must not appear in the DEFAULT specification",
+                "0A000",
+            ));
+        }
+        if matches!(options.format, CopyFormat::Csv) && default_marker.contains(options.quote) {
+            return Err(copy_option_validation_error(
+                "CSV quote character must not appear in the DEFAULT specification",
+                "0A000",
+            ));
+        }
+        if default_marker == options.null_marker {
+            return Err(copy_option_validation_error(
+                "NULL specification and DEFAULT specification cannot be the same",
+                "0A000",
+            ));
+        }
+    }
+    if matches!(options.format, CopyFormat::Binary) && options.on_error_ignore {
+        return Err(copy_option_validation_error(
+            "only ON_ERROR STOP is allowed in BINARY mode",
+            "42601",
+        ));
+    }
+    if options.reject_limit.is_some() && !options.on_error_ignore {
+        return Err(copy_option_validation_error(
+            "COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE",
+            "22023",
+        ));
+    }
+    if !is_from && options.where_clause.is_some() {
+        return Err(copy_option_validation_error(
+            "WHERE clause not allowed with COPY TO",
+            "42601",
+        ));
+    }
+    Ok(())
+}
+
+fn copy_option_validation_error(message: &str, sqlstate: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate,
+    }
 }
 
 fn copy_header_value_starts_next_option(word: &str) -> bool {
@@ -21859,6 +23160,7 @@ fn copy_header_value_starts_next_option(word: &str) -> bool {
             | "default"
             | "freeze"
             | "on_error"
+            | "log_verbosity"
             | "reject_limit"
     )
 }
@@ -21867,66 +23169,12 @@ fn parse_copy_force_quote_option<'a>(
     options: &mut CopyOptions,
     input: &'a str,
 ) -> Result<&'a str, ExecError> {
-    let input = input.trim_start();
-    if let Some(rest) = input.strip_prefix('*') {
-        options.force_quote_all = true;
-        return Ok(rest);
-    }
-    if input.starts_with('(') {
-        let close = find_matching_paren(input, 0).ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "COPY FORCE QUOTE column list",
-                actual: input.into(),
-            })
-        })?;
-        options.force_quote_columns.extend(
-            split_copy_list(&input[1..close])
-                .into_iter()
-                .map(|part| unquote_identifier(part.trim())),
-        );
-        return Ok(input[close + 1..].trim_start());
-    }
-    let (word, after) = take_copy_word(input);
-    if word.is_empty() {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "COPY FORCE QUOTE column",
-            actual: input.into(),
-        }));
-    }
-    options.force_quote_columns.push(unquote_identifier(&word));
-    Ok(after)
-}
-
-fn merge_copy_options(options: &mut CopyOptions, nested: CopyOptions) {
-    if nested.format != CopyFormat::Text {
-        options.format = nested.format;
-    }
-    if nested.encoding.is_some() {
-        options.encoding = nested.encoding;
-    }
-    if nested.delimiter != '\t' {
-        options.delimiter = nested.delimiter;
-    }
-    if nested.header != CopyHeader::None {
-        options.header = nested.header;
-    }
-    if nested.quote != '"' {
-        options.quote = nested.quote;
-    }
-    if nested.escape != '"' {
-        options.escape = nested.escape;
-    }
-    if nested.null_marker != "\\N" {
-        options.null_marker = nested.null_marker;
-    }
-    options.default_marker = options.default_marker.take().or(nested.default_marker);
-    options.on_error_ignore |= nested.on_error_ignore;
-    options.freeze |= nested.freeze;
-    options.where_clause = options.where_clause.take().or(nested.where_clause);
-    options.force_quote_all |= nested.force_quote_all;
-    options
-        .force_quote_columns
-        .extend(nested.force_quote_columns);
+    apply_copy_column_option_from_rest(
+        options,
+        input,
+        "COPY FORCE QUOTE column list",
+        apply_copy_force_quote,
+    )
 }
 
 fn read_copy_text_file(
@@ -21973,6 +23221,7 @@ pub(crate) fn parse_copy_input_rows(
             text,
             delimiter,
             &options.null_marker,
+            options.default_marker.as_deref(),
             table_name,
             stop_on_copy_marker,
         ),
@@ -21981,8 +23230,13 @@ pub(crate) fn parse_copy_input_rows(
             delimiter,
             options.quote,
             options.escape,
+            &options.null_marker,
+            options.default_marker.as_deref(),
             stop_on_copy_marker,
         ),
+        CopyFormat::Binary => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "COPY BINARY".into(),
+        ))),
     }
 }
 
@@ -21990,15 +23244,13 @@ fn parse_copy_text_rows(
     text: &str,
     delimiter: char,
     null_marker: &str,
+    default_marker: Option<&str>,
     table_name: Option<&str>,
     stop_on_copy_marker: bool,
 ) -> Result<Vec<Vec<String>>, ExecError> {
     let mut rows = Vec::new();
     for (line_idx, line) in text.lines().enumerate() {
         let line = line.trim_end_matches('\r');
-        if line.is_empty() {
-            continue;
-        }
         if stop_on_copy_marker && line == "\\." {
             break;
         }
@@ -22017,22 +23269,117 @@ fn parse_copy_text_rows(
                 None => err,
             });
         }
-        let row = line
-            .split(delimiter)
-            .map(|field| {
-                if field == null_marker {
-                    COPY_TEXT_NULL_SENTINEL.to_string()
-                } else {
-                    unescape_copy_text_field(field)
-                }
-            })
-            .collect::<Vec<_>>();
-        if row.is_empty() && line_idx == 0 {
-            continue;
-        }
+        let row = parse_copy_text_line(line, delimiter, null_marker, default_marker);
         rows.push(row);
     }
     Ok(rows)
+}
+
+fn parse_copy_text_line(
+    line: &str,
+    delimiter: char,
+    null_marker: &str,
+    default_marker: Option<&str>,
+) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut raw = String::new();
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == delimiter {
+            push_copy_text_field(&mut fields, &raw, out, null_marker, default_marker);
+            raw.clear();
+            out = String::new();
+            continue;
+        }
+
+        raw.push(ch);
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                raw.push(next);
+                push_copy_text_escape(&mut out, next, &mut chars, &mut raw);
+            } else {
+                out.push('\\');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+
+    push_copy_text_field(&mut fields, &raw, out, null_marker, default_marker);
+    fields
+}
+
+fn push_copy_text_field(
+    fields: &mut Vec<String>,
+    raw: &str,
+    value: String,
+    null_marker: &str,
+    default_marker: Option<&str>,
+) {
+    if raw == null_marker {
+        fields.push(COPY_TEXT_NULL_SENTINEL.to_string());
+    } else if default_marker == Some(raw) {
+        fields.push(COPY_DEFAULT_SENTINEL.to_string());
+    } else {
+        fields.push(value);
+    }
+}
+
+fn push_copy_text_escape<I>(
+    out: &mut String,
+    escaped: char,
+    chars: &mut std::iter::Peekable<I>,
+    raw: &mut String,
+) where
+    I: Iterator<Item = char>,
+{
+    match escaped {
+        '0'..='7' => {
+            let mut value = escaped.to_digit(8).unwrap_or(0);
+            for _ in 0..2 {
+                let Some(next) = chars.peek().copied() else {
+                    break;
+                };
+                let Some(digit) = next.to_digit(8) else {
+                    break;
+                };
+                chars.next();
+                raw.push(next);
+                value = (value << 3) + digit;
+            }
+            out.push(char::from_u32(value & 0xff).unwrap_or('\u{fffd}'));
+        }
+        'x' => {
+            let mut value = 0u32;
+            let mut seen = false;
+            for _ in 0..2 {
+                let Some(next) = chars.peek().copied() else {
+                    break;
+                };
+                let Some(digit) = next.to_digit(16) else {
+                    break;
+                };
+                chars.next();
+                raw.push(next);
+                value = (value << 4) + digit;
+                seen = true;
+            }
+            if seen {
+                out.push(char::from_u32(value & 0xff).unwrap_or('\u{fffd}'));
+            } else {
+                out.push('x');
+            }
+        }
+        'b' => out.push('\u{0008}'),
+        'f' => out.push('\u{000c}'),
+        'n' => out.push('\n'),
+        'r' => out.push('\r'),
+        't' => out.push('\t'),
+        'v' => out.push('\u{000b}'),
+        other => out.push(other),
+    }
 }
 
 fn first_copy_row_context(text: &str, table_name: &str) -> Option<String> {
@@ -22047,6 +23394,128 @@ fn first_copy_row_context(text: &str, table_name: &str) -> Option<String> {
         ));
     }
     None
+}
+
+fn copy_insert_options_force_not_null_column(
+    options: &CopyInsertOptions<'_>,
+    column: &crate::include::nodes::primnodes::ColumnDesc,
+) -> bool {
+    options.force_not_null_all
+        || options
+            .force_not_null_columns
+            .iter()
+            .any(|name| name == &column.name)
+}
+
+fn copy_insert_options_force_null_column(
+    options: &CopyInsertOptions<'_>,
+    column: &crate::include::nodes::primnodes::ColumnDesc,
+) -> bool {
+    options.force_null_all
+        || options
+            .force_null_columns
+            .iter()
+            .any(|name| name == &column.name)
+}
+
+fn copy_field_is_null(
+    raw: &str,
+    options: &CopyInsertOptions<'_>,
+    force_not_null: bool,
+    force_null: bool,
+) -> bool {
+    match options.format {
+        CopyFormat::Text => raw == COPY_TEXT_NULL_SENTINEL,
+        CopyFormat::Csv => {
+            (raw == COPY_TEXT_NULL_SENTINEL && !force_not_null)
+                || (raw == COPY_CSV_QUOTED_NULL_SENTINEL && force_null)
+        }
+        CopyFormat::Binary => false,
+    }
+}
+
+fn copy_field_input<'a>(
+    raw: &'a str,
+    options: &'a CopyInsertOptions<'_>,
+    force_not_null: bool,
+    _force_null: bool,
+) -> &'a str {
+    match options.format {
+        CopyFormat::Csv if raw == COPY_TEXT_NULL_SENTINEL && force_not_null => options.null_marker,
+        CopyFormat::Csv if raw == COPY_CSV_QUOTED_NULL_SENTINEL => options.null_marker,
+        CopyFormat::Csv if raw == COPY_CSV_QUOTED_EOC_SENTINEL => "\\.",
+        _ => raw,
+    }
+}
+
+fn copy_datetime_field_input<'a>(
+    raw: &'a str,
+    column: &crate::include::nodes::primnodes::ColumnDesc,
+) -> &'a str {
+    if matches!(
+        column.ty,
+        ScalarType::Date
+            | ScalarType::Time
+            | ScalarType::TimeTz
+            | ScalarType::Timestamp
+            | ScalarType::TimestampTz
+    ) && raw.len() >= 2
+        && raw.starts_with('\'')
+        && raw.ends_with('\'')
+    {
+        &raw[1..raw.len() - 1]
+    } else {
+        raw
+    }
+}
+
+fn copy_error_is_soft(err: &ExecError) -> bool {
+    match err {
+        ExecError::Parse(ParseError::InvalidInteger(_))
+        | ExecError::Parse(ParseError::InvalidNumeric(_))
+        | ExecError::InvalidIntegerInput { .. }
+        | ExecError::IntegerOutOfRange { .. }
+        | ExecError::InvalidNumericInput(_)
+        | ExecError::InvalidBooleanInput { .. }
+        | ExecError::InvalidFloatInput { .. }
+        | ExecError::InvalidUuidInput { .. }
+        | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidStorageValue { .. }
+        | ExecError::ArrayInput { .. }
+        | ExecError::StringDataRightTruncation { .. } => true,
+        ExecError::DetailedError { message, .. } => {
+            message.starts_with("domain ") && message.ends_with(" does not allow null values")
+        }
+        _ => false,
+    }
+}
+
+fn push_copy_skip_notice(
+    _table_name: &str,
+    row_index: usize,
+    row: &Vec<String>,
+    target_indexes: &[usize],
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    err: &ExecError,
+) {
+    let value = copy_error_context_column(row, target_indexes, desc, catalog, err)
+        .map(|(column, value)| {
+            if copy_error_is_domain_null(err) {
+                format!(" for column \"{column}\": null input")
+            } else {
+                format!(
+                    " for column \"{column}\": \"{}\"",
+                    copy_display_field(&value)
+                )
+            }
+        })
+        .unwrap_or_default();
+    crate::backend::utils::misc::notices::push_notice(format!(
+        "skipping row due to data type incompatibility at line {}{}",
+        row_index + 1,
+        value
+    ));
 }
 
 fn copy_row_error_context(
@@ -22075,12 +23544,64 @@ fn copy_row_error_context(
         {
             return format!("COPY {table_name}, line {line_no}, column {column}: null input");
         }
+        if let Some((column, raw)) =
+            copy_error_context_column(row, target_indexes, desc, catalog, err)
+        {
+            return format!(
+                "COPY {table_name}, line {line_no}, column {column}: \"{}\"",
+                copy_display_field(&raw)
+            );
+        }
         return format!(
             "COPY {table_name}, line {line_no}: \"{}\"",
             copy_display_row(row)
         );
     }
     format!("COPY {table_name}, line {line_no}")
+}
+
+fn copy_error_context_column(
+    row: &[String],
+    target_indexes: &[usize],
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    err: &ExecError,
+) -> Option<(String, String)> {
+    let value = copy_error_value(err)?;
+    row.iter()
+        .zip(target_indexes.iter().copied())
+        .find_map(|(raw, column_index)| {
+            let display_raw = copy_display_field(raw);
+            (display_raw == value).then(|| {
+                desc.columns
+                    .get(column_index)
+                    .map(|column| (column.name.clone(), raw.clone()))
+            })?
+        })
+        .or_else(|| {
+            if copy_error_is_domain_null(err) {
+                copy_null_domain_context_column(row, target_indexes, desc, catalog)
+            } else {
+                None
+            }
+        })
+}
+
+fn copy_error_value(err: &ExecError) -> Option<String> {
+    match err {
+        ExecError::Parse(ParseError::InvalidInteger(value))
+        | ExecError::Parse(ParseError::InvalidNumeric(value))
+        | ExecError::InvalidNumericInput(value)
+        | ExecError::InvalidUuidInput { value }
+        | ExecError::InvalidBooleanInput { value }
+        | ExecError::InvalidFloatInput { value, .. }
+        | ExecError::IntegerOutOfRange { value, .. }
+        | ExecError::InvalidStorageValue { details: value, .. } => Some(value.clone()),
+        ExecError::InvalidIntegerInput { value, .. } => Some(value.clone()),
+        ExecError::ArrayInput { value, .. } => Some(value.clone()),
+        ExecError::TypeMismatch { right, .. } => right.as_text().map(str::to_string),
+        _ => None,
+    }
 }
 
 fn copy_character_typmod_context_column(
@@ -22155,6 +23676,12 @@ fn copy_display_row(row: &[String]) -> String {
 fn copy_display_field(field: &str) -> String {
     if field == COPY_TEXT_NULL_SENTINEL {
         "\\N".to_string()
+    } else if field == COPY_CSV_QUOTED_NULL_SENTINEL {
+        String::new()
+    } else if field == COPY_CSV_QUOTED_EOC_SENTINEL {
+        "\\.".to_string()
+    } else if field == COPY_DEFAULT_SENTINEL {
+        "\\D".to_string()
     } else {
         field.to_string()
     }
@@ -22163,7 +23690,10 @@ fn copy_display_field(field: &str) -> String {
 fn is_parsed_copy_null(field: &str, options: &CopyOptions) -> bool {
     match options.format {
         CopyFormat::Text => field == COPY_TEXT_NULL_SENTINEL,
-        CopyFormat::Csv => field == options.null_marker,
+        CopyFormat::Csv => {
+            field == COPY_TEXT_NULL_SENTINEL || field == COPY_CSV_QUOTED_NULL_SENTINEL
+        }
+        CopyFormat::Binary => false,
     }
 }
 
@@ -22172,12 +23702,15 @@ fn parse_copy_csv_rows(
     delimiter: char,
     quote: char,
     escape: char,
+    null_marker: &str,
+    default_marker: Option<&str>,
     stop_on_copy_marker: bool,
 ) -> Result<Vec<Vec<String>>, ExecError> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
     let mut field = String::new();
     let mut in_quotes = false;
+    let mut quoted_field = false;
     let mut chars = text.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -22204,20 +23737,44 @@ fn parse_copy_csv_rows(
         }
 
         match ch {
-            c if c == quote && field.is_empty() => in_quotes = true,
+            c if c == quote && field.is_empty() => {
+                in_quotes = true;
+                quoted_field = true;
+            }
             c if c == delimiter => {
-                row.push(mem::take(&mut field));
+                push_copy_csv_field(
+                    &mut row,
+                    mem::take(&mut field),
+                    quoted_field,
+                    null_marker,
+                    default_marker,
+                );
+                quoted_field = false;
             }
             '\n' => {
-                row.push(mem::take(&mut field));
-                rows.push(mem::take(&mut row));
+                push_copy_csv_field(
+                    &mut row,
+                    mem::take(&mut field),
+                    quoted_field,
+                    null_marker,
+                    default_marker,
+                );
+                push_copy_csv_row(&mut rows, &mut row, stop_on_copy_marker);
+                quoted_field = false;
             }
             '\r' => {
                 if matches!(chars.peek(), Some('\n')) {
                     chars.next();
                 }
-                row.push(mem::take(&mut field));
-                rows.push(mem::take(&mut row));
+                push_copy_csv_field(
+                    &mut row,
+                    mem::take(&mut field),
+                    quoted_field,
+                    null_marker,
+                    default_marker,
+                );
+                push_copy_csv_row(&mut rows, &mut row, stop_on_copy_marker);
+                quoted_field = false;
             }
             _ => field.push(ch),
         }
@@ -22229,13 +23786,42 @@ fn parse_copy_csv_rows(
         }));
     }
     if !field.is_empty() || !row.is_empty() {
-        row.push(field);
-        rows.push(row);
-    }
-    if stop_on_copy_marker {
-        rows.retain(|row| !(row.len() == 1 && row[0] == "\\."));
+        push_copy_csv_field(&mut row, field, quoted_field, null_marker, default_marker);
+        push_copy_csv_row(&mut rows, &mut row, stop_on_copy_marker);
     }
     Ok(rows)
+}
+
+fn push_copy_csv_field(
+    row: &mut Vec<String>,
+    field: String,
+    quoted: bool,
+    null_marker: &str,
+    default_marker: Option<&str>,
+) {
+    if !quoted && field == null_marker {
+        row.push(COPY_TEXT_NULL_SENTINEL.to_string());
+    } else if quoted && field == null_marker {
+        row.push(COPY_CSV_QUOTED_NULL_SENTINEL.to_string());
+    } else if quoted && field == "\\." {
+        row.push(COPY_CSV_QUOTED_EOC_SENTINEL.to_string());
+    } else if !quoted && default_marker == Some(field.as_str()) {
+        row.push(COPY_DEFAULT_SENTINEL.to_string());
+    } else {
+        row.push(field);
+    }
+}
+
+fn push_copy_csv_row(
+    rows: &mut Vec<Vec<String>>,
+    row: &mut Vec<String>,
+    stop_on_copy_marker: bool,
+) {
+    if stop_on_copy_marker && row.len() == 1 && row[0] == "\\." {
+        row.clear();
+        return;
+    }
+    rows.push(mem::take(row));
 }
 
 pub(crate) fn render_copy_output(
@@ -22252,9 +23838,14 @@ pub(crate) fn render_copy_output(
             .iter()
             .map(|column| match options.format {
                 CopyFormat::Text => escape_copy_text_field(&column.name, delimiter),
-                CopyFormat::Csv => {
-                    escape_copy_csv_field(&column.name, options.quote, options.escape, false)
-                }
+                CopyFormat::Csv => escape_copy_csv_field(
+                    &column.name,
+                    delimiter,
+                    options.quote,
+                    options.escape,
+                    false,
+                ),
+                CopyFormat::Binary => column.name.clone(),
             })
             .collect::<Vec<_>>()
             .join(&delimiter_text);
@@ -22287,6 +23878,7 @@ fn copy_command_output_format(format: CopyFormat) -> ParserCopyFormat {
     match format {
         CopyFormat::Text => ParserCopyFormat::Text,
         CopyFormat::Csv => ParserCopyFormat::Csv,
+        CopyFormat::Binary => ParserCopyFormat::Binary,
     }
 }
 
@@ -22311,6 +23903,7 @@ fn copy_value_to_field(
         return match options.format {
             CopyFormat::Text => options.null_marker.clone(),
             CopyFormat::Csv => String::new(),
+            CopyFormat::Binary => options.null_marker.clone(),
         };
     }
     let raw = match value {
@@ -22400,7 +23993,14 @@ fn copy_value_to_field(
     };
     match options.format {
         CopyFormat::Text => escape_copy_text_field(&raw, effective_copy_delimiter(options)),
-        CopyFormat::Csv => escape_copy_csv_field(&raw, options.quote, options.escape, force_quote),
+        CopyFormat::Csv => escape_copy_csv_field(
+            &raw,
+            effective_copy_delimiter(options),
+            options.quote,
+            options.escape,
+            force_quote,
+        ),
+        CopyFormat::Binary => raw,
     }
 }
 
@@ -22449,29 +24049,16 @@ fn escape_copy_text_field(value: &str, delimiter: char) -> String {
     out
 }
 
-fn unescape_copy_text_field(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('\\') => out.push('\\'),
-            Some(other) => out.push(other),
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
-fn escape_copy_csv_field(value: &str, quote: char, escape: char, force_quote: bool) -> String {
+fn escape_copy_csv_field(
+    value: &str,
+    delimiter: char,
+    quote: char,
+    escape: char,
+    force_quote: bool,
+) -> String {
     let needs_quote = force_quote
-        || value.contains(',')
+        || value.is_empty()
+        || value.contains(delimiter)
         || value.contains(quote)
         || value.contains('\n')
         || value.contains('\r')
@@ -22665,7 +24252,14 @@ fn parse_copy_string_token(input: &str) -> Option<(String, &str)> {
         if escape_string && ch == '\\' {
             let next = i + 1;
             if let Some(escaped) = input[next..].chars().next() {
-                out.push(escaped);
+                match escaped {
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'b' => out.push('\u{0008}'),
+                    'f' => out.push('\u{000c}'),
+                    other => out.push(other),
+                }
                 i = next + escaped.len_utf8();
                 continue;
             }
