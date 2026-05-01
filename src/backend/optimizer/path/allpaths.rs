@@ -1517,7 +1517,8 @@ fn access_method_supports_index_scan_for_index(index: &BoundIndexRelation) -> bo
 }
 
 fn hash_index_gettuple_supported(index: &BoundIndexRelation) -> bool {
-    index.index_meta.indpred.is_some()
+    index.index_meta.am_oid == HASH_AM_OID
+        && index.index_meta.indpred.is_some()
         && index.desc.columns.first().is_some_and(|column| {
             matches!(
                 column.sql_type.kind,

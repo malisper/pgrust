@@ -457,7 +457,7 @@ fn sample_expression_indexes(
                     .desc
                     .columns
                     .iter()
-                    .any(|column| column.attstattarget > 0)
+                    .any(|column| column.attstattarget != 0)
         })
         .collect::<Vec<_>>();
     if expression_indexes.is_empty() {
@@ -496,7 +496,7 @@ fn sample_expression_indexes(
             .columns
             .iter()
             .enumerate()
-            .filter_map(|(idx, column)| (column.attstattarget > 0).then_some(idx))
+            .filter_map(|(idx, column)| (column.attstattarget != 0).then_some(idx))
             .collect::<Vec<_>>();
         if selected_columns.is_empty() {
             continue;
