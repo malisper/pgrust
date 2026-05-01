@@ -28,6 +28,7 @@ use crate::backend::executor::window::execute_window_clause;
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::libpq::pqformat::format_float8_text;
 use crate::backend::optimizer::partition_prune::partition_may_satisfy_filter_with_runtime_values;
+use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::backend::storage::lmgr::RowLockMode;
 use crate::backend::storage::page::bufpage::{
@@ -4855,8 +4856,10 @@ fn render_explain_expr_inner_with_qualifier(
             render_explain_sql_datetime_keyword("LOCALTIMESTAMP", *precision)
         }
         Expr::CurrentUser => "CURRENT_USER".into(),
+        Expr::User => "USER".into(),
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),
+        Expr::SystemUser => "SYSTEM_USER".into(),
         Expr::Random => "random()".into(),
         Expr::Like {
             expr,
@@ -6227,6 +6230,8 @@ fn comparison_display_type(
 ) -> Option<SqlType> {
     if expr_has_bpchar_display_type(left) || expr_has_bpchar_display_type(right) {
         Some(SqlType::new(SqlTypeKind::Char))
+    } else if expr_has_varchar_display_type(left) || expr_has_varchar_display_type(right) {
+        Some(SqlType::new(SqlTypeKind::Text))
     } else if collation_oid == Some(POSIX_COLLATION_OID)
         && (expr_sql_type_hint_is(left, SqlTypeKind::Text)
             || expr_sql_type_hint_is(right, SqlTypeKind::Text))
@@ -6853,6 +6858,11 @@ fn render_explain_cast(
     qualifier: Option<&str>,
     column_names: &[String],
 ) -> String {
+    if let Expr::Var(var) = expr
+        && explain_cast_is_implicit_integer_widening(var.vartype, ty)
+    {
+        return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    }
     if let Some(rendered) = render_explain_datetime_cast_literal(expr, ty) {
         return rendered;
     }
@@ -6882,6 +6892,14 @@ fn render_explain_cast(
     }
     let inner = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
     format!("({inner})::{}", render_explain_sql_type_name(ty))
+}
+
+fn explain_cast_is_implicit_integer_widening(from: SqlType, to: SqlType) -> bool {
+    use SqlTypeKind::{Int2, Int4, Int8};
+    matches!(
+        (from.kind, to.kind),
+        (Int2, Int4) | (Int2, Int8) | (Int4, Int8)
+    )
 }
 
 fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
@@ -8521,22 +8539,24 @@ fn materialize_ordered_current_row(
 
 fn sort_keyed_materialized_rows(
     items: &[OrderByEntry],
-    keyed_rows: &mut [(Vec<Value>, MaterializedRow)],
+    keyed_rows: &mut [(usize, Vec<Value>, MaterializedRow)],
 ) -> Result<(), ExecError> {
     let mut sort_error = None;
-    keyed_rows.sort_by(
-        |(left_keys, left_row), (right_keys, right_row)| match compare_order_by_keys(
-            items, left_keys, right_keys,
-        ) {
-            Ok(std::cmp::Ordering::Equal) => {
-                geometry_circle_distance_order_tie_break(left_keys, right_keys, left_row, right_row)
-            }
-            Ok(ordering) => ordering,
-            Err(err) => {
-                if sort_error.is_none() {
-                    sort_error = Some(err);
+    pg_sql_sort_by(
+        keyed_rows,
+        |(left_ordinal, left_keys, left_row), (right_ordinal, right_keys, right_row)| {
+            match compare_order_by_keys(items, left_keys, right_keys) {
+                Ok(std::cmp::Ordering::Equal) => geometry_circle_distance_order_tie_break(
+                    left_keys, right_keys, left_row, right_row,
+                )
+                .then_with(|| right_ordinal.cmp(left_ordinal)),
+                Ok(ordering) => ordering,
+                Err(err) => {
+                    if sort_error.is_none() {
+                        sort_error = Some(err);
+                    }
+                    std::cmp::Ordering::Equal
                 }
-                std::cmp::Ordering::Equal
             }
         },
     );
@@ -8580,7 +8600,9 @@ impl IncrementalSortState {
             return Ok(false);
         };
 
-        let mut keyed_rows = vec![(first_keys.clone(), first_row)];
+        let mut next_ordinal = 0usize;
+        let mut keyed_rows = vec![(next_ordinal, first_keys.clone(), first_row)];
+        next_ordinal += 1;
         loop {
             ctx.check_for_interrupts()?;
             if self.input.exec_proc_node(ctx)?.is_none() {
@@ -8588,7 +8610,8 @@ impl IncrementalSortState {
             }
             let (keys, row) = materialize_ordered_current_row(&mut self.input, &self.items, ctx)?;
             if presorted_keys_equal(&self.items, self.presorted_count, &first_keys, &keys)? {
-                keyed_rows.push((keys, row));
+                keyed_rows.push((next_ordinal, keys, row));
+                next_ordinal += 1;
             } else {
                 self.lookahead = Some((keys, row));
                 break;
@@ -8596,7 +8619,7 @@ impl IncrementalSortState {
         }
 
         sort_keyed_materialized_rows(&self.items, &mut keyed_rows)?;
-        self.rows = keyed_rows.into_iter().map(|(_, row)| row).collect();
+        self.rows = keyed_rows.into_iter().map(|(_, _, row)| row).collect();
         self.next_index = 0;
         Ok(true)
     }
@@ -9111,6 +9134,8 @@ fn expr_is_plain_aggregate_safe(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -9910,7 +9935,45 @@ impl PlanNode for WindowAggState {
                 ctx.check_for_interrupts()?;
                 input_rows.push(self.input.materialize_current_row()?);
             }
-            self.result_rows = Some(execute_window_clause(ctx, &self.clause, input_rows)?);
+            let mut rows = execute_window_clause(ctx, &self.clause, input_rows)?;
+            if self.run_condition.is_some() || self.top_qual.is_some() {
+                let run_condition = self.run_condition.clone();
+                let top_qual = self.top_qual.clone();
+                let mut filtered = Vec::with_capacity(rows.len());
+                for mut row in rows {
+                    ctx.check_for_interrupts()?;
+                    set_active_system_bindings(ctx, &row.system_bindings);
+                    set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
+                    clear_inner_expr_bindings(ctx);
+                    let pass_through_run_condition =
+                        matches!(top_qual.as_ref(), Some(Expr::Const(Value::Bool(true))));
+                    let run_ok = if pass_through_run_condition {
+                        true
+                    } else {
+                        run_condition
+                            .as_ref()
+                            .map(|qual| eval_bool_qual(qual, &mut row.slot, ctx))
+                            .transpose()?
+                            .unwrap_or(true)
+                    };
+                    let top_ok = if pass_through_run_condition {
+                        true
+                    } else {
+                        top_qual
+                            .as_ref()
+                            .map(|qual| eval_bool_qual(qual, &mut row.slot, ctx))
+                            .transpose()?
+                            .unwrap_or(true)
+                    };
+                    if run_ok && top_ok {
+                        filtered.push(row);
+                    } else {
+                        note_filtered_row(&mut self.stats);
+                    }
+                }
+                rows = filtered;
+            }
+            self.result_rows = Some(rows);
         }
 
         let rows = self.result_rows.as_mut().unwrap();
@@ -9991,6 +10054,20 @@ impl PlanNode for WindowAggState {
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("{prefix}Order By: {order_by}"));
+        }
+        if let Some(run_condition) = &self.run_condition {
+            lines.push(format!(
+                "{prefix}Run Condition: {}",
+                render_explain_expr(run_condition, self.output_columns.as_slice())
+            ));
+        }
+        if let Some(top_qual) = &self.top_qual
+            && !matches!(top_qual, Expr::Const(Value::Bool(true)))
+        {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(top_qual, self.output_columns.as_slice())
+            ));
         }
     }
 
@@ -10950,4 +11027,37 @@ impl TupleSlot {
         Value::materialize_all(&mut self.tts_values);
         Ok(self.tts_values)
     }
+}
+
+pub(crate) fn ensure_no_deferred_column_errors(values: &[Value]) -> Result<(), ExecError> {
+    for value in values {
+        match value {
+            Value::DroppedColumn(attnum) => {
+                return Err(ExecError::DetailedError {
+                    message: format!("attribute {attnum} of type record has been dropped"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42703",
+                });
+            }
+            Value::WrongTypeColumn {
+                attnum,
+                table_type,
+                query_type,
+            } => {
+                return Err(ExecError::DetailedError {
+                    message: format!("attribute {attnum} of type record has wrong type"),
+                    detail: Some(format!(
+                        "Table has type {}, but query expects {}.",
+                        sql_type_name(*table_type),
+                        sql_type_name(*query_type)
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

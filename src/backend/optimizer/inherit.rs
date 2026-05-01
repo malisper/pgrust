@@ -104,6 +104,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             };
             let child_rte = RangeTblEntry {
                 alias: Some(child_alias.clone()),
+                alias_is_user_defined: false,
                 alias_preserves_source_names: false,
                 eref: RangeTblEref {
                     aliasname: child_alias,
@@ -372,6 +373,7 @@ fn partition_info_for_parent(
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 })
             })
             .collect(),
@@ -584,6 +586,7 @@ fn translate_parent_column_to_child(
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: child_column.sql_type,
+                collation_oid: None,
             })
         })
         .unwrap_or(Expr::Const(Value::Null))

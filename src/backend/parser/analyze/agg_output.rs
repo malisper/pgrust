@@ -230,6 +230,8 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -3920,7 +3922,9 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::CurrentCatalog => Ok(Expr::CurrentCatalog),
         SqlExpr::CurrentSchema => Ok(Expr::CurrentSchema),
         SqlExpr::CurrentUser => Ok(Expr::CurrentUser),
+        SqlExpr::User => Ok(Expr::User),
         SqlExpr::SessionUser => Ok(Expr::SessionUser),
+        SqlExpr::SystemUser => Ok(Expr::SystemUser),
         SqlExpr::CurrentRole => Ok(Expr::CurrentRole),
         SqlExpr::CurrentTime { precision } => Ok(Expr::CurrentTime {
             precision: *precision,

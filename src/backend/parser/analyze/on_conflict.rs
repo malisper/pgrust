@@ -233,6 +233,12 @@ pub(super) fn resolve_arbiters(
                 });
             }
             if row.contype == crate::include::catalog::CONSTRAINT_EXCLUSION {
+                if row.condeferrable {
+                    return Err(ParseError::FeatureNotSupported(
+                        "ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters"
+                            .into(),
+                    ));
+                }
                 return Ok(BoundOnConflictArbiters {
                     indexes: Vec::new(),
                     exclusion_constraints: vec![super::constraints::bind_exclusion_constraint(
@@ -584,6 +590,7 @@ fn executor_output_exprs(desc: &RelationDesc, varno: usize) -> Vec<Expr> {
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()

@@ -150,6 +150,7 @@ pub(super) fn normalize_rte_path(
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 })
             })
             .collect(),

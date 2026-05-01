@@ -1706,7 +1706,9 @@ fn validate_publication_filter_types(
         | CurrentCatalog
         | CurrentSchema
         | CurrentUser
+        | User
         | SessionUser
+        | SystemUser
         | CurrentRole
         | CurrentTime { .. }
         | CurrentTimestamp { .. }
@@ -1964,7 +1966,9 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
         | CurrentCatalog
         | CurrentSchema
         | CurrentUser
+        | User
         | SessionUser
+        | SystemUser
         | CurrentRole
         | CurrentTime { .. }
         | CurrentTimestamp { .. }

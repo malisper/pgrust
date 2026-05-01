@@ -121,7 +121,7 @@ if prev_dir:
     lines.append(f"_Previous run: `{prev_dir}`_")
 
 memory_peaks = summary.get("memory_peaks") or []
-HOTSPOT_THRESHOLD_MB = 1024  # 1 GB
+HOTSPOT_THRESHOLD_MB = 500
 hotspots = [p for p in memory_peaks if (p.get("peak_rss_mb") or 0) >= HOTSPOT_THRESHOLD_MB]
 
 blocks = [
@@ -147,7 +147,7 @@ if hotspots:
     if len(hotspots) > 5:
         hotspot_lines.append(f"_...and {len(hotspots) - 5} more above {HOTSPOT_THRESHOLD_MB} MB._")
     hotspot_lines.append(
-        "_Upstream PG holds these tests well under 100MB — peaks above ~1GB suggest a pgrust memory regression worth investigating. To dig in: `git fetch origin regression-history && git show origin/regression-history:runs/" + run_dir + "/output/<test>.out`._"
+        "_Upstream PG holds these tests well under 100MB — peaks above 500MB suggest a pgrust memory regression worth investigating. To dig in: `git fetch origin regression-history && git show origin/regression-history:runs/" + run_dir + "/output/<test>.out`._"
     )
     blocks.append(
         {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(hotspot_lines)}}

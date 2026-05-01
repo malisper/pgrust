@@ -20,6 +20,7 @@ use crate::include::catalog::{BTREE_AM_OID, HASH_AM_OID};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SetOperator, SqlType, SqlTypeKind, TableSampleClause,
+    WindowFrameMode,
 };
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerIndexExprCacheEntry, PlannerInfo,
@@ -29,9 +30,10 @@ use crate::include::nodes::plannodes::{
     AggregateStrategy, PartitionPruneChildDomain, PartitionPrunePlan, PlanEstimate, SetOpStrategy,
 };
 use crate::include::nodes::primnodes::{
-    BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind, OrderByEntry, QueryColumn,
-    RelationDesc, ScalarArrayOpExpr, ScalarFunctionImpl, SortGroupClause, ToastRelationRef, Var,
-    attrno_index, expr_contains_set_returning, expr_sql_type_hint, is_system_attr,
+    AggFunc, BoolExprType, BuiltinScalarFunction, BuiltinWindowFunction, Expr, JoinType,
+    OpExprKind, OrderByEntry, QueryColumn, RelationDesc, ScalarArrayOpExpr, ScalarFunctionImpl,
+    SortGroupClause, ToastRelationRef, Var, WindowClause, WindowFrameBound, WindowFuncExpr,
+    WindowFuncKind, attrno_index, expr_contains_set_returning, expr_sql_type_hint, is_system_attr,
     set_returning_call_exprs, user_attrno,
 };
 
@@ -145,6 +147,7 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
                 relids.is_empty() && single_direct_base_relid(root).is_some();
             !pushed_to_single_base
                 && !(!has_outer_joins(root) && relids.len() > 1)
+                && !clause_reduces_outer_join(root, clause)
                 && !is_pushable_base_clause(root, &relids)
         })
         .collect();
@@ -1351,6 +1354,35 @@ fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<
     order_items_for_base_rel_pathkeys(root, rtindex, &root.query_pathkeys)
 }
 
+fn window_order_items_for_base_rel(
+    root: &PlannerInfo,
+    rtindex: usize,
+) -> Option<Vec<OrderByEntry>> {
+    root.parse.window_clauses.iter().find_map(|clause| {
+        let mut items = clause
+            .spec
+            .partition_by
+            .iter()
+            .cloned()
+            .map(|expr| OrderByEntry {
+                expr,
+                ressortgroupref: 0,
+                descending: false,
+                nulls_first: None,
+                collation_oid: None,
+            })
+            .collect::<Vec<_>>();
+        items.extend(clause.spec.order_by.iter().cloned());
+        (!items.is_empty()
+            && items.iter().all(|item| {
+                expr_relids(&item.expr)
+                    .iter()
+                    .all(|relid| *relid == rtindex)
+            }))
+        .then_some(items)
+    })
+}
+
 fn cheapest_path_by_total(mut paths: Vec<Path>) -> Option<Path> {
     let (index, _) = paths.iter().enumerate().min_by(|(_, left), (_, right)| {
         left.plan_info()
@@ -1820,12 +1852,21 @@ fn collect_required_index_only_attrs_for_root(
     order_items: Option<&[OrderByEntry]>,
 ) -> Vec<usize> {
     let mut attrs = BTreeSet::new();
-    for target in [
-        &root.scanjoin_target,
-        &root.final_target,
-        &root.sort_input_target,
-        &root.group_input_target,
-    ] {
+    let targets = if root.parse.window_clauses.is_empty() {
+        vec![
+            &root.scanjoin_target,
+            &root.final_target,
+            &root.sort_input_target,
+            &root.group_input_target,
+        ]
+    } else {
+        vec![
+            &root.final_target,
+            &root.sort_input_target,
+            &root.group_input_target,
+        ]
+    };
+    for target in targets {
         for expr in &target.exprs {
             collect_expr_attrs_for_rel(expr, rtindex, &mut attrs);
         }
@@ -1837,6 +1878,9 @@ fn collect_required_index_only_attrs_for_root(
         for item in order_items {
             collect_expr_attrs_for_rel(&item.expr, rtindex, &mut attrs);
         }
+    }
+    for restrict in &root.inner_join_clauses {
+        collect_expr_attrs_for_rel(&restrict.clause, rtindex, &mut attrs);
     }
     attrs.into_iter().collect()
 }
@@ -1962,6 +2006,8 @@ fn collect_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -2142,6 +2188,8 @@ fn collect_relation_access_paths(
     desc: RelationDesc,
     filter: Option<Expr>,
     query_order_items: Option<Vec<OrderByEntry>>,
+    window_order_items: Option<Vec<OrderByEntry>>,
+    window_query: bool,
     required_index_only_attrs: &[usize],
     config: PlannerConfig,
     index_expr_cache: &PlannerIndexExprCache,
@@ -2301,7 +2349,33 @@ fn collect_relation_access_paths(
                     &stats,
                     full_index_scan_spec(index, filter.clone()),
                     None,
-                    false,
+                    target_index_only,
+                    config,
+                    catalog,
+                )
+                .plan,
+            );
+        }
+        if config.enable_indexscan
+            && window_query
+            && query_order_items.is_none()
+            && filter.is_none()
+            && target_index_only
+            && index.index_meta.am_oid == crate::include::catalog::BTREE_AM_OID
+            && access_method_supports_index_scan(index.index_meta.am_oid)
+        {
+            paths.push(
+                estimate_index_candidate(
+                    rtindex,
+                    heap_rel,
+                    relation_name.clone(),
+                    relation_oid,
+                    toast,
+                    desc.clone(),
+                    &stats,
+                    full_index_scan_spec(index, filter.clone()),
+                    None,
+                    target_index_only,
                     config,
                     catalog,
                 )
@@ -2358,8 +2432,9 @@ fn collect_relation_access_paths(
                 .plan,
             );
         }
+        let ordered_index_items = query_order_items.as_ref().or(window_order_items.as_ref());
         if config.enable_indexscan
-            && let Some(order_items) = query_order_items.as_ref()
+            && let Some(order_items) = ordered_index_items
             && let Some(spec) = build_index_path_spec(
                 filter.as_ref(),
                 Some(order_items),
@@ -2457,7 +2532,7 @@ fn collect_relation_ordered_index_paths(
     desc: RelationDesc,
     filter: Option<Expr>,
     order_items: &[OrderByEntry],
-    _required_index_only_attrs: &[usize],
+    required_index_only_attrs: &[usize],
     config: PlannerConfig,
     index_expr_cache: &PlannerIndexExprCache,
     catalog: &dyn CatalogLookup,
@@ -2479,6 +2554,7 @@ fn collect_relation_ordered_index_paths(
         if !access_method_supports_index_scan_for_index(index) {
             continue;
         }
+        let target_index_only = index_supports_index_only_attrs(index, required_index_only_attrs);
         if let Some(spec) = build_index_path_spec(
             filter.as_ref(),
             Some(order_items),
@@ -2499,7 +2575,7 @@ fn collect_relation_ordered_index_paths(
                     &stats,
                     spec,
                     Some(order_items.to_vec()),
-                    false,
+                    target_index_only,
                     config,
                     catalog,
                 )
@@ -2678,6 +2754,8 @@ fn cheapest_relation_access_path(
         desc,
         filter,
         None,
+        None,
+        false,
         &[],
         config,
         index_expr_cache,
@@ -3202,6 +3280,7 @@ fn set_op_output_exprs(source_id: usize, output_columns: &[QueryColumn]) -> Vec<
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -3343,6 +3422,7 @@ fn build_subquery_scan_path(
                         varattno: user_attrno(index),
                         varlevelsup: 0,
                         vartype: sql_type,
+                        collation_oid: None,
                     }),
                     ressortgroupref: key.ressortgroupref,
                     descending: key.descending,
@@ -3430,6 +3510,23 @@ fn push_subquery_filter(
         return push_set_operation_filter(rtindex, query, filter);
     }
     if !subquery_filter_pushdown_is_safe(&query) {
+        if window_subquery_filter_pushdown_is_safe(&query) {
+            let visible_targets = query
+                .target_list
+                .iter()
+                .filter(|target| !target.resjunk)
+                .collect::<Vec<_>>();
+            if let Some(pushed) =
+                rewrite_filter_for_subquery(filter.clone(), rtindex, &visible_targets, &query)
+                && pushed_filter_is_window_partition_safe(&query, &pushed)
+            {
+                query.where_qual = Some(match query.where_qual.take() {
+                    Some(existing) => Expr::and(existing, pushed),
+                    None => pushed,
+                });
+                return (query, None);
+            }
+        }
         return (query, Some(filter));
     }
     let visible_targets = query
@@ -3447,6 +3544,498 @@ fn push_subquery_filter(
         None => pushed,
     });
     (query, None)
+}
+
+fn window_subquery_filter_pushdown_is_safe(query: &Query) -> bool {
+    !query.distinct
+        && query.group_by.is_empty()
+        && query.accumulators.is_empty()
+        && !query.window_clauses.is_empty()
+        && query.having_qual.is_none()
+        && query.sort_clause.is_empty()
+        && query.limit_count.is_none()
+        && query.limit_offset.is_none()
+        && query.locking_clause.is_none()
+        && query.row_marks.is_empty()
+        && !query.has_target_srfs
+        && query.recursive_union.is_none()
+        && query.set_operation.is_none()
+}
+
+fn pushed_filter_is_window_partition_safe(query: &Query, filter: &Expr) -> bool {
+    let mut vars = Vec::new();
+    if !collect_partition_filter_vars(filter, &mut vars) {
+        return false;
+    }
+    !vars.is_empty()
+        && vars.iter().all(|var| {
+            query.window_clauses.iter().all(|clause| {
+                clause
+                    .spec
+                    .partition_by
+                    .iter()
+                    .any(|expr| expr_contains_matching_var(expr, var))
+            })
+        })
+}
+
+fn collect_partition_filter_vars(expr: &Expr, vars: &mut Vec<Var>) -> bool {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => {
+            if !vars.iter().any(|existing| vars_match(existing, var)) {
+                vars.push(var.clone());
+            }
+            true
+        }
+        Expr::Const(_) | Expr::Param(_) => true,
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            collect_partition_filter_vars(inner, vars)
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .all(|arg| collect_partition_filter_vars(arg, vars)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .all(|arg| collect_partition_filter_vars(arg, vars)),
+        _ => false,
+    }
+}
+
+fn expr_contains_matching_var(expr: &Expr, wanted: &Var) -> bool {
+    match expr {
+        Expr::Var(var) => vars_match(var, wanted),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_matching_var(inner, wanted)
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| expr_contains_matching_var(arg, wanted)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_contains_matching_var(arg, wanted)),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_contains_matching_var(arg, wanted)),
+        _ => false,
+    }
+}
+
+fn vars_match(left: &Var, right: &Var) -> bool {
+    left.varno == right.varno
+        && left.varattno == right.varattno
+        && left.varlevelsup == right.varlevelsup
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowMonotonicity {
+    Increasing,
+    Decreasing,
+    Both,
+}
+
+struct WindowRunCondition {
+    winno: usize,
+    run_qual: Expr,
+    removes_original: bool,
+}
+
+fn window_run_condition_filter_marker() -> Expr {
+    Expr::Const(Value::Bool(true))
+}
+
+fn is_window_run_condition_filter_marker(expr: &Expr) -> bool {
+    matches!(expr, Expr::Const(Value::Bool(true)))
+}
+
+fn combine_optional_qual(current: &mut Option<Expr>, qual: Expr) {
+    match current.take() {
+        Some(existing) if is_window_run_condition_filter_marker(&existing) => *current = Some(qual),
+        Some(existing) => *current = Some(Expr::and(existing, qual)),
+        None => *current = Some(qual),
+    }
+}
+
+fn expr_contains_window_run_unsafe(expr: &Expr) -> bool {
+    match expr {
+        Expr::SubLink(_) | Expr::SubPlan(_) | Expr::SetReturning(_) => true,
+        Expr::WindowFunc(window_func) => window_func_contains_window_run_unsafe(window_func),
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_contains_window_run_unsafe)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_window_run_unsafe)
+        }
+        _ => expr_contains_planner_volatile(expr) || expr_contains_subplan(expr),
+    }
+}
+
+fn window_func_contains_window_run_unsafe(func: &WindowFuncExpr) -> bool {
+    func.args.iter().any(expr_contains_window_run_unsafe)
+        || match &func.kind {
+            WindowFuncKind::Aggregate(aggref) => {
+                aggref.args.iter().any(expr_contains_window_run_unsafe)
+                    || aggref
+                        .aggfilter
+                        .as_ref()
+                        .is_some_and(expr_contains_window_run_unsafe)
+            }
+            WindowFuncKind::Builtin(_) => false,
+        }
+}
+
+fn count_window_monotonicity(clause: &WindowClause) -> Option<WindowMonotonicity> {
+    if clause.spec.order_by.is_empty() {
+        return Some(WindowMonotonicity::Both);
+    }
+    match (
+        &clause.spec.frame.mode,
+        &clause.spec.frame.start_bound,
+        &clause.spec.frame.end_bound,
+    ) {
+        (
+            WindowFrameMode::Rows | WindowFrameMode::Range | WindowFrameMode::Groups,
+            WindowFrameBound::UnboundedPreceding,
+            WindowFrameBound::CurrentRow,
+        ) => Some(WindowMonotonicity::Increasing),
+        (
+            WindowFrameMode::Rows | WindowFrameMode::Range | WindowFrameMode::Groups,
+            WindowFrameBound::UnboundedPreceding,
+            WindowFrameBound::UnboundedFollowing,
+        ) => Some(WindowMonotonicity::Both),
+        (
+            WindowFrameMode::Rows | WindowFrameMode::Range | WindowFrameMode::Groups,
+            WindowFrameBound::CurrentRow,
+            WindowFrameBound::UnboundedFollowing,
+        ) => Some(WindowMonotonicity::Decreasing),
+        _ => None,
+    }
+}
+
+fn window_func_monotonicity(query: &Query, func: &WindowFuncExpr) -> Option<WindowMonotonicity> {
+    if window_func_contains_window_run_unsafe(func) {
+        return None;
+    }
+    let clause = query.window_clauses.iter().find(|clause| {
+        clause
+            .functions
+            .iter()
+            .any(|candidate| candidate.winno == func.winno)
+    })?;
+    match &func.kind {
+        WindowFuncKind::Builtin(
+            BuiltinWindowFunction::RowNumber
+            | BuiltinWindowFunction::Rank
+            | BuiltinWindowFunction::DenseRank
+            | BuiltinWindowFunction::Ntile,
+        ) => Some(WindowMonotonicity::Increasing),
+        WindowFuncKind::Aggregate(aggref)
+            if builtin_aggregate_is_count(aggref.aggfnoid)
+                && !aggref.aggdistinct
+                && aggref.aggorder.is_empty() =>
+        {
+            count_window_monotonicity(clause)
+        }
+        _ => None,
+    }
+}
+
+fn builtin_aggregate_is_count(aggfnoid: u32) -> bool {
+    crate::include::catalog::builtin_aggregate_function_for_proc_oid(aggfnoid)
+        .is_some_and(|agg| agg == AggFunc::Count)
+}
+
+fn reverse_comparison_op(op: OpExprKind) -> Option<OpExprKind> {
+    match op {
+        OpExprKind::Lt => Some(OpExprKind::Gt),
+        OpExprKind::LtEq => Some(OpExprKind::GtEq),
+        OpExprKind::Gt => Some(OpExprKind::Lt),
+        OpExprKind::GtEq => Some(OpExprKind::LtEq),
+        OpExprKind::Eq => Some(OpExprKind::Eq),
+        _ => None,
+    }
+}
+
+fn window_comparison_parts<'a>(
+    expr: &'a Expr,
+) -> Option<(
+    &'a crate::include::nodes::primnodes::OpExpr,
+    &'a WindowFuncExpr,
+    Expr,
+    OpExprKind,
+)> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.args.len() != 2 {
+        return None;
+    }
+    if let Expr::WindowFunc(window_func) = &op.args[0] {
+        return Some((op, window_func, op.args[1].clone(), op.op));
+    }
+    if let Expr::WindowFunc(window_func) = &op.args[1] {
+        return Some((
+            op,
+            window_func,
+            op.args[0].clone(),
+            reverse_comparison_op(op.op)?,
+        ));
+    }
+    None
+}
+
+fn make_window_left_comparison(
+    template: &crate::include::nodes::primnodes::OpExpr,
+    func: &WindowFuncExpr,
+    op: OpExprKind,
+    other: Expr,
+) -> Expr {
+    Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+        op,
+        args: vec![Expr::WindowFunc(Box::new(func.clone())), other],
+        ..template.clone()
+    }))
+}
+
+fn window_run_condition_for_conjunct(query: &Query, expr: &Expr) -> Option<WindowRunCondition> {
+    let (op, window_func, other, normalized_op) = window_comparison_parts(expr)?;
+    if expr_contains_window_run_unsafe(&other) {
+        return None;
+    }
+    let monotonicity = window_func_monotonicity(query, window_func)?;
+    let full = WindowRunCondition {
+        winno: window_func.winno,
+        run_qual: expr.clone(),
+        removes_original: true,
+    };
+    match (monotonicity, normalized_op) {
+        (
+            WindowMonotonicity::Increasing | WindowMonotonicity::Both,
+            OpExprKind::Lt | OpExprKind::LtEq,
+        )
+        | (
+            WindowMonotonicity::Decreasing | WindowMonotonicity::Both,
+            OpExprKind::Gt | OpExprKind::GtEq,
+        ) => Some(full),
+        (WindowMonotonicity::Both, OpExprKind::Eq) => Some(full),
+        (WindowMonotonicity::Increasing, OpExprKind::Eq) => Some(WindowRunCondition {
+            winno: window_func.winno,
+            run_qual: make_window_left_comparison(op, window_func, OpExprKind::LtEq, other),
+            removes_original: false,
+        }),
+        (WindowMonotonicity::Decreasing, OpExprKind::Eq) => Some(WindowRunCondition {
+            winno: window_func.winno,
+            run_qual: make_window_left_comparison(op, window_func, OpExprKind::GtEq, other),
+            removes_original: false,
+        }),
+        _ => None,
+    }
+}
+
+fn attach_window_run_condition(
+    path: &mut Path,
+    winno: usize,
+    qual: Expr,
+    has_higher_window: bool,
+) -> Option<bool> {
+    match path {
+        Path::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
+            if clause.functions.iter().any(|func| func.winno == winno) {
+                combine_optional_qual(run_condition, qual);
+                if has_higher_window && top_qual.is_none() {
+                    *top_qual = Some(window_run_condition_filter_marker());
+                }
+                return Some(has_higher_window);
+            }
+            attach_window_run_condition(input, winno, qual, true)
+        }
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::SubqueryScan { input, .. } => {
+            attach_window_run_condition(input, winno, qual, has_higher_window)
+        }
+        _ => None,
+    }
+}
+
+fn attach_top_window_qual(path: &mut Path, qual: Expr) -> bool {
+    match path {
+        Path::WindowAgg { top_qual, .. } => {
+            combine_optional_qual(top_qual, qual);
+            true
+        }
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::SubqueryScan { input, .. } => attach_top_window_qual(input, qual),
+        _ => false,
+    }
+}
+
+fn apply_output_column_names_to_path(path: &mut Path, output_columns: &[QueryColumn]) -> bool {
+    match path {
+        Path::WindowAgg {
+            output_columns: child_columns,
+            ..
+        } => {
+            if child_columns.len() != output_columns.len() {
+                return false;
+            }
+            for (child, parent) in child_columns.iter_mut().zip(output_columns) {
+                child.name.clone_from(&parent.name);
+            }
+            true
+        }
+        Path::Projection { targets, .. } => {
+            let visible_targets = targets
+                .iter_mut()
+                .filter(|target| !target.resjunk)
+                .collect::<Vec<_>>();
+            if visible_targets.len() != output_columns.len() {
+                return false;
+            }
+            for (target, parent) in visible_targets.into_iter().zip(output_columns) {
+                target.name.clone_from(&parent.name);
+            }
+            true
+        }
+        Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. } => apply_output_column_names_to_path(input, output_columns),
+        _ => false,
+    }
+}
+
+fn apply_subquery_output_names_if_filter_consumed(path: &mut Path, filter: &Option<Expr>) {
+    if filter.is_some() {
+        return;
+    }
+    let Some((input, output_columns)) = (match path {
+        Path::SubqueryScan {
+            input,
+            output_columns,
+            ..
+        } => Some((input, output_columns.clone())),
+        _ => None,
+    }) else {
+        return;
+    };
+    let _ = apply_output_column_names_to_path(input, &output_columns);
+}
+
+fn windowagg_count(path: &Path) -> usize {
+    match path {
+        Path::WindowAgg { input, .. } => 1 + windowagg_count(input),
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::SubqueryScan { input, .. } => windowagg_count(input),
+        _ => 0,
+    }
+}
+
+fn clear_single_window_subquery_pathkeys_if_filter_consumed(
+    path: &mut Path,
+    filter: &Option<Expr>,
+) {
+    if filter.is_some() {
+        return;
+    }
+    let Path::SubqueryScan {
+        input, pathkeys, ..
+    } = path
+    else {
+        return;
+    };
+    if windowagg_count(input) == 1 {
+        pathkeys.clear();
+    }
+}
+
+fn push_window_run_conditions_into_subquery_path(
+    rtindex: usize,
+    mut path: Path,
+    filter: Option<Expr>,
+) -> (Path, Option<Expr>) {
+    let Some(filter) = filter else {
+        return (path, None);
+    };
+    let query_for_pushdown = match &path {
+        Path::SubqueryScan { query, .. } => (**query).clone(),
+        _ => return (path, Some(filter)),
+    };
+    if query_for_pushdown.window_clauses.is_empty() || query_for_pushdown.set_operation.is_some() {
+        return (path, Some(filter));
+    }
+    let visible_targets = visible_query_targets(&query_for_pushdown);
+    let mut remaining = Vec::new();
+    let mut top_window_quals = Vec::new();
+    for outer_conjunct in flatten_and_conjuncts(&filter) {
+        let Some(inner_conjunct) =
+            rewrite_filter_for_subquery_relaxed(outer_conjunct.clone(), rtindex, &visible_targets)
+        else {
+            remaining.push(outer_conjunct);
+            continue;
+        };
+        let Some(run_condition) =
+            window_run_condition_for_conjunct(&query_for_pushdown, &inner_conjunct)
+        else {
+            remaining.push(outer_conjunct);
+            continue;
+        };
+        let Some(attached_below_higher_window) = attach_window_run_condition(
+            &mut path,
+            run_condition.winno,
+            run_condition.run_qual,
+            false,
+        ) else {
+            remaining.push(outer_conjunct);
+            continue;
+        };
+        if !run_condition.removes_original {
+            remaining.push(outer_conjunct);
+        } else if attached_below_higher_window {
+            top_window_quals.push(inner_conjunct);
+        }
+    }
+    for qual in top_window_quals {
+        if !attach_top_window_qual(&mut path, qual.clone()) {
+            remaining.push(qual);
+        }
+    }
+    let filter = and_exprs(remaining);
+    apply_subquery_output_names_if_filter_consumed(&mut path, &filter);
+    clear_single_window_subquery_pathkeys_if_filter_consumed(&mut path, &filter);
+    (path, filter)
 }
 
 fn visible_query_targets(query: &Query) -> Vec<&crate::include::nodes::primnodes::TargetEntry> {
@@ -3802,6 +4391,8 @@ fn expr_contains_outer_var(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -4018,6 +4609,8 @@ fn rewrite_filter_for_subquery(
         Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -4509,6 +5102,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         return;
     }
     let query_order_items = query_order_items_for_base_rel(root, rtindex);
+    let window_order_items = window_order_items_for_base_rel(root, rtindex);
     let base_filter = root
         .simple_rel_array
         .get(rtindex)
@@ -4518,7 +5112,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         root,
         rtindex,
         base_filter.as_ref(),
-        query_order_items.as_deref(),
+        query_order_items
+            .as_deref()
+            .or(window_order_items.as_deref()),
     );
     let subquery_used_attrs = if matches!(&rte.kind, RangeTblEntryKind::Subquery { .. }) {
         Some(used_parent_attrs_for_rte(
@@ -4565,6 +5161,8 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rte.desc.clone(),
             base_filter,
             query_order_items,
+            window_order_items,
+            !root.parse.window_clauses.is_empty(),
             &required_index_only_attrs,
             root.config,
             &root.index_expr_cache,
@@ -4714,6 +5312,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 catalog,
                 root.config,
             );
+            let pushed = push_window_run_conditions_into_subquery_path(rtindex, path, filter);
+            path = pushed.0;
+            let filter = pushed.1;
             if let Some(filter) = filter {
                 path = optimize_path_with_config(
                     Path::Filter {
@@ -4786,6 +5387,22 @@ fn build_join_restrict_clauses(
                 .map(|clause| joininfo::make_restrict_info_with_pushdown(clause, false)),
         );
     }
+    if matches!(kind, JoinType::Left | JoinType::Right)
+        && let Some(where_qual) = root.parse.where_qual.as_ref()
+    {
+        for clause in flatten_and_conjuncts(where_qual)
+            .into_iter()
+            .map(|clause| expand_join_rte_vars(root, clause))
+            .filter(|clause| outer_join_reduction_clause(kind, left_relids, right_relids, clause))
+        {
+            if !clauses
+                .iter()
+                .any(|existing: &RestrictInfo| existing.clause == clause)
+            {
+                clauses.push(joininfo::make_restrict_info_with_pushdown(clause, true));
+            }
+        }
+    }
     if matches!(kind, JoinType::Inner | JoinType::Cross) {
         for restrict in inner_join_clauses {
             let clause = &restrict.clause;
@@ -4813,6 +5430,47 @@ fn build_join_restrict_clauses(
         );
     }
     clauses
+}
+
+fn clause_reduces_outer_join(root: &PlannerInfo, clause: &Expr) -> bool {
+    root.join_info_list.iter().any(|sjinfo| {
+        outer_join_reduction_clause(
+            sjinfo.jointype,
+            &sjinfo.syn_lefthand,
+            &sjinfo.syn_righthand,
+            clause,
+        )
+    })
+}
+
+fn outer_join_reduction_clause(
+    kind: JoinType,
+    left_relids: &[usize],
+    right_relids: &[usize],
+    clause: &Expr,
+) -> bool {
+    let nullable_relids = match kind {
+        JoinType::Left => right_relids,
+        JoinType::Right => left_relids,
+        _ => return false,
+    };
+    let clause_relids = expr_relids(clause);
+    relids_overlap(&clause_relids, left_relids)
+        && relids_overlap(&clause_relids, right_relids)
+        && relids_subset(&clause_relids, &relids_union(left_relids, right_relids))
+        && relids_overlap(&joininfo::strict_relids(clause), nullable_relids)
+}
+
+fn outer_join_reduced_to_inner(
+    kind: JoinType,
+    left_relids: &[usize],
+    right_relids: &[usize],
+    join_restrict_clauses: &[RestrictInfo],
+) -> bool {
+    join_restrict_clauses.iter().any(|restrict| {
+        restrict.is_pushed_down
+            && outer_join_reduction_clause(kind, left_relids, right_relids, &restrict.clause)
+    })
 }
 
 fn remove_redundant_join_equalities_with_base_filters(
@@ -5798,6 +6456,12 @@ fn path_dominates(left: &Path, right: &Path) -> bool {
     if bestpath::preferred_unqualified_left_join_above_nulltest(left, right) {
         return true;
     }
+    if bestpath::preferred_field_select_hash_join(right, left) {
+        return false;
+    }
+    if bestpath::preferred_field_select_hash_join(left, right) {
+        return true;
+    }
     if preferred_plain_values_join_order(right, left) {
         return false;
     }
@@ -6153,8 +6817,16 @@ fn make_join_rel(
             &logical_right_rel.relids,
             &root.inner_join_clauses,
         );
-        let path_kind =
-            physical_join_kind_for_paths(root, logical_kind, &relids, &join_restrict_clauses);
+        let path_kind = if outer_join_reduced_to_inner(
+            logical_kind,
+            &logical_left_rel.relids,
+            &logical_right_rel.relids,
+            &join_restrict_clauses,
+        ) {
+            JoinType::Inner
+        } else {
+            physical_join_kind_for_paths(root, logical_kind, &relids, &join_restrict_clauses)
+        };
         let mut join_restrict_clauses_for_rel = join_restrict_clauses.clone();
         let mut candidate_paths = collect_join_candidate_paths(
             root,
@@ -6190,12 +6862,21 @@ fn make_join_rel(
                 &right_rel.relids,
                 &root.inner_join_clauses,
             );
-            let fallback_path_kind = physical_join_kind_for_paths(
-                root,
+            let fallback_path_kind = if outer_join_reduced_to_inner(
                 spec.kind,
-                &relids,
+                &left_rel.relids,
+                &right_rel.relids,
                 &fallback_join_restrict_clauses,
-            );
+            ) {
+                JoinType::Inner
+            } else {
+                physical_join_kind_for_paths(
+                    root,
+                    spec.kind,
+                    &relids,
+                    &fallback_join_restrict_clauses,
+                )
+            };
             candidate_paths = collect_join_candidate_paths(
                 root,
                 catalog,

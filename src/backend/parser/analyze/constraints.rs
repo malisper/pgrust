@@ -26,6 +26,7 @@ pub struct IndexBackedConstraintAction {
     pub tablespace: Option<String>,
     pub access_method: Option<String>,
     pub exclusion_operators: Vec<String>,
+    pub predicate_sql: Option<String>,
     pub deferrable: bool,
     pub initially_deferred: bool,
 }
@@ -136,10 +137,16 @@ pub struct BoundTemporalConstraint {
 pub struct BoundExclusionConstraint {
     pub constraint_oid: u32,
     pub constraint_name: String,
+    pub relation_oid: u32,
     pub column_names: Vec<String>,
     pub column_indexes: Vec<usize>,
+    pub key_columns: Vec<Option<usize>>,
+    pub key_exprs: Vec<Option<Expr>>,
     pub operator_oids: Vec<u32>,
     pub operator_proc_oids: Vec<u32>,
+    pub predicate: Option<Expr>,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
     pub enforced: bool,
 }
 
@@ -210,6 +217,7 @@ struct PendingIndexConstraint {
     tablespace: Option<String>,
     access_method: Option<String>,
     exclusion_operators: Vec<String>,
+    predicate_sql: Option<String>,
     deferrable: bool,
     initially_deferred: bool,
 }
@@ -652,7 +660,7 @@ pub fn normalize_create_table_constraints(
                         explicit_name: attributes.name.clone(),
                         generated_base: GeneratedConstraintName::new(
                             &stmt.table_name,
-                            Some(column.name.clone()),
+                            check_constraint_name_column(expr_sql, &relation_columns),
                             "check",
                         ),
                         expr_sql: expr_sql.clone(),
@@ -685,6 +693,7 @@ pub fn normalize_create_table_constraints(
                         tablespace: tablespace.clone(),
                         access_method: None,
                         exclusion_operators: Vec::new(),
+                        predicate_sql: None,
                         deferrable,
                         initially_deferred,
                     });
@@ -713,6 +722,7 @@ pub fn normalize_create_table_constraints(
                         tablespace: tablespace.clone(),
                         access_method: None,
                         exclusion_operators: Vec::new(),
+                        predicate_sql: None,
                         deferrable,
                         initially_deferred,
                     });
@@ -830,6 +840,7 @@ pub fn normalize_create_table_constraints(
                     tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    predicate_sql: None,
                     deferrable,
                     initially_deferred,
                 });
@@ -882,6 +893,7 @@ pub fn normalize_create_table_constraints(
                     tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    predicate_sql: None,
                     deferrable,
                     initially_deferred,
                 });
@@ -891,6 +903,7 @@ pub fn normalize_create_table_constraints(
                 using_method,
                 elements,
                 include_columns,
+                predicate_sql,
             } => {
                 let (deferrable, initially_deferred) =
                     validate_key_attributes(attributes, "EXCLUDE")?;
@@ -903,13 +916,20 @@ pub fn normalize_create_table_constraints(
                 let resolved_include =
                     resolve_constraint_columns(include_columns, &columns, &column_lookup)?;
                 let index_columns = exclusion_index_columns(elements, &resolved);
+                let relation_columns = columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>();
                 let generated_columns = index_columns
                     .iter()
                     .map(|column| {
-                        column
-                            .expr_sql
-                            .clone()
-                            .unwrap_or_else(|| column.name.clone())
+                        column.expr_sql.as_deref().map_or_else(
+                            || column.name.clone(),
+                            |expr_sql| {
+                                check_constraint_name_column(expr_sql, &relation_columns)
+                                    .unwrap_or_else(|| "expr".into())
+                            },
+                        )
                     })
                     .chain(resolved_include.iter().cloned())
                     .collect::<Vec<_>>();
@@ -934,6 +954,7 @@ pub fn normalize_create_table_constraints(
                         .iter()
                         .map(|element| element.operator.clone())
                         .collect(),
+                    predicate_sql: predicate_sql.clone(),
                     deferrable,
                     initially_deferred,
                 });
@@ -1100,6 +1121,7 @@ pub fn normalize_create_table_constraints(
             tablespace: constraint.tablespace,
             access_method: constraint.access_method,
             exclusion_operators: constraint.exclusion_operators,
+            predicate_sql: constraint.predicate_sql,
             deferrable: constraint.deferrable,
             initially_deferred: constraint.initially_deferred,
         })
@@ -1386,37 +1408,61 @@ pub(crate) fn bind_exclusion_constraint(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if conkey
-        .iter()
-        .take(operator_oids.len())
-        .any(|attnum| *attnum <= 0)
-    {
-        let column_names =
-            exclusion_expression_key_names(row.conrelid, row.conindid, &conkey, desc, catalog)
-                .unwrap_or_else(|| {
-                    conkey
-                        .iter()
-                        .take(operator_oids.len())
-                        .enumerate()
-                        .map(|(index, _)| format!("expr{}", index + 1))
-                        .collect()
-                });
-        return Ok(BoundExclusionConstraint {
-            constraint_oid: row.oid,
-            constraint_name: row.conname,
-            column_names,
-            column_indexes: Vec::new(),
-            operator_oids,
-            operator_proc_oids,
-            // :HACK: Expression exclusion keys are represented in pg_index, but
-            // the executor conflict checker is still column-based. Keep DDL and
-            // catalog behavior working without crashing row writes.
-            enforced: false,
-        });
-    }
+    let index_relation = catalog
+        .index_relations_for_heap(row.conrelid)
+        .into_iter()
+        .find(|index| index.relation_oid == row.conindid);
+    let predicate = index_relation
+        .as_ref()
+        .and_then(|index| index.index_predicate.clone());
+    let expression_key_names =
+        exclusion_expression_key_names(row.conrelid, row.conindid, &conkey, desc, catalog)
+            .unwrap_or_else(|| {
+                conkey
+                    .iter()
+                    .take(operator_oids.len())
+                    .enumerate()
+                    .map(|(index, attnum)| {
+                        if *attnum > 0 {
+                            desc.columns
+                                .get((*attnum as usize).saturating_sub(1))
+                                .map(|column| column.name.clone())
+                                .unwrap_or_else(|| format!("attnum{attnum}"))
+                        } else {
+                            format!("expr{}", index + 1)
+                        }
+                    })
+                    .collect()
+            });
+    let mut expression_iter = index_relation
+        .as_ref()
+        .map(|index| index.index_exprs.iter())
+        .into_iter()
+        .flatten();
     let mut column_names = Vec::with_capacity(operator_oids.len());
     let mut column_indexes = Vec::with_capacity(operator_oids.len());
-    for attnum in conkey.iter().take(operator_oids.len()) {
+    let mut key_columns = Vec::with_capacity(operator_oids.len());
+    let mut key_exprs = Vec::with_capacity(operator_oids.len());
+    for (key_index, attnum) in conkey.iter().take(operator_oids.len()).enumerate() {
+        if *attnum <= 0 {
+            let expr =
+                expression_iter
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "exclusion index expression",
+                        actual: format!("missing expression for constraint {}", row.conname),
+                    })?;
+            column_names.push(
+                expression_key_names
+                    .get(key_index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("expr{}", key_index + 1)),
+            );
+            key_columns.push(None);
+            key_exprs.push(Some(expr));
+            continue;
+        }
         let index = usize::try_from(*attnum)
             .ok()
             .and_then(|attnum| attnum.checked_sub(1))
@@ -1439,14 +1485,16 @@ pub(crate) fn bind_exclusion_constraint(
         }
         column_names.push(column.name.clone());
         column_indexes.push(index);
+        key_columns.push(Some(index));
+        key_exprs.push(None);
     }
-    if column_indexes.len() != operator_oids.len() {
+    if key_columns.len() != operator_oids.len() {
         return Err(ParseError::UnexpectedToken {
             expected: "one exclusion operator per key column",
             actual: format!(
-                "constraint {} has {} columns and {} operators",
+                "constraint {} has {} keys and {} operators",
                 row.conname,
-                column_indexes.len(),
+                key_columns.len(),
                 operator_oids.len()
             ),
         });
@@ -1454,10 +1502,16 @@ pub(crate) fn bind_exclusion_constraint(
     Ok(BoundExclusionConstraint {
         constraint_oid: row.oid,
         constraint_name: row.conname,
+        relation_oid: row.conrelid,
         column_names,
         column_indexes,
+        key_columns,
+        key_exprs,
         operator_oids,
         operator_proc_oids,
+        predicate,
+        deferrable: row.condeferrable,
+        initially_deferred: row.condeferred,
         enforced: row.conenforced,
     })
 }
@@ -1803,6 +1857,7 @@ pub fn normalize_alter_table_add_constraint(
                     tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    predicate_sql: None,
                     deferrable,
                     initially_deferred,
                 },
@@ -1855,6 +1910,7 @@ pub fn normalize_alter_table_add_constraint(
                     tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    predicate_sql: None,
                     deferrable,
                     initially_deferred,
                 },
@@ -1865,6 +1921,7 @@ pub fn normalize_alter_table_add_constraint(
             using_method,
             elements,
             include_columns,
+            predicate_sql,
         } => {
             let (deferrable, initially_deferred) = validate_key_attributes(attributes, "EXCLUDE")?;
             let key_columns = elements
@@ -1879,10 +1936,13 @@ pub fn normalize_alter_table_add_constraint(
             let generated_columns = index_columns
                 .iter()
                 .map(|column| {
-                    column
-                        .expr_sql
-                        .clone()
-                        .unwrap_or_else(|| column.name.clone())
+                    column.expr_sql.as_deref().map_or_else(
+                        || column.name.clone(),
+                        |expr_sql| {
+                            check_constraint_name_column(expr_sql, &relation_columns)
+                                .unwrap_or_else(|| "expr".into())
+                        },
+                    )
                 })
                 .chain(resolved_include.iter().cloned())
                 .collect::<Vec<_>>();
@@ -1908,6 +1968,7 @@ pub fn normalize_alter_table_add_constraint(
                         .iter()
                         .map(|element| element.operator.clone())
                         .collect(),
+                    predicate_sql: predicate_sql.clone(),
                     deferrable,
                     initially_deferred,
                 },
@@ -1966,6 +2027,7 @@ pub fn normalize_alter_table_add_constraint(
                     tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    predicate_sql: None,
                     deferrable,
                     initially_deferred,
                 },
@@ -2008,6 +2070,7 @@ pub fn normalize_alter_table_add_constraint(
                     tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    predicate_sql: None,
                     deferrable,
                     initially_deferred,
                 },
@@ -4272,6 +4335,8 @@ fn reject_unsupported_relation_predicate_expr(
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

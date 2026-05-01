@@ -341,6 +341,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
         parent_index_oid: u32,
         relation: &BoundRelation,
         spec: &PartitionedIndexSpec,
+        allow_constraint_backed: bool,
     ) -> Result<Option<BoundIndexRelation>, ExecError> {
         let expected_relkind = if relation.relkind == 'p' { 'I' } else { 'i' };
         for child_index in self.direct_index_children(parent_index_oid)? {
@@ -354,7 +355,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 expected_relkind,
                 false,
                 false,
-                false,
+                allow_constraint_backed,
             )? {
                 return Ok(Some(child_index));
             }
@@ -367,6 +368,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
         relation: &BoundRelation,
         spec: &PartitionedIndexSpec,
         require_valid: bool,
+        allow_constraint_backed: bool,
     ) -> Result<Option<BoundIndexRelation>, ExecError> {
         let expected_relkind = if relation.relkind == 'p' { 'I' } else { 'i' };
         for index in self
@@ -380,7 +382,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 expected_relkind,
                 require_valid,
                 true,
-                false,
+                allow_constraint_backed,
             )? {
                 return Ok(Some(index));
             }
@@ -394,6 +396,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
         spec: &PartitionedIndexSpec,
         index_name: &str,
         require_valid: bool,
+        allow_constraint_backed: bool,
     ) -> Result<Option<BoundIndexRelation>, ExecError> {
         for index in self
             .catalog()
@@ -412,7 +415,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 'I',
                 require_valid,
                 true,
-                false,
+                allow_constraint_backed,
             )? {
                 return Ok(Some(index));
             }
@@ -664,19 +667,34 @@ impl<'a> PartitionedIndexInstaller<'a> {
         if relation.relkind == 'f' {
             return Ok((0, true));
         }
-        if let Some(attached) = self.find_attached_child_index(parent_index_oid, &relation, spec)? {
+        let parent_heap_oid = self.index_heap_oid(parent_index_oid)?;
+        let allow_constraint_backed = self
+            .constraint_for_index(parent_heap_oid, parent_index_oid)
+            .is_none();
+        if let Some(attached) = self.find_attached_child_index(
+            parent_index_oid,
+            &relation,
+            spec,
+            allow_constraint_backed,
+        )? {
             return Ok((attached.relation_oid, attached.index_meta.indisvalid));
         }
-        if let Some(existing) = self.find_matching_unattached_index(&relation, spec, true)? {
+        if let Some(existing) =
+            self.find_matching_unattached_index(&relation, spec, true, allow_constraint_backed)?
+        {
             self.create_index_inheritance(existing.relation_oid, parent_index_oid)?;
             return Ok((existing.relation_oid, existing.index_meta.indisvalid));
         }
 
         if relation.relkind == 'p' {
             let base_name = self.child_index_base_name(&relation, spec)?;
-            if let Some(existing) =
-                self.find_matching_unattached_index_named(&relation, spec, &base_name, false)?
-            {
+            if let Some(existing) = self.find_matching_unattached_index_named(
+                &relation,
+                spec,
+                &base_name,
+                false,
+                allow_constraint_backed,
+            )? {
                 self.create_index_inheritance(existing.relation_oid, parent_index_oid)?;
                 return Ok((existing.relation_oid, existing.index_meta.indisvalid));
             }
@@ -1041,6 +1059,7 @@ impl Database {
                     without_overlaps: None,
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    predicate_sql: None,
                     tablespace: None,
                     deferrable: false,
                     initially_deferred: false,

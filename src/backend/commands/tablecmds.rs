@@ -2105,6 +2105,7 @@ fn push_partitioned_view_merge_explain_lines(
             varattno: user_attrno(child_column_index),
             varlevelsup: 0,
             vartype: child_relation.desc.columns[child_column_index].sql_type,
+            collation_oid: None,
         });
         let prune_filter = Expr::op_auto(
             crate::include::nodes::primnodes::OpExprKind::Eq,
@@ -3207,6 +3208,7 @@ fn first_lateral_derived_table_alias_in_from_item(item: &FromItem) -> Option<&st
         FromItem::DerivedTable(select) => first_lateral_derived_table_alias_in_select(select),
         FromItem::Table { .. }
         | FromItem::Values { .. }
+        | FromItem::Expression { .. }
         | FromItem::RowsFrom { .. }
         | FromItem::FunctionCall { .. }
         | FromItem::JsonTable(_)
@@ -6564,26 +6566,63 @@ pub(crate) fn enforce_exclusion_constraints_for_write(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for constraint in &constraints.exclusions {
-        if !constraint.enforced || exclusion_constraint_skips_conflict_check(constraint, values) {
+        if exclusion_constraint_is_deferred(constraint, ctx) {
+            if let Some(tracker) = ctx.deferred_foreign_keys.as_ref() {
+                tracker.record(constraint.constraint_oid);
+            }
             continue;
         }
+        if !constraint.enforced || !exclusion_row_matches_predicate(constraint, values, None, ctx)?
+        {
+            continue;
+        }
+        let Some(proposed_key) = exclusion_constraint_key_values(constraint, values, None, ctx)?
+        else {
+            continue;
+        };
         let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
         for (tid, existing) in rows {
             if excluded_tid.is_some_and(|excluded| excluded == tid) {
                 continue;
             }
-            if exclusion_rows_conflict(constraint, values, &existing)? {
+            if !exclusion_row_matches_predicate(constraint, &existing, Some(tid), ctx)? {
+                continue;
+            }
+            let Some(existing_key) =
+                exclusion_constraint_key_values(constraint, &existing, Some(tid), ctx)?
+            else {
+                continue;
+            };
+            if exclusion_rows_conflict(constraint, &proposed_key, &existing_key)? {
                 return Err(exclusion_violation(
                     desc,
                     relation_name,
                     constraint,
-                    values,
-                    &existing,
+                    &proposed_key,
+                    &existing_key,
                 ));
             }
         }
     }
     Ok(())
+}
+
+fn exclusion_constraint_is_deferred(
+    constraint: &BoundExclusionConstraint,
+    ctx: &ExecutorContext,
+) -> bool {
+    constraint.deferrable
+        && ctx
+            .deferred_foreign_keys
+            .as_ref()
+            .map(|tracker| {
+                tracker.effective_timing(
+                    constraint.constraint_oid,
+                    constraint.deferrable,
+                    constraint.initially_deferred,
+                ) == ConstraintTiming::Deferred
+            })
+            .unwrap_or(false)
 }
 
 pub(crate) fn exclusion_arbiter_conflicts_with_existing_row(
@@ -6595,15 +6634,26 @@ pub(crate) fn exclusion_arbiter_conflicts_with_existing_row(
     excluded_tid: Option<ItemPointerData>,
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
-    if !constraint.enforced || exclusion_constraint_skips_conflict_check(constraint, values) {
+    if !constraint.enforced || !exclusion_row_matches_predicate(constraint, values, None, ctx)? {
         return Ok(false);
     }
+    let Some(proposed_key) = exclusion_constraint_key_values(constraint, values, None, ctx)? else {
+        return Ok(false);
+    };
     let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
     for (tid, existing) in rows {
         if excluded_tid.is_some_and(|excluded| excluded == tid) {
             continue;
         }
-        if exclusion_rows_conflict(constraint, values, &existing)? {
+        if !exclusion_row_matches_predicate(constraint, &existing, Some(tid), ctx)? {
+            continue;
+        }
+        let Some(existing_key) =
+            exclusion_constraint_key_values(constraint, &existing, Some(tid), ctx)?
+        else {
+            continue;
+        };
+        if exclusion_rows_conflict(constraint, &proposed_key, &existing_key)? {
             return Ok(true);
         }
     }
@@ -6616,22 +6666,33 @@ pub(crate) fn enforce_exclusion_constraints_against_values(
     constraints: &BoundRelationConstraints,
     values: &[Value],
     existing_rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for constraint in &constraints.exclusions {
-        if !constraint.enforced || exclusion_constraint_skips_conflict_check(constraint, values) {
+        if !constraint.enforced || !exclusion_row_matches_predicate(constraint, values, None, ctx)?
+        {
             continue;
         }
+        let Some(proposed_key) = exclusion_constraint_key_values(constraint, values, None, ctx)?
+        else {
+            continue;
+        };
         for existing in existing_rows {
-            if exclusion_constraint_skips_conflict_check(constraint, existing) {
+            if !exclusion_row_matches_predicate(constraint, existing, None, ctx)? {
                 continue;
             }
-            if exclusion_rows_conflict(constraint, values, existing)? {
+            let Some(existing_key) =
+                exclusion_constraint_key_values(constraint, existing, None, ctx)?
+            else {
+                continue;
+            };
+            if exclusion_rows_conflict(constraint, &proposed_key, &existing_key)? {
                 return Err(exclusion_violation(
                     desc,
                     relation_name,
                     constraint,
-                    values,
-                    existing,
+                    &proposed_key,
+                    &existing_key,
                 ));
             }
         }
@@ -6679,19 +6740,71 @@ pub(crate) fn validate_exclusion_constraint_existing_rows(
     desc: &RelationDesc,
     constraint: &BoundExclusionConstraint,
     rows: &[(ItemPointerData, Vec<Value>)],
-    _ctx: &mut ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    for (left_pos, (_, left_values)) in rows.iter().enumerate() {
-        if exclusion_constraint_skips_conflict_check(constraint, left_values) {
+    validate_exclusion_constraint_existing_rows_inner(
+        relation_name,
+        desc,
+        constraint,
+        rows,
+        ctx,
+        true,
+    )
+}
+
+pub(crate) fn validate_deferred_exclusion_constraint_existing_rows(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraint: &BoundExclusionConstraint,
+    rows: &[(ItemPointerData, Vec<Value>)],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    validate_exclusion_constraint_existing_rows_inner(
+        relation_name,
+        desc,
+        constraint,
+        rows,
+        ctx,
+        false,
+    )
+}
+
+fn validate_exclusion_constraint_existing_rows_inner(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraint: &BoundExclusionConstraint,
+    rows: &[(ItemPointerData, Vec<Value>)],
+    ctx: &mut ExecutorContext,
+    create_error: bool,
+) -> Result<(), ExecError> {
+    for (left_pos, (left_tid, left_values)) in rows.iter().enumerate() {
+        if !exclusion_row_matches_predicate(constraint, left_values, Some(*left_tid), ctx)? {
             continue;
         }
-        for (_, right_values) in rows.iter().skip(left_pos + 1) {
-            if exclusion_constraint_skips_conflict_check(constraint, right_values) {
+        let Some(left_key) =
+            exclusion_constraint_key_values(constraint, left_values, Some(*left_tid), ctx)?
+        else {
+            continue;
+        };
+        for (right_tid, right_values) in rows.iter().skip(left_pos + 1) {
+            if !exclusion_row_matches_predicate(constraint, right_values, Some(*right_tid), ctx)? {
                 continue;
             }
-            if exclusion_rows_conflict(constraint, left_values, right_values)? {
-                let left_key = exclusion_constraint_key_values(constraint, left_values);
-                let right_key = exclusion_constraint_key_values(constraint, right_values);
+            let Some(right_key) =
+                exclusion_constraint_key_values(constraint, right_values, Some(*right_tid), ctx)?
+            else {
+                continue;
+            };
+            if exclusion_rows_conflict(constraint, &left_key, &right_key)? {
+                if !create_error {
+                    return Err(exclusion_violation(
+                        desc,
+                        relation_name,
+                        constraint,
+                        &left_key,
+                        &right_key,
+                    ));
+                }
                 return Err(ExecError::DetailedError {
                     message: format!(
                         "could not create exclusion constraint \"{}\"",
@@ -6710,32 +6823,48 @@ pub(crate) fn validate_exclusion_constraint_existing_rows(
             }
         }
     }
-    let _ = relation_name;
     Ok(())
 }
 
-fn exclusion_constraint_skips_conflict_check(
+fn exclusion_constraint_has_null_key(
+    constraint: &BoundExclusionConstraint,
+    key_values: &[Value],
+) -> bool {
+    key_values
+        .iter()
+        .take(constraint.operator_proc_oids.len())
+        .any(|value| matches!(value, Value::Null))
+}
+
+fn exclusion_row_matches_predicate(
     constraint: &BoundExclusionConstraint,
     values: &[Value],
-) -> bool {
-    constraint
-        .column_indexes
-        .iter()
-        .any(|index| matches!(values.get(*index), Some(Value::Null) | None))
+    heap_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(predicate) = constraint.predicate.as_ref() else {
+        return Ok(true);
+    };
+    let mut slot = TupleSlot::virtual_row_with_metadata(
+        values.to_vec(),
+        heap_tid,
+        Some(constraint.relation_oid),
+    );
+    match eval_expr(predicate, &mut slot, ctx)? {
+        Value::Bool(value) => Ok(value),
+        Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other)),
+    }
 }
 
 fn exclusion_rows_conflict(
     constraint: &BoundExclusionConstraint,
-    proposed: &[Value],
-    existing: &[Value],
+    proposed_key: &[Value],
+    existing_key: &[Value],
 ) -> Result<bool, ExecError> {
-    for (column_index, proc_oid) in constraint
-        .column_indexes
-        .iter()
-        .zip(constraint.operator_proc_oids.iter())
-    {
-        let left = proposed.get(*column_index).unwrap_or(&Value::Null);
-        let right = existing.get(*column_index).unwrap_or(&Value::Null);
+    for (key_index, proc_oid) in constraint.operator_proc_oids.iter().enumerate() {
+        let left = proposed_key.get(key_index).unwrap_or(&Value::Null);
+        let right = existing_key.get(key_index).unwrap_or(&Value::Null);
         if matches!(left, Value::Null) || matches!(right, Value::Null) {
             return Ok(false);
         }
@@ -6815,8 +6944,8 @@ fn exclusion_violation(
     desc: &RelationDesc,
     _relation_name: &str,
     constraint: &BoundExclusionConstraint,
-    proposed: &[Value],
-    existing: &[Value],
+    proposed_key: &[Value],
+    existing_key: &[Value],
 ) -> ExecError {
     ExecError::DetailedError {
         message: format!(
@@ -6824,13 +6953,11 @@ fn exclusion_violation(
             constraint.constraint_name
         ),
         detail: {
-            let proposed_key = exclusion_constraint_key_values(constraint, proposed);
-            let existing_key = exclusion_constraint_key_values(constraint, existing);
             Some(
                 crate::backend::executor::value_io::format_exclusion_key_detail(
                     &exclusion_constraint_columns(desc, constraint),
-                    &proposed_key,
-                    &existing_key,
+                    proposed_key,
+                    existing_key,
                 ),
             )
         },
@@ -6842,12 +6969,32 @@ fn exclusion_violation(
 fn exclusion_constraint_key_values(
     constraint: &BoundExclusionConstraint,
     values: &[Value],
-) -> Vec<Value> {
-    constraint
-        .column_indexes
+    heap_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    let mut slot = TupleSlot::virtual_row_with_metadata(
+        values.to_vec(),
+        heap_tid,
+        Some(constraint.relation_oid),
+    );
+    let mut key_values = Vec::with_capacity(constraint.key_columns.len());
+    for (column, expr) in constraint
+        .key_columns
         .iter()
-        .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
-        .collect()
+        .zip(constraint.key_exprs.iter())
+    {
+        let value = match (column, expr) {
+            (Some(index), _) => values.get(*index).cloned().unwrap_or(Value::Null),
+            (None, Some(expr)) => eval_expr(expr, &mut slot, ctx)?,
+            (None, None) => Value::Null,
+        };
+        key_values.push(value);
+    }
+    if exclusion_constraint_has_null_key(constraint, &key_values) {
+        Ok(None)
+    } else {
+        Ok(Some(key_values))
+    }
 }
 
 fn exclusion_constraint_columns(
@@ -6855,9 +7002,18 @@ fn exclusion_constraint_columns(
     constraint: &BoundExclusionConstraint,
 ) -> Vec<crate::backend::executor::ColumnDesc> {
     constraint
-        .column_indexes
+        .key_columns
         .iter()
-        .filter_map(|index| desc.columns.get(*index).cloned())
+        .enumerate()
+        .filter_map(|(key_index, column)| {
+            let mut desc_column = column
+                .and_then(|index| desc.columns.get(index).cloned())
+                .or_else(|| desc.columns.iter().find(|column| !column.dropped).cloned())?;
+            if let Some(name) = constraint.column_names.get(key_index) {
+                desc_column.name = name.clone();
+            }
+            Some(desc_column)
+        })
         .collect()
 }
 
@@ -7630,7 +7786,7 @@ pub(crate) fn validate_pending_no_action_checks(
 
 fn validate_pending_updated_exclusion_checks(
     pending: &[PendingUpdatedExclusionCheck],
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for (index, check) in pending.iter().enumerate() {
         let previous_values = pending[..index]
@@ -7655,6 +7811,7 @@ fn validate_pending_updated_exclusion_checks(
             &check.constraints,
             &check.values,
             &previous_values,
+            ctx,
         )?;
     }
     Ok(())
@@ -8311,6 +8468,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
                                     varattno: user_attrno(index),
                                     varlevelsup: 0,
                                     vartype: column.sql_type,
+                                    collation_oid: None,
                                 })
                             })
                             .collect(),
@@ -9986,6 +10144,7 @@ fn partition_parent_layout_exprs(
                         varattno: user_attrno(child_index),
                         varlevelsup: 0,
                         vartype: child_column.sql_type,
+                        collation_oid: None,
                     })
                 })
                 .unwrap_or(Expr::Const(Value::Null))
@@ -11229,6 +11388,7 @@ fn execute_merge_insert_action(
             &stmt.relation_constraints,
             &row_values,
             &[],
+            ctx,
         )?;
         let heap_tid = write_insert_heap_row(
             &stmt.relation_name,
@@ -14118,6 +14278,7 @@ pub(crate) fn execute_insert_rows(
                 relation_constraints,
                 &values,
                 &inserted_rows,
+                ctx,
             )?;
             let heap_tid = write_insert_heap_row(
                 relation_name,

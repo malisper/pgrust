@@ -406,7 +406,9 @@ fn collect_local_selected_columns(expr: &Expr, selected: &mut Vec<usize>) {
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentUser
+        | Expr::User
         | Expr::SessionUser
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1570,6 +1572,9 @@ fn bind_returning_targets(
     if targets.is_empty() {
         return Ok(Vec::new());
     }
+    for target in targets {
+        reject_window_clause(&target.expr, "RETURNING")?;
+    }
     match bind_select_targets(targets, scope, catalog, outer_scopes, None, local_ctes)? {
         BoundSelectTargets::Plain(targets)
             if targets
@@ -1594,6 +1599,7 @@ fn returning_pseudo_output_exprs(desc: &RelationDesc, varno: usize) -> Vec<Expr>
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -1737,6 +1743,7 @@ fn projected_output_exprs(desc: &RelationDesc, start_index: usize) -> Vec<Expr> 
                 varattno: user_attrno(start_index + index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -1757,6 +1764,7 @@ fn projected_output_exprs_with_width(
                 varattno: user_attrno(start_index + index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -1781,6 +1789,7 @@ fn with_merge_target_identity(
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Tid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Tid),
             ctid_resno,
@@ -1796,6 +1805,7 @@ fn with_merge_target_identity(
                 varattno: TABLE_OID_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Oid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Oid),
             tableoid_resno,
@@ -1824,6 +1834,7 @@ fn with_update_target_identity(
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Tid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Tid),
             ctid_resno,
@@ -1839,6 +1850,7 @@ fn with_update_target_identity(
                 varattno: TABLE_OID_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Oid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Oid),
             tableoid_resno,
@@ -2204,15 +2216,15 @@ const MERGE_ACTION_RETURNING_COLUMN: &str = "__pgrust_merge_action";
 
 fn scope_with_merge_action_column(mut scope: BoundScope, merge_action_index: usize) -> BoundScope {
     let sql_type = SqlType::new(SqlTypeKind::Text);
-    scope
-        .desc
-        .columns
-        .push(column_desc(MERGE_ACTION_RETURNING_COLUMN, sql_type, true));
+    let merge_action_column = column_desc(MERGE_ACTION_RETURNING_COLUMN, sql_type, true);
+    let collation_oid = Some(merge_action_column.collation_oid);
+    scope.desc.columns.push(merge_action_column);
     scope.output_exprs.push(Expr::Var(Var {
         varno: 1,
         varattno: user_attrno(merge_action_index),
         varlevelsup: 0,
         vartype: sql_type,
+        collation_oid,
     }));
     scope.columns.push(ScopeColumn {
         output_name: MERGE_ACTION_RETURNING_COLUMN.into(),
@@ -2566,6 +2578,7 @@ fn bind_merge_returning_targets(
                         varattno: user_attrno(merge_action_index),
                         varlevelsup: 0,
                         vartype: SqlType::new(SqlTypeKind::Text),
+                        collation_oid: None,
                     }),
                     SqlType::new(SqlTypeKind::Text),
                     entries.len() + 1,
@@ -2902,6 +2915,7 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
         target_from,
         source_from,
         merge_join_type(&stmt.when_clauses),
+        false,
         join_condition,
         None,
     );
@@ -3661,6 +3675,7 @@ fn update_input_identity_expr(index: usize, input_columns: &[QueryColumn]) -> Ex
             .get(index)
             .map(|column| column.sql_type)
             .unwrap_or_else(|| SqlType::new(SqlTypeKind::AnyElement)),
+        collation_oid: None,
     })
 }
 
@@ -4040,6 +4055,8 @@ fn rewrite_auto_view_scan_plan(
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => Plan::WindowAgg {
             plan_info,
@@ -4051,6 +4068,8 @@ fn rewrite_auto_view_scan_plan(
                 resolved,
             )),
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         },
         Plan::SubqueryScan {
@@ -5927,6 +5946,7 @@ fn bind_simple_update(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, local_ctes)
         })
         .transpose()?;
@@ -6108,6 +6128,7 @@ fn bind_update_from(
         target_from,
         source_from,
         JoinType::Cross,
+        false,
         Expr::Const(Value::Bool(true)),
         None,
     );
@@ -6139,6 +6160,7 @@ fn bind_update_from(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(
                 expr,
                 &eval_scope,
@@ -6455,6 +6477,7 @@ pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &visible_ctes)
         })
         .transpose()?;
@@ -6564,6 +6587,7 @@ fn bind_delete_using(
         target_from,
         source_from,
         JoinType::Cross,
+        false,
         Expr::Const(Value::Bool(true)),
         None,
     );
@@ -6595,6 +6619,7 @@ fn bind_delete_using(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(
                 expr,
                 &eval_scope,

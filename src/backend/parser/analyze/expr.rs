@@ -575,6 +575,8 @@ fn raw_sql_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bo
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -2549,6 +2551,7 @@ fn bind_window_func_call(
     args: &[SqlFunctionArg],
     func_variadic: bool,
     null_treatment: Option<WindowNullTreatment>,
+    filter: Option<&SqlExpr>,
     over: &RawWindowSpec,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
@@ -2656,7 +2659,7 @@ fn bind_window_func_call(
                 &[],
                 false,
                 resolved.func_variadic,
-                None,
+                filter,
                 over,
                 scope,
                 catalog,
@@ -2672,7 +2675,7 @@ fn bind_window_func_call(
             &[],
             false,
             func_variadic,
-            None,
+            filter,
             over,
             scope,
             catalog,
@@ -2982,6 +2985,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     varattno: system_column.varattno,
                     varlevelsup: system_column.varlevelsup,
                     vartype: system_column.sql_type,
+                    collation_oid: None,
                 })
             } else {
                 match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
@@ -3985,29 +3989,34 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     domain.as_ref(),
                 ));
             }
-            if target_type.kind == SqlTypeKind::RegRole
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegRole
                 && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regrole);
             }
-            if target_type.kind == SqlTypeKind::RegClass
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegClass
                 && let Some(bound_regclass) =
                     bind_regclass_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regclass);
             }
-            if target_type.kind == SqlTypeKind::RegOperator
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegOperator
                 && let Some(bound_regoperator) =
                     bind_regoperator_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regoperator);
             }
-            if target_type.kind == SqlTypeKind::RegType
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegType
                 && let Some(bound_regtype) = bind_regtype_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regtype);
             }
-            if target_type.kind == SqlTypeKind::RegProcedure
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegProcedure
                 && let Some(bound_regprocedure) =
                     bind_regprocedure_literal_cast(inner, target_type, catalog)?
             {
@@ -5551,6 +5560,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     args_list,
                     *func_variadic,
                     *null_treatment,
+                    filter.as_deref(),
                     raw_over,
                     scope,
                     catalog,
@@ -6239,7 +6249,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::CurrentCatalog => Expr::CurrentCatalog,
         SqlExpr::CurrentSchema => Expr::CurrentSchema,
         SqlExpr::CurrentUser => Expr::CurrentUser,
+        SqlExpr::User => Expr::User,
         SqlExpr::SessionUser => Expr::SessionUser,
+        SqlExpr::SystemUser => Expr::SystemUser,
         SqlExpr::CurrentRole => Expr::CurrentRole,
         SqlExpr::CurrentTime { precision } => Expr::CurrentTime {
             precision: *precision,

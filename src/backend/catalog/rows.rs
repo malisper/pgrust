@@ -478,7 +478,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     .map(|row| row.typstorage)
                     .unwrap_or(column.storage.attstorage),
                 attcompression: column.storage.attcompression,
-                attstattarget: column.attstattarget,
+                attstattarget: (column.attstattarget >= 0).then_some(column.attstattarget),
                 attinhcount: column.attinhcount,
                 attislocal: column.attislocal,
                 attidentity: column

@@ -30,6 +30,7 @@ fn scope_for_special_rule_tuple(
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 })
             })
             .collect(),

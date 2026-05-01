@@ -848,6 +848,8 @@ fn expr_references_relation_column(
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
@@ -1395,7 +1397,7 @@ pub(super) fn validate_alter_table_add_column(
             desc.default_expr = Some(type_default);
         }
         if let Some(sql) = desc.default_expr.as_deref() {
-            desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
+            desc.missing_default_value = derive_literal_default_value(sql, desc.sql_type).ok();
         }
     }
     if let Some(storage) = column.storage {
@@ -2322,6 +2324,7 @@ pub(super) fn validate_alter_table_alter_column_type(
                 varattno: user_attrno(column_index),
                 varlevelsup: 0,
                 vartype: current_column.sql_type,
+                collation_oid: None,
             }),
             current_column.sql_type,
         ),
