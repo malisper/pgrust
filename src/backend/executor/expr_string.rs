@@ -3740,12 +3740,10 @@ pub(super) fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value
     let prefix = decode_valid_prefix(bytes, src);
     match prefix.status {
         DecodePrefixStatus::InvalidSource => {
+            let message = invalid_byte_sequence_message(src_name, &prefix.error_bytes);
             if !no_error {
                 return Err(ExecError::DetailedError {
-                    message: format!(
-                        "invalid byte sequence for encoding \"{}\"",
-                        src_name.to_ascii_uppercase()
-                    ),
+                    message,
                     detail: None,
                     hint: None,
                     sqlstate: "22021",
@@ -3769,8 +3767,8 @@ pub(super) fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value
     match encode_without_replacement(&prefix.decoded, dst) {
         Ok(encoded) => Ok(build_test_enc_conversion_record(bytes.len(), encoded)),
         Err(EncodeFailure::Unmappable { utf8_bytes_read }) if no_error => {
-            let converted_bytes = if src == encoding_rs::UTF_8 {
-                utf8_bytes_read
+            let (converted_bytes, encoded_prefix) = if src == encoding_rs::UTF_8 {
+                encode_prefix_before_unmappable(&prefix.decoded, dst, utf8_bytes_read)
             } else {
                 return Err(ExecError::DetailedError {
                     message: format!(
@@ -3787,8 +3785,7 @@ pub(super) fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value
             };
             Ok(build_test_enc_conversion_record(
                 converted_bytes,
-                encode_without_replacement(&prefix.decoded[..utf8_bytes_read], dst)
-                    .expect("prefix must remain encodable"),
+                encoded_prefix,
             ))
         }
         Err(EncodeFailure::Unmappable { .. }) => Err(ExecError::DetailedError {
@@ -3812,10 +3809,24 @@ fn invalid_encoding_name(kind: &str, name: &str) -> ExecError {
     }
 }
 
+fn invalid_byte_sequence_message(encoding_name: &str, error_bytes: &[u8]) -> String {
+    let bytes = error_bytes
+        .iter()
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "invalid byte sequence for encoding \"{}\": {}",
+        encoding_name.to_ascii_uppercase(),
+        bytes
+    )
+}
+
 fn lookup_pg_encoding(name: &str) -> Option<&'static Encoding> {
     let normalized = normalize_encoding_label(name);
     let canonical = match normalized.as_str() {
         "utf8" | "utf-8" => "utf-8",
+        "euc-jis-2004" => "euc-jp",
         "euc-kr" => "euc-kr",
         "big5" => "big5",
         "gb18030" => "gb18030",
@@ -3840,6 +3851,7 @@ struct DecodePrefix {
     valid_bytes: usize,
     decoded: String,
     encoded_prefix: Vec<u8>,
+    error_bytes: Vec<u8>,
 }
 
 fn decode_valid_prefix(input: &[u8], encoding: &'static Encoding) -> DecodePrefix {
@@ -3858,21 +3870,48 @@ fn decode_valid_prefix(input: &[u8], encoding: &'static Encoding) -> DecodePrefi
             valid_bytes: input.len(),
             decoded,
             encoded_prefix: input.to_vec(),
+            error_bytes: Vec::new(),
         },
         DecoderResult::InputEmpty => DecodePrefix {
             status: DecodePrefixStatus::InvalidSource,
             valid_bytes: nul_index.expect("nul exists"),
             decoded,
             encoded_prefix: input[..nul_index.expect("nul exists")].to_vec(),
+            error_bytes: vec![0],
         },
-        DecoderResult::Malformed(_, _) => DecodePrefix {
-            status: DecodePrefixStatus::InvalidSource,
-            valid_bytes: read,
-            decoded,
-            encoded_prefix: input[..read].to_vec(),
-        },
+        DecoderResult::Malformed(malformed_len, consumed_after) => {
+            let error_len = usize::from(malformed_len) + usize::from(consumed_after);
+            let valid_bytes = read.saturating_sub(error_len);
+            let error_bytes = if encoding == encoding_rs::UTF_8 {
+                utf8_malformed_message_bytes(input, valid_bytes)
+            } else {
+                input[valid_bytes..read].to_vec()
+            };
+            DecodePrefix {
+                status: DecodePrefixStatus::InvalidSource,
+                valid_bytes,
+                decoded,
+                encoded_prefix: input[..valid_bytes].to_vec(),
+                error_bytes,
+            }
+        }
         DecoderResult::OutputFull => unreachable!("buffer sized from max_utf8_buffer_length"),
     }
+}
+
+fn utf8_malformed_message_bytes(input: &[u8], offset: usize) -> Vec<u8> {
+    let Some(&lead) = input.get(offset) else {
+        return Vec::new();
+    };
+    let expected_len = match lead {
+        0x00..=0x7f => 1,
+        0x80..=0xbf => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => 1,
+    };
+    input[offset..input.len().min(offset + expected_len)].to_vec()
 }
 
 #[derive(Debug)]
@@ -3898,6 +3937,27 @@ fn encode_without_replacement(
             utf8_bytes_read: read,
         }),
         EncoderResult::OutputFull => unreachable!("buffer sized from max_buffer_length"),
+    }
+}
+
+fn encode_prefix_before_unmappable(
+    input: &str,
+    encoding: &'static Encoding,
+    utf8_bytes_read: usize,
+) -> (usize, Vec<u8>) {
+    let mut read = utf8_bytes_read.min(input.len());
+    loop {
+        if let Ok(encoded) = encode_without_replacement(&input[..read], encoding) {
+            return (read, encoded);
+        }
+        if read == 0 {
+            return (0, Vec::new());
+        }
+        read = input[..read]
+            .char_indices()
+            .last()
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
     }
 }
 

@@ -1518,6 +1518,17 @@ impl Database {
                     ))
                 })?;
             let type_name = index_type_name_for_oid(self, client_id, txn_ctx, type_oid);
+            if column.collation.is_some() && !crate::backend::parser::is_collatable_type(sql_type) {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!(
+                        "collations are not supported by type {}",
+                        crate::backend::parser::sql_type_name(sql_type)
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42804",
+                }));
+            }
             let opclass = if let Some(opclass_name) = column.opclass.as_deref() {
                 let opclass_lookup_name = opclass_name
                     .rsplit_once('.')

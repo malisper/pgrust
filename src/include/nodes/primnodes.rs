@@ -3415,7 +3415,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
     }
 }
 
-fn expr_collation_oid_hint(expr: &Expr) -> Option<u32> {
+pub fn expr_collation_oid_hint(expr: &Expr) -> Option<u32> {
     match expr {
         Expr::Var(var) => var.collation_oid,
         Expr::Collate { collation_oid, .. } => Some(*collation_oid),
@@ -3436,6 +3436,11 @@ fn expr_collation_oid_hint(expr: &Expr) -> Option<u32> {
                     .find_map(|when| expr_collation_oid_hint(&when.result))
             })
             .or_else(|| expr_collation_oid_hint(&case_expr.defresult)),
+        Expr::SubLink(sublink) => sublink
+            .subselect
+            .target_list
+            .first()
+            .and_then(|target| expr_collation_oid_hint(&target.expr)),
         _ => None,
     }
 }
