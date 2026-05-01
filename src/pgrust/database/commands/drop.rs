@@ -1298,38 +1298,6 @@ fn drop_table_direct_dependencies(
     let mut proc_oids = BTreeSet::new();
     let mut deps = Vec::new();
 
-    if let Some(relation) = ctx
-        .catalog
-        .lookup_relation_by_oid(relation_oid)
-        .or_else(|| ctx.catalog.relation_by_oid(relation_oid))
-    {
-        for sequence_oid in relation.desc.columns.iter().filter_map(|column| {
-            (!column.dropped)
-                .then_some(column.default_sequence_oid)
-                .flatten()
-        }) {
-            if !relation_oids.insert(sequence_oid) {
-                continue;
-            }
-            let Some(class) = ctx.catalog.class_row_by_oid(sequence_oid) else {
-                continue;
-            };
-            if class.relkind != 'S' {
-                continue;
-            }
-            deps.push(DropTableDependency::Relation {
-                relation_oid: sequence_oid,
-                relkind: class.relkind,
-                is_partition: true,
-                display_name: drop_table_display_relation_name(
-                    ctx.catalog,
-                    sequence_oid,
-                    ctx.search_path,
-                ),
-            });
-        }
-    }
-
     for row in ctx.graph.dependents(ObjectAddress::relation(relation_oid)) {
         if row.objsubid != 0 {
             continue;
