@@ -4669,6 +4669,7 @@ fn pseudo_row_absent_expr(desc: &RelationDesc, varno: usize) -> Option<Expr> {
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             });
             if !column.sql_type.is_array
                 && matches!(
@@ -5719,7 +5720,9 @@ fn security_barrier_target_clause_can_run_before_leaky(expr: &Expr) -> bool {
         | Expr::Xml(_)
         | Expr::Random
         | Expr::CurrentUser
+        | Expr::User
         | Expr::SessionUser
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema

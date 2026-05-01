@@ -6,7 +6,7 @@ use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
-    Expr, RelationDesc, Var, attrno_index, is_system_attr, user_attrno,
+    Expr, RelationDesc, Var, attrno_index, is_system_attr, set_returning_call_exprs, user_attrno,
 };
 
 use super::views::{

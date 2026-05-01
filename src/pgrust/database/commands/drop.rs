@@ -3596,7 +3596,7 @@ impl Database {
                     .iter()
                     .map(|row| row.oid)
                     .collect::<BTreeSet<_>>();
-                let (graph, constraints_by_oid, rewrites_by_oid, policies_by_oid) =
+                let (graph, constraints_by_oid, rewrites_by_oid, policies_by_oid, procs_by_oid) =
                     build_drop_table_dependency_graph(
                         self,
                         client_id,
@@ -3610,6 +3610,7 @@ impl Database {
                     constraints_by_oid,
                     rewrites_by_oid,
                     policies_by_oid,
+                    procs_by_oid,
                     search_path: &search_path,
                 };
                 let mut dependency_plan = DropTablePlan::default();
