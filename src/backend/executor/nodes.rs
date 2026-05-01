@@ -693,6 +693,21 @@ pub(crate) fn render_index_scan_condition_with_key_names_and_runtime_renderer(
         let row_key = rendered.remove(index);
         rendered.insert(0, row_key);
     }
+    // :HACK: PostgreSQL prints min/max index quals with the synthetic
+    // same-column IS NOT NULL guard before range quals. This only reorders
+    // EXPLAIN text for equivalent index conditions.
+    let mut index = 1;
+    while index < rendered.len() {
+        if rendered[index - 1].0.attribute_number == rendered[index].0.attribute_number
+            && index_scan_condition_display_rank(&rendered[index].1)
+                < index_scan_condition_display_rank(&rendered[index - 1].1)
+        {
+            rendered.swap(index - 1, index);
+            index = index.saturating_sub(1).max(1);
+        } else {
+            index += 1;
+        }
+    }
     let rendered = rendered
         .into_iter()
         .map(|(_, rendered)| rendered)
@@ -707,6 +722,14 @@ pub(crate) fn render_index_scan_condition_with_key_names_and_runtime_renderer(
                 .collect::<Vec<_>>()
                 .join(" AND "),
         ),
+    }
+}
+
+fn index_scan_condition_display_rank(rendered: &str) -> u8 {
+    if rendered.contains(" IS NOT NULL") {
+        0
+    } else {
+        1
     }
 }
 
