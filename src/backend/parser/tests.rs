@@ -87,6 +87,7 @@ fn from_without_table_locations(mut from: Option<FromItem>) -> Option<FromItem> 
                 }
             }
             FromItem::Values { .. }
+            | FromItem::Expression { .. }
             | FromItem::FunctionCall { .. }
             | FromItem::RowsFrom { .. }
             | FromItem::JsonTable(_)
