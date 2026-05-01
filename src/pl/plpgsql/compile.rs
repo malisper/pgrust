@@ -376,7 +376,9 @@ pub(crate) enum CompiledStmt {
         condition: CompiledExpr,
         message: Option<CompiledExpr>,
     },
-    Continue,
+    Continue {
+        condition: Option<CompiledExpr>,
+    },
     Return {
         expr: Option<CompiledExpr>,
         line: usize,
@@ -1696,7 +1698,12 @@ fn compile_stmt(
                 .map(|expr| compile_expr_text(expr, catalog, env))
                 .transpose()?,
         },
-        Stmt::Continue => CompiledStmt::Continue,
+        Stmt::Continue { condition } => CompiledStmt::Continue {
+            condition: condition
+                .as_deref()
+                .map(|expr| compile_condition_text(expr, catalog, env))
+                .transpose()?,
+        },
         Stmt::Return { expr, line } => {
             compile_return_stmt(expr.as_deref(), *line, catalog, env, return_contract)?
         }

@@ -213,7 +213,9 @@ pub enum Stmt {
         condition: String,
         message: Option<String>,
     },
-    Continue,
+    Continue {
+        condition: Option<String>,
+    },
     Return {
         expr: Option<String>,
         line: usize,

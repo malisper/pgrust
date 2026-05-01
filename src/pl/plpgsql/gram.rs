@@ -481,7 +481,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::foreach_stmt => build_foreach_stmt(inner),
         Rule::raise_stmt => build_raise_stmt(inner),
         Rule::assert_stmt => build_assert_stmt(inner),
-        Rule::continue_stmt => Ok(Stmt::Continue),
+        Rule::continue_stmt => build_continue_stmt(inner),
         Rule::return_stmt => build_return_stmt(inner),
         Rule::return_next_stmt => build_return_next_stmt(inner),
         Rule::return_query_stmt => build_return_query_stmt(inner),
@@ -520,6 +520,14 @@ fn build_assign_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         expr: expr.ok_or(ParseError::UnexpectedEof)?,
         line,
     })
+}
+
+fn build_continue_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let condition = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::expr_until_semi)
+        .map(|part| part.as_str().trim().to_string());
+    Ok(Stmt::Continue { condition })
 }
 
 fn build_assign_target(pair: Pair<'_, Rule>) -> Result<AssignTarget, ParseError> {
@@ -2276,7 +2284,34 @@ mod tests {
         let Stmt::ForQuery { body, .. } = unline(&block.statements[0]) else {
             panic!("expected query FOR loop");
         };
-        assert!(matches!(unline(&body[0]), Stmt::Continue));
+        assert!(matches!(
+            unline(&body[0]),
+            Stmt::Continue { condition: None }
+        ));
+    }
+
+    #[test]
+    fn parse_continue_when_stmt() {
+        let block = parse_block(
+            "
+            begin
+                for item in values (1), (2) loop
+                    continue when item is null;
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::ForQuery { body, .. } = unline(&block.statements[0]) else {
+            panic!("expected query FOR loop");
+        };
+        assert!(matches!(
+            unline(&body[0]),
+            Stmt::Continue {
+                condition: Some(condition),
+            } if condition == "item is null"
+        ));
     }
 
     #[test]

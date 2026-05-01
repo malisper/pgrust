@@ -1809,7 +1809,17 @@ fn exec_do_stmt(
             Ok(DoControl::Continue)
         }
         CompiledStmt::Exit { .. } => Ok(DoControl::Continue),
-        CompiledStmt::Continue => Ok(DoControl::LoopContinue),
+        CompiledStmt::Continue { condition } => {
+            let should_continue = match condition {
+                Some(condition) => eval_plpgsql_condition(&eval_do_expr(condition, values)?)?,
+                None => true,
+            };
+            if should_continue {
+                Ok(DoControl::LoopContinue)
+            } else {
+                Ok(DoControl::Continue)
+            }
+        }
         CompiledStmt::Raise {
             level,
             sqlstate,
@@ -2360,7 +2370,19 @@ fn exec_function_stmt(
             state.values[compiled.found_slot] = Value::Bool(true);
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::Continue => Ok(FunctionControl::LoopContinue),
+        CompiledStmt::Continue { condition } => {
+            let should_continue = match condition {
+                Some(condition) => {
+                    eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)?
+                }
+                None => true,
+            };
+            if should_continue {
+                Ok(FunctionControl::LoopContinue)
+            } else {
+                Ok(FunctionControl::Continue)
+            }
+        }
         CompiledStmt::ForQuery {
             target,
             source,
@@ -8199,7 +8221,7 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::Raise { .. } => "RAISE",
         CompiledStmt::Reraise => "RAISE",
         CompiledStmt::Assert { .. } => "ASSERT",
-        CompiledStmt::Continue => "CONTINUE",
+        CompiledStmt::Continue { .. } => "CONTINUE",
         CompiledStmt::Return { .. }
         | CompiledStmt::ReturnRuntimeQuery { .. }
         | CompiledStmt::ReturnSelect { .. } => "RETURN",
