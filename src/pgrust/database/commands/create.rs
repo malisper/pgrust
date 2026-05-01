@@ -396,7 +396,7 @@ fn validate_create_or_replace_view_columns(
                 sqlstate: "42P16",
             });
         }
-        if old_column.sql_type != new_column.sql_type {
+        if !view_column_sql_types_compatible(old_column.sql_type, new_column.sql_type) {
             return Err(ExecError::DetailedError {
                 message: format!(
                     "cannot change data type of view column \"{}\" from {} to {}",
@@ -425,6 +425,16 @@ fn validate_create_or_replace_view_columns(
     }
 
     Ok(())
+}
+
+fn view_column_sql_types_compatible(old_type: SqlType, new_type: SqlType) -> bool {
+    if old_type == new_type {
+        return true;
+    }
+    old_type.is_array
+        && new_type.is_array
+        && matches!(old_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+        && matches!(new_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
 }
 
 fn apply_create_view_column_names(
@@ -1881,7 +1891,9 @@ fn lookup_aggregate_support_proc_row(
         .zip(support.declared_arg_types.iter().copied())
         .zip(support.declared_arg_oids.iter().copied())
     {
-        if is_polymorphic_aggregate_signature_oid(declared_oid) && actual_type == declared_type {
+        if is_polymorphic_aggregate_signature_oid(declared_oid)
+            && (actual_type == declared_type || is_polymorphic_sql_type(declared_type))
+        {
             continue;
         }
         if !is_binary_coercible_type(actual_type, declared_type) {
@@ -1897,6 +1909,95 @@ fn lookup_aggregate_support_proc_row(
         }
     }
     Ok(support)
+}
+
+fn lookup_aggregate_support_proc_row_spec(
+    catalog: &dyn CatalogLookup,
+    proc_spec: &str,
+    default_arg_oids: &[u32],
+    explicit_variadic: bool,
+) -> Result<AggregateSupportProc, ExecError> {
+    if let Some((proc_name, explicit_arg_oids)) =
+        parse_aggregate_support_proc_signature(catalog, proc_spec)?
+    {
+        lookup_aggregate_support_proc_row(catalog, &proc_name, &explicit_arg_oids, false)
+    } else {
+        lookup_aggregate_support_proc_row(catalog, proc_spec, default_arg_oids, explicit_variadic)
+    }
+}
+
+fn parse_aggregate_support_proc_signature(
+    catalog: &dyn CatalogLookup,
+    proc_spec: &str,
+) -> Result<Option<(String, Vec<u32>)>, ExecError> {
+    let Some(paren_idx) = proc_spec.find('(') else {
+        return Ok(None);
+    };
+    let proc_name = proc_spec[..paren_idx].trim();
+    let signature = proc_spec[paren_idx + 1..].trim_end();
+    let Some(signature) = signature.strip_suffix(')') else {
+        return Ok(None);
+    };
+    if proc_name.is_empty() {
+        return Ok(None);
+    }
+    let arg_oids = if signature.trim().is_empty() {
+        Vec::new()
+    } else {
+        split_aggregate_support_proc_signature_args(signature)?
+            .into_iter()
+            .map(|arg| {
+                let raw_type = crate::backend::parser::parse_type_name(arg.trim())
+                    .map_err(ExecError::Parse)?;
+                let sql_type =
+                    resolve_raw_type_name(&raw_type, catalog).map_err(ExecError::Parse)?;
+                catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(format!("{sql_type:?}")))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(Some((proc_name.to_string(), arg_oids)))
+}
+
+fn split_aggregate_support_proc_signature_args(input: &str) -> Result<Vec<String>, ExecError> {
+    let mut items = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let bytes = input.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == quote {
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+                continue;
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                items.push(input[start..index].trim().to_string());
+                start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    if depth != 0 {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "balanced aggregate support function signature",
+            actual: input.into(),
+        }));
+    }
+    items.push(input[start..].trim().to_string());
+    Ok(items)
 }
 
 fn aggregate_support_from_resolved(
@@ -1952,6 +2053,21 @@ fn is_polymorphic_aggregate_signature_oid(oid: u32) -> bool {
             | ANYCOMPATIBLEARRAYOID
             | ANYCOMPATIBLERANGEOID
             | ANYCOMPATIBLEMULTIRANGEOID
+    )
+}
+
+fn is_polymorphic_sql_type(ty: SqlType) -> bool {
+    matches!(
+        ty.kind,
+        SqlTypeKind::AnyElement
+            | SqlTypeKind::AnyArray
+            | SqlTypeKind::AnyEnum
+            | SqlTypeKind::AnyRange
+            | SqlTypeKind::AnyMultirange
+            | SqlTypeKind::AnyCompatible
+            | SqlTypeKind::AnyCompatibleArray
+            | SqlTypeKind::AnyCompatibleRange
+            | SqlTypeKind::AnyCompatibleMultirange
     )
 }
 
@@ -5424,7 +5540,7 @@ impl Database {
         let mut trans_arg_oids = Vec::with_capacity(transition_input_oids.len() + 1);
         trans_arg_oids.push(stype_oid);
         trans_arg_oids.extend(transition_input_oids.iter().copied());
-        let transfn_row = lookup_aggregate_support_proc_row(
+        let transfn_row = lookup_aggregate_support_proc_row_spec(
             &catalog,
             &create_stmt.sfunc_name,
             &trans_arg_oids,
@@ -5449,13 +5565,20 @@ impl Database {
         let finalfn_row = create_stmt
             .finalfunc_name
             .as_deref()
-            .map(|name| lookup_aggregate_support_proc_row(&catalog, name, &final_arg_oids, false))
+            .map(|name| {
+                lookup_aggregate_support_proc_row_spec(&catalog, name, &final_arg_oids, false)
+            })
             .transpose()?;
         let combinefn_row = create_stmt
             .combinefunc_name
             .as_deref()
             .map(|name| {
-                lookup_aggregate_support_proc_row(&catalog, name, &[stype_oid, stype_oid], false)
+                lookup_aggregate_support_proc_row_spec(
+                    &catalog,
+                    name,
+                    &[stype_oid, stype_oid],
+                    false,
+                )
             })
             .transpose()?;
         if let Some(combinefn_row) = combinefn_row.as_ref()
@@ -5475,7 +5598,7 @@ impl Database {
         let serialfn_row = create_stmt
             .serialfunc_name
             .as_deref()
-            .map(|name| lookup_aggregate_support_proc_row(&catalog, name, &[stype_oid], false))
+            .map(|name| lookup_aggregate_support_proc_row_spec(&catalog, name, &[stype_oid], false))
             .transpose()?;
         if let Some(serialfn_row) = serialfn_row.as_ref()
             && support_result_type_oid(&catalog, serialfn_row)? != BYTEA_TYPE_OID
@@ -5494,7 +5617,7 @@ impl Database {
             .deserialfunc_name
             .as_deref()
             .map(|name| {
-                lookup_aggregate_support_proc_row(
+                lookup_aggregate_support_proc_row_spec(
                     &catalog,
                     name,
                     &[BYTEA_TYPE_OID, INTERNAL_TYPE_OID],
@@ -5537,7 +5660,7 @@ impl Database {
                 let mut args = Vec::with_capacity(transition_input_oids.len() + 1);
                 args.push(mstype_oid);
                 args.extend(transition_input_oids.iter().copied());
-                lookup_aggregate_support_proc_row(&catalog, name, &args, explicit_variadic)
+                lookup_aggregate_support_proc_row_spec(&catalog, name, &args, explicit_variadic)
             })
             .transpose()?;
         if let Some(msfunc_row) = msfunc_row.as_ref()
@@ -5562,7 +5685,7 @@ impl Database {
                 let mut args = Vec::with_capacity(transition_input_oids.len() + 1);
                 args.push(mstype_oid);
                 args.extend(transition_input_oids.iter().copied());
-                lookup_aggregate_support_proc_row(&catalog, name, &args, explicit_variadic)
+                lookup_aggregate_support_proc_row_spec(&catalog, name, &args, explicit_variadic)
             })
             .transpose()?;
         if let Some(minvfunc_row) = minvfunc_row.as_ref()
@@ -5598,7 +5721,9 @@ impl Database {
         let mfinalfn_row = create_stmt
             .mfinalfunc_name
             .as_deref()
-            .map(|name| lookup_aggregate_support_proc_row(&catalog, name, &mfinal_arg_oids, false))
+            .map(|name| {
+                lookup_aggregate_support_proc_row_spec(&catalog, name, &mfinal_arg_oids, false)
+            })
             .transpose()?;
         let result_type_oid = finalfn_row
             .as_ref()

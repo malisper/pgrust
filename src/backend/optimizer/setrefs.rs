@@ -3661,6 +3661,7 @@ fn lower_sublink(
         .first()
         .map(|target| target.sql_type);
     let target_width = sublink.subselect.target_list.len();
+    let target_attnos = subplan_target_attnos(&sublink.subselect.target_list);
     let config = ctx.root.map(|root| root.config).unwrap_or_default();
     let (planned_stmt, next_param_id) =
         planner_with_param_base_and_config(*sublink.subselect, catalog, ctx.next_param_id, config)
@@ -3716,10 +3717,21 @@ fn lower_sublink(
         comparison: sublink.comparison,
         first_col_type,
         target_width,
+        target_attnos,
         plan_id,
         par_param,
         args,
     }))
+}
+
+fn subplan_target_attnos(target_list: &[TargetEntry]) -> Vec<Option<usize>> {
+    target_list
+        .iter()
+        .map(|target| match &target.expr {
+            Expr::Var(var) if var.varlevelsup == 0 => attrno_index(var.varattno),
+            _ => None,
+        })
+        .collect()
 }
 
 fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> Expr {
@@ -3865,6 +3877,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             comparison: subplan.comparison,
             first_col_type: subplan.first_col_type,
             target_width: subplan.target_width,
+            target_attnos: subplan.target_attnos,
             plan_id: subplan.plan_id,
             par_param: subplan.par_param,
             args: subplan
@@ -6423,6 +6436,7 @@ fn lower_partition_prune_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr 
             comparison: subplan.comparison,
             first_col_type: subplan.first_col_type,
             target_width: subplan.target_width,
+            target_attnos: subplan.target_attnos,
             plan_id: subplan.plan_id,
             par_param: subplan.par_param,
             args: subplan

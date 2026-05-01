@@ -954,6 +954,8 @@ pub(super) fn resolve_builtin_hypothetical_aggregate(name: &str) -> Option<Hypot
 pub(super) fn resolve_builtin_ordered_set_aggregate(name: &str) -> Option<OrderedSetAggFunc> {
     match normalize_builtin_function_name(name) {
         "percentile_disc" => Some(OrderedSetAggFunc::PercentileDisc),
+        "percentile_cont" => Some(OrderedSetAggFunc::PercentileCont),
+        "mode" => Some(OrderedSetAggFunc::Mode),
         _ => None,
     }
 }
@@ -2311,7 +2313,8 @@ pub(super) fn validate_scalar_function_arity(
             }
             BuiltinScalarFunction::Int4Pl
             | BuiltinScalarFunction::Int4Mi
-            | BuiltinScalarFunction::Int4Smaller => args.len() == 2,
+            | BuiltinScalarFunction::Int4Smaller
+            | BuiltinScalarFunction::Int4Sum => args.len() == 2,
             BuiltinScalarFunction::Int8Inc => args.len() == 1,
             BuiltinScalarFunction::Int8IncAny => args.len() == 2,
             BuiltinScalarFunction::Int4AvgAccum => args.len() == 2,

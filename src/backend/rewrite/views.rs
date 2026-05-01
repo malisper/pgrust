@@ -1177,7 +1177,32 @@ fn validate_view_shape(
         .zip(relation_desc.columns.iter())
         .enumerate()
     {
-        if actual_column.sql_type != stored_column.sql_type {
+        if actual_column.name != stored_column.name
+            && !values_query
+            && !query
+                .columns()
+                .iter()
+                .skip(index)
+                .any(|column| column.name == stored_column.name)
+        {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "attribute {} of type record has been dropped",
+                    dropped_view_attribute_number(
+                        query,
+                        catalog,
+                        query.target_list.get(index),
+                        index,
+                        &stored_column.name,
+                        &actual_column.name,
+                    )
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            });
+        }
+        if !view_column_sql_types_compatible(actual_column.sql_type, stored_column.sql_type) {
             return Err(ParseError::DetailedError {
                 message: format!(
                     "attribute {} of type record has wrong type",
@@ -1230,6 +1255,24 @@ fn validate_view_shape(
         }
     }
     Ok(())
+}
+
+fn query_is_single_values_rte(query: &Query) -> bool {
+    query.rtable.len() == 1
+        && matches!(
+            query.rtable.first().map(|rte| &rte.kind),
+            Some(RangeTblEntryKind::Values { .. })
+        )
+}
+
+fn view_column_sql_types_compatible(actual: SqlType, stored: SqlType) -> bool {
+    if actual == stored {
+        return true;
+    }
+    actual.is_array
+        && stored.is_array
+        && matches!(actual.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+        && matches!(stored.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
 }
 
 fn validate_view_function_target_columns(
@@ -1438,14 +1481,6 @@ fn function_outputs_single_composite_column(output_columns: &[QueryColumn]) -> b
         && matches!(
             output_columns[0].sql_type.kind,
             SqlTypeKind::Composite | SqlTypeKind::Record
-        )
-}
-
-fn query_is_single_values_rte(query: &Query) -> bool {
-    query.rtable.len() == 1
-        && matches!(
-            query.rtable.first().map(|rte| &rte.kind),
-            Some(RangeTblEntryKind::Values { .. })
         )
 }
 

@@ -5,7 +5,8 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::include::nodes::datum::{ArrayValue, RecordValue};
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, OpExprKind, ParamKind, SubqueryComparison, Var, user_attrno,
+    BoolExprType, Expr, OpExprKind, ParamKind, SubqueryComparison, Var, expr_sql_type_hint,
+    user_attrno,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -13,12 +14,31 @@ use std::collections::{HashMap, HashSet};
 thread_local! {
     static EXISTS_MEMBERSHIP_CACHE: RefCell<HashMap<usize, HashSet<Value>>> =
         RefCell::new(HashMap::new());
+    static ANY_EQ_MEMBERSHIP_CACHE: RefCell<HashMap<usize, QuantifiedMembershipCache>> =
+        RefCell::new(HashMap::new());
+    static SCALAR_LOOKUP_CACHE: RefCell<HashMap<usize, ScalarLookupCache>> =
+        RefCell::new(HashMap::new());
     static EXISTS_RESULT_CACHE: RefCell<HashMap<usize, Value>> = RefCell::new(HashMap::new());
 }
 
 pub(crate) fn clear_subquery_eval_cache() {
     EXISTS_MEMBERSHIP_CACHE.with(|cache| cache.borrow_mut().clear());
+    ANY_EQ_MEMBERSHIP_CACHE.with(|cache| cache.borrow_mut().clear());
+    SCALAR_LOOKUP_CACHE.with(|cache| cache.borrow_mut().clear());
     EXISTS_RESULT_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+#[derive(Clone)]
+struct QuantifiedMembershipCache {
+    values: HashSet<Value>,
+    saw_row: bool,
+    saw_null: bool,
+}
+
+#[derive(Clone)]
+struct ScalarLookupCache {
+    values: HashMap<Value, Value>,
+    duplicates: HashSet<Value>,
 }
 
 fn local_var(index: usize) -> Expr {
@@ -335,6 +355,39 @@ fn exists_membership_spec(plan: &Plan) -> Option<(&Plan, Expr, Expr)> {
     }
 }
 
+fn scalar_lookup_spec(plan: &Plan) -> Option<(&Plan, Expr, Expr, Expr)> {
+    match plan {
+        Plan::Projection { input, targets, .. } if targets.len() == 1 => {
+            if !expr_is_exists_membership_safe(&targets[0].expr) {
+                return None;
+            }
+            scalar_lookup_filter_spec(input)
+                .map(|(input, local, param)| (input, local, param, targets[0].expr.clone()))
+        }
+        Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::SubqueryScan { input, .. } => scalar_lookup_spec(input),
+        _ => None,
+    }
+}
+
+fn scalar_lookup_filter_spec(plan: &Plan) -> Option<(&Plan, Expr, Expr)> {
+    match plan {
+        Plan::Filter {
+            input, predicate, ..
+        } if plan_is_exists_membership_safe(input) => split_exists_membership_eq(predicate)
+            .map(|(local, param)| (input.as_ref(), local, param)),
+        Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::SubqueryScan { input, .. } => scalar_lookup_filter_spec(input),
+        _ => None,
+    }
+}
+
 fn build_exists_membership_set(
     input: &Plan,
     local_expr: &Expr,
@@ -361,6 +414,106 @@ fn build_exists_membership_set(
     ctx.expr_bindings.outer_tuple = saved_outer_tuple;
     ctx.expr_bindings.outer_system_bindings = saved_outer_system_bindings;
     result
+}
+
+fn build_scalar_lookup_cache(
+    input: &Plan,
+    key_expr: &Expr,
+    value_expr: &Expr,
+    bpchar_key: bool,
+    ctx: &mut ExecutorContext,
+) -> Result<ScalarLookupCache, ExecError> {
+    let mut state = executor_start(input.clone());
+    let saved_outer_tuple = ctx.expr_bindings.outer_tuple.clone();
+    let saved_outer_system_bindings = ctx.expr_bindings.outer_system_bindings.clone();
+    let result = (|| {
+        let mut values = HashMap::new();
+        let mut duplicates = HashSet::new();
+        while exec_next(&mut state, ctx)?.is_some() {
+            let mut row = state.materialize_current_row()?;
+            let mut outer_values = row.slot.values()?.to_vec();
+            Value::materialize_all(&mut outer_values);
+            ctx.expr_bindings.outer_tuple = Some(outer_values);
+            ctx.expr_bindings.outer_system_bindings = row.system_bindings.clone();
+            let key = eval_expr(key_expr, &mut row.slot, ctx)?;
+            if matches!(key, Value::Null) {
+                continue;
+            }
+            let key = scalar_lookup_cache_key(key, bpchar_key);
+            let value = eval_expr(value_expr, &mut row.slot, ctx)?.to_owned_value();
+            if values.insert(key.clone(), value).is_some() {
+                duplicates.insert(key);
+            }
+        }
+        Ok(ScalarLookupCache { values, duplicates })
+    })();
+    ctx.expr_bindings.outer_tuple = saved_outer_tuple;
+    ctx.expr_bindings.outer_system_bindings = saved_outer_system_bindings;
+    result
+}
+
+fn scalar_lookup_uses_bpchar_key(key_expr: &Expr, param_expr: &Expr) -> bool {
+    [key_expr, param_expr]
+        .into_iter()
+        .filter_map(expr_sql_type_hint)
+        .any(|ty| !ty.is_array && matches!(ty.kind, SqlTypeKind::Char))
+}
+
+fn scalar_lookup_cache_key(value: Value, bpchar_key: bool) -> Value {
+    let value = value.to_owned_value();
+    if bpchar_key && let Some(text) = value.as_text() {
+        return Value::Text(text.trim_end_matches(' ').into());
+    }
+    value
+}
+
+fn eval_scalar_lookup_fast_path(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    plan: &Plan,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Value>, ExecError> {
+    let Some((input, key_expr, param_expr, value_expr)) = scalar_lookup_spec(plan) else {
+        return Ok(None);
+    };
+    if !expr_is_exists_membership_safe(&key_expr)
+        || !expr_is_exists_membership_safe(&param_expr)
+        || !expr_is_exists_membership_safe(&value_expr)
+        || expr_has_exec_param(&value_expr)
+        || !plan_is_exists_membership_safe(input)
+    {
+        return Ok(None);
+    }
+    let mut dummy = TupleSlot::empty(0);
+    let param_value = eval_expr(&param_expr, &mut dummy, ctx)?;
+    if matches!(param_value, Value::Null) {
+        return Ok(Some(Value::Null));
+    }
+    let bpchar_key = scalar_lookup_uses_bpchar_key(&key_expr, &param_expr);
+    let param_value = scalar_lookup_cache_key(param_value, bpchar_key);
+    let cache = if let Some(cache) =
+        SCALAR_LOOKUP_CACHE.with(|cache| cache.borrow().get(&subplan.plan_id).cloned())
+    {
+        cache
+    } else {
+        let built = build_scalar_lookup_cache(input, &key_expr, &value_expr, bpchar_key, ctx)?;
+        SCALAR_LOOKUP_CACHE.with(|cache| {
+            cache.borrow_mut().insert(subplan.plan_id, built.clone());
+        });
+        built
+    };
+    if cache.duplicates.contains(&param_value) {
+        return Err(ExecError::CardinalityViolation {
+            message: "more than one row returned by a subquery used as an expression".into(),
+            hint: None,
+        });
+    }
+    Ok(Some(
+        cache
+            .values
+            .get(&param_value)
+            .cloned()
+            .unwrap_or(Value::Null),
+    ))
 }
 
 fn eval_exists_membership_fast_path(
@@ -515,6 +668,9 @@ pub(super) fn eval_scalar_subquery(
     let plan = planned_subquery_plan(subplan, ctx)?.clone();
     let result = with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
+        if let Some(value) = eval_scalar_lookup_fast_path(subplan, &plan, ctx)? {
+            return Ok(value);
+        }
         let mut state = executor_start(plan);
         let mut first_value = None;
         while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
@@ -702,6 +858,17 @@ pub(super) fn eval_quantified_subquery(
             sqlstate: "0A000",
         });
     }
+    if matches!(op, SubqueryComparisonOp::Eq)
+        && !is_all
+        && subplan.par_param.is_empty()
+        && subplan.target_width == 1
+        && !subplan
+            .comparison
+            .as_ref()
+            .is_some_and(|comparison| comparison_uses_user_defined_operator(comparison, ctx))
+    {
+        return eval_cached_any_eq_subquery(left_value, subplan, &plan, slot, ctx);
+    }
     with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan);
@@ -739,6 +906,61 @@ pub(super) fn eval_quantified_subquery(
             Ok(Value::Bool(is_all))
         }
     })
+}
+
+fn eval_cached_any_eq_subquery(
+    left_value: &Value,
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    plan: &Plan,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let cache = if let Some(cache) =
+        ANY_EQ_MEMBERSHIP_CACHE.with(|cache| cache.borrow().get(&subplan.plan_id).cloned())
+    {
+        cache
+    } else {
+        let built = with_scoped_subquery_runtime(ctx, |ctx| {
+            bind_subplan_params(subplan, slot, ctx)?;
+            let mut state = executor_start(plan.clone());
+            let mut values = HashSet::new();
+            let mut saw_row = false;
+            let mut saw_null = false;
+            while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
+                saw_row = true;
+                let row = subplan_visible_values(subplan, &mut inner_slot)?;
+                let value = quantified_subquery_right_value(left_value, row)?;
+                if matches!(value, Value::Null) {
+                    saw_null = true;
+                } else {
+                    values.insert(value.to_owned_value());
+                }
+            }
+            Ok(QuantifiedMembershipCache {
+                values,
+                saw_row,
+                saw_null,
+            })
+        })?;
+        ANY_EQ_MEMBERSHIP_CACHE.with(|cache| {
+            cache.borrow_mut().insert(subplan.plan_id, built.clone());
+        });
+        built
+    };
+
+    if !cache.saw_row {
+        return Ok(Value::Bool(false));
+    }
+    if matches!(left_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if cache.values.contains(left_value) {
+        Ok(Value::Bool(true))
+    } else if cache.saw_null {
+        Ok(Value::Null)
+    } else {
+        Ok(Value::Bool(false))
+    }
 }
 
 fn compare_quantified_subquery_values(
@@ -787,10 +1009,28 @@ fn subplan_visible_values(
 ) -> Result<Vec<Value>, ExecError> {
     let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
     if subplan.target_width < values.len() {
+        if let Some(mut projected) = project_wide_subplan_values(subplan, &values) {
+            Value::materialize_all(&mut projected);
+            return Ok(projected);
+        }
         values.truncate(subplan.target_width);
     }
     Value::materialize_all(&mut values);
     Ok(values)
+}
+
+fn project_wide_subplan_values(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    values: &[Value],
+) -> Option<Vec<Value>> {
+    if subplan.target_attnos.len() != subplan.target_width {
+        return None;
+    }
+    subplan
+        .target_attnos
+        .iter()
+        .map(|attno| values.get((*attno)?).cloned())
+        .collect()
 }
 
 fn quantified_subquery_right_value(

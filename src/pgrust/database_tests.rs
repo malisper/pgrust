@@ -4,7 +4,9 @@ use crate::backend::catalog::persistence::sync_catalog_rows_subset;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{ExecError, Value};
-use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
+use crate::backend::parser::{
+    BoundRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind, UngroupedColumnClause,
+};
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
@@ -16,7 +18,7 @@ use crate::include::catalog::{
     PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
     PG_TYPE_RELATION_OID, POINT_ARRAY_TYPE_OID, PgAggregateRow, TEXT_TYPE_OID,
 };
-use crate::include::nodes::datum::{ArrayValue, IntervalValue, RecordValue};
+use crate::include::nodes::datum::{ArrayValue, BitString, IntervalValue, RecordValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -55589,6 +55591,344 @@ fn pg_get_viewdef_returns_canonical_view_query() {
             " SELECT (f1)::integer AS f1\n   FROM t1\n      LEFT JOIN t2 USING (f1)\n  GROUP BY f1;"
                 .into()
         )]]
+    );
+}
+
+#[test]
+fn aggregate_regress_nested_sublink_outer_aggregate() {
+    let dir = temp_dir("nested_sublink_outer_aggregate");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table tenk1 (unique1 int4, unique2 int4)")
+        .unwrap();
+    db.execute(1, "insert into tenk1 values (1, 10), (2, 20), (3, 30)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select
+               (select max((select i.unique2 from tenk1 i where i.unique1 = o.unique1)))
+             from tenk1 o"
+        ),
+        vec![vec![Value::Int32(30)]]
+    );
+}
+
+#[test]
+fn aggregate_regress_filter_in_subquery_materializes_once() {
+    let dir = temp_dir("aggregate_filter_in_subquery_materializes_once");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table tenk1 (unique1 int4)").unwrap();
+    db.execute(1, "create table onek (unique1 int4)").unwrap();
+    let tenk_values = (0..512)
+        .map(|i| format!("({i})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let onek_values = (0..100)
+        .map(|i| format!("({i})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into tenk1 values {tenk_values}"))
+        .unwrap();
+    db.execute(1, &format!("insert into onek values {onek_values}"))
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select sum(unique1) filter (where unique1 in
+               (select unique1 from onek where unique1 < 100))
+             from tenk1"
+        ),
+        vec![vec![Value::Int64(4950)]]
+    );
+}
+
+#[test]
+fn aggregate_regress_minmax_unique2_backward_index() {
+    let dir = temp_dir("minmax_unique2_backward_index");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table tenk1 (unique1 int4, unique2 int4)")
+        .unwrap();
+    db.execute(1, "create unique index tenk1_unique2 on tenk1(unique2)")
+        .unwrap();
+    let row_count = 4096;
+    let values = (0..row_count)
+        .map(|i| format!("({}, {})", i, (i * 17) % row_count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into tenk1 values {values}"))
+        .unwrap();
+    db.execute(1, "vacuum analyze tenk1").unwrap();
+
+    let plan = query_rows(
+        &db,
+        1,
+        "explain (costs off) select distinct max(unique2) from tenk1",
+    )
+    .into_iter()
+    .map(|row| match &row[0] {
+        Value::Text(line) => line.to_string(),
+        other => panic!("expected explain text row, got {other:?}"),
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("Index Only Scan Backward using tenk1_unique2")),
+        "expected min/max rewrite to use backward unique2 index-only scan, got {plan:?}"
+    );
+
+    let expected = vec![vec![Value::Int32(row_count - 1)]];
+    assert_eq!(
+        query_rows(&db, 1, "select distinct max(unique2) from tenk1"),
+        expected
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select max(unique2) from tenk1 order by 1"),
+        expected
+    );
+}
+
+#[test]
+fn aggregate_regress_bitwise_fixed_bit_width_from_copy() {
+    let dir = temp_dir("bitwise_aggregate_fixed_bit");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table bitwise_test (i2 int2, i4 int4, i8 int8, i int4, x int2, y bit(4))",
+        )
+        .unwrap();
+    let copy =
+        crate::pgrust::session::parse_copy_command("copy bitwise_test from stdin null 'null'")
+            .unwrap()
+            .unwrap();
+    session
+        .copy_from_text(
+            &db,
+            &copy,
+            "1\t1\t1\t1\t1\tB0101\n3\t3\t3\tnull\t2\tB0100\n7\t7\t7\t3\t4\tB1100\n",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select bit_and(y), bit_or(y), bit_xor(y) from bitwise_test"
+        ),
+        vec![vec![
+            Value::Bit(BitString::new(4, vec![0b0100_0000])),
+            Value::Bit(BitString::new(4, vec![0b1101_0000])),
+            Value::Bit(BitString::new(4, vec![0b1101_0000])),
+        ]]
+    );
+}
+
+#[test]
+fn aggregate_regress_join_using_qualified_grouping() {
+    let dir = temp_dir("join_using_qualified_grouping");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table t1 (f1 int4)").unwrap();
+    db.execute(1, "create table t2 (f1 int4)").unwrap();
+
+    match db
+        .execute(
+            1,
+            "select t1.f1 from t1 left join t2 using (f1) group by f1",
+        )
+        .unwrap_err()
+    {
+        ExecError::Parse(ParseError::UngroupedColumn { token, clause, .. }) => {
+            assert_eq!(token, "t1.f1");
+            assert_eq!(clause, UngroupedColumnClause::SelectTarget);
+        }
+        other => panic!("expected ungrouped t1.f1 error, got {other:?}"),
+    }
+}
+
+#[test]
+fn aggregate_regress_ordered_set_percentile_cont_multi_and_mode() {
+    let dir = temp_dir("ordered_set_percentile_cont_mode");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table os_input (v int4, label text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into os_input values (1, 'b'), (2, 'a'), (3, 'b'), (4, 'a')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select percentile_cont(0.5) within group (order by v) from os_input"
+        ),
+        vec![vec![Value::Float64(2.5)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select percentile_cont(array[0.0, 0.5, 1.0]) within group (order by v) from os_input"
+        ),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_1d(vec![
+                Value::Float64(1.0),
+                Value::Float64(2.5),
+                Value::Float64(4.0),
+            ])
+            .with_element_type_oid(FLOAT8_TYPE_OID)
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select percentile_disc(array[0.25, 0.75]) within group (order by v) from os_input"
+        ),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(3)])
+                .with_element_type_oid(INT4_TYPE_OID)
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select mode() within group (order by label) from os_input"
+        ),
+        vec![vec![Value::Text("a".into())]]
+    );
+
+    db.execute(
+        1,
+        "create aggregate test_rank(VARIADIC \"any\" ORDER BY VARIADIC \"any\") (
+           stype = internal,
+           sfunc = ordered_set_transition_multi,
+           finalfunc = rank_final,
+           finalfunc_extra = true,
+           hypothetical
+         )",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select test_rank(3) within group (order by x)
+             from (values (1),(1),(2),(2),(3),(3),(4)) v(x)"
+        ),
+        vec![vec![Value::Int64(5)]]
+    );
+}
+
+#[test]
+fn aggregate_regress_create_aggregate_support_signatures_and_final_extra() {
+    let dir = temp_dir("create_aggregate_support_signatures");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function balkifnull(int8, int4) returns int8
+         as 'select coalesce($1, 0) + $2'
+         language sql immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate balkagg(int4) (
+             sfunc = balkifnull(int8, int4),
+             stype = int8,
+             initcond = '0'
+         )",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select balkagg(v) from (values (1), (2), (3)) s(v)"),
+        vec![vec![Value::Int64(6)]]
+    );
+    db.execute(
+        1,
+        "create function balknull(int8, int4) returns int8
+         as 'select null::int8'
+         language sql immutable strict",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate balknullagg(int4) (
+             sfunc = balknull(int8, int4),
+             stype = int8,
+             initcond = '0'
+         )",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select balknullagg(v) from (values (1), (2)) s(v)"),
+        vec![vec![Value::Null]]
+    );
+    db.execute(
+        1,
+        "create function balkcombine(int8, int8) returns int8
+         as 'select null::int8'
+         language sql immutable strict",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate balkcombineagg(int4) (
+             sfunc = int4_sum(int8, int4),
+             stype = int8,
+             combinefunc = balkcombine(int8, int8),
+             initcond = '0'
+         )",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select balkcombineagg(v) from (values (1), (2)) s(v)"
+        ),
+        vec![vec![Value::Null]]
+    );
+
+    db.execute(
+        1,
+        "create function final_extra_add(int8, int4) returns int8
+         as 'select $1 + 100'
+         language sql immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate finalextraagg(int4) (
+             sfunc = int8inc_any,
+             stype = int8,
+             finalfunc = final_extra_add(int8, int4),
+             finalfunc_extra,
+             initcond = '0'
+         )",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select finalextraagg(v) from (values (1), (2), (null)) s(v)"
+        ),
+        vec![vec![Value::Int64(102)]]
     );
 }
 

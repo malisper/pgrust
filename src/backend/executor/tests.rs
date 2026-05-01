@@ -4690,6 +4690,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     comparison: None,
                     first_col_type: Some(int4),
                     target_width: 1,
+                    target_attnos: vec![Some(0)],
                     plan_id: 0,
                     par_param: Vec::new(),
                     args: Vec::new(),
@@ -9818,6 +9819,36 @@ fn unnest_single_and_multi_arg_work() {
                 vec![
                     vec![Value::Int32(1), Value::Text("x".into())],
                     vec![Value::Int32(2), Value::Null]
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn unnest_multidimensional_array_flattens_storage_order() {
+    let base = temp_dir("unnest_multidimensional_array");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from unnest(ARRAY[[1, 2], [3, 4]]) as u(x)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["x"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)],
+                    vec![Value::Int32(4)],
                 ]
             );
         }

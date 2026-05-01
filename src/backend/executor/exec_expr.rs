@@ -148,6 +148,7 @@ use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any,
     jsonb_from_value, parse_json_text_input,
 };
+use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::analyze::{
     analyze_select_query_with_outer, is_binary_coercible_type, scope_for_relation,
     with_external_param_types,
@@ -10387,6 +10388,22 @@ pub fn eval_expr(
             let value = eval_expr(inner, slot, ctx)?;
             let casted = if let Value::Record(record) = value {
                 cast_record_value_for_target(record, *ty, ctx)
+            } else if let Value::Bytea(bytes) = value {
+                match ty.kind {
+                    SqlTypeKind::Text
+                    | SqlTypeKind::Name
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
+                        format_bytea_text(&bytes, ctx.bytea_output()),
+                    ))),
+                    _ => cast_value_with_source_type_catalog_and_config(
+                        Value::Bytea(bytes),
+                        expr_sql_type_hint(inner),
+                        *ty,
+                        ctx.catalog.as_deref(),
+                        &ctx.datetime_config,
+                    ),
+                }
             } else {
                 cast_value_with_source_type_catalog_and_config(
                     value,
@@ -11734,6 +11751,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Int4Pl
         | BuiltinScalarFunction::Int4Mi
         | BuiltinScalarFunction::Int4Smaller
+        | BuiltinScalarFunction::Int4Sum
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum
@@ -13878,6 +13896,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Int4Pl
         | BuiltinScalarFunction::Int4Mi
         | BuiltinScalarFunction::Int4Smaller
+        | BuiltinScalarFunction::Int4Sum
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum

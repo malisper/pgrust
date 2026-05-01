@@ -1418,7 +1418,7 @@ fn compile_var_decl(
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
 ) -> Result<CompiledVar, ParseError> {
-    let ty = resolve_decl_type(&decl.type_name, catalog)?;
+    let ty = resolve_decl_type(&decl.type_name, catalog, env)?;
     let default_expr = decl
         .default_expr
         .as_deref()
@@ -1470,11 +1470,20 @@ fn compile_cursor_decl(
     })
 }
 
-fn resolve_decl_type(type_name: &str, catalog: &dyn CatalogLookup) -> Result<SqlType, ParseError> {
+fn resolve_decl_type(
+    type_name: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<SqlType, ParseError> {
     let trimmed = type_name.trim();
     let lowered = trimmed.to_ascii_lowercase();
     if let Some(prefix) = lowered.strip_suffix("%type") {
         let original_prefix = &trimmed[..prefix.len()];
+        if !original_prefix.contains('.')
+            && let Some(var) = env.get_var(original_prefix.trim())
+        {
+            return Ok(var.ty);
+        }
         let Some((relation_name, column_name)) = original_prefix.trim().rsplit_once('.') else {
             return Err(ParseError::UnexpectedToken {
                 expected: "PL/pgSQL %TYPE reference in relation.column form",

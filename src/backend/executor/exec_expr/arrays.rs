@@ -836,9 +836,11 @@ pub(crate) fn append_array_value(
     prepend: bool,
 ) -> Result<Value, ExecError> {
     let Some(array) = normalize_array_value(array) else {
-        return Ok(Value::PgArray(ArrayValue::from_1d(vec![
-            element.to_owned_value(),
-        ])));
+        let mut result = ArrayValue::from_1d(vec![element.to_owned_value()]);
+        if let Some(element_type_oid) = array_element_type_oid_from_value(element) {
+            result = result.with_element_type_oid(element_type_oid);
+        }
+        return Ok(Value::PgArray(result));
     };
     let element_type_oid = array.element_type_oid;
     if array.ndim() == 0 {
@@ -869,6 +871,14 @@ pub(crate) fn append_array_value(
         result = result.with_element_type_oid(element_type_oid);
     }
     Ok(Value::PgArray(result))
+}
+
+fn array_element_type_oid_from_value(value: &Value) -> Option<u32> {
+    match value {
+        Value::Record(record) if record.type_oid() != 0 => Some(record.type_oid()),
+        Value::PgArray(array) => array.element_type_oid,
+        _ => None,
+    }
 }
 
 pub(crate) fn concatenate_arrays(

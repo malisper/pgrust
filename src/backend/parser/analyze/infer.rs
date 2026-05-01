@@ -365,12 +365,26 @@ fn infer_visible_outer_aggregate_type(
             )
         })
         .collect::<Vec<_>>();
+    let direct_arg_types = direct_args
+        .iter()
+        .map(|arg| {
+            infer_sql_expr_type_with_ctes(
+                &arg.value,
+                owner_scope,
+                catalog,
+                owner_outer_scopes,
+                None,
+                ctes,
+            )
+        })
+        .collect::<Vec<_>>();
     if !direct_args.is_empty()
         && let Some(resolved) = resolve_hypothetical_aggregate_call(name)
     {
         Some(resolved.result_type)
-    } else if !direct_args.is_empty()
-        && let Some(resolved) = resolve_ordered_set_aggregate_call(name, &arg_types)
+    } else if !order_by.is_empty()
+        && let Some(resolved) =
+            resolve_ordered_set_aggregate_call(name, &direct_arg_types, &arg_types)
     {
         Some(resolved.result_type)
     } else {
@@ -906,8 +920,24 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             ) {
                 return result_type;
             }
+            if name.eq_ignore_ascii_case("pg_collation_for") {
+                return SqlType::new(SqlTypeKind::Text);
+            }
             let aggregate_arg_types = aggregate_args
                 .args()
+                .iter()
+                .map(|arg| {
+                    infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let direct_arg_types = direct_args
                 .iter()
                 .map(|arg| {
                     infer_sql_expr_type_with_ctes(
@@ -926,8 +956,30 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 return resolved.result_type;
             }
             if within_group.is_some()
-                && let Some(resolved) =
-                    resolve_ordered_set_aggregate_call(name, &aggregate_arg_types)
+                && let Some(resolved) = resolve_ordered_set_aggregate_call(
+                    name,
+                    &direct_arg_types,
+                    &aggregate_arg_types,
+                )
+            {
+                return resolved.result_type;
+            }
+            if within_group.is_some()
+                && let Some(aggkind) = aggregate_call_kind_matches_catalog(
+                    catalog,
+                    name,
+                    args,
+                    within_group.as_deref(),
+                )
+                && matches!(aggkind, 'o' | 'h')
+                && let Some(resolved) = resolve_catalog_within_group_aggregate_call(
+                    catalog,
+                    name,
+                    &direct_arg_types,
+                    &aggregate_arg_types,
+                    *func_variadic,
+                    aggkind,
+                )
             {
                 return resolved.result_type;
             }

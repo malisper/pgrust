@@ -2,7 +2,10 @@ use super::agg_output::{
     bind_agg_output_expr, current_grouped_agg_visible_ctes, grouped_infer_common_scalar_expr_type,
     grouped_infer_sql_expr_type,
 };
-use super::expr::{catalog_backed_explicit_cast_allowed, exists_subquery_query};
+use super::expr::{
+    bind_user_defined_scalar_function_call_from_resolved_typed_args,
+    catalog_backed_explicit_cast_allowed, exists_subquery_query,
+};
 use super::functions::{
     fixed_scalar_return_type, resolve_function_cast_type, resolve_scalar_function,
     validate_scalar_function_arity,
@@ -344,10 +347,60 @@ pub(super) fn bind_grouped_func_call(
             ));
         }
     }
-    let func = resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
-        expected: "supported builtin function",
-        actual: name.to_string(),
-    })?;
+    let func = match resolve_scalar_function(name) {
+        Some(func) => func,
+        None => {
+            let raw_args = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+            let bound_args = raw_args
+                .iter()
+                .map(|arg| {
+                    let expr = bind_agg_output_expr(
+                        arg,
+                        group_by_exprs,
+                        group_key_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )?;
+                    let sql_type = expr_sql_type_hint(&expr).unwrap_or_else(|| {
+                        grouped_infer_sql_expr_type(
+                            arg,
+                            input_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        )
+                    });
+                    Ok(TypedExpr {
+                        expr,
+                        sql_type,
+                        contains_srf: false,
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?;
+            let arg_types = bound_args
+                .iter()
+                .map(|arg| arg.sql_type)
+                .collect::<Vec<_>>();
+            let resolved = resolve_function_call(catalog, name, &arg_types, func_variadic)
+                .map_err(|_| ParseError::UnexpectedToken {
+                    expected: "supported builtin function",
+                    actual: name.to_string(),
+                })?;
+            if resolved.prokind != 'f' {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "scalar function",
+                    actual: name.to_string(),
+                });
+            }
+            return bind_user_defined_scalar_function_call_from_resolved_typed_args(
+                &resolved, &raw_args, bound_args, catalog,
+            );
+        }
+    };
     let lowered_args = lower_named_scalar_function_args(func, args)?;
     validate_scalar_function_arity(func, &lowered_args)?;
     let bound_args = lowered_args

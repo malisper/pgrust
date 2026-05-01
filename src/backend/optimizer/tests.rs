@@ -4641,10 +4641,14 @@ fn planner_keeps_nested_sublink_max_as_aggregate() {
     let planned = super::planner(query, &catalog).expect("plan");
 
     assert!(
-        planned
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Aggregate { .. }
+        )) || planned
             .subplans
             .iter()
-            .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. })))
+            .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. }))),
+        "expected max over nested scalar sublink to remain an aggregate: {planned:#?}"
     );
 }
 fn planner_rewrites_correlated_min_with_index_subplan() {
