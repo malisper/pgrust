@@ -41530,10 +41530,16 @@ fn create_index_expression_stats_and_collation_deparse_match_postgres() {
                'concur_exprs_index_pred_2'::regclass) \
              group by starelid order by starelid::regclass::text",
         ),
-        vec![vec![
-            Value::Text("concur_exprs_index_expr".into()),
-            Value::Int64(1),
-        ]]
+        vec![
+            vec![
+                Value::Text("concur_exprs_index_expr".into()),
+                Value::Int64(1),
+            ],
+            vec![
+                Value::Text("concur_exprs_index_pred_2".into()),
+                Value::Int64(1),
+            ],
+        ]
     );
     assert_eq!(
         query_rows(
