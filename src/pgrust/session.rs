@@ -3916,7 +3916,7 @@ impl Session {
         let is_grant = tokens
             .iter()
             .any(|token| token.eq_ignore_ascii_case("grant"));
-        let grantee_name = token_after(&tokens, &["to"]);
+        let grantee_name = token_after(&tokens, &[if is_grant { "to" } else { "from" }]);
         let catalog = self.catalog_lookup_for_command(db, xid, cid);
         let role = if let Some(role_name) = role_name {
             catalog
@@ -3966,12 +3966,25 @@ impl Session {
         {
             object_addresses.remove_default_acl(role.oid, namespace_oid, objtype);
         } else {
+            let privilege_chars =
+                crate::backend::catalog::object_address::default_acl_privilege_chars_from_tokens(
+                    &tokens, objtype,
+                );
+            let acl_items =
+                crate::backend::catalog::object_address::default_acl_items_for_object_address(
+                    &role.rolname,
+                    objtype,
+                    is_grant,
+                    grantee_name.as_deref(),
+                    &privilege_chars,
+                );
             object_addresses.upsert_default_acl(
                 role.oid,
                 role.rolname,
                 namespace_oid,
                 namespace_name,
                 objtype,
+                acl_items,
             );
         }
         Ok(())
@@ -7485,6 +7498,22 @@ impl Session {
                 if matches!(explain_stmt.statement.as_ref(), Statement::Execute(_)) =>
             {
                 self.execute_prepared_explain_statement(db, explain_stmt, statement_lock_scope_id)
+            }
+            Statement::Explain(ref explain_stmt)
+                if Self::explain_create_table_as_uses_execute(explain_stmt) =>
+            {
+                let resolved_explain =
+                    self.resolve_create_table_as_explain_statement(explain_stmt)?;
+                let search_path = self.configured_search_path();
+                db.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+                    self.client_id,
+                    Statement::Explain(resolved_explain),
+                    search_path.as_deref(),
+                    &self.datetime_config,
+                    &self.gucs,
+                    self.planner_config(),
+                    Arc::clone(&self.random_state),
+                )
             }
             Statement::Deallocate(ref deallocate_stmt) => {
                 self.apply_deallocate_statement(deallocate_stmt)
@@ -11363,12 +11392,50 @@ impl Session {
         let Statement::Explain(mut explain_stmt) = stmt else {
             return Ok(stmt);
         };
-        let Statement::Execute(execute_stmt) = explain_stmt.statement.as_ref() else {
-            return Ok(Statement::Explain(explain_stmt));
+        let replacement = match explain_stmt.statement.as_ref() {
+            Statement::Execute(execute_stmt) => {
+                Some(self.resolve_prepared_statement_to_statement(execute_stmt)?)
+            }
+            Statement::CreateTableAs(create_stmt)
+                if matches!(create_stmt.query, CreateTableAsQuery::Execute(_)) =>
+            {
+                Some(Statement::CreateTableAs(
+                    self.resolve_create_table_as_statement(create_stmt)?,
+                ))
+            }
+            _ => None,
         };
-        explain_stmt.statement =
-            Box::new(self.resolve_prepared_statement_to_statement(execute_stmt)?);
+        if let Some(replacement) = replacement {
+            explain_stmt.statement = Box::new(replacement);
+        }
         Ok(Statement::Explain(explain_stmt))
+    }
+
+    fn explain_create_table_as_uses_execute(
+        explain_stmt: &crate::include::nodes::parsenodes::ExplainStatement,
+    ) -> bool {
+        matches!(
+            explain_stmt.statement.as_ref(),
+            Statement::CreateTableAs(CreateTableAsStatement {
+                query: CreateTableAsQuery::Execute(_),
+                ..
+            })
+        )
+    }
+
+    fn resolve_create_table_as_explain_statement(
+        &self,
+        explain_stmt: &crate::include::nodes::parsenodes::ExplainStatement,
+    ) -> Result<crate::include::nodes::parsenodes::ExplainStatement, ExecError> {
+        let mut resolved = explain_stmt.clone();
+        let create_stmt = match resolved.statement.as_ref() {
+            Statement::CreateTableAs(create_stmt) => create_stmt.clone(),
+            _ => return Ok(resolved),
+        };
+        resolved.statement = Box::new(Statement::CreateTableAs(
+            self.resolve_create_table_as_statement(&create_stmt)?,
+        ));
+        Ok(resolved)
     }
 
     fn resolve_create_table_as_statement(
@@ -19236,6 +19303,11 @@ impl Session {
                         hint: None,
                         sqlstate: "22023",
                     });
+                }
+                if let CopyRelation::Query(sql) = &copy.relation
+                    && copy_query_looks_like_select_into(sql)
+                {
+                    return Err(copy_to_feature_error("COPY (SELECT INTO) is not supported"));
                 }
                 if let CopyEndpoint::File(path) = endpoint {
                     self.ensure_copy_to_file_allowed(db, path)?;

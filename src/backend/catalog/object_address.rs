@@ -5,6 +5,80 @@ use crate::include::nodes::datetime::TimestampTzADT;
 
 const INVALID_PARAMETER_VALUE: &str = "22023";
 const UNDEFINED_OBJECT: &str = "42704";
+const TABLE_DEFAULT_PRIVILEGE_CHARS: &str = "arwdDxtm";
+
+pub fn default_acl_privilege_chars_from_tokens(tokens: &[String], objtype: char) -> String {
+    if objtype != 'r' {
+        return String::new();
+    }
+    let Some(action_index) = tokens.iter().position(|token| {
+        token.eq_ignore_ascii_case("grant") || token.eq_ignore_ascii_case("revoke")
+    }) else {
+        return String::new();
+    };
+    let on_index = tokens[action_index + 1..]
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("on"))
+        .map(|index| action_index + 1 + index)
+        .unwrap_or(tokens.len());
+    let mut chars = String::new();
+    for token in &tokens[action_index + 1..on_index] {
+        let privilege = match token.to_ascii_lowercase().as_str() {
+            "all" => return TABLE_DEFAULT_PRIVILEGE_CHARS.into(),
+            "privileges" => continue,
+            "select" => "r",
+            "insert" => "a",
+            "update" => "w",
+            "delete" => "d",
+            "truncate" => "D",
+            "references" => "x",
+            "trigger" => "t",
+            "maintain" => "m",
+            _ => "",
+        };
+        for ch in privilege.chars() {
+            if !chars.contains(ch) {
+                chars.push(ch);
+            }
+        }
+    }
+    chars
+}
+
+pub fn default_acl_items_for_object_address(
+    role_name: &str,
+    objtype: char,
+    is_grant: bool,
+    grantee_name: Option<&str>,
+    privilege_chars: &str,
+) -> Vec<String> {
+    if objtype != 'r' || privilege_chars.is_empty() {
+        return Vec::new();
+    }
+    let owner_default = format!("{role_name}={TABLE_DEFAULT_PRIVILEGE_CHARS}/{role_name}");
+    let Some(grantee_name) = grantee_name else {
+        return vec![owner_default];
+    };
+    if grantee_name.eq_ignore_ascii_case(role_name) {
+        if is_grant {
+            return vec![owner_default];
+        }
+        let remaining = TABLE_DEFAULT_PRIVILEGE_CHARS
+            .chars()
+            .filter(|ch| !privilege_chars.contains(*ch))
+            .collect::<String>();
+        return (!remaining.is_empty())
+            .then(|| vec![format!("{role_name}={remaining}/{role_name}")])
+            .unwrap_or_default();
+    }
+    if is_grant {
+        return vec![
+            owner_default,
+            format!("{grantee_name}={privilege_chars}/{role_name}"),
+        ];
+    }
+    Vec::new()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectAddress {
@@ -42,6 +116,7 @@ pub struct DefaultAclAddressEntry {
     pub namespace_oid: Option<u32>,
     pub namespace_name: Option<String>,
     pub objtype: char,
+    pub acl_items: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,10 +165,12 @@ impl ObjectAddressState {
         namespace_oid: Option<u32>,
         namespace_name: Option<String>,
         objtype: char,
+        acl_items: Vec<String>,
     ) -> u32 {
-        if let Some(row) = self.default_acls.iter().find(|row| {
+        if let Some(row) = self.default_acls.iter_mut().find(|row| {
             row.role_oid == role_oid && row.namespace_oid == namespace_oid && row.objtype == objtype
         }) {
+            row.acl_items = acl_items;
             return row.oid;
         }
         let oid = self.allocate_oid();
@@ -104,6 +181,7 @@ impl ObjectAddressState {
             namespace_oid,
             namespace_name,
             objtype,
+            acl_items,
         });
         oid
     }

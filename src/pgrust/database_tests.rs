@@ -47239,6 +47239,67 @@ fn create_table_as_execute_uses_prepared_select() {
 }
 
 #[test]
+fn explain_analyze_create_table_as_execute_uses_prepared_select() {
+    let base = temp_dir("explain_ctas_execute_prepared_select");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table source_items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into source_items (id) values (1), (2)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare copy_items as select id from source_items order by id",
+        )
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "explain (analyze, costs off, summary off, timing off, buffers off) \
+             create table copied_items as execute copy_items",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert!(!rows.is_empty()),
+        other => panic!("expected explain query result, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from copied_items order by id"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn create_table_as_rejects_too_many_column_aliases_before_create() {
+    let base = temp_dir("ctas_rejects_too_many_aliases");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ctas_base (i int4, j int4)")
+        .unwrap();
+    let err = session
+        .execute(
+            &db,
+            "create table ctas_nodata (ii, jj, kk) as select i, j from ctas_base",
+        )
+        .unwrap_err();
+    assert_sqlstate(err, "42601", "too many column names were specified");
+    session
+        .execute(
+            &db,
+            "create table ctas_nodata (ii, jj) as select i, j from ctas_base",
+        )
+        .unwrap();
+}
+
+#[test]
 fn execute_prepared_select_uses_external_params() {
     let base = temp_dir("execute_prepared_select_uses_external_params");
     let db = Database::open(&base, 16).unwrap();
