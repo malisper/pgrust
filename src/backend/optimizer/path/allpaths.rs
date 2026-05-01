@@ -641,25 +641,6 @@ fn is_append_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
         .is_some_and(|rel| matches!(rel.reloptkind, RelOptKind::OtherMemberRel))
 }
 
-fn is_regular_inheritance_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
-    let Some(parent_relid) = root
-        .append_rel_infos
-        .get(rtindex)
-        .and_then(Option::as_ref)
-        .map(|info| info.parent_relid)
-    else {
-        return false;
-    };
-    root.parse
-        .rtable
-        .get(parent_relid.saturating_sub(1))
-        .and_then(|rte| match rte.kind {
-            RangeTblEntryKind::Relation { relkind, .. } => Some(relkind),
-            _ => None,
-        })
-        .is_some_and(|relkind| relkind != 'p')
-}
-
 fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
     if rel
         .baserestrictinfo
@@ -1372,7 +1353,16 @@ fn order_items_for_base_rel_pathkeys(
 }
 
 fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<Vec<OrderByEntry>> {
-    order_items_for_base_rel_pathkeys(root, rtindex, &root.query_pathkeys)
+    let pathkeys = query_order_pathkeys_for_base_rel(root, rtindex);
+    order_items_for_base_rel_pathkeys(root, rtindex, &pathkeys)
+}
+
+fn query_order_pathkeys_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Vec<PathKey> {
+    root.simple_rel_array
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .map(|rel| required_query_pathkeys_for_rel(root, rel))
+        .unwrap_or_else(|| root.query_pathkeys.clone())
 }
 
 fn window_order_items_for_base_rel(
@@ -2661,8 +2651,164 @@ pub(super) fn relation_ordered_index_paths(
                 catalog,
             )
         }
+        RangeTblEntryKind::Relation {
+            relation_oid,
+            relkind,
+            ..
+        } if *relkind == 'p' => collect_partitioned_relation_ordered_paths(
+            root,
+            rtindex,
+            *relation_oid,
+            rte.desc.clone(),
+            base_filter_expr(rel),
+            &order_items,
+            pathkeys,
+            catalog,
+        ),
         _ => Vec::new(),
     }
+}
+
+fn collect_partitioned_relation_ordered_paths(
+    root: &PlannerInfo,
+    rtindex: usize,
+    relation_oid: u32,
+    desc: RelationDesc,
+    filter: Option<Expr>,
+    order_items: &[OrderByEntry],
+    pathkeys: &[PathKey],
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    let child_rtindexes = sorted_append_child_rtindexes(root, catalog, rtindex);
+    if child_rtindexes.is_empty() {
+        return Vec::new();
+    }
+    let partition_spec = partition_cache::partition_spec(root, catalog, relation_oid);
+    let partition_child_bounds =
+        partition_cache::partition_child_bounds(root, catalog, relation_oid);
+    let ancestor_bound = relation_own_partition_bound(catalog, relation_oid);
+    let sibling_bounds = partition_child_bounds
+        .iter()
+        .filter_map(|child| child.bound.clone())
+        .collect::<Vec<_>>();
+    if !relation_may_satisfy_own_partition_bound(catalog, relation_oid, filter.as_ref()) {
+        return Vec::new();
+    }
+
+    let mut children = Vec::new();
+    let mut child_prune_bounds = Vec::new();
+    let mut child_bounds = Vec::new();
+    for child_rtindex in child_rtindexes {
+        let child_relation_oid = relation_oid_for_rtindex(root, child_rtindex);
+        let child_bound = child_relation_oid.and_then(|child_oid| {
+            partition_child_bounds
+                .iter()
+                .find(|child| child.row.inhrelid == child_oid)
+                .and_then(|child| child.bound.clone())
+        });
+        if root.config.enable_partition_pruning
+            && !partition_may_satisfy_filter_for_relation(
+                partition_spec.as_ref(),
+                child_bound.as_ref(),
+                &sibling_bounds,
+                ancestor_bound.as_ref(),
+                filter.as_ref(),
+                catalog,
+                child_relation_oid.unwrap_or(relation_oid),
+            )
+        {
+            continue;
+        }
+        let translated_pathkeys =
+            translate_append_pathkeys_for_child(root, child_rtindex, pathkeys);
+        let ordered_child_path = cheapest_path_by_total(relation_ordered_index_paths(
+            root,
+            child_rtindex,
+            &translated_pathkeys,
+            catalog,
+        ))
+        .or_else(|| {
+            root.simple_rel_array
+                .get(child_rtindex)
+                .and_then(Option::as_ref)
+                .and_then(|rel| {
+                    bestpath::get_cheapest_path_for_pathkeys(
+                        rel,
+                        &translated_pathkeys,
+                        bestpath::CostSelector::Total,
+                    )
+                })
+                .cloned()
+        });
+        let Some(path) = ordered_child_path else {
+            return Vec::new();
+        };
+        if path_is_const_false_filter(&path) {
+            continue;
+        }
+        let translated_vars = append_translation(root, child_rtindex)
+            .map(|info| info.translated_vars.clone())
+            .unwrap_or_default();
+        let Some(bound) = child_bound.clone() else {
+            return Vec::new();
+        };
+        children.push(project_to_slot_layout(
+            rtindex,
+            &desc,
+            path,
+            PathTarget::new(translated_vars),
+            catalog,
+        ));
+        child_prune_bounds.push(child_bound);
+        child_bounds.push(bound);
+    }
+    let partition_prune = root
+        .config
+        .enable_partition_pruning
+        .then(|| {
+            append_partition_prune_plan(
+                partition_spec.clone(),
+                &sibling_bounds,
+                filter.as_ref(),
+                &child_prune_bounds,
+            )
+        })
+        .flatten();
+    let pathtarget = slot_output_target(rtindex, &desc.columns, |column| column.sql_type);
+    let path = if let Some(proof) = ordered_partition_append_proof(
+        root,
+        partition_spec.as_ref(),
+        &child_bounds,
+        filter.as_ref(),
+        pathkeys,
+    ) {
+        let mut children = children;
+        if proof.reverse_children {
+            children.reverse();
+        }
+        Path::Append {
+            plan_info: PlanEstimate::default(),
+            pathtarget,
+            pathkeys: proof.pathkeys,
+            relids: vec![rtindex],
+            source_id: rtindex,
+            desc,
+            child_roots: Vec::new(),
+            partition_prune,
+            children,
+        }
+    } else {
+        Path::MergeAppend {
+            plan_info: PlanEstimate::default(),
+            pathtarget,
+            source_id: rtindex,
+            desc,
+            items: order_items.to_vec(),
+            partition_prune,
+            children,
+        }
+    };
+    vec![optimize_path_with_config(path, catalog, root.config)]
 }
 
 pub(super) fn relation_index_only_full_scan_paths(
@@ -2984,7 +3130,7 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
             )
         })
         .unzip::<_, _, Vec<_>, Vec<_>>();
-    let set_op = build_set_operation_path(
+    let mut set_op = build_set_operation_path(
         set_operation.op,
         source_id,
         desc.clone(),
@@ -2995,6 +3141,22 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         root.config,
         force_sorted_union,
     );
+    if let Some(filter) = root.parse.where_qual.clone() {
+        // :HACK: Set-operation queries normally receive pushed-down quals
+        // before this point. Keep a legal output-level filter for fallback
+        // cases so nested UNION ALL children do not silently ignore their
+        // Query.where_qual while the planner lacks a set-op upper-rel layer.
+        set_op = optimize_path_with_config(
+            Path::Filter {
+                plan_info: PlanEstimate::default(),
+                pathtarget: set_op.semantic_output_target(),
+                predicate: filter,
+                input: Box::new(set_op),
+            },
+            catalog,
+            root.config,
+        );
+    }
     let mut rel = RelOptInfo::new(
         Vec::new(),
         RelOptKind::UpperRel,
@@ -3156,6 +3318,7 @@ fn set_op_append_path(
     child_roots: Vec<Option<PlannerSubroot>>,
     children: Vec<Path>,
 ) -> Path {
+    let (child_roots, children) = flatten_set_op_append_children(child_roots, children);
     Path::Append {
         plan_info: PlanEstimate::default(),
         pathtarget: slot_output_target(source_id, output_columns, |column| column.sql_type),
@@ -3166,6 +3329,47 @@ fn set_op_append_path(
         child_roots,
         partition_prune: None,
         children,
+    }
+}
+
+fn flatten_set_op_append_children(
+    child_roots: Vec<Option<PlannerSubroot>>,
+    children: Vec<Path>,
+) -> (Vec<Option<PlannerSubroot>>, Vec<Path>) {
+    if children.is_empty() {
+        return (child_roots, children);
+    }
+    let mut flattened_roots = Vec::new();
+    let mut flattened_children = Vec::new();
+    let mut changed = false;
+    for (index, child) in children.into_iter().enumerate() {
+        let child_root = child_roots.get(index).cloned().flatten();
+        match child {
+            Path::Append {
+                partition_prune: None,
+                child_roots: nested_roots,
+                children: nested_children,
+                ..
+            } if !nested_children.is_empty() => {
+                changed = true;
+                let nested_count = nested_children.len();
+                if nested_roots.len() == nested_count {
+                    flattened_roots.extend(nested_roots);
+                } else {
+                    flattened_roots.extend((0..nested_count).map(|_| child_root.clone()));
+                }
+                flattened_children.extend(nested_children);
+            }
+            other => {
+                flattened_roots.push(child_root);
+                flattened_children.push(other);
+            }
+        }
+    }
+    if changed {
+        (flattened_roots, flattened_children)
+    } else {
+        (child_roots, flattened_children)
     }
 }
 
@@ -4084,9 +4288,17 @@ fn push_set_operation_filter(
     };
     let original_set_operation = set_operation.clone();
     let visible_targets = visible_query_targets(&query);
-    let Some(setop_filter) =
+    let setop_filter = if visible_targets.is_empty() {
+        rewrite_filter_for_set_operation_identity(
+            filter.clone(),
+            rtindex,
+            &set_operation.output_desc,
+            &query,
+        )
+    } else {
         rewrite_filter_for_subquery(filter.clone(), rtindex, &visible_targets, &query)
-    else {
+    };
+    let Some(setop_filter) = setop_filter else {
         query.set_operation = Some(set_operation);
         return (query, Some(filter));
     };
@@ -4102,9 +4314,14 @@ fn push_set_operation_filter(
     let mut pushed_inputs = Vec::with_capacity(set_operation.inputs.len());
     for child in set_operation.inputs {
         let child_targets = visible_query_targets(&child);
-        let Some(child_filter) =
+        let child_filter = if child_targets.is_empty() && child.set_operation.is_some() {
+            Some(setop_filter.clone())
+        } else if child_targets.is_empty() {
+            rewrite_filter_for_child_identity(setop_filter.clone(), 1, &child)
+        } else {
             rewrite_filter_for_subquery_relaxed(setop_filter.clone(), 1, &child_targets)
-        else {
+        };
+        let Some(child_filter) = child_filter else {
             query.set_operation = Some(original_set_operation);
             return (query, Some(filter));
         };
@@ -4117,6 +4334,51 @@ fn push_set_operation_filter(
     set_operation.inputs = pushed_inputs;
     query.set_operation = Some(set_operation);
     (query, None)
+}
+
+fn rewrite_filter_for_set_operation_identity(
+    expr: Expr,
+    rtindex: usize,
+    desc: &RelationDesc,
+    query: &Query,
+) -> Option<Expr> {
+    let targets = set_operation_identity_targets(desc);
+    let target_refs = targets.iter().collect::<Vec<_>>();
+    rewrite_filter_for_subquery(expr, rtindex, &target_refs, query)
+}
+
+fn rewrite_filter_for_child_identity(expr: Expr, rtindex: usize, query: &Query) -> Option<Expr> {
+    let desc = query
+        .set_operation
+        .as_ref()
+        .map(|set_operation| &set_operation.output_desc)
+        .or_else(|| query.rtable.first().map(|rte| &rte.desc))?;
+    let targets = set_operation_identity_targets(desc);
+    let target_refs = targets.iter().collect::<Vec<_>>();
+    rewrite_filter_for_subquery_relaxed(expr, rtindex, &target_refs)
+}
+
+fn set_operation_identity_targets(
+    desc: &RelationDesc,
+) -> Vec<crate::include::nodes::primnodes::TargetEntry> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            crate::include::nodes::primnodes::TargetEntry::new(
+                column.name.clone(),
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(index),
+                    varlevelsup: 0,
+                    vartype: column.sql_type,
+                    collation_oid: None,
+                }),
+                column.sql_type,
+                index + 1,
+            )
+        })
+        .collect()
 }
 
 fn set_operation_filter_is_safe_for_distinct(filter: &Expr, inputs: &[Query]) -> bool {
@@ -4135,6 +4397,23 @@ fn push_filter_into_child_query(
     filter: Expr,
     prune_false: bool,
 ) -> Option<Query> {
+    if query.set_operation.is_some() {
+        // :HACK: PostgreSQL recursively distributes UNION ALL parent quals
+        // before planning set-operation inputs. pgrust still represents nested
+        // set-ops as Query nodes, so recurse here until set-op planning grows a
+        // proper pull-up/qual-pushdown phase.
+        let (pushed, leftover) = push_set_operation_filter(1, query, filter);
+        query = pushed;
+        if leftover.is_none() {
+            return Some(query);
+        }
+        let filter = leftover.expect("checked above");
+        query.where_qual = Some(match query.where_qual.take() {
+            Some(existing) => Expr::and(existing, filter),
+            None => filter,
+        });
+        return Some(query);
+    }
     query.where_qual = Some(match query.where_qual.take() {
         Some(existing) => Expr::and(existing, filter),
         None => filter,
@@ -4164,6 +4443,24 @@ fn rewrite_filter_for_subquery_relaxed(
             Some(targets.get(index)?.expr.clone())
         }
         Expr::Param(_) | Expr::Const(_) => Some(expr),
+        Expr::SubLink(mut sublink) => {
+            if query_contains_outer_var(&sublink.subselect) {
+                return None;
+            }
+            sublink.testexpr =
+                rewrite_optional_subquery_filter_expr_relaxed(sublink.testexpr, rtindex, targets)?;
+            Some(Expr::SubLink(sublink))
+        }
+        Expr::SubPlan(mut subplan) => {
+            subplan.testexpr =
+                rewrite_optional_subquery_filter_expr_relaxed(subplan.testexpr, rtindex, targets)?;
+            subplan.args = subplan
+                .args
+                .into_iter()
+                .map(|arg| rewrite_filter_for_subquery_relaxed(arg, rtindex, targets))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::SubPlan(subplan))
+        }
         Expr::Op(mut op) => {
             op.args = op
                 .args
@@ -4188,6 +4485,27 @@ fn rewrite_filter_for_subquery_relaxed(
                 .collect::<Option<Vec<_>>>()?;
             Some(Expr::Func(func))
         }
+        Expr::ScalarArrayOp(mut saop) => {
+            saop.left = Box::new(rewrite_filter_for_subquery_relaxed(
+                *saop.left, rtindex, targets,
+            )?);
+            saop.right = Box::new(rewrite_filter_for_subquery_relaxed(
+                *saop.right,
+                rtindex,
+                targets,
+            )?);
+            Some(Expr::ScalarArrayOp(saop))
+        }
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Some(Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| rewrite_filter_for_subquery_relaxed(element, rtindex, targets))
+                .collect::<Option<Vec<_>>>()?,
+            array_type,
+        }),
         Expr::Cast(inner, ty) => Some(Expr::Cast(
             Box::new(rewrite_filter_for_subquery_relaxed(
                 *inner, rtindex, targets,
@@ -4234,6 +4552,19 @@ fn rewrite_filter_for_subquery_relaxed(
             )?),
         )),
         _ => None,
+    }
+}
+
+fn rewrite_optional_subquery_filter_expr_relaxed(
+    expr: Option<Box<Expr>>,
+    rtindex: usize,
+    targets: &[&crate::include::nodes::primnodes::TargetEntry],
+) -> Option<Option<Box<Expr>>> {
+    match expr {
+        Some(expr) => rewrite_filter_for_subquery_relaxed(*expr, rtindex, targets)
+            .map(Box::new)
+            .map(Some),
+        None => Some(None),
     }
 }
 
@@ -4429,6 +4760,47 @@ fn expr_contains_outer_var(expr: &Expr) -> bool {
     }
 }
 
+fn query_contains_outer_var(query: &Query) -> bool {
+    query
+        .target_list
+        .iter()
+        .any(|target| expr_contains_outer_var(&target.expr))
+        || query
+            .where_qual
+            .as_ref()
+            .is_some_and(expr_contains_outer_var)
+        || query.group_by.iter().any(expr_contains_outer_var)
+        || query
+            .having_qual
+            .as_ref()
+            .is_some_and(expr_contains_outer_var)
+        || query
+            .sort_clause
+            .iter()
+            .any(|item| expr_contains_outer_var(&item.expr))
+        || query.rtable.iter().any(|rte| match &rte.kind {
+            RangeTblEntryKind::Subquery { query } | RangeTblEntryKind::Cte { query, .. } => {
+                query_contains_outer_var(query)
+            }
+            RangeTblEntryKind::Values { rows, .. } => {
+                rows.iter().flatten().any(expr_contains_outer_var)
+            }
+            RangeTblEntryKind::Function { call } => set_returning_call_exprs(call)
+                .into_iter()
+                .any(expr_contains_outer_var),
+            RangeTblEntryKind::Join { joinaliasvars, .. } => {
+                joinaliasvars.iter().any(expr_contains_outer_var)
+            }
+            RangeTblEntryKind::Result
+            | RangeTblEntryKind::Relation { .. }
+            | RangeTblEntryKind::WorkTable { .. } => false,
+        })
+        || query
+            .set_operation
+            .as_ref()
+            .is_some_and(|set_operation| set_operation.inputs.iter().any(query_contains_outer_var))
+}
+
 fn rewrite_filter_for_subquery(
     expr: Expr,
     rtindex: usize,
@@ -4465,6 +4837,24 @@ fn rewrite_filter_for_subquery(
             Some(target.expr.clone())
         }
         Expr::Param(_) | Expr::Const(_) => Some(expr),
+        Expr::SubLink(mut sublink) => {
+            if query_contains_outer_var(&sublink.subselect) {
+                return None;
+            }
+            sublink.testexpr =
+                rewrite_optional_subquery_filter_expr(sublink.testexpr, rtindex, targets, query)?;
+            Some(Expr::SubLink(sublink))
+        }
+        Expr::SubPlan(mut subplan) => {
+            subplan.testexpr =
+                rewrite_optional_subquery_filter_expr(subplan.testexpr, rtindex, targets, query)?;
+            subplan.args = subplan
+                .args
+                .into_iter()
+                .map(|arg| rewrite_filter_for_subquery(arg, rtindex, targets, query))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::SubPlan(subplan))
+        }
         Expr::Op(mut op) => {
             op.args = op
                 .args
@@ -4648,8 +5038,6 @@ fn rewrite_filter_for_subquery(
         | Expr::WindowFunc(_)
         | Expr::CaseTest(_)
         | Expr::SetReturning(_)
-        | Expr::SubLink(_)
-        | Expr::SubPlan(_)
         | Expr::SqlJsonQueryFunction(_)
         | Expr::Xml(_) => None,
     }
@@ -4727,11 +5115,16 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         .get(rtindex)
         .and_then(Option::as_ref)
         .and_then(base_filter_expr);
-    let constraint_exclusion_applies = root.config.constraint_exclusion_on
-        || (root.config.constraint_exclusion_partition
-            && is_regular_inheritance_child_rel(root, rtindex));
-    if constraint_exclusion_applies
-        && let RangeTblEntryKind::Relation { relation_oid, .. } = rte.kind.clone()
+    if let RangeTblEntryKind::Relation { relation_oid, .. } = rte.kind.clone()
+        && {
+            let is_declarative_partition = catalog
+                .relation_by_oid(relation_oid)
+                .is_some_and(|relation| relation.relpartbound.is_some());
+            root.config.constraint_exclusion_on
+                || (root.config.constraint_exclusion_partition
+                    && is_append_child_rel(root, rtindex)
+                    && !is_declarative_partition)
+        }
         && (!relation_may_satisfy_own_partition_bound(catalog, relation_oid, filter.as_ref())
             || !relation_may_satisfy_check_constraints(
                 catalog,
@@ -4779,8 +5172,8 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             }
             return;
         }
-        let query_order_items = query_order_items_for_base_rel(root, rtindex);
-        let query_pathkeys = root.query_pathkeys.clone();
+        let query_pathkeys = query_order_pathkeys_for_base_rel(root, rtindex);
+        let query_order_items = order_items_for_base_rel_pathkeys(root, rtindex, &query_pathkeys);
         let has_null_scalar_array_filter = if relkind == 'p' {
             filter
                 .as_ref()

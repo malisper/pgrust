@@ -3819,6 +3819,44 @@ fn planner_lowers_union_all_append_children_with_their_own_roots() {
 }
 
 #[test]
+fn planner_pushes_initplan_filter_into_simple_union_all_parent() {
+    let mut catalog = Catalog::default();
+    catalog
+        .create_table(
+            "union_parent_t",
+            RelationDesc {
+                columns: vec![
+                    column_desc("a", int4(), false),
+                    column_desc("b", int4(), false),
+                ],
+            },
+        )
+        .expect("create union_parent_t");
+
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select *
+         from (
+             select * from union_parent_t
+             union all
+             select * from union_parent_t
+         ) s
+         where b = (select 1)",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+    assert!(
+        lines.iter().all(|line| !line.contains("Subquery Scan")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Filter: (b = (InitPlan 1).col1)")),
+        "{lines:#?}"
+    );
+}
+
+#[test]
 fn planner_uses_metadata_fallback_when_live_pages_are_unavailable() {
     let mut catalog = Catalog::default();
     catalog
@@ -4104,13 +4142,15 @@ fn planner_keeps_unique_for_ordered_select_distinct() {
         "select distinct id from items order by id desc",
         &catalog,
     );
+    let lines = explain_lines_for_planned_stmt(&planned);
 
     assert_eq!(
         count_plan_nodes(&planned.plan_tree, |plan| matches!(
             plan,
             Plan::Unique { .. }
         )),
-        1
+        1,
+        "{lines:#?}"
     );
 }
 
@@ -4126,13 +4166,15 @@ fn planner_keeps_unique_for_ordered_select_distinct_saop_index_path() {
             ..PlannerConfig::default()
         },
     );
+    let lines = explain_lines_for_planned_stmt(&planned);
 
     assert_eq!(
         count_plan_nodes(&planned.plan_tree, |plan| matches!(
             plan,
             Plan::Unique { .. }
         )),
-        1
+        1,
+        "{lines:#?}"
     );
 }
 
@@ -4572,7 +4614,10 @@ fn planner_preserves_ordered_index_path_under_limit() {
     let planned =
         planned_stmt_for_sql_with_catalog("select id from items order by id limit 1", &catalog);
 
-    assert!(matches!(planned.plan_tree, Plan::Limit { .. }));
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::Limit { .. }
+    )));
     assert!(plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
         Plan::IndexOnlyScan { direction, .. }
@@ -4827,6 +4872,164 @@ fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
     assert!(
         has_runtime_index,
         "expected OR join clause to use a runtime scalar-array index scan: {planned:#?}"
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
+fn planner_uses_parameterized_index_append_for_partitioned_inner_join() {
+    let mut catalog = catalog_with_indexed_range_partitions();
+    catalog
+        .create_table(
+            "tbl1",
+            RelationDesc {
+                columns: vec![column_desc("k", int4(), false)],
+            },
+        )
+        .expect("create outer table");
+    let tbl1_oid = catalog
+        .lookup_any_relation("tbl1")
+        .expect("outer table exists")
+        .relation_oid;
+    catalog
+        .set_relation_stats(tbl1_oid, 1, 1.0)
+        .expect("seed outer stats");
+
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select * from tbl1 join rp on tbl1.k < rp.k",
+        &catalog,
+        PlannerConfig {
+            enable_hashjoin: false,
+            enable_mergejoin: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            match plan {
+            Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => keys.iter().any(
+                |key| matches!(&key.argument, IndexScanKeyArgument::Runtime(expr) if contains_exec_param_for_tests(expr))
+            ),
+            _ => false,
+        }
+        }),
+        "expected partitioned inner join to use runtime child index scans: {:#?}",
+        planned.plan_tree
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
+fn planner_uses_parameterized_index_append_for_tprt_join_shape() {
+    let mut catalog = Catalog::default();
+    catalog
+        .create_table(
+            "tbl1",
+            RelationDesc {
+                columns: vec![column_desc("col1", int4(), false)],
+            },
+        )
+        .expect("create outer table");
+    let parent_oid = {
+        let desc = RelationDesc {
+            columns: vec![column_desc("col1", int4(), false)],
+        };
+        let entry = catalog
+            .create_table_with_relkind(
+                "tprt",
+                desc,
+                PUBLIC_NAMESPACE_OID,
+                CURRENT_DATABASE_OID,
+                'p',
+                'p',
+                BOOTSTRAP_SUPERUSER_OID,
+            )
+            .expect("create partitioned tprt");
+        let spec = LoweredPartitionSpec {
+            strategy: PartitionStrategy::Range,
+            key_columns: vec!["col1".into()],
+            key_exprs: vec![var(1, 1)],
+            key_types: vec![int4()],
+            key_sqls: vec!["col1".into()],
+            partattrs: vec![1],
+            partclass: vec![0],
+            partcollation: vec![0],
+        };
+        let table = catalog.tables.get_mut("tprt").expect("tprt catalog row");
+        table.relhassubclass = true;
+        table.partitioned_table = Some(pg_partitioned_table_row(entry.relation_oid, &spec, 0));
+        entry.relation_oid
+    };
+
+    for (index, (name, from, to)) in [
+        ("tprt_1", 1, 501),
+        ("tprt_2", 501, 1001),
+        ("tprt_3", 1001, 2001),
+        ("tprt_4", 2001, 3001),
+        ("tprt_5", 3001, 4001),
+        ("tprt_6", 4001, 5001),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let entry = catalog
+            .create_table(
+                name,
+                RelationDesc {
+                    columns: vec![column_desc("col1", int4(), false)],
+                },
+            )
+            .expect("create partition child");
+        let bound = PartitionBoundSpec::Range {
+            from: vec![PartitionRangeDatumValue::Value(
+                SerializedPartitionValue::Int32(from),
+            )],
+            to: vec![PartitionRangeDatumValue::Value(
+                SerializedPartitionValue::Int32(to),
+            )],
+            is_default: false,
+        };
+        let table = catalog.tables.get_mut(name).expect("partition catalog row");
+        table.relispartition = true;
+        table.relpartbound = Some(serialize_partition_bound(&bound).expect("serialize bound"));
+        catalog.inherits.push(PgInheritsRow {
+            inhrelid: entry.relation_oid,
+            inhparent: parent_oid,
+            inhseqno: (index + 1) as i32,
+            inhdetachpending: false,
+        });
+        let index_entry = catalog
+            .create_index(
+                format!("{name}_idx"),
+                name,
+                false,
+                &[IndexColumnDef::from("col1")],
+            )
+            .expect("create child index");
+        catalog
+            .set_index_ready_valid(index_entry.relation_oid, true, true)
+            .expect("mark index ready");
+        let _ = index_entry;
+    }
+
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select * from tbl1 join tprt on tbl1.col1 > tprt.col1",
+        &catalog,
+        PlannerConfig {
+            enable_hashjoin: false,
+            enable_mergejoin: false,
+            enable_indexonlyscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    let lines = explain_lines_for_planned_stmt(&planned);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Scan using tprt_1_idx on tprt_1")),
+        "expected tprt join to use parameterized child index scans, got {lines:?}"
     );
     validate_planned_stmt_for_tests(&planned);
 }

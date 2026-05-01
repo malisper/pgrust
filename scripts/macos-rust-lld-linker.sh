@@ -20,8 +20,12 @@ while (($#)); do
             args+=("-platform_version" "macos" "$version" "$version")
             ;;
         -Wl,*)
-            IFS=',' read -r -a linker_args <<< "${1#-Wl,}"
-            args+=("${linker_args[@]}")
+            linker_args="${1#-Wl,}"
+            while [[ "$linker_args" == *,* ]]; do
+                args+=("${linker_args%%,*}")
+                linker_args="${linker_args#*,}"
+            done
+            args+=("$linker_args")
             ;;
         -dynamiclib)
             args+=("-dylib")

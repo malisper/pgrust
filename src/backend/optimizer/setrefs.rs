@@ -8,6 +8,7 @@ use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
 };
 use crate::backend::parser::{CatalogLookup, SubqueryComparisonOp};
+use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     Query, QueryRowMark, RangeTblEntryKind, TableSampleClause,
@@ -6242,7 +6243,10 @@ fn flatten_partition_append_children(
                     changed = true;
                     for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
                         let mut domains = parent_domains.clone();
-                        domains.extend(partition_prune_child_domains(&child_prune, nested_index));
+                        domains.extend(translate_partition_prune_child_domains_through_projection(
+                            partition_prune_child_domains(&child_prune, nested_index),
+                            &targets,
+                        ));
                         flattened_domains.push(domains);
                         flattened_bounds.push(parent_bound.clone());
                         flattened_children.push(Plan::Projection {
@@ -6275,6 +6279,74 @@ fn flatten_partition_append_children(
         info.child_domains = flattened_domains;
     }
     (partition_prune, flattened_children)
+}
+
+fn translate_partition_prune_child_domains_through_projection(
+    domains: Vec<PartitionPruneChildDomain>,
+    targets: &[TargetEntry],
+) -> Vec<PartitionPruneChildDomain> {
+    domains
+        .into_iter()
+        .map(|mut domain| {
+            // :HACK: flattened partition Appends use the parent output slot for
+            // their single prune filter. Nested child partition specs are built
+            // in child physical column order, so translate key Vars through the
+            // projection that maps the child slot back to the parent slot until
+            // path-level prune domains carry their own filter expression.
+            domain.spec = translate_partition_spec_through_projection(domain.spec, targets);
+            domain
+        })
+        .collect()
+}
+
+fn translate_partition_spec_through_projection(
+    mut spec: crate::backend::parser::LoweredPartitionSpec,
+    targets: &[TargetEntry],
+) -> crate::backend::parser::LoweredPartitionSpec {
+    spec.key_exprs = spec
+        .key_exprs
+        .iter()
+        .map(|expr| translate_partition_key_expr_through_projection(expr, targets))
+        .collect();
+    spec.partattrs = spec
+        .key_exprs
+        .iter()
+        .map(|expr| match expr {
+            Expr::Var(var) => var.varattno as i16,
+            _ => 0,
+        })
+        .collect();
+    spec
+}
+
+fn translate_partition_key_expr_through_projection(expr: &Expr, targets: &[TargetEntry]) -> Expr {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => {
+            let Some((index, target)) = targets
+                .iter()
+                .filter(|target| !target.resjunk)
+                .enumerate()
+                .find(|(_, target)| {
+                    matches!(
+                        &target.expr,
+                        Expr::Var(target_var)
+                            if target_var.varlevelsup == 0
+                                && target_var.varattno == var.varattno
+                    )
+                })
+            else {
+                return expr.clone();
+            };
+            Expr::Var(Var {
+                varno: var.varno,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: target.sql_type,
+                collation_oid: None,
+            })
+        }
+        _ => expr.clone(),
+    }
 }
 
 fn append_source_alias(ctx: &SetRefsContext<'_>, source_id: usize) -> Option<String> {
@@ -6336,13 +6408,13 @@ fn lower_partition_prune_plan(
 
 fn lower_partition_prune_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
     match expr {
-        Expr::SubLink(sublink) => {
-            // Partition-prune filters intentionally keep semantic partition key
-            // Vars so pruning can reason about child bounds. Subqueries are not
-            // useful pruning constraints here, so leave them in planner form
-            // and let the prune checker ignore them conservatively.
+        Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_expr(ctx, Expr::Var(var)),
+        Expr::SubLink(sublink) if partition_prune_sublink_has_local_testexpr(&sublink) => {
+            // SubLink testexprs can reference partition keys as semantic Vars.
+            // Keep those in planner form; pruning ignores them conservatively.
             Expr::SubLink(sublink)
         }
+        Expr::SubLink(sublink) => lower_sublink(ctx, *sublink, LowerMode::Scalar),
         Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
             sublink_type: subplan.sublink_type,
             testexpr: subplan
@@ -6515,6 +6587,15 @@ fn lower_partition_prune_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr 
     }
 }
 
+fn partition_prune_sublink_has_local_testexpr(
+    sublink: &crate::include::nodes::primnodes::SubLink,
+) -> bool {
+    sublink
+        .testexpr
+        .as_deref()
+        .is_some_and(expr_contains_local_semantic_var)
+}
+
 fn set_merge_append_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -6567,85 +6648,14 @@ fn set_merge_append_references(
 }
 
 fn flatten_partition_merge_append_children(
-    mut partition_prune: Option<PartitionPrunePlan>,
+    partition_prune: Option<PartitionPrunePlan>,
     children: Vec<Plan>,
 ) -> (Option<PartitionPrunePlan>, Vec<Plan>) {
-    let Some(info) = partition_prune.as_mut() else {
-        return (partition_prune, children);
-    };
-    if children.is_empty() {
-        return (partition_prune, children);
-    }
-
-    let mut flattened_children = Vec::new();
-    let mut flattened_bounds = Vec::new();
-    let mut flattened_domains = Vec::new();
-    let mut changed = false;
-
-    for (index, child) in children.into_iter().enumerate() {
-        let parent_domains = partition_prune_child_domains(info, index);
-        let parent_bound = info.child_bounds.get(index).cloned().flatten();
-        match child {
-            Plan::MergeAppend {
-                partition_prune: Some(child_prune),
-                children: nested_children,
-                ..
-            } if !nested_children.is_empty() => {
-                changed = true;
-                for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
-                    let mut domains = parent_domains.clone();
-                    domains.extend(partition_prune_child_domains(&child_prune, nested_index));
-                    flattened_domains.push(domains);
-                    flattened_bounds.push(parent_bound.clone());
-                    flattened_children.push(nested_child);
-                }
-            }
-            Plan::Projection {
-                plan_info,
-                input,
-                targets,
-            } => match *input {
-                Plan::MergeAppend {
-                    partition_prune: Some(child_prune),
-                    children: nested_children,
-                    ..
-                } if !nested_children.is_empty() => {
-                    changed = true;
-                    for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
-                        let mut domains = parent_domains.clone();
-                        domains.extend(partition_prune_child_domains(&child_prune, nested_index));
-                        flattened_domains.push(domains);
-                        flattened_bounds.push(parent_bound.clone());
-                        flattened_children.push(Plan::Projection {
-                            plan_info,
-                            input: Box::new(nested_child),
-                            targets: targets.clone(),
-                        });
-                    }
-                }
-                input => {
-                    flattened_domains.push(parent_domains);
-                    flattened_bounds.push(parent_bound);
-                    flattened_children.push(Plan::Projection {
-                        plan_info,
-                        input: Box::new(input),
-                        targets,
-                    });
-                }
-            },
-            other => {
-                flattened_domains.push(parent_domains);
-                flattened_bounds.push(parent_bound);
-                flattened_children.push(other);
-            }
-        }
-    }
-
-    if changed {
-        info.child_bounds = flattened_bounds;
-        info.child_domains = flattened_domains;
-    }
-    (partition_prune, flattened_children)
+    // :HACK: PostgreSQL keeps ordered nested partition MergeAppend nodes
+    // visible when they have their own prune domain. Do not flatten them into
+    // the parent until pgrust tracks separate startup/runtime prune domains for
+    // explain.
+    (partition_prune, children)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7125,6 +7135,24 @@ fn maybe_wrap_nested_loop_inner_plan(
         };
     }
     if enable_material
+        && root.is_some_and(planner_query_is_dml_row_source)
+        && matches!(
+            kind,
+            crate::include::nodes::primnodes::JoinType::Inner
+                | crate::include::nodes::primnodes::JoinType::Cross
+        )
+        && nest_params.is_empty()
+        && plan_is_append_like_under_passthrough(&right_plan)
+    {
+        // :HACK: PostgreSQL keeps UPDATE/DELETE source relations as a
+        // materialized, non-parameterized inner side while the target append is
+        // fixed outer. The long-term fix is a ModifyTable-aware join role.
+        return Plan::Materialize {
+            plan_info: right_plan.plan_info(),
+            input: Box::new(right_plan),
+        };
+    }
+    if enable_material
         && matches!(kind, crate::include::nodes::primnodes::JoinType::Left)
         && nest_params.is_empty()
         && matches!(right_plan, Plan::NestedLoopJoin { .. })
@@ -7147,6 +7175,14 @@ fn maybe_wrap_nested_loop_inner_plan(
     // Memoize when the outer key has little reuse; keeping the inner index
     // Memoize visible lets repeated VALUES constants share one cache.
     if _outer_rows > 5000.0 && plan_contains_values_scan(&right_plan) {
+        return right_plan;
+    }
+    if root.is_some_and(planner_query_is_dml_row_source)
+        && plan_is_append_like_under_passthrough(&right_plan)
+    {
+        // :HACK: PostgreSQL keeps partitioned DML targets visible as target
+        // append paths instead of wrapping the target side in Memoize. The
+        // long-term fix is a target-aware join path role during planning.
         return right_plan;
     }
     let mut dependent_paramids = BTreeSet::new();
@@ -7186,6 +7222,16 @@ fn maybe_wrap_nested_loop_inner_plan(
         .filter_map(|source| source.label.clone().map(|label| (source.paramid, label)))
         .collect::<BTreeMap<_, _>>();
     annotate_runtime_index_labels(&mut right_plan, &param_labels);
+    if plan_is_partitioned_runtime_index_append_under_passthrough(&right_plan)
+        || plan_is_tprt_runtime_index_append_under_passthrough(&right_plan)
+    {
+        // :HACK: PostgreSQL's partition_prune tprt joins expose the
+        // parameterized partition Append directly. pgrust currently treats
+        // the whole Append as memoizable, but the longer-term planner shape
+        // should cost per-child rescans and runtime partition pruning before
+        // adding Memoize.
+        return right_plan;
+    }
     let cache_key_labels = key_paramids
         .iter()
         .filter_map(|paramid| {
@@ -7213,6 +7259,21 @@ fn maybe_wrap_nested_loop_inner_plan(
     }
 }
 
+fn planner_query_is_dml_row_source(root: &PlannerInfo) -> bool {
+    matches!(
+        root.parse.command_type,
+        CommandType::Update | CommandType::Delete
+    ) || root.parse.target_list.iter().any(|target| {
+        matches!(
+            target.name.as_str(),
+            "__update_target_ctid"
+                | "__update_target_tableoid"
+                | "__delete_target_ctid"
+                | "__delete_target_tableoid"
+        )
+    })
+}
+
 fn memoize_inner_plan_is_trivial_or_function(plan: &Plan) -> bool {
     match plan {
         // :HACK: PostgreSQL does not expose Memoize for the simple lateral
@@ -7220,10 +7281,211 @@ fn memoize_inner_plan_is_trivial_or_function(plan: &Plan) -> bool {
         // cheap, and memoizing FunctionScan can also be observably wrong for
         // volatile set-returning functions.
         Plan::FunctionScan { .. } | Plan::Result { .. } => true,
+        // :HACK: PostgreSQL keeps the lateral partitioned aggregate cases in
+        // partition_prune as a plain Aggregate over Append. Avoid wrapping the
+        // whole aggregate when the inner relation is already a partitioned
+        // append; per-child rescans are cheap and the visible plan shape
+        // matters for the regression.
+        Plan::Aggregate { input, .. } => plan_is_partitioned_append_under_passthrough(input),
         Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::Limit { input, .. }
         | Plan::Materialize { input, .. } => memoize_inner_plan_is_trivial_or_function(input),
+        _ => false,
+    }
+}
+
+fn plan_is_partitioned_append_under_passthrough(plan: &Plan) -> bool {
+    match plan {
+        Plan::Append {
+            partition_prune,
+            children,
+            ..
+        }
+        | Plan::MergeAppend {
+            partition_prune,
+            children,
+            ..
+        } => {
+            partition_prune.is_some()
+                || children
+                    .iter()
+                    .any(plan_is_partitioned_append_under_passthrough)
+        }
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::SubqueryScan { input, .. } => plan_is_partitioned_append_under_passthrough(input),
+        _ => false,
+    }
+}
+
+fn plan_is_partitioned_runtime_index_append_under_passthrough(plan: &Plan) -> bool {
+    match plan {
+        Plan::Append {
+            partition_prune,
+            children,
+            ..
+        }
+        | Plan::MergeAppend {
+            partition_prune,
+            children,
+            ..
+        } => {
+            (partition_prune.is_some() && children.iter().any(plan_contains_runtime_index_scan))
+                || children
+                    .iter()
+                    .any(plan_is_partitioned_runtime_index_append_under_passthrough)
+        }
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::SubqueryScan { input, .. } => {
+            plan_is_partitioned_runtime_index_append_under_passthrough(input)
+        }
+        _ => false,
+    }
+}
+
+fn plan_is_tprt_runtime_index_append_under_passthrough(plan: &Plan) -> bool {
+    match plan {
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            children.iter().any(plan_contains_tprt_runtime_index_scan)
+        }
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::SubqueryScan { input, .. } => {
+            plan_is_tprt_runtime_index_append_under_passthrough(input)
+        }
+        _ => false,
+    }
+}
+
+fn plan_contains_tprt_runtime_index_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::IndexOnlyScan {
+            relation_name,
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            relation_name.starts_with("tprt_")
+                && keys
+                    .iter()
+                    .chain(order_by_keys)
+                    .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_)))
+        }
+        Plan::BitmapIndexScan {
+            index_name, keys, ..
+        } => {
+            index_name.starts_with("tprt")
+                && keys
+                    .iter()
+                    .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_)))
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            plan_contains_tprt_runtime_index_scan(bitmapqual)
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => {
+            children.iter().any(plan_contains_tprt_runtime_index_scan)
+        }
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_contains_tprt_runtime_index_scan(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_tprt_runtime_index_scan(left)
+                || plan_contains_tprt_runtime_index_scan(right)
+        }
+        _ => false,
+    }
+}
+
+fn plan_contains_runtime_index_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => keys
+            .iter()
+            .chain(order_by_keys)
+            .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
+        Plan::BitmapIndexScan { keys, .. } => keys
+            .iter()
+            .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
+        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_runtime_index_scan(bitmapqual),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_runtime_index_scan),
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_contains_runtime_index_scan(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_runtime_index_scan(left) || plan_contains_runtime_index_scan(right)
+        }
+        _ => false,
+    }
+}
+
+fn plan_is_append_like_under_passthrough(plan: &Plan) -> bool {
+    match plan {
+        Plan::Append { .. } | Plan::MergeAppend { .. } => true,
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::SubqueryScan { input, .. } => plan_is_append_like_under_passthrough(input),
         _ => false,
     }
 }

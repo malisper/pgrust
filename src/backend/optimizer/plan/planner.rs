@@ -2026,7 +2026,22 @@ fn window_pathkeys(clause: &WindowClause) -> Vec<PathKey> {
         nulls_first: item.nulls_first,
         collation_oid: item.collation_oid,
     }));
-    pathkeys
+    // :HACK: PostgreSQL treats duplicate window order requirements such as
+    // PARTITION BY a ORDER BY a as one pathkey. Keep the planner request in
+    // that canonical shape until pathkey equivalence classes are modeled.
+    let mut deduped = Vec::with_capacity(pathkeys.len());
+    for key in pathkeys {
+        if deduped.iter().any(|existing: &PathKey| {
+            existing.expr == key.expr
+                && existing.descending == key.descending
+                && existing.nulls_first == key.nulls_first
+                && existing.collation_oid == key.collation_oid
+        }) {
+            continue;
+        }
+        deduped.push(key);
+    }
+    deduped
 }
 
 fn window_clause_sort_key(clause: &WindowClause) -> Vec<PathKey> {
@@ -2343,7 +2358,6 @@ fn make_window_rel(
             .iter()
             .any(|path| bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys))
         && let [rtindex] = input_rel.relids.as_slice()
-        && !rtindex_has_inheritance_children(root, catalog, *rtindex)
     {
         let ordered_paths =
             relation_ordered_index_paths(root, *rtindex, &required_pathkeys, catalog);
@@ -2449,35 +2463,6 @@ fn make_window_rel(
     bestpath::set_cheapest(&mut rel);
     root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
-}
-
-fn rtindex_has_inheritance_children(
-    root: &PlannerInfo,
-    catalog: &dyn CatalogLookup,
-    rtindex: usize,
-) -> bool {
-    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
-        return false;
-    };
-    if !rte.inh {
-        return false;
-    }
-    let RangeTblEntryKind::Relation {
-        relation_oid,
-        relkind,
-        ..
-    } = rte.kind
-    else {
-        return false;
-    };
-    match relkind {
-        'p' => !catalog.inheritance_children(relation_oid).is_empty(),
-        'r' => catalog
-            .find_all_inheritors(relation_oid)
-            .into_iter()
-            .any(|oid| oid != relation_oid),
-        _ => false,
-    }
 }
 
 fn make_project_set_rel(
@@ -2972,14 +2957,37 @@ fn make_ordered_rel(
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    let required_pathkeys = required_query_pathkeys_for_rel(root, &input_rel);
     let mut extra_presorted_paths = Vec::new();
-    if (root.parse.limit_count.is_some() || root.parse.limit_offset.is_some())
-        && let [rtindex] = input_rel.relids.as_slice()
-        && !rtindex_has_inheritance_children(root, catalog, *rtindex)
+    if let Some(rtindex) = ordered_single_parent_rtindex(&input_rel)
+        && !pathtarget_has_unlowered_upper_expr(&input_rel.reltarget)
+        && ordered_rel_can_use_base_presorted_paths(&input_rel)
     {
+        let (base_target, base_pathkeys) = root
+            .simple_rel_array
+            .get(rtindex)
+            .and_then(Option::as_ref)
+            .map(|base_rel| {
+                (
+                    base_rel.reltarget.clone(),
+                    required_query_pathkeys_for_rel(root, base_rel),
+                )
+            })
+            .unwrap_or_else(|| (input_rel.reltarget.clone(), root.query_pathkeys.clone()));
         extra_presorted_paths =
-            relation_ordered_index_paths(root, *rtindex, &required_pathkeys, catalog);
+            relation_ordered_index_paths(root, rtindex, &base_pathkeys, catalog);
+        if !extra_presorted_paths.is_empty() && input_rel.reltarget != base_target {
+            let mut ordered_rel = RelOptInfo::new(vec![rtindex], RelOptKind::BaseRel, base_target);
+            ordered_rel.pathlist = extra_presorted_paths;
+            bestpath::set_cheapest(&mut ordered_rel);
+            extra_presorted_paths = make_pathtarget_projection_rel(
+                root,
+                ordered_rel,
+                &input_rel.reltarget,
+                catalog,
+                false,
+            )
+            .pathlist;
+        }
     }
     let required_matches = |path: &Path| {
         if pathkeys_are_fully_identified(&root.query_pathkeys) {
@@ -3059,6 +3067,27 @@ fn make_ordered_rel(
     rel
 }
 
+fn ordered_single_parent_rtindex(rel: &RelOptInfo) -> Option<usize> {
+    match rel.relids.as_slice() {
+        [rtindex] => Some(*rtindex),
+        _ => rel.pathlist.iter().find_map(path_single_append_rtindex),
+    }
+}
+
+fn path_single_append_rtindex(path: &Path) -> Option<usize> {
+    match path {
+        Path::Append { relids, .. } => match relids.as_slice() {
+            [rtindex] => Some(*rtindex),
+            _ => None,
+        },
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => path_single_append_rtindex(input),
+        _ => None,
+    }
+}
+
 fn ordered_append_path(path: &Path) -> bool {
     match path {
         Path::Append { .. } | Path::MergeAppend { .. } => true,
@@ -3067,6 +3096,155 @@ fn ordered_append_path(path: &Path) -> bool {
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => ordered_append_path(input),
         _ => false,
+    }
+}
+
+fn ordered_rel_can_use_base_presorted_paths(rel: &RelOptInfo) -> bool {
+    rel.pathlist
+        .iter()
+        .all(path_allows_base_presorted_replacement)
+}
+
+fn path_allows_base_presorted_replacement(path: &Path) -> bool {
+    match path {
+        Path::SeqScan { .. }
+        | Path::IndexOnlyScan { .. }
+        | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
+        | Path::BitmapOr { .. }
+        | Path::BitmapAnd { .. }
+        | Path::BitmapHeapScan { .. }
+        | Path::Append { .. }
+        | Path::MergeAppend { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. } => path_allows_base_presorted_replacement(input),
+        Path::Unique { .. }
+        | Path::Limit { .. }
+        | Path::LockRows { .. }
+        | Path::Aggregate { .. }
+        | Path::WindowAgg { .. }
+        | Path::ProjectSet { .. }
+        | Path::SubqueryScan { .. }
+        | Path::NestedLoopJoin { .. }
+        | Path::HashJoin { .. }
+        | Path::MergeJoin { .. }
+        | Path::Result { .. }
+        | Path::Values { .. }
+        | Path::FunctionScan { .. }
+        | Path::CteScan { .. }
+        | Path::WorkTableScan { .. }
+        | Path::RecursiveUnion { .. }
+        | Path::SetOp { .. } => false,
+    }
+}
+
+fn pathtarget_has_unlowered_upper_expr(target: &PathTarget) -> bool {
+    target.exprs.iter().any(expr_has_unlowered_upper_expr)
+}
+
+fn expr_has_unlowered_upper_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Aggref(_) | Expr::WindowFunc(_) | Expr::GroupingKey(_) | Expr::GroupingFunc(_) => {
+            true
+        }
+        Expr::Op(op) => op.args.iter().any(expr_has_unlowered_upper_expr),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_has_unlowered_upper_expr),
+        Expr::Func(func) => func.args.iter().any(expr_has_unlowered_upper_expr),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(expr_has_unlowered_upper_expr),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_has_unlowered_upper_expr(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_has_unlowered_upper_expr(expr)
+                || expr_has_unlowered_upper_expr(pattern)
+                || escape.as_deref().is_some_and(expr_has_unlowered_upper_expr)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_has_unlowered_upper_expr(left) || expr_has_unlowered_upper_expr(right)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_has_unlowered_upper_expr(&saop.left) || expr_has_unlowered_upper_expr(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_has_unlowered_upper_expr),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_has_unlowered_upper_expr(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_has_unlowered_upper_expr(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_has_unlowered_upper_expr)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_has_unlowered_upper_expr)
+                })
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_has_unlowered_upper_expr)
+                || case_expr.args.iter().any(|arm| {
+                    expr_has_unlowered_upper_expr(&arm.expr)
+                        || expr_has_unlowered_upper_expr(&arm.result)
+                })
+                || expr_has_unlowered_upper_expr(&case_expr.defresult)
+        }
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_has_unlowered_upper_expr),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_some_and(expr_has_unlowered_upper_expr)
+                || subplan.args.iter().any(expr_has_unlowered_upper_expr)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_has_unlowered_upper_expr),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_has_unlowered_upper_expr),
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
     }
 }
 
