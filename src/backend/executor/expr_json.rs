@@ -93,6 +93,8 @@ fn is_jsonpath_parse_error(details: &str) -> bool {
             && details.ends_with(" of jsonpath input")
         || details.starts_with("invalid numeric literal at or near ")
             && details.ends_with(" of jsonpath input")
+        || details.starts_with("invalid Unicode escape sequence at or near ")
+            && details.ends_with(" of jsonpath input")
 }
 
 pub(crate) fn canonicalize_jsonpath_text(text: &str) -> Result<CompactString, ExecError> {

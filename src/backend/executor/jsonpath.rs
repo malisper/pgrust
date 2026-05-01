@@ -2972,6 +2972,38 @@ fn exec_jsonpath_error(message: &str) -> ExecError {
     }
 }
 
+fn jsonpath_invalid_unicode_escape_near(token: &str) -> ExecError {
+    exec_jsonpath_error(&format!(
+        "invalid Unicode escape sequence at or near \"{token}\" of jsonpath input"
+    ))
+}
+
+fn jsonpath_unsupported_unicode_zero_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "unsupported Unicode escape sequence".into(),
+        detail: Some("\\u0000 cannot be converted to text.".into()),
+        hint: None,
+        sqlstate: "22P05",
+    }
+}
+
+fn jsonpath_unicode_high_surrogate_error() -> ExecError {
+    jsonpath_unicode_surrogate_error("Unicode high surrogate must not follow a high surrogate.")
+}
+
+fn jsonpath_unicode_low_surrogate_error() -> ExecError {
+    jsonpath_unicode_surrogate_error("Unicode low surrogate must follow a high surrogate.")
+}
+
+fn jsonpath_unicode_surrogate_error(detail: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: "invalid input syntax for type jsonpath".into(),
+        detail: Some(detail.into()),
+        hint: None,
+        sqlstate: "22P02",
+    }
+}
+
 fn render_jsonpath(path: &JsonPath) -> String {
     let mut out = String::new();
     if matches!(path.mode, PathMode::Strict) {
@@ -4450,63 +4482,98 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unicode_escape(&mut self, out: &mut String) -> Result<(), ExecError> {
+        let escape_start = self.offset.saturating_sub(2);
+        let high = self.parse_unicode_escape_value(escape_start)?;
+        if (0xD800..=0xDBFF).contains(&high) {
+            if !self.consume("\\u") {
+                return Err(jsonpath_unicode_low_surrogate_error());
+            }
+            let low_escape_start = self.offset.saturating_sub(2);
+            let low = self.parse_unicode_escape_value(low_escape_start)?;
+            if (0xD800..=0xDBFF).contains(&low) {
+                return Err(jsonpath_unicode_high_surrogate_error());
+            }
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return Err(jsonpath_unicode_low_surrogate_error());
+            }
+            let scalar = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+            self.push_unicode_codepoint(scalar, escape_start, out)?;
+        } else if (0xDC00..=0xDFFF).contains(&high) {
+            return Err(jsonpath_unicode_low_surrogate_error());
+        } else {
+            self.push_unicode_codepoint(high, escape_start, out)?;
+        }
+        Ok(())
+    }
+
+    fn parse_unicode_escape_value(&mut self, escape_start: usize) -> Result<u32, ExecError> {
         if self.consume("{") {
             let mut value = 0u32;
             let mut digits = 0usize;
             while !self.consume("}") {
                 if digits >= 6 {
-                    return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
+                    return Err(self.invalid_unicode_escape_at(escape_start));
                 }
-                value = (value << 4) | self.parse_hex_digit("invalid Unicode escape sequence")?;
+                value = (value << 4) | self.parse_unicode_hex_digit(escape_start)?;
                 digits += 1;
             }
             if digits == 0 {
-                return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
+                return Err(self.invalid_unicode_escape_at(escape_start));
             }
-            out.push(
-                char::from_u32(value)
-                    .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?,
-            );
-            return Ok(());
-        }
-
-        let high = self.parse_four_hex_digits()?;
-        if (0xD800..=0xDBFF).contains(&high) {
-            if !self.consume("\\u") {
-                return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
-            }
-            let low = self.parse_four_hex_digits()?;
-            if !(0xDC00..=0xDFFF).contains(&low) {
-                return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
-            }
-            let scalar = 0x10000 + (((high - 0xD800) as u32) << 10) + (low - 0xDC00) as u32;
-            out.push(
-                char::from_u32(scalar)
-                    .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?,
-            );
-        } else if (0xDC00..=0xDFFF).contains(&high) {
-            return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
+            Ok(value)
         } else {
-            out.push(
-                char::from_u32(high as u32)
-                    .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?,
-            );
+            self.parse_four_hex_digits(escape_start).map(u32::from)
         }
-        Ok(())
     }
 
-    fn parse_four_hex_digits(&mut self) -> Result<u16, ExecError> {
+    fn parse_four_hex_digits(&mut self, escape_start: usize) -> Result<u16, ExecError> {
         let mut value = 0u16;
         for _ in 0..4 {
-            value = (value << 4) | self.parse_hex_digit("invalid Unicode escape sequence")? as u16;
+            value = (value << 4) | self.parse_unicode_hex_digit(escape_start)? as u16;
         }
         Ok(value)
+    }
+
+    fn parse_unicode_hex_digit(&mut self, escape_start: usize) -> Result<u32, ExecError> {
+        let Some(ch) = self.peek() else {
+            return Err(self.invalid_unicode_escape_at(escape_start));
+        };
+        let Some(digit) = ch.to_digit(16) else {
+            return Err(self.invalid_unicode_escape_at(escape_start));
+        };
+        self.bump();
+        Ok(digit)
+    }
+
+    fn invalid_unicode_escape_at(&self, escape_start: usize) -> ExecError {
+        let token = &self.input[escape_start..self.offset];
+        jsonpath_invalid_unicode_escape_near(token)
+    }
+
+    fn push_unicode_codepoint(
+        &self,
+        codepoint: u32,
+        escape_start: usize,
+        out: &mut String,
+    ) -> Result<(), ExecError> {
+        if codepoint == 0 {
+            return Err(jsonpath_unsupported_unicode_zero_error());
+        }
+        out.push(
+            char::from_u32(codepoint)
+                .ok_or_else(|| self.invalid_unicode_escape_at(escape_start))?,
+        );
+        Ok(())
     }
 
     fn parse_hex_escape(&mut self) -> Result<char, ExecError> {
         let high = self.parse_hex_digit("invalid hexadecimal character sequence")?;
         let low = self.parse_hex_digit("invalid hexadecimal character sequence")?;
-        char::from_u32((high << 4) | low)
+        let codepoint = (high << 4) | low;
+        if codepoint == 0 {
+            return Err(jsonpath_unsupported_unicode_zero_error());
+        }
+        char::from_u32(codepoint)
             .ok_or_else(|| exec_jsonpath_error("invalid hexadecimal character sequence"))
     }
 

@@ -23828,7 +23828,50 @@ fn getdatabaseencoding_and_jsonpath_unicode_work() {
         "select '\"\\u\"'::jsonpath",
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::InvalidStorageValue { column, .. } if column == "jsonpath"));
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "invalid Unicode escape sequence at or near \"\\u\" of jsonpath input"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '\"\\u0000\"'::jsonpath",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        } if message == "unsupported Unicode escape sequence"
+            && detail == "\\u0000 cannot be converted to text."
+            && sqlstate == "22P05"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '\"\\ud83d\\ud83d\"'::jsonpath",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        } if message == "invalid input syntax for type jsonpath"
+            && detail == "Unicode high surrogate must not follow a high surrogate."
+            && sqlstate == "22P02"
+    ));
 
     let err = run_sql(
         &base,
@@ -23837,7 +23880,17 @@ fn getdatabaseencoding_and_jsonpath_unicode_work() {
         "select '\"\\ud83dX\"'::jsonpath",
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::InvalidStorageValue { column, .. } if column == "jsonpath"));
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        } if message == "invalid input syntax for type jsonpath"
+            && detail == "Unicode low surrogate must follow a high surrogate."
+            && sqlstate == "22P02"
+    ));
 }
 
 #[test]
