@@ -187,11 +187,11 @@ use crate::include::catalog::{
     PG_LARGEOBJECT_RELATION_OID, PG_MAINTAIN_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
     PG_READ_ALL_DATA_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
     PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
-    PgClassRow, PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow,
-    PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID,
-    SPGIST_AM_OID, TEXT_ARRAY_TYPE_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID,
-    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
-    default_btree_opclass_oid, default_hash_opclass_oid,
+    PgClassRow, PgCollationRow, PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_ARRAY_TYPE_OID, TEXT_SPGIST_OPCLASS_OID,
+    TEXT_TYPE_OID, bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid,
+    builtin_type_name_for_oid, default_btree_opclass_oid, default_hash_opclass_oid,
 };
 
 const SET_CONFIG_EFFECT_PREFIX: &str = "__pgrust_set_config_effect__";
@@ -2417,6 +2417,38 @@ fn eval_pg_conversion_is_visible(
                     .find(|candidate: &PgConversionRow| {
                         candidate.connamespace == namespace_oid
                             && candidate.conname.eq_ignore_ascii_case(conname)
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
+}
+
+fn eval_pg_collation_is_visible(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_collation_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog
+            .collation_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.collnamespace,
+            &row.collname,
+            |namespace_oid, collname| {
+                catalog
+                    .collation_rows()
+                    .into_iter()
+                    .find(|candidate: &PgCollationRow| {
+                        candidate.collnamespace == namespace_oid
+                            && candidate.collname.eq_ignore_ascii_case(collname)
                     })
                     .map(|candidate| candidate.oid)
             },
@@ -11945,6 +11977,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgOpclassIsVisible
         | BuiltinScalarFunction::PgOpfamilyIsVisible
         | BuiltinScalarFunction::PgConversionIsVisible
+        | BuiltinScalarFunction::PgCollationIsVisible
         | BuiltinScalarFunction::PgTsParserIsVisible
         | BuiltinScalarFunction::PgTsDictIsVisible
         | BuiltinScalarFunction::PgTsTemplateIsVisible
@@ -14009,6 +14042,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgOpclassIsVisible => eval_pg_opclass_is_visible(&values, ctx),
         BuiltinScalarFunction::PgOpfamilyIsVisible => eval_pg_opfamily_is_visible(&values, ctx),
         BuiltinScalarFunction::PgConversionIsVisible => eval_pg_conversion_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgCollationIsVisible => eval_pg_collation_is_visible(&values, ctx),
         BuiltinScalarFunction::PgTsParserIsVisible => eval_pg_ts_parser_is_visible(&values, ctx),
         BuiltinScalarFunction::PgTsDictIsVisible => eval_pg_ts_dict_is_visible(&values, ctx),
         BuiltinScalarFunction::PgTsTemplateIsVisible => {

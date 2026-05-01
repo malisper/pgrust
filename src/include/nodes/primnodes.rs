@@ -499,6 +499,7 @@ pub enum BuiltinScalarFunction {
     PgOpclassIsVisible,
     PgOpfamilyIsVisible,
     PgConversionIsVisible,
+    PgCollationIsVisible,
     PgTsParserIsVisible,
     PgTsDictIsVisible,
     PgTsTemplateIsVisible,

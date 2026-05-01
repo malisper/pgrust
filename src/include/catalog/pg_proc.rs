@@ -1419,6 +1419,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            3815,
+            "pg_collation_is_visible",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_collation_is_visible",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             3756,
             "pg_ts_parser_is_visible",
             BOOL_TYPE_OID,
@@ -12620,6 +12632,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_conversion_is_visible",
             BuiltinScalarFunction::PgConversionIsVisible,
+        ),
+        (
+            "pg_collation_is_visible",
+            BuiltinScalarFunction::PgCollationIsVisible,
         ),
         (
             "pg_ts_parser_is_visible",

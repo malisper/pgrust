@@ -11165,9 +11165,20 @@ impl Session {
 
     pub(crate) fn set_protocol_prepared_statement_view_rows(
         &mut self,
-        rows: Vec<SessionPreparedStatementViewRow>,
+        mut rows: Vec<SessionPreparedStatementViewRow>,
     ) {
+        rows.retain(|row| !row.name.is_empty());
         self.protocol_prepared_statements = rows;
+    }
+
+    pub(crate) fn prepared_statement_result_columns_for_describe(
+        &self,
+        execute_stmt: &ExecuteStatement,
+    ) -> Result<Option<Vec<QueryColumn>>, ExecError> {
+        Ok(self
+            .resolve_prepared_statement(execute_stmt)?
+            .result_columns
+            .clone())
     }
 
     fn session_view_state(&self, catalog: &dyn CatalogLookup) -> SessionViewState {

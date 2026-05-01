@@ -12395,9 +12395,13 @@ fn handle_describe(
                     .map(|oid| *oid as i32)
                     .collect::<Vec<_>>();
                 send_parameter_description(stream, &param_type_oids)?;
-                match describe_sql(db, &state.session, &stmt.sql, &[]) {
-                    Some(cols) => send_row_description(stream, &cols),
-                    None => send_no_data(stream),
+                match describe_sql(db, &state.session, &stmt.sql, &stmt.param_type_oids) {
+                    Ok(Some(cols)) => send_row_description(stream, &cols),
+                    Ok(None) => send_no_data(stream),
+                    Err(e) => {
+                        let describe_sql = sql_without_describe_terminator(&stmt.sql);
+                        send_exec_error(stream, &describe_sql, &e)
+                    }
                 }
             }
             None => {
@@ -13754,29 +13758,126 @@ fn describe_sql(
     db: &Database,
     session: &Session,
     sql: &str,
-    params: &[BoundParam],
-) -> Option<Vec<QueryColumn>> {
+    param_type_oids: &[u32],
+) -> Result<Option<Vec<QueryColumn>>, ExecError> {
     let catalog = session.catalog_lookup(db);
-    let sql = rewrite_regression_sql(&substitute_params(sql, params, &catalog)).into_owned();
-    match crate::backend::parser::parse_statement_with_options(
+    let sql = sql_without_describe_terminator(sql);
+    if sql.trim().is_empty() {
+        return Ok(None);
+    }
+    if let Some(err) = describe_trailing_syntax_error(&sql) {
+        return Err(err);
+    }
+    let sql = rewrite_regression_sql(&sql_with_describe_null_params(
+        &sql,
+        param_type_oids,
+        &catalog,
+    ))
+    .into_owned();
+    let stmt = crate::backend::parser::parse_statement_with_options(
         &sql,
         crate::backend::parser::ParseOptions {
             max_stack_depth_kb: session.datetime_config().max_stack_depth_kb,
             ..crate::backend::parser::ParseOptions::default()
         },
-    )
-    .ok()?
-    {
-        Statement::Select(stmt) => crate::backend::parser::pg_plan_query(&stmt, &catalog)
-            .ok()
-            .map(|planned_stmt| {
-                let mut columns = planned_stmt.columns();
-                annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
-                columns
-            }),
-        Statement::Explain(_) => Some(vec![QueryColumn::text("QUERY PLAN")]),
-        _ => None,
+    )?;
+    match stmt {
+        Statement::Select(stmt) => {
+            let planned_stmt =
+                crate::backend::parser::pg_plan_query(&stmt, &catalog).map_err(ExecError::Parse)?;
+            let mut columns = planned_stmt.columns();
+            annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
+            Ok(Some(columns))
+        }
+        Statement::Execute(execute_stmt) => {
+            let mut columns = session
+                .prepared_statement_result_columns_for_describe(&execute_stmt)?
+                .unwrap_or_default();
+            annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
+            Ok(Some(columns))
+        }
+        Statement::Explain(_) => Ok(Some(vec![QueryColumn::text("QUERY PLAN")])),
+        _ => Ok(None),
     }
+}
+
+fn sql_without_describe_terminator(sql: &str) -> String {
+    let trimmed = sql.trim_end();
+    if let Some(without_semicolon) = trimmed.strip_suffix(';') {
+        without_semicolon.trim_end().to_string()
+    } else {
+        sql.to_string()
+    }
+}
+
+fn describe_trailing_syntax_error(sql: &str) -> Option<ExecError> {
+    let trimmed = sql.trim_end();
+    let last_token_start = trimmed
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+    let last_token = &trimmed[last_token_start..];
+    if !last_token.eq_ignore_ascii_case("as") && !matches!(last_token, "+") {
+        return None;
+    }
+    // :HACK: psql's \gdesc sends the unfinished query through Parse/Describe.
+    // pgrust's grammar currently accepts trailing AS as an alias name; keep
+    // these protocol-visible errors aligned with PostgreSQL until parser error
+    // recovery distinguishes unfinished input from an explicit terminator.
+    Some(ExecError::Parse(
+        crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "complete expression",
+            actual: "syntax error at or near \"end of input\"".into(),
+        },
+    ))
+}
+
+fn sql_with_describe_null_params(
+    sql: &str,
+    param_type_oids: &[u32],
+    catalog: &dyn CatalogLookup,
+) -> String {
+    // :HACK: Describe needs result-column metadata before Bind supplies values.
+    // Reparse with typed NULL placeholders until the parser/planner can carry
+    // protocol parameter type context directly.
+    let mut out = String::with_capacity(sql.len());
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+    let mut copied_until = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == start {
+            index += 1;
+            continue;
+        }
+        out.push_str(&sql[copied_until..index]);
+        let param_index = sql[start..end].parse::<usize>().ok();
+        let type_oid = param_index
+            .and_then(|param| param.checked_sub(1))
+            .and_then(|idx| param_type_oids.get(idx).copied())
+            .filter(|oid| *oid != 0);
+        out.push_str("NULL");
+        if let Some(type_oid) = type_oid {
+            out.push_str("::");
+            out.push_str(&crate::backend::executor::expr_reg::format_type_text(
+                type_oid, None, catalog,
+            ));
+        }
+        copied_until = end;
+        index = end;
+    }
+    out.push_str(&sql[copied_until..]);
+    out
 }
 
 fn substitute_params(sql: &str, params: &[BoundParam], catalog: &dyn CatalogLookup) -> String {
@@ -14567,6 +14668,17 @@ mod tests {
 
     fn flush_message() -> Vec<u8> {
         frontend_message(b'H', &[])
+    }
+
+    fn sync_message() -> Vec<u8> {
+        frontend_message(b'S', &[])
+    }
+
+    fn describe_statement_message(statement_name: &str) -> Vec<u8> {
+        let mut body = vec![b'S'];
+        body.extend_from_slice(statement_name.as_bytes());
+        body.push(0);
+        frontend_message(b'D', &body)
     }
 
     fn read_message(stream: &mut impl Read, label: &str) -> (u8, Vec<u8>) {
@@ -15496,6 +15608,125 @@ mod tests {
 
         write_packet(&mut listener, &terminate_message());
         drop(listener);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn describe_sql_reports_gdesc_columns_with_unbound_params() {
+        let db = Database::open(temp_dir("describe_sql_gdesc_params"), 16).unwrap();
+        let session = Session::new(1);
+        let columns = describe_sql(
+            &db,
+            &session,
+            "SELECT
+                NULL AS zero,
+                1 AS one,
+                2.0 AS two,
+                'three' AS three,
+                $1 AS four,
+                sin($2) as five,
+                'foo'::varchar(4) as six,
+                CURRENT_DATE AS now",
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            columns
+                .iter()
+                .map(|col| col.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zero", "one", "two", "three", "four", "five", "six", "now"]
+        );
+        assert_eq!(columns[4].sql_type.kind, SqlTypeKind::Text);
+        assert_eq!(columns[5].sql_type.kind, SqlTypeKind::Float8);
+        assert_eq!(columns[6].sql_type.kind, SqlTypeKind::Varchar);
+        assert_eq!(columns[7].sql_type.kind, SqlTypeKind::Date);
+    }
+
+    #[test]
+    fn extended_protocol_describe_statement_reports_gdesc_columns() {
+        let db = Database::open(temp_dir("extended_describe_statement_gdesc"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(1),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+            ignore_till_sync: false,
+        };
+        let mut output = Vec::new();
+
+        let parse_packet = parse_message(
+            "",
+            "SELECT
+                NULL AS zero,
+                1 AS one,
+                2.0 AS two,
+                'three' AS three,
+                $1 AS four,
+                sin($2) as five,
+                'foo'::varchar(4) as six,
+                CURRENT_DATE AS now",
+        );
+        handle_parse(&mut output, &mut state, &parse_packet[5..]).unwrap();
+        handle_describe(&mut output, &db, &mut state, &[b'S', 0]).unwrap();
+
+        let mut cursor = Cursor::new(output);
+        let (parse_tag, _) = read_message(&mut cursor, "parse complete");
+        let (param_tag, _) = read_message(&mut cursor, "parameter description");
+        let (row_tag, _) = read_message(&mut cursor, "row description");
+
+        assert_eq!(parse_tag, b'1');
+        assert_eq!(param_tag, b't');
+        assert_eq!(row_tag, b'T');
+    }
+
+    #[test]
+    fn connection_describe_unnamed_prepared_statement_survives_sync() {
+        let cluster = Cluster::open(temp_dir("connection_describe_unnamed"), 16).unwrap();
+        let (mut client, server) = start_test_connection_with_cluster(cluster, 1);
+
+        write_packet(&mut client, &startup_packet("postgres", "postgres"));
+        let _ = read_until_ready(&mut client, "startup");
+        write_packet(
+            &mut client,
+            &parse_message(
+                "",
+                "SELECT
+                    NULL AS zero,
+                    1 AS one,
+                    2.0 AS two,
+                    'three' AS three,
+                    $1 AS four,
+                    sin($2) as five,
+                    'foo'::varchar(4) as six,
+                    CURRENT_DATE AS now",
+            ),
+        );
+        write_packet(&mut client, &sync_message());
+        let parse_response = read_until_ready(&mut client, "parse sync");
+        assert_eq!(
+            parse_response
+                .iter()
+                .map(|(tag, _)| *tag)
+                .collect::<Vec<_>>(),
+            vec![b'1', b'Z']
+        );
+
+        write_packet(&mut client, &describe_statement_message(""));
+        write_packet(&mut client, &sync_message());
+        let describe_response = read_until_ready(&mut client, "describe sync");
+        assert_eq!(
+            describe_response
+                .iter()
+                .map(|(tag, _)| *tag)
+                .collect::<Vec<_>>(),
+            vec![b't', b'T', b'Z']
+        );
+
+        write_packet(&mut client, &terminate_message());
+        drop(client);
         server.join().unwrap().unwrap();
     }
 

@@ -36957,6 +36957,7 @@ fn catalog_visibility_functions_cover_psql_describe_helpers() {
                     pg_operator_is_visible(0::oid), \
                     pg_opclass_is_visible(0::oid), \
                     pg_opfamily_is_visible(0::oid), \
+                    pg_collation_is_visible(0::oid), \
                     pg_conversion_is_visible(0::oid), \
                     pg_ts_parser_is_visible(0::oid), \
                     pg_ts_dict_is_visible(0::oid), \
@@ -36974,6 +36975,7 @@ fn catalog_visibility_functions_cover_psql_describe_helpers() {
             Value::Null,
             Value::Null,
             Value::Null,
+            Value::Null,
         ]]
     );
 
@@ -36981,6 +36983,7 @@ fn catalog_visibility_functions_cover_psql_describe_helpers() {
         "select pg_operator_is_visible(oid) from pg_operator where oprname = '=' order by oid limit 1",
         "select pg_opclass_is_visible(oid) from pg_opclass where opcname = 'int4_ops' order by oid limit 1",
         "select pg_opfamily_is_visible(oid) from pg_opfamily where opfname = 'integer_ops' order by oid limit 1",
+        "select pg_collation_is_visible(oid) from pg_collation where collname = 'default'",
         "select pg_ts_parser_is_visible(oid) from pg_ts_parser where prsname = 'default'",
         "select pg_ts_dict_is_visible(oid) from pg_ts_dict where dictname = 'simple'",
         "select pg_ts_template_is_visible(oid) from pg_ts_template where tmplname = 'simple'",
