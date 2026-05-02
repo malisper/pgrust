@@ -1,5 +1,4 @@
 use super::super::*;
-use super::privilege::{acl_grants_privilege, type_owner_default_acl};
 use super::reloptions::normalize_create_table_reloptions;
 use super::tablespace::resolve_relation_tablespace_oid;
 use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
@@ -20,9 +19,6 @@ use crate::backend::parser::{
     pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::rewrite::render_view_query_sql;
-use crate::backend::utils::cache::syscache::{
-    SearchSysCache1, SearchSysCacheList1, SysCacheId, SysCacheTuple,
-};
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::notices::{
     push_backend_notice, push_notice, push_notice_with_detail,
@@ -33,10 +29,9 @@ use crate::include::catalog::{
     ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL,
     DEPENDENCY_NORMAL, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID,
-    PG_LANGUAGE_SQL_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow,
-    PgDependRow, PgProcRow, RECORD_TYPE_OID, TRIGGER_TYPE_OID, VOID_TYPE_OID,
+    PG_LANGUAGE_SQL_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgDependRow, PgProcRow,
+    RECORD_TYPE_OID, TRIGGER_TYPE_OID, VOID_TYPE_OID,
 };
-use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     AliasColumnSpec, ForeignKeyAction, ForeignKeyMatchType, FromItem, GroupByItem, Query,
     RangeTblEntryKind, SelectStatement, ViewCheckOption,
@@ -67,11 +62,6 @@ pub(super) fn owned_sequence_dependency_kind(kind: OwnedSequenceKind) -> char {
         OwnedSequenceKind::Serial => DEPENDENCY_AUTO,
         OwnedSequenceKind::Identity => DEPENDENCY_INTERNAL,
     }
-}
-
-struct EffectiveTypeAclGrantees {
-    names: std::collections::BTreeSet<String>,
-    is_superuser: bool,
 }
 
 fn constraint_index_columns_with_expr_types(
@@ -1831,6 +1821,12 @@ fn lookup_aggregate_support_proc_row(
         ) => {
             if let Some(support) = exact_polymorphic_support.clone() {
                 support
+            } else if let Some(retry_types) =
+                aggregate_domain_base_retry_types(catalog, &actual_types)
+                && let Ok(resolved) =
+                    resolve_function_call(catalog, proc_name, &retry_types, explicit_variadic)
+            {
+                aggregate_support_from_resolved(catalog, proc_name, resolved)?
             } else if let Some(retry_types) = aggregate_runtime_coercion_retry_types(&actual_types)
                 && let Ok(resolved) =
                     resolve_function_call(catalog, proc_name, &retry_types, explicit_variadic)
@@ -1915,7 +1911,7 @@ fn lookup_aggregate_support_proc_row(
         {
             continue;
         }
-        if !is_binary_coercible_type(actual_type, declared_type) {
+        if !aggregate_type_is_binary_coercible(catalog, actual_type, declared_type) {
             return Err(ExecError::DetailedError {
                 message: format!(
                     "function {} requires run-time type coercion",
@@ -2101,6 +2097,51 @@ fn aggregate_runtime_coercion_retry_types(actual_types: &[SqlType]) -> Option<Ve
     Some(vec![first; actual_types.len()])
 }
 
+fn domain_base_sql_type(catalog: &dyn CatalogLookup, sql_type: SqlType) -> Option<SqlType> {
+    let mut current_oid = sql_type.type_oid;
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        if current_oid == 0 || !seen.insert(current_oid) {
+            return None;
+        }
+        let row = catalog.type_by_oid(current_oid)?;
+        if row.typtype != 'd' || row.typbasetype == 0 {
+            return (current_oid != sql_type.type_oid).then_some(row.sql_type);
+        }
+        current_oid = row.typbasetype;
+    }
+}
+
+fn aggregate_domain_base_retry_types(
+    catalog: &dyn CatalogLookup,
+    actual_types: &[SqlType],
+) -> Option<Vec<SqlType>> {
+    let mut changed = false;
+    let retry_types = actual_types
+        .iter()
+        .copied()
+        .map(|actual_type| {
+            if let Some(base_type) = domain_base_sql_type(catalog, actual_type) {
+                changed = true;
+                base_type
+            } else {
+                actual_type
+            }
+        })
+        .collect::<Vec<_>>();
+    changed.then_some(retry_types)
+}
+
+fn aggregate_type_is_binary_coercible(
+    catalog: &dyn CatalogLookup,
+    actual_type: SqlType,
+    declared_type: SqlType,
+) -> bool {
+    is_binary_coercible_type(actual_type, declared_type)
+        || domain_base_sql_type(catalog, actual_type)
+            .is_some_and(|base_type| is_binary_coercible_type(base_type, declared_type))
+}
+
 fn lookup_exact_aggregate_support_proc(
     catalog: &dyn CatalogLookup,
     proc_name: &str,
@@ -2241,6 +2282,21 @@ fn support_result_type_oid(
                 support.result_type
             )))
         })
+}
+
+fn support_result_type_matches_oid(
+    catalog: &dyn CatalogLookup,
+    support: &AggregateSupportProc,
+    expected_oid: u32,
+) -> Result<bool, ExecError> {
+    let actual_oid = support_result_type_oid(catalog, support)?;
+    Ok(actual_oid == expected_oid
+        || catalog
+            .type_by_oid(expected_oid)
+            .filter(|row| row.typtype == 'd')
+            .and_then(|row| domain_base_sql_type(catalog, row.sql_type))
+            .and_then(|base_type| catalog.type_oid_for_sql_type(base_type))
+            == Some(actual_oid))
 }
 
 fn proc_signature_type_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
@@ -4583,6 +4639,7 @@ impl Database {
         let sql_type = crate::backend::parser::resolve_raw_type_name(&create_stmt.ty, &catalog)
             .map_err(ExecError::Parse)?;
         Self::validate_create_domain_base_type(sql_type)?;
+        self.ensure_sql_type_usage_privilege(client_id, None, configured_search_path, sql_type)?;
         Self::validate_create_domain_collation(create_stmt.collation.as_deref(), sql_type)?;
         if let Some(default_sql) = create_stmt.default.as_deref() {
             Self::validate_create_domain_default_expr(default_sql, &catalog)?;
@@ -4677,6 +4734,8 @@ impl Database {
                 }
             })
             .collect::<Vec<_>>();
+        let owner_oid = self.auth_state(client_id).current_user_oid();
+        let typacl = self.default_acl_for_new_type(owner_oid, namespace_oid);
         let mut domains = self.domains.write();
         domains.insert(
             normalized,
@@ -4685,14 +4744,14 @@ impl Database {
                 array_oid,
                 name: object_name,
                 namespace_oid,
-                owner_oid: self.auth_state(client_id).current_user_oid(),
+                owner_oid,
                 sql_type,
                 default: create_stmt.default.clone(),
                 check: create_stmt.check.clone(),
                 not_null: create_stmt.not_null,
                 constraints,
                 enum_check,
-                typacl: None,
+                typacl,
                 comment: None,
             },
         );
@@ -5081,6 +5140,12 @@ impl Database {
 
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
+            self.ensure_sql_type_usage_privilege(
+                client_id,
+                Some((xid, function_cid)),
+                configured_search_path,
+                sql_type,
+            )?;
             if let Some(notice) = percent_type_signature_notice(&arg.ty, sql_type) {
                 percent_type_notices.insert(notice);
             }
@@ -5138,6 +5203,7 @@ impl Database {
 
         match &create_stmt.return_spec {
             CreateFunctionReturnSpec::Type { ty, setof } => {
+                let mut created_shell_return_type = false;
                 let sql_type = match resolve_raw_type_name(ty, &catalog) {
                     Ok(sql_type) => {
                         if matches!(sql_type.kind, SqlTypeKind::Shell) {
@@ -5167,12 +5233,21 @@ impl Database {
                             format!("type \"{object_name}\" is not yet defined"),
                             "Creating a shell type definition.",
                         );
+                        created_shell_return_type = true;
                         SqlType::new(SqlTypeKind::Shell).with_identity(type_oid, 0)
                     }
                     Err(err) => return Err(ExecError::Parse(err)),
                 };
                 if let Some(notice) = percent_type_signature_notice(ty, sql_type) {
                     percent_type_notices.insert(notice);
+                }
+                if !created_shell_return_type {
+                    self.ensure_sql_type_usage_privilege(
+                        client_id,
+                        Some((xid, function_cid)),
+                        configured_search_path,
+                        sql_type,
+                    )?;
                 }
                 proretset = *setof;
                 prorettype = create_function_type_oid(&catalog, sql_type, format!("{sql_type:?}"))?;
@@ -5218,6 +5293,12 @@ impl Database {
                 for column in columns {
                     let sql_type =
                         resolve_raw_type_name(&column.ty, &catalog).map_err(ExecError::Parse)?;
+                    self.ensure_sql_type_usage_privilege(
+                        client_id,
+                        Some((xid, function_cid)),
+                        configured_search_path,
+                        sql_type,
+                    )?;
                     if let Some(notice) = percent_type_signature_notice(&column.ty, sql_type) {
                         percent_type_notices.insert(notice);
                     }
@@ -5594,6 +5675,19 @@ impl Database {
         let stype_oid = catalog
             .type_oid_for_sql_type(stype)
             .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("{stype:?}"))))?;
+        for type_oid in arg_oids
+            .iter()
+            .chain(transition_input_oids.iter())
+            .copied()
+            .chain(std::iter::once(stype_oid))
+        {
+            self.ensure_type_usage_privilege_by_oid(
+                client_id,
+                txn_ctx,
+                configured_search_path,
+                type_oid,
+            )?;
+        }
         validate_polymorphic_aggregate_transition_type(stype_oid, &transition_input_oids)?;
         if create_stmt.serialfunc_name.is_some() != create_stmt.deserialfunc_name.is_some() {
             return Err(ExecError::DetailedError {
@@ -5614,7 +5708,7 @@ impl Database {
             &trans_arg_oids,
             explicit_variadic,
         )?;
-        if support_result_type_oid(&catalog, &transfn_row)? != stype_oid {
+        if !support_result_type_matches_oid(&catalog, &transfn_row, stype_oid)? {
             return Err(ExecError::DetailedError {
                 message: format!(
                     "return type of transition function {} is not {}",
@@ -5650,7 +5744,7 @@ impl Database {
             })
             .transpose()?;
         if let Some(combinefn_row) = combinefn_row.as_ref()
-            && support_result_type_oid(&catalog, combinefn_row)? != stype_oid
+            && !support_result_type_matches_oid(&catalog, combinefn_row, stype_oid)?
         {
             return Err(ExecError::DetailedError {
                 message: format!(
@@ -5694,7 +5788,7 @@ impl Database {
             })
             .transpose()?;
         if let Some(deserialfn_row) = deserialfn_row.as_ref()
-            && support_result_type_oid(&catalog, deserialfn_row)? != stype_oid
+            && !support_result_type_matches_oid(&catalog, deserialfn_row, stype_oid)?
         {
             return Err(ExecError::DetailedError {
                 message: format!(
@@ -5720,6 +5814,14 @@ impl Database {
                     })
             })
             .transpose()?;
+        if let Some(mstype_oid) = mstype_oid {
+            self.ensure_type_usage_privilege_by_oid(
+                client_id,
+                txn_ctx,
+                configured_search_path,
+                mstype_oid,
+            )?;
+        }
         let msfunc_row = create_stmt
             .msfunc_name
             .as_deref()
@@ -5732,7 +5834,11 @@ impl Database {
             })
             .transpose()?;
         if let Some(msfunc_row) = msfunc_row.as_ref()
-            && support_result_type_oid(&catalog, msfunc_row)? != mstype_oid.unwrap_or(stype_oid)
+            && !support_result_type_matches_oid(
+                &catalog,
+                msfunc_row,
+                mstype_oid.unwrap_or(stype_oid),
+            )?
         {
             return Err(ExecError::DetailedError {
                 message: format!(
@@ -5757,7 +5863,11 @@ impl Database {
             })
             .transpose()?;
         if let Some(minvfunc_row) = minvfunc_row.as_ref()
-            && support_result_type_oid(&catalog, minvfunc_row)? != mstype_oid.unwrap_or(stype_oid)
+            && !support_result_type_matches_oid(
+                &catalog,
+                minvfunc_row,
+                mstype_oid.unwrap_or(stype_oid),
+            )?
         {
             return Err(ExecError::DetailedError {
                 message: format!(
@@ -6254,7 +6364,8 @@ impl Database {
         self.ensure_create_table_type_usage(
             client_id,
             Some((xid, table_cid)),
-            &lowered.relation_desc,
+            configured_search_path,
+            &lowered,
         )?;
         if create_stmt.if_not_exists
             && relation_exists_in_namespace(&catalog, &table_name, namespace_oid)
@@ -6892,137 +7003,23 @@ impl Database {
         &self,
         client_id: ClientId,
         txn_ctx: Option<(TransactionId, CommandId)>,
-        desc: &RelationDesc,
+        configured_search_path: Option<&[String]>,
+        lowered: &crate::backend::parser::LoweredCreateTable,
     ) -> Result<(), ExecError> {
-        let used_range_types = {
-            let range_types = self.range_types.read();
-            desc.columns
-                .iter()
-                .filter_map(|column| {
-                    let ty = column.sql_type.element_type();
-                    range_types
-                        .values()
-                        .find(|entry| {
-                            ty.type_oid == entry.oid || ty.type_oid == entry.multirange_oid
-                        })
-                        .map(|entry| {
-                            let type_name = if ty.type_oid == entry.multirange_oid {
-                                entry.multirange_name.clone()
-                            } else {
-                                entry.name.clone()
-                            };
-                            (entry.clone(), type_name)
-                        })
-                })
-                .collect::<Vec<_>>()
-        };
-        if used_range_types.is_empty() {
-            return Ok(());
+        if lowered.of_type_oid != 0 {
+            self.ensure_type_usage_privilege_by_oid(
+                client_id,
+                txn_ctx,
+                configured_search_path,
+                lowered.of_type_oid,
+            )?;
         }
-
-        let effective_grantees = self.effective_type_acl_grantees(client_id, txn_ctx)?;
-        for (entry, type_name) in used_range_types {
-            let owner_name = self
-                .syscache_role_by_oid(client_id, txn_ctx, entry.owner_oid)?
-                .map(|role| role.rolname)
-                .unwrap_or_else(|| entry.owner_oid.to_string());
-            let acl = entry
-                .typacl
-                .clone()
-                .unwrap_or_else(|| type_owner_default_acl(&owner_name));
-            if !effective_grantees.is_superuser
-                && !acl_grants_privilege(&acl, &effective_grantees.names, 'U')
-            {
-                return Err(ExecError::DetailedError {
-                    message: format!("permission denied for type {type_name}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42501",
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn effective_type_acl_grantees(
-        &self,
-        client_id: ClientId,
-        txn_ctx: Option<(TransactionId, CommandId)>,
-    ) -> Result<EffectiveTypeAclGrantees, ExecError> {
-        let auth = self.auth_state(client_id);
-        let mut names = std::collections::BTreeSet::from([String::new()]);
-        let mut pending = std::collections::VecDeque::from([auth.current_user_oid()]);
-        let mut visited = std::collections::BTreeSet::new();
-
-        while let Some(member_oid) = pending.pop_front() {
-            if !visited.insert(member_oid) {
-                continue;
-            }
-            if let Some(role) = self.syscache_role_by_oid(client_id, txn_ctx, member_oid)? {
-                if member_oid == auth.current_user_oid() && role.rolsuper {
-                    return Ok(EffectiveTypeAclGrantees {
-                        names,
-                        is_superuser: true,
-                    });
-                }
-                names.insert(role.rolname);
-            }
-            for membership in
-                self.syscache_auth_memberships_for_member(client_id, txn_ctx, member_oid)?
-            {
-                if membership.inherit_option {
-                    pending.push_back(membership.roleid);
-                }
-            }
-        }
-
-        Ok(EffectiveTypeAclGrantees {
-            names,
-            is_superuser: false,
-        })
-    }
-
-    fn syscache_role_by_oid(
-        &self,
-        client_id: ClientId,
-        txn_ctx: Option<(TransactionId, CommandId)>,
-        role_oid: u32,
-    ) -> Result<Option<PgAuthIdRow>, ExecError> {
-        Ok(SearchSysCache1(
-            self,
+        self.ensure_relation_desc_type_usage_privileges(
             client_id,
             txn_ctx,
-            SysCacheId::AUTHOID,
-            Value::Int64(i64::from(role_oid)),
+            configured_search_path,
+            &lowered.relation_desc,
         )
-        .map_err(map_catalog_error)?
-        .into_iter()
-        .find_map(|tuple| match tuple {
-            SysCacheTuple::AuthId(row) => Some(row),
-            _ => None,
-        }))
-    }
-
-    fn syscache_auth_memberships_for_member(
-        &self,
-        client_id: ClientId,
-        txn_ctx: Option<(TransactionId, CommandId)>,
-        member_oid: u32,
-    ) -> Result<Vec<PgAuthMembersRow>, ExecError> {
-        Ok(SearchSysCacheList1(
-            self,
-            client_id,
-            txn_ctx,
-            SysCacheId::AUTHMEMMEMROLE,
-            Value::Int64(i64::from(member_oid)),
-        )
-        .map_err(map_catalog_error)?
-        .into_iter()
-        .filter_map(|tuple| match tuple {
-            SysCacheTuple::AuthMembers(row) => Some(row),
-            _ => None,
-        })
-        .collect())
     }
 
     pub(crate) fn execute_create_view_stmt_in_transaction_with_search_path(
@@ -7487,6 +7484,12 @@ impl Database {
                 })
                 .collect(),
         };
+        self.ensure_relation_desc_type_usage_privileges(
+            client_id,
+            Some((xid, table_cid)),
+            configured_search_path,
+            &desc,
+        )?;
         let relation_tablespace_oid = if persistence == TablePersistence::Temporary {
             0
         } else {

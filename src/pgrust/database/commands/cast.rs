@@ -4,7 +4,7 @@ use crate::backend::parser::{
     CastContext, CatalogLookup, CreateCastMethod, CreateCastStatement, DropCastStatement,
     ParseError, RawTypeName, resolve_raw_type_name,
 };
-use crate::backend::utils::misc::notices::push_notice;
+use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
     BOOL_TYPE_OID, DEPENDENCY_NORMAL, INT4_TYPE_OID, PG_CAST_RELATION_OID, PG_PROC_RELATION_OID,
     PG_TYPE_RELATION_OID, PgCastRow, PgDependRow, PgProcRow, PgTypeRow, builtin_type_name_for_oid,
@@ -187,6 +187,21 @@ fn is_binary_coercible(catalog: &dyn CatalogLookup, source_oid: u32, target_oid:
     source_oid == target_oid || binary_coercible_cast_row(catalog, source_oid, target_oid).is_some()
 }
 
+fn domain_base_type_oid(catalog: &dyn CatalogLookup, type_oid: u32) -> Option<u32> {
+    let mut current_oid = type_oid;
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        if !seen.insert(current_oid) {
+            return None;
+        }
+        let row = catalog.type_by_oid(current_oid)?;
+        if row.typtype != 'd' || row.typbasetype == 0 {
+            return Some(current_oid);
+        }
+        current_oid = row.typbasetype;
+    }
+}
+
 fn validate_binary_cast_physical_compatibility(
     catalog: &dyn CatalogLookup,
     source: &PgTypeRow,
@@ -252,7 +267,10 @@ fn validate_cast_function(
     }
     let first_arg_oid = arg_oids[0];
     let in_cast = binary_coercible_cast_row(catalog, source_oid, first_arg_oid);
-    if source_oid != first_arg_oid && in_cast.is_none() {
+    if source_oid != first_arg_oid
+        && domain_base_type_oid(catalog, source_oid) != Some(first_arg_oid)
+        && in_cast.is_none()
+    {
         return Err(ExecError::DetailedError {
             message:
                 "argument of cast function must match or be binary-coercible from source data type"
@@ -279,7 +297,10 @@ fn validate_cast_function(
         });
     }
     let out_cast = binary_coercible_cast_row(catalog, proc_row.prorettype, target_oid);
-    if proc_row.prorettype != target_oid && out_cast.is_none() {
+    if proc_row.prorettype != target_oid
+        && domain_base_type_oid(catalog, target_oid) != Some(proc_row.prorettype)
+        && out_cast.is_none()
+    {
         return Err(ExecError::DetailedError {
             message: "return data type of cast function must match or be binary-coercible to target data type".into(),
             detail: None,
@@ -346,6 +367,18 @@ impl Database {
                 sqlstate: "42P17",
             });
         }
+        self.ensure_type_usage_privilege_by_oid(
+            client_id,
+            Some((xid, cid)),
+            configured_search_path,
+            source_row.oid,
+        )?;
+        self.ensure_type_usage_privilege_by_oid(
+            client_id,
+            Some((xid, cid)),
+            configured_search_path,
+            target_row.oid,
+        )?;
         if catalog
             .cast_by_source_target(source_row.oid, target_row.oid)
             .is_some()
@@ -359,6 +392,9 @@ impl Database {
                 hint: None,
                 sqlstate: "42710",
             });
+        }
+        if source_row.typtype == 'd' {
+            push_warning("cast will be ignored because the source data type is a domain");
         }
 
         let mut depends = Vec::new();

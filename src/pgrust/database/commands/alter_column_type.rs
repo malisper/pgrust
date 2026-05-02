@@ -596,6 +596,7 @@ fn collect_alter_column_type_targets(
     cid: CommandId,
     relation: &crate::backend::parser::BoundRelation,
     alter_stmt: &crate::backend::parser::AlterTableAlterColumnTypeStatement,
+    configured_search_path: Option<&[String]>,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
 ) -> Result<Vec<AlterColumnTypeTarget>, ExecError> {
     let target_relation_oids = catalog
@@ -652,6 +653,12 @@ fn collect_alter_column_type_targets(
         }
         let requested_type = crate::backend::parser::resolve_raw_type_name(&alter_stmt.ty, catalog)
             .map_err(ExecError::Parse)?;
+        db.ensure_sql_type_usage_privilege(
+            client_id,
+            Some((xid, cid)),
+            configured_search_path,
+            requested_type,
+        )?;
         reject_recursive_composite_column_type(
             catalog,
             target_relation.relation_oid,
@@ -813,6 +820,7 @@ impl Database {
             cid,
             &relation,
             alter_stmt,
+            configured_search_path,
             datetime_config,
         )?;
         let table_rewrite_trigger_may_fire =

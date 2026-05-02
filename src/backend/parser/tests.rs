@@ -6195,7 +6195,7 @@ fn parse_grant_usage_on_type_statement() {
     assert_eq!(
         stmt,
         Statement::GrantObject(GrantObjectStatement {
-            privilege: GrantObjectPrivilege::UsageOnType,
+            privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Type),
             columns: Vec::new(),
             object_names: vec!["custom_t".into()],
             grantee_names: vec!["public".into()],
@@ -6211,7 +6211,7 @@ fn parse_grant_usage_on_domain_statement() {
     assert_eq!(
         stmt,
         Statement::GrantObject(GrantObjectStatement {
-            privilege: GrantObjectPrivilege::UsageOnType,
+            privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Domain),
             columns: Vec::new(),
             object_names: vec!["priv_testdomain1".into()],
             grantee_names: vec!["regress_priv_user2".into()],
@@ -6226,7 +6226,7 @@ fn parse_grant_all_on_type_statement() {
     assert_eq!(
         stmt,
         Statement::GrantObject(GrantObjectStatement {
-            privilege: GrantObjectPrivilege::UsageOnType,
+            privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Type),
             columns: Vec::new(),
             object_names: vec!["custom_t".into()],
             grantee_names: vec!["public".into()],
@@ -6581,7 +6581,7 @@ fn parse_revoke_usage_on_type_statement() {
     assert_eq!(
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
-            privilege: GrantObjectPrivilege::UsageOnType,
+            privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Type),
             columns: Vec::new(),
             object_names: vec!["custom_t".into()],
             grantee_names: vec!["public".into()],
@@ -6596,7 +6596,7 @@ fn parse_revoke_usage_on_domain_statement() {
     assert_eq!(
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
-            privilege: GrantObjectPrivilege::UsageOnType,
+            privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Domain),
             columns: Vec::new(),
             object_names: vec!["priv_testdomain1".into()],
             grantee_names: vec!["public".into()],
@@ -6611,7 +6611,7 @@ fn parse_revoke_all_on_domain_statement() {
     assert_eq!(
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
-            privilege: GrantObjectPrivilege::UsageOnType,
+            privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Domain),
             columns: Vec::new(),
             object_names: vec!["priv_testdomain1".into()],
             grantee_names: vec!["public".into()],
@@ -16801,7 +16801,10 @@ fn parse_create_and_drop_type_statements() {
     else {
         panic!("expected revoke type usage");
     };
-    assert_eq!(revoke_stmt.privilege, GrantObjectPrivilege::UsageOnType);
+    assert_eq!(
+        revoke_stmt.privilege,
+        GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Type)
+    );
     assert_eq!(revoke_stmt.object_names, vec!["complex"]);
     assert_eq!(revoke_stmt.grantee_names, vec!["public"]);
     assert!(!revoke_stmt.cascade);
