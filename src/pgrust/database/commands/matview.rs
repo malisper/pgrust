@@ -10,7 +10,7 @@ use crate::include::nodes::parsenodes::{
     AlterMaterializedViewSetAccessMethodStatement, CreateTableAsQuery,
     DropMaterializedViewStatement, RefreshMaterializedViewStatement, TableAsObjectType,
 };
-use crate::include::nodes::primnodes::QueryColumn;
+use crate::include::nodes::primnodes::{Expr, QueryColumn, set_returning_call_exprs};
 use std::collections::{HashMap, HashSet};
 
 impl Database {
@@ -806,11 +806,139 @@ fn matview_concurrent_refresh_predicate_qualifies(
     let Some(predicate) = index.index_predicate.as_ref() else {
         return false;
     };
+    if matview_predicate_depends_on_row(predicate) {
+        return false;
+    }
     let mut slot = crate::backend::executor::TupleSlot::empty(0);
     matches!(
         crate::backend::executor::eval_expr(predicate, &mut slot, ctx),
         Ok(Value::Bool(true))
     )
+}
+
+fn matview_predicate_depends_on_row(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(_) | Expr::Param(_) => true,
+        Expr::GroupingKey(grouping_key) => matview_predicate_depends_on_row(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(matview_predicate_depends_on_row),
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(matview_predicate_depends_on_row)
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| matview_predicate_depends_on_row(&item.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(matview_predicate_depends_on_row)
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(matview_predicate_depends_on_row),
+        Expr::Op(op) => op.args.iter().any(matview_predicate_depends_on_row),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(matview_predicate_depends_on_row),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(matview_predicate_depends_on_row)
+                || case_expr.args.iter().any(|arm| {
+                    matview_predicate_depends_on_row(&arm.expr)
+                        || matview_predicate_depends_on_row(&arm.result)
+                })
+                || matview_predicate_depends_on_row(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(matview_predicate_depends_on_row),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(matview_predicate_depends_on_row),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(matview_predicate_depends_on_row),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(matview_predicate_depends_on_row),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_some_and(matview_predicate_depends_on_row)
+                || subplan.args.iter().any(matview_predicate_depends_on_row)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            matview_predicate_depends_on_row(&saop.left)
+                || matview_predicate_depends_on_row(&saop.right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(matview_predicate_depends_on_row),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => matview_predicate_depends_on_row(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            matview_predicate_depends_on_row(expr)
+                || matview_predicate_depends_on_row(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(matview_predicate_depends_on_row)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            matview_predicate_depends_on_row(left) || matview_predicate_depends_on_row(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().any(matview_predicate_depends_on_row)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| matview_predicate_depends_on_row(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            matview_predicate_depends_on_row(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(matview_predicate_depends_on_row)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(matview_predicate_depends_on_row)
+                })
+        }
+        Expr::CaseTest(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn validate_refresh_matview_rows(
