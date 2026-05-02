@@ -20542,9 +20542,22 @@ fn parse_sql_json_special_syntax() {
         );
     }
 
-    assert!(parse_select("select json()").is_err());
-    assert!(parse_select("select json_scalar()").is_err());
-    assert!(parse_select("select json_serialize()").is_err());
+    for sql in [
+        "select json()",
+        "select json_scalar()",
+        "select json_serialize()",
+    ] {
+        let err = parse_select(sql).unwrap_err();
+        assert_eq!(err.position(), Some(sql.find(')').unwrap() + 1));
+        assert!(
+            matches!(
+                err.unpositioned(),
+                ParseError::UnexpectedToken { actual, .. }
+                    if actual == "syntax error at or near \")\""
+            ),
+            "expected empty SQL/JSON constructor syntax error, got {err:?}"
+        );
+    }
 }
 
 #[test]

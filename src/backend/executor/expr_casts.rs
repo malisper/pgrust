@@ -4284,6 +4284,18 @@ fn enforce_domain_check(
                 &constraint_name,
             ));
         }
+        if let Some(disallowed) = parse_not_in_domain_check(check) {
+            if !disallowed
+                .iter()
+                .any(|disallowed| domain_value_equals(&value, disallowed))
+            {
+                continue;
+            }
+            return Err(domain_check_violation_for_name(
+                &domain.name,
+                &constraint_name,
+            ));
+        }
         if let Some(limit) = parse_greater_than_domain_check(check) {
             if domain_greater_than_limit(&value, limit) {
                 continue;
@@ -4407,6 +4419,26 @@ fn parse_not_equal_domain_check(check: &str) -> Option<Value> {
         return None;
     }
     parse_domain_check_literal(right.trim())
+}
+
+fn parse_not_in_domain_check(check: &str) -> Option<Vec<Value>> {
+    let lower = check.to_ascii_lowercase();
+    let index = lower.find("not in")?;
+    let (left, right) = check.split_at(index);
+    let left = left
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '(' && *ch != ')')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if left != "value" {
+        return None;
+    }
+    let values = right["not in".len()..].trim();
+    let values = values.strip_prefix('(')?.strip_suffix(')')?;
+    values
+        .split(',')
+        .map(|item| parse_domain_check_literal(item.trim()))
+        .collect()
 }
 
 fn parse_domain_check_literal(input: &str) -> Option<Value> {

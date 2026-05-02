@@ -20598,6 +20598,48 @@ fn json_builders_and_object_agg_work() {
 }
 
 #[test]
+fn sql_json_returning_coerces_typmods_and_domains() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "select json_serialize('{ \"a\" : 1 } ' returning varchar(2))",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::StringDataRightTruncation { ref ty }
+            if ty == "character varying(2)"
+    ));
+
+    session
+        .execute(
+            &db,
+            "create domain sqljson_char2 as char(2) check (value not in ('12'))",
+        )
+        .unwrap();
+
+    let err = session
+        .execute(&db, "select json_serialize('123' returning sqljson_char2)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::StringDataRightTruncation { ref ty } if ty == "character(2)"
+    ));
+
+    let err = session
+        .execute(&db, "select json_serialize('12' returning sqljson_char2)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { ref message, .. }
+            if message == "value for domain sqljson_char2 violates check constraint \"sqljson_char2_check\""
+    ));
+}
+
+#[test]
 fn json_variadic_calls_match_supported_postgres_cases() {
     let base = temp_dir("json_variadic_calls");
     let txns = TransactionManager::new_durable(&base).unwrap();

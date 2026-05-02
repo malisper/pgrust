@@ -644,7 +644,7 @@ pub(crate) fn eval_json_builtin_function(
                 )?)))
             }
             BuiltinScalarFunction::SqlJsonConstructor => {
-                eval_sql_json_constructor(values, result_type)
+                eval_sql_json_constructor(values, result_type, catalog, datetime_config)
             }
             BuiltinScalarFunction::SqlJsonScalar => {
                 let value = values.first().cloned().unwrap_or(Value::Null);
@@ -658,11 +658,14 @@ pub(crate) fn eval_json_builtin_function(
                         catalog,
                     )))
                 };
-                coerce_sql_json_return_value(result, result_type)
+                coerce_sql_json_return_value(result, result_type, catalog, datetime_config)
             }
-            BuiltinScalarFunction::SqlJsonSerialize => {
-                eval_sql_json_serialize(values.first().unwrap_or(&Value::Null), result_type)
-            }
+            BuiltinScalarFunction::SqlJsonSerialize => eval_sql_json_serialize(
+                values.first().unwrap_or(&Value::Null),
+                result_type,
+                catalog,
+                datetime_config,
+            ),
             BuiltinScalarFunction::SqlJsonObject => {
                 eval_sql_json_object(values, result_type, datetime_config, catalog)
             }
@@ -2008,12 +2011,14 @@ fn variadic_args(
 fn coerce_sql_json_return_value(
     value: Value,
     result_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
 ) -> Result<Value, ExecError> {
     let Some(result_type) = result_type else {
         return Ok(value);
     };
     if matches!(value, Value::Null) {
-        return Ok(Value::Null);
+        return enforce_domain_constraints_for_value(Value::Null, result_type, catalog);
     }
     let text = match &value {
         Value::Json(text) => text.to_string(),
@@ -2027,12 +2032,18 @@ fn coerce_sql_json_return_value(
             None,
         ),
     };
-    match result_type.kind {
+    let coerced = match result_type.kind {
         SqlTypeKind::Json => Ok(Value::Json(CompactString::from_owned(text))),
         SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(&text)?)),
         SqlTypeKind::Bytea => Ok(Value::Bytea(text.into_bytes())),
         SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char => {
-            Ok(Value::Text(CompactString::from_owned(text)))
+            return cast_text_value_with_catalog_and_config(
+                &text,
+                result_type,
+                false,
+                catalog,
+                config,
+            );
         }
         _ => Err(ExecError::DetailedError {
             message: format!(
@@ -2043,12 +2054,15 @@ fn coerce_sql_json_return_value(
             hint: None,
             sqlstate: "0A000",
         }),
-    }
+    }?;
+    enforce_domain_constraints_for_value(coerced, result_type, catalog)
 }
 
 fn eval_sql_json_constructor(
     values: &[Value],
     result_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
 ) -> Result<Value, ExecError> {
     let value = values.first().unwrap_or(&Value::Null);
     let unique_keys = values
@@ -2094,7 +2108,7 @@ fn eval_sql_json_constructor(
             });
         }
     };
-    coerce_sql_json_return_value(result, result_type)
+    coerce_sql_json_return_value(result, result_type, catalog, config)
 }
 
 struct JsonUniqueKeysSeed;
@@ -2210,6 +2224,8 @@ fn validate_json_unique_keys(text: &str) -> Result<(), ExecError> {
 fn eval_sql_json_serialize(
     value: &Value,
     result_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
 ) -> Result<Value, ExecError> {
     let result = match value {
         Value::Null => Value::Null,
@@ -2224,15 +2240,14 @@ fn eval_sql_json_serialize(
         }
         Value::Jsonb(bytes) => Value::Text(CompactString::from_owned(render_jsonb_bytes(bytes)?)),
         other => Value::Text(CompactString::from_owned(value_to_json_text(
-            other,
-            false,
-            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-            None,
+            other, false, config, catalog,
         ))),
     };
     coerce_sql_json_return_value(
         result,
         Some(result_type.unwrap_or(SqlType::new(SqlTypeKind::Text))),
+        catalog,
+        config,
     )
 }
 
@@ -2279,7 +2294,12 @@ fn eval_sql_json_object(
         out.push_str(&value_to_json_text(value, false, datetime_config, catalog));
     }
     out.push('}');
-    coerce_sql_json_return_value(Value::Json(CompactString::from_owned(out)), result_type)
+    coerce_sql_json_return_value(
+        Value::Json(CompactString::from_owned(out)),
+        result_type,
+        catalog,
+        datetime_config,
+    )
 }
 
 fn eval_sql_json_array(
@@ -2313,7 +2333,12 @@ fn eval_sql_json_array(
         out.push_str(&value_to_json_text(value, false, datetime_config, catalog));
     }
     out.push(']');
-    coerce_sql_json_return_value(Value::Json(CompactString::from_owned(out)), result_type)
+    coerce_sql_json_return_value(
+        Value::Json(CompactString::from_owned(out)),
+        result_type,
+        catalog,
+        datetime_config,
+    )
 }
 
 fn eval_sql_json_is_json(values: &[Value]) -> Result<Value, ExecError> {
