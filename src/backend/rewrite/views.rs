@@ -1882,11 +1882,11 @@ fn render_plain_query(ctx: &ViewDeparseContext<'_>, output_names: Option<&[Strin
 }
 
 fn append_limit_offset_lines(lines: &mut Vec<String>, ctx: &ViewDeparseContext<'_>) {
-    if let Some(limit_count) = ctx.query.limit_count {
-        lines.push(format!("  LIMIT {limit_count}"));
+    if let Some(limit_count) = &ctx.query.limit_count {
+        lines.push(format!("  LIMIT {}", render_expr(limit_count, ctx)));
     }
-    if let Some(limit_offset) = ctx.query.limit_offset {
-        lines.push(format!("  OFFSET {limit_offset}"));
+    if let Some(limit_offset) = &ctx.query.limit_offset {
+        lines.push(format!("  OFFSET {}", render_expr(limit_offset, ctx)));
     }
 }
 

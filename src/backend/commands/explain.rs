@@ -1771,7 +1771,7 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
         Plan::Limit {
             input,
             limit: None,
-            offset: 0,
+            offset: None,
             ..
         } => Some(input.as_ref()),
         Plan::Projection { input, targets, .. } => {
@@ -6253,7 +6253,7 @@ fn rowtypes_single_record_cte_scan(plan: &Plan) -> Option<&Plan> {
         Plan::Limit {
             input,
             limit: None,
-            offset: 0,
+            offset: None,
             ..
         } => return rowtypes_single_record_cte_scan(input),
         _ => {}
@@ -10702,7 +10702,7 @@ fn const_false_cte_scan(plan: &Plan) -> Option<&Plan> {
         Plan::Limit {
             input,
             limit: None,
-            offset: 0,
+            offset: None,
             ..
         } => const_false_cte_scan(input),
         _ => None,

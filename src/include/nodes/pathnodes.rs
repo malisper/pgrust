@@ -638,8 +638,8 @@ pub enum Path {
         plan_info: PlanEstimate,
         pathtarget: PathTarget,
         input: Box<Path>,
-        limit: Option<usize>,
-        offset: usize,
+        limit: Option<Expr>,
+        offset: Option<Expr>,
     },
     LockRows {
         plan_info: PlanEstimate,

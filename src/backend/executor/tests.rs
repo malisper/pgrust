@@ -4119,6 +4119,113 @@ fn order_by_limit_offset_returns_expected_rows() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn limit_accepts_offset_before_limit_clause_order() {
+    let mut harness = SeededSqlHarness::new("offset_before_limit", catalog());
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')",
+        )
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people order by id offset 1 limit 1",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn limit_and_offset_nullable_volatile_exprs_treat_null_as_unbounded_or_zero() {
+    let mut harness = SeededSqlHarness::new("limit_nullable_volatile_exprs", catalog());
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')",
+        )
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people order by id limit (case when random() < 2 then null::bigint end)",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)]
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people order by id offset (case when random() < 2 then null::bigint end)",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)]
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn correlated_offset_expression_evaluates_per_outer_scan() {
+    let base = temp_dir("correlated_offset_expression");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select (select n from generate_series(1, 3) as n order by n limit 1 offset s - 1) \
+         from generate_series(1, 3) as s",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)]
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn explain_mentions_sort_and_limit_nodes() {
     let base = temp_dir("explain_sort_limit");

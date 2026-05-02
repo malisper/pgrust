@@ -1,3 +1,4 @@
+use crate::backend::executor::Value;
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::executor::execdesc::CommandType;
@@ -1573,7 +1574,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         having_qual: None,
         sort_clause,
         constraint_deps: query.constraint_deps.clone(),
-        limit_count: Some(1),
+        limit_count: Some(Expr::Const(Value::Int64(1))),
         limit_offset: None,
         locking_clause: None,
         locking_targets: Vec::new(),

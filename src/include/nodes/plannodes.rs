@@ -395,8 +395,8 @@ pub enum Plan {
     Limit {
         plan_info: PlanEstimate,
         input: Box<Plan>,
-        limit: Option<usize>,
-        offset: usize,
+        limit: Option<Expr>,
+        offset: Option<Expr>,
     },
     LockRows {
         plan_info: PlanEstimate,

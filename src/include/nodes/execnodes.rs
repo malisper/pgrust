@@ -960,8 +960,11 @@ pub struct IncrementalSortState {
 #[derive(Debug)]
 pub struct LimitState {
     pub(crate) input: PlanState,
+    pub(crate) limit_expr: Option<crate::include::nodes::primnodes::Expr>,
+    pub(crate) offset_expr: Option<crate::include::nodes::primnodes::Expr>,
     pub(crate) limit: Option<usize>,
     pub(crate) offset: usize,
+    pub(crate) limits_ready: bool,
     pub(crate) skipped: usize,
     pub(crate) returned: usize,
     pub(crate) plan_info: PlanEstimate,

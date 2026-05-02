@@ -109,8 +109,14 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .map(simplify_sort_group_clause)
             .collect::<Result<Vec<_>, _>>()?,
         constraint_deps: query.constraint_deps,
-        limit_count: query.limit_count,
-        limit_offset: query.limit_offset,
+        limit_count: query
+            .limit_count
+            .map(|expr| simplify_expr(expr, None))
+            .transpose()?,
+        limit_offset: query
+            .limit_offset
+            .map(|expr| simplify_expr(expr, None))
+            .transpose()?,
         locking_clause: query.locking_clause,
         locking_targets: query.locking_targets,
         locking_nowait: query.locking_nowait,

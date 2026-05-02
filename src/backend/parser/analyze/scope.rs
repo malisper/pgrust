@@ -4542,6 +4542,7 @@ fn sql_function_target_only_body_can_inline(stmt: &SelectStatement) -> bool {
         && stmt.window_clauses.is_empty()
         && stmt.order_by.is_empty()
         && stmt.limit.is_none()
+        && stmt.offset.is_none()
         && stmt.locking_clause.is_none()
         && stmt.set_operation.is_none()
 }
@@ -4573,8 +4574,8 @@ fn analyze_sql_function_target_only_body(
         having_qual: None,
         sort_clause: Vec::new(),
         constraint_deps: Vec::new(),
-        limit_count: stmt.limit,
-        limit_offset: stmt.offset,
+        limit_count: None,
+        limit_offset: None,
         locking_clause: None,
         locking_targets: Vec::new(),
         locking_nowait: false,

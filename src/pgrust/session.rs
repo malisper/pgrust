@@ -11836,9 +11836,9 @@ impl Session {
                 .collect::<Result<Vec<_>, ExecError>>()?,
             order_by: Self::substitute_order_by_items(&select.order_by, subst)?,
             order_by_location: select.order_by_location,
-            limit: select.limit,
+            limit: select.limit.clone(),
             limit_location: select.limit_location,
-            offset: select.offset,
+            offset: select.offset.clone(),
             offset_location: select.offset_location,
             locking_clause: select.locking_clause,
             locking_location: select.locking_location,
@@ -12163,8 +12163,8 @@ impl Session {
                 .map(|row| Self::substitute_exprs(row, subst))
                 .collect::<Result<Vec<_>, _>>()?,
             order_by: Self::substitute_order_by_items(&values.order_by, subst)?,
-            limit: values.limit,
-            offset: values.offset,
+            limit: values.limit.clone(),
+            offset: values.offset.clone(),
         })
     }
 
