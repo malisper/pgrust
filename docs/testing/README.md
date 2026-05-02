@@ -11,7 +11,7 @@ techniques known to find database bugs at scale.
 | # | Item | Tier | Status | Artifact |
 |---|------|------|--------|----------|
 | 1 | PostgreSQL isolation tester harness | 1 | **Done, gated on `pg_locks`** | [PR #58](https://github.com/your-github-org/pgrust/pull/58), `scripts/run_isolation.sh`, [docs/isolation-tests.md](../isolation-tests.md) |
-| 2 | Differential testing vs real Postgres (SQLancer) | 1 | **Harness live; first findings captured** | [SQLancer adapter plan](./sqlancer-adapter-plan.md), [findings](./sqlancer-findings.md), `scripts/run_sqlancer_smoke.sh`, `scripts/run_sqlancer_triage.sh`, `/Users/jasonseibel/dev/2026/your-projects-parent/sqlancer` |
+| 2 | Differential testing vs real Postgres (SQLancer) | 1 | **Harness live; first findings captured** | [SQLancer handoff](./sqlancer-handoff.md), [adapter plan](./sqlancer-adapter-plan.md), [findings](./sqlancer-findings.md), `scripts/run_sqlancer_smoke.sh`, `scripts/run_sqlancer_triage.sh`, `/Users/jasonseibel/dev/2026/your-projects-parent/sqlancer` |
 | 3 | cargo-fuzz on parser + wire-protocol decoder | 1 | **Parser + startup-packet targets live** | `fuzz/`, `cargo +nightly fuzz run parse -- -max_total_time=30`, `cargo +nightly fuzz run startup_packet -- -max_total_time=30` |
 | 4 | Hegel property-based testing | 1 | Not started | — |
 | 5 | Antithesis (paid Founder Package or free OSS Giveaway) | 2 | **Prep started** | [system summary](./antithesis-system-summary.md), `antithesis/` |
