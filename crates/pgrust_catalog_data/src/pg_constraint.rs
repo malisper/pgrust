@@ -1,0 +1,215 @@
+use crate::desc::column_desc;
+use crate::{PG_CATALOG_NAMESPACE_OID, system_catalog_index_is_primary, system_catalog_indexes};
+use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind};
+use pgrust_nodes::primnodes::RelationDesc;
+
+pub const CONSTRAINT_CHECK: char = 'c';
+pub const CONSTRAINT_FOREIGN: char = 'f';
+pub const CONSTRAINT_NOTNULL: char = 'n';
+pub const CONSTRAINT_PRIMARY: char = 'p';
+pub const CONSTRAINT_UNIQUE: char = 'u';
+pub const CONSTRAINT_TRIGGER: char = 't';
+pub const CONSTRAINT_EXCLUSION: char = 'x';
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgConstraintRow {
+    pub oid: u32,
+    pub conname: String,
+    pub connamespace: u32,
+    pub contype: char,
+    pub condeferrable: bool,
+    pub condeferred: bool,
+    pub conenforced: bool,
+    pub convalidated: bool,
+    pub conrelid: u32,
+    pub contypid: u32,
+    pub conindid: u32,
+    pub conparentid: u32,
+    pub confrelid: u32,
+    pub confupdtype: char,
+    pub confdeltype: char,
+    pub confmatchtype: char,
+    pub conkey: Option<Vec<i16>>,
+    pub confkey: Option<Vec<i16>>,
+    pub conpfeqop: Option<Vec<u32>>,
+    pub conppeqop: Option<Vec<u32>>,
+    pub conffeqop: Option<Vec<u32>>,
+    pub confdelsetcols: Option<Vec<i16>>,
+    pub conexclop: Option<Vec<u32>>,
+    pub conbin: Option<String>,
+    pub conislocal: bool,
+    pub coninhcount: i16,
+    pub connoinherit: bool,
+    pub conperiod: bool,
+}
+
+pub fn pg_constraint_desc() -> RelationDesc {
+    RelationDesc {
+        columns: vec![
+            column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("conname", SqlType::new(SqlTypeKind::Name), false),
+            column_desc("connamespace", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("contype", SqlType::new(SqlTypeKind::InternalChar), false),
+            column_desc("condeferrable", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("condeferred", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("conenforced", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("convalidated", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("conrelid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("contypid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("conindid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("conparentid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("confrelid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc(
+                "confupdtype",
+                SqlType::new(SqlTypeKind::InternalChar),
+                false,
+            ),
+            column_desc(
+                "confdeltype",
+                SqlType::new(SqlTypeKind::InternalChar),
+                false,
+            ),
+            column_desc(
+                "confmatchtype",
+                SqlType::new(SqlTypeKind::InternalChar),
+                false,
+            ),
+            column_desc(
+                "conkey",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
+                true,
+            ),
+            column_desc(
+                "confkey",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
+                true,
+            ),
+            column_desc(
+                "conpfeqop",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
+                true,
+            ),
+            column_desc(
+                "conppeqop",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
+                true,
+            ),
+            column_desc(
+                "conffeqop",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
+                true,
+            ),
+            column_desc(
+                "confdelsetcols",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
+                true,
+            ),
+            column_desc(
+                "conexclop",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
+                true,
+            ),
+            column_desc("conbin", SqlType::new(SqlTypeKind::PgNodeTree), true),
+            column_desc("conislocal", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("coninhcount", SqlType::new(SqlTypeKind::Int2), false),
+            column_desc("connoinherit", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("conperiod", SqlType::new(SqlTypeKind::Bool), false),
+        ],
+    }
+}
+
+pub fn bootstrap_pg_constraint_rows() -> Vec<PgConstraintRow> {
+    system_catalog_indexes()
+        .iter()
+        .filter(|descriptor| descriptor.unique)
+        .map(|descriptor| {
+            let primary = system_catalog_index_is_primary(descriptor);
+            PgConstraintRow {
+                oid: synthetic_system_index_constraint_oid(descriptor.relation_oid),
+                conname: descriptor.relation_name.to_string(),
+                connamespace: PG_CATALOG_NAMESPACE_OID,
+                contype: if primary {
+                    CONSTRAINT_PRIMARY
+                } else {
+                    CONSTRAINT_UNIQUE
+                },
+                condeferrable: false,
+                condeferred: false,
+                conenforced: true,
+                convalidated: true,
+                conrelid: descriptor.heap_kind.relation_oid(),
+                contypid: 0,
+                conindid: descriptor.relation_oid,
+                conparentid: 0,
+                confrelid: 0,
+                confupdtype: ' ',
+                confdeltype: ' ',
+                confmatchtype: ' ',
+                conkey: Some(descriptor.key_attnums.to_vec()),
+                confkey: None,
+                conpfeqop: None,
+                conppeqop: None,
+                conffeqop: None,
+                confdelsetcols: None,
+                conexclop: None,
+                conbin: None,
+                conislocal: true,
+                coninhcount: 0,
+                connoinherit: true,
+                conperiod: false,
+            }
+        })
+        .collect()
+}
+
+fn synthetic_system_index_constraint_oid(index_oid: u32) -> u32 {
+    0x5c1c_0000 ^ index_oid
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pg_constraint_desc_matches_expected_columns() {
+        let desc = pg_constraint_desc();
+        let names: Vec<_> = desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "oid",
+                "conname",
+                "connamespace",
+                "contype",
+                "condeferrable",
+                "condeferred",
+                "conenforced",
+                "convalidated",
+                "conrelid",
+                "contypid",
+                "conindid",
+                "conparentid",
+                "confrelid",
+                "confupdtype",
+                "confdeltype",
+                "confmatchtype",
+                "conkey",
+                "confkey",
+                "conpfeqop",
+                "conppeqop",
+                "conffeqop",
+                "confdelsetcols",
+                "conexclop",
+                "conbin",
+                "conislocal",
+                "coninhcount",
+                "connoinherit",
+                "conperiod",
+            ]
+        );
+    }
+}

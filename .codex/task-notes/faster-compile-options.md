@@ -23,6 +23,16 @@ Implemented first migration slices:
   method behavior through free functions or extension traits.
 - Added small node-local builtin proc/type lookup helpers in pgrust_nodes and
   moved PgInheritsRow plus stable catalog constants into pgrust_core.
+- Added pgrust_catalog_ids for builtin function identity enums plus scalar,
+  window, aggregate, hypothetical aggregate, and ordered-set aggregate proc-OID
+  lookup helpers. pgrust_nodes now re-exports those enums from primnodes and no
+  longer owns the big builtin match table.
+- Added pgrust_catalog_data for generated catalog rows/constants/index
+  descriptors/range specs. Root src/include/catalog modules are compatibility
+  shims that re-export pgrust_catalog_data modules.
+- Kept root runtime catalog/cache/storage behavior in root. Pure descriptor
+  helpers needed to construct generated catalog rows moved with the generated
+  data so pgrust_catalog_data has no root dependency.
 
 Files touched:
 Cargo.toml, Cargo.lock, crates/pgrust_core/*, src/pgrust/compact_string.rs.
@@ -30,7 +40,10 @@ Also added cache-workspace-crates: true to merge-queue and regression workflow
 cache steps. Latest slice touched smgr/bufpage, access itemptr/tupdesc, catalog
 policy/range re-export shims, node imports, crates/pgrust_nodes/*, optimizer
 Path/PlannerInfo helper ownership, parser partition re-exports, and relcache
-index helper call sites. Branch was renamed to malisper/faster-compile.
+index helper call sites. Catalog split touched crates/pgrust_catalog_ids/*,
+crates/pgrust_catalog_data/*, crates/pgrust_nodes builtins/primnodes/Cargo.toml,
+Cargo.toml/Cargo.lock, and src/include/catalog compatibility shims. Branch was
+renamed to malisper/faster-compile.
 
 Tests run:
 scripts/cargo_isolated.sh check --timings
@@ -49,11 +62,20 @@ scripts/cargo_isolated.sh test -p pgrust_nodes
 scripts/cargo_isolated.sh test --lib --quiet parser
 scripts/cargo_isolated.sh test --lib --quiet optimizer
 rg "crate::backend::|crate::include::|crate::pgrust::|crate::RelFileLocator" crates/pgrust_nodes/src
+cargo fmt --all -- --check
+scripts/cargo_isolated.sh check
+scripts/cargo_isolated.sh test -p pgrust_catalog_ids
+scripts/cargo_isolated.sh test -p pgrust_catalog_data
+scripts/cargo_isolated.sh test -p pgrust_nodes
+scripts/cargo_isolated.sh test --lib --quiet catalog
+scripts/cargo_isolated.sh test --lib --quiet parser
+scripts/cargo_isolated.sh test --lib --quiet optimizer
+rg "crate::backend::|crate::include::|crate::pgrust::" crates/pgrust_catalog_ids/src crates/pgrust_catalog_data/src
+rg "pub enum (BuiltinScalarFunction|BuiltinWindowFunction|AggFunc|HypotheticalAggFunc|OrderedSetAggFunc|HashFunctionKind)" crates/pgrust_nodes/src/primnodes.rs
+rg "BuiltinScalarFunction::" crates/pgrust_nodes/src/builtins.rs
 
 Remaining:
-Choose between test-target splitting, generated catalog crate extraction,
-parser/nodes crate extraction, and cache/workflow cleanup. For pgrust_nodes,
-the portable node crate now exists and compiles independently. Remaining crate
-split work is mostly higher-level: decide whether parser analysis/planner
-helpers, generated catalog data, or executor runtime state should get their own
-crates next.
+Generated catalog data and builtin catalog IDs are split out. Remaining crate
+split work is mostly higher-level: parser/analyzer/planner logic can move into
+smaller crates next, while executor runtime state should stay root-owned until a
+separate executor-runtime crate is worth the extra boundary.

@@ -486,6 +486,7 @@ dependencies = [
  "parking_lot",
  "pbkdf2",
  "pest",
+ "pgrust_catalog_data",
  "pgrust_core",
  "pgrust_nodes",
  "pgrust_plpgsql_grammar",
@@ -507,6 +508,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgrust_catalog_data"
+version = "0.1.0"
+dependencies = [
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "pgrust_nodes",
+ "serde",
+]
+
+[[package]]
+name = "pgrust_catalog_ids"
+version = "0.1.0"
+
+[[package]]
 name = "pgrust_core"
 version = "0.1.0"
 dependencies = [
@@ -520,6 +535,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "pgrust_catalog_ids",
  "pgrust_core",
  "serde",
 ]

@@ -1,26 +1,2 @@
-use crate::backend::catalog::catalog::column_desc;
-use crate::backend::executor::RelationDesc;
-use crate::backend::parser::{SqlType, SqlTypeKind};
-
-pub fn pg_extension_desc() -> RelationDesc {
-    RelationDesc {
-        columns: vec![
-            column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("extname", SqlType::new(SqlTypeKind::Name), false),
-            column_desc("extowner", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("extnamespace", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("extrelocatable", SqlType::new(SqlTypeKind::Bool), false),
-            column_desc("extversion", SqlType::new(SqlTypeKind::Text), false),
-            column_desc(
-                "extconfig",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
-                true,
-            ),
-            column_desc(
-                "extcondition",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
-                true,
-            ),
-        ],
-    }
-}
+// :HACK: Compatibility shim for the old include::catalog public path.
+pub use pgrust_catalog_data::pg_extension::*;

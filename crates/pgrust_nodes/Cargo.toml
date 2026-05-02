@@ -11,5 +11,6 @@ path = "src/lib.rs"
 num-bigint = "0.4.6"
 num-integer = "0.1.46"
 num-traits = "0.2.19"
+pgrust_catalog_ids = { path = "../pgrust_catalog_ids" }
 pgrust_core = { path = "../pgrust_core" }
 serde = { version = "1", features = ["derive"] }
