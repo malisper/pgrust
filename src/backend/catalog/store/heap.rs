@@ -8304,17 +8304,18 @@ impl CatalogStore {
                 if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
+                let old_not_null_signature = not_null_constraint_signature(&entry.desc);
                 entry.desc = new_desc;
                 allocate_relation_object_oids(&mut entry.desc, &mut control.next_oid);
-                Ok((
-                    (),
-                    vec![
-                        BootstrapCatalogKind::PgAttribute,
-                        BootstrapCatalogKind::PgDepend,
-                        BootstrapCatalogKind::PgAttrdef,
-                        BootstrapCatalogKind::PgConstraint,
-                    ],
-                ))
+                let mut kinds = vec![
+                    BootstrapCatalogKind::PgAttribute,
+                    BootstrapCatalogKind::PgDepend,
+                    BootstrapCatalogKind::PgAttrdef,
+                ];
+                if old_not_null_signature != not_null_constraint_signature(&entry.desc) {
+                    kinds.push(BootstrapCatalogKind::PgConstraint);
+                }
+                Ok(((), kinds))
             })?;
 
         let mut effect = CatalogMutationEffect::default();
@@ -11658,6 +11659,20 @@ fn type_row_by_name_namespace_mvcc(
             SysCacheTuple::Type(row) => Some(row),
             _ => None,
         }))
+}
+
+fn not_null_constraint_signature(desc: &RelationDesc) -> Vec<(i16, Option<u32>, bool)> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            (!column.storage.nullable || column.not_null_constraint_oid.is_some()).then_some((
+                (index + 1) as i16,
+                column.not_null_constraint_oid,
+                column.dropped,
+            ))
+        })
+        .collect()
 }
 
 fn relation_constraints_mvcc(

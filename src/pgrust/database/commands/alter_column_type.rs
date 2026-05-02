@@ -2,10 +2,13 @@ use super::super::*;
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{
-    collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
-    materialize_generated_columns, reinitialize_index_relation, row_matches_index_predicate,
+    collect_matching_rows_heap, evaluate_default_value, index_key_values_for_row,
+    insert_index_entry_for_row, materialize_generated_columns, reinitialize_index_relation,
+    row_matches_index_predicate,
 };
-use crate::backend::executor::value_io::{format_unique_key_detail, tuple_from_values};
+use crate::backend::executor::value_io::{
+    coerce_assignment_value, format_unique_key_detail, tuple_from_values,
+};
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
 use crate::backend::parser::{RawTypeName, SequenceOptionsPatchSpec};
 use crate::backend::utils::cache::catcache::sql_type_oid;
@@ -178,12 +181,23 @@ fn original_binding_desc_for_alter_table_batch(
     binding_desc
 }
 
-fn default_value_for_batch_added_column(column: &crate::backend::executor::ColumnDesc) -> Value {
-    if column.generated.is_some() {
-        Value::Null
-    } else {
-        column.missing_default_value.clone().unwrap_or(Value::Null)
+fn missing_value_for_batch_rewrite_column(
+    original_desc: &RelationDesc,
+    final_desc: &RelationDesc,
+    column_index: usize,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let column = &final_desc.columns[column_index];
+    if column.dropped || column.generated.is_some() {
+        return Ok(Value::Null);
     }
+    if column_index < original_desc.columns.len() {
+        return Ok(crate::backend::executor::value_io::missing_column_value(
+            column,
+        ));
+    }
+    let value = evaluate_default_value(final_desc, column_index, ctx)?;
+    coerce_assignment_value(&value, column.sql_type)
 }
 
 fn materialize_generated_columns_for_batch_validation(
@@ -250,8 +264,14 @@ fn plan_rewritten_rows_for_alter_table_batch(
     for (tid, original_values) in target_rows {
         ctx.check_for_interrupts()?;
         let mut values = original_values.clone();
-        for column in final_desc.columns.iter().skip(values.len()) {
-            values.push(default_value_for_batch_added_column(column));
+        while values.len() < final_desc.columns.len() {
+            let column_index = values.len();
+            values.push(missing_value_for_batch_rewrite_column(
+                &relation.desc,
+                final_desc,
+                column_index,
+                ctx,
+            )?);
         }
         let mut eval_slot = TupleSlot::virtual_row(original_values);
         for rewrite in rewrite_exprs {
