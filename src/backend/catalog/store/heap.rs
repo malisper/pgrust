@@ -4844,8 +4844,7 @@ impl CatalogStore {
         ];
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         if let Some(query) = stored_view_query {
-            let scope = crate::backend::rewrite::stored_view_query_cache_scope_for_pool(&ctx.pool);
-            crate::backend::rewrite::register_stored_view_query(scope, rewrite_row.oid, query);
+            self.register_stored_view_query(rewrite_row.oid, query);
         }
         self.control = control;
 
@@ -4914,6 +4913,7 @@ impl CatalogStore {
             self.scope_db_oid(),
             &kinds,
         )?;
+        self.remove_stored_view_query(old_rewrite_oid);
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -4927,6 +4927,7 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let old_rewrite = rewrite_row_by_oid_mvcc(self, ctx, row.oid)?;
+        let ev_action_changed = old_rewrite.ev_action != row.ev_action;
         let kinds = [BootstrapCatalogKind::PgRewrite];
         delete_catalog_rows_subset_mvcc(
             ctx,
@@ -4946,6 +4947,9 @@ impl CatalogStore {
             self.scope_db_oid(),
             &kinds,
         )?;
+        if ev_action_changed {
+            self.remove_stored_view_query(row.oid);
+        }
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -9553,6 +9557,7 @@ impl CatalogStore {
             BootstrapCatalogKind::PgRewrite,
         ];
         delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+        self.remove_stored_view_query(rewrite_oid);
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);

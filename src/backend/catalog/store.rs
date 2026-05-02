@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use parking_lot::RwLock;
@@ -20,6 +20,7 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::include::catalog::PgTypeRow;
 use crate::include::catalog::{BootstrapCatalogKind, CatalogScope};
+use crate::include::nodes::parsenodes::Query;
 
 // Mirror PostgreSQL's catalog split: durable control/storage lives in `storage`,
 // while relation DDL and catalog row mutation paths live in `heap`.
@@ -55,6 +56,7 @@ pub struct CatalogStore {
     catalog: Catalog,
     control: CatalogControl,
     extra_type_rows: Vec<PgTypeRow>,
+    stored_view_queries: HashMap<u32, Query>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +64,7 @@ pub(crate) struct CatalogStoreSnapshot {
     catalog: Catalog,
     control: CatalogControl,
     extra_type_rows: Vec<PgTypeRow>,
+    stored_view_queries: HashMap<u32, Query>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -137,6 +140,7 @@ impl CatalogStore {
             catalog: self.catalog.clone(),
             control: self.control.clone(),
             extra_type_rows: self.extra_type_rows.clone(),
+            stored_view_queries: self.stored_view_queries.clone(),
         }
     }
 
@@ -152,6 +156,7 @@ impl CatalogStore {
             catalog,
             control: self.control_state()?,
             extra_type_rows: self.extra_type_rows.clone(),
+            stored_view_queries: self.stored_view_queries.clone(),
         })
     }
 
@@ -159,6 +164,23 @@ impl CatalogStore {
         self.catalog = snapshot.catalog;
         self.control = snapshot.control;
         self.extra_type_rows = snapshot.extra_type_rows;
+        self.stored_view_queries = snapshot.stored_view_queries;
+    }
+
+    pub(crate) fn stored_view_query_for_rule(&self, rewrite_oid: u32) -> Option<Query> {
+        self.stored_view_queries.get(&rewrite_oid).cloned()
+    }
+
+    pub(crate) fn has_stored_view_query(&self, rewrite_oid: u32) -> bool {
+        self.stored_view_queries.contains_key(&rewrite_oid)
+    }
+
+    pub(crate) fn register_stored_view_query(&mut self, rewrite_oid: u32, query: Query) {
+        self.stored_view_queries.insert(rewrite_oid, query);
+    }
+
+    pub(crate) fn remove_stored_view_query(&mut self, rewrite_oid: u32) {
+        self.stored_view_queries.remove(&rewrite_oid);
     }
 
     pub(crate) fn restore_snapshot_for_savepoint_rollback(
@@ -215,6 +237,7 @@ impl CatalogStore {
         self.catalog = snapshot.catalog;
         self.control = snapshot.control;
         self.extra_type_rows = snapshot.extra_type_rows;
+        self.stored_view_queries = snapshot.stored_view_queries;
         Ok(effect)
     }
 }

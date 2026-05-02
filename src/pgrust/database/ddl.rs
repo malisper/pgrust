@@ -625,9 +625,11 @@ pub(crate) fn rewrite_dependent_views(
                     ),
                 })
             })?;
-        let scope = crate::backend::rewrite::stored_view_query_cache_scope_for_pool(&db.pool);
-        if crate::backend::rewrite::has_stored_view_query(scope, rewrite_oid) {
-            crate::backend::rewrite::register_stored_view_query(scope, rewrite_oid, query);
+        let has_cached_query = db.catalog.read().has_stored_view_query(rewrite_oid);
+        if has_cached_query {
+            db.catalog
+                .write()
+                .register_stored_view_query(rewrite_oid, query);
             continue;
         }
         let mut sql = crate::backend::rewrite::render_view_query_sql(&query, &catalog);

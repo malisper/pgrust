@@ -3614,6 +3614,23 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
     }
 }
 
+fn return_rule_oid_for_relation(db: &Database, relname: &str) -> u32 {
+    let catalog = db.catalog.read();
+    let catcache = catalog.catcache().unwrap();
+    let relation_oid = catcache
+        .class_rows()
+        .into_iter()
+        .find(|row| row.relname == relname)
+        .map(|row| row.oid)
+        .unwrap_or_else(|| panic!("missing relation {relname}"));
+    catcache
+        .rewrite_rows()
+        .into_iter()
+        .find(|row| row.ev_class == relation_oid && row.rulename == "_RETURN")
+        .map(|row| row.oid)
+        .unwrap_or_else(|| panic!("missing _RETURN rule for {relname}"))
+}
+
 #[test]
 fn pg_lsn_wal_filename_offset_helpers_match_segment_boundaries() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
@@ -18939,6 +18956,63 @@ fn drop_table_cascade_notice_uses_visible_search_path_name() {
     assert_eq!(
         take_backend_notice_messages(),
         vec![String::from("drop cascades to table gtestc")]
+    );
+}
+
+#[test]
+fn stored_view_query_cache_is_owned_by_database_instance() {
+    let db1 = Database::open_ephemeral(32).expect("open first ephemeral database");
+    let db2 = Database::open_ephemeral(32).expect("open second ephemeral database");
+
+    db1.execute(1, "create table cache_base(a int, filler text)")
+        .unwrap();
+    db1.execute(1, "insert into cache_base values (11, 'unused')")
+        .unwrap();
+    db1.execute(1, "create view cache_view as select a from cache_base")
+        .unwrap();
+
+    db2.execute(1, "create table cache_base(b text, c text)")
+        .unwrap();
+    db2.execute(1, "insert into cache_base values ('x', 'y')")
+        .unwrap();
+    db2.execute(1, "create view cache_view as select b, c from cache_base")
+        .unwrap();
+
+    let db1_rule_oid = return_rule_oid_for_relation(&db1, "cache_view");
+    let db2_rule_oid = return_rule_oid_for_relation(&db2, "cache_view");
+    assert_eq!(
+        db1_rule_oid, db2_rule_oid,
+        "test requires overlapping rewrite OIDs"
+    );
+
+    let db1_cached_targets = db1
+        .catalog
+        .read()
+        .stored_view_query_for_rule(db1_rule_oid)
+        .unwrap()
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .count();
+    let db2_cached_targets = db2
+        .catalog
+        .read()
+        .stored_view_query_for_rule(db2_rule_oid)
+        .unwrap()
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .count();
+    assert_eq!(db1_cached_targets, 1);
+    assert_eq!(db2_cached_targets, 2);
+
+    assert_eq!(
+        query_rows(&db1, 1, "select * from cache_view"),
+        vec![vec![Value::Int32(11)]]
+    );
+    assert_eq!(
+        query_rows(&db2, 1, "select * from cache_view"),
+        vec![vec![Value::Text("x".into()), Value::Text("y".into())]]
     );
 }
 

@@ -191,6 +191,7 @@ impl CatalogStore {
             catalog,
             control: effective_control,
             extra_type_rows: Vec::new(),
+            stored_view_queries: Default::default(),
         })
     }
 
@@ -212,6 +213,7 @@ impl CatalogStore {
             catalog,
             control,
             extra_type_rows: Vec::new(),
+            stored_view_queries: Default::default(),
         }
     }
 

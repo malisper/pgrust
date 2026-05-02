@@ -2009,8 +2009,14 @@ fn append_missing_derived_not_null_constraints(
 }
 
 impl CatalogLookup for LazyCatalogLookup {
-    fn view_query_cache_scope(&self) -> usize {
-        std::sync::Arc::as_ptr(&self.db.pool) as usize
+    fn stored_view_query_for_rule(
+        &self,
+        rewrite_oid: u32,
+    ) -> Option<crate::include::nodes::parsenodes::Query> {
+        self.db
+            .catalog
+            .read()
+            .stored_view_query_for_rule(rewrite_oid)
     }
 
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {

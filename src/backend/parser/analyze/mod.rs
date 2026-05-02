@@ -1305,8 +1305,8 @@ pub trait CatalogLookup: Send + Sync {
         None
     }
 
-    fn view_query_cache_scope(&self) -> usize {
-        0
+    fn stored_view_query_for_rule(&self, _rewrite_oid: u32) -> Option<Query> {
+        None
     }
 
     fn relation_by_oid(&self, _relation_oid: u32) -> Option<BoundRelation> {

@@ -164,7 +164,7 @@ use crate::backend::parser::{
 use crate::backend::rewrite::{
     format_stored_rule_definition_with_catalog, format_view_definition,
     format_view_definition_unpretty, render_relation_expr_sql,
-    render_relation_expr_sql_for_constraint, stored_view_query_for_rule,
+    render_relation_expr_sql_for_constraint,
 };
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
@@ -9473,14 +9473,14 @@ fn currtid_view_source_relation(
             hint: None,
             sqlstate: "0A000",
         })?;
-    let query = stored_view_query_for_rule(catalog.view_query_cache_scope(), rule.oid).ok_or_else(
-        || ExecError::DetailedError {
+    let query = catalog
+        .stored_view_query_for_rule(rule.oid)
+        .ok_or_else(|| ExecError::DetailedError {
             message: "currtid cannot handle views with no CTID".into(),
             detail: None,
             hint: None,
             sqlstate: "0A000",
-        },
-    )?;
+        })?;
     let target = query
         .target_list
         .iter()

@@ -14,6 +14,8 @@ Files touched:
 - `src/backend/parser/analyze/mod.rs`
 - `src/backend/utils/cache/lsyscache.rs`
 - view-cache call sites under catalog/executor/database code
+- `src/backend/catalog/store.rs`
+- `src/pgrust/database_tests.rs`
 
 Tests run:
 - `scripts/cargo_isolated.sh test` initially failed after `/tmp` filled.
@@ -22,8 +24,9 @@ Tests run:
 - Sample failed tests passed individually with `--test-threads=1`.
 - `cargo fmt --all -- --check` passed.
 - `scripts/cargo_isolated.sh check` passed after the FD/cache-scope fixes.
+- `scripts/cargo_isolated.sh test --lib --quiet stored_view_query_cache_is_owned_by_database_instance` passed.
+- `ulimit -n 65536 && scripts/cargo_isolated.sh test --lib --quiet` passed:
+  `4362 passed; 0 failed; 1 ignored`.
 
 Remaining:
-Long-term follow-up: move stored view query cache ownership into the database
-catalog state instead of keeping a process-global cache. See
-`deferred/database-scoped-view-query-cache.md`.
+Stored view query cache ownership moved into per-database catalog state.
