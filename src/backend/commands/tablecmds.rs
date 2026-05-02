@@ -1070,7 +1070,18 @@ fn normalize_structured_plan_json(
     object
         .entry("Disabled")
         .or_insert_with(|| serde_json::Value::Bool(false));
-    if object
+    let is_bitmap_heap_scan = object
+        .get("Node Type")
+        .and_then(|value| value.as_str())
+        .is_some_and(|node_type| node_type == "Bitmap Heap Scan");
+    if analyze && is_bitmap_heap_scan {
+        // :HACK: PostgreSQL's JSON EXPLAIN exposes this field on bitmap heap
+        // scans even when no rows fail recheck. Keep this local to structured
+        // EXPLAIN rendering until plan nodes expose PostgreSQL-shaped metadata.
+        object
+            .entry("Rows Removed by Index Recheck")
+            .or_insert_with(|| serde_json::json!(0));
+    } else if object
         .get("Rows Removed by Index Recheck")
         .is_some_and(|value| value.as_i64() == Some(0) || value.as_u64() == Some(0))
     {

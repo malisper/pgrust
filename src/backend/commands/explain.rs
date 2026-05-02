@@ -425,8 +425,33 @@ fn format_explain_analyze_json_plan(state: &dyn PlanNode) -> String {
         return state.explain_json(true, 4);
     };
     append_captured_initplans_to_json_plan(&mut value);
+    ensure_bitmap_recheck_count_in_json_plan(&mut value);
     let rendered = serde_json::to_string_pretty(&value).unwrap_or(plan);
     indent_multiline_json(&rendered, 4)
+}
+
+fn ensure_bitmap_recheck_count_in_json_plan(value: &mut JsonValue) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object
+        .get("Node Type")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|node_type| node_type.starts_with("Bitmap Heap Scan"))
+    {
+        // :HACK: JSON EXPLAIN rows for bitmap heap scans should expose the
+        // PostgreSQL field even when no rows failed index recheck. The executor
+        // keeps the zero in node stats, but command-level JSON normalization can
+        // otherwise leave the field absent for passthrough scan shapes.
+        object
+            .entry("Rows Removed by Index Recheck")
+            .or_insert_with(|| serde_json::json!(0));
+    }
+    if let Some(children) = object.get_mut("Plans").and_then(JsonValue::as_array_mut) {
+        for child in children {
+            ensure_bitmap_recheck_count_in_json_plan(child);
+        }
+    }
 }
 
 fn append_captured_initplans_to_json_plan(plan: &mut serde_json::Value) {

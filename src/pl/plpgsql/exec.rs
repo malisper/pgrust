@@ -2820,7 +2820,7 @@ fn exec_function_return(
         } => {
             state.scalar_return = Some(match expr {
                 Some(expr) => {
-                    let value = eval_function_expr(expr, &state.values, ctx)?;
+                    let value = eval_function_return_expr(expr, &state.values, ctx)?;
                     cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)
                         .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?
                 }
@@ -2844,7 +2844,7 @@ fn exec_function_return(
         | FunctionReturnContract::AnonymousRecord { setof: true } => Ok(FunctionControl::Return),
         FunctionReturnContract::FixedRow { setof: false, .. } => {
             if let Some(expr) = expr {
-                let value = eval_function_expr(expr, &state.values, ctx)?;
+                let value = eval_function_return_expr(expr, &state.values, ctx)?;
                 let row = return_row_values_from_value(
                     value,
                     &compiled.return_contract,
@@ -2862,7 +2862,7 @@ fn exec_function_return(
         }
         FunctionReturnContract::AnonymousRecord { setof: false } => {
             if let Some(expr) = expr {
-                let value = eval_function_expr(expr, &state.values, ctx)?;
+                let value = eval_function_return_expr(expr, &state.values, ctx)?;
                 state.rows.clear();
                 if let Some(shape) = expected_record_shape {
                     let row = return_row_values_from_value(
@@ -7501,6 +7501,21 @@ fn eval_function_expr(
     let source = compiled_expr_source(expr);
     eval_function_expr_inner(expr, values, ctx)
         .map_err(|err| with_plpgsql_expression_context(err, source))
+}
+
+fn eval_function_return_expr(
+    expr: &CompiledExpr,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let source = compiled_expr_source(expr);
+    eval_function_expr_inner(expr, values, ctx).map_err(|err| {
+        if plpgsql_expression_uses_internal_query(&err) {
+            with_plpgsql_expression_context(err, source)
+        } else {
+            err
+        }
+    })
 }
 
 fn eval_function_expr_inner(
