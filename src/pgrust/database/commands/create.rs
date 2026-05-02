@@ -5167,6 +5167,7 @@ impl Database {
 
         match &create_stmt.return_spec {
             CreateFunctionReturnSpec::Type { ty, setof } => {
+                let mut created_shell_return_type = false;
                 let sql_type = match resolve_raw_type_name(ty, &catalog) {
                     Ok(sql_type) => {
                         if matches!(sql_type.kind, SqlTypeKind::Shell) {
@@ -5196,6 +5197,7 @@ impl Database {
                             format!("type \"{object_name}\" is not yet defined"),
                             "Creating a shell type definition.",
                         );
+                        created_shell_return_type = true;
                         SqlType::new(SqlTypeKind::Shell).with_identity(type_oid, 0)
                     }
                     Err(err) => return Err(ExecError::Parse(err)),
@@ -5203,12 +5205,14 @@ impl Database {
                 if let Some(notice) = percent_type_signature_notice(ty, sql_type) {
                     percent_type_notices.insert(notice);
                 }
-                self.ensure_sql_type_usage_privilege(
-                    client_id,
-                    Some((xid, function_cid)),
-                    configured_search_path,
-                    sql_type,
-                )?;
+                if !created_shell_return_type {
+                    self.ensure_sql_type_usage_privilege(
+                        client_id,
+                        Some((xid, function_cid)),
+                        configured_search_path,
+                        sql_type,
+                    )?;
+                }
                 proretset = *setof;
                 prorettype = create_function_type_oid(&catalog, sql_type, format!("{sql_type:?}"))?;
                 if !output_args.is_empty() {

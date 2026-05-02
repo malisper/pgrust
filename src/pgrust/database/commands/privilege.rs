@@ -2355,10 +2355,13 @@ impl Database {
             .map_err(map_catalog_error)?;
         let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
         let (row, display_name) = type_usage_acl_target(&catalog, type_oid)?;
+        // Preserve existing range/multirange behavior: owners can revoke their own USAGE.
+        let owner_has_implicit_usage = row.typtype != 'r';
         if auth_catalog
             .role_by_oid(auth.current_user_oid())
             .is_some_and(|entry| entry.rolsuper)
-            || auth.has_effective_membership(row.typowner, &auth_catalog)
+            || (owner_has_implicit_usage
+                && auth.has_effective_membership(row.typowner, &auth_catalog))
         {
             return Ok(());
         }

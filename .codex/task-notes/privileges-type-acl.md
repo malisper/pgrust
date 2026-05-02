@@ -18,6 +18,9 @@ Tests run:
 - Focused unit tests for type ACL blocking, array/domain target errors, default type ACLs.
 - Parser tests for `ON DOMAIN` grant/revoke parsing.
 - `env -u CARGO_TARGET_DIR -u PGRUST_TARGET_POOL_DIR scripts/run_regression.sh --test privileges --results-dir /tmp/diffs/privileges-type-acl --timeout 120 --jobs 1`
+- `env -u CARGO_TARGET_DIR -u PGRUST_TARGET_POOL_DIR PGRUST_TARGET_POOL_SIZE=16 PGRUST_TARGET_SLOT=11 scripts/cargo_isolated.sh test --lib --quiet create_function_creates_and_references_shell_return_type`
+- `env -u CARGO_TARGET_DIR -u PGRUST_TARGET_POOL_DIR PGRUST_TARGET_POOL_SIZE=16 PGRUST_TARGET_SLOT=11 scripts/cargo_isolated.sh test --lib --quiet range_owner_and_usage_privileges_apply_to_multirange_columns`
 
 Remaining:
 - Full `privileges` still fails in unrelated sections. The type/domain/cast/default-type-ACL hunks no longer appear in `/tmp/diffs/privileges-type-acl/diff/privileges.diff`.
+- CI fix preserves newly-created shell return types and range owner self-revoke behavior.
