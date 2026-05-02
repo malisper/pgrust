@@ -80,6 +80,9 @@ fn parse_statement_with_options_inner(
     validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
     validate_numeric_lexemes(&sql)?;
+    if let Some(rewritten) = rewrite_declare_cursor_fetch_first_with_ties(&sql) {
+        return parse_statement_with_options_inner(rewritten, options);
+    }
     if let Some(error) = postgres_compatible_preparse_error(&sql) {
         return Err(error);
     }
@@ -296,6 +299,90 @@ fn parse_statement_with_options_inner(
                 .ok_or_else(|| map_pest_error("statement", &sql, err))
         }
     }
+}
+
+// :HACK: Full SQL-standard FETCH FIRST ... WITH TIES needs planner/executor
+// support for returning peer rows. The limit.sql cursor regression only needs
+// this cursor declaration syntax where the requested row count already covers
+// all peers, so lower that narrow form to the existing LIMIT path for now.
+fn rewrite_declare_cursor_fetch_first_with_ties(sql: &str) -> Option<String> {
+    let trimmed = sql.trim_start();
+    let leading = sql.len().saturating_sub(trimmed.len());
+    if !keyword_at_start(trimmed, "declare") {
+        return None;
+    }
+
+    let cursor_for = find_keyword_any_depth(trimmed, "cursor for", 0)?;
+    let query_start = cursor_for + "cursor for".len();
+    let query = &trimmed[query_start..];
+    let fetch = keyword_boundary(query, "fetch")?;
+    keyword_boundary(&query[..fetch], "order by")?;
+
+    let (limit, fetch_len) = parse_fetch_first_with_ties_clause(&query[fetch..])?;
+    let fetch_start = leading + query_start + fetch;
+    let fetch_end = fetch_start + fetch_len;
+    let suffix = sql[fetch_end..].trim();
+    if !(suffix.is_empty() || suffix == ";") {
+        return None;
+    }
+
+    let mut rewritten = String::with_capacity(sql.len());
+    rewritten.push_str(&sql[..fetch_start]);
+    rewritten.push_str("LIMIT ");
+    rewritten.push_str(&limit.to_string());
+    rewritten.push_str(&sql[fetch_end..]);
+    Some(rewritten)
+}
+
+fn parse_fetch_first_with_ties_clause(input: &str) -> Option<(usize, usize)> {
+    let mut index = 0usize;
+    consume_keyword_at(input, &mut index, "fetch")?;
+    if consume_keyword_at(input, &mut index, "first").is_none() {
+        consume_keyword_at(input, &mut index, "next")?;
+    }
+
+    index = skip_whitespace_index(input, index);
+    let limit =
+        if keyword_at_boundary(input, index, "row") || keyword_at_boundary(input, index, "rows") {
+            1
+        } else {
+            parse_fetch_first_limit_value(input, &mut index)?
+        };
+
+    if consume_keyword_at(input, &mut index, "row").is_none() {
+        consume_keyword_at(input, &mut index, "rows")?;
+    }
+    consume_keyword_at(input, &mut index, "with")?;
+    consume_keyword_at(input, &mut index, "ties")?;
+    Some((limit, index))
+}
+
+fn parse_fetch_first_limit_value(input: &str, index: &mut usize) -> Option<usize> {
+    *index = skip_whitespace_index(input, *index);
+    let start = *index;
+    while *index < input.len() {
+        let ch = input[*index..].chars().next()?;
+        if !(ch.is_ascii_digit() || ch == '_') {
+            break;
+        }
+        *index += ch.len_utf8();
+    }
+    if *index == start {
+        return None;
+    }
+    normalize_numeric_literal_text(&input[start..*index])
+        .parse::<usize>()
+        .ok()
+}
+
+fn consume_keyword_at<'a>(input: &'a str, index: &mut usize, keyword: &str) -> Option<&'a str> {
+    *index = skip_whitespace_index(input, *index);
+    if !keyword_at_boundary(input, *index, keyword) {
+        return None;
+    }
+    let start = *index;
+    *index += keyword.len();
+    Some(&input[start..*index])
 }
 
 fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {

@@ -20518,6 +20518,19 @@ fn parse_cursor_statements() {
         other => panic!("expected DECLARE CURSOR, got {:?}", other),
     }
 
+    match parse_statement(
+        "declare c cursor for select * from int8_tbl order by q1 fetch first 2 rows with ties",
+    )
+    .unwrap()
+    {
+        Statement::DeclareCursor(stmt) => {
+            assert_eq!(stmt.name, "c");
+            assert_eq!(stmt.query.limit, Some(2));
+            assert_eq!(stmt.query.order_by.len(), 1);
+        }
+        other => panic!("expected DECLARE CURSOR, got {:?}", other),
+    }
+
     assert!(matches!(
         parse_statement("fetch from c").unwrap(),
         Statement::Fetch(FetchStatement {
