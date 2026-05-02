@@ -276,6 +276,17 @@ fn compare_bt_values_for_type_with_option(
     ty: crate::backend::parser::SqlType,
     option: i16,
 ) -> Ordering {
+    if matches!(ty.kind, crate::backend::parser::SqlTypeKind::InternalChar)
+        && !ty.is_array
+        && let (Some(left_byte), Some(right_byte)) =
+            (internal_char_cmp_key(left), internal_char_cmp_key(right))
+    {
+        let mut ord = left_byte.cmp(&right_byte);
+        if option & crate::backend::access::nbtree::nbtcompare::BT_DESC_FLAG != 0 {
+            ord = ord.reverse();
+        }
+        return ord;
+    }
     if matches!(
         ty.kind,
         crate::backend::parser::SqlTypeKind::Int2Vector
@@ -300,6 +311,15 @@ fn compare_bt_values_for_type_with_option(
         return ord;
     }
     compare_bt_values_with_options(left, right, option)
+}
+
+fn internal_char_cmp_key(value: &Value) -> Option<u8> {
+    match value {
+        Value::InternalChar(byte) => Some(*byte),
+        _ => value
+            .as_text()
+            .map(|text| text.as_bytes().first().copied().unwrap_or_default()),
+    }
 }
 
 fn compare_key_arrays_with_columns_and_options(

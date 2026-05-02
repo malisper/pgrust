@@ -2626,6 +2626,7 @@ pub(super) fn validate_scalar_function_arity(
             }
             BuiltinScalarFunction::PgLogBackendMemoryContexts => args.len() == 1,
             BuiltinScalarFunction::HasFunctionPrivilege
+            | BuiltinScalarFunction::HasSchemaPrivilege
             | BuiltinScalarFunction::HasTypePrivilege => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::HasTablePrivilege
             | BuiltinScalarFunction::HasSequencePrivilege
@@ -4188,6 +4189,34 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "has_function_privilege_id",
             BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_schema_privilege",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_name_name",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_name_id",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_id_name",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_id_id",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_name",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_id",
+            BuiltinScalarFunction::HasSchemaPrivilege,
         ),
         (
             "has_type_privilege",

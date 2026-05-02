@@ -177,7 +177,7 @@ use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::htup::AttributeStorage;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::toast_compression::ToastCompressionId;
-use crate::include::catalog::pg_proc::bootstrap_proc_execute_acl_has_grantee;
+use crate::include::catalog::pg_proc::{bootstrap_pg_proc_row_by_oid, bootstrap_proc_acl_override};
 use crate::include::catalog::{
     ANYOID, ARRAY_BTREE_OPCLASS_OID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID,
     BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
@@ -190,9 +190,9 @@ use crate::include::catalog::{
     PG_LARGEOBJECT_RELATION_OID, PG_MAINTAIN_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
     PG_READ_ALL_DATA_OID, PG_SIGNAL_BACKEND_OID, PG_STATISTIC_EXT_RELATION_OID,
     PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow, PgConversionRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_ARRAY_TYPE_OID,
+    PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow, PgConversionRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_ARRAY_TYPE_OID,
     TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
     builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
     default_hash_opclass_oid,
@@ -7383,6 +7383,116 @@ fn relation_acl_allows_role(
     })
 }
 
+fn namespace_row_from_value(
+    value: &Value,
+    catalog: &dyn CatalogLookup,
+    function_name: &'static str,
+) -> Result<(Option<PgNamespaceRow>, bool), ExecError> {
+    if let Some(name) = value.as_text() {
+        let row = catalog
+            .namespace_rows()
+            .into_iter()
+            .find(|row| row.nspname.eq_ignore_ascii_case(name))
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("schema \"{name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "3F000",
+            })?;
+        return Ok((Some(row), false));
+    }
+    let oid = oid_arg_to_u32(value, function_name)?;
+    Ok((catalog.namespace_row_by_oid(oid), true))
+}
+
+fn schema_owner_default_acl(owner_name: &str) -> Vec<String> {
+    vec![format!("{owner_name}=UC/{owner_name}")]
+}
+
+fn schema_acl_allows_role(
+    catalog: &dyn CatalogLookup,
+    role_oid: u32,
+    namespace: &PgNamespaceRow,
+    spec: PrivilegeSpec,
+) -> bool {
+    let authid_rows = catalog.authid_rows();
+    let auth_members_rows = catalog.auth_members_rows();
+    if role_is_superuser(&authid_rows, role_oid)
+        || role_has_effective_membership(
+            role_oid,
+            namespace.nspowner,
+            &authid_rows,
+            &auth_members_rows,
+        )
+    {
+        return true;
+    }
+    if spec.acl_char == 'U'
+        && !spec.grant_option
+        && (role_has_effective_membership(
+            role_oid,
+            PG_READ_ALL_DATA_OID,
+            &authid_rows,
+            &auth_members_rows,
+        ) || role_has_effective_membership(
+            role_oid,
+            PG_WRITE_ALL_DATA_OID,
+            &authid_rows,
+            &auth_members_rows,
+        ))
+    {
+        return true;
+    }
+    let owner_name = authid_rows
+        .iter()
+        .find(|row| row.oid == namespace.nspowner)
+        .map(|row| row.rolname.clone())
+        .unwrap_or_else(|| "postgres".into());
+    let acl = namespace
+        .nspacl
+        .clone()
+        .unwrap_or_else(|| schema_owner_default_acl(&owner_name));
+    acl_grants_privilege_to_names(&acl, &effective_role_names_for_oid(catalog, role_oid), spec)
+}
+
+fn eval_has_schema_privilege(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let function_name = "has_schema_privilege";
+    let catalog = privilege_catalog(ctx, function_name)?;
+    let (role_oid, schema_value, privilege_value) = match values {
+        [schema_value, privilege_value] => (ctx.current_user_oid, schema_value, privilege_value),
+        [role_value, schema_value, privilege_value] => (
+            role_oid_from_value(role_value, ctx, function_name)?,
+            schema_value,
+            privilege_value,
+        ),
+        _ => return Err(malformed_expr_error(function_name)),
+    };
+    let specs = parse_privilege_specs(
+        privilege_value,
+        function_name,
+        &[
+            ("CREATE", 'C', false),
+            ("CREATE WITH GRANT OPTION", 'C', true),
+            ("USAGE", 'U', false),
+            ("USAGE WITH GRANT OPTION", 'U', true),
+        ],
+    )?;
+    let (namespace, oid_lookup) = namespace_row_from_value(schema_value, catalog, function_name)?;
+    let Some(namespace) = namespace else {
+        return if oid_lookup {
+            Ok(Value::Null)
+        } else {
+            unreachable!("schema name lookup errors before returning None")
+        };
+    };
+    Ok(Value::Bool(specs.into_iter().any(|spec| {
+        schema_acl_allows_role(catalog, role_oid, &namespace, spec)
+    })))
+}
+
 fn eval_has_relation_privilege(
     kind: PrivilegeRelationKind,
     values: &[Value],
@@ -7817,7 +7927,7 @@ fn function_oid_from_signature(
         return catalog
             .proc_rows_by_name(trimmed)
             .into_iter()
-            .find(|row| row.prokind == 'f')
+            .next()
             .map(|row| row.oid)
             .ok_or_else(|| ExecError::DetailedError {
                 message: format!("function {trimmed} does not exist"),
@@ -7865,10 +7975,9 @@ fn function_oid_from_signature(
         .proc_rows_by_name(base_name)
         .into_iter()
         .find(|row| {
-            row.prokind == 'f'
-                && namespace_oid
-                    .map(|oid| row.pronamespace == oid)
-                    .unwrap_or(true)
+            namespace_oid
+                .map(|oid| row.pronamespace == oid)
+                .unwrap_or(true)
                 && row
                     .proargtypes
                     .split_whitespace()
@@ -7899,6 +8008,90 @@ fn function_oid_from_value(value: &Value, catalog: &dyn CatalogLookup) -> Result
     function_oid_from_signature(signature, catalog)
 }
 
+pub(crate) fn proc_execute_acl_allows_role(
+    catalog: &dyn CatalogLookup,
+    role_oid: u32,
+    row: &crate::include::catalog::PgProcRow,
+    grant_option: bool,
+) -> bool {
+    let explicit_acl = bootstrap_proc_acl_override(row.oid).or_else(|| row.proacl.clone());
+    if !grant_option && explicit_acl.is_none() {
+        return true;
+    }
+
+    let authid_rows = catalog.authid_rows();
+    let auth_members_rows = catalog.auth_members_rows();
+    if role_is_superuser(&authid_rows, role_oid)
+        || role_has_effective_membership(role_oid, row.proowner, &authid_rows, &auth_members_rows)
+    {
+        return true;
+    }
+    let owner_name = authid_rows
+        .iter()
+        .find(|role| role.oid == row.proowner)
+        .map(|role| role.rolname.clone())
+        .unwrap_or_else(|| "postgres".into());
+    let acl = explicit_acl.unwrap_or_else(|| {
+        vec![
+            format!("{owner_name}=X/{owner_name}"),
+            format!("=X/{owner_name}"),
+        ]
+    });
+    let effective_names = effective_role_names_for_oid(catalog, role_oid);
+    acl_grants_privilege_to_names(
+        &acl,
+        &effective_names,
+        PrivilegeSpec {
+            acl_char: 'X',
+            grant_option,
+        },
+    )
+}
+
+pub(crate) fn proc_execute_permission_denied(
+    row: &crate::include::catalog::PgProcRow,
+) -> ExecError {
+    let object_kind = match row.prokind {
+        'a' => "aggregate",
+        'p' => "procedure",
+        _ => "function",
+    };
+    ExecError::DetailedError {
+        message: format!("permission denied for {object_kind} {}", row.proname),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    }
+}
+
+pub(crate) fn ensure_proc_execute_allowed(
+    proc_oid: u32,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if proc_oid == 0 {
+        return Ok(());
+    }
+    let cache_key = (ctx.current_user_oid, proc_oid);
+    if ctx.proc_execute_acl_cache.contains(&cache_key) {
+        return Ok(());
+    }
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return Ok(());
+    };
+    let Some(row) =
+        bootstrap_pg_proc_row_by_oid(proc_oid).or_else(|| catalog.proc_row_by_oid(proc_oid))
+    else {
+        ctx.proc_execute_acl_cache.insert(cache_key);
+        return Ok(());
+    };
+    if proc_execute_acl_allows_role(catalog, ctx.current_user_oid, &row, false) {
+        ctx.proc_execute_acl_cache.insert(cache_key);
+        Ok(())
+    } else {
+        Err(proc_execute_permission_denied(&row))
+    }
+}
+
 fn eval_has_function_privilege(
     values: &[Value],
     ctx: &ExecutorContext,
@@ -7923,16 +8116,14 @@ fn eval_has_function_privilege(
         ),
         _ => return Err(malformed_expr_error("has_function_privilege")),
     };
-    let Some(privilege) = privilege_value.as_text() else {
-        return Err(ExecError::TypeMismatch {
-            op: "has_function_privilege privilege",
-            left: privilege_value.clone(),
-            right: Value::Text("".into()),
-        });
-    };
-    if !privilege.eq_ignore_ascii_case("execute") {
-        return Ok(Value::Bool(false));
-    }
+    let specs = parse_privilege_specs(
+        privilege_value,
+        "has_function_privilege",
+        &[
+            ("EXECUTE", 'X', false),
+            ("EXECUTE WITH GRANT OPTION", 'X', true),
+        ],
+    )?;
     let function_oid = function_oid_from_value(function_value, catalog)?;
     let row = catalog
         .proc_row_by_oid(function_oid)
@@ -7942,29 +8133,8 @@ fn eval_has_function_privilege(
             hint: None,
             sqlstate: "42883",
         })?;
-    let owner_name = catalog
-        .authid_rows()
-        .into_iter()
-        .find(|role| role.oid == row.proowner)
-        .map(|role| role.rolname)
-        .unwrap_or_else(|| "postgres".into());
-    let acl = row.proacl.unwrap_or_else(|| {
-        vec![
-            format!("{owner_name}=X/{owner_name}"),
-            format!("=X/{owner_name}"),
-        ]
-    });
-    let effective_names = effective_role_names_for_oid(catalog, role_oid);
-    if effective_names
-        .iter()
-        .any(|name| bootstrap_proc_execute_acl_has_grantee(function_oid, name))
-    {
-        return Ok(Value::Bool(true));
-    }
-    Ok(Value::Bool(acl.iter().any(|item| {
-        acl_item_parts(item).is_some_and(|(grantee, privileges, _)| {
-            effective_names.contains(grantee) && privileges.contains('X')
-        })
+    Ok(Value::Bool(specs.into_iter().any(|spec| {
+        proc_execute_acl_allows_role(catalog, role_oid, &row, spec.grant_option)
     })))
 }
 
@@ -10887,6 +11057,8 @@ pub fn eval_expr(
             eval_record_field(value, field, expr_sql_type_hint(expr), ctx)
         }
         Expr::Cast(inner, ty) => {
+            let source_type = expr_sql_type_hint(inner);
+            ensure_array_cast_function_execute_allowed(source_type, *ty, ctx)?;
             let value = eval_expr(inner, slot, ctx)?;
             let casted = if let Value::Record(record) = value {
                 cast_record_value_for_target(record, *ty, ctx)
@@ -10900,7 +11072,7 @@ pub fn eval_expr(
                     ))),
                     _ => cast_value_with_source_type_catalog_and_config(
                         Value::Bytea(bytes),
-                        expr_sql_type_hint(inner),
+                        source_type,
                         *ty,
                         ctx.catalog.as_deref(),
                         &ctx.datetime_config,
@@ -10909,7 +11081,7 @@ pub fn eval_expr(
             } else {
                 cast_value_with_source_type_catalog_and_config(
                     value,
-                    expr_sql_type_hint(inner),
+                    source_type,
                     *ty,
                     ctx.catalog.as_deref(),
                     &ctx.datetime_config,
@@ -11651,6 +11823,16 @@ fn cast_array_literal_value(
     target: SqlType,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    let source_type = value.sql_type_hint();
+    if let Some(source_type) = source_type
+        && source_type != target
+    {
+        if source_type.is_array && target.is_array {
+            ensure_array_cast_function_execute_allowed(Some(source_type), target, ctx)?;
+        } else {
+            ensure_cast_function_execute_allowed(source_type, target, ctx)?;
+        }
+    }
     let casted = if let Value::Record(record) = value {
         cast_record_value_for_target(record, target, ctx)
     } else {
@@ -11663,6 +11845,47 @@ fn cast_array_literal_value(
         )
     }?;
     enforce_domain_constraints_for_value(casted, target, ctx)
+}
+
+fn ensure_array_cast_function_execute_allowed(
+    source_type: Option<SqlType>,
+    target_type: SqlType,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(source_type) = source_type else {
+        return Ok(());
+    };
+    if !source_type.is_array || !target_type.is_array {
+        return Ok(());
+    }
+    ensure_cast_function_execute_allowed(
+        source_type.element_type(),
+        target_type.element_type(),
+        ctx,
+    )
+}
+
+fn ensure_cast_function_execute_allowed(
+    source_type: SqlType,
+    target_type: SqlType,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return Ok(());
+    };
+    let Some(source_oid) = catalog.type_oid_for_sql_type(source_type) else {
+        return Ok(());
+    };
+    let Some(target_oid) = catalog.type_oid_for_sql_type(target_type) else {
+        return Ok(());
+    };
+    let Some(cast_row) = catalog.cast_by_source_target(source_oid, target_oid) else {
+        return Ok(());
+    };
+    if cast_row.castmethod == 'f' && cast_row.castfunc != 0 {
+        ensure_proc_execute_allowed(cast_row.castfunc, ctx)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn cast_record_value_for_target(
@@ -13937,6 +14160,7 @@ pub(crate) fn eval_native_builtin_scalar_typed_value_call(
             eval_pg_log_backend_memory_contexts(values)
         }
         BuiltinScalarFunction::HasFunctionPrivilege => eval_has_function_privilege(values, ctx),
+        BuiltinScalarFunction::HasSchemaPrivilege => eval_has_schema_privilege(values, ctx),
         BuiltinScalarFunction::HasTypePrivilege => eval_has_type_privilege(values, ctx),
         BuiltinScalarFunction::HasTablePrivilege => {
             eval_has_relation_privilege(PrivilegeRelationKind::Table, values, ctx)
@@ -15175,6 +15399,7 @@ pub(crate) fn eval_builtin_function(
             eval_pg_log_backend_memory_contexts(&values)
         }
         BuiltinScalarFunction::HasFunctionPrivilege => eval_has_function_privilege(&values, ctx),
+        BuiltinScalarFunction::HasSchemaPrivilege => eval_has_schema_privilege(&values, ctx),
         BuiltinScalarFunction::HasTypePrivilege => eval_has_type_privilege(&values, ctx),
         BuiltinScalarFunction::HasTablePrivilege => {
             eval_has_relation_privilege(PrivilegeRelationKind::Table, &values, ctx)

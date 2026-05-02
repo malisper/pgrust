@@ -504,6 +504,7 @@ pub enum Statement {
     CreateSubscription(CreateSubscriptionStatement),
     CommentOnDatabase(CommentOnDatabaseStatement),
     CommentOnRole(CommentOnRoleStatement),
+    AlterDefaultPrivileges(AlterDefaultPrivilegesStatement),
     GrantObject(GrantObjectStatement),
     RevokeObject(RevokeObjectStatement),
     GrantRoleMembership(GrantRoleMembershipStatement),
@@ -4085,21 +4086,88 @@ pub enum TypePrivilegeObjectKind {
     Domain,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantAllInSchemaKind {
+    Tables,
+    Functions,
+    Procedures,
+    Routines,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantObjectTarget {
+    Named(Vec<String>),
+    AllInSchema {
+        kind: GrantAllInSchemaKind,
+        schema_names: Vec<String>,
+    },
+}
+
+impl GrantObjectTarget {
+    pub fn named(object_names: Vec<String>) -> Self {
+        Self::Named(object_names)
+    }
+
+    pub fn named_names(&self) -> Option<&[String]> {
+        match self {
+            Self::Named(names) => Some(names),
+            Self::AllInSchema { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantObjectStatement {
     pub privilege: GrantObjectPrivilege,
     pub columns: Vec<String>,
-    pub object_names: Vec<String>,
+    pub target: GrantObjectTarget,
     pub grantee_names: Vec<String>,
     pub with_grant_option: bool,
+}
+
+impl GrantObjectStatement {
+    pub fn named_object_names(&self) -> &[String] {
+        self.target.named_names().unwrap_or(&[])
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokeObjectStatement {
     pub privilege: GrantObjectPrivilege,
     pub columns: Vec<String>,
-    pub object_names: Vec<String>,
+    pub target: GrantObjectTarget,
     pub grantee_names: Vec<String>,
+    pub grant_option_for: bool,
+    pub cascade: bool,
+}
+
+impl RevokeObjectStatement {
+    pub fn named_object_names(&self) -> &[String] {
+        self.target.named_names().unwrap_or(&[])
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlterDefaultPrivilegesObjectType {
+    Tables,
+    Sequences,
+    Functions,
+    Routines,
+    Types,
+    Schemas,
+    LargeObjects,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterDefaultPrivilegesStatement {
+    pub role_names: Vec<String>,
+    pub schema_names: Vec<String>,
+    pub is_grant: bool,
+    pub grant_option_for: bool,
+    pub object_type: AlterDefaultPrivilegesObjectType,
+    pub privilege_chars: String,
+    pub grantee_names: Vec<String>,
+    pub with_grant_option: bool,
     pub cascade: bool,
 }
 

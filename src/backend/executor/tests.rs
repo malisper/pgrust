@@ -949,6 +949,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         pending_portals: Vec::new(),
         catalog: None,
         scalar_function_cache: std::collections::HashMap::new(),
+        proc_execute_acl_cache: std::collections::HashSet::new(),
         srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
@@ -1034,6 +1035,7 @@ fn run_plan(
         pending_portals: Vec::new(),
         catalog: None,
         scalar_function_cache: std::collections::HashMap::new(),
+        proc_execute_acl_cache: std::collections::HashSet::new(),
         srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
@@ -1155,6 +1157,7 @@ fn first_tuple_slot_kind_for_sql(
             pending_portals: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            proc_execute_acl_cache: std::collections::HashSet::new(),
             srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
@@ -1258,6 +1261,7 @@ fn first_tuple_slot_kind_for_plan(
             pending_portals: Vec::new(),
             catalog: None,
             scalar_function_cache: std::collections::HashMap::new(),
+            proc_execute_acl_cache: std::collections::HashSet::new(),
             srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
@@ -1375,6 +1379,7 @@ fn run_sql_with_catalog(
             pending_portals: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            proc_execute_acl_cache: std::collections::HashSet::new(),
             srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
@@ -12777,6 +12782,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         pending_portals: Vec::new(),
         catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
         scalar_function_cache: std::collections::HashMap::new(),
+        proc_execute_acl_cache: std::collections::HashSet::new(),
         srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),

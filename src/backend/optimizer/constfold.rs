@@ -1151,6 +1151,9 @@ fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
     let Some(source) = value.sql_type_hint() else {
         return true;
     };
+    if source.is_array && target.is_array && source.element_type() != target.element_type() {
+        return false;
+    }
     // Datetime text input can depend on DateStyle, TimeZone, IntervalStyle, or
     // the transaction timestamp for special values like now/today.
     if matches!(

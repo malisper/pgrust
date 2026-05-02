@@ -170,9 +170,12 @@ impl Database {
                     Ok((entry, effect)) => {
                         catalog_effects.push(effect);
                         if let Some(typacl) = self.default_acl_for_new_type(
+                            client_id,
                             self.auth_state(client_id).current_user_oid(),
                             namespace_oid,
-                        ) {
+                            xid,
+                            cid,
+                        )? {
                             let effect = self
                                 .catalog
                                 .write()
@@ -2921,7 +2924,13 @@ impl Database {
                 owner_oid,
                 labels,
                 creating_xid: Some(xid),
-                typacl: self.default_acl_for_new_type(owner_oid, namespace_oid),
+                typacl: self.default_acl_for_new_type(
+                    client_id,
+                    owner_oid,
+                    namespace_oid,
+                    xid,
+                    cid,
+                )?,
                 comment: None,
             },
         );
@@ -3354,7 +3363,13 @@ impl Database {
                 subtype_opclass: stmt.subtype_opclass.clone(),
                 subtype_diff: stmt.subtype_diff.clone(),
                 collation: stmt.collation.clone(),
-                typacl: self.default_acl_for_new_type(owner_oid, namespace_oid),
+                typacl: self.default_acl_for_new_type(
+                    client_id,
+                    owner_oid,
+                    namespace_oid,
+                    xid,
+                    cid,
+                )?,
                 comment: None,
             },
         );

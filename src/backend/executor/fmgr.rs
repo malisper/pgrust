@@ -24,6 +24,7 @@ pub(crate) fn call_scalar_function(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    super::exec_expr::ensure_proc_execute_allowed(func.funcid, ctx)?;
     let call_info = match func.implementation {
         ScalarFunctionImpl::Builtin(builtin) => ScalarFunctionCallInfo::Builtin(builtin),
         ScalarFunctionImpl::UserDefined { proc_oid } => scalar_function_call_info(proc_oid, ctx)?,

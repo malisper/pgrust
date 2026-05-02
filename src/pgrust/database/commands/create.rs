@@ -23,14 +23,17 @@ use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::notices::{
     push_backend_notice, push_notice, push_notice_with_detail,
 };
+use crate::include::catalog::pg_language::{
+    bootstrap_language_acl_override, language_owner_default_acl,
+};
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
     ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL,
     DEPENDENCY_NORMAL, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID,
-    PG_LANGUAGE_SQL_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgDependRow, PgProcRow,
-    RECORD_TYPE_OID, TRIGGER_TYPE_OID, VOID_TYPE_OID,
+    PG_LANGUAGE_SQL_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgDependRow, PgLanguageRow,
+    PgProcRow, RECORD_TYPE_OID, TRIGGER_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{
     AliasColumnSpec, ForeignKeyAction, ForeignKeyMatchType, FromItem, GroupByItem, Query,
@@ -40,6 +43,9 @@ use crate::include::nodes::primnodes::{
     Expr, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl, SetReturningCall,
     SqlJsonTableBehavior, SqlJsonTableColumnKind, SqlXmlTableColumnKind, TargetEntry, Var,
     attrno_index,
+};
+use crate::pgrust::database::commands::privilege::{
+    acl_grants_privilege, effective_acl_grantee_names,
 };
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
 use crate::pgrust::database::sequences::pg_sequence_row;
@@ -131,6 +137,42 @@ fn validate_sql_procedure_body(
         }
     }
     Ok(())
+}
+
+fn ensure_language_usage_privilege(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    language: &PgLanguageRow,
+) -> Result<(), ExecError> {
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    let auth = db.auth_state(client_id);
+    let current_user_oid = auth.current_user_oid();
+    let current_user_is_superuser = auth_catalog
+        .role_by_oid(current_user_oid)
+        .is_some_and(|row| row.rolsuper);
+    if current_user_is_superuser || auth.has_effective_membership(language.lanowner, &auth_catalog)
+    {
+        return Ok(());
+    }
+    let owner_name = auth_catalog
+        .role_by_oid(language.lanowner)
+        .map(|row| row.rolname.clone())
+        .unwrap_or_else(|| "postgres".into());
+    let acl = bootstrap_language_acl_override(language.oid)
+        .unwrap_or_else(|| language_owner_default_acl(&owner_name, language.lanpltrusted));
+    let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
+    if acl_grants_privilege(&acl, &effective_names, 'U') {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("permission denied for language {}", language.lanname),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
 }
 
 fn proc_config_from_options(options: &[AlterRoutineOption]) -> Option<Vec<String>> {
@@ -4763,7 +4805,13 @@ impl Database {
             })
             .collect::<Vec<_>>();
         let owner_oid = self.auth_state(client_id).current_user_oid();
-        let typacl = self.default_acl_for_new_type(owner_oid, namespace_oid);
+        let typacl = self.default_acl_for_new_type(
+            client_id,
+            owner_oid,
+            namespace_oid,
+            crate::backend::access::transam::xact::INVALID_TRANSACTION_ID,
+            0,
+        )?;
         let mut domains = self.domains.write();
         domains.insert(
             normalized,
@@ -5154,6 +5202,7 @@ impl Database {
                 actual: format!("LANGUAGE {}", create_stmt.language),
             }));
         }
+        ensure_language_usage_privilege(self, client_id, Some((xid, function_cid)), &language_row)?;
 
         let mut callable_arg_oids = Vec::new();
         let mut callable_arg_defaults = Vec::new();
@@ -5568,12 +5617,18 @@ impl Database {
             .transpose()?
             .unwrap_or_default();
 
+        let owner_oid = self.auth_state(client_id).current_user_oid();
+        let proacl = if let Some(existing) = existing_proc.as_ref() {
+            existing.proacl.clone()
+        } else {
+            self.default_acl_for_new_proc(client_id, owner_oid, namespace_oid, xid, function_cid)?
+        };
         let proc_row = PgProcRow {
             oid: 0,
             proname: function_name.clone(),
             pronamespace: namespace_oid,
-            proowner: self.auth_state(client_id).current_user_oid(),
-            proacl: None,
+            proowner: owner_oid,
+            proacl,
             prolang: language_row.oid,
             procost: create_stmt
                 .cost
@@ -5999,12 +6054,18 @@ impl Database {
             }
         }
 
+        let owner_oid = self.auth_state(client_id).current_user_oid();
+        let proacl = if let Some((old_proc_row, _)) = existing.first() {
+            old_proc_row.proacl.clone()
+        } else {
+            self.default_acl_for_new_proc(client_id, owner_oid, namespace_oid, xid, cid)?
+        };
         let proc_row = PgProcRow {
             oid: 0,
             proname: aggregate_name.clone(),
             pronamespace: namespace_oid,
-            proowner: self.auth_state(client_id).current_user_oid(),
-            proacl: None,
+            proowner: owner_oid,
+            proacl,
             prolang: PG_LANGUAGE_INTERNAL_OID,
             procost: 1.0,
             prorows: 0.0,
@@ -6589,6 +6650,36 @@ impl Database {
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                         catalog_effects.push(effect);
                         let mut next_metadata_cid = table_cid.saturating_add(1);
+                        if let Some(relacl) = self.default_acl_for_new_relation(
+                            client_id,
+                            created.entry.owner_oid,
+                            namespace_oid,
+                            created.entry.relkind,
+                            xid,
+                            next_metadata_cid,
+                        )? {
+                            let ctx = CatalogWriteContext {
+                                pool: self.pool.clone(),
+                                txns: self.txns.clone(),
+                                xid,
+                                cid: next_metadata_cid,
+                                client_id,
+                                waiter: None,
+                                interrupts: Arc::clone(&interrupts),
+                            };
+                            next_metadata_cid = next_metadata_cid.saturating_add(1);
+                            let effect = self
+                                .catalog
+                                .write()
+                                .alter_relation_acl_mvcc(
+                                    created.entry.relation_oid,
+                                    Some(relacl),
+                                    &ctx,
+                                )
+                                .map_err(map_catalog_error)?;
+                            self.apply_catalog_mutation_effect_immediate(&effect)?;
+                            catalog_effects.push(effect);
+                        }
                         if relation_tablespace_oid != created.entry.rel.spc_oid {
                             let ctx = CatalogWriteContext {
                                 pool: self.pool.clone(),
@@ -7214,6 +7305,21 @@ impl Database {
                         )
                         .map_err(map_catalog_error)?;
                     catalog_effects.push(create_effect);
+                    if let Some(relacl) = self.default_acl_for_new_relation(
+                        client_id,
+                        entry.owner_oid,
+                        namespace_oid,
+                        'v',
+                        xid,
+                        cid,
+                    )? {
+                        let acl_effect = self
+                            .catalog
+                            .write()
+                            .alter_relation_acl_mvcc(entry.relation_oid, Some(relacl), &ctx)
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(acl_effect);
+                    }
                     entry.relation_oid
                 }
                 TablePersistence::Unlogged => {
@@ -7323,22 +7429,6 @@ impl Database {
             }));
         }
         Ok(())
-    }
-
-    fn default_acl_for_new_table(&self, owner_oid: u32, namespace_oid: u32) -> Option<Vec<String>> {
-        let mut acl_items = None;
-        for row in &self.object_addresses.read().default_acls {
-            if row.role_oid == owner_oid
-                && row.objtype == 'r'
-                && row
-                    .namespace_oid
-                    .is_none_or(|default_namespace_oid| default_namespace_oid == namespace_oid)
-                && !row.acl_items.is_empty()
-            {
-                acl_items = Some(row.acl_items.clone());
-            }
-        }
-        acl_items
     }
 
     pub(crate) fn execute_create_table_as_stmt_in_transaction_with_search_path(
@@ -7470,6 +7560,7 @@ impl Database {
             pending_portals: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            proc_execute_acl_cache: std::collections::HashSet::new(),
             srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
@@ -7606,7 +7697,14 @@ impl Database {
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
                 let mut metadata_cid = table_cid.saturating_add(1);
-                if let Some(relacl) = self.default_acl_for_new_table(owner_oid, namespace_oid) {
+                if let Some(relacl) = self.default_acl_for_new_relation(
+                    client_id,
+                    owner_oid,
+                    namespace_oid,
+                    created.entry.relkind,
+                    xid,
+                    metadata_cid,
+                )? {
                     let ctx = CatalogWriteContext {
                         pool: self.pool.clone(),
                         txns: self.txns.clone(),
@@ -7742,6 +7840,7 @@ impl Database {
                 insert_catalog.clone(),
             )),
             scalar_function_cache: std::collections::HashMap::new(),
+            proc_execute_acl_cache: std::collections::HashSet::new(),
             srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),

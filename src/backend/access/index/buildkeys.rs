@@ -189,6 +189,7 @@ impl IndexBuildKeyProjector {
                 pending_portals: Vec::new(),
                 catalog: expr_ctx.visible_catalog.clone(),
                 scalar_function_cache: std::collections::HashMap::new(),
+                proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                     crate::pl::plpgsql::PlpgsqlFunctionCache::default(),

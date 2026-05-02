@@ -233,6 +233,22 @@ impl Database {
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&create_effect)?;
         catalog_effects.push(create_effect);
+        if let Some(relacl) = self.default_acl_for_new_relation(
+            client_id,
+            created.entry.owner_oid,
+            namespace_oid,
+            'm',
+            xid,
+            create_cid,
+        )? {
+            let acl_effect = self
+                .catalog
+                .write()
+                .alter_relation_acl_mvcc(created.entry.relation_oid, Some(relacl), &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&acl_effect)?;
+            catalog_effects.push(acl_effect);
+        }
         if relation_tablespace_oid != created.entry.rel.spc_oid {
             let set_ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
@@ -635,6 +651,7 @@ impl Database {
             pending_portals: Vec::new(),
             catalog,
             scalar_function_cache: std::collections::HashMap::new(),
+            proc_execute_acl_cache: std::collections::HashSet::new(),
             srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),

@@ -411,6 +411,7 @@ impl Database {
             pending_portals: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            proc_execute_acl_cache: std::collections::HashSet::new(),
             srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),

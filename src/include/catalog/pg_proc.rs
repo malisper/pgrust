@@ -6,7 +6,7 @@ use crate::include::nodes::primnodes::{
     AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc,
     OrderedSetAggFunc,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{OnceLock, RwLock};
 
 const VOID_TYPE_OID: u32 = 2278;
@@ -525,28 +525,28 @@ pub fn is_bootstrap_proc_oid(oid: u32) -> bool {
     bootstrap_pg_proc_by_oid().contains_key(&oid)
 }
 
-fn bootstrap_proc_execute_acl_overrides() -> &'static RwLock<BTreeSet<(u32, String)>> {
-    static ACLS: OnceLock<RwLock<BTreeSet<(u32, String)>>> = OnceLock::new();
-    ACLS.get_or_init(|| RwLock::new(BTreeSet::new()))
+fn bootstrap_proc_acl_overrides() -> &'static RwLock<BTreeMap<u32, Vec<String>>> {
+    static ACLS: OnceLock<RwLock<BTreeMap<u32, Vec<String>>>> = OnceLock::new();
+    ACLS.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
-pub fn set_bootstrap_proc_execute_acl(oid: u32, grantee: &str, granted: bool) {
-    let mut overrides = bootstrap_proc_execute_acl_overrides()
+pub fn set_bootstrap_proc_acl_override(oid: u32, acl: Option<Vec<String>>) {
+    let mut overrides = bootstrap_proc_acl_overrides()
         .write()
         .expect("bootstrap proc ACL override lock poisoned");
-    let key = (oid, grantee.to_string());
-    if granted {
-        overrides.insert(key);
+    if let Some(acl) = acl {
+        overrides.insert(oid, acl);
     } else {
-        overrides.remove(&key);
+        overrides.remove(&oid);
     }
 }
 
-pub fn bootstrap_proc_execute_acl_has_grantee(oid: u32, grantee: &str) -> bool {
-    bootstrap_proc_execute_acl_overrides()
+pub fn bootstrap_proc_acl_override(oid: u32) -> Option<Vec<String>> {
+    bootstrap_proc_acl_overrides()
         .read()
         .expect("bootstrap proc ACL override lock poisoned")
-        .contains(&(oid, grantee.to_string()))
+        .get(&oid)
+        .cloned()
 }
 
 fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
@@ -4112,6 +4112,78 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             BOOL_TYPE_OID,
             &oid_argtypes(&[OID_TYPE_OID, TEXT_TYPE_OID]),
             "has_function_privilege_id",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2268,
+            "has_schema_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[NAME_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "has_schema_privilege_name_name",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2269,
+            "has_schema_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[NAME_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID]),
+            "has_schema_privilege_name_id",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2270,
+            "has_schema_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "has_schema_privilege_id_name",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2271,
+            "has_schema_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID]),
+            "has_schema_privilege_id_id",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2272,
+            "has_schema_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "has_schema_privilege_name",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2273,
+            "has_schema_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, TEXT_TYPE_OID]),
+            "has_schema_privilege_id",
             2,
             false,
             true,
@@ -13283,6 +13355,34 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "has_function_privilege_id",
             BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_schema_privilege",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_name_name",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_name_id",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_id_name",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_id_id",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_name",
+            BuiltinScalarFunction::HasSchemaPrivilege,
+        ),
+        (
+            "has_schema_privilege_id",
+            BuiltinScalarFunction::HasSchemaPrivilege,
         ),
         (
             "has_type_privilege",

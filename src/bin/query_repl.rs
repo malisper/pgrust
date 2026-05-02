@@ -631,6 +631,7 @@ fn run_statement(
         | Statement::DropAccessMethod(_)
         | Statement::GrantObject(_)
         | Statement::RevokeObject(_)
+        | Statement::AlterDefaultPrivileges(_)
         | Statement::GrantRoleMembership(_)
         | Statement::RevokeRoleMembership(_)
         | Statement::SetRole(_)
@@ -715,9 +716,6 @@ fn run_statement(
                 "ALTER TABLE ALTER COLUMN TYPE in query_repl: {}.{} -> {:?}",
                 stmt.table_name, stmt.column_name, stmt.ty
             ))))
-        }
-        Statement::Unsupported(stmt) if stmt.feature == "ALTER DEFAULT PRIVILEGES" => {
-            Ok(StatementResult::AffectedRows(0))
         }
         Statement::Unsupported(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("{}: {}", stmt.feature, stmt.sql),
@@ -924,6 +922,7 @@ fn run_statement(
                 pending_portals: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
@@ -991,6 +990,7 @@ fn run_statement(
                 pending_portals: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
@@ -1058,6 +1058,7 @@ fn run_statement(
                 pending_portals: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
@@ -1125,6 +1126,7 @@ fn run_statement(
                 pending_portals: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
@@ -1303,6 +1305,7 @@ fn run_statement(
                 pending_portals: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
@@ -1370,6 +1373,7 @@ fn run_statement(
                 pending_portals: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
@@ -1440,6 +1444,7 @@ fn run_statement(
                     pending_portals: Vec::new(),
                     catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    proc_execute_acl_cache: std::collections::HashSet::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                     pinned_cte_tables: std::collections::HashMap::new(),
@@ -1521,6 +1526,7 @@ fn run_statement(
                     pending_portals: Vec::new(),
                     catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    proc_execute_acl_cache: std::collections::HashSet::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                     pinned_cte_tables: std::collections::HashMap::new(),
@@ -1602,6 +1608,7 @@ fn run_statement(
                     pending_portals: Vec::new(),
                     catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    proc_execute_acl_cache: std::collections::HashSet::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                     pinned_cte_tables: std::collections::HashMap::new(),

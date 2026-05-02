@@ -384,6 +384,22 @@ impl Database {
                     Ok((entry, effect)) => {
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                         catalog_effects.push(effect);
+                        if let Some(relacl) = self.default_acl_for_new_relation(
+                            client_id,
+                            entry.owner_oid,
+                            namespace_oid,
+                            'S',
+                            xid,
+                            cid,
+                        )? {
+                            let acl_effect = self
+                                .catalog
+                                .write()
+                                .alter_relation_acl_mvcc(entry.relation_oid, Some(relacl), &ctx)
+                                .map_err(map_catalog_error)?;
+                            self.apply_catalog_mutation_effect_immediate(&acl_effect)?;
+                            catalog_effects.push(acl_effect);
+                        }
                         let pg_sequence_effect = self
                             .catalog
                             .write()
