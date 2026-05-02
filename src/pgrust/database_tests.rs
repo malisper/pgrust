@@ -12134,11 +12134,23 @@ fn alter_table_only_partitioned_primary_key_does_not_reconcile_children() {
         query_rows(
             &db,
             1,
-            "select inhparent::regclass::text, indisvalid \
+            "select indexrelid::regclass::text, inhparent::regclass::text, indisvalid \
                from pg_index idx left join pg_inherits inh on (idx.indexrelid = inh.inhrelid) \
-              where indexrelid = 'idxpart0_a_key'::regclass",
+              where indexrelid in ('idxpart0_a_key'::regclass, 'idxpart_pkey'::regclass) \
+              order by indexrelid::regclass::text",
         ),
-        vec![vec![Value::Text("idxpart_pkey".into()), Value::Bool(true)]]
+        vec![
+            vec![
+                Value::Text("idxpart0_a_key".into()),
+                Value::Text("idxpart_pkey".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart_pkey".into()),
+                Value::Null,
+                Value::Bool(true),
+            ],
+        ]
     );
 }
 
@@ -53201,6 +53213,54 @@ fn partition_index_pg_depend_rows_use_partition_deptypes() {
                 Value::Text("table depend_part_0_1".into()),
                 Value::Text("table depend_part_0".into()),
                 Value::Text("a".into()),
+            ],
+        ]
+    );
+
+    db.execute(1, "alter table depend_part detach partition depend_part_0")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relispartition \
+             from pg_class \
+             where relname = 'depend_part_idx_0'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_describe_object(refclassid, refobjid, refobjsubid), deptype::text \
+             from pg_depend \
+             where classid = 'pg_class'::regclass \
+               and objid = 'depend_part_idx_0'::regclass \
+               and deptype::text in ('P', 'S') \
+             order by 1, 2",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_describe_object(refclassid, refobjid, refobjsubid), deptype::text \
+             from pg_depend \
+             where classid = 'pg_class'::regclass \
+               and objid = 'depend_part_idx_0_1'::regclass \
+               and deptype::text in ('P', 'S') \
+             order by 1, 2",
+        ),
+        vec![
+            vec![
+                Value::Text("index depend_part_idx_0".into()),
+                Value::Text("P".into()),
+            ],
+            vec![
+                Value::Text("table depend_part_0_1".into()),
+                Value::Text("S".into()),
             ],
         ]
     );
