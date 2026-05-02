@@ -4880,6 +4880,17 @@ fn parse_alter_table_set_statement() {
         })
     );
 
+    let stmt = parse_statement("alter view rw_view1 reset (toast.autovacuum_enabled)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableReset(AlterTableResetStatement {
+            if_exists: false,
+            only: false,
+            table_name: "rw_view1".into(),
+            options: vec!["toast.autovacuum_enabled".into()],
+        })
+    );
+
     let stmt = parse_statement("alter table vac_truncate_test reset (vacuum_truncate)").unwrap();
     assert_eq!(
         stmt,
