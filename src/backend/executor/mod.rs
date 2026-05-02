@@ -708,6 +708,13 @@ impl ExecutorContext {
     }
 
     pub fn serializable_xact_id(&self) -> Option<SerializableXactId> {
+        if !self
+            .gucs
+            .get("transaction_isolation")
+            .is_some_and(|value| value.eq_ignore_ascii_case("serializable"))
+        {
+            return None;
+        }
         self.transaction_state
             .as_ref()
             .and_then(|state| state.lock().serializable_xact)

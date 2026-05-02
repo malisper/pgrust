@@ -4,6 +4,7 @@ Add PostgreSQL-style serializable snapshot isolation support for the prepared_xa
 Key decisions:
 Use a separate predicate lock manager for nonblocking SIREAD locks and rw-conflict tracking instead of row-lock approximations. Register serializable transaction state on first serializable snapshot, keep predicate state across PREPARE TRANSACTION, and report PG-compatible 40001 dangerous-structure errors. Treat the prepared_xacts post-SSI PREPARE path as an SSI-canceled transaction cleanup so regress output matches PostgreSQL.
 Read-only deferrable transactions now wait on possible unsafe writable transactions and retry if the snapshot is proven unsafe. Old committed serializable transactions are summarized into a pg_serial-like runtime summary plus an OldCommittedSxact-style dummy SIREAD owner until no active serializable transaction can overlap.
+SSI executor hooks fast-path non-serializable sessions before consulting transaction state so read committed workloads avoid predicate-lock mutex overhead.
 
 Files touched:
 src/backend/storage/lmgr/predicate.rs
