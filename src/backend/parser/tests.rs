@@ -6217,7 +6217,7 @@ fn parse_grant_create_on_database_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::CreateOnDatabase,
             columns: Vec::new(),
-            object_names: vec!["regression".into()],
+            target: GrantObjectTarget::named(vec!["regression".into()]),
             grantee_names: vec!["regress_role_admin".into()],
             with_grant_option: true,
         })
@@ -6232,7 +6232,7 @@ fn parse_grant_all_on_schema_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
             columns: Vec::new(),
-            object_names: vec!["public".into()],
+            target: GrantObjectTarget::named(vec!["public".into()]),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -6247,9 +6247,50 @@ fn parse_grant_all_on_multiple_schemas_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
             columns: Vec::new(),
-            object_names: vec!["alt_nsp1".into(), "alt_nsp2".into()],
+            target: GrantObjectTarget::named(vec!["alt_nsp1".into(), "alt_nsp2".into()]),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_alter_default_privileges_grant_on_tables_in_schema_statement() {
+    let stmt = parse_statement(
+        "alter default privileges in schema testns,testns grant select on tables to public,public",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterDefaultPrivileges(AlterDefaultPrivilegesStatement {
+            role_names: Vec::new(),
+            schema_names: vec!["testns".into(), "testns".into()],
+            is_grant: true,
+            grant_option_for: false,
+            object_type: AlterDefaultPrivilegesObjectType::Tables,
+            privilege_chars: "r".into(),
+            grantee_names: vec!["public".into(), "public".into()],
+            with_grant_option: false,
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_alter_default_privileges_grant_all_on_schemas_statement() {
+    let stmt = parse_statement("alter default privileges grant all on schemas to role").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterDefaultPrivileges(AlterDefaultPrivilegesStatement {
+            role_names: Vec::new(),
+            schema_names: Vec::new(),
+            is_grant: true,
+            grant_option_for: false,
+            object_type: AlterDefaultPrivilegesObjectType::Schemas,
+            privilege_chars: "UC".into(),
+            grantee_names: vec!["role".into()],
+            with_grant_option: false,
+            cascade: false,
         })
     );
 }
@@ -6262,7 +6303,7 @@ fn parse_grant_usage_on_schema_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnSchema,
             columns: Vec::new(),
-            object_names: vec!["public".into()],
+            target: GrantObjectTarget::named(vec!["public".into()]),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -6277,7 +6318,7 @@ fn parse_grant_create_on_schema_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::CreateOnSchema,
             columns: Vec::new(),
-            object_names: vec!["tststats".into()],
+            target: GrantObjectTarget::named(vec!["tststats".into()]),
             grantee_names: vec!["regress_stats_user1".into()],
             with_grant_option: false,
         })
@@ -6293,8 +6334,78 @@ fn parse_revoke_create_on_schema_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::CreateOnSchema,
             columns: Vec::new(),
-            object_names: vec!["tststats".into()],
+            target: GrantObjectTarget::named(vec!["tststats".into()]),
             grantee_names: vec!["regress_stats_user1".into()],
+            grant_option_for: false,
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_revoke_all_in_schema_statements() {
+    let stmt =
+        parse_statement("GRANT ALL ON ALL TABLES IN SCHEMA testns TO regress_priv_user1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+            columns: Vec::new(),
+            target: GrantObjectTarget::AllInSchema {
+                kind: GrantAllInSchemaKind::Tables,
+                schema_names: vec!["testns".into()],
+            },
+            grantee_names: vec!["regress_priv_user1".into()],
+            with_grant_option: false,
+        })
+    );
+
+    let stmt =
+        parse_statement("grant all on all functions in schema testns to public with grant option")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            columns: Vec::new(),
+            target: GrantObjectTarget::AllInSchema {
+                kind: GrantAllInSchemaKind::Functions,
+                schema_names: vec!["testns".into()],
+            },
+            grantee_names: vec!["public".into()],
+            with_grant_option: true,
+        })
+    );
+
+    let stmt =
+        parse_statement("REVOKE ALL ON ALL PROCEDURES IN SCHEMA testns FROM PUBLIC").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnProcedure,
+            columns: Vec::new(),
+            target: GrantObjectTarget::AllInSchema {
+                kind: GrantAllInSchemaKind::Procedures,
+                schema_names: vec!["testns".into()],
+            },
+            grantee_names: vec!["public".into()],
+            grant_option_for: false,
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("revoke all on all routines in schema testns from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnRoutine,
+            columns: Vec::new(),
+            target: GrantObjectTarget::AllInSchema {
+                kind: GrantAllInSchemaKind::Routines,
+                schema_names: vec!["testns".into()],
+            },
+            grantee_names: vec!["public".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6308,7 +6419,7 @@ fn parse_grant_usage_on_type_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Type),
             columns: Vec::new(),
-            object_names: vec!["custom_t".into()],
+            target: GrantObjectTarget::named(vec!["custom_t".into()]),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -6324,7 +6435,7 @@ fn parse_grant_usage_on_domain_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Domain),
             columns: Vec::new(),
-            object_names: vec!["priv_testdomain1".into()],
+            target: GrantObjectTarget::named(vec!["priv_testdomain1".into()]),
             grantee_names: vec!["regress_priv_user2".into()],
             with_grant_option: false,
         })
@@ -6339,7 +6450,7 @@ fn parse_grant_all_on_type_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Type),
             columns: Vec::new(),
-            object_names: vec!["custom_t".into()],
+            target: GrantObjectTarget::named(vec!["custom_t".into()]),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -6354,7 +6465,7 @@ fn parse_grant_usage_on_language_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnLanguage,
             columns: Vec::new(),
-            object_names: vec!["sql".into()],
+            target: GrantObjectTarget::named(vec!["sql".into()]),
             grantee_names: vec!["regress_priv_user1".into()],
             with_grant_option: false,
         })
@@ -6370,7 +6481,7 @@ fn parse_grant_usage_on_foreign_data_wrapper_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnForeignDataWrapper,
             columns: Vec::new(),
-            object_names: vec!["foo".into()],
+            target: GrantObjectTarget::named(vec!["foo".into()]),
             grantee_names: vec!["regress_test_role".into()],
             with_grant_option: false,
         })
@@ -6387,7 +6498,7 @@ fn parse_grant_usage_on_foreign_server_with_grant_option_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnForeignServer,
             columns: Vec::new(),
-            object_names: vec!["s1".into()],
+            target: GrantObjectTarget::named(vec!["s1".into()]),
             grantee_names: vec!["regress_test_role".into()],
             with_grant_option: true,
         })
@@ -6402,7 +6513,7 @@ fn parse_grant_select_on_table_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::SelectOnTable,
             columns: Vec::new(),
-            object_names: vec!["uaccount".into()],
+            target: GrantObjectTarget::named(vec!["uaccount".into()]),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -6418,7 +6529,7 @@ fn parse_grant_column_select_and_insert_on_table_statements() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::SelectOnTable,
             columns: vec!["a".into()],
-            object_names: vec!["key_desc_1".into()],
+            target: GrantObjectTarget::named(vec!["key_desc_1".into()]),
             grantee_names: vec!["regress_insert_other_user".into()],
             with_grant_option: false,
         })
@@ -6430,7 +6541,7 @@ fn parse_grant_column_select_and_insert_on_table_statements() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::InsertOnTable,
             columns: vec!["two".into()],
-            object_names: vec!["atest5".into()],
+            target: GrantObjectTarget::named(vec!["atest5".into()]),
             grantee_names: vec!["regress_priv_user4".into()],
             with_grant_option: false,
         })
@@ -6442,7 +6553,7 @@ fn parse_grant_column_select_and_insert_on_table_statements() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::SelectOnTable,
             columns: vec!["one".into(), "two".into()],
-            object_names: vec!["atest6".into()],
+            target: GrantObjectTarget::named(vec!["atest6".into()]),
             grantee_names: vec!["regress_priv_user4".into()],
             with_grant_option: false,
         })
@@ -6454,7 +6565,7 @@ fn parse_grant_column_select_and_insert_on_table_statements() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::InsertOnTable,
             columns: Vec::new(),
-            object_names: vec!["key_desc".into()],
+            target: GrantObjectTarget::named(vec!["key_desc".into()]),
             grantee_names: vec!["regress_insert_other_user".into()],
             with_grant_option: false,
         })
@@ -6485,7 +6596,7 @@ fn parse_grant_mixed_column_privileges_on_table_statement() {
                 },
             ]),
             columns: Vec::new(),
-            object_names: vec!["atest5".into()],
+            target: GrantObjectTarget::named(vec!["atest5".into()]),
             grantee_names: vec!["regress_priv_user4".into()],
             with_grant_option: false,
         })
@@ -6500,7 +6611,7 @@ fn parse_grant_on_table_to_group_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::DeleteOnTable,
             columns: Vec::new(),
-            object_names: vec!["atest3".into()],
+            target: GrantObjectTarget::named(vec!["atest3".into()]),
             grantee_names: vec!["regress_priv_group2".into()],
             with_grant_option: false,
         })
@@ -6515,7 +6626,7 @@ fn parse_grant_all_on_table_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
             columns: Vec::new(),
-            object_names: vec!["uaccount".into()],
+            target: GrantObjectTarget::named(vec!["uaccount".into()]),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -6530,7 +6641,7 @@ fn parse_grant_update_on_table_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UpdateOnTable,
             columns: Vec::new(),
-            object_names: vec!["atest2".into()],
+            target: GrantObjectTarget::named(vec!["atest2".into()]),
             grantee_names: vec!["regress_priv_user3".into()],
             with_grant_option: false,
         })
@@ -6546,7 +6657,7 @@ fn parse_grant_multiple_table_privileges_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::TablePrivileges("rw".into()),
             columns: Vec::new(),
-            object_names: vec!["grantor_test3".into()],
+            target: GrantObjectTarget::named(vec!["grantor_test3".into()]),
             grantee_names: vec!["regress_grantor3".into()],
             with_grant_option: false,
         })
@@ -6561,8 +6672,9 @@ fn parse_revoke_all_on_table_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
             columns: Vec::new(),
-            object_names: vec!["key_desc".into()],
+            target: GrantObjectTarget::named(vec!["key_desc".into()]),
             grantee_names: vec!["regress_insert_other_user".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6573,8 +6685,9 @@ fn parse_revoke_all_on_table_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::SelectOnTable,
             columns: Vec::new(),
-            object_names: vec!["brtrigpartcon".into()],
+            target: GrantObjectTarget::named(vec!["brtrigpartcon".into()]),
             grantee_names: vec!["regress_coldesc_role".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6588,7 +6701,7 @@ fn parse_grant_execute_on_function_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::ExecuteOnFunction,
             columns: Vec::new(),
-            object_names: vec!["f_leak(text)".into()],
+            target: GrantObjectTarget::named(vec!["f_leak(text)".into()]),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -6604,7 +6717,7 @@ fn parse_grant_all_on_function_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::ExecuteOnFunction,
             columns: Vec::new(),
-            object_names: vec!["priv_testfunc1(int)".into()],
+            target: GrantObjectTarget::named(vec!["priv_testfunc1(int)".into()]),
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -6620,7 +6733,7 @@ fn parse_grant_execute_on_procedure_statement() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::ExecuteOnProcedure,
             columns: Vec::new(),
-            object_names: vec!["ptest1(text)".into()],
+            target: GrantObjectTarget::named(vec!["ptest1(text)".into()]),
             grantee_names: vec!["regress_cp_user1".into()],
             with_grant_option: false,
         })
@@ -6649,8 +6762,9 @@ fn parse_revoke_all_privileges_on_table_from_public_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
             columns: Vec::new(),
-            object_names: vec!["tenant_table".into()],
+            target: GrantObjectTarget::named(vec!["tenant_table".into()]),
             grantee_names: vec!["public".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6664,8 +6778,9 @@ fn parse_revoke_delete_on_table_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::DeleteOnTable,
             columns: Vec::new(),
-            object_names: vec!["atest3".into()],
+            target: GrantObjectTarget::named(vec!["atest3".into()]),
             grantee_names: vec!["regress_priv_group2".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6679,8 +6794,9 @@ fn parse_revoke_usage_on_schema_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnSchema,
             columns: Vec::new(),
-            object_names: vec!["public".into()],
+            target: GrantObjectTarget::named(vec!["public".into()]),
             grantee_names: vec!["public".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6694,8 +6810,9 @@ fn parse_revoke_usage_on_type_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Type),
             columns: Vec::new(),
-            object_names: vec!["custom_t".into()],
+            target: GrantObjectTarget::named(vec!["custom_t".into()]),
             grantee_names: vec!["public".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6709,8 +6826,9 @@ fn parse_revoke_usage_on_domain_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Domain),
             columns: Vec::new(),
-            object_names: vec!["priv_testdomain1".into()],
+            target: GrantObjectTarget::named(vec!["priv_testdomain1".into()]),
             grantee_names: vec!["public".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6724,8 +6842,9 @@ fn parse_revoke_all_on_domain_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Domain),
             columns: Vec::new(),
-            object_names: vec!["priv_testdomain1".into()],
+            target: GrantObjectTarget::named(vec!["priv_testdomain1".into()]),
             grantee_names: vec!["public".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6739,8 +6858,9 @@ fn parse_revoke_usage_on_language_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnLanguage,
             columns: Vec::new(),
-            object_names: vec!["sql".into()],
+            target: GrantObjectTarget::named(vec!["sql".into()]),
             grantee_names: vec!["public".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6755,8 +6875,9 @@ fn parse_revoke_column_update_from_group_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::UpdateOnTable,
             columns: vec!["three".into()],
-            object_names: vec!["atest5".into()],
+            target: GrantObjectTarget::named(vec!["atest5".into()]),
             grantee_names: vec!["regress_priv_group2".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6767,8 +6888,9 @@ fn parse_revoke_column_update_from_group_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::TablePrivileges("arwx".into()),
             columns: vec!["one".into(), "two".into()],
-            object_names: vec!["atest5".into()],
+            target: GrantObjectTarget::named(vec!["atest5".into()]),
             grantee_names: vec!["regress_priv_user4".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6783,8 +6905,9 @@ fn parse_revoke_all_on_foreign_data_wrapper_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper,
             columns: Vec::new(),
-            object_names: vec!["foo".into()],
+            target: GrantObjectTarget::named(vec!["foo".into()]),
             grantee_names: vec!["regress_test_role".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6798,8 +6921,9 @@ fn parse_revoke_execute_on_function_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::ExecuteOnFunction,
             columns: Vec::new(),
-            object_names: vec!["f_leak(text)".into()],
+            target: GrantObjectTarget::named(vec!["f_leak(text)".into()]),
             grantee_names: vec!["public".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -6814,8 +6938,9 @@ fn parse_revoke_all_on_function_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::ExecuteOnFunction,
             columns: Vec::new(),
-            object_names: vec!["priv_testfunc1(int)".into()],
+            target: GrantObjectTarget::named(vec!["priv_testfunc1(int)".into()]),
             grantee_names: vec!["public".into()],
+            grant_option_for: false,
             cascade: false,
         })
     );
@@ -12408,7 +12533,7 @@ fn parse_insert_update_delete() {
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::SelectOnTable,
             columns,
-            object_names,
+            target: GrantObjectTarget::Named(object_names),
             ..
         }) if columns.is_empty() && object_names == &vec!["tab".to_string()]
     ));
@@ -16994,7 +17119,7 @@ fn parse_create_and_drop_type_statements() {
         revoke_stmt.privilege,
         GrantObjectPrivilege::UsageOnType(TypePrivilegeObjectKind::Type)
     );
-    assert_eq!(revoke_stmt.object_names, vec!["complex"]);
+    assert_eq!(revoke_stmt.named_object_names(), &["complex".to_string()]);
     assert_eq!(revoke_stmt.grantee_names, vec!["public"]);
     assert!(!revoke_stmt.cascade);
 }

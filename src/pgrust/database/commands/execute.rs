@@ -2604,6 +2604,12 @@ impl Database {
                     grant_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterDefaultPrivileges(ref stmt) => self
+                .execute_alter_default_privileges_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
             Statement::RevokeObject(ref revoke_stmt) => self
                 .execute_revoke_object_stmt_with_search_path(
                     client_id,

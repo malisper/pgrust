@@ -5668,10 +5668,8 @@ impl Session {
             | Statement::CommentOnDatabase(_) => Some("COMMENT"),
             Statement::GrantObject(_) => Some("GRANT"),
             Statement::RevokeObject(_) => Some("REVOKE"),
+            Statement::AlterDefaultPrivileges(_) => Some("ALTER DEFAULT PRIVILEGES"),
             Statement::ReindexIndex(_) => Some("REINDEX"),
-            Statement::Unsupported(stmt) if stmt.feature == "ALTER DEFAULT PRIVILEGES" => {
-                Some("ALTER DEFAULT PRIVILEGES")
-            }
             _ => None,
         }
     }
@@ -9602,6 +9600,24 @@ impl Session {
                     db.execute_grant_object_stmt_with_search_path(
                         self.client_id,
                         grant_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterDefaultPrivileges(ref default_privileges_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_default_privileges_stmt_with_search_path(
+                        self.client_id,
+                        default_privileges_stmt,
                         search_path.as_deref(),
                     )
                 }
@@ -17216,6 +17232,18 @@ impl Session {
                     db.execute_grant_object_stmt_in_transaction_with_search_path(
                         client_id,
                         grant_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterDefaultPrivileges(ref default_privileges_stmt) => {
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_default_privileges_stmt_in_transaction_with_search_path(
+                        client_id,
+                        default_privileges_stmt,
                         xid,
                         cid,
                         search_path.as_deref(),

@@ -156,8 +156,32 @@ impl Database {
             .write()
             .create_namespace_mvcc(0, &resolved.schema_name, resolved.owner_oid, &ctx)
             .map_err(map_catalog_error)?;
+        let namespace_oid = effect.namespace_oids.first().copied().unwrap_or_default();
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
+        if let Some(nspacl) = self.default_acl_for_new_schema(
+            client_id,
+            resolved.owner_oid,
+            xid,
+            cid.saturating_add(1),
+        )? {
+            let acl_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(1),
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_namespace_acl_mvcc(namespace_oid, Some(nspacl), &acl_ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
         self.invalidate_backend_cache_state(client_id);
 
         if !elements.is_empty() {

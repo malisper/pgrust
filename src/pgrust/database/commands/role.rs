@@ -1,5 +1,9 @@
 use super::super::*;
+use crate::backend::catalog::persistence::{
+    delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
+};
 use crate::backend::catalog::roles::find_role_by_name;
+use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::commands::rolecmds::{
     PasswordSettings, build_alter_role_spec, build_create_role_spec, can_rename_role,
     grant_membership_authorized, membership_row, normalize_drop_role_names,
@@ -9,7 +13,12 @@ use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,
     DropOwnedStatement, DropRoleStatement, ReassignOwnedStatement, RoleOption,
 };
-use crate::include::catalog::{DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_POLICY_RELATION_OID};
+use crate::include::catalog::{
+    BootstrapCatalogKind, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_POLICY_RELATION_OID,
+};
+use crate::pgrust::database::commands::privilege::{
+    catalog_effect_for_acl, default_acl_acl_shdepend_rows, default_acl_hardwired,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Database {
@@ -1058,6 +1067,85 @@ impl Database {
                 .alter_attribute_acls_mvcc(relation_oid, acl_by_attnum.into_iter().collect(), &ctx)
                 .map_err(map_role_catalog_error)?;
             catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
+        }
+
+        let snapshot = self
+            .txns
+            .read()
+            .snapshot_for_command(xid, current_cid)
+            .map_err(|err| ExecError::DetailedError {
+                message: format!("catalog snapshot failed: {err:?}"),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let default_acl_rows = self.scan_default_acl_rows(client_id, &snapshot)?;
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, current_cid)))
+            .map_err(map_role_catalog_error)?;
+        let mut delete_rows = PhysicalCatalogRows::default();
+        let mut insert_rows = PhysicalCatalogRows::default();
+        for row in default_acl_rows {
+            let drop_row = role_oids.contains(&row.defaclrole);
+            let cleaned_acl = row
+                .defaclacl
+                .clone()
+                .and_then(|acl| remove_acl_role_mentions(acl, &role_names));
+            if !drop_row && cleaned_acl == row.defaclacl {
+                continue;
+            }
+            delete_rows.default_acls.push(row.clone());
+            delete_rows
+                .shdepends
+                .extend(self.default_acl_shdepend_rows(client_id, &snapshot, row.oid)?);
+            if drop_row {
+                continue;
+            }
+            let owner_name = owner_names
+                .get(&row.defaclrole)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let Some(cleaned_acl) = cleaned_acl else {
+                continue;
+            };
+            let hardwired = default_acl_hardwired(owner_name, row.defaclobjtype);
+            if cleaned_acl == hardwired {
+                continue;
+            }
+            let default_acl_oid = row.oid;
+            insert_rows
+                .default_acls
+                .push(crate::include::catalog::PgDefaultAclRow {
+                    defaclacl: Some(cleaned_acl.clone()),
+                    ..row
+                });
+            insert_rows.shdepends.extend(default_acl_acl_shdepend_rows(
+                self.database_oid,
+                default_acl_oid,
+                &cleaned_acl,
+                &auth_catalog,
+            ));
+        }
+        if !delete_rows.default_acls.is_empty() {
+            let kinds = [
+                BootstrapCatalogKind::PgDefaultAcl,
+                BootstrapCatalogKind::PgShdepend,
+            ];
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts,
+            };
+            delete_catalog_rows_subset_mvcc(&ctx, &delete_rows, self.database_oid, &kinds)
+                .map_err(map_role_catalog_error)?;
+            insert_catalog_rows_subset_mvcc(&ctx, &insert_rows, self.database_oid, &kinds)
+                .map_err(map_role_catalog_error)?;
+            catalog_effects.push(catalog_effect_for_acl(&kinds));
             current_cid = current_cid.saturating_add(1);
         }
 

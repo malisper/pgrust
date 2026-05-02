@@ -631,6 +631,7 @@ fn run_statement(
         | Statement::DropAccessMethod(_)
         | Statement::GrantObject(_)
         | Statement::RevokeObject(_)
+        | Statement::AlterDefaultPrivileges(_)
         | Statement::GrantRoleMembership(_)
         | Statement::RevokeRoleMembership(_)
         | Statement::SetRole(_)
@@ -715,9 +716,6 @@ fn run_statement(
                 "ALTER TABLE ALTER COLUMN TYPE in query_repl: {}.{} -> {:?}",
                 stmt.table_name, stmt.column_name, stmt.ty
             ))))
-        }
-        Statement::Unsupported(stmt) if stmt.feature == "ALTER DEFAULT PRIVILEGES" => {
-            Ok(StatementResult::AffectedRows(0))
         }
         Statement::Unsupported(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("{}: {}", stmt.feature, stmt.sql),

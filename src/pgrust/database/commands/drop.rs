@@ -1138,6 +1138,28 @@ fn strip_drop_function_arg_mode(text: &str) -> Option<(&str, bool)> {
     None
 }
 
+fn ensure_drop_routine_owner(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    proc_row: &PgProcRow,
+    object_kind: &'static str,
+) -> Result<(), ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    if auth.has_effective_membership(proc_row.proowner, &auth_catalog) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be owner of {object_kind} {}", proc_row.proname),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DropRoutineArgSpec {
     mode: Option<u8>,
@@ -2042,6 +2064,7 @@ impl Database {
                 });
             }
         };
+        ensure_drop_routine_owner(self, client_id, txn_ctx, &proc_row, "aggregate")?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -2399,6 +2422,7 @@ impl Database {
                 });
             }
         };
+        ensure_drop_routine_owner(self, client_id, txn_ctx, &proc_row, object_kind)?;
         let catcache = self
             .backend_catcache(client_id, txn_ctx)
             .map_err(map_catalog_error)?;
@@ -4115,6 +4139,13 @@ impl Database {
                     catalog_effects,
                 )?;
             }
+            namespace_cid = self.delete_default_acls_for_namespace_in_transaction(
+                client_id,
+                schema.oid,
+                xid,
+                namespace_cid,
+                catalog_effects,
+            )?;
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),

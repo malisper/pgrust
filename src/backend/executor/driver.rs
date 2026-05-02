@@ -732,6 +732,7 @@ fn execute_statement_with_source(
         | Statement::DropRole(_)
         | Statement::GrantObject(_)
         | Statement::RevokeObject(_)
+        | Statement::AlterDefaultPrivileges(_)
         | Statement::GrantRoleMembership(_)
         | Statement::RevokeRoleMembership(_)
         | Statement::SetSessionAuthorization(_)

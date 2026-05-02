@@ -750,7 +750,7 @@ impl Database {
         Ok(rows)
     }
 
-    fn scan_default_acl_rows(
+    pub(crate) fn scan_default_acl_rows(
         &self,
         client_id: ClientId,
         snapshot: &Snapshot,
@@ -1345,7 +1345,7 @@ impl Database {
         let result = self.execute_large_object_acl_stmt_in_transaction(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             stmt.with_grant_option,
             xid,
@@ -1370,7 +1370,7 @@ impl Database {
         let result = self.execute_large_object_acl_stmt_in_transaction(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             false,
             xid,

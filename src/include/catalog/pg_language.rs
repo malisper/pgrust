@@ -2,6 +2,8 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::BOOTSTRAP_SUPERUSER_OID;
+use std::collections::BTreeMap;
+use std::sync::{OnceLock, RwLock};
 
 pub const PG_LANGUAGE_INTERNAL_OID: u32 = 12;
 pub const PG_LANGUAGE_C_OID: u32 = 13;
@@ -18,6 +20,38 @@ pub struct PgLanguageRow {
     pub lanplcallfoid: u32,
     pub laninline: u32,
     pub lanvalidator: u32,
+}
+
+fn bootstrap_language_acl_overrides() -> &'static RwLock<BTreeMap<u32, Vec<String>>> {
+    static ACLS: OnceLock<RwLock<BTreeMap<u32, Vec<String>>>> = OnceLock::new();
+    ACLS.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+pub fn set_bootstrap_language_acl_override(oid: u32, acl: Option<Vec<String>>) {
+    let mut overrides = bootstrap_language_acl_overrides()
+        .write()
+        .expect("bootstrap language ACL override lock poisoned");
+    if let Some(acl) = acl {
+        overrides.insert(oid, acl);
+    } else {
+        overrides.remove(&oid);
+    }
+}
+
+pub fn bootstrap_language_acl_override(oid: u32) -> Option<Vec<String>> {
+    bootstrap_language_acl_overrides()
+        .read()
+        .expect("bootstrap language ACL override lock poisoned")
+        .get(&oid)
+        .cloned()
+}
+
+pub fn language_owner_default_acl(owner_name: &str, trusted: bool) -> Vec<String> {
+    let mut acl = vec![format!("{owner_name}=U/{owner_name}")];
+    if trusted {
+        acl.push(format!("=U/{owner_name}"));
+    }
+    acl
 }
 
 pub fn pg_language_desc() -> RelationDesc {

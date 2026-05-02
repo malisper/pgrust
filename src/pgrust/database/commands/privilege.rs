@@ -1,18 +1,35 @@
 use super::super::*;
+use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use crate::backend::access::transam::xact::Snapshot;
+use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
+use crate::backend::catalog::persistence::{
+    delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
+};
 use crate::backend::catalog::roles::find_role_by_name;
+use crate::backend::catalog::rowcodec::{decode_catalog_tuple_values, pg_shdepend_row_from_values};
+use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::commands::rolecmds::{membership_row, role_management_error};
 use crate::backend::parser::{
-    CatalogLookup, GrantObjectPrivilege, GrantObjectStatement, GrantRoleMembershipStatement,
-    ParseError, RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec, RoutineKind,
-    SqlType, TypePrivilegeObjectKind, parse_type_name, resolve_raw_type_name,
+    AlterDefaultPrivilegesObjectType, AlterDefaultPrivilegesStatement, CatalogLookup,
+    GrantAllInSchemaKind, GrantObjectPrivilege, GrantObjectStatement, GrantObjectTarget,
+    GrantRoleMembershipStatement, ParseError, RevokeObjectStatement, RevokeRoleMembershipStatement,
+    RoleGrantorSpec, RoutineKind, SqlType, SqlTypeKind, TypePrivilegeObjectKind, parse_type_name,
+    resolve_raw_type_name,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
-use crate::include::catalog::pg_proc::{is_bootstrap_proc_oid, set_bootstrap_proc_execute_acl};
+use crate::include::catalog::pg_language::{
+    bootstrap_language_acl_override, language_owner_default_acl,
+    set_bootstrap_language_acl_override,
+};
+use crate::include::catalog::pg_proc::{is_bootstrap_proc_oid, set_bootstrap_proc_acl_override};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID, PgAuthIdRow,
-    PgForeignDataWrapperRow, PgForeignServerRow, PgTypeRow,
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID,
+    PG_AUTHID_RELATION_OID, PG_DEFAULT_ACL_RELATION_OID, PgAuthIdRow, PgDefaultAclRow,
+    PgForeignDataWrapperRow, PgForeignServerRow, PgShdependRow, PgTypeRow, SHARED_DEPENDENCY_ACL,
+    bootstrap_relation_desc, sort_pg_shdepend_rows,
 };
 use crate::include::nodes::primnodes::RelationDesc;
+use crate::pgrust::database::ddl::format_sql_type_name;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
@@ -30,6 +47,55 @@ const SCHEMA_CREATE_PRIVILEGE_CHARS: &str = "C";
 const TYPE_USAGE_PRIVILEGE_CHARS: &str = "U";
 const FUNCTION_EXECUTE_PRIVILEGE_CHARS: &str = "X";
 const FOREIGN_USAGE_PRIVILEGE_CHARS: &str = "U";
+const LARGE_OBJECT_ALL_PRIVILEGE_CHARS: &str = "rw";
+const DEFAULT_ACL_RELATION: char = 'r';
+const DEFAULT_ACL_SEQUENCE: char = 'S';
+const DEFAULT_ACL_FUNCTION: char = 'f';
+const DEFAULT_ACL_TYPE: char = 'T';
+const DEFAULT_ACL_SCHEMA: char = 'n';
+const DEFAULT_ACL_LARGE_OBJECT: char = 'L';
+
+fn default_acl_objtype_for_statement(object_type: AlterDefaultPrivilegesObjectType) -> char {
+    match object_type {
+        AlterDefaultPrivilegesObjectType::Tables => DEFAULT_ACL_RELATION,
+        AlterDefaultPrivilegesObjectType::Sequences => DEFAULT_ACL_SEQUENCE,
+        AlterDefaultPrivilegesObjectType::Functions
+        | AlterDefaultPrivilegesObjectType::Routines => DEFAULT_ACL_FUNCTION,
+        AlterDefaultPrivilegesObjectType::Types => DEFAULT_ACL_TYPE,
+        AlterDefaultPrivilegesObjectType::Schemas => DEFAULT_ACL_SCHEMA,
+        AlterDefaultPrivilegesObjectType::LargeObjects => DEFAULT_ACL_LARGE_OBJECT,
+    }
+}
+
+pub(crate) fn default_acl_allowed_privileges(objtype: char) -> &'static str {
+    match objtype {
+        DEFAULT_ACL_RELATION => TABLE_ALL_PRIVILEGE_CHARS,
+        DEFAULT_ACL_SEQUENCE => "rwU",
+        DEFAULT_ACL_FUNCTION => FUNCTION_EXECUTE_PRIVILEGE_CHARS,
+        DEFAULT_ACL_TYPE => TYPE_USAGE_PRIVILEGE_CHARS,
+        DEFAULT_ACL_SCHEMA => SCHEMA_ALL_PRIVILEGE_CHARS,
+        DEFAULT_ACL_LARGE_OBJECT => LARGE_OBJECT_ALL_PRIVILEGE_CHARS,
+        _ => "",
+    }
+}
+
+pub(crate) fn default_acl_hardwired(owner_name: &str, objtype: char) -> Vec<String> {
+    match objtype {
+        DEFAULT_ACL_RELATION => table_owner_default_acl(owner_name, 'r')
+            .into_iter()
+            .collect(),
+        DEFAULT_ACL_SEQUENCE => table_owner_default_acl(owner_name, 'S')
+            .into_iter()
+            .collect(),
+        DEFAULT_ACL_FUNCTION => function_owner_default_acl(owner_name),
+        DEFAULT_ACL_TYPE => type_owner_default_acl(owner_name),
+        DEFAULT_ACL_SCHEMA => schema_owner_default_acl(owner_name),
+        DEFAULT_ACL_LARGE_OBJECT => vec![format!(
+            "{owner_name}={LARGE_OBJECT_ALL_PRIVILEGE_CHARS}/{owner_name}"
+        )],
+        _ => Vec::new(),
+    }
+}
 
 fn table_privilege_chars(privilege: &GrantObjectPrivilege) -> Option<&str> {
     match privilege {
@@ -303,6 +369,37 @@ fn revoke_table_acl_entry(
             privilege_chars,
             allowed,
         );
+        if remaining.is_empty() {
+            return false;
+        }
+        *item = format!("{grantee}={remaining}/{grantor}");
+        true
+    });
+}
+
+fn revoke_acl_grant_options_only(
+    acl: &mut Vec<String>,
+    grantee: &str,
+    privilege_chars: &str,
+    allowed: &str,
+) {
+    acl.retain_mut(|item| {
+        let Some((item_grantee, existing_privileges, grantor)) = parse_acl_item(item) else {
+            return true;
+        };
+        if item_grantee != grantee {
+            return true;
+        }
+        let mut remaining = String::new();
+        for ch in allowed.chars() {
+            if !acl_privilege_present(&existing_privileges, ch) {
+                continue;
+            }
+            remaining.push(ch);
+            if acl_privilege_grantable(&existing_privileges, ch) && !privilege_chars.contains(ch) {
+                remaining.push('*');
+            }
+        }
         if remaining.is_empty() {
             return false;
         }
@@ -724,6 +821,15 @@ pub(crate) fn routine_kind_matches(kind: RoutineKind, prokind: char) -> bool {
     }
 }
 
+fn routine_privilege_kind_matches(kind: RoutineKind, prokind: char) -> bool {
+    match kind {
+        RoutineKind::Function => prokind != 'p',
+        RoutineKind::Procedure => prokind == 'p',
+        RoutineKind::Aggregate => prokind == 'a',
+        RoutineKind::Routine => true,
+    }
+}
+
 pub(crate) fn routine_kind_name(kind: RoutineKind) -> &'static str {
     match kind {
         RoutineKind::Function => "function",
@@ -731,6 +837,38 @@ pub(crate) fn routine_kind_name(kind: RoutineKind) -> &'static str {
         RoutineKind::Aggregate => "aggregate",
         RoutineKind::Routine => "routine",
     }
+}
+
+fn routine_signature_display(name: &str, arg_types: &[SqlType]) -> String {
+    let args = arg_types
+        .iter()
+        .copied()
+        .map(routine_signature_type_display)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
+}
+
+fn routine_signature_type_display(mut sql_type: SqlType) -> String {
+    if sql_type.is_array {
+        return format!(
+            "{}[]",
+            routine_signature_type_display(sql_type.element_type())
+        );
+    }
+    if matches!(
+        sql_type.kind,
+        SqlTypeKind::Int2
+            | SqlTypeKind::Int4
+            | SqlTypeKind::Int8
+            | SqlTypeKind::Float4
+            | SqlTypeKind::Float8
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+    ) {
+        sql_type.type_oid = 0;
+    }
+    format_sql_type_name(sql_type)
 }
 
 fn ensure_function_signature_exists(
@@ -747,17 +885,24 @@ fn ensure_function_signature_exists(
         .rsplit_once('.')
         .map(|(schema, name)| (Some(schema.trim().to_ascii_lowercase()), name.trim()))
         .unwrap_or((None, proc_name));
-    let desired_arg_oids = arg_names
+    let desired_args = arg_names
         .into_iter()
         .map(|arg| {
             let raw_type = parse_type_name(arg)?;
             let sql_type = resolve_raw_type_name(&raw_type, &catalog)?;
-            catalog
+            let oid = catalog
                 .type_oid_for_sql_type(sql_type)
-                .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
+                .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))?;
+            Ok((oid, sql_type))
         })
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<Vec<_>, ParseError>>()
         .map_err(ExecError::Parse)?;
+    let desired_arg_oids = desired_args.iter().map(|(oid, _)| *oid).collect::<Vec<_>>();
+    let desired_arg_types = desired_args
+        .iter()
+        .map(|(_, sql_type)| *sql_type)
+        .collect::<Vec<_>>();
+    let display_signature = routine_signature_display(proc_name, &desired_arg_types);
     let schema_oid = match schema_name {
         Some(ref schema_name) => Some(
             db.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
@@ -784,7 +929,7 @@ fn ensure_function_signature_exists(
         Ok(())
     } else {
         Err(ExecError::DetailedError {
-            message: format!("function {signature} does not exist"),
+            message: format!("function {display_signature} does not exist"),
             detail: None,
             hint: None,
             sqlstate: "42883",
@@ -807,17 +952,24 @@ fn lookup_function_row_by_signature(
         .rsplit_once('.')
         .map(|(schema, name)| (Some(schema.trim().to_ascii_lowercase()), name.trim()))
         .unwrap_or((None, proc_name));
-    let desired_arg_oids = arg_names
+    let desired_args = arg_names
         .into_iter()
         .map(|arg| {
             let raw_type = parse_type_name(arg)?;
             let sql_type = resolve_raw_type_name(&raw_type, &catalog)?;
-            catalog
+            let oid = catalog
                 .type_oid_for_sql_type(sql_type)
-                .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
+                .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))?;
+            Ok((oid, sql_type))
         })
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<Vec<_>, ParseError>>()
         .map_err(ExecError::Parse)?;
+    let desired_arg_oids = desired_args.iter().map(|(oid, _)| *oid).collect::<Vec<_>>();
+    let desired_arg_types = desired_args
+        .iter()
+        .map(|(_, sql_type)| *sql_type)
+        .collect::<Vec<_>>();
+    let display_signature = routine_signature_display(proc_name, &desired_arg_types);
     let schema_oid = match schema_name {
         Some(ref schema_name) => Some(
             db.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
@@ -843,19 +995,22 @@ fn lookup_function_row_by_signature(
         .collect::<Vec<_>>();
     candidates
         .iter()
-        .find(|row| routine_kind_matches(kind, row.prokind))
+        .find(|row| routine_privilege_kind_matches(kind, row.prokind))
         .cloned()
         .ok_or_else(|| {
             if !candidates.is_empty() {
                 return ExecError::DetailedError {
-                    message: format!("{} is not a {}", signature, routine_kind_name(kind)),
+                    message: format!("{} is not a {}", display_signature, routine_kind_name(kind)),
                     detail: None,
                     hint: None,
                     sqlstate: "42809",
                 };
             }
             ExecError::DetailedError {
-                message: format!("{} {signature} does not exist", routine_kind_name(kind)),
+                message: format!(
+                    "{} {display_signature} does not exist",
+                    routine_kind_name(kind)
+                ),
                 detail: None,
                 hint: None,
                 sqlstate: "42883",
@@ -889,12 +1044,792 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    pub(crate) fn execute_alter_default_privileges_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterDefaultPrivilegesStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_default_privileges_stmt_in_transaction_with_search_path(
+            client_id,
+            stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_default_privileges_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterDefaultPrivilegesStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        if !stmt.schema_names.is_empty() {
+            match stmt.object_type {
+                AlterDefaultPrivilegesObjectType::Schemas => {
+                    return Err(ExecError::DetailedError {
+                        message: "cannot use IN SCHEMA clause when using GRANT/REVOKE ON SCHEMAS"
+                            .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
+                }
+                AlterDefaultPrivilegesObjectType::LargeObjects => {
+                    return Err(ExecError::DetailedError {
+                        message:
+                            "cannot use IN SCHEMA clause when using GRANT/REVOKE ON LARGE OBJECTS"
+                                .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let current_user_is_superuser = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .is_some_and(|row| row.rolsuper);
+        let mut target_role_oids = if stmt.role_names.is_empty() {
+            vec![auth.current_user_oid()]
+        } else {
+            stmt.role_names
+                .iter()
+                .map(|role_name| {
+                    let role = auth_catalog
+                        .role_by_name(role_name)
+                        .ok_or_else(|| role_does_not_exist_error(role_name))?;
+                    if !current_user_is_superuser
+                        && !auth.has_effective_membership(role.oid, &auth_catalog)
+                    {
+                        return Err(ExecError::DetailedError {
+                            message: "permission denied to change default privileges".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42501",
+                        });
+                    }
+                    Ok(role.oid)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        target_role_oids.sort_unstable();
+        target_role_oids.dedup();
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let mut namespace_oids = if stmt.schema_names.is_empty() {
+            vec![0]
+        } else {
+            stmt.schema_names
+                .iter()
+                .map(|schema_name| {
+                    catcache
+                        .namespace_by_name(schema_name)
+                        .map(|row| row.oid)
+                        .ok_or_else(|| ExecError::DetailedError {
+                            message: format!("schema \"{schema_name}\" does not exist"),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "3F000",
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        namespace_oids.sort_unstable();
+        namespace_oids.dedup();
+        let objtype = default_acl_objtype_for_statement(stmt.object_type);
+        for role_oid in target_role_oids {
+            for namespace_oid in &namespace_oids {
+                self.update_default_acl_entry(
+                    client_id,
+                    role_oid,
+                    *namespace_oid,
+                    objtype,
+                    &stmt.privilege_chars,
+                    &stmt.grantee_names,
+                    stmt.with_grant_option,
+                    !stmt.is_grant,
+                    stmt.grant_option_for,
+                    xid,
+                    cid,
+                    catalog_effects,
+                )?;
+            }
+        }
+        let _ = configured_search_path;
+        let _ = stmt.cascade;
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn update_default_acl_entry(
+        &self,
+        client_id: ClientId,
+        role_oid: u32,
+        namespace_oid: u32,
+        objtype: char,
+        privilege_chars: &str,
+        grantee_names: &[String],
+        with_grant_option: bool,
+        revoke: bool,
+        grant_option_for: bool,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let snapshot = snapshot_for_acl_command(self, xid, cid)?;
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let owner_name = auth_catalog
+            .role_by_oid(role_oid)
+            .map(|row| row.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("role with OID {role_oid} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        let existing = self
+            .scan_default_acl_rows(client_id, &snapshot)?
+            .into_iter()
+            .find(|row| {
+                row.defaclrole == role_oid
+                    && row.defaclnamespace == namespace_oid
+                    && row.defaclobjtype == objtype
+            });
+        let allowed = default_acl_allowed_privileges(objtype);
+        let base_acl = if namespace_oid == 0 {
+            default_acl_hardwired(&owner_name, objtype)
+        } else {
+            Vec::new()
+        };
+        let mut acl = existing
+            .as_ref()
+            .and_then(|row| row.defaclacl.clone())
+            .unwrap_or_else(|| base_acl.clone());
+        for grantee_name in grantee_names {
+            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                String::new()
+            } else {
+                auth_catalog
+                    .role_by_name(grantee_name)
+                    .map(|row| row.rolname.clone())
+                    .ok_or_else(|| role_does_not_exist_error(grantee_name))?
+            };
+            if grant_option_for {
+                revoke_acl_grant_options_only(
+                    &mut acl,
+                    &grantee_acl_name,
+                    privilege_chars,
+                    allowed,
+                );
+            } else if revoke {
+                revoke_table_acl_entry(&mut acl, &grantee_acl_name, privilege_chars, allowed);
+            } else {
+                grant_table_acl_entry(
+                    &mut acl,
+                    &grantee_acl_name,
+                    &owner_name,
+                    privilege_chars,
+                    allowed,
+                    with_grant_option,
+                );
+            }
+        }
+        let collapsed = if acl == base_acl || acl.is_empty() {
+            None
+        } else {
+            Some(acl)
+        };
+        let default_acl_oid = if let Some(row) = existing.as_ref() {
+            Some(row.oid)
+        } else if collapsed.is_some() {
+            Some(
+                self.catalog
+                    .write()
+                    .allocate_next_oid(0)
+                    .map_err(map_catalog_error)?,
+            )
+        } else {
+            None
+        };
+        let old_shdepends = existing
+            .as_ref()
+            .map(|row| self.default_acl_shdepend_rows(client_id, &snapshot, row.oid))
+            .transpose()?
+            .unwrap_or_default();
+        let delete_rows = PhysicalCatalogRows {
+            default_acls: existing.iter().cloned().collect(),
+            shdepends: old_shdepends,
+            ..PhysicalCatalogRows::default()
+        };
+        let (insert_default_acls, insert_shdepends) = if let (Some(oid), Some(defaclacl)) =
+            (default_acl_oid, collapsed)
+        {
+            let row = PgDefaultAclRow {
+                oid,
+                defaclrole: role_oid,
+                defaclnamespace: namespace_oid,
+                defaclobjtype: objtype,
+                defaclacl: Some(defaclacl.clone()),
+            };
+            (
+                vec![row],
+                default_acl_acl_shdepend_rows(self.database_oid, oid, &defaclacl, &auth_catalog),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let insert_rows = PhysicalCatalogRows {
+            default_acls: insert_default_acls,
+            shdepends: insert_shdepends,
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [
+            BootstrapCatalogKind::PgDefaultAcl,
+            BootstrapCatalogKind::PgShdepend,
+        ];
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        delete_catalog_rows_subset_mvcc(&ctx, &delete_rows, self.database_oid, &kinds)
+            .map_err(map_catalog_error)?;
+        insert_catalog_rows_subset_mvcc(&ctx, &insert_rows, self.database_oid, &kinds)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(catalog_effect_for_acl(&kinds));
+        Ok(())
+    }
+
+    pub(crate) fn default_acl_for_new_relation(
+        &self,
+        client_id: ClientId,
+        owner_oid: u32,
+        namespace_oid: u32,
+        relkind: char,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<Option<Vec<String>>, ExecError> {
+        let objtype = if relkind == 'S' {
+            DEFAULT_ACL_SEQUENCE
+        } else {
+            DEFAULT_ACL_RELATION
+        };
+        self.default_acl_for_new_object(
+            client_id,
+            owner_oid,
+            Some(namespace_oid),
+            objtype,
+            xid,
+            cid,
+        )
+    }
+
+    pub(crate) fn default_acl_for_new_type(
+        &self,
+        client_id: ClientId,
+        owner_oid: u32,
+        namespace_oid: u32,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<Option<Vec<String>>, ExecError> {
+        self.default_acl_for_new_object(
+            client_id,
+            owner_oid,
+            Some(namespace_oid),
+            DEFAULT_ACL_TYPE,
+            xid,
+            cid,
+        )
+    }
+
+    pub(crate) fn default_acl_for_new_proc(
+        &self,
+        client_id: ClientId,
+        owner_oid: u32,
+        namespace_oid: u32,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<Option<Vec<String>>, ExecError> {
+        self.default_acl_for_new_object(
+            client_id,
+            owner_oid,
+            Some(namespace_oid),
+            DEFAULT_ACL_FUNCTION,
+            xid,
+            cid,
+        )
+    }
+
+    pub(crate) fn default_acl_for_new_schema(
+        &self,
+        client_id: ClientId,
+        owner_oid: u32,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<Option<Vec<String>>, ExecError> {
+        self.default_acl_for_new_object(client_id, owner_oid, None, DEFAULT_ACL_SCHEMA, xid, cid)
+    }
+
+    pub(crate) fn delete_default_acls_for_namespace_in_transaction(
+        &self,
+        client_id: ClientId,
+        namespace_oid: u32,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let snapshot = snapshot_for_acl_command(self, xid, cid)?;
+        let mut rows = PhysicalCatalogRows::default();
+        for row in self
+            .scan_default_acl_rows(client_id, &snapshot)?
+            .into_iter()
+            .filter(|row| row.defaclnamespace == namespace_oid)
+        {
+            rows.shdepends
+                .extend(self.default_acl_shdepend_rows(client_id, &snapshot, row.oid)?);
+            rows.default_acls.push(row);
+        }
+        if rows.default_acls.is_empty() {
+            return Ok(cid);
+        }
+        let kinds = [
+            BootstrapCatalogKind::PgDefaultAcl,
+            BootstrapCatalogKind::PgShdepend,
+        ];
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        delete_catalog_rows_subset_mvcc(&ctx, &rows, self.database_oid, &kinds)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(catalog_effect_for_acl(&kinds));
+        Ok(cid.saturating_add(1))
+    }
+
+    fn default_acl_for_new_object(
+        &self,
+        client_id: ClientId,
+        owner_oid: u32,
+        namespace_oid: Option<u32>,
+        objtype: char,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<Option<Vec<String>>, ExecError> {
+        let snapshot = snapshot_for_acl_command(self, xid, cid)?;
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let owner_name = auth_catalog
+            .role_by_oid(owner_oid)
+            .map(|row| row.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("role with OID {owner_oid} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        let hardwired = default_acl_hardwired(&owner_name, objtype);
+        let rows = self.scan_default_acl_rows(client_id, &snapshot)?;
+        let global_acl = rows
+            .iter()
+            .find(|row| {
+                row.defaclrole == owner_oid
+                    && row.defaclnamespace == 0
+                    && row.defaclobjtype == objtype
+            })
+            .and_then(|row| row.defaclacl.clone())
+            .unwrap_or_else(|| hardwired.clone());
+        let mut merged_acl = global_acl;
+        if let Some(namespace_oid) = namespace_oid
+            && let Some(schema_acl) = rows
+                .iter()
+                .find(|row| {
+                    row.defaclrole == owner_oid
+                        && row.defaclnamespace == namespace_oid
+                        && row.defaclobjtype == objtype
+                })
+                .and_then(|row| row.defaclacl.clone())
+        {
+            merge_default_acl_overlay(
+                &mut merged_acl,
+                &schema_acl,
+                default_acl_allowed_privileges(objtype),
+            );
+        }
+        Ok((merged_acl != hardwired).then_some(merged_acl))
+    }
+
+    pub(crate) fn default_acl_shdepend_rows(
+        &self,
+        client_id: ClientId,
+        snapshot: &Snapshot,
+        default_acl_oid: u32,
+    ) -> Result<Vec<PgShdependRow>, ExecError> {
+        let kind = BootstrapCatalogKind::PgShdepend;
+        let rel = bootstrap_catalog_rel(kind, self.database_oid);
+        let desc = bootstrap_relation_desc(kind);
+        let mut scan = heap_scan_begin_visible(&self.pool, client_id, rel, snapshot.clone())
+            .map_err(ExecError::Heap)?;
+        let txns = self.txns.read();
+        let mut rows = Vec::new();
+        while let Some((_, tuple)) = heap_scan_next_visible(&self.pool, client_id, &txns, &mut scan)
+            .map_err(ExecError::Heap)?
+        {
+            let row = pg_shdepend_row_from_values(
+                decode_catalog_tuple_values(&desc, &tuple).map_err(map_catalog_error)?,
+            )
+            .map_err(map_catalog_error)?;
+            if row.classid == PG_DEFAULT_ACL_RELATION_OID
+                && row.objid == default_acl_oid
+                && row.objsubid == 0
+                && row.deptype == SHARED_DEPENDENCY_ACL
+            {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
+    fn execute_all_in_schema_acl_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        privilege: GrantObjectPrivilege,
+        target: &GrantObjectTarget,
+        grantee_names: &[String],
+        with_grant_option: bool,
+        revoke: bool,
+        grant_option_for: bool,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_all_in_schema_acl_stmt_in_transaction_with_search_path(
+            client_id,
+            privilege,
+            target,
+            grantee_names,
+            with_grant_option,
+            revoke,
+            grant_option_for,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    fn execute_all_in_schema_acl_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        privilege: GrantObjectPrivilege,
+        target: &GrantObjectTarget,
+        grantee_names: &[String],
+        with_grant_option: bool,
+        revoke: bool,
+        grant_option_for: bool,
+        xid: TransactionId,
+        cid: CommandId,
+        _configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let GrantObjectTarget::AllInSchema { kind, schema_names } = target else {
+            return Err(ExecError::Parse(ParseError::UnexpectedEof));
+        };
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let grantor_name = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .map(|row| row.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "current user does not exist".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let namespace_oids = schema_names
+            .iter()
+            .map(|schema_name| {
+                catcache
+                    .namespace_by_name(schema_name)
+                    .map(|row| row.oid)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{schema_name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut current_cid = cid;
+        match kind {
+            GrantAllInSchemaKind::Tables => {
+                let requested_privilege = privilege.clone();
+                for namespace_oid in namespace_oids {
+                    let rows = catcache
+                        .class_rows()
+                        .into_iter()
+                        .filter(|row| row.relnamespace == namespace_oid)
+                        .filter(|row| matches!(row.relkind, 'r' | 'p' | 'v' | 'm' | 'f'))
+                        .collect::<Vec<_>>();
+                    for row in rows {
+                        let owner_name = auth_catalog
+                            .role_by_oid(row.relowner)
+                            .map(|role| role.rolname.clone())
+                            .ok_or_else(|| ExecError::DetailedError {
+                                message: format!(
+                                    "owner for table \"{}\" does not exist",
+                                    row.relname
+                                ),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "XX000",
+                            })?;
+                        if !auth_catalog
+                            .role_by_oid(auth.current_user_oid())
+                            .is_some_and(|role| role.rolsuper)
+                            && !auth.has_effective_membership(row.relowner, &auth_catalog)
+                        {
+                            return Err(ExecError::DetailedError {
+                                message: format!("must be owner of table {}", row.relname),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "42501",
+                            });
+                        }
+                        let privilege_chars =
+                            relation_privilege_chars(&requested_privilege, row.relkind)
+                                .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+                        let allowed_privilege_chars = allowed_relation_privilege_chars(row.relkind);
+                        let mut acl = row.relacl.clone().unwrap_or_else(|| {
+                            table_owner_default_acl(&owner_name, row.relkind)
+                                .into_iter()
+                                .collect()
+                        });
+                        for grantee_name in grantee_names {
+                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                                String::new()
+                            } else {
+                                auth_catalog
+                                    .role_by_name(grantee_name)
+                                    .map(|role| role.rolname.clone())
+                                    .ok_or_else(|| role_does_not_exist_error(grantee_name))?
+                            };
+                            if grant_option_for {
+                                revoke_acl_grant_options_only(
+                                    &mut acl,
+                                    &grantee_acl_name,
+                                    privilege_chars,
+                                    allowed_privilege_chars,
+                                );
+                            } else if revoke {
+                                revoke_table_acl_entry(
+                                    &mut acl,
+                                    &grantee_acl_name,
+                                    privilege_chars,
+                                    allowed_privilege_chars,
+                                );
+                            } else {
+                                grant_table_acl_entry(
+                                    &mut acl,
+                                    &grantee_acl_name,
+                                    &grantor_name,
+                                    privilege_chars,
+                                    allowed_privilege_chars,
+                                    with_grant_option,
+                                );
+                            }
+                        }
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid: current_cid,
+                            client_id,
+                            waiter: None,
+                            interrupts: self.interrupt_state(client_id),
+                        };
+                        let effect = self
+                            .catalog
+                            .write()
+                            .alter_relation_acl_mvcc(
+                                row.oid,
+                                collapse_relation_acl_defaults(acl, &owner_name, row.relkind),
+                                &ctx,
+                            )
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(effect);
+                        current_cid = current_cid.saturating_add(1);
+                    }
+                }
+            }
+            GrantAllInSchemaKind::Functions
+            | GrantAllInSchemaKind::Procedures
+            | GrantAllInSchemaKind::Routines => {
+                let privilege_chars = object_privilege_chars(privilege)
+                    .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+                for namespace_oid in namespace_oids {
+                    let rows = catcache
+                        .proc_rows()
+                        .into_iter()
+                        .filter(|row| row.pronamespace == namespace_oid)
+                        .filter(|row| match kind {
+                            GrantAllInSchemaKind::Functions => row.prokind != 'p',
+                            GrantAllInSchemaKind::Procedures => row.prokind == 'p',
+                            GrantAllInSchemaKind::Routines => true,
+                            GrantAllInSchemaKind::Tables => false,
+                        })
+                        .collect::<Vec<_>>();
+                    for row in rows {
+                        let owner_name = auth_catalog
+                            .role_by_oid(row.proowner)
+                            .map(|role| role.rolname.clone())
+                            .ok_or_else(|| ExecError::DetailedError {
+                                message: format!(
+                                    "owner for function \"{}\" does not exist",
+                                    row.proname
+                                ),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "XX000",
+                            })?;
+                        if !auth_catalog
+                            .role_by_oid(auth.current_user_oid())
+                            .is_some_and(|role| role.rolsuper)
+                            && !auth.has_effective_membership(row.proowner, &auth_catalog)
+                        {
+                            return Err(ExecError::DetailedError {
+                                message: format!("must be owner of function {}", row.proname),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "42501",
+                            });
+                        }
+                        let mut acl = row
+                            .proacl
+                            .clone()
+                            .unwrap_or_else(|| function_owner_default_acl(&owner_name));
+                        for grantee_name in grantee_names {
+                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                                String::new()
+                            } else {
+                                auth_catalog
+                                    .role_by_name(grantee_name)
+                                    .map(|role| role.rolname.clone())
+                                    .ok_or_else(|| role_does_not_exist_error(grantee_name))?
+                            };
+                            if grant_option_for {
+                                revoke_acl_grant_options_only(
+                                    &mut acl,
+                                    &grantee_acl_name,
+                                    privilege_chars,
+                                    FUNCTION_EXECUTE_PRIVILEGE_CHARS,
+                                );
+                            } else if revoke {
+                                revoke_table_acl_entry(
+                                    &mut acl,
+                                    &grantee_acl_name,
+                                    privilege_chars,
+                                    FUNCTION_EXECUTE_PRIVILEGE_CHARS,
+                                );
+                            } else {
+                                grant_table_acl_entry(
+                                    &mut acl,
+                                    &grantee_acl_name,
+                                    &grantor_name,
+                                    privilege_chars,
+                                    FUNCTION_EXECUTE_PRIVILEGE_CHARS,
+                                    with_grant_option,
+                                );
+                            }
+                        }
+                        let new_acl =
+                            collapse_acl_defaults(acl, &function_owner_default_acl(&owner_name));
+                        if is_bootstrap_proc_oid(row.oid) {
+                            // :HACK: bootstrap pg_proc rows are not physically
+                            // replaceable yet; keep full EXECUTE ACL
+                            // replacements in a process-local overlay.
+                            set_bootstrap_proc_acl_override(row.oid, new_acl);
+                            continue;
+                        }
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid: current_cid,
+                            client_id,
+                            waiter: None,
+                            interrupts: self.interrupt_state(client_id),
+                        };
+                        let effect = self
+                            .catalog
+                            .write()
+                            .alter_proc_acl_mvcc(row.oid, new_acl, &ctx)
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(effect);
+                        current_cid = current_cid.saturating_add(1);
+                    }
+                }
+            }
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_grant_object_stmt_with_search_path(
         &self,
         client_id: ClientId,
         stmt: &GrantObjectStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        if matches!(stmt.target, GrantObjectTarget::AllInSchema { .. }) {
+            return self.execute_all_in_schema_acl_stmt_with_search_path(
+                client_id,
+                stmt.privilege.clone(),
+                &stmt.target,
+                &stmt.grantee_names,
+                stmt.with_grant_option,
+                false,
+                false,
+                configured_search_path,
+            );
+        }
         match stmt.privilege {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_grant_database_create_stmt(client_id, stmt)
@@ -925,7 +1860,7 @@ impl Database {
                 ),
             GrantObjectPrivilege::AllPrivilegesOnTablespace
             | GrantObjectPrivilege::CreateOnTablespace => {
-                self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
+                self.execute_tablespace_acl_stmt(client_id, stmt.named_object_names())
             }
             GrantObjectPrivilege::UsageOnType(_) => self
                 .execute_grant_type_acl_stmt_with_search_path(
@@ -936,8 +1871,10 @@ impl Database {
             GrantObjectPrivilege::UsageOnLanguage
             | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
                 client_id,
-                &stmt.object_names,
+                stmt.named_object_names(),
                 &stmt.grantee_names,
+                stmt.with_grant_option,
+                false,
                 false,
             ),
             GrantObjectPrivilege::ExecuteOnFunction
@@ -975,6 +1912,21 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        if matches!(stmt.target, GrantObjectTarget::AllInSchema { .. }) {
+            return self.execute_all_in_schema_acl_stmt_in_transaction_with_search_path(
+                client_id,
+                stmt.privilege.clone(),
+                &stmt.target,
+                &stmt.grantee_names,
+                false,
+                true,
+                stmt.grant_option_for,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+            );
+        }
         match stmt.privilege {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_revoke_database_create_stmt(client_id, stmt)
@@ -1004,7 +1956,7 @@ impl Database {
                 .execute_schema_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     xid,
                     cid,
@@ -1014,13 +1966,13 @@ impl Database {
                 ),
             GrantObjectPrivilege::AllPrivilegesOnTablespace
             | GrantObjectPrivilege::CreateOnTablespace => {
-                self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
+                self.execute_tablespace_acl_stmt(client_id, stmt.named_object_names())
             }
             GrantObjectPrivilege::UsageOnType(_) => self
                 .execute_type_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     xid,
                     cid,
@@ -1032,9 +1984,11 @@ impl Database {
             GrantObjectPrivilege::UsageOnLanguage
             | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
                 client_id,
-                &stmt.object_names,
+                stmt.named_object_names(),
                 &stmt.grantee_names,
+                false,
                 true,
+                stmt.grant_option_for,
             ),
             GrantObjectPrivilege::ExecuteOnFunction
             | GrantObjectPrivilege::ExecuteOnProcedure
@@ -1042,7 +1996,7 @@ impl Database {
                 .execute_function_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     xid,
                     cid,
@@ -1057,7 +2011,7 @@ impl Database {
                 .execute_large_object_acl_stmt_in_transaction(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     false,
                     xid,
@@ -1072,7 +2026,7 @@ impl Database {
                 .execute_foreign_usage_acl_stmt_in_transaction(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     false,
                     xid,
@@ -1093,6 +2047,21 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        if matches!(stmt.target, GrantObjectTarget::AllInSchema { .. }) {
+            return self.execute_all_in_schema_acl_stmt_in_transaction_with_search_path(
+                client_id,
+                stmt.privilege.clone(),
+                &stmt.target,
+                &stmt.grantee_names,
+                stmt.with_grant_option,
+                false,
+                false,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+            );
+        }
         match stmt.privilege {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_grant_database_create_stmt(client_id, stmt)
@@ -1122,7 +2091,7 @@ impl Database {
                 .execute_schema_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     xid,
                     cid,
@@ -1132,13 +2101,13 @@ impl Database {
                 ),
             GrantObjectPrivilege::AllPrivilegesOnTablespace
             | GrantObjectPrivilege::CreateOnTablespace => {
-                self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
+                self.execute_tablespace_acl_stmt(client_id, stmt.named_object_names())
             }
             GrantObjectPrivilege::UsageOnType(_) => self
                 .execute_type_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     xid,
                     cid,
@@ -1150,8 +2119,10 @@ impl Database {
             GrantObjectPrivilege::UsageOnLanguage
             | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
                 client_id,
-                &stmt.object_names,
+                stmt.named_object_names(),
                 &stmt.grantee_names,
+                stmt.with_grant_option,
+                false,
                 false,
             ),
             GrantObjectPrivilege::ExecuteOnFunction
@@ -1160,7 +2131,7 @@ impl Database {
                 .execute_function_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     xid,
                     cid,
@@ -1175,7 +2146,7 @@ impl Database {
                 .execute_large_object_acl_stmt_in_transaction(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     stmt.with_grant_option,
                     xid,
@@ -1190,7 +2161,7 @@ impl Database {
                 .execute_foreign_usage_acl_stmt_in_transaction(
                     client_id,
                     stmt.privilege.clone(),
-                    &stmt.object_names,
+                    stmt.named_object_names(),
                     &stmt.grantee_names,
                     stmt.with_grant_option,
                     xid,
@@ -1208,6 +2179,18 @@ impl Database {
         stmt: &RevokeObjectStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        if matches!(stmt.target, GrantObjectTarget::AllInSchema { .. }) {
+            return self.execute_all_in_schema_acl_stmt_with_search_path(
+                client_id,
+                stmt.privilege.clone(),
+                &stmt.target,
+                &stmt.grantee_names,
+                false,
+                true,
+                stmt.grant_option_for,
+                configured_search_path,
+            );
+        }
         match stmt.privilege {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_revoke_database_create_stmt(client_id, stmt)
@@ -1238,7 +2221,7 @@ impl Database {
                 ),
             GrantObjectPrivilege::AllPrivilegesOnTablespace
             | GrantObjectPrivilege::CreateOnTablespace => {
-                self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
+                self.execute_tablespace_acl_stmt(client_id, stmt.named_object_names())
             }
             GrantObjectPrivilege::UsageOnType(_) => self
                 .execute_revoke_type_acl_stmt_with_search_path(
@@ -1249,9 +2232,11 @@ impl Database {
             GrantObjectPrivilege::UsageOnLanguage
             | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
                 client_id,
-                &stmt.object_names,
+                stmt.named_object_names(),
                 &stmt.grantee_names,
+                false,
                 true,
+                stmt.grant_option_for,
             ),
             GrantObjectPrivilege::ExecuteOnFunction
             | GrantObjectPrivilege::ExecuteOnProcedure
@@ -1285,7 +2270,7 @@ impl Database {
         stmt: &RevokeObjectStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let type_name = single_object_name(&stmt.object_names, "single type name")?;
+        let type_name = single_object_name(stmt.named_object_names(), "single type name")?;
         let search_path = self.effective_search_path(client_id, configured_search_path);
         let auth_catalog = self
             .auth_catalog(client_id, None)
@@ -1377,12 +2362,12 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        if stmt.object_names.is_empty() {
+        if stmt.named_object_names().is_empty() {
             return Err(ExecError::Parse(ParseError::UnexpectedEof));
         }
         let auth = self.auth_state(client_id);
         let mut current_cid = cid;
-        for object_name in &stmt.object_names {
+        for object_name in stmt.named_object_names() {
             let catalog = self.lazy_catalog_lookup(
                 client_id,
                 Some((xid, current_cid)),
@@ -1606,12 +2591,12 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        if stmt.object_names.is_empty() {
+        if stmt.named_object_names().is_empty() {
             return Err(ExecError::Parse(ParseError::UnexpectedEof));
         }
         let auth = self.auth_state(client_id);
         let mut current_cid = cid;
-        for object_name in &stmt.object_names {
+        for object_name in stmt.named_object_names() {
             let catalog = self.lazy_catalog_lookup(
                 client_id,
                 Some((xid, current_cid)),
@@ -1788,7 +2773,9 @@ impl Database {
         client_id: ClientId,
         object_names: &[String],
         grantee_names: &[String],
+        with_grant_option: bool,
         revoke: bool,
+        grant_option_for: bool,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, None, None);
         let auth_catalog = self
@@ -1798,6 +2785,10 @@ impl Database {
         let is_superuser = auth_catalog
             .role_by_oid(auth.current_user_oid())
             .is_some_and(|row| row.rolsuper);
+        let grantor_name = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .map(|row| row.rolname.clone())
+            .unwrap_or_else(|| "postgres".into());
         for grantee_name in grantee_names {
             if !grantee_name.eq_ignore_ascii_case("public")
                 && auth_catalog.role_by_name(grantee_name).is_none()
@@ -1828,16 +2819,62 @@ impl Database {
                     sqlstate: "42501",
                 });
             }
+            let owner_name = auth_catalog
+                .role_by_oid(language.lanowner)
+                .map(|row| row.rolname.clone())
+                .unwrap_or_else(|| "postgres".into());
             if !is_superuser && !auth.has_effective_membership(language.lanowner, &auth_catalog) {
                 let action = if revoke { "revoked" } else { "granted" };
                 push_warning(format!(
                     "no privileges were {action} for \"{}\"",
                     language.lanname
                 ));
+                continue;
             }
-            // :HACK: pg_language does not carry lanacl in pgrust yet. Validate
-            // existence, trusted-language rules, grantees, and ownership warning
-            // behavior so object-GRANT scripts can proceed until lanacl exists.
+            let defaults = language_owner_default_acl(&owner_name, language.lanpltrusted);
+            let mut acl =
+                bootstrap_language_acl_override(language.oid).unwrap_or_else(|| defaults.clone());
+            for grantee_name in grantee_names {
+                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                    String::new()
+                } else {
+                    auth_catalog
+                        .role_by_name(grantee_name)
+                        .map(|row| row.rolname.clone())
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "role \"{}\" does not exist",
+                                grantee_name
+                            )))
+                        })?
+                };
+                if grant_option_for {
+                    revoke_acl_grant_options_only(
+                        &mut acl,
+                        &grantee_acl_name,
+                        TYPE_USAGE_PRIVILEGE_CHARS,
+                        TYPE_USAGE_PRIVILEGE_CHARS,
+                    );
+                } else if revoke {
+                    revoke_table_acl_entry(
+                        &mut acl,
+                        &grantee_acl_name,
+                        TYPE_USAGE_PRIVILEGE_CHARS,
+                        TYPE_USAGE_PRIVILEGE_CHARS,
+                    );
+                } else {
+                    grant_table_acl_entry(
+                        &mut acl,
+                        &grantee_acl_name,
+                        &grantor_name,
+                        TYPE_USAGE_PRIVILEGE_CHARS,
+                        TYPE_USAGE_PRIVILEGE_CHARS,
+                        with_grant_option,
+                    );
+                }
+            }
+            let collapsed = collapse_acl_defaults(acl, &defaults);
+            set_bootstrap_language_acl_override(language.oid, collapsed);
         }
         Ok(StatementResult::AffectedRows(0))
     }
@@ -1854,7 +2891,7 @@ impl Database {
         let result = self.execute_schema_acl_stmt_in_transaction_with_search_path(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             xid,
             0,
@@ -1879,7 +2916,7 @@ impl Database {
         let result = self.execute_schema_acl_stmt_in_transaction_with_search_path(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             xid,
             0,
@@ -2017,7 +3054,7 @@ impl Database {
         self.execute_type_acl_stmt_with_search_path(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             configured_search_path,
             false,
@@ -2034,7 +3071,7 @@ impl Database {
         self.execute_type_acl_stmt_with_search_path(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             configured_search_path,
             true,
@@ -2297,26 +3334,6 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
-    pub(crate) fn default_acl_for_new_type(
-        &self,
-        owner_oid: u32,
-        namespace_oid: u32,
-    ) -> Option<Vec<String>> {
-        let mut acl_items = None;
-        for row in &self.object_addresses.read().default_acls {
-            if row.role_oid == owner_oid
-                && row.objtype == 'T'
-                && row
-                    .namespace_oid
-                    .is_none_or(|default_namespace_oid| default_namespace_oid == namespace_oid)
-                && !row.acl_items.is_empty()
-            {
-                acl_items = Some(row.acl_items.clone());
-            }
-        }
-        acl_items
-    }
-
     pub(crate) fn ensure_sql_type_usage_privilege(
         &self,
         client_id: ClientId,
@@ -2417,7 +3434,7 @@ impl Database {
         self.execute_function_acl_stmt_with_search_path(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             configured_search_path,
             false,
@@ -2433,7 +3450,7 @@ impl Database {
         self.execute_function_acl_stmt_with_search_path(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             configured_search_path,
             true,
@@ -2543,7 +3560,6 @@ impl Database {
                 .proacl
                 .clone()
                 .unwrap_or_else(|| function_owner_default_acl(&owner_name));
-            let mut resolved_grantees = Vec::new();
             for grantee_name in grantee_names {
                 let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
                     String::new()
@@ -2558,7 +3574,6 @@ impl Database {
                             )))
                         })?
                 };
-                resolved_grantees.push(grantee_acl_name.clone());
                 if revoke {
                     revoke_acl_entry(
                         &mut acl,
@@ -2579,10 +3594,8 @@ impl Database {
             let new_acl = collapse_acl_defaults(acl, &function_owner_default_acl(&owner_name));
             if is_bootstrap_proc_oid(row.oid) {
                 // :HACK: bootstrap pg_proc rows are not physically replaceable
-                // yet; keep EXECUTE ACL deltas in a process-local overlay.
-                for grantee in resolved_grantees {
-                    set_bootstrap_proc_execute_acl(row.oid, &grantee, !revoke);
-                }
+                // yet; keep full EXECUTE ACL replacements in a process-local overlay.
+                set_bootstrap_proc_acl_override(row.oid, new_acl);
                 continue;
             }
             let effect = self
@@ -2606,7 +3619,7 @@ impl Database {
         let result = self.execute_foreign_usage_acl_stmt_in_transaction(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             stmt.with_grant_option,
             xid,
@@ -2631,7 +3644,7 @@ impl Database {
         let result = self.execute_foreign_usage_acl_stmt_in_transaction(
             client_id,
             stmt.privilege.clone(),
-            &stmt.object_names,
+            stmt.named_object_names(),
             &stmt.grantee_names,
             false,
             xid,
@@ -3244,13 +4257,86 @@ fn can_revoke_database_create(
     })
 }
 
+fn snapshot_for_acl_command(
+    db: &Database,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<Snapshot, ExecError> {
+    db.txns
+        .read()
+        .snapshot_for_command(xid, cid)
+        .map_err(|err| ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(err)))
+}
+
+pub(crate) fn catalog_effect_for_acl(kinds: &[BootstrapCatalogKind]) -> CatalogMutationEffect {
+    let mut effect = CatalogMutationEffect::default();
+    for &kind in kinds {
+        if !effect.touched_catalogs.contains(&kind) {
+            effect.touched_catalogs.push(kind);
+        }
+    }
+    effect
+}
+
+fn merge_default_acl_overlay(base: &mut Vec<String>, overlay: &[String], allowed: &str) {
+    for item in overlay {
+        let Some((grantee, privileges, grantor)) = parse_acl_item(item) else {
+            continue;
+        };
+        if let Some(existing) = base.iter_mut().find(|base_item| {
+            parse_acl_item(base_item)
+                .map(|(base_grantee, _, base_grantor)| {
+                    base_grantee == grantee && base_grantor == grantor
+                })
+                .unwrap_or(false)
+        }) {
+            let (_, existing_privileges, _) = parse_acl_item(existing).expect("validated above");
+            let merged = canonicalize_acl_privileges_with_grant_options(
+                &existing_privileges,
+                &privileges,
+                false,
+                allowed,
+            );
+            *existing = format!("{grantee}={merged}/{grantor}");
+        } else {
+            base.push(item.clone());
+        }
+    }
+}
+
+pub(crate) fn default_acl_acl_shdepend_rows(
+    db_oid: u32,
+    default_acl_oid: u32,
+    acl: &[String],
+    auth_catalog: &crate::pgrust::auth::AuthCatalog,
+) -> Vec<PgShdependRow> {
+    let mut rows = acl
+        .iter()
+        .filter_map(|item| parse_acl_item(item).map(|(grantee, _, _)| grantee))
+        .filter(|grantee| !grantee.is_empty())
+        .filter_map(|grantee| auth_catalog.role_by_name(&grantee).map(|role| role.oid))
+        .map(|role_oid| PgShdependRow {
+            dbid: db_oid,
+            classid: PG_DEFAULT_ACL_RELATION_OID,
+            objid: default_acl_oid,
+            objsubid: 0,
+            refclassid: PG_AUTHID_RELATION_OID,
+            refobjid: role_oid,
+            deptype: SHARED_DEPENDENCY_ACL,
+        })
+        .collect::<Vec<_>>();
+    sort_pg_shdepend_rows(&mut rows);
+    rows.dedup();
+    rows
+}
+
 impl Database {
     fn execute_grant_database_create_stmt(
         &self,
         client_id: ClientId,
         stmt: &GrantObjectStatement,
     ) -> Result<StatementResult, ExecError> {
-        let object_name = single_object_name(&stmt.object_names, "single database name")?;
+        let object_name = single_object_name(stmt.named_object_names(), "single database name")?;
         if !execute_database_name_matches_current(object_name) {
             return Err(ExecError::DetailedError {
                 message: format!("database \"{}\" does not exist", object_name),
@@ -3306,7 +4392,7 @@ impl Database {
         client_id: ClientId,
         stmt: &RevokeObjectStatement,
     ) -> Result<StatementResult, ExecError> {
-        let object_name = single_object_name(&stmt.object_names, "single database name")?;
+        let object_name = single_object_name(stmt.named_object_names(), "single database name")?;
         if !execute_database_name_matches_current(object_name) {
             return Err(ExecError::DetailedError {
                 message: format!("database \"{}\" does not exist", object_name),
@@ -3996,6 +5082,215 @@ mod tests {
     }
 
     #[test]
+    fn default_table_acl_applies_only_to_new_tables() {
+        let base = temp_dir("default_table_acl");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role reader").unwrap();
+        session.execute(&db, "create schema defacl_ns").unwrap();
+        session
+            .execute(&db, "create table defacl_ns.before_acl (a int)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "alter default privileges in schema defacl_ns grant select on tables to reader",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create table defacl_ns.after_acl (a int)")
+            .unwrap();
+
+        assert!(table_acl(&db, "before_acl").is_none());
+        let after_acl = table_acl(&db, "after_acl").unwrap();
+        assert!(after_acl.iter().any(|item| item == "reader=r/postgres"));
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select count(*)::int4 from pg_default_acl"
+            ),
+            vec![vec![Value::Int32(1)]]
+        );
+    }
+
+    #[test]
+    fn default_schema_acl_applies_to_new_schemas() {
+        let base = temp_dir("default_schema_acl");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role schema_reader").unwrap();
+        session
+            .execute(
+                &db,
+                "alter default privileges grant usage on schemas to schema_reader",
+            )
+            .unwrap();
+        session.execute(&db, "create schema schema_acl_a").unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_schema_privilege('schema_reader', 'schema_acl_a', 'usage'),
+                        has_schema_privilege('schema_reader', 'schema_acl_a', 'create')"
+            ),
+            vec![vec![Value::Bool(true), Value::Bool(false)]]
+        );
+
+        session
+            .execute(
+                &db,
+                "alter default privileges revoke usage on schemas from schema_reader",
+            )
+            .unwrap();
+        session.execute(&db, "create schema schema_acl_b").unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_schema_privilege('schema_reader', 'schema_acl_b', 'usage')"
+            ),
+            vec![vec![Value::Bool(false)]]
+        );
+    }
+
+    #[test]
+    fn grant_all_tables_in_schema_updates_existing_tables() {
+        let base = temp_dir("grant_all_tables_in_schema");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role bulk_reader").unwrap();
+        session.execute(&db, "create schema bulk_acl_ns").unwrap();
+        session
+            .execute(&db, "create table bulk_acl_ns.bulk_a (a int)")
+            .unwrap();
+        session
+            .execute(&db, "create table bulk_acl_ns.bulk_b (a int)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "grant select on all tables in schema bulk_acl_ns to bulk_reader",
+            )
+            .unwrap();
+
+        for relname in ["bulk_a", "bulk_b"] {
+            let acl = table_acl(&db, relname).unwrap();
+            assert!(acl.iter().any(|item| item == "bulk_reader=r/postgres"));
+        }
+    }
+
+    #[test]
+    fn bulk_function_procedure_routine_acl_classification() {
+        let base = temp_dir("bulk_routine_acl");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role routine_user").unwrap();
+        session
+            .execute(&db, "create schema routine_acl_ns")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create function routine_acl_ns.f_acl() returns int4 as 'select 1' language sql",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create aggregate routine_acl_ns.a_acl(int) (sfunc = int4pl, stype = int4)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create procedure routine_acl_ns.p_acl() language sql as 'select 1'",
+            )
+            .unwrap();
+
+        session
+            .execute(
+                &db,
+                "revoke execute on function routine_acl_ns.a_acl(int) from public",
+            )
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_function_privilege('routine_user', 'routine_acl_ns.a_acl(int)', 'execute')"
+            ),
+            vec![vec![Value::Bool(false)]]
+        );
+        session
+            .execute(
+                &db,
+                "grant execute on function routine_acl_ns.a_acl(int) to routine_user",
+            )
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_function_privilege('routine_user', 'routine_acl_ns.a_acl(int)', 'execute')"
+            ),
+            vec![vec![Value::Bool(true)]]
+        );
+        session
+            .execute(
+                &db,
+                "revoke execute on function routine_acl_ns.a_acl(int) from routine_user",
+            )
+            .unwrap();
+
+        session
+            .execute(
+                &db,
+                "revoke execute on all functions in schema routine_acl_ns from public",
+            )
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_function_privilege('routine_user', 'routine_acl_ns.f_acl()', 'execute'),
+                        has_function_privilege('routine_user', 'routine_acl_ns.a_acl(int)', 'execute'),
+                        has_function_privilege('routine_user', 'routine_acl_ns.p_acl()', 'execute')"
+            ),
+            vec![vec![Value::Bool(false), Value::Bool(false), Value::Bool(true)]]
+        );
+
+        session
+            .execute(
+                &db,
+                "revoke execute on all procedures in schema routine_acl_ns from public",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "grant execute on all routines in schema routine_acl_ns to routine_user",
+            )
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_function_privilege('routine_user', 'routine_acl_ns.f_acl()', 'execute'),
+                        has_function_privilege('routine_user', 'routine_acl_ns.a_acl(int)', 'execute'),
+                        has_function_privilege('routine_user', 'routine_acl_ns.p_acl()', 'execute'),
+                        has_function_privilege('sum(numeric)', 'execute')"
+            ),
+            vec![vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true)
+            ]]
+        );
+    }
+
+    #[test]
     fn grant_role_membership_updates_existing_options() {
         let base = temp_dir("grant_role_options");
         let db = Database::open(&base, 16).unwrap();
@@ -4678,7 +5973,7 @@ mod tests {
         session
             .execute(
                 &db,
-                "alter default privileges in schema type_acl_ns revoke usage on types from public",
+                "alter default privileges revoke usage on types from public",
             )
             .unwrap();
         session

@@ -233,6 +233,22 @@ impl Database {
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&create_effect)?;
         catalog_effects.push(create_effect);
+        if let Some(relacl) = self.default_acl_for_new_relation(
+            client_id,
+            created.entry.owner_oid,
+            namespace_oid,
+            'm',
+            xid,
+            create_cid,
+        )? {
+            let acl_effect = self
+                .catalog
+                .write()
+                .alter_relation_acl_mvcc(created.entry.relation_oid, Some(relacl), &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&acl_effect)?;
+            catalog_effects.push(acl_effect);
+        }
         if relation_tablespace_oid != created.entry.rel.spc_oid {
             let set_ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
