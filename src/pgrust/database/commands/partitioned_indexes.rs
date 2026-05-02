@@ -774,16 +774,14 @@ impl<'a> PartitionedIndexInstaller<'a> {
             })
         });
         self.set_index_valid(index_oid, valid)?;
-        if valid {
-            let parent_oids = self
-                .catalog()
-                .inheritance_parents(index_oid)
-                .into_iter()
-                .map(|row| row.inhparent)
-                .collect::<Vec<_>>();
-            for parent_oid in parent_oids {
-                let _ = self.validate_partitioned_index_upward(parent_oid)?;
-            }
+        let parent_oids = self
+            .catalog()
+            .inheritance_parents(index_oid)
+            .into_iter()
+            .map(|row| row.inhparent)
+            .collect::<Vec<_>>();
+        for parent_oid in parent_oids {
+            let _ = self.validate_partitioned_index_upward(parent_oid)?;
         }
         Ok(valid)
     }

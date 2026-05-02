@@ -4804,6 +4804,61 @@ fn sql_cursor_fetch_move_close_and_cleanup() {
 }
 
 #[test]
+fn sql_cursor_fetch_first_with_ties_uses_limit_cursor_path() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table cursor_ties (k int4, v int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cursor_ties values (1, 10), (1, 20), (2, 30)",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c cursor for select k, v from cursor_ties order by k fetch first 2 rows with ties",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from c"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(20)]
+        ]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch 1 from c"),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch backward 1 from c"),
+        vec![vec![Value::Int32(1), Value::Int32(20)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch backward 1 from c"),
+        vec![vec![Value::Int32(1), Value::Int32(10)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from c"),
+        vec![vec![Value::Int32(1), Value::Int32(20)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch backward all from c"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(20)],
+            vec![Value::Int32(1), Value::Int32(10)]
+        ]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn update_where_current_of_uses_cursor_tuple() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -6248,6 +6303,113 @@ fn dml_returning_old_new_pseudo_rows() {
             "delete from returning_old_new_tbl returning old.id, new.id",
         ),
         vec![vec![Value::Int32(1), Value::Null]]
+    );
+}
+
+#[test]
+fn dml_returning_old_new_system_columns_and_aliases() {
+    let dir = temp_dir("dml_returning_old_new_system_columns_and_aliases");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table returning_old_new_sys_tbl (id int4, name text)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returning_old_new_sys_tbl values (1, 'alice') \
+             returning with (old as o, new as n) \
+             o.tableoid is null, o.ctid is null, n.tableoid is not null, n.ctid is not null",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true)
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "update returning_old_new_sys_tbl set name = 'bob' \
+             returning old.tableoid is not null, old.ctid is not null, \
+                       new.tableoid is not null, new.ctid is not null",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true)
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "delete from returning_old_new_sys_tbl \
+             returning old.tableoid is not null, old.ctid is not null, \
+                       new.tableoid is null, new.ctid is null",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true)
+        ]]
+    );
+}
+
+#[test]
+fn partition_update_returning_old_new_system_columns() {
+    let dir = temp_dir("partition_update_returning_old_new_system_columns");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table part_returning_tbl (id int4, name text) partition by list (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_returning_tbl_1 partition of part_returning_tbl for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_returning_tbl_2 partition of part_returning_tbl for values in (2)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into part_returning_tbl values (1, 'alpha')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "update part_returning_tbl set id = 2 \
+             returning old.tableoid is not null, old.ctid is not null, old.id, \
+                       new.tableoid is not null, new.ctid is not null, new.id",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Int32(1),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Int32(2),
+        ]]
     );
 }
 
@@ -12079,11 +12241,23 @@ fn alter_table_only_partitioned_primary_key_does_not_reconcile_children() {
         query_rows(
             &db,
             1,
-            "select inhparent::regclass::text, indisvalid \
+            "select indexrelid::regclass::text, inhparent::regclass::text, indisvalid \
                from pg_index idx left join pg_inherits inh on (idx.indexrelid = inh.inhrelid) \
-              where indexrelid = 'idxpart0_a_key'::regclass",
+              where indexrelid in ('idxpart0_a_key'::regclass, 'idxpart_pkey'::regclass) \
+              order by indexrelid::regclass::text",
         ),
-        vec![vec![Value::Text("idxpart_pkey".into()), Value::Bool(true)]]
+        vec![
+            vec![
+                Value::Text("idxpart0_a_key".into()),
+                Value::Text("idxpart_pkey".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart_pkey".into()),
+                Value::Null,
+                Value::Bool(true),
+            ],
+        ]
     );
 }
 
@@ -16325,6 +16499,51 @@ fn create_view_persists_security_reloptions() {
             "select reloptions from pg_class where relname = 'secure_items'",
         ),
         vec![vec![Value::Null]]
+    );
+}
+
+#[test]
+fn view_reset_accepts_storage_reloptions_as_noops() {
+    let dir = temp_dir("view_reset_storage_reloptions");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table items(id int4)").unwrap();
+    db.execute(
+        1,
+        "create view storage_view with (security_barrier=true) as select id from items",
+    )
+    .unwrap();
+
+    for sql in [
+        "alter table storage_view set (autovacuum_enabled=false)",
+        "alter view storage_view set (autovacuum_enabled=false)",
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) if message == "unrecognized parameter \"autovacuum_enabled\""
+                && sqlstate == "22023" => {}
+            other => panic!("expected view storage reloption rejection, got {other:?}"),
+        }
+    }
+
+    db.execute(1, "alter table storage_view reset (autovacuum_enabled)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter view storage_view reset (autovacuum_enabled, fillfactor, toast.autovacuum_enabled)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'storage_view'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["security_barrier=true"],
+            TEXT_TYPE_OID
+        )]]
     );
 }
 
@@ -22556,6 +22775,63 @@ fn view_dml_returning_routes_through_instead_rules() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn view_rule_returning_projects_statement_old_new() {
+    let base = temp_dir("rule_view_dml_returning_old_new");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view item_view as select id, name from base_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_ins as on insert to item_view do instead insert into base_items values (new.id, new.name) returning id, name",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_upd as on update to item_view do instead update base_items set id = new.id, name = new.name where id = old.id returning id, name",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_del as on delete to item_view do instead delete from base_items where id = old.id returning id, name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "insert into item_view values (1, 'alpha') returning old.name is null, new.name",
+        ),
+        vec![vec![Value::Bool(true), Value::Text("alpha".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update item_view set name = 'beta' where id = 1 returning old.name, new.name",
+        ),
+        vec![vec![
+            Value::Text("alpha".into()),
+            Value::Text("beta".into())
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "delete from item_view where id = 1 returning old.name, new.name",
+        ),
+        vec![vec![Value::Text("beta".into()), Value::Null]]
+    );
 }
 
 fn assert_rule_returning_error(err: ExecError, expected_message: &str, expected_hint: &str) {
@@ -53101,6 +53377,54 @@ fn partition_index_pg_depend_rows_use_partition_deptypes() {
                 Value::Text("table depend_part_0_1".into()),
                 Value::Text("table depend_part_0".into()),
                 Value::Text("a".into()),
+            ],
+        ]
+    );
+
+    db.execute(1, "alter table depend_part detach partition depend_part_0")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relispartition \
+             from pg_class \
+             where relname = 'depend_part_idx_0'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_describe_object(refclassid, refobjid, refobjsubid), deptype::text \
+             from pg_depend \
+             where classid = 'pg_class'::regclass \
+               and objid = 'depend_part_idx_0'::regclass \
+               and deptype::text in ('P', 'S') \
+             order by 1, 2",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_describe_object(refclassid, refobjid, refobjsubid), deptype::text \
+             from pg_depend \
+             where classid = 'pg_class'::regclass \
+               and objid = 'depend_part_idx_0_1'::regclass \
+               and deptype::text in ('P', 'S') \
+             order by 1, 2",
+        ),
+        vec![
+            vec![
+                Value::Text("index depend_part_idx_0".into()),
+                Value::Text("P".into()),
+            ],
+            vec![
+                Value::Text("table depend_part_0_1".into()),
+                Value::Text("S".into()),
             ],
         ]
     );

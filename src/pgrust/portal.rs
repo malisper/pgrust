@@ -448,9 +448,9 @@ impl Portal {
         } else {
             pos.saturating_sub(1)
         };
-        let count = match limit {
-            PortalFetchLimit::All => start_row,
-            PortalFetchLimit::Count(count) => count.min(start_row),
+        let (count, completed) = match limit {
+            PortalFetchLimit::All => (start_row, true),
+            PortalFetchLimit::Count(requested) => (requested.min(start_row), requested > start_row),
         };
         let first_returned = start_row.saturating_sub(count).saturating_add(1);
         let start_idx = first_returned.saturating_sub(1);
@@ -468,7 +468,7 @@ impl Portal {
             .copied();
         *pos = if count == 0 {
             *pos
-        } else if count == start_row {
+        } else if completed {
             0
         } else {
             first_returned
@@ -985,5 +985,42 @@ mod tests {
             .fetch_direction(PortalFetchDirection::Next, false)
             .unwrap();
         assert!(next_after_refetching_last.rows.is_empty());
+    }
+
+    #[test]
+    fn materialized_fetch_backward_one_to_first_row_stays_on_first() {
+        let mut portal = materialized_portal("c", true);
+
+        portal
+            .fetch_direction(PortalFetchDirection::Forward(PortalFetchLimit::All), false)
+            .unwrap();
+        portal
+            .fetch_direction(
+                PortalFetchDirection::Backward(PortalFetchLimit::Count(1)),
+                false,
+            )
+            .unwrap();
+        let second = portal
+            .fetch_direction(
+                PortalFetchDirection::Backward(PortalFetchLimit::Count(1)),
+                false,
+            )
+            .unwrap();
+        assert_eq!(second.rows, vec![vec![Value::Int32(2)]]);
+        let first = portal
+            .fetch_direction(
+                PortalFetchDirection::Backward(PortalFetchLimit::Count(1)),
+                false,
+            )
+            .unwrap();
+        assert_eq!(first.rows, vec![vec![Value::Int32(1)]]);
+
+        let rest = portal
+            .fetch_direction(PortalFetchDirection::Forward(PortalFetchLimit::All), false)
+            .unwrap();
+        assert_eq!(
+            rest.rows,
+            vec![vec![Value::Int32(2)], vec![Value::Int32(3)]]
+        );
     }
 }

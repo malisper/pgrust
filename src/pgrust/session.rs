@@ -11897,11 +11897,14 @@ impl Session {
                 .map(|expr| Self::substitute_sql_expr(expr, subst))
                 .transpose()?,
             current_of: update.current_of.clone(),
-            returning: update
-                .returning
-                .iter()
-                .map(|target| Self::substitute_select_item(target, subst))
-                .collect::<Result<Vec<_>, _>>()?,
+            returning: crate::backend::parser::ReturningClause::new(
+                update.returning.options.clone(),
+                update
+                    .returning
+                    .iter()
+                    .map(|target| Self::substitute_select_item(target, subst))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
         })
     }
 
@@ -11930,11 +11933,14 @@ impl Session {
                 .map(|expr| Self::substitute_sql_expr(expr, subst))
                 .transpose()?,
             current_of: delete.current_of.clone(),
-            returning: delete
-                .returning
-                .iter()
-                .map(|target| Self::substitute_select_item(target, subst))
-                .collect::<Result<Vec<_>, _>>()?,
+            returning: crate::backend::parser::ReturningClause::new(
+                delete.returning.options.clone(),
+                delete
+                    .returning
+                    .iter()
+                    .map(|target| Self::substitute_select_item(target, subst))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
         })
     }
 
@@ -12023,11 +12029,14 @@ impl Session {
                     })
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?,
-            returning: merge
-                .returning
-                .iter()
-                .map(|target| Self::substitute_select_item(target, subst))
-                .collect::<Result<Vec<_>, _>>()?,
+            returning: crate::backend::parser::ReturningClause::new(
+                merge.returning.options.clone(),
+                merge
+                    .returning
+                    .iter()
+                    .map(|target| Self::substitute_select_item(target, subst))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
         })
     }
 
@@ -12186,11 +12195,14 @@ impl Session {
                 )),
             },
             on_conflict: insert.on_conflict.clone(),
-            returning: insert
-                .returning
-                .iter()
-                .map(|target| Self::substitute_select_item(target, subst))
-                .collect::<Result<Vec<_>, _>>()?,
+            returning: crate::backend::parser::ReturningClause::new(
+                insert.returning.options.clone(),
+                insert
+                    .returning
+                    .iter()
+                    .map(|target| Self::substitute_select_item(target, subst))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
         })
     }
 

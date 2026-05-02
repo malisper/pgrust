@@ -15144,6 +15144,13 @@ fn project_returning_row_with_metadata(
     project_returning_row_with_old_new(targets, row, tid, table_oid, None, None, ctx)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ReturningTuple<'a> {
+    pub(crate) values: &'a [Value],
+    pub(crate) tid: Option<ItemPointerData>,
+    pub(crate) table_oid: Option<u32>,
+}
+
 pub(crate) fn project_returning_row_with_old_new(
     targets: &[TargetEntry],
     row: &[Value],
@@ -15153,35 +15160,62 @@ pub(crate) fn project_returning_row_with_old_new(
     new_row: Option<&[Value]>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    let old_tuple = old_row.map(|values| ReturningTuple {
+        values,
+        tid,
+        table_oid,
+    });
+    let new_tuple = new_row.map(|values| ReturningTuple {
+        values,
+        tid,
+        table_oid,
+    });
+    project_returning_row_with_old_new_metadata(
+        targets, row, tid, table_oid, old_tuple, new_tuple, ctx,
+    )
+}
+
+pub(crate) fn project_returning_row_with_old_new_metadata(
+    targets: &[TargetEntry],
+    row: &[Value],
+    tid: Option<ItemPointerData>,
+    table_oid: Option<u32>,
+    old_tuple: Option<ReturningTuple<'_>>,
+    new_tuple: Option<ReturningTuple<'_>>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
     let saved_bindings = ctx.expr_bindings.clone();
-    let pseudo_width = old_row
-        .map(<[Value]>::len)
-        .or_else(|| new_row.map(<[Value]>::len))
+    let pseudo_width = old_tuple
+        .map(|tuple| tuple.values.len())
+        .or_else(|| new_tuple.map(|tuple| tuple.values.len()))
         .unwrap_or(row.len());
     ctx.expr_bindings.outer_tuple = Some(
-        old_row
-            .map(<[Value]>::to_vec)
+        old_tuple
+            .map(|tuple| tuple.values.to_vec())
             .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
     );
     ctx.expr_bindings.inner_tuple = Some(
-        new_row
-            .map(<[Value]>::to_vec)
+        new_tuple
+            .map(|tuple| tuple.values.to_vec())
             .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
     );
-    ctx.expr_bindings.outer_system_bindings.clear();
-    ctx.expr_bindings.inner_system_bindings.clear();
+    let xid = ctx.transaction_xid();
+    ctx.expr_bindings.outer_system_bindings =
+        returning_tuple_system_binding(OUTER_VAR, old_tuple, xid, false)
+            .into_iter()
+            .collect();
+    ctx.expr_bindings.inner_system_bindings =
+        returning_tuple_system_binding(INNER_VAR, new_tuple, xid, true)
+            .into_iter()
+            .collect();
     let saved_system_bindings = ctx.system_bindings.clone();
-    if let Some(table_oid) = table_oid
-        && let Some(xid) = ctx.transaction_xid()
-    {
-        let has_old = old_row.is_some();
-        let has_new = new_row.is_some();
+    if let Some(table_oid) = table_oid {
         ctx.system_bindings = vec![SystemVarBinding {
             varno: 1,
             table_oid,
             tid,
-            xmin: has_new.then_some(xid),
-            xmax: if has_old { Some(xid) } else { Some(0) },
+            xmin: xid,
+            xmax: xid.map(|_| 0),
         }];
     }
     let mut slot = TupleSlot::virtual_row_with_metadata(row.to_vec(), tid, table_oid);
@@ -15196,6 +15230,22 @@ pub(crate) fn project_returning_row_with_old_new(
     ctx.system_bindings = saved_system_bindings;
     ctx.expr_bindings = saved_bindings;
     result
+}
+
+fn returning_tuple_system_binding(
+    varno: usize,
+    tuple: Option<ReturningTuple<'_>>,
+    xid: Option<u32>,
+    is_new: bool,
+) -> Option<SystemVarBinding> {
+    let tuple = tuple?;
+    Some(SystemVarBinding {
+        varno,
+        table_oid: tuple.table_oid?,
+        tid: tuple.tid,
+        xmin: is_new.then_some(xid).flatten(),
+        xmax: if is_new { xid.map(|_| 0) } else { xid },
+    })
 }
 
 fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> StatementResult {
@@ -16171,13 +16221,21 @@ fn project_update_from_returning_row(
     };
     let mut returning_values = new_visible_values.clone();
     returning_values.extend(source_values.iter().cloned());
-    project_returning_row_with_old_new(
+    project_returning_row_with_old_new_metadata(
         &stmt.returning,
         &returning_values,
         Some(new_tid),
         Some(new_relation_oid),
-        Some(&old_visible_values),
-        Some(&new_visible_values),
+        Some(ReturningTuple {
+            values: &old_visible_values,
+            tid: Some(old_tid),
+            table_oid: Some(target.relation_oid),
+        }),
+        Some(ReturningTuple {
+            values: &new_visible_values,
+            tid: Some(new_tid),
+            table_oid: Some(new_relation_oid),
+        }),
         ctx,
     )
 }
@@ -16545,14 +16603,19 @@ fn project_delete_using_returning_row(
     tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    let mut visible_values = project_delete_target_visible_values(target, old_values, tid, ctx)?;
+    let old_visible_values = project_delete_target_visible_values(target, old_values, tid, ctx)?;
+    let mut visible_values = old_visible_values.clone();
     visible_values.extend(source_values.iter().cloned());
-    project_returning_row_with_old_new(
+    project_returning_row_with_old_new_metadata(
         &stmt.returning,
         &visible_values,
         Some(tid),
         Some(target.relation_oid),
-        Some(old_values),
+        Some(ReturningTuple {
+            values: &old_visible_values,
+            tid: Some(tid),
+            table_oid: Some(target.relation_oid),
+        }),
         None,
         ctx,
     )
