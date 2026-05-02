@@ -29,6 +29,9 @@ Tests run:
 - scripts/cargo_isolated.sh test --lib --quiet normalizes_simple_text_predicates
 - scripts/cargo_isolated.sh test --lib --quiet alter_table_generated_columns_support_staged_type_batches
 - scripts/cargo_isolated.sh test --lib --quiet alter_table_alter_column_type_rewrites_dependent_indexes
+- TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/pgrust-pr485-target scripts/cargo_isolated.sh test --lib --quiet concurrent_indexed_updates_and_deletes_keep_index_results_correct -- --nocapture
+- TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/pgrust-pr485-target scripts/cargo_isolated.sh test --lib --quiet alter_table_generated_columns_support_staged_type_batches
+- TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/pgrust-pr485-target scripts/cargo_isolated.sh test --lib --quiet alter_table_alter_column_type_rewrites_dependent_indexes
 - CARGO_TARGET_DIR=/tmp/pgrust-release-muscat-v7 scripts/run_regression.sh --test alter_table --jobs 1 --timeout 180 --results-dir /tmp/pgrust-alter-table-type-regress-alter-5
 - CARGO_TARGET_DIR=/tmp/pgrust-release-muscat-v7 scripts/run_regression.sh --test generated_stored --jobs 1 --timeout 180 --port 15435 --results-dir /tmp/pgrust-alter-table-type-regress-stored-4
 - CARGO_TARGET_DIR=/tmp/pgrust-release-muscat-v7 scripts/run_regression.sh --test generated_virtual --jobs 1 --timeout 180 --port 15436 --results-dir /tmp/pgrust-alter-table-type-regress-virtual

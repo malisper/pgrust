@@ -748,15 +748,15 @@ pub fn heap_fetch_visible_with_txns(
     txns: &RwLock<TransactionManager>,
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
-    let txns_guard = txns.read();
     let snapshot = relation_snapshot(snapshot, rel);
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let buffer_id = pin.buffer_id();
     let guard = pool.lock_buffer_shared(buffer_id)?;
     let tuple = heap_page_get_tuple(&guard, tid.offset_number)?;
-    let visible = snapshot.tuple_visible(&txns_guard, &tuple);
     drop(guard);
     drop(pin);
+    let txns_guard = txns.read();
+    let visible = snapshot.tuple_visible(&txns_guard, &tuple);
     if visible { Ok(Some(tuple)) } else { Ok(None) }
 }
 
