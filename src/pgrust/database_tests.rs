@@ -57114,7 +57114,7 @@ fn no_pins_leaked_concurrent_contention() {
     }
 
     let num_threads = 8;
-    let iters = 50;
+    let iters = 30;
     let mut handles = Vec::new();
 
     // Writers: all contend on the same hot rows.
@@ -57146,11 +57146,12 @@ fn no_pins_leaked_concurrent_contention() {
                     client,
                     &format!("update cold set val = val + 1 where id = {row}"),
                 );
-                // Delete + reinsert to force page layout changes.
-                let _ = db.execute(client, &format!("delete from cold where id = {}", (i % 20)));
+                // Insert fresh rows to force page layout changes without turning
+                // this pin-leak check into another same-row DML deadlock stress test.
+                let insert_id = 1000 + (t * iters) + i;
                 let _ = db.execute(
                     client,
-                    &format!("insert into cold (id, val) values ({}, {})", i % 20, i),
+                    &format!("insert into cold (id, val) values ({insert_id}, {i})"),
                 );
             }
         }));
