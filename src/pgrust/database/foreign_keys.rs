@@ -10,8 +10,8 @@ use crate::backend::commands::tablecmds::{
 };
 use crate::backend::executor::{
     ConstraintTiming, DeferredForeignKeyTracker, ExecError, ExecutorContext,
-    PendingForeignKeyCheck, PendingParentForeignKeyCheck, StatementResult,
-    enforce_deferred_inbound_foreign_key_check, enforce_outbound_foreign_keys,
+    PendingForeignKeyCheck, PendingParentForeignKeyCheck, PendingUserConstraintTrigger,
+    StatementResult, enforce_deferred_inbound_foreign_key_check, enforce_outbound_foreign_keys,
 };
 use crate::backend::parser::{
     AlterTableAddConstraintStatement, AlterTableValidateConstraintStatement, BoundDeleteStatement,
@@ -28,6 +28,7 @@ use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::catalog::{
     CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
 };
+use crate::pl::plpgsql::execute_user_defined_trigger_function;
 
 use super::Database;
 
@@ -242,7 +243,13 @@ pub(crate) fn table_lock_relations(requests: &[TableLockRequest]) -> Vec<RelFile
 enum ConstraintValidationTarget {
     ImmediateOnly,
     All,
-    Selected(BTreeSet<u32>),
+    Selected(SetConstraintsTargets),
+}
+
+#[derive(Debug, Clone, Default)]
+struct SetConstraintsTargets {
+    constraint_oids: BTreeSet<u32>,
+    trigger_oids: BTreeSet<u32>,
 }
 
 fn build_constraint_validation_context(
@@ -324,7 +331,9 @@ fn should_validate_constraint(
 ) -> bool {
     match target {
         ConstraintValidationTarget::All => true,
-        ConstraintValidationTarget::Selected(selected) => selected.contains(&constraint_oid),
+        ConstraintValidationTarget::Selected(selected) => {
+            selected.constraint_oids.contains(&constraint_oid)
+        }
         ConstraintValidationTarget::ImmediateOnly => catalog
             .constraint_row_by_oid(constraint_oid)
             .map(|row| {
@@ -375,6 +384,29 @@ fn collect_constraint_validation_targets(
         parent_checks,
         unique_constraints,
     )
+}
+
+fn should_fire_user_constraint_trigger(
+    catalog: &LazyCatalogLookup,
+    tracker: &DeferredForeignKeyTracker,
+    trigger_oid: u32,
+    target: &ConstraintValidationTarget,
+) -> bool {
+    match target {
+        ConstraintValidationTarget::All => true,
+        ConstraintValidationTarget::Selected(selected) => {
+            selected.trigger_oids.contains(&trigger_oid)
+        }
+        ConstraintValidationTarget::ImmediateOnly => catalog
+            .trigger_rows()
+            .into_iter()
+            .find(|row| row.oid == trigger_oid)
+            .map(|row| {
+                tracker.effective_timing(trigger_oid, row.tgdeferrable, row.tginitdeferred)
+                    == ConstraintTiming::Immediate
+            })
+            .unwrap_or(false),
+    }
 }
 
 fn validate_foreign_key_constraints(
@@ -590,6 +622,19 @@ fn validate_unique_constraints(
     Ok(())
 }
 
+fn fire_user_constraint_triggers(
+    triggers: &[PendingUserConstraintTrigger],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for trigger in triggers {
+        ctx.trigger_depth = ctx.trigger_depth.saturating_add(1);
+        let result = execute_user_defined_trigger_function(trigger.proc_oid, &trigger.call, ctx);
+        ctx.trigger_depth = ctx.trigger_depth.saturating_sub(1);
+        let _ = result?;
+    }
+    Ok(())
+}
+
 fn validate_constraint_target(
     db: &Database,
     client_id: ClientId,
@@ -603,10 +648,18 @@ fn validate_constraint_target(
 ) -> Result<(), ExecError> {
     let (foreign_key_oids, foreign_key_checks, parent_checks, unique_oids) =
         collect_constraint_validation_targets(catalog, tracker, &target);
+    let user_constraint_triggers = tracker
+        .pending_user_constraint_triggers()
+        .into_iter()
+        .filter(|trigger| {
+            should_fire_user_constraint_trigger(catalog, tracker, trigger.trigger_oid, &target)
+        })
+        .collect::<Vec<_>>();
     if foreign_key_oids.is_empty()
         && foreign_key_checks.is_empty()
         && parent_checks.is_empty()
         && unique_oids.is_empty()
+        && user_constraint_triggers.is_empty()
     {
         return Ok(());
     }
@@ -624,6 +677,7 @@ fn validate_constraint_target(
     validate_foreign_key_constraints(catalog, &foreign_key_oids, &mut ctx)?;
     validate_exclusion_constraints(catalog, &foreign_key_oids, &mut ctx)?;
     validate_unique_constraints(catalog, tracker, &unique_oids, &mut ctx)?;
+    fire_user_constraint_triggers(&user_constraint_triggers, &mut ctx)?;
     let child_foreign_key_oids = foreign_key_checks
         .iter()
         .map(|check| check.constraint_oid)
@@ -632,10 +686,15 @@ fn validate_constraint_target(
         .iter()
         .map(|check| check.constraint_oid)
         .collect::<BTreeSet<_>>();
+    let user_trigger_oids = user_constraint_triggers
+        .iter()
+        .map(|trigger| trigger.trigger_oid)
+        .collect::<BTreeSet<_>>();
     tracker.clear_foreign_key_constraints(&foreign_key_oids);
     tracker.clear_foreign_key_checks(&child_foreign_key_oids);
     tracker.clear_parent_foreign_key_checks(&parent_foreign_key_oids);
     tracker.clear_unique_constraints(&unique_oids);
+    tracker.clear_user_constraint_triggers(&user_trigger_oids);
     Ok(())
 }
 
@@ -759,10 +818,42 @@ fn collect_constraint_descendants(
     }
 }
 
+fn matched_user_constraint_triggers_for_name(
+    catalog: &LazyCatalogLookup,
+    namespace_names: &HashMap<u32, String>,
+    name: &QualifiedNameRef,
+) -> Vec<crate::include::catalog::PgTriggerRow> {
+    let matches_in_schema = |schema_name: &str| {
+        catalog
+            .trigger_rows()
+            .into_iter()
+            .filter(|row| !row.tgisinternal && row.tgconstraint == 0)
+            .filter(|row| row.tgdeferrable || row.tginitdeferred || row.tgconstrrelid != 0)
+            .filter(|row| row.tgname.eq_ignore_ascii_case(&name.name))
+            .filter(|row| {
+                catalog
+                    .class_row_by_oid(row.tgrelid)
+                    .and_then(|class_row| namespace_names.get(&class_row.relnamespace).cloned())
+                    .is_some_and(|namespace| namespace.eq_ignore_ascii_case(schema_name))
+            })
+            .collect::<Vec<_>>()
+    };
+    if let Some(schema_name) = &name.schema_name {
+        return matches_in_schema(schema_name);
+    }
+    for schema_name in catalog.search_path() {
+        let matches = matches_in_schema(&schema_name);
+        if !matches.is_empty() {
+            return matches;
+        }
+    }
+    Vec::new()
+}
+
 fn resolve_set_constraints_targets(
     catalog: &LazyCatalogLookup,
     constraints: &[QualifiedNameRef],
-) -> Result<BTreeSet<u32>, ExecError> {
+) -> Result<SetConstraintsTargets, ExecError> {
     let all_rows = catalog.constraint_rows();
     let namespace_names = catalog
         .namespace_rows()
@@ -778,11 +869,13 @@ fn resolve_set_constraints_targets(
                 .push(row.clone());
         }
     }
-    let mut target_oids = BTreeSet::new();
+    let mut targets = SetConstraintsTargets::default();
     for name in constraints {
         let matched_roots =
             matched_constraint_roots_for_name(catalog, &all_rows, &namespace_names, name);
-        if matched_roots.is_empty() {
+        let matched_triggers =
+            matched_user_constraint_triggers_for_name(catalog, &namespace_names, name);
+        if matched_roots.is_empty() && matched_triggers.is_empty() {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "existing constraint name",
                 actual: format!(
@@ -792,11 +885,14 @@ fn resolve_set_constraints_targets(
             }));
         }
         for row in matched_roots {
-            target_oids.insert(row.oid);
-            collect_constraint_descendants(&by_parent, row.oid, &mut target_oids);
+            targets.constraint_oids.insert(row.oid);
+            collect_constraint_descendants(&by_parent, row.oid, &mut targets.constraint_oids);
+        }
+        for row in matched_triggers {
+            targets.trigger_oids.insert(row.oid);
         }
     }
-    Ok(target_oids)
+    Ok(targets)
 }
 
 pub(crate) fn execute_set_constraints(
@@ -816,9 +912,9 @@ pub(crate) fn execute_set_constraints(
         ConstraintTiming::Immediate
     };
     let target_oids = if let Some(constraints) = &stmt.constraints {
-        let target_oids = resolve_set_constraints_targets(catalog, constraints)?;
+        let targets = resolve_set_constraints_targets(catalog, constraints)?;
         if stmt.deferred {
-            if let Some(row) = target_oids.iter().find_map(|constraint_oid| {
+            if let Some(row) = targets.constraint_oids.iter().find_map(|constraint_oid| {
                 catalog
                     .constraint_row_by_oid(*constraint_oid)
                     .filter(|row| !row.condeferrable)
@@ -830,8 +926,21 @@ pub(crate) fn execute_set_constraints(
                     sqlstate: "55000",
                 });
             }
+            if let Some(row) = targets.trigger_oids.iter().find_map(|trigger_oid| {
+                catalog
+                    .trigger_rows()
+                    .into_iter()
+                    .find(|row| row.oid == *trigger_oid && !row.tgdeferrable)
+            }) {
+                return Err(ExecError::DetailedError {
+                    message: format!("constraint \"{}\" is not deferrable", row.tgname),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55000",
+                });
+            }
         }
-        Some(target_oids)
+        Some(targets)
     } else {
         None
     };
@@ -839,17 +948,21 @@ pub(crate) fn execute_set_constraints(
     if desired_timing == ConstraintTiming::Immediate {
         if let Some(xid) = xid {
             match &target_oids {
-                Some(target_oids) if !target_oids.is_empty() => validate_constraint_target(
-                    db,
-                    client_id,
-                    catalog,
-                    xid,
-                    cid,
-                    Arc::clone(&interrupts),
-                    datetime_config,
-                    tracker,
-                    ConstraintValidationTarget::Selected(target_oids.clone()),
-                )?,
+                Some(targets)
+                    if !targets.constraint_oids.is_empty() || !targets.trigger_oids.is_empty() =>
+                {
+                    validate_constraint_target(
+                        db,
+                        client_id,
+                        catalog,
+                        xid,
+                        cid,
+                        Arc::clone(&interrupts),
+                        datetime_config,
+                        tracker,
+                        ConstraintValidationTarget::Selected(targets.clone()),
+                    )?
+                }
                 None => validate_deferred_constraints(
                     db,
                     client_id,
@@ -866,9 +979,12 @@ pub(crate) fn execute_set_constraints(
     }
 
     match target_oids {
-        Some(target_oids) => {
-            for constraint_oid in target_oids {
+        Some(targets) => {
+            for constraint_oid in targets.constraint_oids {
                 tracker.set_constraint_timing(constraint_oid, desired_timing);
+            }
+            for trigger_oid in targets.trigger_oids {
+                tracker.set_constraint_timing(trigger_oid, desired_timing);
             }
         }
         None => tracker.set_all_timing(desired_timing),

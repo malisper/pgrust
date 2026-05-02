@@ -13690,6 +13690,12 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
     rest = consume_keyword(rest, "on").trim_start();
     let ((schema_name, table_name), mut rest) = parse_schema_qualified_name(rest)?;
 
+    let mut constraint_relation_schema_name = None;
+    let mut constraint_relation_name = None;
+    let mut deferrable = false;
+    let mut initially_deferred = false;
+    let mut saw_deferrability = false;
+    let mut saw_initially = false;
     let mut level = TriggerLevel::Statement;
     let mut referencing = Vec::new();
     let mut when_clause_sql = None;
@@ -13703,6 +13709,76 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
         }
         if keyword_at_start(rest, "execute") {
             break;
+        }
+        if is_constraint && keyword_at_start(rest, "from") {
+            let next = consume_keyword(rest, "from").trim_start();
+            let ((schema, relation), next_rest) = parse_schema_qualified_name(next)?;
+            constraint_relation_schema_name = schema;
+            constraint_relation_name = Some(relation);
+            rest = next_rest;
+            continue;
+        }
+        if is_constraint && keyword_at_start(rest, "not") {
+            let next = consume_keyword(rest, "not").trim_start();
+            if !keyword_at_start(next, "deferrable") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "DEFERRABLE",
+                    actual: next.into(),
+                });
+            }
+            if saw_deferrability {
+                return Err(ParseError::DetailedError {
+                    message: "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_deferrability = true;
+            deferrable = false;
+            rest = consume_keyword(next, "deferrable");
+            continue;
+        }
+        if is_constraint && keyword_at_start(rest, "deferrable") {
+            if saw_deferrability {
+                return Err(ParseError::DetailedError {
+                    message: "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_deferrability = true;
+            deferrable = true;
+            rest = consume_keyword(rest, "deferrable");
+            continue;
+        }
+        if is_constraint && keyword_at_start(rest, "initially") {
+            if saw_initially {
+                return Err(ParseError::DetailedError {
+                    message: "multiple INITIALLY IMMEDIATE/DEFERRED clauses not allowed".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_initially = true;
+            let next = consume_keyword(rest, "initially").trim_start();
+            if keyword_at_start(next, "deferred") {
+                initially_deferred = true;
+                deferrable = true;
+                rest = consume_keyword(next, "deferred");
+                continue;
+            }
+            if keyword_at_start(next, "immediate") {
+                initially_deferred = false;
+                rest = consume_keyword(next, "immediate");
+                continue;
+            }
+            return Err(ParseError::UnexpectedToken {
+                expected: "IMMEDIATE or DEFERRED",
+                actual: next.into(),
+            });
         }
         if keyword_at_start(rest, "for") {
             let mut next = consume_keyword(rest, "for").trim_start();
@@ -13769,6 +13845,10 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
         trigger_name,
         schema_name,
         table_name,
+        constraint_relation_schema_name,
+        constraint_relation_name,
+        deferrable,
+        initially_deferred,
         timing,
         level,
         events,

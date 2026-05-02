@@ -7086,6 +7086,10 @@ fn parse_create_trigger_statement_with_when_and_update_of() {
             trigger_name: "audit_row".into(),
             schema_name: Some("public".into()),
             table_name: "people".into(),
+            constraint_relation_schema_name: None,
+            constraint_relation_name: None,
+            deferrable: false,
+            initially_deferred: false,
             timing: TriggerTiming::Before,
             level: TriggerLevel::Row,
             events: vec![
@@ -7121,6 +7125,10 @@ fn parse_create_instead_of_trigger_statement() {
             trigger_name: "audit_row".into(),
             schema_name: Some("public".into()),
             table_name: "people_view".into(),
+            constraint_relation_schema_name: None,
+            constraint_relation_name: None,
+            deferrable: false,
+            initially_deferred: false,
             timing: TriggerTiming::Instead,
             level: TriggerLevel::Row,
             events: vec![
@@ -7159,7 +7167,7 @@ fn parse_create_trigger_statement_for_statement_without_each() {
 #[test]
 fn parse_create_constraint_trigger_statement() {
     let stmt = parse_statement(
-        "create constraint trigger audit_constraint after insert on public.people for each row execute function public.audit_people()",
+        "create constraint trigger audit_constraint after insert on public.people from public.accounts deferrable initially deferred for each row execute function public.audit_people()",
     )
     .unwrap();
     assert!(matches!(
@@ -7167,10 +7175,16 @@ fn parse_create_constraint_trigger_statement() {
         Statement::CreateTrigger(CreateTriggerStatement {
             is_constraint: true,
             trigger_name,
+            constraint_relation_schema_name: Some(schema_name),
+            constraint_relation_name: Some(relation_name),
+            deferrable: true,
+            initially_deferred: true,
             timing: TriggerTiming::After,
             level: TriggerLevel::Row,
             ..
         }) if trigger_name == "audit_constraint"
+            && schema_name == "public"
+            && relation_name == "accounts"
     ));
 }
 
@@ -7368,6 +7382,10 @@ fn parse_create_trigger_statement_with_referencing_and_truncate() {
             trigger_name: "audit_stmt".into(),
             schema_name: None,
             table_name: "people".into(),
+            constraint_relation_schema_name: None,
+            constraint_relation_name: None,
+            deferrable: false,
+            initially_deferred: false,
             timing: TriggerTiming::After,
             level: TriggerLevel::Statement,
             events: vec![TriggerEventSpec {
@@ -15447,12 +15465,21 @@ fn lower_create_table_rejects_invalid_key_constraints() {
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
-    assert!(matches!(
-        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
-        Err(ParseError::UnexpectedToken { expected, actual })
-            if expected == "distinct PRIMARY KEY/UNIQUE definitions"
-                && actual == "duplicate key definition on (id)"
-    ));
+    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+        .expect("primary key and unique on same columns");
+    assert_eq!(lowered.constraint_actions.len(), 2);
+    assert!(
+        lowered
+            .constraint_actions
+            .iter()
+            .any(|action| { action.primary && action.columns == vec!["id"] })
+    );
+    assert!(
+        lowered
+            .constraint_actions
+            .iter()
+            .any(|action| { !action.primary && action.columns == vec!["id"] })
+    );
 }
 
 #[test]

@@ -184,7 +184,7 @@ use crate::pgrust::database::{
     SequenceRuntime, SessionStatsState, TempMutationEffect, TransactionWaiter,
 };
 use crate::pgrust::portal::Portal;
-use crate::pl::plpgsql::PlpgsqlFunctionCache;
+use crate::pl::plpgsql::{PlpgsqlFunctionCache, TriggerCallContext};
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 pub type ExecutorCatalog = std::sync::Arc<dyn CatalogLookup>;
@@ -258,6 +258,13 @@ pub struct PendingForeignKeyCheck {
     pub values: Vec<Value>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingUserConstraintTrigger {
+    pub trigger_oid: u32,
+    pub proc_oid: u32,
+    pub call: TriggerCallContext,
+}
+
 #[derive(Debug, Clone, Default)]
 struct DeferredConstraintState {
     all_override: Option<ConstraintTiming>,
@@ -266,6 +273,7 @@ struct DeferredConstraintState {
     pending_foreign_key_checks: Vec<PendingForeignKeyCheck>,
     pending_parent_foreign_key_checks: Vec<PendingParentForeignKeyCheck>,
     pending_unique_checks: HashMap<u32, HashSet<PendingUniqueCheck>>,
+    pending_user_constraint_triggers: Vec<PendingUserConstraintTrigger>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -370,6 +378,36 @@ impl DeferredConstraintTracker {
             });
     }
 
+    pub fn record_user_constraint_trigger(
+        &self,
+        trigger_oid: u32,
+        proc_oid: u32,
+        mut call: TriggerCallContext,
+    ) {
+        if trigger_oid == 0 {
+            return;
+        }
+        if let Some(row) = call.old_row.as_mut() {
+            Value::materialize_all(row);
+        }
+        if let Some(row) = call.new_row.as_mut() {
+            Value::materialize_all(row);
+        }
+        for table in &mut call.transition_tables {
+            for row in &mut table.rows {
+                Value::materialize_all(row);
+            }
+        }
+        self.state
+            .lock()
+            .pending_user_constraint_triggers
+            .push(PendingUserConstraintTrigger {
+                trigger_oid,
+                proc_oid,
+                call,
+            });
+    }
+
     pub fn affected_constraint_oids(&self) -> Vec<u32> {
         self.state
             .lock()
@@ -405,6 +443,10 @@ impl DeferredConstraintTracker {
             .unwrap_or_default()
     }
 
+    pub fn pending_user_constraint_triggers(&self) -> Vec<PendingUserConstraintTrigger> {
+        self.state.lock().pending_user_constraint_triggers.clone()
+    }
+
     pub fn clear_foreign_key_constraints(&self, constraint_oids: &BTreeSet<u32>) {
         let mut state = self.state.lock();
         for constraint_oid in constraint_oids {
@@ -431,6 +473,13 @@ impl DeferredConstraintTracker {
         for constraint_oid in constraint_oids {
             state.pending_unique_checks.remove(constraint_oid);
         }
+    }
+
+    pub fn clear_user_constraint_triggers(&self, trigger_oids: &BTreeSet<u32>) {
+        self.state
+            .lock()
+            .pending_user_constraint_triggers
+            .retain(|trigger| !trigger_oids.contains(&trigger.trigger_oid));
     }
 
     pub fn set_all_timing(&self, timing: ConstraintTiming) {
@@ -487,6 +536,7 @@ impl DeferredConstraintTracker {
             && state.pending_foreign_key_checks.is_empty()
             && state.pending_parent_foreign_key_checks.is_empty()
             && state.pending_unique_checks.is_empty()
+            && state.pending_user_constraint_triggers.is_empty()
     }
 }
 
