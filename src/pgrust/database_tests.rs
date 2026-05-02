@@ -58787,6 +58787,10 @@ fn session_user_and_current_role_are_sql_visible() {
         query_rows(&db, 1, "select current_setting('role')"),
         vec![vec![Value::Text("none".into())]]
     );
+    assert_eq!(
+        query_rows(&db, 1, "select current_setting('session_authorization')"),
+        vec![vec![Value::Text("tenant".into())]]
+    );
 
     db.execute(1, "set role manager").unwrap();
 
@@ -58807,6 +58811,149 @@ fn session_user_and_current_role_are_sql_visible() {
     assert_eq!(
         query_rows(&db, 1, "select current_setting('role')"),
         vec![vec![Value::Text("none".into())]]
+    );
+}
+
+#[test]
+fn sql_function_set_role_option_changes_identity_temporarily() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(1, "create role caller login").unwrap();
+    db.execute(1, "create role worker").unwrap();
+    db.execute(1, "grant worker to caller").unwrap();
+    db.execute(
+        1,
+        "create function report_set_role() returns text
+         language sql
+         set role = worker
+         as $$ select current_user || ':' || current_setting('role') || ':' || session_user $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function set_role_and_error(int4) returns int4
+         language sql
+         set role = worker
+         as $$ select 1 / $1 $$",
+    )
+    .unwrap();
+
+    db.execute(1, "set session authorization caller").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select report_set_role(), current_user, current_setting('role')",
+        ),
+        vec![vec![
+            Value::Text("worker:worker:caller".into()),
+            Value::Text("caller".into()),
+            Value::Text("none".into()),
+        ]]
+    );
+
+    assert!(db.execute(1, "select set_role_and_error(0)").is_err());
+    assert_eq!(
+        query_rows(&db, 1, "select current_user, current_setting('role')"),
+        vec![vec![
+            Value::Text("caller".into()),
+            Value::Text("none".into()),
+        ]]
+    );
+}
+
+#[test]
+fn security_definer_sql_function_uses_owner_identity_and_restores_caller() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(1, "create role definer login").unwrap();
+    db.execute(1, "create role caller login").unwrap();
+    db.execute(1, "set session authorization definer").unwrap();
+    db.execute(
+        1,
+        "create function definer_whoami() returns text
+         language sql
+         security definer
+         as $$ select current_user || ':' || session_user $$",
+    )
+    .unwrap();
+
+    db.execute(1, "set session authorization caller").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select current_user, definer_whoami(), current_user",
+        ),
+        vec![vec![
+            Value::Text("caller".into()),
+            Value::Text("definer:caller".into()),
+            Value::Text("caller".into()),
+        ]]
+    );
+}
+
+#[test]
+fn security_definer_plpgsql_function_uses_owner_identity_and_restores_caller() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(1, "create role pl_definer login").unwrap();
+    db.execute(1, "create role pl_caller login").unwrap();
+    db.execute(1, "set session authorization pl_definer")
+        .unwrap();
+    db.execute(
+        1,
+        "create function pl_definer_whoami() returns text
+         language plpgsql
+         security definer
+         as $$ begin return current_user || ':' || session_user; end $$",
+    )
+    .unwrap();
+
+    db.execute(1, "set session authorization pl_caller")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select current_user, pl_definer_whoami(), current_user",
+        ),
+        vec![vec![
+            Value::Text("pl_caller".into()),
+            Value::Text("pl_definer:pl_caller".into()),
+            Value::Text("pl_caller".into()),
+        ]]
+    );
+}
+
+#[test]
+fn security_definer_sql_function_grants_roles_as_owner() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(1, "create role grantor login").unwrap();
+    db.execute(1, "create role grantee login").unwrap();
+    db.execute(1, "create role target_role").unwrap();
+    db.execute(1, "grant target_role to grantor with admin option")
+        .unwrap();
+    db.execute(1, "set session authorization grantor").unwrap();
+    db.execute(
+        1,
+        "create function dogrant_ok() returns void
+         language sql
+         security definer
+         as $$ grant target_role to grantee $$",
+    )
+    .unwrap();
+
+    db.execute(1, "set session authorization grantee").unwrap();
+    db.execute(1, "select dogrant_ok()").unwrap();
+    db.execute(1, "set role target_role").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select current_user, current_setting('role')"),
+        vec![vec![
+            Value::Text("target_role".into()),
+            Value::Text("target_role".into()),
+        ]]
     );
 }
 

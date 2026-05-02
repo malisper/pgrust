@@ -11,7 +11,8 @@ use crate::backend::commands::tablecmds::{
 };
 use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::executor::function_guc::{
-    apply_function_guc, parsed_proconfig, restore_function_gucs,
+    apply_function_guc, apply_security_definer_identity, parsed_proconfig, restore_function_gucs,
+    restore_function_identity, save_function_identity,
 };
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
@@ -1483,17 +1484,28 @@ fn execute_compiled_function(
             cast_function_value(arg_value.clone(), None, slot_def.ty, ctx)?;
     }
 
-    let saved_gucs = ctx.gucs.clone();
     let config_entries = parsed_proconfig(compiled.proconfig.as_deref());
     let has_function_config = !config_entries.is_empty();
+    let restores_identity = compiled.prosecdef
+        || config_entries
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("role"));
+    let saved_identity = save_function_identity(ctx);
+    if compiled.prosecdef {
+        apply_security_definer_identity(ctx, compiled.proowner);
+    }
+    let saved_gucs = ctx.gucs.clone();
     let mut function_config_names = HashSet::new();
     for (name, value) in config_entries {
-        match apply_function_guc(&mut ctx.gucs, &name, Some(&value)) {
+        match apply_function_guc(ctx, &name, Some(&value)) {
             Ok(normalized) => {
                 function_config_names.insert(normalized);
             }
             Err(err) => {
                 ctx.gucs = saved_gucs;
+                if restores_identity {
+                    restore_function_identity(ctx, saved_identity);
+                }
                 return Err(err);
             }
         }
@@ -1512,6 +1524,9 @@ fn execute_compiled_function(
         Ok(FunctionControl::Continue | FunctionControl::Return) => {}
         Ok(FunctionControl::LoopContinue) => {
             ctx.gucs = saved_gucs;
+            if restores_identity {
+                restore_function_identity(ctx, saved_identity);
+            }
             return Err(function_runtime_error(
                 "CONTINUE cannot be used outside a loop",
                 None,
@@ -1520,6 +1535,9 @@ fn execute_compiled_function(
         }
         Ok(FunctionControl::ExitLoop) => {
             ctx.gucs = saved_gucs;
+            if restores_identity {
+                restore_function_identity(ctx, saved_identity);
+            }
             return Err(function_runtime_error(
                 "EXIT cannot be used outside a loop",
                 None,
@@ -1528,6 +1546,9 @@ fn execute_compiled_function(
         }
         Err(err) => {
             ctx.gucs = saved_gucs;
+            if restores_identity {
+                restore_function_identity(ctx, saved_identity);
+            }
             return Err(err);
         }
     }
@@ -1545,6 +1566,9 @@ fn execute_compiled_function(
             )
             .collect::<HashSet<_>>();
         restore_function_gucs(ctx, saved_gucs, restore_names);
+    }
+    if restores_identity && !state.session_guc_writes.contains("role") {
+        restore_function_identity(ctx, saved_identity);
     }
 
     export_open_cursors_as_portals(&state, ctx);
@@ -2568,7 +2592,7 @@ fn exec_function_stmt(
             value,
             is_local,
         } => {
-            let normalized = apply_function_guc(&mut ctx.gucs, name, value.as_deref())?;
+            let normalized = apply_function_guc(ctx, name, value.as_deref())?;
             if *is_local {
                 state.local_guc_writes.insert(normalized);
             } else {

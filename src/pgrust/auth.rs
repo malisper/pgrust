@@ -59,6 +59,19 @@ impl Default for AuthState {
 }
 
 impl AuthState {
+    pub(crate) fn from_executor_identity(
+        session_user_oid: u32,
+        current_user_oid: u32,
+        active_role_oid: Option<u32>,
+    ) -> Self {
+        Self {
+            authenticated_user_oid: session_user_oid,
+            session_user_oid,
+            current_user_oid,
+            active_role_oid,
+        }
+    }
+
     pub fn authenticated_user_oid(&self) -> u32 {
         self.authenticated_user_oid
     }
