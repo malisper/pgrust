@@ -6,9 +6,10 @@ use crate::include::nodes::datetime::TimestampTzADT;
 const INVALID_PARAMETER_VALUE: &str = "22023";
 const UNDEFINED_OBJECT: &str = "42704";
 const TABLE_DEFAULT_PRIVILEGE_CHARS: &str = "arwdDxtm";
+const TYPE_DEFAULT_PRIVILEGE_CHARS: &str = "U";
 
 pub fn default_acl_privilege_chars_from_tokens(tokens: &[String], objtype: char) -> String {
-    if objtype != 'r' {
+    if !matches!(objtype, 'r' | 'T') {
         return String::new();
     }
     let Some(action_index) = tokens.iter().position(|token| {
@@ -23,18 +24,27 @@ pub fn default_acl_privilege_chars_from_tokens(tokens: &[String], objtype: char)
         .unwrap_or(tokens.len());
     let mut chars = String::new();
     for token in &tokens[action_index + 1..on_index] {
-        let privilege = match token.to_ascii_lowercase().as_str() {
-            "all" => return TABLE_DEFAULT_PRIVILEGE_CHARS.into(),
-            "privileges" => continue,
-            "select" => "r",
-            "insert" => "a",
-            "update" => "w",
-            "delete" => "d",
-            "truncate" => "D",
-            "references" => "x",
-            "trigger" => "t",
-            "maintain" => "m",
-            _ => "",
+        let privilege = if objtype == 'T' {
+            match token.to_ascii_lowercase().as_str() {
+                "all" => return TYPE_DEFAULT_PRIVILEGE_CHARS.into(),
+                "privileges" => continue,
+                "usage" => "U",
+                _ => "",
+            }
+        } else {
+            match token.to_ascii_lowercase().as_str() {
+                "all" => return TABLE_DEFAULT_PRIVILEGE_CHARS.into(),
+                "privileges" => continue,
+                "select" => "r",
+                "insert" => "a",
+                "update" => "w",
+                "delete" => "d",
+                "truncate" => "D",
+                "references" => "x",
+                "trigger" => "t",
+                "maintain" => "m",
+                _ => "",
+            }
         };
         for ch in privilege.chars() {
             if !chars.contains(ch) {
@@ -52,18 +62,28 @@ pub fn default_acl_items_for_object_address(
     grantee_name: Option<&str>,
     privilege_chars: &str,
 ) -> Vec<String> {
-    if objtype != 'r' || privilege_chars.is_empty() {
+    if !matches!(objtype, 'r' | 'T') || privilege_chars.is_empty() {
         return Vec::new();
     }
-    let owner_default = format!("{role_name}={TABLE_DEFAULT_PRIVILEGE_CHARS}/{role_name}");
+    let default_privilege_chars = if objtype == 'T' {
+        TYPE_DEFAULT_PRIVILEGE_CHARS
+    } else {
+        TABLE_DEFAULT_PRIVILEGE_CHARS
+    };
+    let owner_default = format!("{role_name}={default_privilege_chars}/{role_name}");
     let Some(grantee_name) = grantee_name else {
         return vec![owner_default];
     };
-    if grantee_name.eq_ignore_ascii_case(role_name) {
+    let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+        ""
+    } else {
+        grantee_name
+    };
+    if grantee_acl_name.eq_ignore_ascii_case(role_name) {
         if is_grant {
             return vec![owner_default];
         }
-        let remaining = TABLE_DEFAULT_PRIVILEGE_CHARS
+        let remaining = default_privilege_chars
             .chars()
             .filter(|ch| !privilege_chars.contains(*ch))
             .collect::<String>();
@@ -71,11 +91,16 @@ pub fn default_acl_items_for_object_address(
             .then(|| vec![format!("{role_name}={remaining}/{role_name}")])
             .unwrap_or_default();
     }
+    if objtype == 'T' && !is_grant && grantee_acl_name.is_empty() {
+        return vec![owner_default];
+    }
     if is_grant {
-        return vec![
-            owner_default,
-            format!("{grantee_name}={privilege_chars}/{role_name}"),
-        ];
+        let mut acl = vec![owner_default];
+        if objtype == 'T' && !grantee_acl_name.is_empty() {
+            acl.push(format!("={TYPE_DEFAULT_PRIVILEGE_CHARS}/{role_name}"));
+        }
+        acl.push(format!("{grantee_acl_name}={privilege_chars}/{role_name}"));
+        return acl;
     }
     Vec::new()
 }

@@ -550,6 +550,7 @@ pub enum BuiltinScalarFunction {
     NumNonNulls,
     PgLogBackendMemoryContexts,
     HasFunctionPrivilege,
+    HasTypePrivilege,
     HasTablePrivilege,
     HasSequencePrivilege,
     HasAnyColumnPrivilege,

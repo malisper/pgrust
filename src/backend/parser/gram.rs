@@ -9671,11 +9671,11 @@ fn build_grant_schema_create(sql: &str) -> Result<GrantObjectStatement, ParseErr
 }
 
 fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let rest = type_usage_prefix(sql, "grant")?;
+    let (rest, object_kind) = type_usage_prefix(sql, "grant")?;
     let (object_names, rest) = split_once_keyword(rest, "to")?;
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::UsageOnType,
+        privilege: GrantObjectPrivilege::UsageOnType(object_kind),
         columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
@@ -9684,32 +9684,43 @@ fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError>
 }
 
 fn is_type_usage_grant(lowered: &str) -> bool {
-    type_usage_prefix_len(lowered, "grant").is_some()
+    type_usage_prefix_match(lowered, "grant").is_some()
 }
 
 fn is_type_usage_revoke(lowered: &str) -> bool {
-    type_usage_prefix_len(lowered, "revoke").is_some()
+    type_usage_prefix_match(lowered, "revoke").is_some()
 }
 
-fn type_usage_prefix<'a>(sql: &'a str, command: &'static str) -> Result<&'a str, ParseError> {
+fn type_usage_prefix<'a>(
+    sql: &'a str,
+    command: &'static str,
+) -> Result<(&'a str, TypePrivilegeObjectKind), ParseError> {
     let lower = sql.to_ascii_lowercase();
-    let prefix_len =
-        type_usage_prefix_len(&lower, command).ok_or_else(|| ParseError::UnexpectedToken {
+    let (prefix_len, object_kind) =
+        type_usage_prefix_match(&lower, command).ok_or_else(|| ParseError::UnexpectedToken {
             expected: "type privilege",
             actual: sql.into(),
         })?;
-    Ok(sql
-        .get(prefix_len..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start())
+    Ok((
+        sql.get(prefix_len..)
+            .ok_or(ParseError::UnexpectedEof)?
+            .trim_start(),
+        object_kind,
+    ))
 }
 
-fn type_usage_prefix_len(lowered: &str, command: &'static str) -> Option<usize> {
-    for object in ["type", "domain"] {
+fn type_usage_prefix_match(
+    lowered: &str,
+    command: &'static str,
+) -> Option<(usize, TypePrivilegeObjectKind)> {
+    for (object, object_kind) in [
+        ("type", TypePrivilegeObjectKind::Type),
+        ("domain", TypePrivilegeObjectKind::Domain),
+    ] {
         for privilege in ["usage", "all", "all privileges"] {
             let prefix = format!("{command} {privilege} on {object} ");
             if lowered.starts_with(&prefix) {
-                return Some(prefix.len());
+                return Some((prefix.len(), object_kind));
             }
         }
     }
@@ -10019,11 +10030,11 @@ fn build_revoke_tablespace_create(sql: &str) -> Result<RevokeObjectStatement, Pa
 }
 
 fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let rest = type_usage_prefix(sql, "revoke")?;
+    let (rest, object_kind) = type_usage_prefix(sql, "revoke")?;
     let (object_names, rest) = split_once_keyword(rest, "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
-        privilege: GrantObjectPrivilege::UsageOnType,
+        privilege: GrantObjectPrivilege::UsageOnType(object_kind),
         columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,

@@ -3963,7 +3963,7 @@ pub enum GrantObjectPrivilege {
     UsageOnSchema,
     AllPrivilegesOnTablespace,
     CreateOnTablespace,
-    UsageOnType,
+    UsageOnType(TypePrivilegeObjectKind),
     UsageOnLanguage,
     AllPrivilegesOnLanguage,
     ExecuteOnFunction,
@@ -3977,6 +3977,12 @@ pub enum GrantObjectPrivilege {
     UsageOnForeignServer,
     AllPrivilegesOnForeignDataWrapper,
     AllPrivilegesOnForeignServer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypePrivilegeObjectKind {
+    Type,
+    Domain,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -672,6 +672,14 @@ impl Database {
                 sqlstate: "42601",
             });
         }
+        for type_oid in [left_type, right_type].into_iter().filter(|oid| *oid != 0) {
+            self.ensure_type_usage_privilege_by_oid(
+                client_id,
+                Some((xid, current_cid)),
+                configured_search_path,
+                type_oid,
+            )?;
+        }
         let proc_oid = resolve_create_operator_proc_oid(&catalog, stmt, left_type, right_type)?;
         let result_type = catalog
             .proc_row_by_oid(proc_oid)
