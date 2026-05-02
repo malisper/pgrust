@@ -195,6 +195,7 @@ impl WorkerContextSeed {
             pending_portals: Vec::new(),
             catalog: self.catalog.clone(),
             scalar_function_cache: HashMap::new(),
+            proc_execute_acl_cache: std::collections::HashSet::new(),
             srf_rows_cache: HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache.clone(),
             pinned_cte_tables: HashMap::new(),
