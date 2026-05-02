@@ -338,7 +338,7 @@ fn reject_constraint_with_dependent_views(
     })
 }
 
-fn ddl_executor_context(
+pub(super) fn ddl_executor_context(
     db: &Database,
     _catalog: &dyn CatalogLookup,
     client_id: ClientId,
@@ -4854,9 +4854,21 @@ impl Database {
         let parent_column_name = parent_relation.desc.columns[parent_column_index]
             .name
             .clone();
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let child_relations = direct_inheritance_children(&catalog, parent_relation.relation_oid)?;
-        for child_relation in child_relations {
+        let lookup_cid = cid.saturating_add(catalog_effects.len() as u32);
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, lookup_cid)), configured_search_path);
+        let mut descendants = Vec::new();
+        collect_inheritance_descendant_oids(
+            &catalog,
+            parent_relation.relation_oid,
+            &mut descendants,
+        );
+        let shape_catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let mut seen = std::collections::BTreeSet::new();
+        for relation_oid in descendants {
+            if !seen.insert(relation_oid) {
+                continue;
+            }
             let lookup_cid = cid
                 .saturating_add(catalog_effects.len() as u32)
                 .saturating_add(1);
@@ -4865,32 +4877,53 @@ impl Database {
                 Some((xid, lookup_cid)),
                 configured_search_path,
             );
-            let child_relation = catalog
-                .lookup_relation_by_oid(child_relation.relation_oid)
+            let child_relation = shape_catalog
+                .lookup_relation_by_oid(relation_oid)
+                .or_else(|| catalog.lookup_relation_by_oid(relation_oid))
                 .ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnknownTable(
-                        child_relation.relation_oid.to_string(),
-                    ))
+                    ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
                 })?;
-            let child_display_name = catalog
-                .class_row_by_oid(child_relation.relation_oid)
+            let child_display_name = shape_catalog
+                .class_row_by_oid(relation_oid)
+                .or_else(|| catalog.class_row_by_oid(relation_oid))
                 .map(|row| row.relname)
-                .unwrap_or_else(|| child_relation.relation_oid.to_string());
+                .unwrap_or_else(|| relation_oid.to_string());
             ensure_relation_owner(self, client_id, &child_relation, &child_display_name)?;
-            let child_column_index =
-                relation_column_index_by_name(&child_relation, &parent_column_name)?;
-            let child_column_name = child_relation.desc.columns[child_column_index].name.clone();
-            let Some(child_constraint) =
-                not_null_constraint_for_column(&catalog, &child_relation, &child_column_name)?
+            let Some(child_constraint) = not_null_constraint_for_column_with_shape(
+                &catalog,
+                &shape_catalog,
+                relation_oid,
+                &parent_column_name,
+            )?
             else {
                 continue;
             };
-            if child_constraint.coninhcount == 0 {
+            let Some(child_attnum) = child_constraint
+                .conkey
+                .as_ref()
+                .and_then(|keys| keys.first())
+                .copied()
+            else {
+                continue;
+            };
+            let next_inhcount = inherited_not_null_parent_count_with_shape(
+                &catalog,
+                &shape_catalog,
+                relation_oid,
+                &parent_column_name,
+            )?;
+            let remove_child_constraint = next_inhcount == 0 && !child_constraint.conislocal;
+            let next_no_inherit = if child_constraint.conislocal {
+                child_constraint.connoinherit
+            } else {
+                false
+            };
+            if !remove_child_constraint
+                && child_constraint.coninhcount == next_inhcount
+                && child_constraint.connoinherit == next_no_inherit
+            {
                 continue;
             }
-
-            let next_inhcount = child_constraint.coninhcount.saturating_sub(1);
-            let remove_child_constraint = next_inhcount == 0 && !child_constraint.conislocal;
             let constraint_ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -4903,27 +4936,19 @@ impl Database {
             let effect = if remove_child_constraint {
                 self.catalog
                     .write()
-                    .drop_column_not_null_mvcc(
-                        child_relation.relation_oid,
-                        &child_column_name,
-                        &constraint_ctx,
-                    )
+                    .drop_column_not_null_mvcc(relation_oid, &parent_column_name, &constraint_ctx)
                     .map_err(map_catalog_error)?
             } else {
                 self.catalog
                     .write()
                     .alter_not_null_constraint_state_by_attnum_mvcc(
-                        child_relation.relation_oid,
-                        (child_column_index + 1) as i16,
+                        relation_oid,
+                        child_attnum,
                         child_constraint.oid,
                         &child_constraint.conname,
                         None,
-                        Some(if child_constraint.conislocal {
-                            child_constraint.connoinherit
-                        } else {
-                            false
-                        }),
-                        Some(child_constraint.conislocal || next_inhcount == 0),
+                        Some(next_no_inherit),
+                        Some(child_constraint.conislocal),
                         Some(next_inhcount),
                         &constraint_ctx,
                     )
@@ -4931,18 +4956,6 @@ impl Database {
             };
             self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
-
-            if remove_child_constraint {
-                self.drop_not_null_constraint_from_inheritors(
-                    client_id,
-                    xid,
-                    cid.saturating_add(1),
-                    &child_relation,
-                    &child_constraint,
-                    configured_search_path,
-                    catalog_effects,
-                )?;
-            }
         }
         Ok(())
     }

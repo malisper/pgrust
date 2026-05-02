@@ -5023,9 +5023,9 @@ fn duplicate_constraint_name(message: &str) -> Option<&str> {
 }
 
 fn missing_constraint_name(message: &str) -> Option<&str> {
-    message
-        .strip_prefix("constraint \"")?
-        .strip_suffix("\" does not exist")
+    let rest = message.strip_prefix("constraint \"")?;
+    let (name, suffix) = rest.split_once('"')?;
+    (suffix == " does not exist").then_some(name)
 }
 
 fn quoted_name_after_prefix<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {

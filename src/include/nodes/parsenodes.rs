@@ -4591,6 +4591,7 @@ pub enum AlterDomainAction {
 pub struct PartitionColumnOverride {
     pub name: String,
     pub default_expr: Option<String>,
+    pub generated: Option<ColumnGeneratedDef>,
     pub constraints: Vec<ColumnConstraint>,
 }
 

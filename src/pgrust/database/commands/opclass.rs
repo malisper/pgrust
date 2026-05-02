@@ -16,7 +16,7 @@ use crate::backend::utils::cache::syscache::{
 use crate::include::catalog::{
     BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID, INT4_TYPE_OID, INTERNAL_TYPE_OID,
     PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgProcRow, VOID_TYPE_OID,
+    PgOperatorRow, PgOpfamilyRow, PgProcRow, VOID_TYPE_OID, bootstrap_pg_operator_rows,
 };
 use crate::pgrust::database::ddl::ensure_can_set_role;
 
@@ -411,8 +411,9 @@ fn resolve_opclass_operator(
                 })
         })
         .transpose()?;
-    let operator = catalog
-        .operator_rows()
+    let mut operator_rows = catalog.operator_rows();
+    operator_rows.extend(bootstrap_pg_operator_rows());
+    let operator = operator_rows
         .into_iter()
         .find(|row| {
             row.oprname.eq_ignore_ascii_case(&operator_name)

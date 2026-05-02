@@ -18,12 +18,20 @@ use crate::include::catalog::{
     PgConstraintRow,
 };
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::parsenodes::ColumnGeneratedKind;
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
     catalog
         .class_row_by_oid(relation_oid)
         .map(|row| row.relname)
         .unwrap_or_else(|| relation_oid.to_string())
+}
+
+fn generated_kind_name(kind: ColumnGeneratedKind) -> &'static str {
+    match kind {
+        ColumnGeneratedKind::Virtual => "VIRTUAL",
+        ColumnGeneratedKind::Stored => "STORED",
+    }
 }
 
 fn direct_partition_children(
@@ -1523,6 +1531,46 @@ pub(crate) fn validate_partition_relation_compatibility(
                 hint: None,
                 sqlstate: "42P21",
             });
+        }
+        match (parent_column.generated, child_column.generated) {
+            (None, Some(_)) => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" in child table must not be a generated column",
+                        parent_column.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            (Some(_), None) => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" in child table must be a generated column",
+                        parent_column.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            (Some(parent_kind), Some(child_kind)) if parent_kind != child_kind => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" inherits from generated column of different kind",
+                        parent_column.name
+                    ),
+                    detail: Some(format!(
+                        "Parent column is {}, child column is {}.",
+                        generated_kind_name(parent_kind),
+                        generated_kind_name(child_kind)
+                    )),
+                    hint: None,
+                    sqlstate: "42P16",
+                });
+            }
+            _ => {}
         }
     }
     Ok(())

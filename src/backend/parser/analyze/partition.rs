@@ -184,7 +184,7 @@ pub(crate) fn lower_partition_clause(
     let spec = stmt
         .partition_spec
         .as_ref()
-        .map(|spec| lower_partition_spec(spec, relation_desc, catalog))
+        .map(|spec| lower_partition_spec(spec, &stmt.table_name, relation_desc, catalog))
         .transpose()?;
 
     let Some(parent_name) = stmt.partition_of.as_deref() else {
@@ -830,6 +830,7 @@ fn deserialize_partition_multirange_value(
 
 fn lower_partition_spec(
     spec: &RawPartitionSpec,
+    relation_name: &str,
     relation_desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Result<LoweredPartitionSpec, ParseError> {
@@ -857,6 +858,7 @@ fn lower_partition_spec(
     let scope = scope_for_relation(None, relation_desc);
 
     for key in &spec.keys {
+        reject_generated_partition_key_expr(&key.expr, relation_name, relation_desc)?;
         if let Some(column_name) = simple_partition_key_column_name(&key.expr) {
             let normalized = column_name.to_ascii_lowercase();
             if is_system_column_name(&normalized) {
@@ -1083,6 +1085,66 @@ fn validate_partition_key_raw_expr(
         return Err(partition_key_error(
             "cannot use subquery in partition key expression",
         ));
+    }
+    Ok(())
+}
+
+fn reject_generated_partition_key_expr(
+    expr: &SqlExpr,
+    relation_name: &str,
+    relation_desc: &RelationDesc,
+) -> Result<(), ParseError> {
+    let generated_column = std::cell::RefCell::new(None::<String>);
+    let unqualified_relation_name = relation_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(relation_name)
+        .trim_matches('"');
+    let relation_has_generated_column = relation_desc
+        .columns
+        .iter()
+        .any(|column| !column.dropped && column.generated.is_some());
+    let generated_column_name = |name: &str| {
+        relation_desc
+            .columns
+            .iter()
+            .find(|column| {
+                !column.dropped
+                    && column.generated.is_some()
+                    && column.name.eq_ignore_ascii_case(name)
+            })
+            .map(|column| column.name.clone())
+    };
+
+    if raw_expr_any(expr, &|expr| {
+        let SqlExpr::Column(name) = expr else {
+            return false;
+        };
+        if let Some(column_name) = generated_column_name(name) {
+            *generated_column.borrow_mut() = Some(column_name);
+            return true;
+        }
+        if relation_has_generated_column && name.eq_ignore_ascii_case(unqualified_relation_name) {
+            if let Some(column) = relation_desc
+                .columns
+                .iter()
+                .find(|column| !column.dropped && column.generated.is_some())
+            {
+                *generated_column.borrow_mut() = Some(column.name.clone());
+                return true;
+            }
+        }
+        false
+    }) {
+        let column_name = generated_column
+            .into_inner()
+            .unwrap_or_else(|| "unknown".into());
+        return Err(ParseError::DetailedError {
+            message: "cannot use generated column in partition key".into(),
+            detail: Some(format!("Column \"{column_name}\" is a generated column.")),
+            hint: None,
+            sqlstate: "42P17",
+        });
     }
     Ok(())
 }

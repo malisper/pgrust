@@ -253,18 +253,33 @@ fn infer_quantified_array_literal_type(
 }
 
 fn bind_array_literal_elements_as_type(
+    raw_elements: &[SqlExpr],
     bound_elements: Vec<TypedExpr>,
     target_array_type: SqlType,
-) -> Expr {
+    catalog: &dyn CatalogLookup,
+) -> Result<Expr, ParseError> {
     let target_element_type = target_array_type.element_type();
     let elements = bound_elements
         .into_iter()
-        .map(|element| coerce_bound_expr(element.expr, element.sql_type, target_element_type))
-        .collect();
-    Expr::ArrayLiteral {
+        .zip(raw_elements.iter())
+        .map(|(element, raw_element)| {
+            if target_element_type.kind == SqlTypeKind::RegClass
+                && let Some(regclass) =
+                    bind_regclass_literal_cast(raw_element, target_element_type, catalog)?
+            {
+                return Ok(regclass);
+            }
+            Ok(coerce_bound_expr(
+                element.expr,
+                element.sql_type,
+                target_element_type,
+            ))
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    Ok(Expr::ArrayLiteral {
         elements,
         array_type: target_array_type,
-    }
+    })
 }
 
 fn validate_record_quantified_array_literal_types(
@@ -809,8 +824,12 @@ pub(super) fn bind_quantified_array_expr(
                 catalog,
             )?;
             let comparison_left_type = target_array_type.element_type();
-            let bound_array =
-                bind_array_literal_elements_as_type(bound_elements, target_array_type);
+            let bound_array = bind_array_literal_elements_as_type(
+                elements,
+                bound_elements,
+                target_array_type,
+                catalog,
+            )?;
             (
                 target_array_type,
                 bound_array,

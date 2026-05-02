@@ -24,12 +24,17 @@ pub(crate) fn normalize_index_predicate_sql(
     let normalized =
         normalize_predicate_text_collation(&normalized, relation_desc).unwrap_or(normalized);
     relation_desc
-        .and_then(|desc| normalize_simple_text_equality(&normalized, desc))
+        .and_then(|desc| normalize_simple_text_comparison(&normalized, desc))
         .unwrap_or(normalized)
 }
 
-fn normalize_simple_text_equality(sql: &str, desc: &RelationDesc) -> Option<String> {
-    let (left, right) = sql.split_once(" = ")?;
+fn normalize_simple_text_comparison(sql: &str, desc: &RelationDesc) -> Option<String> {
+    let (left, operator, right) = split_top_level_comparison(sql)?;
+    let operator = match operator {
+        "=" => "=",
+        "!=" | "<>" => "<>",
+        _ => return None,
+    };
     let left = left.trim();
     let right = right.trim();
     let column = desc
@@ -42,7 +47,7 @@ fn normalize_simple_text_equality(sql: &str, desc: &RelationDesc) -> Option<Stri
     if !is_simple_string_literal(right) || right.contains("::") {
         return None;
     }
-    Some(format!("{left} = {right}::text"))
+    Some(format!("{left} {operator} {right}::text"))
 }
 
 fn is_simple_string_literal(sql: &str) -> bool {
@@ -70,6 +75,7 @@ fn normalize_predicate_text_collation(sql: &str, desc: Option<&RelationDesc>) ->
     if !left.changed && !right.changed {
         return None;
     }
+    let operator = if operator == "!=" { "<>" } else { operator };
     Some(format!("{} {} {}", left.sql, operator, right.sql))
 }
 
@@ -173,9 +179,10 @@ fn is_text_type_name(input: &str) -> bool {
 }
 
 fn split_top_level_comparison(input: &str) -> Option<(&str, &'static str, &str)> {
-    for (idx, op) in
-        top_level_operator_positions(input, &[" >= ", " <= ", " <> ", " = ", " > ", " < "])
-    {
+    for (idx, op) in top_level_operator_positions(
+        input,
+        &[" >= ", " <= ", " <> ", " != ", " = ", " > ", " < "],
+    ) {
         return Some((&input[..idx], op.trim(), &input[idx + op.len()..]));
     }
     None
@@ -457,6 +464,10 @@ mod tests {
         assert_eq!(
             normalize_index_predicate_sql("f1>='a'", Some(&desc)),
             "f1 >= 'a'"
+        );
+        assert_eq!(
+            normalize_index_predicate_sql("f1!='a'", Some(&desc)),
+            "f1 <> 'a'::text"
         );
     }
 

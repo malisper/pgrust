@@ -799,7 +799,11 @@ fn merge_local_column(
             replace_not_null_constraint(&mut merged.column, attributes.clone());
         }
     } else if !local.nullable() {
-        ensure_not_null_constraint(&mut merged.column);
+        if merged.column.nullable() {
+            ensure_not_null_constraint(&mut merged.column);
+        } else {
+            replace_not_null_constraint(&mut merged.column, ConstraintAttributes::default());
+        }
         merged.not_null_is_local = true;
     }
     if local.primary_key() {
@@ -933,16 +937,40 @@ fn merge_partition_column_override(
         if merged.column.generated.is_some() {
             return Err(ParseError::DetailedError {
                 message: format!(
-                    "both default and generation expression specified for column \"{}\"",
+                    "column \"{}\" inherits from generated column but specifies default",
                     merged.column.name
                 ),
                 detail: None,
                 hint: None,
-                sqlstate: "42601",
+                sqlstate: "42P16",
             });
         }
         merged.column.default_expr = Some(default_expr.clone());
         merged.conflicting_parent_default = false;
+    }
+    if merged.column.generated.is_none() && override_.generated.is_some() {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "child column \"{}\" specifies generation expression",
+                merged.column.name
+            ),
+            detail: None,
+            hint: Some(
+                "A child table column cannot be generated unless its parent column is.".into(),
+            ),
+            sqlstate: "42P16",
+        });
+    }
+    if let Some(generated) = &override_.generated {
+        ensure_matching_column_generated_kind(
+            &merged.column.name,
+            merged.column.generated.as_ref(),
+            Some(generated),
+        )?;
+        merged.column.generated = Some(generated.clone());
+        merged.column.default_expr = None;
+        merged.conflicting_parent_default = false;
+        merged.conflicting_parent_generated = false;
     }
     for constraint in &override_.constraints {
         match constraint {
