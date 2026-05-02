@@ -15371,6 +15371,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::Materialize { input, .. }
             | Plan::Memoize { input, .. }
             | Plan::Gather { input, .. }
+            | Plan::GatherMerge { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::IncrementalSort { input, .. }

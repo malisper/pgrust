@@ -4331,6 +4331,7 @@ fn rewrite_auto_view_scan_plan(
                 tablesample: None,
                 desc: resolved.base_relation.desc.clone(),
                 disabled,
+                parallel_aware: false,
             };
             if view_output_is_base_identity(
                 &resolved.visible_output_exprs,
@@ -4349,12 +4350,14 @@ fn rewrite_auto_view_scan_plan(
             plan_info,
             source_id,
             desc,
+            parallel_aware,
             partition_prune,
             children,
         } => Plan::Append {
             plan_info,
             source_id,
             desc,
+            parallel_aware,
             partition_prune,
             children: children
                 .into_iter()

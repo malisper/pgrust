@@ -31,6 +31,7 @@ pub(crate) fn clear_subquery_eval_cache() {
 #[derive(Clone)]
 struct QuantifiedMembershipCache {
     values: HashSet<Value>,
+    nullable_values: Vec<Value>,
     integer_values: HashSet<i64>,
     saw_row: bool,
     saw_null: bool,
@@ -94,6 +95,7 @@ fn plan_is_proven_empty(plan: &Plan) -> bool {
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Hash { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::SubqueryScan { input, .. } => plan_is_proven_empty(input),
         _ => false,
     }
@@ -119,6 +121,7 @@ fn exists_plan_result_cacheable(plan: &Plan) -> bool {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -870,13 +873,20 @@ pub(super) fn eval_quantified_subquery(
     if matches!(op, SubqueryComparisonOp::Eq)
         && !is_all
         && subplan.par_param.is_empty()
-        && subplan.target_width == 1
         && !subplan
             .comparison
             .as_ref()
             .is_some_and(|comparison| comparison_uses_user_defined_operator(comparison, ctx))
     {
-        return eval_cached_any_eq_subquery(left_value, subplan, &plan, slot, ctx);
+        return eval_cached_any_eq_subquery(
+            left_value,
+            op,
+            collation_oid,
+            subplan,
+            &plan,
+            slot,
+            ctx,
+        );
     }
     with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
@@ -919,6 +929,8 @@ pub(super) fn eval_quantified_subquery(
 
 fn eval_cached_any_eq_subquery(
     left_value: &Value,
+    op: SubqueryComparisonOp,
+    collation_oid: Option<u32>,
     subplan: &crate::include::nodes::primnodes::SubPlan,
     plan: &Plan,
     slot: &mut TupleSlot,
@@ -933,6 +945,7 @@ fn eval_cached_any_eq_subquery(
             bind_subplan_params(subplan, slot, ctx)?;
             let mut state = executor_start(plan.clone());
             let mut values = HashSet::new();
+            let mut nullable_values = Vec::new();
             let mut integer_values = HashSet::new();
             let mut saw_row = false;
             let mut saw_null = false;
@@ -942,6 +955,9 @@ fn eval_cached_any_eq_subquery(
                 let value = quantified_subquery_right_value(left_value, row)?;
                 if matches!(value, Value::Null) {
                     saw_null = true;
+                } else if quantified_value_contains_null(&value) {
+                    saw_null = true;
+                    nullable_values.push(value.to_owned_value());
                 } else {
                     if let Some(key) = quantified_membership_integer_key(&value) {
                         integer_values.insert(key);
@@ -951,6 +967,7 @@ fn eval_cached_any_eq_subquery(
             }
             Ok(QuantifiedMembershipCache {
                 values,
+                nullable_values,
                 integer_values,
                 saw_row,
                 saw_null,
@@ -968,12 +985,47 @@ fn eval_cached_any_eq_subquery(
     if matches!(left_value, Value::Null) {
         return Ok(Value::Null);
     }
+    if quantified_value_contains_null(left_value) {
+        return eval_cached_any_eq_nullable_probe(left_value, &cache, op, collation_oid, ctx);
+    }
     if cache.values.contains(left_value)
         || quantified_membership_integer_key(left_value)
             .is_some_and(|key| cache.integer_values.contains(&key))
     {
         Ok(Value::Bool(true))
+    } else if !cache.nullable_values.is_empty() {
+        eval_cached_any_eq_nullable_probe(left_value, &cache, op, collation_oid, ctx)
     } else if cache.saw_null {
+        Ok(Value::Null)
+    } else {
+        Ok(Value::Bool(false))
+    }
+}
+
+fn eval_cached_any_eq_nullable_probe(
+    left_value: &Value,
+    cache: &QuantifiedMembershipCache,
+    op: SubqueryComparisonOp,
+    collation_oid: Option<u32>,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let mut saw_null = false;
+    for right_value in cache.values.iter().chain(cache.nullable_values.iter()) {
+        match compare_quantified_subquery_values(
+            left_value,
+            right_value,
+            op,
+            collation_oid,
+            None,
+            ctx,
+        )? {
+            Value::Bool(true) => return Ok(Value::Bool(true)),
+            Value::Bool(false) => {}
+            Value::Null => saw_null = true,
+            other => return Err(ExecError::NonBoolQual(other)),
+        }
+    }
+    if saw_null || cache.saw_null {
         Ok(Value::Null)
     } else {
         Ok(Value::Bool(false))
@@ -986,6 +1038,14 @@ fn quantified_membership_integer_key(value: &Value) -> Option<i64> {
         Value::Int32(value) => Some(i64::from(*value)),
         Value::Int64(value) => Some(*value),
         _ => None,
+    }
+}
+
+fn quantified_value_contains_null(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Record(record) => record.fields.iter().any(quantified_value_contains_null),
+        _ => false,
     }
 }
 

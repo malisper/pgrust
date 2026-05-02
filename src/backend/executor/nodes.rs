@@ -55,13 +55,13 @@ use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapAndState, BitmapHeapScanState, BitmapIndexScanState,
     BitmapOrState, BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState,
-    GatherState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LateralRightCacheEntry,
-    LimitState, LockRowsState, MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState,
-    MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
-    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
-    SlotKind, SubqueryScanState, SystemVarBinding, TableSampleMethod, TableSampleState,
-    TidScanState, ToastRelationRef, TupleSlot, UniqueState, ValuesState, WindowAggState,
-    WorkTableScanState,
+    GatherMergeState, GatherState, IncrementalSortState, IndexOnlyScanState, IndexScanState,
+    LateralRightCacheEntry, LimitState, LockRowsState, MaterializeState, MaterializedRow,
+    MemoizeCacheKey, MemoizeState, MergeAppendState, NestedLoopJoinState, NodeExecStats,
+    OrderByState, PlanNode, PlanState, ProjectSetState, ProjectionState, RecursiveUnionState,
+    ResultState, SeqScanState, SetOpState, SlotKind, SubqueryScanState, SystemVarBinding,
+    TableSampleMethod, TableSampleState, TidScanState, ToastRelationRef, TupleSlot, UniqueState,
+    ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan,
@@ -71,11 +71,13 @@ use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, CMAX_ATTR_NO, CMIN_ATTR_NO, CaseExpr, Expr, FuncExpr,
     INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, OpExprKind, OrderByEntry, ParamKind, RelationDesc,
     SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SetReturningCall, SubLinkType, SubPlan,
-    TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, is_special_varno,
+    TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, expr_sql_type_hint,
+    is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
+use std::sync::mpsc::TryRecvError;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
 const EMPTY_GROUPING_REFS: [usize; 0] = [];
@@ -1467,7 +1469,11 @@ impl PlanNode for AppendState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        "Append".into()
+        if self.parallel_aware {
+            "Parallel Append".into()
+        } else {
+            "Append".into()
+        }
     }
     fn explain_passthrough(&self) -> Option<&dyn PlanNode> {
         let visible_children = self.visible_children.as_ref()?;
@@ -1856,7 +1862,7 @@ fn startup_prune_expr_is_evaluable(expr: &Expr) -> bool {
     match expr {
         Expr::Const(_) | Expr::Var(_) => true,
         Expr::Param(param) => param.paramkind == ParamKind::External,
-        Expr::SubPlan(subplan) => subplan.par_param.is_empty() && subplan.args.is_empty(),
+        Expr::SubPlan(subplan) => subplan.renders_as_initplan(),
         Expr::SubLink(_) => false,
         Expr::CurrentDate
         | Expr::CurrentTime { .. }
@@ -2789,8 +2795,29 @@ impl PlanNode for SeqScanState {
                 }
             }
 
-            let next: Result<Option<usize>, ExecError> =
-                prepare_next_sampled_page(self.tablesample.as_mut(), ctx, scan);
+            let next: Result<Option<usize>, ExecError> = if self.parallel_aware
+                && self.tablesample.is_none()
+                && let Some(runtime) = super::parallel::current_runtime()
+            {
+                loop {
+                    let block = runtime.next_seq_scan_block(self.source_id);
+                    if block >= scan.nblocks() {
+                        break Ok(None);
+                    }
+                    let prepared = heap_scan_prepare_page_at::<ExecError>(
+                        &ctx.pool,
+                        ctx.client_id,
+                        &ctx.txns,
+                        scan,
+                        block,
+                    )?;
+                    if prepared.is_some() {
+                        break Ok(prepared);
+                    }
+                }
+            } else {
+                prepare_next_sampled_page(self.tablesample.as_mut(), ctx, scan)
+            };
             if next?.is_none() {
                 heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
                 finish_eof(&mut self.stats, start, ctx);
@@ -2842,6 +2869,8 @@ impl PlanNode for SeqScanState {
         let relation_name = explain_relation_name(&self.relation_name);
         if self.tablesample.is_some() {
             format!("Sample Scan on {relation_name}")
+        } else if self.parallel_aware {
+            format!("Parallel Seq Scan on {relation_name}")
         } else {
             format!("Seq Scan on {relation_name}")
         }
@@ -3025,6 +3054,11 @@ impl PlanNode for IndexOnlyScanState {
             if !self.array_scan_seen_tids.insert(tid) {
                 continue;
             }
+            if self.parallel_aware
+                && !next_parallel_tuple_belongs_to_current_worker(&mut self.parallel_tuple_index)
+            {
+                continue;
+            }
             {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
@@ -3169,6 +3203,7 @@ impl PlanNode for IndexOnlyScanState {
         self.array_scan_seen_tids.clear();
         self.array_scan_keys_initialized = false;
         self.scan_exhausted = false;
+        self.parallel_tuple_index = 0;
         self.current_bindings.clear();
         self.slot = TupleSlot::empty(self.column_names.len());
         Ok(())
@@ -3199,8 +3234,13 @@ impl PlanNode for IndexOnlyScanState {
         } else {
             ""
         };
+        let scan_name = if self.parallel_aware {
+            "Parallel Index Only Scan"
+        } else {
+            "Index Only Scan"
+        };
         format!(
-            "Index Only Scan{direction} using {} on {}",
+            "{scan_name}{direction} using {} on {}",
             self.index_name,
             explain_relation_name(&self.relation_name)
         )
@@ -3485,6 +3525,20 @@ fn push_tid_candidate(
     }
 }
 
+fn parallel_ordinal_belongs_to_current_worker(ordinal: usize) -> bool {
+    let Some((worker_index, worker_count)) = super::parallel::current_worker() else {
+        return true;
+    };
+    let worker_count = worker_count.max(1);
+    ordinal % worker_count == worker_index
+}
+
+fn next_parallel_tuple_belongs_to_current_worker(next_ordinal: &mut usize) -> bool {
+    let ordinal = *next_ordinal;
+    *next_ordinal = (*next_ordinal).saturating_add(1);
+    parallel_ordinal_belongs_to_current_worker(ordinal)
+}
+
 fn parse_tid_candidate_text(
     text: &str,
 ) -> Option<crate::include::access::itemptr::ItemPointerData> {
@@ -3554,6 +3608,11 @@ impl PlanNode for IndexScanState {
                 .and_then(|scan| scan.xs_heaptid)
                 .expect("index scan tuple must set heap tid");
             if !self.array_scan_seen_tids.insert(tid) {
+                continue;
+            }
+            if self.parallel_aware
+                && !next_parallel_tuple_belongs_to_current_worker(&mut self.parallel_tuple_index)
+            {
                 continue;
             }
             {
@@ -3700,6 +3759,7 @@ impl PlanNode for IndexScanState {
         self.array_scan_seen_tids.clear();
         self.array_scan_keys_initialized = false;
         self.scan_exhausted = false;
+        self.parallel_tuple_index = 0;
         self.current_bindings.clear();
         self.slot = TupleSlot::empty(self.column_names.len());
         Ok(())
@@ -3717,7 +3777,11 @@ impl PlanNode for IndexScanState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        let scan_name = if self.index_only {
+        let scan_name = if self.parallel_aware && self.index_only {
+            "Parallel Index Only Scan"
+        } else if self.parallel_aware {
+            "Parallel Index Scan"
+        } else if self.index_only {
             "Index Only Scan"
         } else {
             "Index Scan"
@@ -4619,6 +4683,11 @@ impl BitmapHeapScanState {
 
         while let Some(block) = self.bitmap_pages.get(self.current_page_index).copied() {
             self.current_page_index += 1;
+            let page_ordinal = self.parallel_page_index;
+            self.parallel_page_index = self.parallel_page_index.saturating_add(1);
+            if self.parallel_aware && !parallel_ordinal_belongs_to_current_worker(page_ordinal) {
+                continue;
+            }
 
             let pin = ctx
                 .pool
@@ -4787,8 +4856,13 @@ impl PlanNode for BitmapHeapScanState {
     }
 
     fn node_label(&self) -> String {
+        let scan_name = if self.parallel_aware {
+            "Parallel Bitmap Heap Scan"
+        } else {
+            "Bitmap Heap Scan"
+        };
         format!(
-            "Bitmap Heap Scan on {}",
+            "{scan_name} on {}",
             explain_relation_name(&self.relation_name)
         )
     }
@@ -5299,7 +5373,7 @@ fn render_explain_expr_inner_with_qualifier(
             render_explain_array_subscript(array, subscripts, qualifier, column_names)
         }
         Expr::SubPlan(subplan) => {
-            if subplan.par_param.is_empty() {
+            if subplan.renders_as_initplan() {
                 format!("(InitPlan {}).col1", subplan.plan_id + 1)
             } else {
                 format!("(SubPlan {})", subplan.plan_id + 1)
@@ -5592,6 +5666,15 @@ fn render_explain_func_expr(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::JsonbPathQueryArray)
     ) {
         return render_explain_jsonb_path_query_array_function(func, qualifier, column_names);
+    }
+    if matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Length)
+    ) && let [arg] = func.args.as_slice()
+        && expr_sql_type_hint(arg).is_some_and(|ty| ty.kind == SqlTypeKind::Name)
+    {
+        let rendered = render_explain_expr_inner_with_qualifier(arg, qualifier, column_names);
+        return format!("length(({rendered})::text)");
     }
     let name = match func.implementation {
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPoint) => {
@@ -7072,7 +7155,9 @@ pub(crate) fn render_explain_join_expr_inner(
         Expr::Func(func) => render_explain_join_func_expr(func, outer_names, inner_names),
         Expr::SubPlan(subplan) => match subplan.sublink_type {
             SubLinkType::ExistsSubLink => format!("EXISTS(SubPlan {})", subplan.plan_id + 1),
-            _ if subplan.par_param.is_empty() => format!("(InitPlan {}).col1", subplan.plan_id + 1),
+            _ if subplan.renders_as_initplan() => {
+                format!("(InitPlan {}).col1", subplan.plan_id + 1)
+            }
             _ => format!("(SubPlan {})", subplan.plan_id + 1),
         },
         Expr::Row { fields, .. } => render_explain_join_whole_row(fields, outer_names, inner_names)
@@ -8707,9 +8792,84 @@ impl PlanNode for GatherState {
             None
         };
         begin_node(&mut self.stats, ctx)?;
-        if self.input.exec_proc_node(ctx)?.is_some() {
-            finish_row(&mut self.stats, start);
-            Ok(self.input.current_slot())
+
+        if !self.initialized {
+            initialize_gather(self, ctx);
+        }
+
+        if let Some(receiver) = &self.receiver {
+            match receiver.try_recv() {
+                Ok(message) => {
+                    store_gather_message(self, message)?;
+                    finish_row(&mut self.stats, start);
+                    return Ok(Some(&mut self.slot));
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.receiver = None;
+                    finish_gather_workers(self);
+                }
+            }
+        }
+
+        if let Some(leader_index) = self.leader_index
+            && !self.leader_done
+        {
+            let participant_count = self.participant_count;
+            let mut next_leader_row = || {
+                if self.input.exec_proc_node(ctx)?.is_some() {
+                    self.input.materialize_current_row().map(Some)
+                } else {
+                    Ok(None)
+                }
+            };
+            let row = if participant_count == 0 {
+                next_leader_row()
+            } else {
+                let runtime = self.parallel_runtime.clone();
+                let mut run_leader = || {
+                    super::parallel::with_worker_identity(leader_index, participant_count, || {
+                        next_leader_row()
+                    })
+                };
+                match runtime {
+                    Some(runtime) => super::parallel::with_parallel_runtime(runtime, run_leader),
+                    None => run_leader(),
+                }
+            }?;
+            if let Some(row) = row {
+                let tid = row.slot.tid();
+                let table_oid = row.slot.table_oid;
+                store_gather_row(
+                    self,
+                    super::parallel::WorkerTuple {
+                        values: row.slot.tts_values,
+                        system_bindings: row.system_bindings,
+                        grouping_refs: row.grouping_refs,
+                        tid,
+                        table_oid,
+                    },
+                );
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
+            }
+            self.leader_done = true;
+        }
+
+        if let Some(receiver) = &self.receiver {
+            match receiver.recv() {
+                Ok(message) => {
+                    store_gather_message(self, message)?;
+                    finish_row(&mut self.stats, start);
+                    Ok(Some(&mut self.slot))
+                }
+                Err(_) => {
+                    self.receiver = None;
+                    finish_gather_workers(self);
+                    finish_eof(&mut self.stats, start, ctx);
+                    Ok(None)
+                }
+            }
         } else {
             finish_eof(&mut self.stats, start, ctx);
             Ok(None)
@@ -8717,11 +8877,15 @@ impl PlanNode for GatherState {
     }
 
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
-        self.input.current_slot()
+        Some(&mut self.slot)
     }
 
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
-        self.input.current_system_bindings()
+        &self.current_bindings
+    }
+
+    fn current_grouping_refs(&self) -> &[usize] {
+        &self.current_grouping_refs
     }
 
     fn column_names(&self) -> &[String] {
@@ -8747,12 +8911,18 @@ impl PlanNode for GatherState {
     fn explain_details(
         &self,
         indent: usize,
-        _analyze: bool,
+        analyze: bool,
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
         lines.push(format!("{prefix}Workers Planned: {}", self.workers_planned));
+        if analyze {
+            lines.push(format!(
+                "{prefix}Workers Launched: {}",
+                self.workers_launched
+            ));
+        }
         if self.single_copy {
             lines.push(format!("{prefix}Single Copy: true"));
         }
@@ -8779,6 +8949,414 @@ impl PlanNode for GatherState {
     fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
         vec![self.input.explain_json(analyze, indent)]
     }
+
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.receiver = None;
+        finish_gather_workers(self);
+        self.input.rescan(ctx)?;
+        self.initialized = false;
+        self.leader_index = None;
+        self.participant_count = 1;
+        self.leader_done = false;
+        self.parallel_runtime = None;
+        self.workers_launched = 0;
+        self.current_bindings.clear();
+        self.current_grouping_refs.clear();
+        self.slot = TupleSlot::empty(self.column_names().len());
+        Ok(())
+    }
+}
+
+impl PlanNode for GatherMergeState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+
+        if !self.initialized {
+            initialize_gather_merge(self, ctx)?;
+        }
+
+        let Some(row) = self.rows.get(self.next_row) else {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        };
+        self.next_row += 1;
+        self.slot
+            .store_virtual_row(row.values.clone(), row.tid, row.table_oid);
+        self.current_bindings = row.system_bindings.clone();
+        self.current_grouping_refs = row.grouping_refs.clone();
+        finish_row(&mut self.stats, start);
+        Ok(Some(&mut self.slot))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn current_grouping_refs(&self) -> &[usize] {
+        &self.current_grouping_refs
+    }
+
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "Gather Merge".into()
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = explain_detail_prefix(indent);
+        lines.push(format!("{prefix}Workers Planned: {}", self.workers_planned));
+        if analyze {
+            lines.push(format!(
+                "{prefix}Workers Launched: {}",
+                self.workers_launched
+            ));
+        }
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
+    }
+
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        finish_gather_merge_workers(self);
+        self.input.rescan(ctx)?;
+        self.initialized = false;
+        self.rows.clear();
+        self.next_row = 0;
+        self.leader_index = None;
+        self.participant_count = 1;
+        self.leader_done = false;
+        self.parallel_runtime = None;
+        self.workers_launched = 0;
+        self.current_bindings.clear();
+        self.current_grouping_refs.clear();
+        self.slot = TupleSlot::empty(self.column_names().len());
+        Ok(())
+    }
+}
+
+fn initialize_gather(state: &mut GatherState, ctx: &mut ExecutorContext) {
+    state.initialized = true;
+    state.leader_done = false;
+    let max_parallel_workers = ctx
+        .gucs
+        .get("max_parallel_workers")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(8);
+    let leader_participates = ctx
+        .gucs
+        .get("parallel_leader_participation")
+        .map(|value| {
+            let value = value.trim().trim_matches('\'').to_ascii_lowercase();
+            matches!(value.as_str(), "on" | "true" | "1" | "yes")
+        })
+        .unwrap_or(true);
+    let workers_to_launch = if state.single_copy {
+        state.workers_planned.min(max_parallel_workers).min(1)
+    } else {
+        state.workers_planned.min(max_parallel_workers)
+    };
+    record_parallel_worker_launch_stats(ctx, workers_to_launch);
+    if workers_to_launch == 0 {
+        state.leader_index = Some(0);
+        state.participant_count = 0;
+        state.parallel_runtime = None;
+        return;
+    }
+
+    let runtime = std::sync::Arc::new(super::parallel::ParallelRuntime::default());
+    state.parallel_runtime = Some(runtime.clone());
+    let leader_index = (!state.single_copy && leader_participates).then_some(0);
+    let participant_count = workers_to_launch + usize::from(leader_index.is_some());
+    state.leader_index = leader_index;
+    state.participant_count = participant_count;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(64);
+    let seed = super::parallel::WorkerContextSeed::from_ctx(ctx, runtime);
+    for worker_offset in 0..workers_to_launch {
+        let worker_index = if leader_index.is_some() {
+            worker_offset + 1
+        } else {
+            worker_offset
+        };
+        let handle = super::parallel::launch_worker(
+            seed.clone(),
+            state.input_plan.clone(),
+            worker_index,
+            participant_count,
+            sender.clone(),
+        );
+        state.worker_handles.push(handle);
+    }
+    drop(sender);
+    state.receiver = Some(receiver);
+    state.workers_launched = workers_to_launch;
+}
+
+fn record_parallel_worker_launch_stats(ctx: &ExecutorContext, workers_to_launch: usize) {
+    if workers_to_launch == 0 {
+        return;
+    }
+    let mut stats = ctx.stats.write();
+    stats.parallel_workers_to_launch += workers_to_launch as i64;
+    stats.parallel_workers_launched += workers_to_launch as i64;
+}
+
+fn initialize_gather_merge(
+    state: &mut GatherMergeState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    state.initialized = true;
+    state.leader_done = false;
+    let max_parallel_workers = ctx
+        .gucs
+        .get("max_parallel_workers")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(8);
+    let leader_participates = ctx
+        .gucs
+        .get("parallel_leader_participation")
+        .map(|value| {
+            let value = value.trim().trim_matches('\'').to_ascii_lowercase();
+            matches!(value.as_str(), "on" | "true" | "1" | "yes")
+        })
+        .unwrap_or(true);
+    let workers_to_launch = state.workers_planned.min(max_parallel_workers);
+    record_parallel_worker_launch_stats(ctx, workers_to_launch);
+    let runtime = std::sync::Arc::new(super::parallel::ParallelRuntime::default());
+    state.parallel_runtime = Some(runtime.clone());
+    let leader_index = (workers_to_launch == 0 || leader_participates).then_some(0);
+    let participant_count = workers_to_launch + usize::from(leader_index.is_some());
+    state.leader_index = leader_index;
+    state.participant_count = participant_count;
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(64);
+    let seed = super::parallel::WorkerContextSeed::from_ctx(ctx, runtime.clone());
+    for worker_offset in 0..workers_to_launch {
+        let worker_index = if leader_index.is_some() {
+            worker_offset + 1
+        } else {
+            worker_offset
+        };
+        let handle = super::parallel::launch_worker(
+            seed.clone(),
+            state.input_plan.clone(),
+            worker_index,
+            participant_count,
+            sender.clone(),
+        );
+        state.worker_handles.push(handle);
+    }
+    drop(sender);
+    state.workers_launched = workers_to_launch;
+
+    let mut worker_done = workers_to_launch == 0;
+    while !state.leader_done || !worker_done {
+        while !worker_done {
+            match receiver.try_recv() {
+                Ok(message) => push_gather_merge_message(state, message)?,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    worker_done = true;
+                    finish_gather_merge_workers(state);
+                    break;
+                }
+            }
+        }
+
+        if let Some(leader_index) = state.leader_index
+            && !state.leader_done
+        {
+            let participant_count = state.participant_count;
+            let runtime = state.parallel_runtime.clone();
+            let mut next_leader_row = || {
+                if state.input.exec_proc_node(ctx)?.is_some() {
+                    state.input.materialize_current_row().map(Some)
+                } else {
+                    Ok(None)
+                }
+            };
+            let row = match runtime {
+                Some(runtime) => super::parallel::with_parallel_runtime(runtime, || {
+                    super::parallel::with_worker_identity(leader_index, participant_count, || {
+                        next_leader_row()
+                    })
+                }),
+                None => super::parallel::with_worker_identity(
+                    leader_index,
+                    participant_count,
+                    next_leader_row,
+                ),
+            }?;
+            if let Some(row) = row {
+                let tid = row.slot.tid();
+                let table_oid = row.slot.table_oid;
+                state.rows.push(super::parallel::WorkerTuple {
+                    values: row.slot.tts_values,
+                    system_bindings: row.system_bindings,
+                    grouping_refs: row.grouping_refs,
+                    tid,
+                    table_oid,
+                });
+                continue;
+            }
+            state.leader_done = true;
+            continue;
+        }
+        state.leader_done = true;
+
+        if !worker_done {
+            match receiver.recv() {
+                Ok(message) => push_gather_merge_message(state, message)?,
+                Err(_) => {
+                    worker_done = true;
+                    finish_gather_merge_workers(state);
+                }
+            }
+        }
+    }
+    finish_gather_merge_workers(state);
+    sort_gather_merge_rows(state, ctx)?;
+    Ok(())
+}
+
+fn push_gather_merge_message(
+    state: &mut GatherMergeState,
+    message: super::parallel::WorkerMessage,
+) -> Result<(), ExecError> {
+    match message {
+        super::parallel::WorkerMessage::Row(row) => {
+            state.rows.push(row);
+            Ok(())
+        }
+        super::parallel::WorkerMessage::Error(err) => Err(err),
+    }
+}
+
+fn finish_gather_merge_workers(state: &mut GatherMergeState) {
+    for handle in state.worker_handles.drain(..) {
+        let _ = handle.join();
+    }
+}
+
+fn sort_gather_merge_rows(
+    state: &mut GatherMergeState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let mut keyed_rows = Vec::with_capacity(state.rows.len());
+    for row in state.rows.drain(..) {
+        ctx.check_for_interrupts()?;
+        set_active_system_bindings(ctx, &row.system_bindings);
+        set_active_grouping_refs(ctx, &row.grouping_refs);
+        set_outer_expr_bindings(ctx, row.values.clone(), &row.system_bindings);
+        let mut slot =
+            TupleSlot::virtual_row_with_metadata(row.values.clone(), row.tid, row.table_oid);
+        let mut keys = Vec::with_capacity(state.items.len());
+        for item in &state.items {
+            let key = eval_expr(&item.expr, &mut slot, ctx)?;
+            keys.push(order_by_runtime_key(item, key, ctx));
+        }
+        keyed_rows.push((keys, row));
+    }
+
+    let mut sort_error = None;
+    pg_sql_sort_by(
+        &mut keyed_rows,
+        |(left_keys, _), (right_keys, _)| match compare_order_by_keys(
+            &state.items,
+            left_keys,
+            right_keys,
+        ) {
+            Ok(ordering) => ordering,
+            Err(err) => {
+                if sort_error.is_none() {
+                    sort_error = Some(err);
+                }
+                std::cmp::Ordering::Equal
+            }
+        },
+    );
+    if let Some(err) = sort_error {
+        return Err(err);
+    }
+    state.rows = keyed_rows.into_iter().map(|(_, row)| row).collect();
+    Ok(())
+}
+
+fn finish_gather_workers(state: &mut GatherState) {
+    for handle in state.worker_handles.drain(..) {
+        let _ = handle.join();
+    }
+}
+
+fn store_gather_message(
+    state: &mut GatherState,
+    message: super::parallel::WorkerMessage,
+) -> Result<(), ExecError> {
+    match message {
+        super::parallel::WorkerMessage::Row(row) => {
+            store_gather_row(state, row);
+            Ok(())
+        }
+        super::parallel::WorkerMessage::Error(err) => Err(err),
+    }
+}
+
+fn store_gather_row(state: &mut GatherState, row: super::parallel::WorkerTuple) {
+    state
+        .slot
+        .store_virtual_row(row.values, row.tid, row.table_oid);
+    state.current_bindings = row.system_bindings;
+    state.current_grouping_refs = row.grouping_refs;
 }
 
 impl PlanNode for NestedLoopJoinState {
@@ -12148,6 +12726,7 @@ fn collect_plan_cte_ids(plan: &Plan, cte_ids: &mut std::collections::BTreeSet<us
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }

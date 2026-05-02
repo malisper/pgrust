@@ -205,6 +205,7 @@ pub enum Plan {
         plan_info: PlanEstimate,
         source_id: usize,
         desc: RelationDesc,
+        parallel_aware: bool,
         partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Plan>,
     },
@@ -233,6 +234,7 @@ pub enum Plan {
         tablesample: Option<TableSampleClause>,
         desc: RelationDesc,
         disabled: bool,
+        parallel_aware: bool,
     },
     TidScan {
         plan_info: PlanEstimate,
@@ -263,6 +265,7 @@ pub enum Plan {
         keys: Vec<IndexScanKey>,
         order_by_keys: Vec<IndexScanKey>,
         direction: ScanDirection,
+        parallel_aware: bool,
     },
     IndexScan {
         plan_info: PlanEstimate,
@@ -281,6 +284,7 @@ pub enum Plan {
         order_by_keys: Vec<IndexScanKey>,
         direction: ScanDirection,
         index_only: bool,
+        parallel_aware: bool,
     },
     BitmapIndexScan {
         plan_info: PlanEstimate,
@@ -315,6 +319,7 @@ pub enum Plan {
         bitmapqual: Box<Plan>,
         recheck_qual: Vec<Expr>,
         filter_qual: Vec<Expr>,
+        parallel_aware: bool,
     },
     Hash {
         plan_info: PlanEstimate,
@@ -341,6 +346,13 @@ pub enum Plan {
         input: Box<Plan>,
         workers_planned: usize,
         single_copy: bool,
+    },
+    GatherMerge {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        workers_planned: usize,
+        items: Vec<OrderByEntry>,
+        display_items: Vec<String>,
     },
     NestedLoopJoin {
         plan_info: PlanEstimate,
@@ -503,6 +515,7 @@ impl Plan {
             | Plan::Materialize { plan_info, .. }
             | Plan::Memoize { plan_info, .. }
             | Plan::Gather { plan_info, .. }
+            | Plan::GatherMerge { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
             | Plan::MergeJoin { plan_info, .. }
@@ -543,6 +556,7 @@ impl Plan {
             | Plan::Materialize { plan_info, .. }
             | Plan::Memoize { plan_info, .. }
             | Plan::Gather { plan_info, .. }
+            | Plan::GatherMerge { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
             | Plan::MergeJoin { plan_info, .. }
@@ -613,7 +627,8 @@ impl Plan {
             Plan::Hash { input, .. }
             | Plan::Materialize { input, .. }
             | Plan::Memoize { input, .. }
-            | Plan::Gather { input, .. } => input.columns(),
+            | Plan::Gather { input, .. }
+            | Plan::GatherMerge { input, .. } => input.columns(),
             Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::IncrementalSort { input, .. }

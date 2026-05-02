@@ -7,7 +7,8 @@ use crate::include::nodes::parsenodes::SetOperator;
 use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::plannodes::{
-    AggregatePhase, AggregateStrategy, IndexScanKey, PartitionPrunePlan, PlanEstimate,
+    AggregatePhase, AggregateStrategy, EstimateValue, IndexScanKey, PartitionPrunePlan,
+    PlanEstimate,
 };
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
@@ -52,8 +53,16 @@ pub struct PlannerConfig {
     pub retain_partial_index_filters: bool,
     pub enable_hashagg: bool,
     pub enable_sort: bool,
+    pub enable_parallel_append: bool,
+    pub enable_parallel_hash: bool,
     pub force_parallel_gather: bool,
+    pub max_parallel_workers: usize,
     pub max_parallel_workers_per_gather: usize,
+    pub parallel_leader_participation: bool,
+    pub min_parallel_table_scan_size: usize,
+    pub min_parallel_index_scan_size: usize,
+    pub parallel_setup_cost: EstimateValue,
+    pub parallel_tuple_cost: EstimateValue,
     pub fold_constants: bool,
 }
 
@@ -77,8 +86,16 @@ impl Default for PlannerConfig {
             retain_partial_index_filters: false,
             enable_hashagg: true,
             enable_sort: true,
+            enable_parallel_append: true,
+            enable_parallel_hash: true,
             force_parallel_gather: false,
+            max_parallel_workers: 8,
             max_parallel_workers_per_gather: 2,
+            parallel_leader_participation: true,
+            min_parallel_table_scan_size: 8 * 1024 * 1024,
+            min_parallel_index_scan_size: 512 * 1024,
+            parallel_setup_cost: EstimateValue(1000.0),
+            parallel_tuple_cost: EstimateValue(0.1),
             fold_constants: true,
         }
     }

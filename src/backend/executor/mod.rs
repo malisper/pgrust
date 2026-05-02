@@ -42,6 +42,7 @@ mod node_hash;
 mod node_hashjoin;
 mod node_mergejoin;
 mod nodes;
+pub(crate) mod parallel;
 mod permissions;
 mod pg_regex;
 mod random;

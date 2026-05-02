@@ -2181,8 +2181,16 @@ pub(crate) fn build_pg_stat_database_rows(
                 Value::Int64(0),
                 Value::Int64(0),
                 Value::Int64(0),
-                Value::Int64(0),
-                Value::Int64(0),
+                Value::Int64(if oid == 0 {
+                    0
+                } else {
+                    stats.parallel_workers_to_launch
+                }),
+                Value::Int64(if oid == 0 {
+                    0
+                } else {
+                    stats.parallel_workers_launched
+                }),
                 stats
                     .shared
                     .database_reset

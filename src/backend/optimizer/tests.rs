@@ -20,7 +20,8 @@ use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo, RelOptKind,
 };
 use crate::include::nodes::plannodes::{
-    AggregatePhase, AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate, PlannedStmt,
+    AggregatePhase, AggregateStrategy, EstimateValue, IndexScanKeyArgument, Plan, PlanEstimate,
+    PlannedStmt,
 };
 use crate::include::nodes::primnodes::{
     Aggref, AttrNumber, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, INNER_VAR, JoinType,
@@ -699,6 +700,126 @@ fn parse_select_for_optimizer_test(
             }),
         }
     })
+}
+
+#[test]
+fn forced_parallel_count_uses_partial_aggregate_and_gather() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select count(*) from people",
+        &catalog,
+        PlannerConfig {
+            min_parallel_table_scan_size: 0,
+            parallel_setup_cost: EstimateValue(0.0),
+            parallel_tuple_cost: EstimateValue(0.0),
+            max_parallel_workers_per_gather: 2,
+            ..PlannerConfig::default()
+        },
+    );
+
+    let aggregate_plan = match &planned.plan_tree {
+        Plan::Projection { input, .. } => input.as_ref(),
+        other => other,
+    };
+    let Plan::Aggregate {
+        phase: AggregatePhase::Finalize,
+        input,
+        ..
+    } = aggregate_plan
+    else {
+        panic!("expected finalize aggregate, got {:?}", planned.plan_tree);
+    };
+    let Plan::Gather {
+        workers_planned,
+        input,
+        ..
+    } = input.as_ref()
+    else {
+        panic!("expected gather below finalize aggregate, got {input:?}");
+    };
+    assert_eq!(*workers_planned, 2);
+    let Plan::Aggregate {
+        phase: AggregatePhase::Partial,
+        input,
+        ..
+    } = input.as_ref()
+    else {
+        panic!("expected partial aggregate below gather, got {input:?}");
+    };
+    assert!(
+        matches!(
+            input.as_ref(),
+            Plan::SeqScan {
+                parallel_aware: true,
+                ..
+            }
+        ),
+        "expected parallel-aware seq scan below partial aggregate, got {input:?}"
+    );
+}
+
+#[test]
+fn volatile_projection_does_not_enter_parallel_worker_plan() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select random() from people",
+        &catalog,
+        PlannerConfig {
+            min_parallel_table_scan_size: 0,
+            parallel_setup_cost: EstimateValue(0.0),
+            parallel_tuple_cost: EstimateValue(0.0),
+            max_parallel_workers_per_gather: 2,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(
+        !plan_has_gather(&planned.plan_tree),
+        "volatile projection should stay serial until restricted-expression placement exists: {:?}",
+        planned.plan_tree
+    );
+}
+
+fn plan_has_gather(plan: &Plan) -> bool {
+    match plan {
+        Plan::Gather { .. } | Plan::GatherMerge { .. } => true,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_has_gather),
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_has_gather(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => plan_has_gather(left) || plan_has_gather(right),
+        Plan::BitmapHeapScan { bitmapqual, .. } => plan_has_gather(bitmapqual),
+        Plan::CteScan { cte_plan, .. } => plan_has_gather(cte_plan),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => plan_has_gather(anchor) || plan_has_gather(recursive),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. } => false,
+    }
 }
 
 fn planned_stmt_for_sql_with_catalog_and_larger_parse_stack(
@@ -1917,6 +2038,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -1993,6 +2115,7 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -2408,6 +2531,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2569,6 +2693,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -2855,6 +2980,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2916,6 +3042,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -5186,6 +5313,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             | Plan::Materialize { input, .. }
             | Plan::Memoize { input, .. }
             | Plan::Gather { input, .. }
+            | Plan::GatherMerge { input, .. }
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }
@@ -5265,6 +5393,7 @@ fn grouped_target_srf_uses_project_set_before_aggregate() {
             | Plan::Materialize { input, .. }
             | Plan::Memoize { input, .. }
             | Plan::Gather { input, .. }
+            | Plan::GatherMerge { input, .. }
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }

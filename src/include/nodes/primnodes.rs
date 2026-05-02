@@ -2886,6 +2886,12 @@ pub struct SubPlan {
     pub args: Vec<Expr>,
 }
 
+impl SubPlan {
+    pub fn renders_as_initplan(&self) -> bool {
+        self.par_param.is_empty() && self.args.is_empty() && self.testexpr.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScalarArrayOpExpr {
     pub op: SubqueryComparisonOp,
