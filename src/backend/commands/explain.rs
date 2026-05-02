@@ -3539,7 +3539,8 @@ fn nonverbose_sort_items(
         && !((context_has_relation_aliases(ctx) || ctx.force_qualified_sort_keys)
             && display_items
                 .iter()
-                .all(|item| explain_display_item_is_bare_identifier(item)));
+                .all(|item| explain_display_item_is_bare_identifier(item))
+            && !ctx.qualify_window_base_names);
     if should_use_display_items {
         return display_items
             .iter()
