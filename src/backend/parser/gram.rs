@@ -390,6 +390,9 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
     let leading = sql.len() - trimmed.len();
     let lowered = trimmed.to_ascii_lowercase();
     let compact = lowered.trim_end();
+    if let Some(byte_offset) = empty_sql_json_constructor_close_paren(sql) {
+        return Some(syntax_error_at(sql, byte_offset, ")"));
+    }
     if matches!(
         compact,
         "delete from;"
@@ -554,6 +557,56 @@ fn find_keyword_at_depth_before(
             return Some(index);
         }
         index += 1;
+    }
+    None
+}
+
+fn empty_sql_json_constructor_close_paren(sql: &str) -> Option<usize> {
+    // :HACK: The unsupported-SELECT fallback currently masks these SQL/JSON
+    // grammar misses. Keep the PostgreSQL syntax error until constructor parse
+    // errors carry enough local context to bypass that fallback directly.
+    let mut rest = sql.trim_start();
+    let mut offset = sql.len() - rest.len();
+    if !keyword_at_boundary(rest, 0, "select") {
+        return None;
+    }
+    offset += "select".len();
+    rest = &sql[offset..];
+    let trimmed = rest.trim_start();
+    offset += rest.len() - trimmed.len();
+    rest = trimmed;
+
+    for name in ["json_serialize", "json_scalar", "json"] {
+        if !keyword_at_boundary(rest, 0, name) {
+            continue;
+        }
+        offset += name.len();
+        rest = &sql[offset..];
+        let trimmed = rest.trim_start();
+        offset += rest.len() - trimmed.len();
+        rest = trimmed;
+        if !rest.starts_with('(') {
+            return None;
+        }
+        offset += '('.len_utf8();
+        rest = &sql[offset..];
+        let trimmed = rest.trim_start();
+        offset += rest.len() - trimmed.len();
+        rest = trimmed;
+        if !rest.starts_with(')') {
+            return None;
+        }
+        let close_paren = offset;
+        offset += ')'.len_utf8();
+        rest = &sql[offset..];
+        let trimmed = rest.trim_start();
+        offset += rest.len() - trimmed.len();
+        rest = trimmed;
+        if rest.starts_with(';') {
+            offset += ';'.len_utf8();
+            rest = &sql[offset..];
+        }
+        return rest.trim().is_empty().then_some(close_paren);
     }
     None
 }
