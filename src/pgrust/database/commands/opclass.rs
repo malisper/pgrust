@@ -90,6 +90,14 @@ fn namespace_name(catalog: &dyn CatalogLookup, namespace_oid: u32) -> String {
         .unwrap_or_else(|| namespace_oid.to_string())
 }
 
+fn catalog_namespace_oid_by_name(catalog: &dyn CatalogLookup, schema_name: &str) -> Option<u32> {
+    catalog
+        .namespace_rows()
+        .into_iter()
+        .find(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+        .map(|row| row.oid)
+}
+
 fn duplicate_opfamily_error(
     catalog: &dyn CatalogLookup,
     name: &str,
@@ -314,6 +322,8 @@ fn resolve_proc_oid(
     function_name: &str,
     arg_type_oids: &[u32],
 ) -> Result<u32, ExecError> {
+    let namespace_oid =
+        schema_name.and_then(|schema| catalog_namespace_oid_by_name(catalog, schema));
     let desired = arg_type_oids
         .iter()
         .map(u32::to_string)
@@ -325,12 +335,7 @@ fn resolve_proc_oid(
             row.proname.eq_ignore_ascii_case(function_name)
                 && row.proargtypes == desired
                 && schema_name
-                    .map(|schema| {
-                        catalog.namespace_rows().into_iter().any(|namespace| {
-                            namespace.nspname.eq_ignore_ascii_case(schema)
-                                && namespace.oid == row.pronamespace
-                        })
-                    })
+                    .map(|_| namespace_oid == Some(row.pronamespace))
                     .unwrap_or(true)
         })
         .map(|row| row.oid)

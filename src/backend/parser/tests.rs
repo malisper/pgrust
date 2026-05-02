@@ -3872,6 +3872,23 @@ fn parse_operator_family_and_class_alter_statements() {
             }],
         })
     );
+    let stmt = parse_statement(
+        "create operator class alt_opc1 default for type uuid using hash as storage uuid",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateOperatorClass(CreateOperatorClassStatement {
+            schema_name: None,
+            opclass_name: "alt_opc1".into(),
+            data_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)),
+            access_method: "hash".into(),
+            is_default: true,
+            items: vec![CreateOperatorClassItem::Storage {
+                storage_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)),
+            }],
+        })
+    );
 }
 
 #[test]
