@@ -177,7 +177,7 @@ use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::htup::AttributeStorage;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::toast_compression::ToastCompressionId;
-use crate::include::catalog::pg_proc::bootstrap_proc_acl_override;
+use crate::include::catalog::pg_proc::{bootstrap_pg_proc_row_by_oid, bootstrap_proc_acl_override};
 use crate::include::catalog::{
     ANYOID, ARRAY_BTREE_OPCLASS_OID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID,
     BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
@@ -8014,6 +8014,11 @@ pub(crate) fn proc_execute_acl_allows_role(
     row: &crate::include::catalog::PgProcRow,
     grant_option: bool,
 ) -> bool {
+    let explicit_acl = bootstrap_proc_acl_override(row.oid).or_else(|| row.proacl.clone());
+    if !grant_option && explicit_acl.is_none() {
+        return true;
+    }
+
     let authid_rows = catalog.authid_rows();
     let auth_members_rows = catalog.auth_members_rows();
     if role_is_superuser(&authid_rows, role_oid)
@@ -8026,14 +8031,12 @@ pub(crate) fn proc_execute_acl_allows_role(
         .find(|role| role.oid == row.proowner)
         .map(|role| role.rolname.clone())
         .unwrap_or_else(|| "postgres".into());
-    let acl = bootstrap_proc_acl_override(row.oid)
-        .or_else(|| row.proacl.clone())
-        .unwrap_or_else(|| {
-            vec![
-                format!("{owner_name}=X/{owner_name}"),
-                format!("=X/{owner_name}"),
-            ]
-        });
+    let acl = explicit_acl.unwrap_or_else(|| {
+        vec![
+            format!("{owner_name}=X/{owner_name}"),
+            format!("=X/{owner_name}"),
+        ]
+    });
     let effective_names = effective_role_names_for_oid(catalog, role_oid);
     acl_grants_privilege_to_names(
         &acl,
@@ -8063,18 +8066,26 @@ pub(crate) fn proc_execute_permission_denied(
 
 pub(crate) fn ensure_proc_execute_allowed(
     proc_oid: u32,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     if proc_oid == 0 {
+        return Ok(());
+    }
+    let cache_key = (ctx.current_user_oid, proc_oid);
+    if ctx.proc_execute_acl_cache.contains(&cache_key) {
         return Ok(());
     }
     let Some(catalog) = ctx.catalog.as_deref() else {
         return Ok(());
     };
-    let Some(row) = catalog.proc_row_by_oid(proc_oid) else {
+    let Some(row) =
+        bootstrap_pg_proc_row_by_oid(proc_oid).or_else(|| catalog.proc_row_by_oid(proc_oid))
+    else {
+        ctx.proc_execute_acl_cache.insert(cache_key);
         return Ok(());
     };
     if proc_execute_acl_allows_role(catalog, ctx.current_user_oid, &row, false) {
+        ctx.proc_execute_acl_cache.insert(cache_key);
         Ok(())
     } else {
         Err(proc_execute_permission_denied(&row))
@@ -11839,7 +11850,7 @@ fn cast_array_literal_value(
 fn ensure_array_cast_function_execute_allowed(
     source_type: Option<SqlType>,
     target_type: SqlType,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let Some(source_type) = source_type else {
         return Ok(());
@@ -11857,7 +11868,7 @@ fn ensure_array_cast_function_execute_allowed(
 fn ensure_cast_function_execute_allowed(
     source_type: SqlType,
     target_type: SqlType,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let Some(catalog) = ctx.catalog.as_deref() else {
         return Ok(());

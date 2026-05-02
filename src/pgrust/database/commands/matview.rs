@@ -651,6 +651,7 @@ impl Database {
             pending_portals: Vec::new(),
             catalog,
             scalar_function_cache: std::collections::HashMap::new(),
+            proc_execute_acl_cache: std::collections::HashSet::new(),
             srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),

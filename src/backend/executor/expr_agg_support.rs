@@ -38,7 +38,7 @@ use std::cmp::Ordering;
 
 pub(crate) fn build_aggregate_runtime(
     accum: &AggAccum,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<AggregateRuntime, ExecError> {
     super::exec_expr::ensure_proc_execute_allowed(accum.aggfnoid, ctx)?;
     if let Some(func) = builtin_aggregate_function_for_proc_oid(accum.aggfnoid) {

@@ -319,6 +319,7 @@ pub fn execute_query_desc(
     let planned_stmt = query_desc.planned_stmt;
     let saved_subplans = std::mem::replace(&mut ctx.subplans, planned_stmt.subplans);
     let saved_scalar_function_cache = std::mem::take(&mut ctx.scalar_function_cache);
+    let saved_proc_execute_acl_cache = std::mem::take(&mut ctx.proc_execute_acl_cache);
     let saved_initplan_values = std::mem::take(&mut ctx.expr_bindings.initplan_values);
     let result = (|| {
         let saved_exec_params = if planned_stmt.ext_params.is_empty() {
@@ -374,6 +375,7 @@ pub fn execute_query_desc(
         result
     })();
     ctx.expr_bindings.initplan_values = saved_initplan_values;
+    ctx.proc_execute_acl_cache = saved_proc_execute_acl_cache;
     ctx.scalar_function_cache = saved_scalar_function_cache;
     ctx.subplans = saved_subplans;
     clear_subquery_eval_cache();
@@ -426,6 +428,7 @@ fn execute_statement_with_source(
     let cid = ctx.next_command_id;
     ctx.snapshot = ctx.txns.read().snapshot_for_command(xid, cid)?;
     let saved_scalar_function_cache = std::mem::take(&mut ctx.scalar_function_cache);
+    let saved_proc_execute_acl_cache = std::mem::take(&mut ctx.proc_execute_acl_cache);
     let saved_initplan_values = std::mem::take(&mut ctx.expr_bindings.initplan_values);
     let result = (|| match stmt {
         Statement::Do(stmt) => execute_do_with_context(&stmt, catalog, ctx),
@@ -1052,6 +1055,7 @@ fn execute_statement_with_source(
         }
     })();
     ctx.expr_bindings.initplan_values = saved_initplan_values;
+    ctx.proc_execute_acl_cache = saved_proc_execute_acl_cache;
     ctx.scalar_function_cache = saved_scalar_function_cache;
     ctx.next_command_id = ctx.next_command_id.saturating_add(1);
     result

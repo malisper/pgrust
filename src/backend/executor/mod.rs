@@ -640,6 +640,7 @@ pub struct ExecutorContext {
     pub pending_portals: Vec<Portal>,
     pub catalog: Option<ExecutorCatalog>,
     pub scalar_function_cache: HashMap<u32, ScalarFunctionCallInfo>,
+    pub proc_execute_acl_cache: HashSet<(u32, u32)>,
     pub srf_rows_cache: HashMap<String, Vec<TupleSlot>>,
     pub plpgsql_function_cache: Arc<parking_lot::RwLock<PlpgsqlFunctionCache>>,
     pub pinned_cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
