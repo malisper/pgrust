@@ -237,6 +237,17 @@ fn namespace_row_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Option<crate::include::catalog::PgNamespaceRow> {
+    if let Some(namespace) = owned_temp_namespace(db, client_id)
+        && (name.eq_ignore_ascii_case("pg_temp") || namespace.name.eq_ignore_ascii_case(name))
+    {
+        return Some(PgNamespaceRow {
+            oid: namespace.oid,
+            nspname: namespace.name,
+            nspowner: namespace.owner_oid,
+            nspacl: None,
+        });
+    }
+
     catalog_name_lookup_keys(name).into_iter().find_map(|key| {
         select_namespace_row(
             SearchSysCache1(db, client_id, txn_ctx, SysCacheId::NAMESPACENAME, key).ok()?,
@@ -810,17 +821,6 @@ fn dynamic_type_row_by_oid(db: &Database, search_path: &[String], oid: u32) -> O
         .find(|row| row.oid == oid)
 }
 
-fn dynamic_type_row_by_name(
-    db: &Database,
-    search_path: &[String],
-    name: &str,
-) -> Option<PgTypeRow> {
-    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
-    dynamic_type_rows_for_search_path(db, search_path)
-        .into_iter()
-        .find(|row| row.typname.eq_ignore_ascii_case(normalized))
-}
-
 fn dynamic_type_row_by_name_namespace(
     db: &Database,
     search_path: &[String],
@@ -882,8 +882,13 @@ fn visible_type_row_by_name(
         {
             return Some(row);
         }
+        if let Some(row) =
+            dynamic_type_row_by_name_namespace(db, search_path, normalized, namespace.oid)
+        {
+            return Some(row);
+        }
     }
-    dynamic_type_row_by_name(db, search_path, normalized)
+    None
 }
 
 fn visible_type_row_for_sql_type(
@@ -1154,6 +1159,7 @@ fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
     let mut seen = BTreeSet::new();
     rows.retain(|row| {
         seen.insert((
+            row.pronamespace,
             row.proname.clone(),
             row.prorettype,
             row.proargtypes.clone(),
@@ -1740,6 +1746,12 @@ fn relation_entry_by_name_namespace(
     relname: &str,
     namespace_oid: u32,
 ) -> Option<RelCacheEntry> {
+    if owned_temp_namespace(db, client_id).is_some_and(|namespace| namespace.oid == namespace_oid)
+        && let Some(entry) = temp_relation_entry_by_name(db, client_id, relname)
+    {
+        return Some(entry);
+    }
+
     let class = class_row_by_name_namespace(db, client_id, txn_ctx, relname, namespace_oid)?;
     relation_entry_by_oid(db, client_id, txn_ctx, class.oid)
 }
@@ -1824,11 +1836,6 @@ pub fn lookup_any_relation(
         let entry =
             relation_entry_by_name_namespace(db, client_id, txn_ctx, relname, namespace_oid)?;
         return Some(bound_relation_from_entry(db, client_id, txn_ctx, entry));
-    }
-
-    let temp_name = catalog_name.to_ascii_lowercase();
-    if let Some(temp) = temp_relation_entry_by_name(db, client_id, &temp_name) {
-        return Some(bound_relation_from_entry(db, client_id, txn_ctx, temp));
     }
 
     for namespace_name in search_path {
@@ -2151,6 +2158,10 @@ impl CatalogLookup for LazyCatalogLookup {
 
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
         namespace_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid)
+    }
+
+    fn namespace_row_by_name(&self, name: &str) -> Option<PgNamespaceRow> {
+        namespace_row_by_name(&self.db, self.client_id, self.txn_ctx, name)
     }
 
     fn namespace_rows(&self) -> Vec<PgNamespaceRow> {

@@ -58,6 +58,18 @@ impl Database {
         txn_ctx: CatalogTxnContext,
         schema_name: &str,
     ) -> Option<crate::include::catalog::PgNamespaceRow> {
+        if let Some(namespace) = self.owned_temp_namespace(client_id)
+            && (schema_name.eq_ignore_ascii_case("pg_temp")
+                || namespace.name.eq_ignore_ascii_case(schema_name))
+        {
+            return Some(crate::include::catalog::PgNamespaceRow {
+                oid: namespace.oid,
+                nspname: namespace.name,
+                nspowner: namespace.owner_oid,
+                nspacl: None,
+            });
+        }
+
         let mut lookup_names = vec![schema_name.to_string()];
         let folded = schema_name.to_ascii_lowercase();
         if folded != schema_name {

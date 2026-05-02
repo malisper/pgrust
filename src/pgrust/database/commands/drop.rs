@@ -2070,6 +2070,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_drop_function_stmt_in_transaction_with_search_path(
             client_id,
             drop_stmt,
@@ -2077,8 +2078,9 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
         result
     }
@@ -2091,6 +2093,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         for item_stmt in expand_drop_function_statement(drop_stmt) {
             self.execute_drop_function_stmt_in_transaction_with_kind(
@@ -2100,6 +2103,7 @@ impl Database {
                 cid,
                 configured_search_path,
                 catalog_effects,
+                temp_effects,
                 'f',
                 "function",
             )?;
@@ -2116,6 +2120,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_drop_procedure_stmt_in_transaction_with_search_path(
             client_id,
             drop_stmt,
@@ -2123,8 +2128,9 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
         result
     }
@@ -2137,6 +2143,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         for procedure in &drop_stmt.procedures {
             let function_stmt = DropFunctionStatement {
@@ -2155,6 +2162,7 @@ impl Database {
                 cid,
                 configured_search_path,
                 catalog_effects,
+                temp_effects,
                 'p',
                 "procedure",
             )?;
@@ -2171,6 +2179,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_drop_routine_stmt_in_transaction_with_search_path(
             client_id,
             drop_stmt,
@@ -2178,8 +2187,9 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
         result
     }
@@ -2192,6 +2202,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         for routine in &drop_stmt.procedures {
             let function_stmt = DropFunctionStatement {
@@ -2210,6 +2221,7 @@ impl Database {
                 cid,
                 configured_search_path,
                 catalog_effects,
+                temp_effects,
                 'r',
                 "routine",
             )?;
@@ -2228,6 +2240,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_drop_function_stmt_in_transaction_with_kind(
             client_id,
             drop_stmt,
@@ -2235,10 +2248,11 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
             proc_kind,
             object_kind,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
         result
     }
@@ -2251,6 +2265,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
         proc_kind: char,
         object_kind: &'static str,
     ) -> Result<StatementResult, ExecError> {
@@ -2458,6 +2473,8 @@ impl Database {
                 sqlstate: "2BP01",
             });
         }
+
+        self.record_temp_namespace_touch(client_id, proc_row.pronamespace, temp_effects);
 
         let interrupts = self.interrupt_state(client_id);
         let mut next_cid = cid;
@@ -3368,6 +3385,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         if drop_stmt.concurrently && drop_stmt.index_names.len() > 1 {
@@ -3501,6 +3519,55 @@ impl Database {
             let mut dropped = 0usize;
             let mut next_cid = cid;
             for index_oid in drop_oids {
+                if let Some(temp_name) = self.temp_relation_name_for_oid(client_id, index_oid) {
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: next_cid,
+                        client_id,
+                        waiter: Some(self.txn_waiter.clone()),
+                        interrupts: Arc::clone(&interrupts),
+                    };
+                    let effect = if let Some(entry) = catalog.relation_by_oid(index_oid) {
+                        let mut catalog_guard = self.catalog.write();
+                        catalog_guard
+                            .drop_relation_entry_mvcc(
+                                catalog_entry_from_bound_relation(&catcache, &entry),
+                                &ctx,
+                            )
+                            .map_err(|err| match err {
+                                CatalogError::UnknownTable(_) => ExecError::Parse(
+                                    ParseError::TableDoesNotExist(index_oid.to_string()),
+                                ),
+                                other => ExecError::Parse(ParseError::UnexpectedToken {
+                                    expected: "droppable temporary index",
+                                    actual: format!("{other:?}"),
+                                }),
+                            })?
+                    } else {
+                        self.catalog
+                            .write()
+                            .drop_relation_entry_by_oid_mvcc(index_oid, &ctx)
+                            .map_err(|err| match err {
+                                CatalogError::UnknownTable(_) => ExecError::Parse(
+                                    ParseError::TableDoesNotExist(index_oid.to_string()),
+                                ),
+                                other => ExecError::Parse(ParseError::UnexpectedToken {
+                                    expected: "droppable temporary index",
+                                    actual: format!("{other:?}"),
+                                }),
+                            })?
+                            .1
+                    };
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                    self.remove_temp_entry_after_catalog_drop(client_id, &temp_name, temp_effects)?;
+                    dropped += 1;
+                    next_cid = next_cid.saturating_add(1);
+                    continue;
+                }
+
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),

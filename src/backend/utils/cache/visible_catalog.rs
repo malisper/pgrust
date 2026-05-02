@@ -354,6 +354,7 @@ fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
     let mut seen = BTreeSet::new();
     rows.retain(|row| {
         seen.insert((
+            row.pronamespace,
             row.proname.clone(),
             row.prorettype,
             row.proargtypes.clone(),
@@ -463,6 +464,23 @@ impl CatalogLookup for VisibleCatalog {
                     .into_iter()
                     .find(|row| row.oid == oid)
             })
+    }
+
+    fn namespace_row_by_name(&self, name: &str) -> Option<PgNamespaceRow> {
+        if name.eq_ignore_ascii_case("pg_temp")
+            && let Some(temp_schema) = self
+                .search_path
+                .iter()
+                .find(|schema| schema.to_ascii_lowercase().starts_with("pg_temp_"))
+        {
+            return self
+                .namespace_rows()
+                .into_iter()
+                .find(|row| row.nspname.eq_ignore_ascii_case(temp_schema));
+        }
+        self.namespace_rows()
+            .into_iter()
+            .find(|row| row.nspname.eq_ignore_ascii_case(name))
     }
 
     fn namespace_rows(&self) -> Vec<PgNamespaceRow> {

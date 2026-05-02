@@ -613,6 +613,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_create_operator_stmt_in_transaction_with_search_path(
             client_id,
             stmt,
@@ -620,8 +621,9 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[])
+        self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[])
     }
 
     pub(crate) fn execute_create_operator_stmt_in_transaction_with_search_path(
@@ -632,17 +634,38 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let mut current_cid = cid;
+        let explicit_pg_temp = stmt
+            .schema_name
+            .as_deref()
+            .is_some_and(|schema| schema.eq_ignore_ascii_case("pg_temp"));
+        let temp_namespace = if explicit_pg_temp {
+            Some(self.ensure_temp_namespace(
+                client_id,
+                xid,
+                &mut current_cid,
+                catalog_effects,
+                temp_effects,
+            )?)
+        } else {
+            None
+        };
         let catalog =
             self.lazy_catalog_lookup(client_id, Some((xid, current_cid)), configured_search_path);
-        let namespace_oid = normalize_operator_namespace(
-            self,
-            client_id,
-            Some((xid, current_cid)),
-            stmt.schema_name.as_deref(),
-            configured_search_path,
-        )?;
+        let namespace_oid = if let Some(namespace) = temp_namespace {
+            namespace.oid
+        } else {
+            normalize_operator_namespace(
+                self,
+                client_id,
+                Some((xid, current_cid)),
+                stmt.schema_name.as_deref(),
+                configured_search_path,
+            )?
+        };
+        self.record_temp_namespace_touch(client_id, namespace_oid, temp_effects);
         let left_type = resolve_operator_type_oid(&catalog, &stmt.left_arg)?;
         let right_type = resolve_operator_type_oid(&catalog, &stmt.right_arg)?;
         for attribute in &stmt.unrecognized_attributes {

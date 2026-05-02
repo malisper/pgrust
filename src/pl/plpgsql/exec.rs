@@ -3923,6 +3923,7 @@ fn exec_function_drop_index(
         cid,
         None,
         &mut ctx.catalog_effects,
+        &mut ctx.temp_effects,
     );
     if result.is_ok() {
         let consumed_catalog_cids = ctx

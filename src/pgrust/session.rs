@@ -15568,14 +15568,15 @@ impl Session {
                 }
                 Statement::CreateOperator(ref create_stmt) => {
                     let search_path = self.configured_search_path();
-                    let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                    let txn = self.active_txn.as_mut().unwrap();
                     db.execute_create_operator_stmt_in_transaction_with_search_path(
                         client_id,
                         create_stmt,
                         xid,
                         cid,
                         search_path.as_deref(),
-                        catalog_effects,
+                        &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
                     )
                 }
                 Statement::AlterTableOwner(ref alter_stmt) => {
@@ -18347,6 +18348,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
                     )
                 }
                 Statement::DropProcedure(ref drop_stmt) => {
@@ -18359,6 +18361,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
                     )
                 }
                 Statement::DropRoutine(ref drop_stmt) => {
@@ -18371,6 +18374,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
                     )
                 }
                 Statement::DropAggregate(ref drop_stmt) => {
@@ -18677,6 +18681,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
                     )
                 }
                 Statement::DropTable(ref drop_stmt) => {
