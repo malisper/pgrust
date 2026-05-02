@@ -9031,6 +9031,90 @@ fn vacuum_option_validation_and_permission_warnings() {
 }
 
 #[test]
+fn pg_size_bytes_current_setting_is_bound_as_int8() {
+    let db = Database::open_ephemeral(64).expect("open database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set min_parallel_index_scan_size to '128kB'")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_size_bytes(current_setting('min_parallel_index_scan_size')) < 200000::bigint"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn vacuum_index_cleanup_on_keeps_btree_reusable_after_all_rows_deleted() {
+    let dir = temp_dir("vacuum_index_cleanup_reinsert");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parallel_vacuum_reinsert (a int) with (autovacuum_enabled = off)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into parallel_vacuum_reinsert select i from generate_series(1, 600) i",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index pvr_a_idx on parallel_vacuum_reinsert(a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index pvr_a_idx2 on parallel_vacuum_reinsert(a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index pvr_const_idx on parallel_vacuum_reinsert((1))",
+        )
+        .unwrap();
+    session
+        .execute(&db, "delete from parallel_vacuum_reinsert")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "vacuum (parallel 4, index_cleanup on) parallel_vacuum_reinsert",
+        )
+        .unwrap();
+
+    let insert_db = db.clone();
+    let insert = thread::spawn(move || {
+        let mut session = Session::new(2);
+        session
+            .execute(
+                &insert_db,
+                "insert into parallel_vacuum_reinsert select i from generate_series(1, 600) i",
+            )
+            .unwrap();
+    });
+    join_all_with_timeout(vec![insert], TEST_TIMEOUT);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from parallel_vacuum_reinsert"
+        ),
+        vec![vec![Value::Int64(600)]]
+    );
+}
+
+#[test]
 fn analyze_expands_partitioned_targets_and_validates_columns() {
     let dir = temp_dir("analyze_partition_expansion");
     let db = Database::open(&dir, 128).unwrap();

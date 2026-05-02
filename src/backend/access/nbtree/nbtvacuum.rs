@@ -136,13 +136,13 @@ fn remove_child_from_parent(
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
     let mut items = bt_page_items(&page)
         .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
-    if items.len() <= 1 {
-        return Ok(items.len());
-    }
     let before = items.len();
+    if before <= 1 {
+        return Ok(0);
+    }
     items.retain(|item| item.t_tid.block_number != child_block);
     if items.len() == before {
-        return Ok(items.len());
+        return Ok(0);
     }
     bt_page_replace_items(&mut page, &items, opaque)
         .map_err(|err| CatalogError::Io(format!("btree parent rebuild failed: {err:?}")))?;
@@ -448,6 +448,17 @@ pub fn btbulkdelete(
         ctx.pool
             .install_page_image_locked(pin.buffer_id(), &page, lsn, &mut guard)
             .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))?;
+    }
+    // :HACK: Until btree page deletion/recycling is as complete as PostgreSQL's,
+    // compact a fully emptied index to a fresh root page. This keeps later
+    // inserts from walking stale deleted-page paths after VACUUM.
+    if stats.num_index_tuples > 0 && stats.num_removed_tuples == stats.num_index_tuples {
+        crate::backend::access::nbtree::nbtree::ensure_empty_btree(
+            &ctx.pool,
+            ctx.client_id,
+            INVALID_TRANSACTION_ID,
+            ctx.index_relation,
+        )?;
     }
     Ok(stats)
 }

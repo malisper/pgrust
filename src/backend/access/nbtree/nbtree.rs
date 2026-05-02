@@ -778,7 +778,7 @@ fn page_first_key_values(
     tuple_key_prefix_values(desc, tuple, key_count).map(Some)
 }
 
-fn ensure_empty_btree(
+pub(crate) fn ensure_empty_btree(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     xid: u32,

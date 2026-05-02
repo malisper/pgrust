@@ -394,6 +394,7 @@ struct AutovacuumTarget {
 pub(crate) struct VacuumExecOptions {
     analyze: bool,
     full: bool,
+    index_cleanup: Option<bool>,
     truncate: Option<bool>,
     default_truncate: bool,
     parallel_workers: Option<i32>,
@@ -504,6 +505,21 @@ fn parse_vacuum_parallel_workers(stmt: &VacuumStatement) -> Result<Option<i32>, 
     Ok(Some(workers))
 }
 
+fn parse_vacuum_index_cleanup(raw: Option<&str>) -> Result<Option<bool>, ExecError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(None),
+        "true" | "on" | "yes" | "1" => Ok(Some(true)),
+        "false" | "off" | "no" | "0" => Ok(Some(false)),
+        _ => Err(vacuum_option_error(
+            "index_cleanup requires a Boolean value",
+            "42601",
+        )),
+    }
+}
+
 fn parse_buffer_usage_limit_kb(raw: &str) -> Option<i64> {
     let normalized = raw.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -551,6 +567,7 @@ fn vacuum_exec_options(
     gucs: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<VacuumExecOptions, ExecError> {
     let parallel_workers = parse_vacuum_parallel_workers(stmt)?;
+    let index_cleanup = parse_vacuum_index_cleanup(stmt.index_cleanup.as_deref())?;
     if let Some(raw) = &stmt.buffer_usage_limit {
         validate_buffer_usage_limit(raw)?;
     }
@@ -609,6 +626,7 @@ fn vacuum_exec_options(
     Ok(VacuumExecOptions {
         analyze: stmt.analyze,
         full: stmt.full,
+        index_cleanup,
         truncate: stmt.truncate,
         default_truncate: gucs
             .and_then(|gucs| gucs.get("vacuum_truncate"))
@@ -3476,6 +3494,7 @@ impl Database {
                 &mut ctx,
                 false,
                 options.process_toast,
+                options.index_cleanup,
                 options.truncate,
                 options.default_truncate,
             )?
@@ -3486,6 +3505,7 @@ impl Database {
                 &mut ctx,
                 true,
                 options.process_toast,
+                options.index_cleanup,
                 options.truncate,
                 options.default_truncate,
             )?

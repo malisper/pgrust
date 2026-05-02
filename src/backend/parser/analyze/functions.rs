@@ -3395,6 +3395,12 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::XPathExists => {
             return Some(SqlType::new(SqlTypeKind::Bool));
         }
+        BuiltinScalarFunction::PgSizePretty => {
+            return Some(SqlType::new(SqlTypeKind::Text));
+        }
+        BuiltinScalarFunction::PgSizeBytes => {
+            return Some(SqlType::new(SqlTypeKind::Int8));
+        }
         _ => {}
     }
     scalar_fixed_return_types()
