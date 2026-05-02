@@ -671,6 +671,209 @@ fn generated_columns_compute_on_insert_update_and_read() {
 }
 
 #[test]
+fn alter_table_generated_columns_support_staged_type_batches() {
+    fn run(kind: &str) {
+        let db = Database::open_ephemeral(32).unwrap();
+
+        db.execute(1, "create table gtest25 (a int primary key)")
+            .unwrap();
+        db.execute(1, "insert into gtest25 values (3), (4)")
+            .unwrap();
+        db.execute(
+            1,
+            &format!(
+                "alter table gtest25
+                   add column b int generated always as (a * 2) {kind},
+                   alter column b set expression as (a * 3)"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            query_rows(&db, 1, "select a, b from gtest25 order by a"),
+            vec![
+                vec![Value::Int32(3), Value::Int32(9)],
+                vec![Value::Int32(4), Value::Int32(12)],
+            ]
+        );
+
+        db.execute(
+            1,
+            &format!(
+                "alter table gtest25
+                   add column c int default 42,
+                   add column x int generated always as (c * 4) {kind}"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            query_rows(&db, 1, "select c, x from gtest25 order by a"),
+            vec![
+                vec![Value::Int32(42), Value::Int32(168)],
+                vec![Value::Int32(42), Value::Int32(168)],
+            ]
+        );
+
+        db.execute(1, "alter table gtest25 add column d int default 101")
+            .unwrap();
+        db.execute(
+            1,
+            &format!(
+                "alter table gtest25
+                   alter column d type float8,
+                   add column y float8 generated always as (d * 4) {kind}"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            query_rows(&db, 1, "select d, y from gtest25 order by a"),
+            vec![
+                vec![Value::Float64(101.0), Value::Float64(404.0)],
+                vec![Value::Float64(101.0), Value::Float64(404.0)],
+            ]
+        );
+
+        db.execute(
+            1,
+            &format!(
+                "create table gtest27 (
+                    a int,
+                    b int,
+                    x int generated always as ((a + b) * 2) {kind}
+                )"
+            ),
+        )
+        .unwrap();
+        db.execute(1, "insert into gtest27 (a, b) values (3, 7), (4, 11)")
+            .unwrap();
+        assert!(
+            db.execute(1, "alter table gtest27 alter column a type text")
+                .is_err()
+        );
+        db.execute(1, "alter table gtest27 alter column x type numeric")
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &db,
+                1,
+                "select atttypid::regtype::text
+                 from pg_attribute
+                 where attrelid = 'gtest27'::regclass and attname = 'x'",
+            ),
+            vec![vec![Value::Text("numeric".into())]]
+        );
+        match db.execute(
+            1,
+            "alter table gtest27 alter column x type boolean using x <> 0",
+        ) {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(
+                    message,
+                    "cannot specify USING when altering type of generated column"
+                );
+                assert_eq!(sqlstate, "42601");
+            }
+            other => panic!("expected generated USING rejection, got {other:?}"),
+        }
+
+        db.execute(
+            1,
+            &format!(
+                "alter table gtest27
+                   drop column x,
+                   alter column a type bigint,
+                   alter column b type bigint,
+                   add column x bigint generated always as ((a + b) * 2) {kind}"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            query_rows(&db, 1, "select a, b, x from gtest27 order by a"),
+            vec![
+                vec![Value::Int64(3), Value::Int64(7), Value::Int64(20)],
+                vec![Value::Int64(4), Value::Int64(11), Value::Int64(30)],
+            ]
+        );
+    }
+
+    run("stored");
+    run("virtual");
+}
+
+#[test]
+fn alter_table_generated_set_expression_rewrites_and_validates_rows() {
+    for kind in ["stored", "virtual"] {
+        let db = Database::open_ephemeral(32).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                &format!(
+                    "create table gset (
+                    a int,
+                    b int generated always as (a * 2) {kind},
+                    check (b < 10)
+                )"
+                ),
+            )
+            .unwrap();
+        session
+            .execute(&db, "insert into gset (a) values (4)")
+            .unwrap();
+        match session.execute(
+            &db,
+            "alter table gset alter column b set expression as (a * 3)",
+        ) {
+            Err(ExecError::CheckViolation { constraint, .. }) => {
+                assert_eq!(constraint, "gset_b_check");
+            }
+            other => panic!("expected SET EXPRESSION check failure, got {other:?}"),
+        }
+        assert_eq!(
+            query_rows(&db, 1, "select b from gset"),
+            vec![vec![Value::Int32(8)]]
+        );
+
+        session
+            .execute(
+                &db,
+                "alter table gset alter column b set expression as (a + 1)",
+            )
+            .unwrap();
+        assert_eq!(
+            query_rows(&db, 1, "select b from gset"),
+            vec![vec![Value::Int32(5)]]
+        );
+
+        if kind == "stored" {
+            session
+                .execute(
+                    &db,
+                    "create table gnn (
+                    a int,
+                    b int generated always as (a) stored not null
+                )",
+                )
+                .unwrap();
+            session
+                .execute(&db, "insert into gnn (a) values (1)")
+                .unwrap();
+            match session.execute(
+                &db,
+                "alter table gnn alter column b set expression as (nullif(a, 1))",
+            ) {
+                Err(ExecError::NotNullViolation { column, .. }) => {
+                    assert_eq!(column, "b");
+                }
+                other => panic!("expected SET EXPRESSION not-null failure, got {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
 fn generated_columns_keep_view_dml_and_merge_returning_semantics() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -28019,6 +28222,154 @@ fn alter_table_alter_column_type_rewrites_rows_with_using_expr() {
 }
 
 #[test]
+fn alter_table_compound_type_using_binds_original_columns() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table another (f1 int4, f2 text, f3 text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into another values (1, 'one', 'uno'), (2, 'two', 'dos')",
+        )
+        .unwrap();
+    session.execute(&db, "select * from another").unwrap();
+    session
+        .execute(
+            &db,
+            "alter table another
+           alter f1 type text using f2 || ' and ' || f3 || ' more',
+           alter f2 type bigint using f1 * 10,
+           drop column f3",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select f1, f2 from another order by f2"),
+        vec![
+            vec![Value::Text("one and uno more".into()), Value::Int64(10)],
+            vec![Value::Text("two and dos more".into()), Value::Int64(20)],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attname, atttypid::regtype::text
+             from pg_attribute
+             where attrelid = 'another'::regclass and attnum > 0 and not attisdropped
+             order by attnum",
+        ),
+        vec![
+            vec![Value::Text("f1".into()), Value::Text("text".into())],
+            vec![Value::Text("f2".into()), Value::Text("bigint".into())],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_alter_column_type_rewrites_dependent_indexes() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(
+        1,
+        "create table anothertab(f1 int primary key, f2 int unique,
+                                f3 int, f4 int, f5 int)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table anothertab add exclude using btree (f3 with =)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table anothertab
+           add exclude using btree (f4 with =) where (f4 is not null)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table anothertab
+           add exclude using btree (f4 with =) where (f5 > 0)",
+    )
+    .unwrap();
+    db.execute(1, "alter table anothertab add unique(f1,f4)")
+        .unwrap();
+    db.execute(1, "create index on anothertab(f2,f3)").unwrap();
+    db.execute(1, "create unique index on anothertab(f4)")
+        .unwrap();
+
+    db.execute(1, "alter table anothertab alter column f1 type bigint")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table anothertab
+           alter column f2 type bigint,
+           alter column f3 type bigint,
+           alter column f4 type bigint",
+    )
+    .unwrap();
+    db.execute(1, "alter table anothertab alter column f5 type bigint")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into anothertab values
+           (2147483648::bigint, 2147483649::bigint, 2147483650::bigint, null, 1)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attname, atttypid::regtype::text
+             from pg_attribute
+             where attrelid = 'anothertab'::regclass
+               and attname in ('f1', 'f2', 'f3', 'f4', 'f5')
+             order by attname",
+        ),
+        vec![
+            vec![Value::Text("f1".into()), Value::Text("bigint".into())],
+            vec![Value::Text("f2".into()), Value::Text("bigint".into())],
+            vec![Value::Text("f3".into()), Value::Text("bigint".into())],
+            vec![Value::Text("f4".into()), Value::Text("bigint".into())],
+            vec![Value::Text("f5".into()), Value::Text("bigint".into())],
+        ]
+    );
+    let index_defs = query_rows(
+        &db,
+        1,
+        "select indexdef from pg_indexes
+         where tablename = 'anothertab'
+         order by indexname",
+    );
+    assert!(
+        index_defs.iter().any(|row| match row.as_slice() {
+            [Value::Text(def)] => def.contains("f5 > 0"),
+            _ => false,
+        }),
+        "expected rewritten partial index predicate in {index_defs:?}"
+    );
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("anothertab").unwrap();
+    let exclusion_constraints = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_EXCLUSION)
+        .collect::<Vec<_>>();
+    assert_eq!(exclusion_constraints.len(), 3);
+    assert!(
+        exclusion_constraints
+            .iter()
+            .all(|row| row.conexclop.as_ref().map(Vec::len) == Some(1)),
+        "expected rewritten exclusion operators in {exclusion_constraints:?}"
+    );
+}
+
+#[test]
 fn alter_table_alter_inherited_column_type_rewrites_children_with_using_expr() {
     let db = Database::open_ephemeral(32).unwrap();
 
@@ -28069,6 +28420,38 @@ fn alter_table_alter_column_type_rejects_nonautomatic_cast_without_using() {
             && hint.as_deref() == Some("You might need to specify \"USING note::integer\".")
             && sqlstate == "42804" => {}
         other => panic!("expected automatic-cast rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_alter_column_type_rejects_whole_row_using_expr() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(
+        1,
+        "create table test_type_diff2 (int_four int4, text_col text)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table test_type_diff2
+           alter column int_four type int4 using (pg_column_size(test_type_diff2))",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "cannot convert whole-row table reference");
+            assert_eq!(
+                detail.as_deref(),
+                Some("USING expression contains a whole-row table reference.")
+            );
+            assert_eq!(sqlstate, "42804");
+        }
+        other => panic!("expected whole-row USING rejection, got {other:?}"),
     }
 }
 

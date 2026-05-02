@@ -8139,7 +8139,7 @@ fn recheck_values_for_referencing_row(
     )
 }
 
-pub(super) fn materialize_generated_columns(
+pub(crate) fn materialize_generated_columns(
     desc: &RelationDesc,
     values: &mut [Value],
     ctx: &mut ExecutorContext,

@@ -49,25 +49,25 @@ use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
-    BTREE_AM_OID, BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
-    CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
-    GIN_AM_OID, PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID,
-    PG_AUTHID_RELATION_OID, PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_DATABASE_RELATION_OID, PG_EVENT_TRIGGER_RELATION_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_FOREIGN_SERVER_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
-    PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_SUBSCRIPTION_RELATION_OID, PG_TRIGGER_RELATION_OID,
-    PG_TYPE_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow,
-    PgForeignServerRow, PgForeignTableRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
-    policy_shdepend_rows, relkind_has_storage,
+    BTREE_AM_OID, BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
+    CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEPENDENCY_AUTO,
+    DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, GIN_AM_OID, PG_AMOP_RELATION_OID,
+    PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_AUTHID_RELATION_OID, PG_CAST_RELATION_OID,
+    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_DATABASE_RELATION_OID,
+    PG_EVENT_TRIGGER_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_FOREIGN_SERVER_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_OPFAMILY_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
+    PG_SUBSCRIPTION_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgCastRow, PgClassRow,
+    PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
+    PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, policy_shdepend_rows, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -8293,6 +8293,38 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn replace_relation_desc_for_alter_table_batch_mvcc(
+        &mut self,
+        relation_oid: u32,
+        new_desc: RelationDesc,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let old_not_null_signature = not_null_constraint_signature(&entry.desc);
+                entry.desc = new_desc;
+                allocate_relation_object_oids(&mut entry.desc, &mut control.next_oid);
+                let mut kinds = vec![
+                    BootstrapCatalogKind::PgAttribute,
+                    BootstrapCatalogKind::PgDepend,
+                    BootstrapCatalogKind::PgAttrdef,
+                ];
+                if old_not_null_signature != not_null_constraint_signature(&entry.desc) {
+                    kinds.push(BootstrapCatalogKind::PgConstraint);
+                }
+                Ok(((), kinds))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn alter_index_relation_for_column_type_mvcc(
         &mut self,
         index_oid: u32,
@@ -8300,7 +8332,9 @@ impl CatalogStore {
         new_index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let (_old_entry, new_entry, _, kinds) =
+        let heap_oid = new_index_meta.indrelid;
+        let indclass = new_index_meta.indclass.clone();
+        let (_old_entry, new_entry, _, mut kinds) =
             mutate_visible_relation_entry_mvcc(self, index_oid, ctx, move |entry, _control| {
                 if !matches!(entry.relkind, 'i' | 'I') {
                     return Err(CatalogError::UnknownTable(index_oid.to_string()));
@@ -8339,6 +8373,47 @@ impl CatalogStore {
                     ],
                 ))
             })?;
+
+        let old_constraints = relation_constraints_mvcc(self, ctx, heap_oid)?
+            .into_iter()
+            .filter(|constraint| {
+                constraint.conindid == index_oid
+                    && (constraint.contype == CONSTRAINT_EXCLUSION || constraint.conperiod)
+            })
+            .collect::<Vec<_>>();
+        if !old_constraints.is_empty() {
+            let new_conexclop = foreign_key_equality_operators_visible(&indclass);
+            let new_constraints = old_constraints
+                .iter()
+                .cloned()
+                .map(|mut constraint| {
+                    constraint.conexclop = new_conexclop.clone();
+                    constraint
+                })
+                .collect::<Vec<_>>();
+            let constraint_kinds = vec![BootstrapCatalogKind::PgConstraint];
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    constraints: old_constraints,
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &constraint_kinds,
+            )?;
+            insert_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    constraints: new_constraints,
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &constraint_kinds,
+            )?;
+            if !kinds.contains(&BootstrapCatalogKind::PgConstraint) {
+                kinds.push(BootstrapCatalogKind::PgConstraint);
+            }
+        }
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -11584,6 +11659,20 @@ fn type_row_by_name_namespace_mvcc(
             SysCacheTuple::Type(row) => Some(row),
             _ => None,
         }))
+}
+
+fn not_null_constraint_signature(desc: &RelationDesc) -> Vec<(i16, Option<u32>, bool)> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            (!column.storage.nullable || column.not_null_constraint_oid.is_some()).then_some((
+                (index + 1) as i16,
+                column.not_null_constraint_oid,
+                column.dropped,
+            ))
+        })
+        .collect()
 }
 
 fn relation_constraints_mvcc(

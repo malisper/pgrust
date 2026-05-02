@@ -20,7 +20,9 @@ pub(crate) fn normalize_index_predicate_sql(
     predicate_sql: &str,
     relation_desc: Option<&RelationDesc>,
 ) -> String {
-    let normalized = normalize_infix_spacing(strip_outer_parens_once(predicate_sql.trim()));
+    let normalized = normalize_keywords(&normalize_infix_spacing(strip_outer_parens_once(
+        predicate_sql.trim(),
+    )));
     let normalized =
         normalize_predicate_text_collation(&normalized, relation_desc).unwrap_or(normalized);
     relation_desc

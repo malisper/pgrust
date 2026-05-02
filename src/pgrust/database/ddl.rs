@@ -50,13 +50,36 @@ pub(super) fn reject_column_referenced_by_generated_columns(
         if generated_index == column_index || generated_column.generated.is_none() {
             continue;
         }
+        let referenced = &desc.columns[column_index];
+        if let Some(expr_sql) = generated_column.default_expr.as_deref()
+            && let Ok(expr) = parse_expr(expr_sql)
+        {
+            let mut names = BTreeSet::new();
+            collect_sql_expr_column_names(&expr, &mut names);
+            if names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&referenced.name))
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot {operation} column \"{}\" because other objects depend on it",
+                        referenced.name
+                    ),
+                    detail: Some(format!(
+                        "Column \"{}\" is used by generated column \"{}\".",
+                        referenced.name, generated_column.name
+                    )),
+                    hint: None,
+                    sqlstate: "2BP01",
+                });
+            }
+        }
         let Some(expr) =
             bind_generated_expr(desc, generated_index, catalog).map_err(ExecError::Parse)?
         else {
             continue;
         };
         if expr_references_column(&expr, column_index) {
-            let referenced = &desc.columns[column_index];
             return Err(ExecError::DetailedError {
                 message: format!(
                     "cannot {operation} column \"{}\" because other objects depend on it",
@@ -1542,6 +1565,19 @@ fn is_text_like_type(ty: SqlType) -> bool {
         )
 }
 
+fn is_numeric_scalar_type(ty: SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::Int2
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::Float4
+                | SqlTypeKind::Float8
+                | SqlTypeKind::Numeric
+        )
+}
+
 pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
     if sql_type.is_range() {
         return builtin_range_name_for_sql_type(sql_type)
@@ -1724,6 +1760,9 @@ pub(super) fn automatic_alter_type_cast_allowed(
         return true;
     }
     if from.kind == to.kind && from.is_array == to.is_array {
+        return true;
+    }
+    if is_numeric_scalar_type(from) && is_numeric_scalar_type(to) {
         return true;
     }
     if !from.is_array
@@ -2244,10 +2283,16 @@ pub(super) fn validate_alter_table_alter_column_type(
         })
         .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
     let current_column = &desc.columns[column_index];
-    if current_column.generated.is_some() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "ALTER TABLE ALTER COLUMN TYPE on generated columns".into(),
-        )));
+    if current_column.generated.is_some() && using_expr.is_some() {
+        return Err(ExecError::DetailedError {
+            message: "cannot specify USING when altering type of generated column".into(),
+            detail: Some(format!(
+                "Column \"{}\" is a generated column.",
+                current_column.name
+            )),
+            hint: None,
+            sqlstate: "42601",
+        });
     }
     reject_column_referenced_by_generated_columns(catalog, desc, column_index, "alter type of")?;
     let target_sql_type = match ty {
@@ -2293,6 +2338,20 @@ pub(super) fn validate_alter_table_alter_column_type(
         .collect::<Vec<_>>();
     let (rewrite_expr, rewrite_type) = match using_expr {
         Some(expr) => {
+            let relation_name = relation_name_for_oid(catalog, relation_oid);
+            let mut referenced_names = BTreeSet::new();
+            collect_sql_expr_column_names(expr, &mut referenced_names);
+            if referenced_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&relation_name))
+            {
+                return Err(ExecError::DetailedError {
+                    message: "cannot convert whole-row table reference".into(),
+                    detail: Some("USING expression contains a whole-row table reference.".into()),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
             let (bound, from_type) = bind_scalar_expr_in_scope(expr, &scope_columns, catalog)
                 .map_err(ExecError::Parse)?;
             (bound, from_type)
@@ -2335,7 +2394,9 @@ pub(super) fn validate_alter_table_alter_column_type(
         );
     }
 
-    if let Some(default_sql) = current_column.default_expr.as_deref() {
+    if current_column.generated.is_none()
+        && let Some(default_sql) = current_column.default_expr.as_deref()
+    {
         let default_expr =
             crate::backend::parser::parse_expr(default_sql).map_err(ExecError::Parse)?;
         let (_bound_default, default_type) =
@@ -2396,6 +2457,10 @@ pub(super) fn validate_alter_table_alter_column_type(
 
     let mut desc_with_new_type = desc.clone();
     desc_with_new_type.columns[column_index] = new_column.clone();
+    if current_column.generated.is_some() {
+        crate::backend::parser::validate_generated_columns(&desc_with_new_type, catalog)
+            .map_err(ExecError::Parse)?;
+    }
     let relation_name = relation_name_for_oid(catalog, relation_oid);
     for constraint in catalog.constraint_rows_for_relation(relation_oid) {
         if constraint.contype != CONSTRAINT_CHECK {

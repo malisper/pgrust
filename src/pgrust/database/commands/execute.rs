@@ -2059,8 +2059,19 @@ impl Database {
 
         match stmt {
             Statement::AlterTableMulti(ref statements) => {
-                for sql in statements {
-                    let substmt = crate::backend::parser::parse_statement(sql)?;
+                let parsed_statements = statements
+                    .iter()
+                    .map(|sql| crate::backend::parser::parse_statement(sql))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(result) = self.try_execute_alter_table_batch_stmt_with_search_path(
+                    client_id,
+                    &parsed_statements,
+                    configured_search_path,
+                    datetime_config,
+                )? {
+                    return Ok(result);
+                }
+                for substmt in parsed_statements {
                     self.execute_statement_with_search_path_inner(
                         client_id,
                         substmt,
@@ -2322,6 +2333,14 @@ impl Database {
                     configured_search_path,
                 ),
             Statement::AlterTableCompound(ref compound_stmt) => {
+                if let Some(result) = self.try_execute_alter_table_batch_stmt_with_search_path(
+                    client_id,
+                    &compound_stmt.actions,
+                    configured_search_path,
+                    datetime_config,
+                )? {
+                    return Ok(result);
+                }
                 for action in &compound_stmt.actions {
                     self.execute_statement_with_search_path_inner(
                         client_id,
@@ -2355,12 +2374,22 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
-            Statement::AlterTableAddColumns(ref alter_stmt) => self
-                .execute_alter_table_add_columns_stmt_with_search_path(
+            Statement::AlterTableAddColumns(ref alter_stmt) => {
+                let actions = [Statement::AlterTableAddColumns(alter_stmt.clone())];
+                if let Some(result) = self.try_execute_alter_table_batch_stmt_with_search_path(
+                    client_id,
+                    &actions,
+                    configured_search_path,
+                    datetime_config,
+                )? {
+                    return Ok(result);
+                }
+                self.execute_alter_table_add_columns_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
-                ),
+                )
+            }
             Statement::AlterTableDropColumn(ref drop_stmt) => self
                 .execute_alter_table_drop_column_stmt_with_search_path(
                     client_id,
@@ -2372,7 +2401,7 @@ impl Database {
                     client_id,
                     alter_stmt,
                     configured_search_path,
-                    &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    datetime_config,
                 ),
             Statement::AlterTableAlterColumnDefault(ref alter_stmt) => self
                 .execute_alter_table_alter_column_default_stmt_with_search_path(
@@ -2380,12 +2409,24 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
-            Statement::AlterTableAlterColumnExpression(ref alter_stmt) => self
-                .execute_alter_table_alter_column_expression_stmt_with_search_path(
+            Statement::AlterTableAlterColumnExpression(ref alter_stmt) => {
+                let actions = [Statement::AlterTableAlterColumnExpression(
+                    alter_stmt.clone(),
+                )];
+                if let Some(result) = self.try_execute_alter_table_batch_stmt_with_search_path(
+                    client_id,
+                    &actions,
+                    configured_search_path,
+                    datetime_config,
+                )? {
+                    return Ok(result);
+                }
+                self.execute_alter_table_alter_column_expression_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
-                ),
+                )
+            }
             Statement::AlterTableAlterColumnCompression(ref alter_stmt) => self
                 .execute_alter_table_alter_column_compression_stmt_with_search_path(
                     client_id,
