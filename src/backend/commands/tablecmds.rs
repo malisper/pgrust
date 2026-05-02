@@ -17,7 +17,9 @@ use crate::backend::access::heap::heaptoast::{
 use crate::backend::access::index::indexam;
 use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::transam::xact::CommandId;
-use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
+use crate::backend::access::transam::xact::{
+    INVALID_TRANSACTION_ID, TransactionId, TransactionManager,
+};
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::value_io::{
     format_failing_row_detail, format_failing_row_detail_for_columns,
@@ -86,7 +88,7 @@ use crate::backend::executor::{
     cast_value_with_source_type_catalog_and_config, compare_order_values, create_query_desc,
     enforce_domain_constraints_for_value_ref, executor_start,
 };
-use crate::include::access::amapi::IndexUniqueCheck;
+use crate::include::access::amapi::{IndexBuildContext, IndexBuildExprContext, IndexUniqueCheck};
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
 use crate::include::access::gist::{GistBufferingMode, GistOptions};
@@ -5676,6 +5678,134 @@ pub(crate) fn maintain_indexes_for_row(
 ) -> Result<(), ExecError> {
     maintain_indexes_for_row_with_old_tid(heap_rel, heap_desc, indexes, values, heap_tid, None, ctx)
 }
+
+// :HACK: Online btree inserts are still dev-profile slow for large batches into
+// freshly emptied indexed tables. For the narrow non-unique btree case, rebuild
+// the indexes once after heap insertion until the normal insert path is faster.
+const BULK_REBUILD_INSERT_INDEX_THRESHOLD: usize = 1_000;
+
+fn index_needs_build_expr_eval(index: &BoundIndexRelation) -> bool {
+    index
+        .index_meta
+        .indexprs
+        .as_deref()
+        .is_some_and(|exprs| !exprs.trim().is_empty())
+        || index
+            .index_meta
+            .indpred
+            .as_deref()
+            .is_some_and(|predicate| !predicate.trim().is_empty())
+}
+
+fn should_bulk_rebuild_insert_indexes(
+    relation_oid: u32,
+    relation_constraints: &BoundRelationConstraints,
+    rls_write_checks: &[RlsWriteCheck],
+    indexes: &[BoundIndexRelation],
+    rows_len: usize,
+    has_triggers: bool,
+    returning: Option<&[TargetEntry]>,
+    ctx: &ExecutorContext,
+) -> bool {
+    if rows_len < BULK_REBUILD_INSERT_INDEX_THRESHOLD
+        || indexes.is_empty()
+        || ctx.transaction_lock_scope_id.is_some()
+        || has_triggers
+        || returning.is_some_and(|returning| !returning.is_empty())
+        || !rls_write_checks.is_empty()
+        || !relation_constraints.foreign_keys.is_empty()
+        || !relation_constraints.temporal.is_empty()
+        || !relation_constraints.exclusions.is_empty()
+    {
+        return false;
+    }
+    if indexes.iter().any(index_needs_build_expr_eval) && ctx.catalog.is_none() {
+        return false;
+    }
+    if !ctx
+        .catalog
+        .as_deref()
+        .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
+        .is_some_and(|row| row.relpages <= 1)
+    {
+        return false;
+    }
+    if !indexes.iter().all(|index| {
+        ctx.pool
+            .with_storage_mut(|storage| storage.smgr.nblocks(index.rel, ForkNumber::Main))
+            .is_ok_and(|nblocks| nblocks <= 2)
+    }) {
+        return false;
+    }
+    indexes.iter().all(|index| {
+        index.index_meta.am_oid == BTREE_AM_OID
+            && !index.index_meta.indisunique
+            && !index.index_meta.indisexclusion
+            && index.index_meta.indisready
+            && index.index_meta.indisvalid
+    })
+}
+
+fn index_build_expr_context(
+    ctx: &ExecutorContext,
+    current_xid: TransactionId,
+) -> IndexBuildExprContext {
+    IndexBuildExprContext {
+        txn_waiter: ctx.txn_waiter.clone(),
+        sequences: ctx.sequences.clone(),
+        large_objects: ctx.large_objects.clone(),
+        advisory_locks: std::sync::Arc::clone(&ctx.advisory_locks),
+        datetime_config: ctx.datetime_config.clone(),
+        stats: std::sync::Arc::clone(&ctx.stats),
+        session_stats: std::sync::Arc::clone(&ctx.session_stats),
+        current_database_name: ctx.current_database_name.clone(),
+        session_user_oid: ctx.session_user_oid,
+        current_user_oid: ctx.current_user_oid,
+        current_xid,
+        statement_lock_scope_id: ctx.statement_lock_scope_id,
+        session_replication_role: ctx.session_replication_role,
+        visible_catalog: ctx.catalog.clone(),
+    }
+}
+
+fn rebuild_insert_indexes_after_bulk_insert(
+    heap_rel: crate::backend::storage::smgr::RelFileLocator,
+    heap_toast: Option<ToastRelationRef>,
+    heap_desc: &RelationDesc,
+    indexes: &[BoundIndexRelation],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+) -> Result<(), ExecError> {
+    let mut snapshot = ctx.write_snapshot();
+    if snapshot.current_xid == INVALID_TRANSACTION_ID {
+        snapshot.current_xid = xid;
+        snapshot.own_xids.insert(xid);
+    }
+    for index in indexes {
+        let needs_expr_eval = index_needs_build_expr_eval(index);
+        let build_ctx = IndexBuildContext {
+            pool: ctx.pool.clone(),
+            txns: ctx.txns.clone(),
+            client_id: ctx.client_id,
+            interrupts: ctx.interrupts.clone(),
+            snapshot: snapshot.clone(),
+            heap_relation: heap_rel,
+            heap_desc: heap_desc.clone(),
+            heap_toast,
+            index_relation: index.rel,
+            index_name: index.name.clone(),
+            index_desc: index.desc.clone(),
+            index_meta: index.index_meta.clone(),
+            default_toast_compression: ctx.default_toast_compression,
+            maintenance_work_mem_kb: 65_536,
+            expr_eval: needs_expr_eval.then(|| index_build_expr_context(ctx, snapshot.current_xid)),
+        };
+        indexam::index_build_stub(&build_ctx, index.index_meta.am_oid)
+            .map_err(map_index_insert_error)?;
+    }
+    Ok(())
+}
+
 fn map_index_insert_error(err: crate::backend::catalog::CatalogError) -> ExecError {
     match err {
         crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
@@ -8927,7 +9057,16 @@ pub fn collect_vacuum_stats(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
-    collect_vacuum_stats_with_options(targets, catalog, ctx, true, true, Some(true), true)
+    collect_vacuum_stats_with_options(
+        targets,
+        catalog,
+        ctx,
+        true,
+        true,
+        Some(true),
+        Some(true),
+        true,
+    )
 }
 
 pub fn collect_vacuum_stats_with_options(
@@ -8936,6 +9075,7 @@ pub fn collect_vacuum_stats_with_options(
     ctx: &mut ExecutorContext,
     process_main: bool,
     process_toast: bool,
+    index_cleanup: Option<bool>,
     truncate: Option<bool>,
     default_truncate: bool,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
@@ -8963,6 +9103,7 @@ pub fn collect_vacuum_stats_with_options(
         &relations,
         catalog,
         ctx,
+        index_cleanup,
         truncate,
         default_truncate,
     )
@@ -8986,9 +9127,35 @@ pub(crate) fn collect_vacuum_stats_for_relations_with_truncate(
         relations,
         catalog,
         ctx,
+        Some(true),
         Some(truncate),
         true,
     )
+}
+
+fn relation_vacuum_index_cleanup(
+    relation_oid: u32,
+    catalog: &dyn CatalogLookup,
+    index_cleanup: Option<bool>,
+) -> bool {
+    if let Some(index_cleanup) = index_cleanup {
+        return index_cleanup;
+    }
+    catalog
+        .class_row_by_oid(relation_oid)
+        .and_then(|row| row.reloptions)
+        .and_then(|options| {
+            options.into_iter().find_map(|option| {
+                let (name, value) = option.split_once('=')?;
+                name.eq_ignore_ascii_case("vacuum_index_cleanup").then(|| {
+                    !matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "false" | "off" | "no" | "0"
+                    )
+                })
+            })
+        })
+        .unwrap_or(true)
 }
 
 fn relation_vacuum_truncate(
@@ -9021,6 +9188,7 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
     relations: &[BoundRelation],
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
+    index_cleanup: Option<bool>,
     truncate: Option<bool>,
     default_truncate: bool,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
@@ -9034,52 +9202,56 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
             &ctx.txns,
         )
         .map_err(ExecError::Heap)?;
-        let indexes = catalog.index_relations_for_heap(entry.relation_oid);
         let dead_items = &scan.dead_tids;
-        for index in indexes {
-            let index_blocks = ctx
-                .pool
-                .with_storage_mut(|storage| storage.smgr.nblocks(index.rel, ForkNumber::Main))
-                .map_err(HeapError::Storage)
-                .map_err(ExecError::Heap)?;
-            if index_blocks == 0 {
-                continue;
+        if relation_vacuum_index_cleanup(entry.relation_oid, catalog, index_cleanup) {
+            for index in catalog.index_relations_for_heap(entry.relation_oid) {
+                let index_blocks = ctx
+                    .pool
+                    .with_storage_mut(|storage| storage.smgr.nblocks(index.rel, ForkNumber::Main))
+                    .map_err(HeapError::Storage)
+                    .map_err(ExecError::Heap)?;
+                if index_blocks == 0 {
+                    continue;
+                }
+                let vacuum_ctx = crate::include::access::amapi::IndexVacuumContext {
+                    pool: ctx.pool.clone(),
+                    txns: ctx.txns.clone(),
+                    client_id: ctx.client_id,
+                    interrupts: ctx.interrupts.clone(),
+                    heap_relation: entry.rel,
+                    heap_desc: entry.desc.clone(),
+                    heap_toast: entry.toast,
+                    index_relation: index.rel,
+                    index_name: index.name.clone(),
+                    index_desc: index.desc.clone(),
+                    index_meta: index.index_meta.clone(),
+                    expr_eval: None,
+                };
+                let dead_item_callback = |tid| dead_items.contains(&tid);
+                let stats = indexam::index_bulk_delete(
+                    &vacuum_ctx,
+                    index.index_meta.am_oid,
+                    &dead_item_callback,
+                    None,
+                )
+                .map_err(|err| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "VACUUM bulk delete",
+                        actual: format!("{err:?}"),
+                    })
+                })?;
+                let _ = indexam::index_vacuum_cleanup(
+                    &vacuum_ctx,
+                    index.index_meta.am_oid,
+                    Some(stats),
+                )
+                .map_err(|err| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "VACUUM cleanup",
+                        actual: format!("{err:?}"),
+                    })
+                })?;
             }
-            let vacuum_ctx = crate::include::access::amapi::IndexVacuumContext {
-                pool: ctx.pool.clone(),
-                txns: ctx.txns.clone(),
-                client_id: ctx.client_id,
-                interrupts: ctx.interrupts.clone(),
-                heap_relation: entry.rel,
-                heap_desc: entry.desc.clone(),
-                heap_toast: entry.toast,
-                index_relation: index.rel,
-                index_name: index.name.clone(),
-                index_desc: index.desc.clone(),
-                index_meta: index.index_meta.clone(),
-                expr_eval: None,
-            };
-            let dead_item_callback = |tid| dead_items.contains(&tid);
-            let stats = indexam::index_bulk_delete(
-                &vacuum_ctx,
-                index.index_meta.am_oid,
-                &dead_item_callback,
-                None,
-            )
-            .map_err(|err| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "VACUUM bulk delete",
-                    actual: format!("{err:?}"),
-                })
-            })?;
-            let _ =
-                indexam::index_vacuum_cleanup(&vacuum_ctx, index.index_meta.am_oid, Some(stats))
-                    .map_err(|err| {
-                        ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "VACUUM cleanup",
-                            actual: format!("{err:?}"),
-                        })
-                    })?;
         }
         let previous_relfrozenxid = catalog
             .class_row_by_oid(entry.relation_oid)
@@ -15647,6 +15819,18 @@ pub(crate) fn execute_insert_rows(
         .as_ref()
         .map(|triggers| triggers.new_transition_capture());
     let partition_recheck = insert_partition_constraint_recheck(relation_oid, ctx);
+    let bulk_rebuild_indexes = should_bulk_rebuild_insert_indexes(
+        relation_oid,
+        relation_constraints,
+        rls_write_checks,
+        indexes,
+        rows.len(),
+        triggers
+            .as_ref()
+            .is_some_and(|triggers| !triggers.is_empty()),
+        returning,
+        ctx,
+    );
 
     let mut inserted_rows = Vec::new();
     let mut inserted_tids = Vec::new();
@@ -15692,7 +15876,9 @@ pub(crate) fn execute_insert_rows(
                 cid,
             )?;
             inserted_tids.push(heap_tid);
-            maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
+            if !bulk_rebuild_indexes {
+                maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
+            }
             inserted_rows.push(values.clone());
             if let Some(returning) = returning {
                 let row = project_returning_row_with_old_new(
@@ -15728,6 +15914,15 @@ pub(crate) fn execute_insert_rows(
                 None => err,
             });
         }
+    }
+    if bulk_rebuild_indexes
+        && let Err(err) =
+            rebuild_insert_indexes_after_bulk_insert(rel, toast, desc, indexes, ctx, xid)
+    {
+        for heap_tid in inserted_tids.iter().rev().copied() {
+            let _ = rollback_inserted_row(rel, toast, desc, heap_tid, ctx, xid);
+        }
+        return Err(err);
     }
     let post_insert_result = (|| -> Result<(), ExecError> {
         for values in &inserted_rows {
