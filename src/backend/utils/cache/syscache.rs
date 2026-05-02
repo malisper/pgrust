@@ -1433,6 +1433,16 @@ impl CatalogStore {
                     attr.attgenerated,
                 );
             desc.dropped = attr.attisdropped;
+            desc.missing_default_value = attr
+                .attmissingval
+                .as_ref()
+                .and_then(|values| values.first().cloned())
+                .map(|value| {
+                    crate::backend::catalog::catalog::missing_default_value_from_attmissingval(
+                        value,
+                        desc.sql_type,
+                    )
+                });
             if let Some(constraint) = not_null_constraints.get(&attr.attnum) {
                 desc.not_null_constraint_oid = Some(constraint.oid);
                 desc.not_null_constraint_name = Some(constraint.conname.clone());
@@ -1447,7 +1457,6 @@ impl CatalogStore {
                 desc.default_expr = Some(attrdef.adbin.clone());
                 desc.default_sequence_oid =
                     crate::pgrust::database::default_sequence_oid_from_default_expr(&attrdef.adbin);
-                desc.missing_default_value = None;
             }
             columns.push(desc);
         }
@@ -1801,6 +1810,16 @@ pub(crate) fn relation_id_get_relation_db(
             attr.attgenerated,
         );
         desc.dropped = attr.attisdropped;
+        desc.missing_default_value = attr
+            .attmissingval
+            .as_ref()
+            .and_then(|values| values.first().cloned())
+            .map(|value| {
+                crate::backend::catalog::catalog::missing_default_value_from_attmissingval(
+                    value,
+                    desc.sql_type,
+                )
+            });
         if let Some(constraint) = not_null_constraints.get(&attr.attnum) {
             desc.not_null_constraint_oid = Some(constraint.oid);
             desc.not_null_constraint_name = Some(constraint.conname.clone());
@@ -1815,7 +1834,6 @@ pub(crate) fn relation_id_get_relation_db(
             desc.default_expr = Some(attrdef.adbin.clone());
             desc.default_sequence_oid =
                 crate::pgrust::database::default_sequence_oid_from_default_expr(&attrdef.adbin);
-            desc.missing_default_value = None;
         }
         columns.push(desc);
     }

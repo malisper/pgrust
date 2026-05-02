@@ -254,10 +254,6 @@ pub fn lower_create_table(
                     {
                         validate_column_default_expr(default_sql, catalog)?;
                     }
-                    desc.missing_default_value = desc
-                        .default_expr
-                        .as_deref()
-                        .and_then(|sql| super::derive_literal_default_value(sql, sql_type).ok());
                 }
                 if let Some(serial_kind) = serial_kind {
                     desc.default_expr = None;
@@ -814,7 +810,7 @@ fn constraint_column_names(attnums: Option<&[i16]>, desc: &RelationDesc) -> Opti
         .collect()
 }
 
-fn validate_column_default_expr(
+pub(crate) fn validate_column_default_expr(
     default_sql: &str,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {

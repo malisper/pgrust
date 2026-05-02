@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::backend::catalog::catalog::catalog_attmissingval_for_column;
 use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions, CatalogIndexMeta,
     allocate_relation_object_oids,
@@ -7737,10 +7738,11 @@ impl CatalogStore {
     pub fn alter_table_add_column_mvcc(
         &mut self,
         relation_oid: u32,
-        column: ColumnDesc,
+        mut column: ColumnDesc,
+        clear_missing_values: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let (_old_entry, new_entry, _, kinds) =
+        let (old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
                 if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
@@ -7753,22 +7755,37 @@ impl CatalogStore {
                 {
                     return Err(CatalogError::TableAlreadyExists(column.name.clone()));
                 }
+                if clear_missing_values {
+                    for existing in &mut entry.desc.columns {
+                        existing.missing_default_value = None;
+                    }
+                    column.missing_default_value = None;
+                    if relkind_has_storage(entry.relkind) {
+                        entry.rel.rel_number = control.next_rel_number;
+                        control.next_rel_number = control.next_rel_number.saturating_add(1);
+                    }
+                }
                 entry.desc.columns.push(column);
                 allocate_relation_object_oids(&mut entry.desc, &mut control.next_oid);
-                Ok((
-                    (),
-                    vec![
-                        BootstrapCatalogKind::PgAttribute,
-                        BootstrapCatalogKind::PgDepend,
-                        BootstrapCatalogKind::PgAttrdef,
-                    ],
-                ))
+                let mut kinds = vec![
+                    BootstrapCatalogKind::PgAttribute,
+                    BootstrapCatalogKind::PgDepend,
+                    BootstrapCatalogKind::PgAttrdef,
+                ];
+                if clear_missing_values && relkind_has_storage(entry.relkind) {
+                    kinds.push(BootstrapCatalogKind::PgClass);
+                }
+                Ok(((), kinds))
             })?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        if clear_missing_values && relkind_has_storage(old_entry.relkind) {
+            effect_record_rel(&mut effect.dropped_rels, old_entry.rel);
+            effect_record_rel(&mut effect.created_rels, new_entry.rel);
+        }
         Ok(effect)
     }
 
@@ -10910,9 +10927,11 @@ fn rows_for_new_relation_entry(
                     attacl: column.attacl.clone(),
                     attoptions: None,
                     attfdwoptions: column.fdw_options.clone(),
-                    attmissingval: None,
+                    attmissingval: catalog_attmissingval_for_column(column),
                     attbyval: crate::include::catalog::builtin_type_row_by_oid(atttypid)
                         .is_some_and(|row| row.typbyval),
+                    atthasdef: column.default_expr.is_some(),
+                    atthasmissing: column.missing_default_value.is_some(),
                     sql_type: column.sql_type,
                 })
             })
@@ -12516,6 +12535,16 @@ fn relation_desc_from_catalog_rows_mvcc(
             attr.attgenerated,
         );
         desc.dropped = attr.attisdropped;
+        desc.missing_default_value = attr
+            .attmissingval
+            .as_ref()
+            .and_then(|values| values.first().cloned())
+            .map(|value| {
+                crate::backend::catalog::catalog::missing_default_value_from_attmissingval(
+                    value,
+                    desc.sql_type,
+                )
+            });
         if let Some(constraint) = not_null_constraints.get(&attr.attnum) {
             desc.not_null_constraint_oid = Some(constraint.oid);
             desc.not_null_constraint_name = Some(constraint.conname.clone());
@@ -12529,7 +12558,6 @@ fn relation_desc_from_catalog_rows_mvcc(
             desc.default_expr = Some(attrdef.adbin.clone());
             desc.default_sequence_oid =
                 crate::pgrust::database::default_sequence_oid_from_default_expr(&attrdef.adbin);
-            desc.missing_default_value = None;
         }
         columns.push(desc);
     }

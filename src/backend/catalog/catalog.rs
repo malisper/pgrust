@@ -9,6 +9,7 @@ use crate::include::catalog::{
     INT8_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, multirange_type_ref_for_sql_type,
     range_type_ref_for_sql_type,
 };
+use crate::include::nodes::datum::Value;
 
 const FIRST_NORMAL_OBJECT_OID: u32 = 16_384;
 
@@ -87,6 +88,35 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         identity: None,
         missing_default_value: None,
         fdw_options: None,
+    }
+}
+
+pub fn catalog_attmissingval_for_column(column: &ColumnDesc) -> Option<Vec<Value>> {
+    let value = column.missing_default_value.clone()?;
+    Some(vec![catalog_attmissingval_value(value)])
+}
+
+fn catalog_attmissingval_value(value: Value) -> Value {
+    match value {
+        // :HACK: pg_attribute.attmissingval is an anyarray containing one
+        // element of the column type. pgrust's anyarray storage cannot yet
+        // encode array-typed elements, so persist array defaults as their SQL
+        // array literal and parse them back when rebuilding the relation desc.
+        Value::Array(values) => {
+            Value::Text(crate::backend::executor::value_io::format_array_text(&values).into())
+        }
+        Value::PgArray(array) => {
+            Value::Text(crate::backend::executor::value_io::format_array_value_text(&array).into())
+        }
+        other => other,
+    }
+}
+
+pub fn missing_default_value_from_attmissingval(value: Value, sql_type: SqlType) -> Value {
+    if sql_type.is_array && matches!(value, Value::Text(_) | Value::TextRef(_, _)) {
+        crate::backend::executor::cast_value(value.clone(), sql_type).unwrap_or(value)
+    } else {
+        value
     }
 }
 

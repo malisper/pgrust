@@ -3436,6 +3436,11 @@ fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSig
                 Some(NamedArgDefault::Float8(1.0)),
             ],
         }),
+        BuiltinScalarFunction::Random => Some(NamedArgSignature {
+            params: &["min", "max"],
+            required: 2,
+            defaults: &[None, None],
+        }),
         BuiltinScalarFunction::JsonbPathExists
         | BuiltinScalarFunction::JsonbPathMatch
         | BuiltinScalarFunction::JsonbPathQueryArray

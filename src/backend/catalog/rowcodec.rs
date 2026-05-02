@@ -1166,6 +1166,22 @@ pub(crate) fn pg_attribute_row_from_values(
         .map(expect_bool)
         .transpose()?
         .unwrap_or(false);
+    let atthasdef = values
+        .get(22)
+        .map(|value| match value {
+            Value::Null => Ok(false),
+            other => expect_bool(other),
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let atthasmissing = values
+        .get(23)
+        .map(|value| match value {
+            Value::Null => Ok(false),
+            other => expect_bool(other),
+        })
+        .transpose()?
+        .unwrap_or_else(|| attmissingval.is_some());
     Ok(PgAttributeRow {
         attrelid: expect_oid(&values[0])?,
         attname: expect_text(&values[1])?,
@@ -1192,6 +1208,8 @@ pub(crate) fn pg_attribute_row_from_values(
         attfdwoptions,
         attmissingval,
         attbyval,
+        atthasdef,
+        atthasmissing,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
 }
@@ -2183,6 +2201,8 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
             Value::PgArray(ArrayValue::from_1d(values))
         }),
         Value::Bool(row.attbyval),
+        Value::Bool(row.atthasdef),
+        Value::Bool(row.atthasmissing),
     ]
 }
 

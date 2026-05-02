@@ -789,6 +789,17 @@ pub(super) fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: Sq
     let right = right.element_type();
 
     match expr {
+        SqlExpr::Add(_, _)
+            if matches!(
+                (left.kind, right.kind),
+                (Date, Int2 | Int4 | Int8) | (Int2 | Int4 | Int8, Date)
+            ) =>
+        {
+            return SqlType::new(Date);
+        }
+        SqlExpr::Sub(_, _) if matches!((left.kind, right.kind), (Date, Int2 | Int4 | Int8)) => {
+            return SqlType::new(Date);
+        }
         SqlExpr::Add(_, _) if matches!((left.kind, right.kind), (Date, Time) | (Time, Date)) => {
             return SqlType::new(Timestamp);
         }

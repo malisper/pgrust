@@ -10,7 +10,9 @@ use super::{
     pg_statistic_ext_desc, pg_subscription_desc, pg_tablespace_desc, pg_transform_desc,
     pg_type_desc,
 };
-use crate::backend::catalog::catalog::{catalog_attribute_collation_oid, column_desc};
+use crate::backend::catalog::catalog::{
+    catalog_attmissingval_for_column, catalog_attribute_collation_oid, column_desc,
+};
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
 use crate::backend::parser::SqlTypeKind;
@@ -78,6 +80,8 @@ pub struct PgAttributeRow {
     pub attfdwoptions: Option<Vec<String>>,
     pub attmissingval: Option<Vec<Value>>,
     pub attbyval: bool,
+    pub atthasdef: bool,
+    pub atthasmissing: bool,
     pub sql_type: SqlType,
 }
 
@@ -133,6 +137,8 @@ pub fn pg_attribute_desc() -> RelationDesc {
             ),
             column_desc("attmissingval", SqlType::new(SqlTypeKind::AnyArray), true),
             column_desc("attbyval", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("atthasdef", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("atthasmissing", SqlType::new(SqlTypeKind::Bool), false),
         ],
     }
 }
@@ -343,11 +349,13 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
                 attacl: column.attacl.clone(),
                 attoptions: None,
                 attfdwoptions: None,
-                attmissingval: None,
+                attmissingval: catalog_attmissingval_for_column(column),
                 attbyval: type_row
                     .as_ref()
                     .map(|row| row.typbyval)
                     .unwrap_or_else(|| type_byval(column.sql_type, column.storage.attlen)),
+                atthasdef: column.default_expr.is_some(),
+                atthasmissing: column.missing_default_value.is_some(),
                 sql_type: column.sql_type,
             }
         })
