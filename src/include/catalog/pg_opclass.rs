@@ -73,25 +73,41 @@ pub const JSONB_GIN_PATH_OPCLASS_OID: u32 = 10066;
 pub const BYTEA_BRIN_MINMAX_OPCLASS_OID: u32 = 76120;
 pub const CHAR_BRIN_MINMAX_OPCLASS_OID: u32 = 76121;
 pub const INT2_BRIN_MINMAX_OPCLASS_OID: u32 = 76122;
+pub const INT2_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76301;
 pub const INT4_BRIN_MINMAX_OPCLASS_OID: u32 = 76123;
+pub const INT4_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76302;
 pub const INT8_BRIN_MINMAX_OPCLASS_OID: u32 = 76124;
+pub const INT8_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76300;
 pub const NUMERIC_BRIN_MINMAX_OPCLASS_OID: u32 = 76145;
+pub const NUMERIC_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76314;
 pub const OID_BRIN_MINMAX_OPCLASS_OID: u32 = 76125;
+pub const OID_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76303;
 pub const TID_BRIN_MINMAX_OPCLASS_OID: u32 = 76143;
+pub const TID_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76304;
 pub const FLOAT4_BRIN_MINMAX_OPCLASS_OID: u32 = 76126;
+pub const FLOAT4_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76305;
 pub const FLOAT8_BRIN_MINMAX_OPCLASS_OID: u32 = 76127;
+pub const FLOAT8_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76306;
 pub const TEXT_BRIN_MINMAX_OPCLASS_OID: u32 = 76128;
 pub const BPCHAR_BRIN_MINMAX_OPCLASS_OID: u32 = 76129;
 pub const TIME_BRIN_MINMAX_OPCLASS_OID: u32 = 76130;
+pub const TIME_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76308;
 pub const DATE_BRIN_MINMAX_OPCLASS_OID: u32 = 76131;
+pub const DATE_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76309;
 pub const TIMESTAMP_BRIN_MINMAX_OPCLASS_OID: u32 = 76132;
+pub const TIMESTAMP_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76310;
 pub const TIMESTAMPTZ_BRIN_MINMAX_OPCLASS_OID: u32 = 76133;
+pub const TIMESTAMPTZ_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76311;
 pub const TIMETZ_BRIN_MINMAX_OPCLASS_OID: u32 = 76134;
+pub const TIMETZ_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76313;
 pub const INTERVAL_BRIN_MINMAX_OPCLASS_OID: u32 = 76146;
+pub const INTERVAL_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76312;
 pub const BIT_BRIN_MINMAX_OPCLASS_OID: u32 = 76135;
 pub const VARBIT_BRIN_MINMAX_OPCLASS_OID: u32 = 76136;
 pub const UUID_BRIN_MINMAX_OPCLASS_OID: u32 = 76147;
+pub const UUID_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76315;
 pub const PG_LSN_BRIN_MINMAX_OPCLASS_OID: u32 = 76148;
+pub const PG_LSN_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76316;
 pub const MACADDR_BRIN_MINMAX_OPCLASS_OID: u32 = 76137;
 pub const MACADDR8_BRIN_MINMAX_OPCLASS_OID: u32 = 76138;
 pub const MACADDR_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76139;
@@ -99,6 +115,7 @@ pub const MACADDR8_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76140;
 pub const MACADDR_BRIN_BLOOM_OPCLASS_OID: u32 = 76141;
 pub const MACADDR8_BRIN_BLOOM_OPCLASS_OID: u32 = 76142;
 pub const NAME_BRIN_MINMAX_OPCLASS_OID: u32 = 76150;
+pub const INET_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76307;
 pub const BOOL_HASH_OPCLASS_OID: u32 = 76200;
 pub const INT2_HASH_OPCLASS_OID: u32 = 76201;
 pub const INT4_HASH_OPCLASS_OID: u32 = 76202;
@@ -636,10 +653,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_INTEGER_MINMAX_FAMILY_OID,
             INT2_TYPE_OID,
         ),
+        brin_non_default_row(
+            INT2_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "int2_minmax_multi_ops",
+            BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID,
+            INT2_TYPE_OID,
+        ),
         brin_row(
             INT4_BRIN_MINMAX_OPCLASS_OID,
             "int4_minmax_ops",
             BRIN_INTEGER_MINMAX_FAMILY_OID,
+            INT4_TYPE_OID,
+        ),
+        brin_non_default_row(
+            INT4_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "int4_minmax_multi_ops",
+            BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID,
             INT4_TYPE_OID,
         ),
         brin_row(
@@ -648,10 +677,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_INTEGER_MINMAX_FAMILY_OID,
             INT8_TYPE_OID,
         ),
+        brin_non_default_row(
+            INT8_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "int8_minmax_multi_ops",
+            BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID,
+            INT8_TYPE_OID,
+        ),
         brin_row(
             NUMERIC_BRIN_MINMAX_OPCLASS_OID,
             "numeric_minmax_ops",
             BRIN_NUMERIC_MINMAX_FAMILY_OID,
+            NUMERIC_TYPE_OID,
+        ),
+        brin_non_default_row(
+            NUMERIC_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "numeric_minmax_multi_ops",
+            BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID,
             NUMERIC_TYPE_OID,
         ),
         brin_row(
@@ -660,10 +701,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_OID_MINMAX_FAMILY_OID,
             OID_TYPE_OID,
         ),
+        brin_non_default_row(
+            OID_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "oid_minmax_multi_ops",
+            BRIN_OID_MINMAX_MULTI_FAMILY_OID,
+            OID_TYPE_OID,
+        ),
         brin_row(
             TID_BRIN_MINMAX_OPCLASS_OID,
             "tid_minmax_ops",
             BRIN_TID_MINMAX_FAMILY_OID,
+            TID_TYPE_OID,
+        ),
+        brin_non_default_row(
+            TID_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "tid_minmax_multi_ops",
+            BRIN_TID_MINMAX_MULTI_FAMILY_OID,
             TID_TYPE_OID,
         ),
         brin_row(
@@ -672,10 +725,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_FLOAT_MINMAX_FAMILY_OID,
             FLOAT4_TYPE_OID,
         ),
+        brin_non_default_row(
+            FLOAT4_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "float4_minmax_multi_ops",
+            BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID,
+            FLOAT4_TYPE_OID,
+        ),
         brin_row(
             FLOAT8_BRIN_MINMAX_OPCLASS_OID,
             "float8_minmax_ops",
             BRIN_FLOAT_MINMAX_FAMILY_OID,
+            FLOAT8_TYPE_OID,
+        ),
+        brin_non_default_row(
+            FLOAT8_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "float8_minmax_multi_ops",
+            BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID,
             FLOAT8_TYPE_OID,
         ),
         brin_row(
@@ -707,10 +772,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_TIME_MINMAX_FAMILY_OID,
             TIME_TYPE_OID,
         ),
+        brin_non_default_row(
+            TIME_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "time_minmax_multi_ops",
+            BRIN_TIME_MINMAX_MULTI_FAMILY_OID,
+            TIME_TYPE_OID,
+        ),
         brin_row(
             DATE_BRIN_MINMAX_OPCLASS_OID,
             "date_minmax_ops",
             BRIN_DATETIME_MINMAX_FAMILY_OID,
+            DATE_TYPE_OID,
+        ),
+        brin_non_default_row(
+            DATE_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "date_minmax_multi_ops",
+            BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID,
             DATE_TYPE_OID,
         ),
         brin_row(
@@ -719,10 +796,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_DATETIME_MINMAX_FAMILY_OID,
             TIMESTAMP_TYPE_OID,
         ),
+        brin_non_default_row(
+            TIMESTAMP_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "timestamp_minmax_multi_ops",
+            BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID,
+            TIMESTAMP_TYPE_OID,
+        ),
         brin_row(
             TIMESTAMPTZ_BRIN_MINMAX_OPCLASS_OID,
             "timestamptz_minmax_ops",
             BRIN_DATETIME_MINMAX_FAMILY_OID,
+            TIMESTAMPTZ_TYPE_OID,
+        ),
+        brin_non_default_row(
+            TIMESTAMPTZ_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "timestamptz_minmax_multi_ops",
+            BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID,
             TIMESTAMPTZ_TYPE_OID,
         ),
         brin_row(
@@ -731,10 +820,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_TIMETZ_MINMAX_FAMILY_OID,
             TIMETZ_TYPE_OID,
         ),
+        brin_non_default_row(
+            TIMETZ_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "timetz_minmax_multi_ops",
+            BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID,
+            TIMETZ_TYPE_OID,
+        ),
         brin_row(
             INTERVAL_BRIN_MINMAX_OPCLASS_OID,
             "interval_minmax_ops",
             BRIN_INTERVAL_MINMAX_FAMILY_OID,
+            INTERVAL_TYPE_OID,
+        ),
+        brin_non_default_row(
+            INTERVAL_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "interval_minmax_multi_ops",
+            BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID,
             INTERVAL_TYPE_OID,
         ),
         brin_row(
@@ -755,10 +856,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_UUID_MINMAX_FAMILY_OID,
             UUID_TYPE_OID,
         ),
+        brin_non_default_row(
+            UUID_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "uuid_minmax_multi_ops",
+            BRIN_UUID_MINMAX_MULTI_FAMILY_OID,
+            UUID_TYPE_OID,
+        ),
         brin_row(
             PG_LSN_BRIN_MINMAX_OPCLASS_OID,
             "pg_lsn_minmax_ops",
             BRIN_PG_LSN_MINMAX_FAMILY_OID,
+            PG_LSN_TYPE_OID,
+        ),
+        brin_non_default_row(
+            PG_LSN_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "pg_lsn_minmax_multi_ops",
+            BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID,
             PG_LSN_TYPE_OID,
         ),
         brin_row(
@@ -809,6 +922,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             INET_BRIN_MINMAX_OPCLASS_OID,
             "inet_minmax_ops",
             BRIN_NETWORK_MINMAX_FAMILY_OID,
+            INET_TYPE_OID,
+        ),
+        brin_non_default_row(
+            INET_BRIN_MINMAX_MULTI_OPCLASS_OID,
+            "inet_minmax_multi_ops",
+            BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID,
             INET_TYPE_OID,
         ),
         brin_row(
@@ -1343,6 +1462,22 @@ mod tests {
                 true,
             ),
             (
+                INT4_BRIN_MINMAX_MULTI_OPCLASS_OID,
+                BRIN_AM_OID,
+                "int4_minmax_multi_ops",
+                BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID,
+                INT4_TYPE_OID,
+                false,
+            ),
+            (
+                DATE_BRIN_MINMAX_MULTI_OPCLASS_OID,
+                BRIN_AM_OID,
+                "date_minmax_multi_ops",
+                BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID,
+                DATE_TYPE_OID,
+                false,
+            ),
+            (
                 MACADDR_BRIN_MINMAX_OPCLASS_OID,
                 BRIN_AM_OID,
                 "macaddr_minmax_ops",
@@ -1356,6 +1491,14 @@ mod tests {
                 "macaddr8_minmax_multi_ops",
                 BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
                 MACADDR8_TYPE_OID,
+                false,
+            ),
+            (
+                INET_BRIN_MINMAX_MULTI_OPCLASS_OID,
+                BRIN_AM_OID,
+                "inet_minmax_multi_ops",
+                BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID,
+                INET_TYPE_OID,
                 false,
             ),
             (

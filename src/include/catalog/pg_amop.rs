@@ -661,6 +661,37 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
             oid = oid.saturating_add(1);
         }
     }
+    // :HACK: pgrust stores minmax-multi BRIN summaries using the existing
+    // generic minmax runtime shape. These catalog rows make PostgreSQL's named
+    // minmax-multi opclasses usable while preserving lossy heap rechecks.
+    for (family, type_oids) in [
+        (
+            BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID,
+            &[INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID][..],
+        ),
+        (
+            BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID,
+            &[FLOAT4_TYPE_OID, FLOAT8_TYPE_OID],
+        ),
+        (BRIN_OID_MINMAX_MULTI_FAMILY_OID, &[OID_TYPE_OID]),
+        (BRIN_TID_MINMAX_MULTI_FAMILY_OID, &[TID_TYPE_OID]),
+        (
+            BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID,
+            &[INET_TYPE_OID, CIDR_TYPE_OID],
+        ),
+        (BRIN_TIME_MINMAX_MULTI_FAMILY_OID, &[TIME_TYPE_OID]),
+        (
+            BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID,
+            &[DATE_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID],
+        ),
+        (BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID, &[TIMETZ_TYPE_OID]),
+        (BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID, &[INTERVAL_TYPE_OID]),
+        (BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID, &[NUMERIC_TYPE_OID]),
+        (BRIN_UUID_MINMAX_MULTI_FAMILY_OID, &[UUID_TYPE_OID]),
+        (BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID, &[PG_LSN_TYPE_OID]),
+    ] {
+        push_brin_minmax_multi_amop_rows(&mut rows, &mut oid, &operators, family, type_oids);
+    }
     // :HACK: Generic BRIN bloom runtime support is not implemented yet; these
     // rows expose PostgreSQL-compatible catalogs for MAC address types.
     for (family, type_oid) in [
@@ -917,6 +948,48 @@ fn operator_oid(
         .find(|row| row.oprname == name && row.oprleft == left && row.oprright == right)
         .map(|row| row.oid)
         .unwrap_or_else(|| panic!("missing bootstrap operator {name}({left},{right})"))
+}
+
+fn operator_oid_opt(
+    rows: &[crate::include::catalog::PgOperatorRow],
+    name: &str,
+    left: u32,
+    right: u32,
+) -> Option<u32> {
+    rows.iter()
+        .find(|row| row.oprname == name && row.oprleft == left && row.oprright == right)
+        .map(|row| row.oid)
+}
+
+fn push_brin_minmax_multi_amop_rows(
+    rows: &mut Vec<PgAmopRow>,
+    oid: &mut u32,
+    operators: &[crate::include::catalog::PgOperatorRow],
+    family: u32,
+    type_oids: &[u32],
+) {
+    for &left_type in type_oids {
+        for &right_type in type_oids {
+            for (strategy, name) in [(1_i16, "<"), (2, "<="), (3, "="), (4, ">="), (5, ">")] {
+                let Some(operator_oid) = operator_oid_opt(operators, name, left_type, right_type)
+                else {
+                    continue;
+                };
+                rows.push(PgAmopRow {
+                    oid: *oid,
+                    amopfamily: family,
+                    amoplefttype: left_type,
+                    amoprighttype: right_type,
+                    amopstrategy: strategy,
+                    amoppurpose: 's',
+                    amopopr: operator_oid,
+                    amopmethod: BRIN_AM_OID,
+                    amopsortfamily: 0,
+                });
+                *oid = (*oid).saturating_add(1);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

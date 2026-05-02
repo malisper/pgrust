@@ -1,5 +1,6 @@
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::value_io::{decode_value, encode_value};
+use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::brin_internal::{BrinDesc, BrinMemTuple, BrinTupleBytes};
 use crate::include::access::brin_tuple::{
     BRIN_EMPTY_RANGE_MASK, BRIN_NULLS_MASK, BRIN_OFFSET_MASK, BRIN_PLACEHOLDER_MASK, BrinTuple,
@@ -7,6 +8,15 @@ use crate::include::access::brin_tuple::{
     brin_tuple_has_nulls, brin_tuple_is_empty_range, brin_tuple_is_placeholder,
 };
 use crate::include::access::htup::{HeapTuple, TupleValue};
+use crate::include::catalog::{
+    BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID, BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID,
+    BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID, BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID,
+    BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID, BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
+    BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID, BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID,
+    BRIN_OID_MINMAX_MULTI_FAMILY_OID, BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID,
+    BRIN_TID_MINMAX_MULTI_FAMILY_OID, BRIN_TIME_MINMAX_MULTI_FAMILY_OID,
+    BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID, BRIN_UUID_MINMAX_MULTI_FAMILY_OID,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::include::varatt::{is_compressed_inline_datum, is_ondisk_toast_pointer};
@@ -18,13 +28,69 @@ fn disk_column(column: &ColumnDesc, suffix: usize) -> ColumnDesc {
     column
 }
 
+const MINMAX_MULTI_DEFAULT_VALUES_PER_RANGE: usize = 32;
+
+pub(crate) fn brin_opfamily_is_minmax_multi(opfamily_oid: Option<u32>) -> bool {
+    matches!(
+        opfamily_oid,
+        Some(
+            BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID
+                | BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID
+                | BRIN_OID_MINMAX_MULTI_FAMILY_OID
+                | BRIN_TID_MINMAX_MULTI_FAMILY_OID
+                | BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID
+                | BRIN_TIME_MINMAX_MULTI_FAMILY_OID
+                | BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID
+                | BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID
+                | BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID
+                | BRIN_UUID_MINMAX_MULTI_FAMILY_OID
+                | BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID
+                | BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID
+                | BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID
+                | BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID
+        )
+    )
+}
+
+fn brin_minmax_multi_values_per_range(options: &[(String, String)]) -> usize {
+    options
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("values_per_range"))
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+        .unwrap_or(MINMAX_MULTI_DEFAULT_VALUES_PER_RANGE)
+        .clamp(8, 256)
+}
+
 pub(crate) fn brin_build_desc(index_desc: &RelationDesc) -> BrinDesc {
+    brin_build_desc_with_meta(index_desc, None)
+}
+
+pub(crate) fn brin_build_desc_with_meta(
+    index_desc: &RelationDesc,
+    index_meta: Option<&IndexRelCacheEntry>,
+) -> BrinDesc {
     let info = index_desc
         .columns
         .iter()
-        .map(|_| crate::include::access::brin_internal::BrinOpcInfo {
-            nstored: 2,
-            regular_nulls: true,
+        .enumerate()
+        .map(|(index, _)| {
+            let nstored = index_meta
+                .filter(|meta| {
+                    brin_opfamily_is_minmax_multi(meta.opfamily_oids.get(index).copied())
+                })
+                .map(|meta| {
+                    brin_minmax_multi_values_per_range(
+                        meta.indclass_options
+                            .get(index)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
+                    )
+                })
+                .unwrap_or(2);
+            crate::include::access::brin_internal::BrinOpcInfo {
+                nstored,
+                regular_nulls: true,
+            }
         })
         .collect::<Vec<_>>();
     BrinDesc {
@@ -99,15 +165,8 @@ pub(crate) fn brin_form_tuple(
         )));
     }
 
-    let total_len = crate::backend::storage::page::bufpage::max_align(
-        BrinTuple::SIZE
-            + if any_nulls {
-                brin_null_bitmap_len(tuple.columns.len())
-            } else {
-                0
-            }
-            + heap_tuple.data.len(),
-    );
+    let total_len =
+        crate::backend::storage::page::bufpage::max_align(header_size + heap_tuple.data.len());
     let mut bytes = vec![0u8; total_len];
     bytes[0..4].copy_from_slice(&tuple.blkno.to_le_bytes());
 
@@ -383,6 +442,25 @@ mod tests {
         memtuple.columns[0].all_nulls = false;
         memtuple.columns[0].has_nulls = true;
         memtuple.columns[0].values = vec![Value::Int32(-7), Value::Int32(42)];
+
+        let tuple = brin_form_tuple(&desc, &memtuple).unwrap();
+        let deformed = brin_deform_tuple(&desc, &tuple.bytes).unwrap();
+
+        assert_eq!(deformed, memtuple);
+    }
+
+    #[test]
+    fn forms_tuple_with_aligned_bitmap_padding() {
+        let columns = (0..20)
+            .map(|index| column_desc(&format!("c{index}"), SqlType::new(SqlTypeKind::Int2), true))
+            .collect();
+        let desc = brin_build_desc(&RelationDesc { columns });
+        let mut memtuple = BrinMemTuple::new(&desc, 96);
+        memtuple.empty_range = false;
+        for (index, column) in memtuple.columns.iter_mut().enumerate().skip(1) {
+            column.all_nulls = false;
+            column.values = vec![Value::Int16(index as i16), Value::Int16((index * 2) as i16)];
+        }
 
         let tuple = brin_form_tuple(&desc, &memtuple).unwrap();
         let deformed = brin_deform_tuple(&desc, &tuple.bytes).unwrap();

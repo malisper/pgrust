@@ -44121,6 +44121,30 @@ fn indexed_truncate_reinitializes_indexes() {
 }
 
 #[test]
+fn brin_truncate_reinitializes_metapage() {
+    let base = temp_dir("brin_truncate_reinitializes_metapage");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into items values (1), (2)").unwrap();
+    db.execute(
+        1,
+        "create index items_id_brin_idx on items using brin (id) with (pages_per_range = 1)",
+    )
+    .unwrap();
+
+    db.execute(1, "truncate items").unwrap();
+    db.execute(1, "insert into items values (3), (4)").unwrap();
+    db.execute(1, "set enable_seqscan = off").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items where id > 0"),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
 fn btree_prunes_aborted_leaf_entries_when_page_is_full() {
     let base = temp_dir("btree_prunes_aborted_leaf_entries");
     let db = Database::open(&base, 64).unwrap();

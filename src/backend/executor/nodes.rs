@@ -679,7 +679,12 @@ pub(crate) fn render_index_scan_condition_with_key_names_and_runtime_renderer(
                 key_column_names,
                 runtime_renderer,
             )
-            .map(|rendered| (key, rendered))
+            .map(|rendered| {
+                (
+                    key,
+                    normalize_index_scan_key_rendering(index_meta, key, rendered),
+                )
+            })
         })
         .collect::<Vec<_>>();
     if rendered.iter().any(|(key, _)| key.attribute_number == 0)
@@ -730,6 +735,27 @@ fn index_scan_condition_display_rank(rendered: &str) -> u8 {
         0
     } else {
         1
+    }
+}
+
+fn normalize_index_scan_key_rendering(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    key: &IndexScanKey,
+    rendered: String,
+) -> String {
+    let Some(index_attno) = key
+        .attribute_number
+        .checked_sub(1)
+        .and_then(|attno| usize::try_from(attno).ok())
+    else {
+        return rendered;
+    };
+    if index_meta.opcintype_oids.get(index_attno)
+        == Some(&crate::include::catalog::INTERVAL_TYPE_OID)
+    {
+        rendered.replace("::text", "::interval")
+    } else {
+        rendered
     }
 }
 
@@ -3769,22 +3795,6 @@ fn render_index_scan_key(
     runtime_renderer: Option<&dyn Fn(&Expr) -> String>,
 ) -> Option<String> {
     let default_column_names;
-    if purpose == 's'
-        && let Some(display_expr) = &key.display_expr
-    {
-        let column_names = match key_column_names {
-            Some(names) => names,
-            None => {
-                default_column_names = desc
-                    .columns
-                    .iter()
-                    .map(|column| column.name.clone())
-                    .collect::<Vec<_>>();
-                &default_column_names
-            }
-        };
-        return Some(render_index_display_expr(display_expr, column_names));
-    }
     let index_attno = usize::try_from(key.attribute_number.checked_sub(1)?).ok()?;
     let index_key_attno = *index_meta.indkey.get(index_attno)?;
     let (column_name, column_type) = if index_key_attno == 0 {
@@ -3801,6 +3811,33 @@ fn render_index_scan_key(
             .unwrap_or_else(|| column.name.clone());
         (column_name, column.sql_type)
     };
+    let display_column_type = if index_meta.opcintype_oids.get(index_attno)
+        == Some(&crate::include::catalog::INTERVAL_TYPE_OID)
+    {
+        SqlType::new(SqlTypeKind::Interval)
+    } else {
+        column_type
+    };
+    if purpose == 's'
+        && let Some(display_expr) = &key.display_expr
+    {
+        let column_names = match key_column_names {
+            Some(names) => names,
+            None => {
+                default_column_names = desc
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>();
+                &default_column_names
+            }
+        };
+        return Some(render_index_display_expr(
+            display_expr,
+            column_names,
+            display_column_type,
+        ));
+    }
     if purpose == 's' && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null)) {
         match key.strategy {
             0 | 3 => return Some(format!("{column_name} IS NULL")),
@@ -3808,7 +3845,7 @@ fn render_index_scan_key(
             _ => {}
         }
     }
-    let display_type = index_key_argument_display_type(&key.argument, column_type);
+    let display_type = index_key_argument_display_type(&key.argument, display_column_type);
     let right_type_oid = display_type.and_then(index_scan_operator_type_oid_for_sql_type);
     let left_sql = if matches!(display_type.map(|ty| ty.kind), Some(SqlTypeKind::Char))
         && column_type.kind == SqlTypeKind::Char
@@ -3887,7 +3924,11 @@ fn expression_index_key_needs_parens(expr: &str) -> bool {
     false
 }
 
-fn render_index_display_expr(expr: &Expr, column_names: &[String]) -> String {
+fn render_index_display_expr(
+    expr: &Expr,
+    column_names: &[String],
+    index_column_type: SqlType,
+) -> String {
     let Expr::Op(op) = expr else {
         return render_explain_expr_inner_with_qualifier(expr, None, column_names);
     };
@@ -3906,14 +3947,42 @@ fn render_index_display_expr(expr: &Expr, column_names: &[String]) -> String {
         return render_explain_expr_inner_with_qualifier(expr, None, column_names);
     };
     let op_text = infix_operator_text(op.opno, op.op).unwrap_or("=");
-    let left_sql = render_explain_expr_inner_with_qualifier(left, None, column_names);
-    let left_sql = if matches!(left, Expr::Op(_)) {
-        format!("({left_sql})")
+    let display_type = index_column_text_literal_display_type(index_column_type, left, right)
+        .or_else(|| comparison_display_type(left, right, op.collation_oid));
+    let left_sql = render_explain_infix_operand_with_display_type(
+        left,
+        display_type,
+        None,
+        None,
+        column_names,
+    );
+    let right_collation_oid = if text_pattern_operator_suppresses_explain_collation(op.opno) {
+        None
     } else {
-        left_sql
+        op.collation_oid
     };
-    let right_sql = render_explain_infix_operand(right, None, column_names);
+    let right_sql = render_explain_infix_operand_with_display_type(
+        right,
+        display_type,
+        right_collation_oid,
+        None,
+        column_names,
+    );
     format!("{left_sql} {op_text} {right_sql}")
+}
+
+fn index_column_text_literal_display_type(
+    index_column_type: SqlType,
+    left: &Expr,
+    right: &Expr,
+) -> Option<SqlType> {
+    if !matches!(index_column_type.kind, SqlTypeKind::Interval) {
+        return None;
+    }
+    [left, right]
+        .iter()
+        .any(|expr| matches!(expr, Expr::Const(Value::Text(_) | Value::TextRef(_, _))))
+        .then_some(index_column_type)
 }
 
 fn index_scan_operator_type_oid_for_sql_type(sql_type: SqlType) -> Option<u32> {
@@ -4036,6 +4105,11 @@ fn index_key_argument_display_type(
         {
             Some(SqlType::new(column_type.kind))
         }
+        IndexScanKeyArgument::Const(Value::Text(_) | Value::TextRef(_, _))
+            if matches!(column_type.kind, SqlTypeKind::Interval) =>
+        {
+            Some(column_type)
+        }
         IndexScanKeyArgument::Const(Value::Int32(value))
             if column_type.kind == SqlTypeKind::Int4 =>
         {
@@ -4157,6 +4231,7 @@ impl BitmapIndexScanState {
         let mut tuples = 0;
         let allow_array_expansion = self.am_oid == BTREE_AM_OID;
         for key_data in expand_array_equality_scan_keys(key_data, allow_array_expansion) {
+            self.stats.index_searches = self.stats.index_searches.saturating_add(1);
             let begin = crate::include::access::amapi::IndexBeginScanContext {
                 pool: ctx.pool.clone(),
                 client_id: ctx.client_id,
@@ -4385,6 +4460,13 @@ impl PlanNode for BitmapIndexScanState {
             lines.push(format!(
                 "{prefix}Index Cond: {}",
                 render_explain_expr(&format_qual_list(&self.index_quals), &self.column_names)
+            ));
+        }
+        if analyze && (self.stats.index_searches > 0 || self.stats.loops == 0) {
+            let prefix = explain_detail_prefix(indent);
+            lines.push(format!(
+                "{prefix}Index Searches: {}",
+                self.stats.index_searches
             ));
         }
         if analyze
@@ -6692,6 +6774,8 @@ fn comparison_display_type(
         Some(SqlType::new(SqlTypeKind::Text))
     } else if let Some(sql_type) = comparison_cast_literal_display_type(left, right) {
         Some(sql_type)
+    } else if let Some(sql_type) = comparison_text_literal_display_type(left, right) {
+        Some(sql_type)
     } else if timestamp_timestamptz_comparison_display_type(left, right) {
         Some(SqlType::new(SqlTypeKind::TimestampTz))
     } else {
@@ -6711,6 +6795,19 @@ fn comparison_cast_literal_display_type(left: &Expr, right: &Expr) -> Option<Sql
         SqlTypeKind::Int2 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
     )
     .then_some(sql_type)
+}
+
+fn comparison_text_literal_display_type(left: &Expr, right: &Expr) -> Option<SqlType> {
+    fn interval_type_if_text_literal(literal: &Expr, typed: &Expr) -> Option<SqlType> {
+        if !matches!(literal, Expr::Const(Value::Text(_) | Value::TextRef(_, _))) {
+            return None;
+        }
+        let sql_type = crate::include::nodes::primnodes::expr_sql_type_hint(typed)?;
+        matches!(sql_type.kind, SqlTypeKind::Interval).then_some(sql_type)
+    }
+
+    interval_type_if_text_literal(left, right)
+        .or_else(|| interval_type_if_text_literal(right, left))
 }
 
 fn timestamp_timestamptz_comparison_display_type(left: &Expr, right: &Expr) -> bool {
@@ -7207,11 +7304,19 @@ fn render_explain_const(value: &Value) -> String {
         ),
         Value::Timestamp(timestamp) => format!(
             "'{}'::timestamp without time zone",
-            format_timestamp_text(*timestamp, &postgres_explain_datetime_config())
+            format_timestamp_text(*timestamp, &current_explain_datetime_config())
         ),
         Value::TimestampTz(timestamp) => format!(
             "'{}'::timestamp with time zone",
-            format_timestamptz_text(*timestamp, &postgres_explain_datetime_config())
+            format_timestamptz_text(*timestamp, &current_explain_datetime_config())
+        ),
+        Value::Interval(interval) => format!(
+            "'{}'::interval",
+            crate::backend::executor::render_interval_text_with_config(
+                *interval,
+                &current_explain_datetime_config()
+            )
+            .replace('\'', "''")
         ),
         Value::Inet(_) | Value::Cidr(_) => match value.sql_type_hint() {
             Some(sql_type) => format!(
@@ -7478,7 +7583,7 @@ fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<Stri
             })
         }
         SqlTypeKind::Timestamp => {
-            let config = postgres_utc_datetime_config();
+            let config = current_explain_datetime_config();
             parse_timestamp_text(text, &config).ok().map(|timestamp| {
                 format!(
                     "'{}'::timestamp without time zone",
@@ -7487,13 +7592,27 @@ fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<Stri
             })
         }
         SqlTypeKind::TimestampTz => {
-            let config = postgres_utc_datetime_config();
+            let config = current_explain_datetime_config();
             parse_timestamptz_text(text, &config).ok().map(|timestamp| {
                 format!(
                     "'{}'::timestamp with time zone",
                     format_timestamptz_text(timestamp, &config).replace('\'', "''")
                 )
             })
+        }
+        SqlTypeKind::Interval => {
+            let config = current_explain_datetime_config();
+            super::expr_casts::parse_interval_text_value_with_style(text, config.interval_style)
+                .ok()
+                .map(|interval| {
+                    format!(
+                        "'{}'::interval",
+                        crate::backend::executor::render_interval_text_with_config(
+                            interval, &config
+                        )
+                        .replace('\'', "''")
+                    )
+                })
         }
         _ => None,
     }
@@ -7605,6 +7724,14 @@ pub(crate) fn render_explain_literal(value: &Value) -> String {
                 format_timestamptz_text(*timestamp, &postgres_utc_datetime_config())
             )
         }
+        Value::Interval(interval) => {
+            let config = current_explain_datetime_config();
+            format!(
+                "'{}'",
+                crate::backend::executor::render_interval_text_with_config(*interval, &config)
+                    .replace('\'', "''")
+            )
+        }
         Value::Inet(value) => format!("'{}'", value.render_inet()),
         Value::Cidr(value) => format!("'{}'", value.render_cidr()),
         Value::Int16(v) => v.to_string(),
@@ -7633,12 +7760,14 @@ fn render_explain_typed_literal(value: &Value, sql_type: SqlType) -> String {
             .unwrap_or_else(|| render_explain_literal(value)),
         SqlTypeKind::TimestampTz => render_explain_timestamp_typed_literal(value, true)
             .unwrap_or_else(|| render_explain_literal(value)),
+        SqlTypeKind::Interval => render_explain_interval_typed_literal(value)
+            .unwrap_or_else(|| render_explain_literal(value)),
         _ => render_explain_literal(value),
     }
 }
 
 fn render_explain_timestamp_typed_literal(value: &Value, timestamptz: bool) -> Option<String> {
-    let config = postgres_explain_datetime_config();
+    let config = current_explain_datetime_config();
     if timestamptz {
         let timestamp = match value {
             Value::TimestampTz(timestamp) => Some(*timestamp),
@@ -7660,6 +7789,22 @@ fn render_explain_timestamp_typed_literal(value: &Value, timestamptz: bool) -> O
     Some(format!(
         "'{}'",
         format_timestamp_text(timestamp, &config).replace('\'', "''")
+    ))
+}
+
+fn render_explain_interval_typed_literal(value: &Value) -> Option<String> {
+    let config = current_explain_datetime_config();
+    let interval = match value {
+        Value::Interval(interval) => Some(*interval),
+        _ => value.as_text().and_then(|text| {
+            super::expr_casts::parse_interval_text_value_with_style(text, config.interval_style)
+                .ok()
+        }),
+    }?;
+    Some(format!(
+        "'{}'",
+        crate::backend::executor::render_interval_text_with_config(interval, &config)
+            .replace('\'', "''")
     ))
 }
 

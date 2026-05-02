@@ -9171,6 +9171,97 @@ fn resolve_brin_options(options: &[RelOption]) -> Result<BrinOptions, ExecError>
     Ok(resolved)
 }
 
+fn is_brin_minmax_multi_opclass(opclass: &PgOpclassRow) -> bool {
+    matches!(
+        opclass.opcfamily,
+        crate::include::catalog::BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_OID_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_TID_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_TIME_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_UUID_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID
+            | crate::include::catalog::BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID
+    )
+}
+
+fn reloption_bounds_error(name: &str, value: &str, min: &str, max: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("value {value} out of bounds for option \"{name}\""),
+        detail: Some(format!("Valid values are between \"{min}\" and \"{max}\".")),
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn validate_brin_minmax_multi_opclass_options(
+    options: &[RelOption],
+) -> Result<Vec<(String, String)>, ExecError> {
+    let mut seen_values_per_range = false;
+    let mut resolved = Vec::with_capacity(options.len());
+    for option in options {
+        if !option.name.eq_ignore_ascii_case("values_per_range") {
+            return Err(ExecError::DetailedError {
+                message: format!("unrecognized parameter \"{}\"", option.name),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        if seen_values_per_range {
+            return Err(ExecError::DetailedError {
+                message: "parameter \"values_per_range\" specified more than once".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        seen_values_per_range = true;
+        let value = option
+            .value
+            .parse::<i32>()
+            .map_err(|_| ExecError::DetailedError {
+                message: format!(
+                    "invalid value for option \"values_per_range\": \"{}\"",
+                    option.value
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            })?;
+        if !(8..=256).contains(&value) {
+            return Err(reloption_bounds_error(
+                "values_per_range",
+                &option.value,
+                "8",
+                "256",
+            ));
+        }
+        resolved.push((option.name.clone(), option.value.clone()));
+    }
+    Ok(resolved)
+}
+
+fn resolve_index_opclass_options(
+    access_method_oid: u32,
+    opclass: &PgOpclassRow,
+    column: &IndexColumnDef,
+) -> Result<Vec<(String, String)>, ExecError> {
+    if column.opclass_options.is_empty() {
+        return Ok(Vec::new());
+    }
+    if access_method_oid == BRIN_AM_OID && is_brin_minmax_multi_opclass(opclass) {
+        return validate_brin_minmax_multi_opclass_options(&column.opclass_options);
+    }
+    Ok(Vec::new())
+}
+
 fn resolve_gin_options(options: &[RelOption]) -> Result<GinOptions, ExecError> {
     let mut resolved = GinOptions::default();
     for option in options {
@@ -9523,6 +9614,7 @@ fn resolve_create_index_build_options(
 ) -> Result<crate::backend::catalog::CatalogIndexBuildOptions, ExecError> {
     let opclass_rows = catalog.opclass_rows();
     let mut indclass = Vec::with_capacity(columns.len());
+    let mut indclass_options = Vec::with_capacity(columns.len());
     let mut indcollation = Vec::with_capacity(columns.len());
     let mut indoption = Vec::with_capacity(columns.len());
 
@@ -9568,6 +9660,11 @@ fn resolve_create_index_build_options(
                 type_name,
             })
         })?;
+        indclass_options.push(resolve_index_opclass_options(
+            access_method.oid,
+            &opclass,
+            column,
+        )?);
         indclass.push(opclass.oid);
         indcollation.push(
             column
@@ -9613,7 +9710,7 @@ fn resolve_create_index_build_options(
     Ok(crate::backend::catalog::CatalogIndexBuildOptions {
         am_oid: access_method.oid,
         indclass,
-        indclass_options: vec![Vec::new(); indcollation.len()],
+        indclass_options,
         indcollation,
         indoption,
         reloptions: index_reloptions(options),

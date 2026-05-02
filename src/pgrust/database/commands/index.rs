@@ -1239,6 +1239,73 @@ impl Database {
         )
     }
 
+    fn is_brin_minmax_multi_opclass(opclass: &PgOpclassRow) -> bool {
+        matches!(
+            opclass.opcfamily,
+            crate::include::catalog::BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_OID_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_TID_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_TIME_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_UUID_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID
+                | crate::include::catalog::BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID
+        )
+    }
+
+    fn validate_brin_minmax_multi_opclass_options(options: &[RelOption]) -> Result<(), ExecError> {
+        let mut seen_values_per_range = false;
+        for option in options {
+            if !option.name.eq_ignore_ascii_case("values_per_range") {
+                return Err(ExecError::DetailedError {
+                    message: format!("unrecognized parameter \"{}\"", option.name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
+            if seen_values_per_range {
+                return Err(ExecError::DetailedError {
+                    message: "parameter \"values_per_range\" specified more than once".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
+            seen_values_per_range = true;
+            let value = option
+                .value
+                .parse::<i32>()
+                .map_err(|_| ExecError::DetailedError {
+                    message: format!(
+                        "invalid value for option \"values_per_range\": \"{}\"",
+                        option.value
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                })?;
+            if !(8..=256).contains(&value) {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "value {} out of bounds for option \"values_per_range\"",
+                        option.value
+                    ),
+                    detail: Some("Valid values are between \"8\" and \"256\".".into()),
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn validate_index_opclass_options(
         access_method_oid: u32,
         opclass: &PgOpclassRow,
@@ -1246,6 +1313,9 @@ impl Database {
     ) -> Result<(), ExecError> {
         if column.opclass_options.is_empty() {
             return Ok(());
+        }
+        if access_method_oid == BRIN_AM_OID && Self::is_brin_minmax_multi_opclass(opclass) {
+            return Self::validate_brin_minmax_multi_opclass_options(&column.opclass_options);
         }
         if access_method_oid != GIST_AM_OID || opclass.opcfamily != GIST_TSVECTOR_FAMILY_OID {
             return Err(ExecError::DetailedError {
