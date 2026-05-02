@@ -630,6 +630,7 @@ pub struct ExecutorContext {
     /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
     pub timed: bool,
     pub allow_side_effects: bool,
+    pub security_restricted: bool,
     pub pending_async_notifications: Vec<PendingNotification>,
     pub catalog_effects: Vec<CatalogMutationEffect>,
     pub temp_effects: Vec<TempMutationEffect>,

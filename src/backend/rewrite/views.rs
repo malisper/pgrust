@@ -1155,6 +1155,7 @@ fn validate_view_shape(
     relation_desc: &RelationDesc,
     display_name: &str,
     catalog: &dyn CatalogLookup,
+    allow_output_name_mismatch: bool,
 ) -> Result<(), ParseError> {
     // :HACK: PostgreSQL lets stale named-composite function views deparse and
     // explain after referenced attributes are dropped; the executor reports the
@@ -1165,7 +1166,13 @@ fn validate_view_shape(
         if actual_columns.len() > relation_desc.columns.len()
             && prune_added_view_columns_by_name(query, &actual_columns, relation_desc)
         {
-            return validate_view_shape(query, relation_desc, display_name, catalog);
+            return validate_view_shape(
+                query,
+                relation_desc,
+                display_name,
+                catalog,
+                allow_output_name_mismatch,
+            );
         }
         return Err(ParseError::UnexpectedToken {
             expected: "view query width matching stored view columns",
@@ -1177,14 +1184,14 @@ fn validate_view_shape(
         .zip(relation_desc.columns.iter())
         .enumerate()
     {
-        if actual_column.name != stored_column.name
-            && !values_query
-            && !query
-                .columns()
-                .iter()
-                .skip(index)
-                .any(|column| column.name == stored_column.name)
-        {
+        if view_column_name_mismatch_indicates_dropped_attr(
+            query,
+            index,
+            &actual_column.name,
+            &stored_column.name,
+            values_query,
+            allow_output_name_mismatch,
+        ) {
             return Err(ParseError::DetailedError {
                 message: format!(
                     "attribute {} of type record has been dropped",
@@ -1225,14 +1232,14 @@ fn validate_view_shape(
         .zip(relation_desc.columns.iter())
         .enumerate()
     {
-        if actual_column.name != stored_column.name
-            && !values_query
-            && !query
-                .columns()
-                .iter()
-                .skip(index)
-                .any(|column| column.name == stored_column.name)
-        {
+        if view_column_name_mismatch_indicates_dropped_attr(
+            query,
+            index,
+            &actual_column.name,
+            &stored_column.name,
+            values_query,
+            allow_output_name_mismatch,
+        ) {
             return Err(ParseError::DetailedError {
                 message: format!(
                     "attribute {} of type record has been dropped",
@@ -1255,6 +1262,24 @@ fn validate_view_shape(
         }
     }
     Ok(())
+}
+
+fn view_column_name_mismatch_indicates_dropped_attr(
+    query: &Query,
+    index: usize,
+    actual_name: &str,
+    stored_name: &str,
+    values_query: bool,
+    allow_output_name_mismatch: bool,
+) -> bool {
+    if actual_name == stored_name || values_query || allow_output_name_mismatch {
+        return false;
+    }
+    !query
+        .columns()
+        .iter()
+        .skip(index)
+        .any(|column| column.name == stored_name)
 }
 
 fn query_is_single_values_rte(query: &Query) -> bool {
@@ -1686,9 +1711,16 @@ pub(crate) fn load_view_return_query(
         return Err(ParseError::RecursiveView(display_name));
     }
     let rule = return_rule_row(catalog, relation_oid, &display_name)?;
+    let allow_output_name_mismatch = relation_is_materialized_view(catalog, relation_oid);
     if let Some(mut query) = stored_view_query(rule.oid) {
         refresh_query_relation_descriptors(&mut query, catalog);
-        validate_view_shape(&mut query, relation_desc, &display_name, catalog)?;
+        validate_view_shape(
+            &mut query,
+            relation_desc,
+            &display_name,
+            catalog,
+            allow_output_name_mismatch,
+        )?;
         return Ok(query);
     }
     let select = load_view_return_select_from_rule(rule, alias, catalog, expanded_views)?;
@@ -1696,8 +1728,23 @@ pub(crate) fn load_view_return_query(
     next_views.push(relation_oid);
     let (mut query, _) =
         analyze_select_query_with_outer(&select, catalog, &[], None, None, &[], &next_views)?;
-    validate_view_shape(&mut query, relation_desc, &display_name, catalog)?;
+    validate_view_shape(
+        &mut query,
+        relation_desc,
+        &display_name,
+        catalog,
+        allow_output_name_mismatch,
+    )?;
     Ok(query)
+}
+
+fn relation_is_materialized_view(catalog: &dyn CatalogLookup, relation_oid: u32) -> bool {
+    catalog
+        .lookup_relation_by_oid(relation_oid)
+        .is_some_and(|relation| relation.relkind == 'm')
+        || catalog
+            .class_row_by_oid(relation_oid)
+            .is_some_and(|class| class.relkind == 'm')
 }
 
 pub(crate) fn load_view_return_select(

@@ -10,7 +10,7 @@ use crate::include::nodes::parsenodes::{
     AlterMaterializedViewSetAccessMethodStatement, CreateTableAsQuery,
     DropMaterializedViewStatement, RefreshMaterializedViewStatement, TableAsObjectType,
 };
-use crate::include::nodes::primnodes::QueryColumn;
+use crate::include::nodes::primnodes::{Expr, QueryColumn, set_returning_call_exprs};
 use std::collections::{HashMap, HashSet};
 
 impl Database {
@@ -190,6 +190,9 @@ impl Database {
                 &catalog,
                 Statement::Select(select_query.clone()),
                 false,
+                None,
+                false,
+                None,
             )?;
             let create_cid = select_result.next_command_id.max(cid);
             catalog_effects.extend(select_result.catalog_effects);
@@ -329,6 +332,7 @@ impl Database {
         heap_cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        deferred_constraints: Option<crate::backend::executor::DeferredForeignKeyTracker>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
@@ -347,7 +351,16 @@ impl Database {
             }
         };
         ensure_relation_owner(self, client_id, &relation, &refresh_stmt.relation_name)?;
-        validate_concurrent_matview_refresh(refresh_stmt, &relation, &catalog)?;
+        validate_concurrent_matview_refresh(
+            self,
+            client_id,
+            xid,
+            cid,
+            Arc::clone(&interrupts),
+            refresh_stmt,
+            &relation,
+            &catalog,
+        )?;
         lock_tables_interruptible(
             &self.table_locks,
             client_id,
@@ -370,7 +383,10 @@ impl Database {
                     Arc::clone(&interrupts),
                     &catalog,
                     Statement::Select(select),
-                    false,
+                    true,
+                    Some(relation.owner_oid),
+                    true,
+                    deferred_constraints.clone(),
                 )?;
                 let refresh_cid = select_result.next_command_id.max(cid);
                 catalog_effects.extend(select_result.catalog_effects);
@@ -385,6 +401,11 @@ impl Database {
                 .relation_by_oid(relation.relation_oid)
                 .unwrap_or_else(|| relation.clone());
             validate_concurrent_matview_unique_index_after_query(
+                self,
+                client_id,
+                xid,
+                refresh_cid,
+                Arc::clone(&interrupts),
                 refresh_stmt,
                 &refresh_relation,
                 &refresh_catalog,
@@ -415,6 +436,7 @@ impl Database {
                     &refresh_relation,
                     &refresh_catalog,
                     &rows,
+                    deferred_constraints.clone(),
                 )?;
             }
             let populated_ctx = CatalogWriteContext {
@@ -466,6 +488,7 @@ impl Database {
                 cid,
                 configured_search_path,
                 &mut catalog_effects,
+                None,
             );
         }
 
@@ -480,6 +503,7 @@ impl Database {
             cid,
             configured_search_path,
             &mut catalog_effects,
+            None,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
@@ -601,6 +625,7 @@ impl Database {
             subplans: Vec::new(),
             timed: false,
             allow_side_effects,
+            security_restricted: false,
             pending_async_notifications: Vec::new(),
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),
@@ -623,9 +648,14 @@ impl Database {
 }
 
 fn validate_concurrent_matview_refresh(
+    db: &Database,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<InterruptState>,
     refresh_stmt: &RefreshMaterializedViewStatement,
     relation: &BoundRelation,
-    catalog: &dyn CatalogLookup,
+    catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
 ) -> Result<(), ExecError> {
     if !refresh_stmt.concurrently {
         return Ok(());
@@ -647,10 +677,19 @@ fn validate_concurrent_matview_refresh(
             sqlstate: "42601",
         });
     }
-    if catalog
-        .index_relations_for_heap(relation.relation_oid)
+    let indexes = catalog.index_relations_for_heap(relation.relation_oid);
+    let mut ctx = concurrent_refresh_predicate_context(
+        db,
+        client_id,
+        xid,
+        cid,
+        interrupts,
+        relation.owner_oid,
+        catalog,
+    )?;
+    if indexes
         .iter()
-        .any(is_usable_unique_index_for_concurrent_refresh)
+        .any(|index| is_usable_unique_index_for_concurrent_refresh(index, &mut ctx))
     {
         return Ok(());
     }
@@ -668,31 +707,48 @@ fn validate_concurrent_matview_refresh(
     })
 }
 
-fn is_usable_unique_index_for_concurrent_refresh(index: &BoundIndexRelation) -> bool {
+fn is_usable_unique_index_for_concurrent_refresh(
+    index: &BoundIndexRelation,
+    ctx: &mut ExecutorContext,
+) -> bool {
     let meta = &index.index_meta;
     meta.indisunique
         && meta.indimmediate
         && meta.indisvalid
         && meta.indisready
         && meta.indislive
-        && meta.indpred.is_none()
         && meta.indexprs.is_none()
         && !meta.indkey.is_empty()
         && meta.indkey.iter().all(|attnum| *attnum > 0)
+        && matview_concurrent_refresh_predicate_qualifies(index, ctx)
 }
 
 fn validate_concurrent_matview_unique_index_after_query(
+    db: &Database,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<InterruptState>,
     refresh_stmt: &RefreshMaterializedViewStatement,
     relation: &BoundRelation,
-    catalog: &dyn CatalogLookup,
+    catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
 ) -> Result<(), ExecError> {
     if !refresh_stmt.concurrently {
         return Ok(());
     }
-    if catalog
-        .index_relations_for_heap(relation.relation_oid)
+    let indexes = catalog.index_relations_for_heap(relation.relation_oid);
+    let mut ctx = concurrent_refresh_predicate_context(
+        db,
+        client_id,
+        xid,
+        cid,
+        interrupts,
+        relation.owner_oid,
+        catalog,
+    )?;
+    if indexes
         .iter()
-        .any(is_usable_unique_index_for_concurrent_refresh)
+        .any(|index| is_usable_unique_index_for_concurrent_refresh(index, &mut ctx))
     {
         return Ok(());
     }
@@ -709,6 +765,180 @@ fn validate_concurrent_matview_unique_index_after_query(
         hint: None,
         sqlstate: "55000",
     })
+}
+
+fn concurrent_refresh_predicate_context(
+    db: &Database,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<InterruptState>,
+    owner_oid: u32,
+    catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
+) -> Result<ExecutorContext, ExecError> {
+    let mut ctx = db.matview_executor_context(
+        client_id,
+        xid,
+        cid,
+        None,
+        interrupts,
+        Some(crate::backend::executor::executor_catalog(catalog.clone())),
+        true,
+    )?;
+    ctx.current_user_oid = owner_oid;
+    ctx.active_role_oid = Some(owner_oid);
+    ctx.security_restricted = true;
+    Ok(ctx)
+}
+
+fn matview_concurrent_refresh_predicate_qualifies(
+    index: &BoundIndexRelation,
+    ctx: &mut ExecutorContext,
+) -> bool {
+    let has_predicate_sql = index
+        .index_meta
+        .indpred
+        .as_deref()
+        .is_some_and(|predicate| !predicate.trim().is_empty());
+    if !has_predicate_sql && index.index_predicate.is_none() {
+        return true;
+    }
+    let Some(predicate) = index.index_predicate.as_ref() else {
+        return false;
+    };
+    if matview_predicate_depends_on_row(predicate) {
+        return false;
+    }
+    let mut slot = crate::backend::executor::TupleSlot::empty(0);
+    matches!(
+        crate::backend::executor::eval_expr(predicate, &mut slot, ctx),
+        Ok(Value::Bool(true))
+    )
+}
+
+fn matview_predicate_depends_on_row(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(_) | Expr::Param(_) => true,
+        Expr::GroupingKey(grouping_key) => matview_predicate_depends_on_row(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(matview_predicate_depends_on_row),
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(matview_predicate_depends_on_row)
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| matview_predicate_depends_on_row(&item.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(matview_predicate_depends_on_row)
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(matview_predicate_depends_on_row),
+        Expr::Op(op) => op.args.iter().any(matview_predicate_depends_on_row),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(matview_predicate_depends_on_row),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(matview_predicate_depends_on_row)
+                || case_expr.args.iter().any(|arm| {
+                    matview_predicate_depends_on_row(&arm.expr)
+                        || matview_predicate_depends_on_row(&arm.result)
+                })
+                || matview_predicate_depends_on_row(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(matview_predicate_depends_on_row),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(matview_predicate_depends_on_row),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(matview_predicate_depends_on_row),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(matview_predicate_depends_on_row),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_some_and(matview_predicate_depends_on_row)
+                || subplan.args.iter().any(matview_predicate_depends_on_row)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            matview_predicate_depends_on_row(&saop.left)
+                || matview_predicate_depends_on_row(&saop.right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(matview_predicate_depends_on_row),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => matview_predicate_depends_on_row(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            matview_predicate_depends_on_row(expr)
+                || matview_predicate_depends_on_row(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(matview_predicate_depends_on_row)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            matview_predicate_depends_on_row(left) || matview_predicate_depends_on_row(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().any(matview_predicate_depends_on_row)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| matview_predicate_depends_on_row(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            matview_predicate_depends_on_row(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(matview_predicate_depends_on_row)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(matview_predicate_depends_on_row)
+                })
+        }
+        Expr::CaseTest(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn validate_refresh_matview_rows(
@@ -914,6 +1144,9 @@ fn execute_matview_select_rows(
     catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
     stmt: Statement,
     allow_side_effects: bool,
+    current_user_oid: Option<u32>,
+    security_restricted: bool,
+    deferred_constraints: Option<crate::backend::executor::DeferredForeignKeyTracker>,
 ) -> Result<MatviewSelectResult, ExecError> {
     let mut ctx = db.matview_executor_context(
         client_id,
@@ -924,6 +1157,12 @@ fn execute_matview_select_rows(
         Some(crate::backend::executor::executor_catalog(catalog.clone())),
         allow_side_effects,
     )?;
+    if let Some(current_user_oid) = current_user_oid {
+        ctx.current_user_oid = current_user_oid;
+        ctx.active_role_oid = Some(current_user_oid);
+    }
+    ctx.security_restricted = security_restricted;
+    ctx.deferred_foreign_keys = deferred_constraints;
     let StatementResult::Query { rows, .. } = execute_readonly_statement(stmt, catalog, &mut ctx)?
     else {
         unreachable!("materialized view query should return rows");
@@ -979,8 +1218,9 @@ fn insert_matview_rows(
     heap_cid: CommandId,
     interrupts: Arc<InterruptState>,
     relation: &crate::backend::parser::BoundRelation,
-    catalog: &dyn CatalogLookup,
+    catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
     rows: &[Vec<Value>],
+    deferred_constraints: Option<crate::backend::executor::DeferredForeignKeyTracker>,
 ) -> Result<usize, ExecError> {
     let indexes = catalog.index_relations_for_heap(relation.relation_oid);
     let toast_index = relation.toast.and_then(|toast| {
@@ -989,8 +1229,19 @@ fn insert_matview_rows(
             .into_iter()
             .next()
     });
-    let mut ctx =
-        db.matview_executor_context(client_id, xid, cid, Some(heap_cid), interrupts, None, true)?;
+    let mut ctx = db.matview_executor_context(
+        client_id,
+        xid,
+        cid,
+        Some(heap_cid),
+        interrupts,
+        Some(crate::backend::executor::executor_catalog(catalog.clone())),
+        true,
+    )?;
+    ctx.current_user_oid = relation.owner_oid;
+    ctx.active_role_oid = Some(relation.owner_oid);
+    ctx.security_restricted = true;
+    ctx.deferred_foreign_keys = deferred_constraints;
     let relation_name = catalog
         .class_row_by_oid(relation.relation_oid)
         .map(|row| row.relname)

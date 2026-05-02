@@ -224,6 +224,7 @@ fn analyze_executor_context(
         random_state: crate::backend::executor::PgPrngState::shared(),
         timed: false,
         allow_side_effects: false,
+        security_restricted: false,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
@@ -4087,6 +4088,86 @@ fn set_large_test_max_stack_depth(session: &mut Session, db: &Database, requeste
 }
 
 #[test]
+fn misc_builtin_wal_helpers_and_regression_c_shims() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select setting from pg_settings where name = 'wal_segment_size'",
+        ),
+        vec![vec![Value::Text(
+            crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES
+                .to_string()
+                .into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) > 0 from pg_ls_waldir()"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select length((w).name), (w).size \
+             from (select pg_ls_waldir() w) ss \
+             where length((w).name) = 24 limit 1",
+        ),
+        vec![vec![
+            Value::Int32(24),
+            Value::Int64(i64::from(
+                crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES,
+            )),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select segment_number, file_offset \
+             from pg_walfile_name_offset('0/1000000'::pg_lsn), \
+                  pg_split_walfile_name(file_name)",
+        ),
+        vec![vec![Value::Numeric("1".into()), Value::Int32(0)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) >= 0 from pg_ls_archive_statusdir()"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+
+    db.execute(
+        1,
+        "create function test_canonicalize_path(text) returns text \
+         as 'regresslib', 'test_canonicalize_path' language c strict immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function test_relpath() returns void \
+         as 'regresslib', 'test_relpath' language c",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select test_canonicalize_path('./abc/./def/.././ghi/../../../jkl/mno')",
+        ),
+        vec![vec![Value::Text("../jkl/mno".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select test_relpath()"),
+        vec![vec![Value::Null]]
+    );
+}
+
+#[test]
 fn materialized_view_create_refresh_metadata_and_drop() {
     let db = Database::open_ephemeral(64).unwrap();
     let mut session = Session::new(1);
@@ -4221,6 +4302,90 @@ fn materialized_view_create_refresh_metadata_and_drop() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn materialized_view_base_column_rename_preserves_alias_dependencies() {
+    let db = Database::open_ephemeral(64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table mvtest_v (i int4, j int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mvtest_mv_v (ii, jj) as select i, j from mvtest_v",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mvtest_mv_v_2 (ii) as select i, j from mvtest_v",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mvtest_mv_v_3 (ii, jj) as \
+             select i, j from mvtest_v with no data",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mvtest_mv_v_4 (ii) as \
+             select i, j from mvtest_v with no data",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "alter table mvtest_v rename column i to x")
+        .unwrap();
+    session
+        .execute(&db, "insert into mvtest_v values (1, 2)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index mvtest_mv_v_ii on mvtest_mv_v (ii)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view mvtest_mv_v")
+        .unwrap();
+    session
+        .execute(&db, "update mvtest_v set j = 3 where x = 1")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view concurrently mvtest_mv_v")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view mvtest_mv_v_2")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view mvtest_mv_v_3")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view mvtest_mv_v_4")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select * from mvtest_v"),
+        vec![vec![Value::Int32(1), Value::Int32(3)]]
+    );
+    for matview in [
+        "mvtest_mv_v",
+        "mvtest_mv_v_2",
+        "mvtest_mv_v_3",
+        "mvtest_mv_v_4",
+    ] {
+        assert_eq!(
+            session_query_rows(&mut session, &db, &format!("select * from {matview}")),
+            vec![vec![Value::Int32(1), Value::Int32(3)]],
+            "{matview}"
+        );
+    }
 }
 
 #[test]
@@ -4989,6 +5154,157 @@ fn materialized_view_set_schema_refresh_concurrently_and_drop_cascade() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn materialized_view_refresh_uses_security_restricted_operation_guards() {
+    let db = Database::open_ephemeral(64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function mv_action() returns bool language sql as \
+             'declare c cursor with hold for select 1; select true'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view sro_mv as select mv_action() with no data",
+        )
+        .unwrap();
+    let cursor_err = session
+        .execute(&db, "refresh materialized view sro_mv")
+        .unwrap_err();
+    assert!(matches!(
+        cursor_err,
+        ExecError::WithContext { source, .. }
+            if matches!(
+                *source,
+                ExecError::DetailedError { ref message, sqlstate: "0A000", .. }
+                    if message == "cannot create a cursor WITH HOLD within security-restricted operation"
+            )
+    ));
+
+    session
+        .execute(&db, "create table sro_trojan_table(id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function sro_trojan() returns trigger language plpgsql as \
+             'begin return null; end'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create constraint trigger t after insert on sro_trojan_table \
+             initially deferred for each row execute procedure sro_trojan()",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create or replace function mv_action() returns bool language sql as \
+             'insert into sro_trojan_table values (1); select true'",
+        )
+        .unwrap();
+    let deferred_err = session
+        .execute(&db, "refresh materialized view sro_mv")
+        .unwrap_err();
+    assert!(matches!(
+        deferred_err,
+        ExecError::WithContext { source, .. }
+            if matches!(
+                *source,
+                ExecError::DetailedError { ref message, sqlstate: "0A000", .. }
+                    if message == "cannot fire deferred trigger within security-restricted operation"
+            )
+    ));
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "set constraints all immediate")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view sro_mv")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "create role sro_owner").unwrap();
+    session.execute(&db, "create role sro_target").unwrap();
+    session
+        .execute(&db, "set session authorization sro_owner")
+        .unwrap();
+    session
+        .execute(&db, "create table sro_grant_table(id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function sro_unwanted_grant() returns void language sql as \
+             'grant sro_target to sro_owner'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function sro_grant_trigger() returns trigger language plpgsql as \
+             'begin perform sro_unwanted_grant(); return null; end'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create constraint trigger sro_grant_t after insert on sro_grant_table \
+             initially immediate for each row execute procedure sro_grant_trigger()",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function sro_grant_action() returns bool language sql as \
+             'insert into sro_grant_table values (1); select true'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view sro_grant_mv as select sro_grant_action() with no data",
+        )
+        .unwrap();
+    let grant_err = session
+        .execute(&db, "refresh materialized view sro_grant_mv")
+        .unwrap_err();
+    assert!(matches!(
+        exec_error_detailed_message_sqlstate(&grant_err),
+        Some((message, "42501")) if message == "permission denied to grant role \"sro_target\""
+    ));
+    session.execute(&db, "reset session authorization").unwrap();
+
+    session
+        .execute(
+            &db,
+            "create function sro_one(int4) returns int4 immutable language sql as 'select $1'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view sro_index_mv as select 1 as c",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index sro_index_mv_idx on sro_index_mv(c) where sro_one(1) > 0",
+        )
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view concurrently sro_index_mv")
+        .unwrap();
 }
 
 #[test]
@@ -34606,6 +34922,167 @@ fn replica_identity_validation_matches_pg_edge_cases() {
         ExecError::DetailedError { message, .. }
             if message == "column \"id\" is in index used as replica identity"
     ));
+}
+
+#[test]
+fn replica_identity_using_index_validates_candidate_key_metadata() {
+    let base = temp_dir("replica_identity_candidate_key_validation");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table replident (
+                id int4 primary key,
+                keya text not null,
+                keyb text not null,
+                nonkey text,
+                constraint replident_unique_defer unique (keya, keyb) deferrable,
+                constraint replident_unique_nondefer unique (keya, keyb)
+            )",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table replident_other (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index replident_keyab on replident (keya, keyb)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index replident_nonkey on replident (keya, nonkey)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index replident_expr on replident (keya, keyb, (3))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index replident_partial on replident (keya, keyb) where keyb <> '3'",
+        )
+        .unwrap();
+
+    for (sql, expected) in [
+        (
+            "alter table replident replica identity using index replident_keyab",
+            "cannot use non-unique index \"replident_keyab\" as replica identity",
+        ),
+        (
+            "alter table replident replica identity using index replident_nonkey",
+            "index \"replident_nonkey\" cannot be used as replica identity because column \"nonkey\" is nullable",
+        ),
+        (
+            "alter table replident replica identity using index replident_expr",
+            "cannot use expression index \"replident_expr\" as replica identity",
+        ),
+        (
+            "alter table replident replica identity using index replident_partial",
+            "cannot use partial index \"replident_partial\" as replica identity",
+        ),
+        (
+            "alter table replident replica identity using index replident_other_pkey",
+            "\"replident_other_pkey\" is not an index for table \"replident\"",
+        ),
+        (
+            "alter table replident replica identity using index replident_unique_defer",
+            "cannot use non-immediate index \"replident_unique_defer\" as replica identity",
+        ),
+    ] {
+        match session.execute(&db, sql) {
+            Err(ExecError::DetailedError { message, .. })
+            | Err(ExecError::Parse(ParseError::DetailedError { message, .. }))
+            | Err(ExecError::Parse(ParseError::UnexpectedToken {
+                actual: message, ..
+            })) => {
+                assert_eq!(message, expected);
+            }
+            other => panic!("expected replica identity error {expected:?}, got {other:?}"),
+        }
+    }
+
+    session
+        .execute(
+            &db,
+            "alter table replident replica identity using index replident_pkey",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relreplident::text, count(*) \
+             from pg_class c \
+             join pg_index i on i.indrelid = c.oid \
+             where c.relname = 'replident' and i.indisreplident \
+             group by c.relreplident",
+        ),
+        vec![vec![Value::Text("i".into()), Value::Int64(1)]]
+    );
+    session
+        .execute(
+            &db,
+            "alter table replident replica identity using index replident_unique_nondefer",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname \
+             from pg_index i join pg_class c on c.oid = i.indexrelid \
+             where i.indrelid = 'replident'::regclass and i.indisreplident",
+        ),
+        vec![vec![Value::Text("replident_unique_nondefer".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relreplident::text from pg_class where oid = 'pg_class'::regclass",
+        ),
+        vec![vec![Value::Text("n".into())]]
+    );
+}
+
+#[test]
+fn alter_table_add_primary_key_index_is_visible_for_replica_identity() {
+    let base = temp_dir("replica_identity_after_add_primary_key");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table replident_added_pk (a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "alter table replident_added_pk add primary key (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table replident_added_pk replica identity using index replident_added_pk_pkey",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relreplident::text, i.indisreplident \
+             from pg_class c \
+             join pg_index i on i.indrelid = c.oid \
+             join pg_class ic on ic.oid = i.indexrelid \
+             where c.relname = 'replident_added_pk' and ic.relname = 'replident_added_pk_pkey'",
+        ),
+        vec![vec![Value::Text("i".into()), Value::Bool(true)]]
+    );
 }
 
 #[test]

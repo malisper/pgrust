@@ -7262,11 +7262,11 @@ fn parse_create_constraint_trigger_statement() {
         stmt,
         Statement::CreateTrigger(CreateTriggerStatement {
             is_constraint: true,
+            deferrable: true,
+            initially_deferred: true,
             trigger_name,
             constraint_relation_schema_name: Some(schema_name),
             constraint_relation_name: Some(relation_name),
-            deferrable: true,
-            initially_deferred: true,
             timing: TriggerTiming::After,
             level: TriggerLevel::Row,
             ..
