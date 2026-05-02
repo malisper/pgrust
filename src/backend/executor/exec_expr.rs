@@ -1,5 +1,6 @@
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
@@ -173,6 +174,7 @@ use crate::backend::utils::misc::guc::{
     normalize_guc_name, pg_settings_flags, plpgsql_guc_default_value,
 };
 use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
+use crate::include::access::htup::AttributeStorage;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::pg_proc::bootstrap_proc_execute_acl_has_grantee;
@@ -198,7 +200,7 @@ use crate::include::catalog::{
 
 const SET_CONFIG_EFFECT_PREFIX: &str = "__pgrust_set_config_effect__";
 use crate::include::nodes::datum::{
-    ArrayDimension, ArrayValue, NumericValue, RecordDescriptor, RecordValue,
+    ArrayDimension, ArrayValue, IndirectVarlenaValue, NumericValue, RecordDescriptor, RecordValue,
 };
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, CMAX_ATTR_NO, CMIN_ATTR_NO, FuncExpr, HashFunctionKind, INDEX_VAR,
@@ -6443,6 +6445,28 @@ fn current_slot_raw_attr_bytes<'a>(
     }
 }
 
+fn raw_varlena_sidecar(raw: &[u8]) -> Option<Arc<[u8]>> {
+    (crate::include::varatt::is_compressed_inline_datum(raw)
+        || crate::include::varatt::is_ondisk_toast_pointer(raw))
+    .then(|| Arc::from(raw))
+}
+
+fn row_field_raw_varlena_sidecar(
+    expr: &Expr,
+    slot: &TupleSlot,
+) -> Result<Option<Arc<[u8]>>, ExecError> {
+    let Expr::Var(var) = expr else {
+        return Ok(None);
+    };
+    if var.varlevelsup != 0 || var.varattno <= 0 || is_executor_special_varno(var.varno) {
+        return Ok(None);
+    }
+    let Some(index) = attrno_index(var.varattno) else {
+        return Ok(None);
+    };
+    Ok(current_slot_raw_attr_bytes(slot, index)?.and_then(raw_varlena_sidecar))
+}
+
 fn compression_method_name_value(method: u32) -> Result<Value, ExecError> {
     match ToastCompressionId::from_u32(method) {
         Some(ToastCompressionId::Pglz) => Ok(Value::Text("pglz".into())),
@@ -6492,6 +6516,11 @@ fn eval_pg_column_compression_raw(raw: &[u8]) -> Result<Value, ExecError> {
 fn eval_pg_column_compression_values(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null] => Ok(Value::Null),
+        [Value::IndirectVarlena(indirect)]
+            if crate::include::varatt::is_compressed_inline_datum(&indirect.bytes) =>
+        {
+            eval_pg_column_compression_raw(&indirect.bytes)
+        }
         [_] => Ok(Value::Null),
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_column_compression(any)",
@@ -8088,6 +8117,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
     }
 
     let size = match value {
+        Value::IndirectVarlena(indirect) => indirect.bytes.len(),
         Value::Jsonb(bytes) | Value::Bytea(bytes) => bytes.len(),
         Value::Text(text) | Value::Json(text) | Value::JsonPath(text) | Value::Xml(text) => {
             text.len()
@@ -8143,6 +8173,98 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         Value::Null => unreachable!("SQL NULL handled above"),
     };
     Ok(Value::Int32(size.min(i32::MAX as usize) as i32))
+}
+
+fn eval_make_tuple_indirect(
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "make_tuple_indirect(record)",
+            actual: format!("{} args", values.len()),
+        }));
+    };
+    let Value::Record(record) = value else {
+        if matches!(value, Value::Null) {
+            return Ok(Value::Null);
+        }
+        return Err(ExecError::DetailedError {
+            message: "make_tuple_indirect requires a record value".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    };
+
+    let mut fields = Vec::with_capacity(record.fields.len());
+    let mut raw_fields = record.raw_fields.clone();
+    raw_fields.resize_with(record.fields.len(), || None);
+
+    for (index, (field, value)) in record.iter().enumerate() {
+        let column = column_desc(field.name.clone(), field.sql_type, true);
+        if matches!(value, Value::Null | Value::IndirectVarlena(_))
+            || column.storage.attlen != -1
+            || column.storage.attstorage == AttributeStorage::Plain
+        {
+            fields.push(value.clone());
+            continue;
+        }
+
+        let bytes =
+            if let Some(raw) = record.raw_field(index) {
+                if crate::include::varatt::is_indirect_toast_pointer(raw) {
+                    return Err(ExecError::InvalidStorageValue {
+                        column: field.name.clone(),
+                        details: "nested indirect toast datum is not supported".into(),
+                    });
+                }
+                if crate::include::varatt::is_compressed_inline_datum(raw) {
+                    let len = crate::include::varatt::compressed_inline_total_size(raw)
+                        .ok_or_else(|| ExecError::InvalidStorageValue {
+                            column: field.name.clone(),
+                            details: "invalid compressed inline datum".into(),
+                        })?;
+                    raw.get(..len)
+                        .ok_or_else(|| ExecError::InvalidStorageValue {
+                            column: field.name.clone(),
+                            details: "truncated compressed inline datum".into(),
+                        })?
+                        .to_vec()
+                } else {
+                    crate::backend::executor::value_io::complete_varlena_bytes_for_value(
+                        &column,
+                        value,
+                        &ctx.datetime_config,
+                    )?
+                    .unwrap_or_default()
+                }
+            } else {
+                crate::backend::executor::value_io::complete_varlena_bytes_for_value(
+                    &column,
+                    value,
+                    &ctx.datetime_config,
+                )?
+                .unwrap_or_default()
+            };
+
+        if bytes.is_empty() {
+            fields.push(value.clone());
+            continue;
+        }
+        let bytes: Arc<[u8]> = bytes.into();
+        raw_fields[index] = Some(bytes.clone());
+        fields.push(Value::IndirectVarlena(IndirectVarlenaValue {
+            sql_type: field.sql_type,
+            bytes,
+        }));
+    }
+
+    Ok(Value::Record(RecordValue::from_descriptor_with_raw_fields(
+        record.descriptor.clone(),
+        fields,
+        raw_fields,
+    )))
 }
 
 fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -10681,6 +10803,10 @@ pub fn eval_expr(
         }
         Expr::Const(value) => Ok(value.clone()),
         Expr::Row { descriptor, fields } => {
+            let raw_fields = fields
+                .iter()
+                .map(|(_, expr)| row_field_raw_varlena_sidecar(expr, slot))
+                .collect::<Result<Vec<_>, ExecError>>()?;
             let values = fields
                 .iter()
                 .map(|(_, expr)| eval_expr(expr, slot, ctx))
@@ -10701,9 +10827,10 @@ pub fn eval_expr(
                 return Ok(Value::Null);
             }
             Ok(Value::Record(
-                crate::include::nodes::datum::RecordValue::from_descriptor(
+                crate::include::nodes::datum::RecordValue::from_descriptor_with_raw_fields(
                     descriptor.clone(),
                     values,
+                    raw_fields,
                 ),
             ))
         }
@@ -11150,15 +11277,22 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             }
         }
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Row { descriptor, fields } => Ok(Value::Record(
-            crate::include::nodes::datum::RecordValue::from_descriptor(
-                descriptor.clone(),
-                fields
-                    .iter()
-                    .map(|(_, expr)| eval_plpgsql_expr(expr, slot))
-                    .collect::<Result<Vec<_>, ExecError>>()?,
-            ),
-        )),
+        Expr::Row { descriptor, fields } => {
+            let raw_fields = fields
+                .iter()
+                .map(|(_, expr)| row_field_raw_varlena_sidecar(expr, slot))
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            Ok(Value::Record(
+                crate::include::nodes::datum::RecordValue::from_descriptor_with_raw_fields(
+                    descriptor.clone(),
+                    fields
+                        .iter()
+                        .map(|(_, expr)| eval_plpgsql_expr(expr, slot))
+                        .collect::<Result<Vec<_>, ExecError>>()?,
+                    raw_fields,
+                ),
+            ))
+        }
         Expr::FieldSelect { expr, field, .. } => {
             let value = eval_plpgsql_expr(expr, slot)?;
             eval_record_field_without_catalog(value, field)
@@ -13748,6 +13882,7 @@ pub(crate) fn eval_native_builtin_scalar_typed_value_call(
             eval_stats_import_builtin_value_call(func, values, arg_types, ctx)
         }
         BuiltinScalarFunction::PgColumnToastChunkId => eval_pg_column_toast_chunk_id_values(values),
+        BuiltinScalarFunction::MakeTupleIndirect => eval_make_tuple_indirect(values, ctx),
         BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(values, func_variadic, true)),
         BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(values, func_variadic, false)),
         BuiltinScalarFunction::PgLogBackendMemoryContexts => {
@@ -14631,6 +14766,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => {
             eval_pg_rust_is_catalog_text_unique_index_oid(&values)
         }
+        BuiltinScalarFunction::MakeTupleIndirect => eval_make_tuple_indirect(&values, ctx),
         BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
             Ok(Value::Bool(true))
         }

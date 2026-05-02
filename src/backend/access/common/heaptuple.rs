@@ -7,8 +7,7 @@ use crate::include::access::htup::{
     ItemPointerData, SIZEOF_HEAP_TUPLE_HEADER, TupleError, TupleValue,
 };
 use crate::include::varatt::{
-    TOAST_POINTER_SIZE, compressed_inline_total_size, is_compressed_inline_datum,
-    is_ondisk_toast_pointer,
+    compressed_inline_total_size, external_varlena_size, is_compressed_inline_datum,
 };
 
 impl HeapTupleHeaderData {
@@ -259,8 +258,8 @@ impl HeapTuple {
                     off = end;
                 }
                 -1 => {
-                    if is_ondisk_toast_pointer(&self.data[off..]) {
-                        let end = off + TOAST_POINTER_SIZE;
+                    if let Some(size) = external_varlena_size(&self.data[off..]) {
+                        let end = off + size;
                         values.push(Some(&self.data[off..end]));
                         off = end;
                     } else if self.data[off] & 0x01 != 0 {
@@ -356,8 +355,8 @@ pub fn deform_raw<'a>(
                 off = end;
             }
             -1 => {
-                if is_ondisk_toast_pointer(&data[off..]) {
-                    let end = off + TOAST_POINTER_SIZE;
+                if let Some(size) = external_varlena_size(&data[off..]) {
+                    let end = off + size;
                     values.push(Some(&data[off..end]));
                     off = end;
                 } else if data[off] & 0x01 != 0 {

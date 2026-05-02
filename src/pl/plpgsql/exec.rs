@@ -1752,6 +1752,11 @@ fn exec_do_stmt(
                 "indirect PL/pgSQL assignment is only supported inside CREATE FUNCTION".into(),
             )))
         }
+        CompiledStmt::AssignTriggerRow { .. } => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "trigger-row PL/pgSQL assignment is only supported inside CREATE FUNCTION".into(),
+            )))
+        }
         CompiledStmt::Null => Ok(DoControl::Continue),
         CompiledStmt::If {
             branches,
@@ -2292,6 +2297,11 @@ fn exec_function_stmt(
             )?;
             state.values[target.slot] =
                 enforce_domain_constraints_for_value(assigned, target.ty, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::AssignTriggerRow { row, expr, .. } => {
+            let value = eval_function_expr(expr, &state.values, ctx)?;
+            assign_trigger_row_value(compiled, state, *row, value, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::Null => Ok(FunctionControl::Continue),
@@ -6213,6 +6223,62 @@ fn trigger_relation_record_value(
     ))
 }
 
+fn assign_trigger_row_value(
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    row: TriggerReturnedRow,
+    value: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let FunctionReturnContract::Trigger { bindings } = &compiled.return_contract else {
+        return Err(function_runtime_error(
+            "trigger row assignment reached a non-trigger function",
+            None,
+            "0A000",
+        ));
+    };
+    let relation = match row {
+        TriggerReturnedRow::New => &bindings.new_row,
+        TriggerReturnedRow::Old => &bindings.old_row,
+    };
+    let Value::Record(record) = value else {
+        return Err(function_runtime_error(
+            "cannot assign non-composite value to trigger row",
+            None,
+            "42804",
+        ));
+    };
+    if record.fields.len() != relation.slots.len() {
+        return Err(function_runtime_error(
+            "cannot assign record to trigger row",
+            Some(format!(
+                "expected {} fields, got {}",
+                relation.slots.len(),
+                record.fields.len()
+            )),
+            "42804",
+        ));
+    }
+
+    for (index, slot) in relation.slots.iter().copied().enumerate() {
+        let source_type = record
+            .descriptor
+            .fields
+            .get(index)
+            .map(|field| field.sql_type);
+        let target_type = relation.field_types[index];
+        let value =
+            cast_function_value(record.fields[index].clone(), source_type, target_type, ctx)?;
+        ensure_not_null_assignment(
+            relation.field_names.get(index).map(String::as_str),
+            relation.not_null.get(index).copied().unwrap_or(false),
+            &value,
+        )?;
+        state.values[slot] = value;
+    }
+    Ok(())
+}
+
 fn statement_result_changed_rows(result: &StatementResult) -> bool {
     match result {
         StatementResult::AffectedRows(rows) => *rows > 0,
@@ -7044,6 +7110,10 @@ fn render_dynamic_query_param_base_sql(
                 )?);
             }
             format!("ROW({})", fields.join(", "))
+        }
+        Value::IndirectVarlena(indirect) => {
+            let decoded = crate::backend::executor::value_io::indirect_varlena_to_value(indirect)?;
+            render_dynamic_query_param_base_sql(&decoded, declared_type_oid, catalog, ctx)?
         }
         Value::Array(items) => {
             let array = ArrayValue::from_1d(items.clone());
@@ -7993,6 +8063,11 @@ fn render_raise_value(value: &Value) -> String {
         }
         Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
         Value::Record(record) => crate::backend::executor::value_io::format_record_text(record),
+        Value::IndirectVarlena(indirect) => {
+            crate::backend::executor::value_io::indirect_varlena_to_value(indirect)
+                .map(|decoded| render_raise_value(&decoded))
+                .unwrap_or_default()
+        }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "<NULL>".to_string(),
     }
 }
@@ -8230,6 +8305,7 @@ fn stmt_context_line(stmt: &CompiledStmt) -> usize {
         | CompiledStmt::Assign { line, .. }
         | CompiledStmt::AssignSubscript { line, .. }
         | CompiledStmt::AssignIndirect { line, .. }
+        | CompiledStmt::AssignTriggerRow { line, .. }
         | CompiledStmt::Return { line, .. }
         | CompiledStmt::ReturnRuntimeQuery { line, .. }
         | CompiledStmt::ReturnSelect { line, .. } => *line,
@@ -8243,7 +8319,8 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::Block(_) => "statement block",
         CompiledStmt::Assign { .. }
         | CompiledStmt::AssignSubscript { .. }
-        | CompiledStmt::AssignIndirect { .. } => "assignment",
+        | CompiledStmt::AssignIndirect { .. }
+        | CompiledStmt::AssignTriggerRow { .. } => "assignment",
         CompiledStmt::Null => "NULL",
         CompiledStmt::If { .. } => "IF",
         CompiledStmt::While { .. } => "WHILE",
@@ -8406,10 +8483,14 @@ mod tests {
             new_row: CompiledTriggerRelation {
                 slots: vec![],
                 field_names: vec![],
+                field_types: vec![],
+                not_null: vec![],
             },
             old_row: CompiledTriggerRelation {
                 slots: vec![],
                 field_names: vec![],
+                field_types: vec![],
+                not_null: vec![],
             },
             tg_name_slot: 0,
             tg_op_slot: 1,
@@ -8471,10 +8552,14 @@ mod tests {
             new_row: CompiledTriggerRelation {
                 slots: vec![],
                 field_names: vec![],
+                field_types: vec![],
+                not_null: vec![],
             },
             old_row: CompiledTriggerRelation {
                 slots: vec![],
                 field_names: vec![],
+                field_types: vec![],
+                not_null: vec![],
             },
             tg_name_slot: 0,
             tg_op_slot: 1,

@@ -1278,6 +1278,7 @@ fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RangeIntersect
             | BuiltinScalarFunction::RangeDifference
             | BuiltinScalarFunction::RangeMerge
+            | BuiltinScalarFunction::MakeTupleIndirect
             | BuiltinScalarFunction::PgRustTestAtomicOps
     )
 }
@@ -2445,6 +2446,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Int8IncAny => args.len() == 2,
             BuiltinScalarFunction::Int4AvgAccum => args.len() == 2,
             BuiltinScalarFunction::Int8Avg => args.len() == 1,
+            BuiltinScalarFunction::MakeTupleIndirect => args.len() == 1,
             BuiltinScalarFunction::TsLexize => args.len() == 2,
             BuiltinScalarFunction::TsHeadline => matches!(args.len(), 2 | 3 | 4),
             BuiltinScalarFunction::TsQueryNot => args.len() == 1,

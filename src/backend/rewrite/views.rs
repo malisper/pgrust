@@ -5816,6 +5816,11 @@ fn render_literal(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Value::IndirectVarlena(indirect) => {
+            crate::backend::executor::value_io::indirect_varlena_to_value(indirect)
+                .map(|decoded| render_literal(&decoded))
+                .unwrap_or_else(|_| "NULL".into())
+        }
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)

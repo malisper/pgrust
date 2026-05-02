@@ -224,6 +224,10 @@ fn encode_array_element_payload(
         }),
         Value::Jsonb(bytes) => Ok(bytes),
         Value::Record(record) => encode_composite_datum(&record),
+        Value::IndirectVarlena(indirect) => {
+            let decoded = indirect_varlena_to_value(&indirect)?;
+            encode_array_element_payload(element_type, &decoded)
+        }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => Ok(Vec::new()),
     }
 }
@@ -865,6 +869,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         }),
         Value::Range(range) => Some(range.range_type.sql_type),
         Value::Multirange(multirange) => Some(multirange.multirange_type.sql_type),
+        Value::IndirectVarlena(indirect) => Some(indirect.sql_type),
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => None,
     }
 }
@@ -1520,6 +1525,17 @@ fn format_array_values_nested(
                 let rendered = format_record_text_with_config(record, datetime_config);
                 push_array_text_element(&mut out, &rendered);
             }
+            Value::IndirectVarlena(indirect) => match indirect_varlena_to_value(indirect) {
+                Ok(decoded) => {
+                    let rendered = format_array_text_with_config(&[decoded], datetime_config);
+                    let inner = rendered
+                        .strip_prefix('{')
+                        .and_then(|text| text.strip_suffix('}'))
+                        .unwrap_or(&rendered);
+                    out.push_str(inner);
+                }
+                Err(_) => out.push_str("NULL"),
+            },
             Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => out.push_str("NULL"),
         }
     }

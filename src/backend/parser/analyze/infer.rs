@@ -524,6 +524,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::InternalChar(_)) => SqlType::new(SqlTypeKind::InternalChar),
         SqlExpr::Const(Value::EnumOid(_)) => SqlType::new(SqlTypeKind::Enum),
         SqlExpr::Const(Value::Record(record)) => record.sql_type(),
+        SqlExpr::Const(Value::IndirectVarlena(indirect)) => indirect.sql_type,
         SqlExpr::Const(Value::Text(_))
         | SqlExpr::Const(Value::TextRef(_, _))
         | SqlExpr::Const(Value::DroppedColumn(_))

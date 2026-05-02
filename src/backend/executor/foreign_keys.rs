@@ -1585,6 +1585,11 @@ fn render_key_value(value: &Value, ctx: &ExecutorContext) -> String {
         Value::Record(v) => format!("{v:?}"),
         Value::Range(v) => render_range_value_with_config(v, &ctx.datetime_config),
         Value::Multirange(v) => render_multirange_with_config(v, &ctx.datetime_config),
+        Value::IndirectVarlena(indirect) => {
+            crate::backend::executor::value_io::indirect_varlena_to_value(indirect)
+                .map(|decoded| render_key_value(&decoded, ctx))
+                .unwrap_or_else(|_| "null".into())
+        }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".into(),
     }
 }
