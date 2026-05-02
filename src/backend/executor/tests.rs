@@ -11437,6 +11437,12 @@ fn create_index_executor_accepts_methods_features_and_geometry_opclasses() {
                         true,
                     ),
                     crate::backend::catalog::catalog::column_desc("note", text, true),
+                    crate::backend::catalog::catalog::column_desc(
+                        "domain_note",
+                        crate::backend::parser::SqlType::new(SqlTypeKind::Varchar)
+                            .with_identity(88_000, 0),
+                        true,
+                    ),
                 ],
             },
         ),
@@ -11445,8 +11451,10 @@ fn create_index_executor_accepts_methods_features_and_geometry_opclasses() {
         SeededSqlHarness::new("create_index_executor_accepts_methods_features", catalog);
 
     for sql in [
-        "create index idx_features_poly_gist on idx_features using gist(poly)",
+        "create index idx_features_poly_gist on idx_features using gist(poly) with (buffering=on, fillfactor=50)",
         "create index idx_features_circ_gist on idx_features using gist(circ)",
+        "create index idx_features_note_spgist on idx_features using spgist(note) with (fillfactor=75)",
+        "create index idx_features_domain_spgist on idx_features using spgist(domain_note)",
         "create index idx_features_tags_gin on idx_features using gin(tags) with (fastupdate=off, gin_pending_list_limit=128)",
         "create index idx_features_hash on idx_features using hash(id) with (fillfactor=80)",
         "create index idx_features_partial_include on idx_features using btree(id) include(note) where id > 0",
@@ -11470,8 +11478,33 @@ fn create_index_executor_accepts_methods_features_and_geometry_opclasses() {
         vec![crate::include::catalog::POLY_GIST_OPCLASS_OID]
     );
     assert_eq!(
+        index_meta("idx_features_poly_gist")
+            .1
+            .gist_options
+            .unwrap()
+            .fillfactor,
+        50
+    );
+    assert_eq!(
         index_meta("idx_features_circ_gist").1.indclass,
         vec![crate::include::catalog::CIRCLE_GIST_OPCLASS_OID]
+    );
+    assert_eq!(
+        index_meta("idx_features_note_spgist").1.indclass,
+        vec![crate::include::catalog::TEXT_SPGIST_OPCLASS_OID]
+    );
+    assert_eq!(
+        catalog
+            .get("idx_features_note_spgist")
+            .unwrap()
+            .reloptions
+            .as_ref()
+            .unwrap(),
+        &vec!["fillfactor=75".to_string()]
+    );
+    assert_eq!(
+        index_meta("idx_features_domain_spgist").1.indclass,
+        vec![crate::include::catalog::TEXT_SPGIST_OPCLASS_OID]
     );
     assert_eq!(
         index_meta("idx_features_tags_gin").1.indclass,
@@ -11519,6 +11552,71 @@ fn create_index_executor_accepts_methods_features_and_geometry_opclasses() {
     assert_eq!(expr.indkey, vec![0]);
     assert!(expr.indexprs.is_some());
     assert!(catalog.get("idx_features_concurrent").is_some());
+}
+
+#[test]
+fn create_index_executor_reports_gist_spgist_option_errors() {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "idx_options",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14131,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "p",
+                        crate::backend::parser::SqlType::new(SqlTypeKind::Point),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "t",
+                        crate::backend::parser::SqlType::new(SqlTypeKind::Text),
+                        true,
+                    ),
+                ],
+            },
+        ),
+    );
+    let mut harness = SeededSqlHarness::new("create_index_executor_option_errors", catalog);
+
+    let err = harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create index idx_options_bad_buffering on idx_options using gist(p) with (buffering=invalid_value)",
+        )
+        .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "invalid value for enum option \"buffering\": invalid_value"
+    );
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            detail: Some(ref detail),
+            ..
+        } if detail == "Valid values are \"on\", \"off\", and \"auto\"."
+    ));
+
+    for sql in [
+        "create index idx_options_bad_gist_fillfactor_low on idx_options using gist(p) with (fillfactor=9)",
+        "create index idx_options_bad_gist_fillfactor_high on idx_options using gist(p) with (fillfactor=101)",
+        "create index idx_options_bad_spgist_fillfactor_low on idx_options using spgist(t) with (fillfactor=9)",
+        "create index idx_options_bad_spgist_fillfactor_high on idx_options using spgist(t) with (fillfactor=101)",
+    ] {
+        let err = harness.execute(INVALID_TRANSACTION_ID, sql).unwrap_err();
+        assert!(format_exec_error(&err).contains("out of bounds for option \"fillfactor\""));
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                detail: Some(ref detail),
+                ..
+            } if detail == "Valid values are between \"10\" and \"100\"."
+        ));
+    }
 }
 
 #[test]

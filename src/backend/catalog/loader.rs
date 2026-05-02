@@ -606,6 +606,11 @@ fn load_gist_options_from_reloptions(
                 options.buffering_mode = value;
                 saw_option = true;
             }
+        } else if name.eq_ignore_ascii_case("fillfactor")
+            && let Ok(fillfactor) = value.parse::<u16>()
+        {
+            options.fillfactor = fillfactor;
+            saw_option = true;
         }
     }
     saw_option.then_some(options)
