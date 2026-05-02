@@ -251,6 +251,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_cluster_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_security_label_statement(&sql) {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_trigger_state_statement(&sql)? {
         return Ok(stmt);
     }
@@ -2103,6 +2106,11 @@ fn substitute_prepared_parameter_refs(
 }
 
 fn build_copy_from_statement(rest: &str) -> Result<Statement, ParseError> {
+    let mut rest = rest.trim_start();
+    let binary_prefix = keyword_at_start(rest, "binary");
+    if binary_prefix {
+        rest = consume_keyword(rest, "binary").trim_start();
+    }
     let from_idx = find_top_level_keyword(rest, "from").ok_or(ParseError::UnexpectedToken {
         expected: "FROM",
         actual: rest.into(),
@@ -2111,7 +2119,10 @@ fn build_copy_from_statement(rest: &str) -> Result<Statement, ParseError> {
     let mut rest = rest[from_idx + "from".len()..].trim_start();
     let (path, next) = parse_copy_file_literal(rest)?;
     rest = next.trim_start();
-    let options = parse_copy_options(rest)?;
+    let mut options = parse_copy_options(rest)?;
+    if binary_prefix {
+        options.format = CopyFormat::Binary;
+    }
 
     let (table_name, columns) = if let Some(open_paren) = target.find('(') {
         let close_paren = target.rfind(')').ok_or(ParseError::UnexpectedEof)?;
@@ -2195,6 +2206,7 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ParseError> {
         match name.to_ascii_lowercase().as_str() {
             "format" if value.eq_ignore_ascii_case("csv") => options.format = CopyFormat::Csv,
             "format" if value.eq_ignore_ascii_case("text") => options.format = CopyFormat::Text,
+            "format" if value.eq_ignore_ascii_case("binary") => options.format = CopyFormat::Binary,
             "format" => {
                 return Err(ParseError::FeatureNotSupported(format!(
                     "COPY FORMAT {value}"
@@ -6630,6 +6642,52 @@ fn validate_copy_single_char_option(name: &'static str, value: &str) -> Result<(
     }
 }
 
+fn try_parse_security_label_statement(sql: &str) -> Option<Statement> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "security label") {
+        return None;
+    }
+    Some(Statement::Unsupported(UnsupportedStatement {
+        sql: trimmed.into(),
+        feature: "SECURITY LABEL",
+    }))
+}
+
+pub fn security_label_provider_error(sql: &str) -> ParseError {
+    if let Some(provider) = security_label_provider_name(sql) {
+        return ParseError::DetailedError {
+            message: format!("security label provider \"{provider}\" is not loaded"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        };
+    }
+    ParseError::DetailedError {
+        message: "no security label providers have been loaded".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    }
+}
+
+fn security_label_provider_name(sql: &str) -> Option<String> {
+    let mut rest = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(rest, "security") {
+        return None;
+    }
+    rest = consume_keyword(rest, "security").trim_start();
+    if !keyword_at_start(rest, "label") {
+        return None;
+    }
+    rest = consume_keyword(rest, "label").trim_start();
+    if !keyword_at_start(rest, "for") {
+        return None;
+    }
+    rest = consume_keyword(rest, "for").trim_start();
+    let token_len = scan_string_literal_token_len(rest)?;
+    decode_string_literal(&rest[..token_len]).ok()
+}
+
 fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -6678,6 +6736,8 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("PREPARE")
     } else if lowered.starts_with("execute ") {
         Some("EXECUTE")
+    } else if lowered.starts_with("security label ") {
+        Some("SECURITY LABEL")
     } else {
         None
     }?;
@@ -19182,19 +19242,69 @@ fn build_declare_cursor(pair: Pair<'_, Rule>) -> Result<DeclareCursorStatement, 
 }
 
 fn build_cluster(pair: Pair<'_, Rule>) -> Result<ClusterStatement, ParseError> {
-    let names = pair
-        .into_inner()
-        .filter(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier)
-        .collect::<Vec<_>>();
-    let [table_name, index_name] = names.as_slice() else {
-        return Err(ParseError::UnexpectedEof);
+    let Some(clause) = pair.into_inner().find(|part| {
+        matches!(
+            part.as_rule(),
+            Rule::cluster_table_using_clause
+                | Rule::cluster_index_on_clause
+                | Rule::cluster_table_clause
+        )
+    }) else {
+        return Ok(ClusterStatement {
+            table_name: String::new(),
+            index_name: String::new(),
+            mark_only: false,
+        });
     };
-    Ok(ClusterStatement {
-        table_name: table_name.clone(),
-        index_name: index_name.clone(),
-        mark_only: false,
-    })
+
+    match clause.as_rule() {
+        Rule::cluster_table_using_clause => {
+            let names = clause
+                .into_inner()
+                .filter(|part| part.as_rule() == Rule::qualified_identifier)
+                .map(build_qualified_identifier_string)
+                .collect::<Vec<_>>();
+            let [table_name, index_name] = names.as_slice() else {
+                return Err(ParseError::UnexpectedEof);
+            };
+            Ok(ClusterStatement {
+                table_name: table_name.clone(),
+                index_name: index_name.clone(),
+                mark_only: false,
+            })
+        }
+        Rule::cluster_index_on_clause => {
+            let names = clause
+                .into_inner()
+                .filter(|part| part.as_rule() == Rule::qualified_identifier)
+                .map(build_qualified_identifier_string)
+                .collect::<Vec<_>>();
+            let [index_name, table_name] = names.as_slice() else {
+                return Err(ParseError::UnexpectedEof);
+            };
+            Ok(ClusterStatement {
+                table_name: table_name.clone(),
+                index_name: index_name.clone(),
+                mark_only: false,
+            })
+        }
+        Rule::cluster_table_clause => {
+            let table_name = clause
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::qualified_identifier)
+                .map(build_qualified_identifier_string)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(ClusterStatement {
+                table_name,
+                index_name: String::new(),
+                mark_only: false,
+            })
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "CLUSTER target",
+            actual: clause.as_str().into(),
+        }),
+    }
 }
 
 fn build_fetch(pair: Pair<'_, Rule>) -> Result<FetchStatement, ParseError> {
@@ -20395,6 +20505,10 @@ fn build_simple_select_statement(
                             limit_location = Some(inner.as_span().start() + 1);
                             limit = build_limit_clause(inner)?;
                         }
+                        Rule::fetch_select_clause => {
+                            limit_location = Some(inner.as_span().start() + 1);
+                            limit = build_fetch_select_clause(inner)?;
+                        }
                         Rule::offset_clause => {
                             offset_location = Some(inner.as_span().start() + 1);
                             offset = Some(build_offset_clause(inner)?);
@@ -20427,6 +20541,10 @@ fn build_simple_select_statement(
             Rule::limit_clause => {
                 limit_location = Some(part.as_span().start() + 1);
                 limit = build_limit_clause(part)?;
+            }
+            Rule::fetch_select_clause => {
+                limit_location = Some(part.as_span().start() + 1);
+                limit = build_fetch_select_clause(part)?;
             }
             Rule::offset_clause => {
                 offset_location = Some(part.as_span().start() + 1);
@@ -20486,6 +20604,7 @@ fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, Par
             | Rule::window_clause
             | Rule::order_by_clause
             | Rule::limit_clause
+            | Rule::fetch_select_clause
             | Rule::offset_clause
             | Rule::locking_clause => query_parts.push(part),
             Rule::select_into_core => {
@@ -20622,6 +20741,10 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             Rule::limit_clause => {
                 limit_location = Some(part.as_span().start() + 1);
                 limit = build_limit_clause(part)?;
+            }
+            Rule::fetch_select_clause => {
+                limit_location = Some(part.as_span().start() + 1);
+                limit = build_fetch_select_clause(part)?;
             }
             Rule::offset_clause => {
                 offset_location = Some(part.as_span().start() + 1);
@@ -20766,6 +20889,7 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
             Rule::values_row => rows.push(build_values_row(part)?),
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = build_limit_clause(part)?,
+            Rule::fetch_select_clause => limit = build_fetch_select_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             _ => {}
         }
@@ -21342,14 +21466,35 @@ fn order_by_using_operator_direction(operator: &str) -> Option<bool> {
 }
 
 fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<Option<usize>, ParseError> {
+    let text = pair.as_str().trim_start();
+    let value = text["limit".len()..].trim();
+    if value.eq_ignore_ascii_case("all") || value.eq_ignore_ascii_case("null") {
+        return Ok(None);
+    }
     if pair
         .clone()
         .into_inner()
-        .any(|part| part.as_rule() == Rule::kw_null)
+        .any(|part| matches!(part.as_rule(), Rule::kw_null | Rule::kw_all))
     {
         return Ok(None);
     }
     build_usize_clause(pair, "LIMIT").map(Some)
+}
+
+fn build_fetch_select_clause(pair: Pair<'_, Rule>) -> Result<Option<usize>, ParseError> {
+    let Some(expr) = pair
+        .clone()
+        .into_inner()
+        .find(|part| matches!(part.as_rule(), Rule::integer_const_expr | Rule::integer))
+    else {
+        return Ok(Some(1));
+    };
+    parse_usize_const_expr(expr.as_str())
+        .map(Some)
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected: "FETCH",
+            actual: expr.as_str().into(),
+        })
 }
 
 fn build_offset_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {

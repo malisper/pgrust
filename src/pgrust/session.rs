@@ -17199,6 +17199,12 @@ impl Session {
                         cid,
                     )? {
                         Ok(result)
+                    } else if unsupported_stmt.feature == "SECURITY LABEL" {
+                        Err(ExecError::Parse(
+                            crate::backend::parser::security_label_provider_error(
+                                &unsupported_stmt.sql,
+                            ),
+                        ))
                     } else if unsupported_stmt.feature == "ALTER TABLE form" {
                         let lower = unsupported_stmt.sql.to_ascii_lowercase();
                         if lower.contains(" set without oids") {
@@ -18519,7 +18525,10 @@ impl Session {
                 }
                 Statement::Cluster(ref cluster_stmt) => {
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                    if let Some(relation) = catalog.lookup_any_relation(&cluster_stmt.table_name) {
+                    if !cluster_stmt.table_name.is_empty()
+                        && let Some(relation) =
+                            catalog.lookup_any_relation(&cluster_stmt.table_name)
+                    {
                         let mode = if cluster_stmt.mark_only {
                             TableLockMode::ShareUpdateExclusive
                         } else {
@@ -18528,6 +18537,7 @@ impl Session {
                         let mut requests =
                             vec![(crate::pgrust::database::relation_lock_tag(&relation), mode)];
                         if cluster_stmt.mark_only
+                            && !cluster_stmt.index_name.is_empty()
                             && let Some(index) =
                                 catalog.lookup_any_relation(&cluster_stmt.index_name)
                         {
@@ -19738,7 +19748,21 @@ impl Session {
         }
         let stop_on_copy_marker =
             matches!(copy.direction, CopyDirection::From(CopyEndpoint::Stdin));
-        let mut rows = parse_copy_input_rows(text, &copy.options, Some(name), stop_on_copy_marker)?;
+        // :HACK: The session-level COPY shim still streams textual fields; accept
+        // PostgreSQL's legacy COPY BINARY syntax by using text row parsing until
+        // COPY is fully routed through the binary COPY implementation.
+        let mut rows = if matches!(copy.options.format, CopyFormat::Binary) {
+            parse_copy_text_rows(
+                text,
+                effective_copy_delimiter(&copy.options),
+                &copy.options.null_marker,
+                copy.options.default_marker.as_deref(),
+                Some(name),
+                stop_on_copy_marker,
+            )?
+        } else {
+            parse_copy_input_rows(text, &copy.options, Some(name), stop_on_copy_marker)?
+        };
         self.apply_copy_header(db, name, columns.as_deref(), &copy.options, &mut rows)
             .map_err(|err| {
                 if matches!(copy.options.header, CopyHeader::Match)
@@ -19759,11 +19783,7 @@ impl Session {
         let parsed_null_marker = match copy.options.format {
             CopyFormat::Text => COPY_TEXT_NULL_SENTINEL,
             CopyFormat::Csv => &copy.options.null_marker,
-            CopyFormat::Binary => {
-                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                    "COPY BINARY".into(),
-                )));
-            }
+            CopyFormat::Binary => COPY_TEXT_NULL_SENTINEL,
         };
         let bytes_processed = text.len().min(i64::MAX as usize) as i64;
         let progress = match &copy.direction {
@@ -21889,7 +21909,12 @@ pub(crate) fn parse_copy_command(sql: &str) -> Option<Result<CopyCommand, ExecEr
 }
 
 fn parse_copy_command_inner(sql: &str) -> Result<CopyCommand, ExecError> {
-    let body = sql[4..].trim_start();
+    let mut body = sql[4..].trim_start();
+    let binary_prefix = body.to_ascii_lowercase().starts_with("binary")
+        && copy_keyword_boundary(body, "binary".len());
+    if binary_prefix {
+        body = body["binary".len()..].trim_start();
+    }
     let (relation, rest) = parse_copy_relation(body)?;
     let rest = rest.trim_start();
     if matches!(relation, CopyRelation::Query(_)) {
@@ -21922,10 +21947,14 @@ fn parse_copy_command_inner(sql: &str) -> Result<CopyCommand, ExecError> {
     };
     let option_offset = option_text.as_ptr() as usize - sql.as_ptr() as usize;
     let is_from = matches!(direction, CopyDirection::From(_));
+    let mut options = parse_copy_options(option_text, option_offset, is_from)?;
+    if binary_prefix {
+        options.format = CopyFormat::Binary;
+    }
     Ok(CopyCommand {
         relation,
         direction,
-        options: parse_copy_options(option_text, option_offset, is_from)?,
+        options,
     })
 }
 
@@ -23528,7 +23557,10 @@ fn copy_field_is_null(
             (raw == COPY_TEXT_NULL_SENTINEL && !force_not_null)
                 || (raw == COPY_CSV_QUOTED_NULL_SENTINEL && force_null)
         }
-        CopyFormat::Binary => false,
+        // :HACK: Legacy COPY BINARY currently reaches this session shim as
+        // text rows, so preserve text NULL handling until binary COPY has a
+        // dedicated COPY FROM path here.
+        CopyFormat::Binary => raw == COPY_TEXT_NULL_SENTINEL || raw == options.null_marker,
     }
 }
 
@@ -24398,7 +24430,7 @@ fn unquote_identifier(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CopyDirection, CopyEndpoint, Session, parse_bool_guc,
+        CopyDirection, CopyEndpoint, CopyFormat, CopyRelation, Session, parse_bool_guc,
         parse_default_toast_compression_guc_value, parse_max_stack_depth, parse_startup_options,
         parse_statement_timeout, validate_max_stack_depth,
     };
@@ -24427,6 +24459,18 @@ mod tests {
             .expect("copy statement")
             .unwrap();
         assert_eq!(copy.options.delimiter, ',');
+    }
+
+    #[test]
+    fn parse_copy_binary_prefix_as_binary_format() {
+        let copy = super::parse_copy_command("copy binary copy_table to '/tmp/copy.data'")
+            .expect("copy statement")
+            .unwrap();
+        assert!(matches!(copy.options.format, CopyFormat::Binary));
+        assert!(matches!(
+            copy.relation,
+            CopyRelation::Table { ref name, .. } if name == "copy_table"
+        ));
     }
 
     #[test]

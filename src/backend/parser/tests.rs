@@ -11091,6 +11091,26 @@ fn parse_select_with_folded_integer_offset_expression() {
 }
 
 #[test]
+fn parse_select_with_offset_before_limit() {
+    let stmt = parse_select("select name from people order by id offset 10 limit 5").unwrap();
+    assert_eq!(stmt.offset, Some(10));
+    assert_eq!(stmt.limit, Some(5));
+}
+
+#[test]
+fn parse_select_with_fetch_first() {
+    let stmt =
+        parse_select("select name from people order by id fetch first 2 rows with ties").unwrap();
+    assert_eq!(stmt.limit, Some(2));
+}
+
+#[test]
+fn parse_select_with_limit_all() {
+    let stmt = parse_select("select name from people order by id limit all").unwrap();
+    assert_eq!(stmt.limit, None);
+}
+
+#[test]
 fn parse_cluster_table_using_index() {
     let stmt = parse_statement("cluster sorttest using sorttest_idx").unwrap();
     assert!(matches!(
@@ -11127,6 +11147,19 @@ fn parse_cluster_all_marked_tables() {
         stmt,
         Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: false })
             if table_name.is_empty() && index_name.is_empty()
+    ));
+}
+
+#[test]
+fn parse_security_label_as_unsupported_statement() {
+    let stmt = parse_statement("security label for 'dummy' on table seclabel_tbl1 is 'classified'")
+        .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Unsupported(UnsupportedStatement {
+            feature: "SECURITY LABEL",
+            ..
+        })
     ));
 }
 
@@ -11977,6 +12010,9 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: CreateTableAsQuery::Select(SelectStatement { from: Some(FromItem::Table { name, .. }), .. }), .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
+    );
+    assert!(
+        matches!(parse_statement("select two, stringu1, ten, string4 into table tmp from onek").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, query: CreateTableAsQuery::Select(SelectStatement { from: Some(FromItem::Table { name, .. }), targets, .. }), .. }) if table_name == "tmp" && name == "onek" && targets.len() == 4)
     );
     assert!(
         matches!(parse_statement("explain analyze select * into table easi from int8_tbl").unwrap(), Statement::Explain(explain) if matches!(explain.statement.as_ref(), Statement::CreateTableAs(CreateTableAsStatement { table_name, .. }) if table_name == "easi"))

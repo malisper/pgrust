@@ -31,7 +31,10 @@ discard_stmt = { kw_discard ~ (kw_all | kw_temp | kw_temporary | kw_sequences) }
 show_stmt = { kw_show ~ (show_transaction_isolation_clause | time_zone_guc_name | guc_name) }
 show_transaction_isolation_clause = { kw_transaction ~ kw_isolation ~ kw_level }
 declare_cursor_stmt = { kw_declare ~ identifier ~ cursor_option* ~ kw_cursor ~ cursor_hold_clause? ~ kw_for ~ select_stmt }
-cluster_stmt = { kw_cluster ~ identifier ~ kw_using ~ identifier }
+cluster_stmt = { kw_cluster ~ (cluster_table_using_clause | cluster_index_on_clause | cluster_table_clause)? }
+cluster_table_using_clause = { qualified_identifier ~ kw_using ~ qualified_identifier }
+cluster_index_on_clause = { qualified_identifier ~ kw_on ~ qualified_identifier }
+cluster_table_clause = { qualified_identifier }
 cursor_option = { kw_binary | kw_insensitive | kw_no ~ kw_scroll | kw_scroll }
 cursor_hold_clause = { kw_with ~ kw_hold | kw_without ~ kw_hold }
 fetch_stmt = { kw_fetch ~ fetch_direction? ~ fetch_portal_name }
@@ -47,26 +50,26 @@ explain_option_value = { kw_off | kw_true | kw_false | kw_text | kw_json | kw_ya
 select_stmt = { set_operation_stmt | parenthesized_select_stmt | simple_select_stmt }
 parenthesized_select_stmt = { "(" ~ select_stmt ~ ")" }
 select_into_stmt = {
-    cte_clause? ~ select_into_core ~ window_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
-  | cte_clause? ~ select_into_core ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
+    cte_clause? ~ select_into_core ~ window_clause? ~ order_by_clause? ~ select_limit_clause? ~ locking_clause?
+  | cte_clause? ~ select_into_core ~ window_clause? ~ order_by_clause? ~ locking_clause ~ select_limit_clause?
 }
 simple_select_stmt = {
-    cte_clause? ~ simple_select_core ~ window_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
-  | cte_clause? ~ simple_select_core ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
+    cte_clause? ~ simple_select_core ~ window_clause? ~ order_by_clause? ~ select_limit_clause? ~ locking_clause?
+  | cte_clause? ~ simple_select_core ~ window_clause? ~ order_by_clause? ~ locking_clause ~ select_limit_clause?
 }
 select_into_core = { kw_select ~ select_distinct_clause? ~ (empty_select_list | select_list)? ~ kw_into ~ select_into_target ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
 simple_select_core = { kw_select ~ select_distinct_clause? ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
 select_into_target = { temp_clause? ~ kw_table? ~ identifier }
 select_distinct_clause = { kw_distinct ~ (kw_on ~ "(" ~ expr ~ ("," ~ expr)* ~ ")")? }
 set_operation_stmt = {
-    cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
-  | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
+    cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ select_limit_clause? ~ locking_clause?
+  | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ locking_clause ~ select_limit_clause?
 }
 set_operation_term = { parenthesized_select_stmt | parenthesized_values_stmt | parenthesized_set_operation_term | values_stmt | table_stmt | simple_select_core }
 parenthesized_set_operation_term = { "(" ~ (select_stmt | parenthesized_set_operation_term | values_stmt | table_stmt) ~ ")" }
 parenthesized_values_stmt = { "(" ~ values_stmt ~ ")" }
 set_operation_clause = { (kw_union | kw_intersect | kw_except) ~ (kw_all | kw_distinct)? }
-values_stmt = { cte_clause? ~ kw_values ~ values_row ~ ("," ~ values_row)* ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
+values_stmt = { cte_clause? ~ kw_values ~ values_row ~ ("," ~ values_row)* ~ order_by_clause? ~ select_limit_clause? }
 copy_stmt = { ^"copy" ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_from ~ quoted_string_literal }
 cte_clause = { kw_with ~ kw_recursive? ~ common_table_expr ~ ("," ~ common_table_expr)* }
 common_table_expr = { identifier ~ cte_column_list? ~ kw_as ~ cte_materialization? ~ "(" ~ cte_body ~ ")" ~ cte_search_clause? ~ cte_cycle_clause? }
@@ -95,8 +98,10 @@ order_by_clause = { kw_order ~ kw_by ~ order_by_item ~ ("," ~ order_by_item)* }
 operator_token = @{ ("!" | "#" | "%" | "&" | "*" | "+" | "-" | "/" | "<" | "=" | ">" | "?" | "@" | "^" | "|" | "~")+ }
 order_by_item = { expr ~ ((kw_using ~ operator_token) | (kw_asc | kw_desc))? ~ nulls_ordering? }
 nulls_ordering = { kw_nulls ~ (kw_first | kw_last) }
-limit_clause = { kw_limit ~ (integer_const_expr | kw_null) }
+limit_clause = { kw_limit ~ (integer_const_expr | kw_null | kw_all) }
 offset_clause = { kw_offset ~ integer_const_expr }
+fetch_select_clause = { kw_fetch ~ (kw_first | kw_next) ~ integer_const_expr? ~ (kw_row | kw_rows) ~ (kw_only | (kw_with ~ kw_ties)) }
+select_limit_clause = _{ ((limit_clause | fetch_select_clause) ~ offset_clause?) | (offset_clause ~ (limit_clause | fetch_select_clause)?) }
 integer_const_expr = { integer ~ (("+" | "-") ~ integer)* }
 locking_clause = { kw_for ~ ((kw_no ~ kw_key ~ kw_update) | (kw_key ~ kw_share) | kw_update | kw_share) ~ locking_of_clause? ~ lock_nowait_clause? }
 locking_of_clause = { kw_of ~ identifier ~ ("," ~ identifier)* }
@@ -420,7 +425,7 @@ savepoint_stmt = { kw_savepoint ~ identifier }
 select_list = { select_item ~ ("," ~ select_item)* }
 select_item = { star | expr ~ alias? }
 alias = { kw_as ~ identifier | bare_select_alias }
-bare_select_alias = { !kw_as ~ !kw_from ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_window ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_for ~ !kw_share ~ !kw_update ~ !kw_returning ~ !kw_union ~ !kw_intersect ~ !kw_except ~ !kw_with ~ identifier }
+bare_select_alias = { !kw_as ~ !kw_into ~ !kw_from ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_window ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_for ~ !kw_share ~ !kw_update ~ !kw_returning ~ !kw_union ~ !kw_intersect ~ !kw_except ~ !kw_with ~ identifier }
 values_row = { "(" ~ expr_list ~ ")" }
 expr_list = { expr ~ ("," ~ expr)* }
 ident_list = { identifier ~ ("," ~ identifier)* }

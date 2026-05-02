@@ -2505,6 +2505,13 @@ impl Database {
                 )? {
                     return Ok(result);
                 }
+                if unsupported_stmt.feature == "SECURITY LABEL" {
+                    return Err(ExecError::Parse(
+                        crate::backend::parser::security_label_provider_error(
+                            &unsupported_stmt.sql,
+                        ),
+                    ));
+                }
                 if unsupported_stmt.feature == "ALTER TABLE form" {
                     let lower = unsupported_stmt.sql.to_ascii_lowercase();
                     if lower.contains(" set without oids") {
