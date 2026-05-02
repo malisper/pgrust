@@ -6927,14 +6927,20 @@ fn build_alter_view_reset_statement(sql: &str) -> Result<AlterTableResetStatemen
     let options = split_comma_separated_sql(inner)?
         .into_iter()
         .map(|option| {
-            let (name, tail) = parse_sql_identifier(option)?;
+            let (parts, tail) = parse_qualified_identifier_parts(option)?;
+            if parts.len() > 2 {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "RESET option name",
+                    actual: parts.join("."),
+                });
+            }
             if !tail.trim().is_empty() {
                 return Err(ParseError::UnexpectedToken {
                     expected: "RESET option name",
                     actual: tail.trim().into(),
                 });
             }
-            Ok(name)
+            Ok(parts.join("."))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(AlterTableResetStatement {

@@ -16329,6 +16329,51 @@ fn create_view_persists_security_reloptions() {
 }
 
 #[test]
+fn view_reset_accepts_storage_reloptions_as_noops() {
+    let dir = temp_dir("view_reset_storage_reloptions");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table items(id int4)").unwrap();
+    db.execute(
+        1,
+        "create view storage_view with (security_barrier=true) as select id from items",
+    )
+    .unwrap();
+
+    for sql in [
+        "alter table storage_view set (autovacuum_enabled=false)",
+        "alter view storage_view set (autovacuum_enabled=false)",
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) if message == "unrecognized parameter \"autovacuum_enabled\""
+                && sqlstate == "22023" => {}
+            other => panic!("expected view storage reloption rejection, got {other:?}"),
+        }
+    }
+
+    db.execute(1, "alter table storage_view reset (autovacuum_enabled)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter view storage_view reset (autovacuum_enabled, fillfactor, toast.autovacuum_enabled)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'storage_view'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["security_barrier=true"],
+            TEXT_TYPE_OID
+        )]]
+    );
+}
+
+#[test]
 fn table_reloptions_create_set_reset_and_errors() {
     let dir = temp_dir("table_reloptions_create_set_reset");
     let db = Database::open(&dir, 128).unwrap();
