@@ -21050,6 +21050,46 @@ fn row_to_json_renders_regclass_fields_with_relation_names() {
 }
 
 #[test]
+fn jsonb_build_object_embeds_row_to_json_subquery() {
+    let base = temp_dir("jsonb_build_object_row_to_json_subquery");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_build_object(
+            'a', jsonb_build_object('b', false, 'c', 99),
+            'd', jsonb_build_object(
+                'e', array[9,8,7]::int[],
+                'f', (
+                    select row_to_json(r)
+                    from (
+                        select relkind, oid::regclass as name
+                        from pg_class
+                        where relname = 'pg_class'
+                    ) r
+                )
+            )
+        )",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text(
+                        "{\"a\":{\"b\":false,\"c\":99},\"d\":{\"e\":[9,8,7],\"f\":{\"name\":\"pg_class\",\"relkind\":\"r\"}}}"
+                    )
+                    .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonb_object_and_pretty_functions_work() {
     let base = temp_dir("jsonb_object_and_pretty");
     let txns = TransactionManager::new_durable(&base).unwrap();

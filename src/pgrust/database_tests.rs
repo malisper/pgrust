@@ -13,10 +13,11 @@ use crate::backend::utils::misc::notices::{
 };
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
-    INT4RANGE_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
-    PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_TYPE_RELATION_OID, POINT_ARRAY_TYPE_OID, PgAggregateRow, TEXT_TYPE_OID,
+    BPCHAR_ARRAY_TYPE_OID, BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID,
+    INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, NUMERIC_ARRAY_TYPE_OID,
+    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, POINT_ARRAY_TYPE_OID,
+    PgAggregateRow, TEXT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
 };
 use crate::include::nodes::datum::{
     ArrayValue, BitString, IntervalValue, NumericValue, RecordValue,
@@ -64926,6 +64927,37 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
         vec![vec![Value::Text("one".into())]]
     );
     assert!(db.execute(1, "select 'one'::rename_me").is_err());
+}
+
+#[test]
+fn type_usage_privilege_resolves_typmod_array_base_types() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    db.execute(
+        1,
+        "create table typmod_array_acl (fixed char(5)[], varying varchar(4)[])",
+    )
+    .unwrap();
+    db.execute(1, "create domain domainchar4arr varchar(4)[2][3]")
+        .unwrap();
+    db.execute(1, "create table domain_array_acl (payload domainchar4arr)")
+        .unwrap();
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    assert_eq!(
+        visible.type_oid_for_sql_type(SqlType::array_of(SqlType::with_char_len(
+            SqlTypeKind::Char,
+            5
+        ))),
+        Some(BPCHAR_ARRAY_TYPE_OID)
+    );
+    assert_eq!(
+        visible.type_oid_for_sql_type(SqlType::array_of(SqlType::with_char_len(
+            SqlTypeKind::Varchar,
+            4
+        ))),
+        Some(VARCHAR_ARRAY_TYPE_OID)
+    );
 }
 
 #[test]
