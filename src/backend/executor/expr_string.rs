@@ -1076,6 +1076,10 @@ fn value_output_text_with_config(
                 datetime_config,
             )
         }
+        Value::IndirectVarlena(indirect) => {
+            let decoded = crate::backend::executor::value_io::indirect_varlena_to_value(indirect)?;
+            return value_output_text_with_config(&decoded, datetime_config);
+        }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => String::new(),
     })
 }

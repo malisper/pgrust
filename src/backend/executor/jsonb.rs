@@ -1403,6 +1403,10 @@ pub(crate) fn jsonb_from_value(
                 .map(|value| jsonb_from_value(value, datetime_config))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        Value::IndirectVarlena(indirect) => {
+            let decoded = crate::backend::executor::value_io::indirect_varlena_to_value(indirect)?;
+            return jsonb_from_value(&decoded, datetime_config);
+        }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => JsonbValue::Null,
     })
 }
@@ -1700,6 +1704,10 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         )
         .to_serde()
         .to_string()),
+        Value::IndirectVarlena(indirect) => {
+            let decoded = crate::backend::executor::value_io::indirect_varlena_to_value(indirect)?;
+            jsonb_builder_key(&decoded)
+        }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => Ok("null".into()),
     }
 }

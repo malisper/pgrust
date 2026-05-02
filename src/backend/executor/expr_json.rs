@@ -2750,6 +2750,10 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
 fn json_object_text_value(value: &Value, op: &'static str) -> Result<Option<String>, ExecError> {
     match value {
         Value::Null => Ok(None),
+        Value::IndirectVarlena(indirect) => {
+            let decoded = crate::backend::executor::value_io::indirect_varlena_to_value(indirect)?;
+            json_object_text_value(&decoded, op)
+        }
         Value::Text(_) | Value::TextRef(_, _) => Ok(Some(value.as_text().unwrap().to_string())),
         Value::Bit(v) => Ok(Some(render_bit_text(v))),
         Value::Bytea(v) => Ok(Some(format_bytea_text(v, ByteaOutputFormat::Hex))),
@@ -4775,6 +4779,11 @@ fn value_to_json_serde_with_config(
                 .map(|value| value_to_json_serde_with_config(value, datetime_config))
                 .collect(),
         ),
+        Value::IndirectVarlena(indirect) => {
+            crate::backend::executor::value_io::indirect_varlena_to_value(indirect)
+                .map(|decoded| value_to_json_serde_with_config(&decoded, datetime_config))
+                .unwrap_or(SerdeJsonValue::Null)
+        }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => SerdeJsonValue::Null,
     }
 }
@@ -4900,6 +4909,13 @@ fn render_json_value_text_with_config(
         Value::Record(record) => render_json_record_value(record, false, datetime_config, catalog),
         Value::PgArray(array) => {
             render_json_array_values(&array.to_nested_values(), false, datetime_config, catalog)
+        }
+        Value::IndirectVarlena(indirect) => {
+            crate::backend::executor::value_io::indirect_varlena_to_value(indirect)
+                .map(|decoded| {
+                    render_json_value_text_with_config(&decoded, datetime_config, catalog)
+                })
+                .unwrap_or_else(|_| "null".into())
         }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".into(),
     }

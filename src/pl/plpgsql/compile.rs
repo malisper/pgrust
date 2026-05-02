@@ -283,6 +283,8 @@ pub(crate) struct CompiledTriggerBindings {
 pub(crate) struct CompiledTriggerRelation {
     pub(crate) slots: Vec<usize>,
     pub(crate) field_names: Vec<String>,
+    pub(crate) field_types: Vec<SqlType>,
+    pub(crate) not_null: Vec<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +324,11 @@ pub(crate) enum CompiledStmt {
     },
     AssignIndirect {
         target: CompiledIndirectAssignTarget,
+        expr: CompiledExpr,
+        line: usize,
+    },
+    AssignTriggerRow {
+        row: TriggerReturnedRow,
         expr: CompiledExpr,
         line: usize,
     },
@@ -756,12 +763,16 @@ impl CompileEnv {
     ) -> CompiledTriggerRelation {
         let mut slots = Vec::with_capacity(desc.columns.len());
         let mut field_names = Vec::with_capacity(desc.columns.len());
+        let mut field_types = Vec::with_capacity(desc.columns.len());
+        let mut not_null = Vec::with_capacity(desc.columns.len());
         let mut columns = Vec::with_capacity(desc.columns.len());
         for column in &desc.columns {
             let slot = self.next_slot;
             self.next_slot += 1;
             slots.push(slot);
             field_names.push(column.name.clone());
+            field_types.push(column.sql_type);
+            not_null.push(!column.storage.nullable);
             columns.push(SlotScopeColumn {
                 slot,
                 name: column.name.clone(),
@@ -774,7 +785,12 @@ impl CompileEnv {
             columns,
             trigger_row: None,
         });
-        CompiledTriggerRelation { slots, field_names }
+        CompiledTriggerRelation {
+            slots,
+            field_names,
+            field_types,
+            not_null,
+        }
     }
 
     fn define_trigger_relation_scope(
@@ -1585,7 +1601,15 @@ fn compile_stmt(
             CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
         }
         Stmt::Assign { target, expr, line } => {
-            if let Some(target) = compile_indirect_assign_target(target, catalog, env)? {
+            if let AssignTarget::Name(name) = target
+                && let Some(row) = env.trigger_relation_return_row(name)
+            {
+                CompiledStmt::AssignTriggerRow {
+                    row,
+                    expr: compile_assignment_expr_text(expr, catalog, env)?,
+                    line: *line,
+                }
+            } else if let Some(target) = compile_indirect_assign_target(target, catalog, env)? {
                 CompiledStmt::AssignIndirect {
                     target,
                     expr: compile_assignment_expr_text(expr, catalog, env)?,

@@ -12406,6 +12406,7 @@ fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RangeMerge
             | BuiltinScalarFunction::PgRustInternalBinaryCoercible
             | BuiltinScalarFunction::PgRustTestAtomicOps
+            | BuiltinScalarFunction::MakeTupleIndirect
             | BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid
     )
 }
@@ -12701,6 +12702,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("drandom_normal_noargs", BuiltinScalarFunction::RandomNormal),
         ("setseed", BuiltinScalarFunction::SetSeed),
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
+        (
+            "make_tuple_indirect",
+            BuiltinScalarFunction::MakeTupleIndirect,
+        ),
         ("current_schemas", BuiltinScalarFunction::CurrentSchemas),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
         ("pg_blocking_pids", BuiltinScalarFunction::PgBlockingPids),

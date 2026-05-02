@@ -27,6 +27,7 @@ use super::expr_string::{
 };
 use super::expr_txid::{cast_text_to_txid_snapshot, is_txid_snapshot_type_oid};
 use super::node_types::*;
+use super::value_io::indirect_varlena_to_value;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, jsonb_to_value, parse_json_text_input, parse_jsonb_text,
     parse_jsonb_text_with_limit, render_jsonb_bytes, validate_json_text_input_with_limit,
@@ -4643,6 +4644,22 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
     catalog: Option<&dyn CatalogLookup>,
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
+    if let Value::IndirectVarlena(indirect) = value {
+        if !ty.is_array && ty.kind == indirect.sql_type.kind {
+            let result = Value::IndirectVarlena(indirect);
+            let result = apply_time_precision(result, ty.time_precision());
+            return enforce_domain_check(result, ty, catalog);
+        }
+        let source_type = Some(indirect.sql_type);
+        let decoded = indirect_varlena_to_value(&indirect)?;
+        return cast_value_with_source_type_catalog_and_config(
+            decoded,
+            source_type,
+            ty,
+            catalog,
+            config,
+        );
+    }
     if ty.is_array {
         let array_cast_type = catalog
             .and_then(|catalog| catalog.domain_by_type_oid(ty.type_oid))
@@ -6252,6 +6269,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }
             _ => Ok(Value::Record(record)),
         },
+        Value::IndirectVarlena(_) => {
+            unreachable!("indirect varlena casts are handled before match")
+        }
         Value::DroppedColumn(attnum) => Ok(Value::DroppedColumn(attnum)),
         Value::WrongTypeColumn {
             attnum,

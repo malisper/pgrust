@@ -11,6 +11,7 @@ use num_integer::Integer;
 use num_traits::{Signed, Zero};
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BitString {
@@ -43,6 +44,12 @@ pub struct RecordDescriptor {
     pub typrelid: u32,
     pub typmod: i32,
     pub fields: Vec<RecordFieldDesc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndirectVarlenaValue {
+    pub sql_type: SqlType,
+    pub bytes: Arc<[u8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -185,6 +192,7 @@ impl RecordDescriptor {
 pub struct RecordValue {
     pub descriptor: RecordDescriptor,
     pub fields: Vec<Value>,
+    pub raw_fields: Vec<Option<Arc<[u8]>>>,
 }
 
 impl RecordValue {
@@ -206,6 +214,7 @@ impl RecordValue {
         Self {
             descriptor,
             fields: fields.into_iter().map(|(_, value)| value).collect(),
+            raw_fields: Vec::new(),
         }
     }
 
@@ -229,12 +238,35 @@ impl RecordValue {
         Self {
             descriptor,
             fields: fields.into_iter().map(|(_, value)| value).collect(),
+            raw_fields: Vec::new(),
         }
     }
 
     pub fn from_descriptor(descriptor: RecordDescriptor, fields: Vec<Value>) -> Self {
         debug_assert_eq!(descriptor.fields.len(), fields.len());
-        Self { descriptor, fields }
+        Self {
+            descriptor,
+            fields,
+            raw_fields: Vec::new(),
+        }
+    }
+
+    pub fn from_descriptor_with_raw_fields(
+        descriptor: RecordDescriptor,
+        fields: Vec<Value>,
+        mut raw_fields: Vec<Option<Arc<[u8]>>>,
+    ) -> Self {
+        debug_assert_eq!(descriptor.fields.len(), fields.len());
+        raw_fields.resize_with(fields.len(), || None);
+        Self {
+            descriptor,
+            fields,
+            raw_fields,
+        }
+    }
+
+    pub fn raw_field(&self, index: usize) -> Option<&[u8]> {
+        self.raw_fields.get(index).and_then(|raw| raw.as_deref())
     }
 
     pub fn type_oid(&self) -> u32 {
@@ -814,6 +846,7 @@ pub enum Value {
     Array(Vec<Value>),
     PgArray(ArrayValue),
     Record(RecordValue),
+    IndirectVarlena(IndirectVarlenaValue),
     DroppedColumn(usize),
     WrongTypeColumn {
         attnum: usize,
@@ -1205,7 +1238,9 @@ impl Value {
             Value::Record(record) => Value::Record(RecordValue {
                 descriptor: record.descriptor.clone(),
                 fields: record.fields.iter().map(Value::to_owned_value).collect(),
+                raw_fields: record.raw_fields.clone(),
             }),
+            Value::IndirectVarlena(indirect) => Value::IndirectVarlena(indirect.clone()),
             Value::DroppedColumn(attnum) => Value::DroppedColumn(*attnum),
             Value::WrongTypeColumn {
                 attnum,
@@ -1239,6 +1274,8 @@ impl Value {
                 for value in record.fields.iter_mut() {
                     *value = value.to_owned_value();
                 }
+            } else if let Value::IndirectVarlena(indirect) = v {
+                *v = Value::IndirectVarlena(indirect.clone());
             } else if let Value::Range(range) = v {
                 if let Some(lower) = &mut range.lower {
                     lower.value = Box::new(lower.value.to_owned_value());
@@ -1327,6 +1364,7 @@ impl Value {
                 element_type.map(SqlType::array_of)
             }
             Value::Record(record) => Some(record.sql_type()),
+            Value::IndirectVarlena(indirect) => Some(indirect.sql_type),
             Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => None,
             Value::Null => None,
         }
@@ -1423,6 +1461,7 @@ impl PartialEq for Value {
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Record(a), Value::Record(b)) => a == b,
+            (Value::IndirectVarlena(a), Value::IndirectVarlena(b)) => a == b,
             (Value::DroppedColumn(a), Value::DroppedColumn(b)) => a == b,
             (
                 Value::WrongTypeColumn {
@@ -1654,6 +1693,10 @@ impl std::hash::Hash for Value {
             }
             Value::Record(v) => {
                 25u8.hash(state);
+                v.hash(state);
+            }
+            Value::IndirectVarlena(v) => {
+                42u8.hash(state);
                 v.hash(state);
             }
             Value::DroppedColumn(attnum) => {

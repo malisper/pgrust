@@ -31,6 +31,7 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::record::register_anonymous_record_descriptor;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::catalog::range_type_ref_for_sql_type;
+use crate::include::nodes::datum::IndirectVarlenaValue;
 use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::primnodes::ColumnDesc;
 use crate::pgrust::compact_string::CompactString;
@@ -149,55 +150,10 @@ pub(crate) fn format_record_text_with_options(
                 .unwrap_or_default(),
             Value::InternalChar(byte) => render_internal_char_text(*byte),
             Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
-            other => {
-                if let Some(text) = other.as_text() {
-                    text.to_string()
-                } else {
-                    render_datetime_value_text_with_config(other, &float_format.datetime_config)
-                        .or_else(|| render_geometry_text(other, float_format.clone()))
-                        .unwrap_or_else(|| match other {
-                            Value::Bool(true) => "t".to_string(),
-                            Value::Bool(false) => "f".to_string(),
-                            Value::Int16(v) => v.to_string(),
-                            Value::Int32(v) => v.to_string(),
-                            Value::Int64(v) => v.to_string(),
-                            Value::Xid8(v) => v.to_string(),
-                            Value::Money(v) => v.to_string(),
-                            Value::Float64(v) => match field.sql_type.kind {
-                                SqlTypeKind::Float4 => format_float4_text(*v, float_format.clone()),
-                                SqlTypeKind::Float8 => format_float8_text(*v, float_format.clone()),
-                                _ => v.to_string(),
-                            },
-                            Value::Numeric(v) => v.render(),
-                            Value::Interval(v) => {
-                                render_interval_text_with_config(*v, &float_format.datetime_config)
-                            }
-                            Value::Bytea(v) => {
-                                let mut rendered = String::from("\\\\x");
-                                for byte in v {
-                                    rendered.push_str(&format!("{byte:02x}"));
-                                }
-                                rendered
-                            }
-                            Value::Uuid(v) => render_uuid_text(v),
-                            Value::Inet(v) => v.render_inet(),
-                            Value::Cidr(v) => v.render_cidr(),
-                            Value::MacAddr(v) => render_macaddr_text(v),
-                            Value::MacAddr8(v) => render_macaddr8_text(v),
-                            Value::Bit(v) => v.render(),
-                            Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
-                            Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
-                            Value::Json(v) => v.to_string(),
-                            Value::JsonPath(v) => v.to_string(),
-                            Value::Xml(v) => {
-                                crate::backend::executor::render_xml_output_text(v).to_string()
-                            }
-                            Value::Tid(v) => render_tid_text(v),
-                            Value::Null => String::new(),
-                            _ => format!("{other:?}"),
-                        })
-                }
-            }
+            Value::IndirectVarlena(indirect) => indirect_varlena_to_value(indirect)
+                .map(|decoded| format_record_field_text(&decoded, field.sql_type, float_format))
+                .unwrap_or_default(),
+            other => format_record_field_text(other, field.sql_type, float_format),
         };
         let needs_quotes = rendered.is_empty()
             || rendered
@@ -218,6 +174,60 @@ pub(crate) fn format_record_text_with_options(
     }
     out.push(')');
     out
+}
+
+fn format_record_field_text(
+    value: &Value,
+    sql_type: SqlType,
+    float_format: &FloatFormatOptions,
+) -> String {
+    if let Some(text) = value.as_text() {
+        return text.to_string();
+    }
+    render_datetime_value_text_with_config(value, &float_format.datetime_config)
+        .or_else(|| render_geometry_text(value, float_format.clone()))
+        .unwrap_or_else(|| match value {
+            Value::Bool(true) => "t".to_string(),
+            Value::Bool(false) => "f".to_string(),
+            Value::Int16(v) => v.to_string(),
+            Value::Int32(v) => v.to_string(),
+            Value::Int64(v) => v.to_string(),
+            Value::Xid8(v) => v.to_string(),
+            Value::Money(v) => v.to_string(),
+            Value::Float64(v) => match sql_type.kind {
+                SqlTypeKind::Float4 => format_float4_text(*v, float_format.clone()),
+                SqlTypeKind::Float8 => format_float8_text(*v, float_format.clone()),
+                _ => v.to_string(),
+            },
+            Value::Numeric(v) => v.render(),
+            Value::Interval(v) => {
+                render_interval_text_with_config(*v, &float_format.datetime_config)
+            }
+            Value::Bytea(v) => {
+                let mut rendered = String::from("\\\\x");
+                for byte in v {
+                    rendered.push_str(&format!("{byte:02x}"));
+                }
+                rendered
+            }
+            Value::Uuid(v) => render_uuid_text(v),
+            Value::Inet(v) => v.render_inet(),
+            Value::Cidr(v) => v.render_cidr(),
+            Value::MacAddr(v) => render_macaddr_text(v),
+            Value::MacAddr8(v) => render_macaddr8_text(v),
+            Value::Bit(v) => v.render(),
+            Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
+            Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
+            Value::Json(v) => v.to_string(),
+            Value::JsonPath(v) => v.to_string(),
+            Value::Xml(v) => crate::backend::executor::render_xml_output_text(v).to_string(),
+            Value::Tid(v) => render_tid_text(v),
+            Value::IndirectVarlena(indirect) => indirect_varlena_to_value(indirect)
+                .map(|decoded| format_record_field_text(&decoded, sql_type, float_format))
+                .unwrap_or_default(),
+            Value::Null => String::new(),
+            _ => format!("{value:?}"),
+        })
 }
 
 pub(crate) fn format_failing_row_detail(
@@ -408,6 +418,9 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::Array(values) => format_array_text_with_config(values, datetime_config),
         Value::PgArray(array) => format_array_value_text_with_config(array, datetime_config),
         Value::Record(record) => format_record_text_with_config(record, datetime_config),
+        Value::IndirectVarlena(indirect) => indirect_varlena_to_value(indirect)
+            .map(|decoded| format_failing_row_value(&decoded, datetime_config))
+            .unwrap_or_default(),
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".to_string(),
     }
 }
@@ -1211,6 +1224,9 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
             out.push(INTERNAL_VALUE_TAG_RECORD);
             encode_internal_text(&encode_internal_record(&v)?, &mut out);
         }
+        Value::IndirectVarlena(indirect) => {
+            return encode_internal_value(&indirect_varlena_to_value(&indirect)?);
+        }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => {
             out.push(INTERNAL_VALUE_TAG_NULL);
         }
@@ -1619,6 +1635,92 @@ pub(crate) fn encode_tuple_values_with_config(
         .collect::<Result<Vec<_>, _>>()
 }
 
+pub(crate) fn indirect_varlena_to_value(
+    indirect: &IndirectVarlenaValue,
+) -> Result<Value, ExecError> {
+    let column = column_desc("<indirect>", indirect.sql_type, true);
+    let bytes = detoast_indirect_varlena_bytes(indirect.bytes.as_ref())?;
+    decode_value(&column, Some(bytes))
+}
+
+pub(crate) fn complete_varlena_bytes_for_value(
+    column: &ColumnDesc,
+    value: &Value,
+    datetime_config: &DateTimeConfig,
+) -> Result<Option<Vec<u8>>, ExecError> {
+    if matches!(value, Value::Null) || column.storage.attlen != -1 {
+        return Ok(None);
+    }
+    if let Value::IndirectVarlena(indirect) = value {
+        return Ok(Some(indirect.bytes.to_vec()));
+    }
+    tuple_value_to_complete_varlena(encode_value_with_config(column, value, datetime_config)?)
+}
+
+fn tuple_value_to_complete_varlena(value: TupleValue) -> Result<Option<Vec<u8>>, ExecError> {
+    match value {
+        TupleValue::Null => Ok(None),
+        TupleValue::EncodedVarlena(bytes) => Ok(Some(bytes)),
+        TupleValue::Bytes(bytes) => Ok(Some(encode_complete_plain_varlena(&bytes))),
+    }
+}
+
+fn encode_complete_plain_varlena(payload: &[u8]) -> Vec<u8> {
+    let total_len_1b = payload.len() + 1;
+    if total_len_1b <= 127 {
+        let mut out = Vec::with_capacity(total_len_1b);
+        out.push((total_len_1b as u8) << 1 | 0x01);
+        out.extend_from_slice(payload);
+        out
+    } else {
+        let total_len = u32::try_from(payload.len().saturating_add(4)).unwrap_or(u32::MAX);
+        let mut out = Vec::with_capacity(payload.len() + 4);
+        out.extend_from_slice(&(total_len << 2).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+}
+
+fn detoast_indirect_varlena_bytes(bytes: &[u8]) -> Result<&[u8], ExecError> {
+    if crate::include::varatt::is_indirect_toast_pointer(bytes) {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<indirect>".into(),
+            details: "nested indirect toast datum is not supported".into(),
+        });
+    }
+    if crate::include::varatt::is_ondisk_toast_pointer(bytes) {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<indirect>".into(),
+            details: "runtime indirect toast datum cannot point at on-disk toast".into(),
+        });
+    }
+    if crate::include::varatt::is_compressed_inline_datum(bytes) {
+        return Ok(bytes);
+    }
+    if bytes.first().is_some_and(|byte| byte & 0x01 != 0) {
+        let total_len = (bytes[0] >> 1) as usize;
+        return bytes
+            .get(1..total_len)
+            .ok_or_else(|| ExecError::InvalidStorageValue {
+                column: "<indirect>".into(),
+                details: "truncated short indirect varlena datum".into(),
+            });
+    }
+    let total_len =
+        crate::include::varatt::compressed_inline_total_size(bytes).ok_or_else(|| {
+            ExecError::InvalidStorageValue {
+                column: "<indirect>".into(),
+                details: "invalid indirect varlena header".into(),
+            }
+        })?;
+    bytes
+        .get(4..total_len)
+        .ok_or_else(|| ExecError::InvalidStorageValue {
+            column: "<indirect>".into(),
+            details: "truncated indirect varlena datum".into(),
+        })
+}
+
 pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleValue, ExecError> {
     encode_value_with_config(column, value, &DateTimeConfig::default())
 }
@@ -1634,6 +1736,16 @@ pub(crate) fn encode_value_with_config(
         } else {
             Ok(TupleValue::Null)
         };
+    }
+    if let Value::IndirectVarlena(indirect) = value {
+        if column.storage.attlen == -1
+            && indirect.sql_type.kind == column.sql_type.kind
+            && crate::include::varatt::is_compressed_inline_datum(&indirect.bytes)
+        {
+            return Ok(TupleValue::EncodedVarlena(indirect.bytes.to_vec()));
+        }
+        let decoded = indirect_varlena_to_value(indirect)?;
+        return encode_value_with_config(column, &decoded, datetime_config);
     }
 
     let coerced = coerce_assignment_value_with_config(value, column.sql_type, datetime_config)?;
@@ -1919,6 +2031,18 @@ pub(crate) fn coerce_assignment_value_with_catalog_and_config(
     catalog: Option<&dyn CatalogLookup>,
     datetime_config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
+    if let Value::IndirectVarlena(indirect) = value {
+        if !target.is_array && target.kind == indirect.sql_type.kind {
+            return Ok(Value::IndirectVarlena(indirect.clone()));
+        }
+        let decoded = indirect_varlena_to_value(indirect)?;
+        return coerce_assignment_value_with_catalog_and_config(
+            &decoded,
+            target,
+            catalog,
+            datetime_config,
+        );
+    }
     if target.kind == SqlTypeKind::AnyArray {
         return match value {
             Value::Null => Ok(Value::Null),
@@ -2151,6 +2275,7 @@ pub(crate) fn coerce_assignment_value_with_catalog_and_config(
         Value::Array(items) => Ok(Value::Array(items.clone())),
         Value::PgArray(array) => Ok(Value::PgArray(array.clone())),
         Value::Record(record) => Ok(Value::Record(record.clone())),
+        Value::IndirectVarlena(indirect) => Ok(Value::IndirectVarlena(indirect.clone())),
         Value::DroppedColumn(attnum) => Ok(Value::DroppedColumn(*attnum)),
         Value::WrongTypeColumn {
             attnum,
@@ -2186,6 +2311,12 @@ pub(crate) fn decode_value_with_toast(
         return Ok(Value::Null);
     };
     let owned = if column.storage.attlen == -1 {
+        if crate::include::varatt::is_indirect_toast_pointer(bytes) {
+            return Err(ExecError::InvalidStorageValue {
+                column: column.name.clone(),
+                details: "indirect toast pointer found in stored tuple".into(),
+            });
+        }
         if bytes.len() == crate::include::varatt::TOAST_POINTER_SIZE
             && crate::include::access::detoast::is_ondisk_toast_pointer(bytes)
         {
@@ -2676,8 +2807,9 @@ mod tests {
     use crate::backend::utils::time::timestamp::parse_timestamp_text;
     use crate::include::catalog::{INT4_TYPE_OID, INT4RANGE_TYPE_OID};
     use crate::include::nodes::datum::{
-        ArrayDimension, NumericValue, RecordDescriptor, RecordValue,
+        ArrayDimension, IndirectVarlenaValue, NumericValue, RecordDescriptor, RecordValue,
     };
+    use std::sync::Arc;
 
     #[test]
     fn anyarray_value_roundtrips_through_tuple_storage() {
@@ -2954,6 +3086,46 @@ mod tests {
         match error {
             ExecError::InvalidStorageValue { details, .. } => {
                 assert!(details.contains("does not match expected element type"));
+            }
+            other => panic!("expected invalid storage value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn indirect_varlena_dereferences_for_record_text_and_tuple_encoding() {
+        let text_type = SqlType::new(SqlTypeKind::Text);
+        let column = column_desc("v", text_type, true);
+        let bytes = complete_varlena_bytes_for_value(
+            &column,
+            &Value::Text("hello".into()),
+            &DateTimeConfig::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let indirect = Value::IndirectVarlena(IndirectVarlenaValue {
+            sql_type: text_type,
+            bytes: Arc::from(bytes.into_boxed_slice()),
+        });
+        let record = RecordValue::anonymous(vec![("v".into(), indirect.clone())]);
+
+        assert_eq!(format_record_text(&record), "(hello)");
+        match encode_value(&column, &indirect).unwrap() {
+            TupleValue::Bytes(bytes) => assert_eq!(bytes, b"hello"),
+            other => panic!("expected materialized text bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stored_literal_indirect_toast_pointer_is_rejected() {
+        let column = column_desc("v", SqlType::new(SqlTypeKind::Text), true);
+        let mut bytes = vec![0; crate::include::varatt::INDIRECT_POINTER_SIZE];
+        bytes[0] = crate::include::varatt::VARATT_EXTERNAL_HEADER;
+        bytes[1] = crate::include::varatt::VARTAG_INDIRECT;
+
+        let error = decode_value(&column, Some(&bytes)).unwrap_err();
+        match error {
+            ExecError::InvalidStorageValue { details, .. } => {
+                assert!(details.contains("indirect toast pointer"));
             }
             other => panic!("expected invalid storage value, got {other:?}"),
         }

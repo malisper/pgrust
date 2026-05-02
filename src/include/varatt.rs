@@ -9,6 +9,7 @@ pub const VARLENA_EXTSIZE_BITS: u32 = 30;
 pub const VARLENA_EXTSIZE_MASK: u32 = (1u32 << VARLENA_EXTSIZE_BITS) - 1;
 
 pub const VARATT_EXTERNAL_HEADER: u8 = 0x01;
+pub const VARTAG_INDIRECT: u8 = 1;
 pub const VARTAG_ONDISK: u8 = 18;
 pub const VARATT_4B_COMPRESSED_TAG: u8 = 0x02;
 pub const VARATT_4B_TAG_MASK: u8 = 0x03;
@@ -23,6 +24,7 @@ pub struct VarattExternal {
 }
 
 pub const TOAST_POINTER_SIZE: usize = VARHDRSZ_EXTERNAL + size_of::<VarattExternal>();
+pub const INDIRECT_POINTER_SIZE: usize = VARHDRSZ_EXTERNAL + size_of::<usize>();
 
 pub const fn varsize_4b(header: u32) -> usize {
     ((header >> 2) & 0x3fff_ffff) as usize
@@ -100,6 +102,22 @@ pub fn is_ondisk_toast_pointer(bytes: &[u8]) -> bool {
     bytes.len() >= TOAST_POINTER_SIZE
         && bytes[0] == VARATT_EXTERNAL_HEADER
         && bytes[1] == VARTAG_ONDISK
+}
+
+pub fn is_indirect_toast_pointer(bytes: &[u8]) -> bool {
+    bytes.len() >= INDIRECT_POINTER_SIZE
+        && bytes[0] == VARATT_EXTERNAL_HEADER
+        && bytes[1] == VARTAG_INDIRECT
+}
+
+pub fn external_varlena_size(bytes: &[u8]) -> Option<usize> {
+    if is_ondisk_toast_pointer(bytes) {
+        Some(TOAST_POINTER_SIZE)
+    } else if is_indirect_toast_pointer(bytes) {
+        Some(INDIRECT_POINTER_SIZE)
+    } else {
+        None
+    }
 }
 
 pub fn decode_ondisk_toast_pointer(bytes: &[u8]) -> Option<VarattExternal> {

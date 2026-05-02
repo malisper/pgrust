@@ -526,6 +526,7 @@ pub enum BuiltinScalarFunction {
     PgRustTestPtInWidget,
     PgRustTestAtomicOps,
     PgRustIsCatalogTextUniqueIndexOid,
+    MakeTupleIndirect,
     CurrentSetting,
     SetConfig,
     PgSettingsGetFlags,

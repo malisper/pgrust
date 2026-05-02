@@ -933,6 +933,16 @@ pub(crate) fn send_typed_data_row(
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
     for (idx, val) in values.iter().enumerate() {
+        let decoded_indirect;
+        let val = if let Value::IndirectVarlena(indirect) = val {
+            decoded_indirect = Some(
+                crate::backend::executor::value_io::indirect_varlena_to_value(indirect)
+                    .map_err(|err| io::Error::other(format!("{err:?}")))?,
+            );
+            decoded_indirect.as_ref().expect("decoded indirect value")
+        } else {
+            val
+        };
         let sql_type = columns.get(idx).map(|col| col.sql_type);
         let format_code = result_format_code(result_formats, idx);
         if format_code == 1 {
@@ -1368,6 +1378,7 @@ pub(crate) fn send_typed_data_row(
             Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => {
                 buf.extend_from_slice(&(-1_i32).to_be_bytes());
             }
+            Value::IndirectVarlena(_) => unreachable!("indirect datums are decoded before output"),
         }
     }
 

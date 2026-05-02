@@ -24031,6 +24031,11 @@ fn copy_value_to_field(
     enum_labels: Option<&HashMap<(u32, u32), String>>,
     force_quote: bool,
 ) -> String {
+    if let Value::IndirectVarlena(indirect) = value {
+        return crate::backend::executor::value_io::indirect_varlena_to_value(indirect)
+            .map(|decoded| copy_value_to_field(&decoded, column, options, enum_labels, force_quote))
+            .unwrap_or_else(|_| options.null_marker.clone());
+    }
     let sql_type = column.sql_type;
     let enum_label_type_oid = || {
         (matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Enum)
@@ -24131,6 +24136,7 @@ fn copy_value_to_field(
             )
         }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => options.null_marker.clone(),
+        Value::IndirectVarlena(_) => options.null_marker.clone(),
         Value::Null => options.null_marker.clone(),
     };
     match options.format {
