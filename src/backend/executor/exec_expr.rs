@@ -143,6 +143,7 @@ use crate::backend::catalog::object_address::{
     ObjectAddress, ObjectAddressError, get_object_address, identify_object,
     identify_object_as_address,
 };
+use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any,
@@ -185,13 +186,14 @@ use crate::include::catalog::{
     PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
     PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_LARGEOBJECT_RELATION_OID, PG_MAINTAIN_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
-    PG_READ_ALL_DATA_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-    PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
-    PgClassRow, PgCollationRow, PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_ARRAY_TYPE_OID, TEXT_SPGIST_OPCLASS_OID,
-    TEXT_TYPE_OID, bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid,
-    builtin_type_name_for_oid, default_btree_opclass_oid, default_hash_opclass_oid,
+    PG_READ_ALL_DATA_OID, PG_SIGNAL_BACKEND_OID, PG_STATISTIC_EXT_RELATION_OID,
+    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow, PgConversionRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_ARRAY_TYPE_OID,
+    TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
+    default_hash_opclass_oid,
 };
 
 const SET_CONFIG_EFFECT_PREFIX: &str = "__pgrust_set_config_effect__";
@@ -7135,7 +7137,8 @@ fn role_row_by_oid(authid_rows: &[PgAuthIdRow], role_oid: u32) -> Option<&PgAuth
 }
 
 fn role_is_superuser(authid_rows: &[PgAuthIdRow], role_oid: u32) -> bool {
-    role_row_by_oid(authid_rows, role_oid).is_some_and(|role| role.rolsuper)
+    role_oid == crate::include::catalog::BOOTSTRAP_SUPERUSER_OID
+        || role_row_by_oid(authid_rows, role_oid).is_some_and(|role| role.rolsuper)
 }
 
 fn effective_role_names_for_oid(
@@ -13903,6 +13906,121 @@ fn client_id_arg(value: &Value, op: &'static str) -> Result<Option<crate::Client
     }
 }
 
+fn pg_signal_permission_error(func: BuiltinScalarFunction, superuser_target: bool) -> ExecError {
+    let (message, detail) = match (func, superuser_target) {
+        (BuiltinScalarFunction::PgCancelBackend, true) => (
+            "permission denied to cancel query",
+            "Only roles with the SUPERUSER attribute may cancel queries of roles with the SUPERUSER attribute.",
+        ),
+        (BuiltinScalarFunction::PgCancelBackend, false) => (
+            "permission denied to cancel query",
+            "Only roles with privileges of the role whose query is being canceled or with privileges of the \"pg_signal_backend\" role may cancel this query.",
+        ),
+        (BuiltinScalarFunction::PgTerminateBackend, true) => (
+            "permission denied to terminate process",
+            "Only roles with the SUPERUSER attribute may terminate processes of roles with the SUPERUSER attribute.",
+        ),
+        (BuiltinScalarFunction::PgTerminateBackend, false) => (
+            "permission denied to terminate process",
+            "Only roles with privileges of the role whose process is being terminated or with privileges of the \"pg_signal_backend\" role may terminate this process.",
+        ),
+        _ => (
+            "permission denied to signal backend",
+            "Insufficient privileges.",
+        ),
+    };
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: Some(detail.into()),
+        hint: None,
+        sqlstate: "42501",
+    }
+}
+
+fn eval_pg_signal_backend_function(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let Some(pid_value) = values.first() else {
+        return Err(malformed_expr_error("pg_signal_backend"));
+    };
+    if matches!(pid_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let op = match func {
+        BuiltinScalarFunction::PgCancelBackend => "pg_cancel_backend",
+        BuiltinScalarFunction::PgTerminateBackend => "pg_terminate_backend",
+        _ => "pg_signal_backend",
+    };
+    if matches!(func, BuiltinScalarFunction::PgTerminateBackend) {
+        let timeout = values
+            .get(1)
+            .map(|value| int64_arg(value, "pg_terminate_backend"))
+            .transpose()?
+            .unwrap_or(0);
+        if timeout < 0 {
+            return Err(ExecError::DetailedError {
+                message: "\"timeout\" must not be negative".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22003",
+            });
+        }
+    }
+    let Some(target_pid) = client_id_arg(pid_value, op)? else {
+        return Ok(Value::Bool(false));
+    };
+    let Some(db) = ctx.database.as_ref() else {
+        return Ok(Value::Bool(false));
+    };
+    let Some((_, target_auth)) = db.backend_signal_state(target_pid) else {
+        return Ok(Value::Bool(false));
+    };
+    let target_role_oid = target_auth
+        .map(|auth| auth.current_user_oid())
+        .or_else(|| (target_pid == ctx.client_id).then_some(ctx.current_user_oid));
+    let (authid_rows, auth_members_rows) = ctx
+        .catalog
+        .as_deref()
+        .map(|catalog| (catalog.authid_rows(), catalog.auth_members_rows()))
+        .unwrap_or_default();
+    let current_is_superuser = role_is_superuser(&authid_rows, ctx.current_user_oid);
+    let target_is_superuser = target_role_oid
+        .map(|oid| role_is_superuser(&authid_rows, oid))
+        .unwrap_or(true);
+    if target_is_superuser {
+        if !current_is_superuser {
+            return Err(pg_signal_permission_error(func, true));
+        }
+    } else if let Some(target_role_oid) = target_role_oid
+        && !has_effective_membership(
+            ctx.current_user_oid,
+            target_role_oid,
+            &authid_rows,
+            &auth_members_rows,
+        )
+        && !has_effective_membership(
+            ctx.current_user_oid,
+            PG_SIGNAL_BACKEND_OID,
+            &authid_rows,
+            &auth_members_rows,
+        )
+    {
+        return Err(pg_signal_permission_error(func, false));
+    }
+    if matches!(func, BuiltinScalarFunction::PgCancelBackend) {
+        return Ok(Value::Bool(db.signal_backend_query_cancel(target_pid)));
+    }
+    // :HACK: pgrust has a query-cancel interrupt path, but not yet a backend
+    // termination lifecycle. Preserve PostgreSQL's privilege checks and report
+    // a successful signal without tearing down the current connection.
+    if target_pid != ctx.client_id {
+        db.signal_backend_query_cancel(target_pid);
+    }
+    Ok(Value::Bool(true))
+}
+
 fn eval_pg_blocking_pids(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
         return Err(malformed_expr_error("pg_blocking_pids"));
@@ -14828,6 +14946,9 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::Version => Ok(Value::Text(pg_version_text().into())),
         BuiltinScalarFunction::PgBackendPid => Ok(Value::Int32(ctx.client_id as i32)),
+        BuiltinScalarFunction::PgCancelBackend | BuiltinScalarFunction::PgTerminateBackend => {
+            eval_pg_signal_backend_function(func, &values, ctx)
+        }
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::PgColumnToastChunkId => {
             eval_pg_column_toast_chunk_id_values(&values)

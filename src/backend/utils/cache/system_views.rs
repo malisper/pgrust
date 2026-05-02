@@ -2123,6 +2123,7 @@ pub(crate) fn build_pg_stat_activity_rows(current_pid: i32, datname: &str) -> Ve
         vec![
             Value::Int32(current_pid),
             Value::Text(datname.to_string().into()),
+            Value::Int64(i64::from(BOOTSTRAP_SUPERUSER_OID)),
             Value::Text("postgres".into()),
             Value::Text("active".into()),
             Value::Null,
@@ -2131,6 +2132,7 @@ pub(crate) fn build_pg_stat_activity_rows(current_pid: i32, datname: &str) -> Ve
         ],
         vec![
             Value::Int32(0),
+            Value::Null,
             Value::Null,
             Value::Null,
             Value::Null,

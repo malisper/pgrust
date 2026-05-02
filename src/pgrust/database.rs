@@ -86,7 +86,7 @@ use crate::backend::utils::cache::syscache::{
     invalidate_backend_cache_state, scan_auth_members_rows_db, scan_authid_rows_db,
 };
 use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsSnapshot};
-use crate::backend::utils::misc::interrupts::InterruptState;
+use crate::backend::utils::misc::interrupts::{InterruptReason, InterruptState};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID,
@@ -973,6 +973,33 @@ impl Database {
             .get(&client_id)
             .cloned()
             .unwrap_or_else(|| Arc::new(InterruptState::new()))
+    }
+
+    pub(crate) fn backend_signal_state(
+        &self,
+        client_id: ClientId,
+    ) -> Option<(Arc<InterruptState>, Option<AuthState>)> {
+        self.cluster
+            .open_databases
+            .read()
+            .values()
+            .find_map(|state| {
+                let interrupts = state
+                    .session_interrupt_states
+                    .read()
+                    .get(&client_id)
+                    .cloned()?;
+                let auth = state.session_auth_states.read().get(&client_id).cloned();
+                Some((interrupts, auth))
+            })
+    }
+
+    pub(crate) fn signal_backend_query_cancel(&self, client_id: ClientId) -> bool {
+        let Some((interrupts, _)) = self.backend_signal_state(client_id) else {
+            return false;
+        };
+        interrupts.set_pending(InterruptReason::QueryCancel);
+        true
     }
 
     pub(crate) fn allocate_statement_lock_scope_id(&self) -> u64 {
@@ -2239,7 +2266,7 @@ impl Database {
         let mut rows = activity
             .into_iter()
             .map(|entry| {
-                let usename = sessions_by_db
+                let role_oid = sessions_by_db
                     .iter()
                     .find(|(db_oid, _)| *db_oid == entry.database_oid)
                     .and_then(|(_, state)| {
@@ -2248,7 +2275,8 @@ impl Database {
                             .read()
                             .get(&entry.client_id)
                             .map(|auth| auth.current_user_oid())
-                    })
+                    });
+                let usename = role_oid
                     .and_then(|role_oid| role_names.get(&role_oid).cloned())
                     .unwrap_or_else(|| "unknown".to_string());
                 vec![
@@ -2260,6 +2288,9 @@ impl Database {
                             .unwrap_or_else(|| "unknown".to_string())
                             .into(),
                     ),
+                    role_oid
+                        .map(|oid| Value::Int64(i64::from(oid)))
+                        .unwrap_or(Value::Null),
                     Value::Text(usename.into()),
                     Value::Text(entry.state.as_str().into()),
                     entry.query_id.map(Value::Int64).unwrap_or(Value::Null),
@@ -2271,6 +2302,7 @@ impl Database {
         rows.push(vec![
             Value::Int32(0),
             Value::Text(self.current_database_name().into()),
+            Value::Null,
             Value::Text("postgres".into()),
             Value::Text("".into()),
             Value::Null,
