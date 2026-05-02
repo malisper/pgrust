@@ -1,6 +1,7 @@
 pub mod access;
 pub mod catalog;
 pub mod compact_string;
+pub mod stack_depth;
 pub mod storage;
 
 pub use access::{

@@ -1,0 +1,16 @@
+[package]
+name = "pgrust_parser"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+num-bigint = "0.4.6"
+pest = "2.7"
+pgrust_catalog_data = { path = "../pgrust_catalog_data" }
+pgrust_core = { path = "../pgrust_core" }
+pgrust_nodes = { path = "../pgrust_nodes" }
+pgrust_sql_grammar = { path = "../pgrust_sql_grammar" }

@@ -489,8 +489,8 @@ dependencies = [
  "pgrust_catalog_data",
  "pgrust_core",
  "pgrust_nodes",
+ "pgrust_parser",
  "pgrust_plpgsql_grammar",
- "pgrust_sql_grammar",
  "quick-xml",
  "rand",
  "regex",
@@ -525,7 +525,9 @@ version = "0.1.0"
 name = "pgrust_core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
+ "stacker",
 ]
 
 [[package]]
@@ -538,6 +540,18 @@ dependencies = [
  "pgrust_catalog_ids",
  "pgrust_core",
  "serde",
+]
+
+[[package]]
+name = "pgrust_parser"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "pest",
+ "pgrust_catalog_data",
+ "pgrust_core",
+ "pgrust_nodes",
+ "pgrust_sql_grammar",
 ]
 
 [[package]]

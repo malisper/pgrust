@@ -8,4 +8,6 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
+stacker = "0.1.23"

@@ -15,6 +15,7 @@ members = [
     "crates/pgrust_catalog_ids",
     "crates/pgrust_core",
     "crates/pgrust_nodes",
+    "crates/pgrust_parser",
     "crates/pgrust_plpgsql_grammar",
     "crates/pgrust_sql_grammar",
 ]
@@ -190,8 +191,8 @@ pbkdf2 = "0.12"
 pgrust_catalog_data = { path = "crates/pgrust_catalog_data" }
 pgrust_core = { path = "crates/pgrust_core" }
 pgrust_nodes = { path = "crates/pgrust_nodes" }
+pgrust_parser = { path = "crates/pgrust_parser" }
 pgrust_plpgsql_grammar = { path = "crates/pgrust_plpgsql_grammar" }
-pgrust_sql_grammar = { path = "crates/pgrust_sql_grammar" }
 rand = "0.8"
 regex = "1"
 rustc-hash = "2.1.2"
