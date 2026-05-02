@@ -1594,19 +1594,26 @@ fn merge_projection_targets(columns: &[QueryColumn], output_exprs: &[Expr]) -> V
 }
 
 fn bind_returning_targets(
-    targets: &[crate::include::nodes::parsenodes::SelectItem],
+    returning: &ReturningClause,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     local_ctes: &[BoundCte],
 ) -> Result<Vec<TargetEntry>, ParseError> {
-    if targets.is_empty() {
+    if returning.is_empty() {
         return Ok(Vec::new());
     }
-    for target in targets {
+    for target in returning {
         reject_window_clause(&target.expr, "RETURNING")?;
     }
-    match bind_select_targets(targets, scope, catalog, outer_scopes, None, local_ctes)? {
+    match bind_select_targets(
+        &returning.targets,
+        scope,
+        catalog,
+        outer_scopes,
+        None,
+        local_ctes,
+    )? {
         BoundSelectTargets::Plain(targets)
             if targets
                 .iter()
@@ -1615,6 +1622,12 @@ fn bind_returning_targets(
             Err(ParseError::FeatureNotSupported(
                 "set-returning functions are not allowed in RETURNING".into(),
             ))
+        }
+        BoundSelectTargets::Plain(targets) if targets.is_empty() => {
+            Err(ParseError::UnexpectedToken {
+                expected: "non-empty RETURNING target list",
+                actual: "RETURNING must have at least one column".into(),
+            })
         }
         BoundSelectTargets::Plain(targets) => Ok(targets),
     }
@@ -1655,14 +1668,78 @@ fn scope_with_returning_pseudo_rows_with_generated(
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
     relation_oid: Option<u32>,
+    returning: &ReturningClause,
 ) -> Result<BoundScope, ParseError> {
+    let aliases = returning_pseudo_aliases(returning, &scope)?;
     Ok(scope_with_returning_pseudo_row_exprs(
         scope,
         desc,
         returning_pseudo_output_exprs_with_generated(desc, catalog, OUTER_VAR)?,
         returning_pseudo_output_exprs_with_generated(desc, catalog, INNER_VAR)?,
         relation_oid,
+        &aliases,
     ))
+}
+
+fn returning_pseudo_aliases(
+    returning: &ReturningClause,
+    scope: &BoundScope,
+) -> Result<Vec<(String, usize)>, ParseError> {
+    let mut old_alias = None::<String>;
+    let mut new_alias = None::<String>;
+    for option in &returning.options {
+        let slot = match option.kind {
+            ReturningAliasKind::Old => &mut old_alias,
+            ReturningAliasKind::New => &mut new_alias,
+        };
+        if slot.is_some() {
+            let name = match option.kind {
+                ReturningAliasKind::Old => "OLD",
+                ReturningAliasKind::New => "NEW",
+            };
+            return Err(ParseError::UnexpectedToken {
+                expected: "unique RETURNING WITH option",
+                actual: format!("{name} cannot be specified multiple times"),
+            });
+        }
+        if scope_has_relation_name(scope, &option.alias) {
+            return Err(ParseError::DuplicateTableName(option.alias.clone()));
+        }
+        *slot = Some(option.alias.clone());
+    }
+
+    if let (Some(old), Some(new)) = (&old_alias, &new_alias)
+        && old.eq_ignore_ascii_case(new)
+    {
+        return Err(ParseError::DuplicateTableName(new.clone()));
+    }
+
+    let mut aliases = Vec::new();
+    match old_alias {
+        Some(alias) => aliases.push((alias, OUTER_VAR)),
+        None if !scope_has_relation_name(scope, "old") => aliases.push(("old".into(), OUTER_VAR)),
+        None => {}
+    }
+    match new_alias {
+        Some(alias) => aliases.push((alias, INNER_VAR)),
+        None if !scope_has_relation_name(scope, "new") => aliases.push(("new".into(), INNER_VAR)),
+        None => {}
+    }
+    Ok(aliases)
+}
+
+fn scope_has_relation_name(scope: &BoundScope, name: &str) -> bool {
+    scope.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
+    }) || scope.columns.iter().any(|column| {
+        column
+            .relation_names
+            .iter()
+            .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
+    })
 }
 
 fn scope_with_hidden_invalid_relation(
@@ -1731,10 +1808,11 @@ fn scope_with_returning_pseudo_row_exprs(
     old_output_exprs: Vec<Expr>,
     new_output_exprs: Vec<Expr>,
     relation_oid: Option<u32>,
+    aliases: &[(String, usize)],
 ) -> BoundScope {
-    for (relation_name, varno) in [("old", OUTER_VAR), ("new", INNER_VAR)] {
+    for (relation_name, varno) in aliases {
         scope.desc.columns.extend(desc.columns.iter().cloned());
-        scope.output_exprs.extend(if varno == OUTER_VAR {
+        scope.output_exprs.extend(if *varno == OUTER_VAR {
             old_output_exprs.clone()
         } else {
             new_output_exprs.clone()
@@ -1745,7 +1823,7 @@ fn scope_with_returning_pseudo_row_exprs(
                 output_name: column.name.clone(),
                 hidden: true,
                 qualified_only: true,
-                relation_names: vec![relation_name.to_string()],
+                relation_names: vec![relation_name.clone()],
                 relation_output_exprs: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
@@ -1754,10 +1832,10 @@ fn scope_with_returning_pseudo_row_exprs(
                 source_columns: Vec::new(),
             }));
         scope.relations.push(ScopeRelation {
-            relation_names: vec![relation_name.to_string()],
+            relation_names: vec![relation_name.clone()],
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
-            system_varno: None,
+            system_varno: Some(*varno),
             relation_oid,
         });
     }
@@ -3119,6 +3197,7 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
 
     let returning_visible_column_count =
         execution_relation.desc.columns.len() + source_visible_count;
+    let returning_aliases = returning_pseudo_aliases(&stmt.returning, &returning_merged_scope)?;
     let returning_scope = if let Some(resolved) = auto_view_target.as_ref() {
         scope_with_returning_pseudo_row_exprs(
             returning_merged_scope,
@@ -3134,6 +3213,7 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
                 INNER_VAR,
             ),
             Some(entry.relation_oid),
+            &returning_aliases,
         )
     } else {
         scope_with_returning_pseudo_rows_with_generated(
@@ -3141,6 +3221,7 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
             &execution_relation.desc,
             catalog,
             Some(execution_relation.relation_oid),
+            &stmt.returning,
         )?
     };
     let returning = bind_merge_returning_targets(
@@ -6348,12 +6429,18 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         Some(entry.relation_oid),
         catalog,
     )?;
+    let target_scope = if stmt.table_alias.is_some() {
+        mark_scope_hidden_invalid_relation(target_scope, &stmt.table_name)
+    } else {
+        target_scope
+    };
     let expr_scope = empty_scope();
     let mut returning_scope = scope_with_returning_pseudo_rows_with_generated(
         target_scope.clone(),
         &entry.desc,
         catalog,
         Some(entry.relation_oid),
+        &stmt.returning,
     )?;
     if stmt.on_conflict.is_some() {
         returning_scope =
@@ -6768,6 +6855,7 @@ fn bind_simple_update(
         &entry.desc,
         catalog,
         Some(entry.relation_oid),
+        &stmt.returning,
     )?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let predicate = stmt
@@ -6973,6 +7061,7 @@ fn bind_update_from(
         &entry.desc,
         catalog,
         Some(entry.relation_oid),
+        &stmt.returning,
     )?;
 
     let target_rls = build_target_relation_row_security(
@@ -7307,6 +7396,7 @@ pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
         &entry.desc,
         catalog,
         Some(entry.relation_oid),
+        &stmt.returning,
     )?;
     let predicate = stmt
         .where_clause
@@ -7439,6 +7529,7 @@ fn bind_delete_using(
         &entry.desc,
         catalog,
         Some(entry.relation_oid),
+        &stmt.returning,
     )?;
 
     let target_rls = build_target_relation_row_security(

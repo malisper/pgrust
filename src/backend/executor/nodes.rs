@@ -2268,6 +2268,10 @@ impl PlanNode for UniqueState {
             lines,
         );
     }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
+    }
 }
 
 fn table_sample_method(method: &str) -> Result<TableSampleMethod, ExecError> {
@@ -8010,6 +8014,10 @@ impl PlanNode for FilterState {
             lines,
         );
     }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
+    }
 }
 
 fn filter_state_is_one_time_false_result(state: &FilterState) -> bool {
@@ -8192,6 +8200,10 @@ impl PlanNode for MaterializeState {
             timing,
             lines,
         );
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
     }
 }
 
@@ -8513,6 +8525,10 @@ impl PlanNode for MemoizeState {
             lines,
         );
     }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
+    }
 }
 
 impl PlanNode for GatherState {
@@ -8593,6 +8609,10 @@ impl PlanNode for GatherState {
             timing,
             lines,
         );
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
     }
 }
 
@@ -8894,6 +8914,13 @@ impl PlanNode for NestedLoopJoinState {
             timing,
             lines,
         );
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![
+            self.left.explain_json(analyze, indent),
+            self.right.explain_json(analyze, indent),
+        ]
     }
 }
 
@@ -9494,6 +9521,10 @@ impl PlanNode for OrderByState {
             lines,
         );
     }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
+    }
 }
 
 fn materialize_ordered_current_row(
@@ -9716,6 +9747,10 @@ impl PlanNode for IncrementalSortState {
             lines,
         );
     }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
+    }
 }
 
 fn order_by_runtime_key(
@@ -9838,6 +9873,10 @@ impl PlanNode for LimitState {
             lines,
         );
     }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
+    }
 }
 
 impl PlanNode for LockRowsState {
@@ -9912,6 +9951,10 @@ impl PlanNode for LockRowsState {
             timing,
             lines,
         );
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
     }
 }
 
@@ -10010,6 +10053,10 @@ impl PlanNode for ProjectionState {
             timing,
             lines,
         );
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
     }
 }
 
@@ -10916,6 +10963,10 @@ impl PlanNode for AggregateState {
             timing,
             lines,
         );
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.input.explain_json(analyze, indent)]
     }
 }
 

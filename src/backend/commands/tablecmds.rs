@@ -751,8 +751,8 @@ pub(crate) fn execute_explain(
             }
         };
         if matches!(format, ExplainFormat::Json) {
-            end_explain_analyze_initplan_capture();
             lines.push(format_explain_analyze_json(state.as_ref()));
+            end_explain_analyze_initplan_capture();
         } else {
             format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
             end_explain_analyze_initplan_capture();
@@ -812,14 +812,40 @@ pub(crate) fn execute_explain(
         }
     }
 
+    let json_output = explain_lines_are_single_json_value(format, &lines);
     Ok(StatementResult::Query {
-        columns: vec![QueryColumn::text("QUERY PLAN")],
+        columns: vec![explain_query_column(json_output)],
         column_names: vec!["QUERY PLAN".into()],
         rows: lines
             .into_iter()
-            .map(|line| vec![Value::Text(line.into())])
+            .map(|line| {
+                if json_output {
+                    vec![Value::Json(line.into())]
+                } else {
+                    vec![Value::Text(line.into())]
+                }
+            })
             .collect(),
     })
+}
+
+fn explain_lines_are_single_json_value(format: ExplainFormat, lines: &[String]) -> bool {
+    if !matches!(format, ExplainFormat::Json) || lines.len() != 1 {
+        return false;
+    }
+    matches!(lines[0].trim_start().as_bytes().first(), Some(b'[' | b'{'))
+}
+
+pub(crate) fn explain_query_column(json_output: bool) -> QueryColumn {
+    if json_output {
+        QueryColumn {
+            name: "QUERY PLAN".into(),
+            sql_type: SqlType::new(SqlTypeKind::Json),
+            wire_type_oid: None,
+        }
+    } else {
+        QueryColumn::text("QUERY PLAN")
+    }
 }
 
 fn explain_merge_target_name(target_name: &str, verbose: bool) -> String {
@@ -4963,7 +4989,7 @@ impl UpdatedRowWriteInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PublicationDmlAction {
+pub(crate) enum PublicationDmlAction {
     Update,
     Delete,
 }
@@ -5237,7 +5263,7 @@ fn publication_generated_identity_is_published(
         )
 }
 
-fn enforce_publication_replica_identity(
+pub(crate) fn enforce_publication_replica_identity(
     relation_name: &str,
     relation_oid: u32,
     namespace_oid: u32,
@@ -5932,6 +5958,7 @@ pub(crate) fn rollback_inserted_row(
 
 struct PartitionUpdateDestination {
     relation_info: PartitionResultRelInfo,
+    parent_relation_oid: u32,
     parent_desc: RelationDesc,
     parent_values: Vec<Value>,
     values: Vec<Value>,
@@ -5997,10 +6024,76 @@ fn route_updated_partition_row(
     )?;
     Ok(Some(PartitionUpdateDestination {
         relation_info,
+        parent_relation_oid: root_relation.relation_oid,
         parent_desc: root_relation.desc,
         parent_values: root_values,
         values: routed_values,
     }))
+}
+
+fn partition_tree_contains_relation(
+    catalog: &dyn CatalogLookup,
+    root_oid: u32,
+    relation_oid: u32,
+) -> bool {
+    if root_oid == relation_oid {
+        return true;
+    }
+    catalog
+        .inheritance_children(root_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .any(|row| {
+            row.inhrelid == relation_oid
+                || partition_tree_contains_relation(catalog, row.inhrelid, relation_oid)
+        })
+}
+
+fn reject_root_update_with_direct_nonroot_fk_reference(
+    catalog: &dyn CatalogLookup,
+    root_oid: u32,
+    source_relation_oid: u32,
+    referenced_by_foreign_keys: &[BoundReferencedByForeignKey],
+) -> Result<(), ExecError> {
+    for constraint in referenced_by_foreign_keys {
+        if constraint.referenced_relation_oid == root_oid {
+            continue;
+        }
+        let Some(referenced_relation) = catalog.relation_by_oid(constraint.referenced_relation_oid)
+        else {
+            continue;
+        };
+        if referenced_relation.relkind != 'p'
+            || !partition_tree_contains_relation(
+                catalog,
+                constraint.referenced_relation_oid,
+                source_relation_oid,
+            )
+        {
+            continue;
+        }
+        let ancestor_name = catalog
+            .class_row_by_oid(constraint.referenced_relation_oid)
+            .map(|row| row.relname)
+            .unwrap_or_else(|| constraint.referenced_relation_oid.to_string());
+        let root_name = catalog
+            .class_row_by_oid(root_oid)
+            .map(|row| row.relname)
+            .unwrap_or_else(|| root_oid.to_string());
+        return Err(ExecError::DetailedError {
+            message: "cannot move tuple across partitions when a non-root ancestor of the source partition is directly referenced in a foreign key".into(),
+            detail: Some(format!(
+                "A foreign key points to ancestor \"{}\" but not the root ancestor \"{}\".",
+                ancestor_name, root_name
+            )),
+            hint: Some(format!(
+                "Consider defining the foreign key on table \"{}\".",
+                root_name
+            )),
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
 }
 
 fn enforce_direct_partition_update_constraint(
@@ -6081,6 +6174,16 @@ fn move_updated_row_to_partition(
     )>,
 ) -> Result<WriteUpdatedRowResult, ExecError> {
     let catalog = ctx.catalog.clone();
+    if let Some(catalog) = catalog.as_deref()
+        && destination.parent_desc != *desc
+    {
+        reject_root_update_with_direct_nonroot_fk_reference(
+            catalog,
+            destination.parent_relation_oid,
+            relation_oid,
+            referenced_by_foreign_keys,
+        )?;
+    }
     let delete_triggers = catalog
         .as_deref()
         .map(|catalog| {
@@ -6135,6 +6238,8 @@ fn move_updated_row_to_partition(
         &destination.relation_info.relation.desc,
         &destination.parent_desc,
     )?;
+    let source_layout_new_values =
+        remap_partition_row_to_child_layout(&projected_values, &destination.parent_desc, desc)?;
     if parent_rls_write_checks.is_empty() {
         crate::backend::executor::enforce_row_security_write_checks(
             rls_relation_name,
@@ -6161,7 +6266,7 @@ fn move_updated_row_to_partition(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        &projected_values,
+        &source_layout_new_values,
         ForeignKeyActionPhase::BeforeParentWrite,
         ctx,
         xid,
@@ -6305,7 +6410,7 @@ fn move_updated_row_to_partition(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        &projected_values,
+        &source_layout_new_values,
         ForeignKeyActionPhase::AfterParentWrite,
         ctx,
         xid,
@@ -6317,7 +6422,7 @@ fn move_updated_row_to_partition(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        &projected_values,
+        &source_layout_new_values,
         ctx,
     )?;
     Ok(WriteUpdatedRowResult::Updated(
@@ -15144,6 +15249,13 @@ fn project_returning_row_with_metadata(
     project_returning_row_with_old_new(targets, row, tid, table_oid, None, None, ctx)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ReturningTuple<'a> {
+    pub(crate) values: &'a [Value],
+    pub(crate) tid: Option<ItemPointerData>,
+    pub(crate) table_oid: Option<u32>,
+}
+
 pub(crate) fn project_returning_row_with_old_new(
     targets: &[TargetEntry],
     row: &[Value],
@@ -15153,35 +15265,62 @@ pub(crate) fn project_returning_row_with_old_new(
     new_row: Option<&[Value]>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    let old_tuple = old_row.map(|values| ReturningTuple {
+        values,
+        tid,
+        table_oid,
+    });
+    let new_tuple = new_row.map(|values| ReturningTuple {
+        values,
+        tid,
+        table_oid,
+    });
+    project_returning_row_with_old_new_metadata(
+        targets, row, tid, table_oid, old_tuple, new_tuple, ctx,
+    )
+}
+
+pub(crate) fn project_returning_row_with_old_new_metadata(
+    targets: &[TargetEntry],
+    row: &[Value],
+    tid: Option<ItemPointerData>,
+    table_oid: Option<u32>,
+    old_tuple: Option<ReturningTuple<'_>>,
+    new_tuple: Option<ReturningTuple<'_>>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
     let saved_bindings = ctx.expr_bindings.clone();
-    let pseudo_width = old_row
-        .map(<[Value]>::len)
-        .or_else(|| new_row.map(<[Value]>::len))
+    let pseudo_width = old_tuple
+        .map(|tuple| tuple.values.len())
+        .or_else(|| new_tuple.map(|tuple| tuple.values.len()))
         .unwrap_or(row.len());
     ctx.expr_bindings.outer_tuple = Some(
-        old_row
-            .map(<[Value]>::to_vec)
+        old_tuple
+            .map(|tuple| tuple.values.to_vec())
             .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
     );
     ctx.expr_bindings.inner_tuple = Some(
-        new_row
-            .map(<[Value]>::to_vec)
+        new_tuple
+            .map(|tuple| tuple.values.to_vec())
             .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
     );
-    ctx.expr_bindings.outer_system_bindings.clear();
-    ctx.expr_bindings.inner_system_bindings.clear();
+    let xid = ctx.transaction_xid();
+    ctx.expr_bindings.outer_system_bindings =
+        returning_tuple_system_binding(OUTER_VAR, old_tuple, xid, false)
+            .into_iter()
+            .collect();
+    ctx.expr_bindings.inner_system_bindings =
+        returning_tuple_system_binding(INNER_VAR, new_tuple, xid, true)
+            .into_iter()
+            .collect();
     let saved_system_bindings = ctx.system_bindings.clone();
-    if let Some(table_oid) = table_oid
-        && let Some(xid) = ctx.transaction_xid()
-    {
-        let has_old = old_row.is_some();
-        let has_new = new_row.is_some();
+    if let Some(table_oid) = table_oid {
         ctx.system_bindings = vec![SystemVarBinding {
             varno: 1,
             table_oid,
             tid,
-            xmin: has_new.then_some(xid),
-            xmax: if has_old { Some(xid) } else { Some(0) },
+            xmin: xid,
+            xmax: xid.map(|_| 0),
         }];
     }
     let mut slot = TupleSlot::virtual_row_with_metadata(row.to_vec(), tid, table_oid);
@@ -15196,6 +15335,22 @@ pub(crate) fn project_returning_row_with_old_new(
     ctx.system_bindings = saved_system_bindings;
     ctx.expr_bindings = saved_bindings;
     result
+}
+
+fn returning_tuple_system_binding(
+    varno: usize,
+    tuple: Option<ReturningTuple<'_>>,
+    xid: Option<u32>,
+    is_new: bool,
+) -> Option<SystemVarBinding> {
+    let tuple = tuple?;
+    Some(SystemVarBinding {
+        varno,
+        table_oid: tuple.table_oid?,
+        tid: tuple.tid,
+        xmin: is_new.then_some(xid).flatten(),
+        xmax: if is_new { xid.map(|_| 0) } else { xid },
+    })
 }
 
 fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> StatementResult {
@@ -16171,13 +16326,21 @@ fn project_update_from_returning_row(
     };
     let mut returning_values = new_visible_values.clone();
     returning_values.extend(source_values.iter().cloned());
-    project_returning_row_with_old_new(
+    project_returning_row_with_old_new_metadata(
         &stmt.returning,
         &returning_values,
         Some(new_tid),
         Some(new_relation_oid),
-        Some(&old_visible_values),
-        Some(&new_visible_values),
+        Some(ReturningTuple {
+            values: &old_visible_values,
+            tid: Some(old_tid),
+            table_oid: Some(target.relation_oid),
+        }),
+        Some(ReturningTuple {
+            values: &new_visible_values,
+            tid: Some(new_tid),
+            table_oid: Some(new_relation_oid),
+        }),
         ctx,
     )
 }
@@ -16545,14 +16708,19 @@ fn project_delete_using_returning_row(
     tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    let mut visible_values = project_delete_target_visible_values(target, old_values, tid, ctx)?;
+    let old_visible_values = project_delete_target_visible_values(target, old_values, tid, ctx)?;
+    let mut visible_values = old_visible_values.clone();
     visible_values.extend(source_values.iter().cloned());
-    project_returning_row_with_old_new(
+    project_returning_row_with_old_new_metadata(
         &stmt.returning,
         &visible_values,
         Some(tid),
         Some(target.relation_oid),
-        Some(old_values),
+        Some(ReturningTuple {
+            values: &old_visible_values,
+            tid: Some(tid),
+            table_oid: Some(target.relation_oid),
+        }),
         None,
         ctx,
     )

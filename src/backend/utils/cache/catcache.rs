@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::{
-    Catalog, catalog_attmissingval_for_column, catalog_attribute_collation_oid,
+    Catalog, CatalogEntry, catalog_attmissingval_for_column, catalog_attribute_collation_oid,
 };
 use crate::backend::catalog::loader::load_physical_catalog_rows;
 use crate::backend::catalog::pg_aggregate::sort_pg_aggregate_rows;
@@ -58,22 +58,22 @@ use crate::include::catalog::{
     INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID,
     MONEY_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PATH_TYPE_OID, PG_TOAST_NAMESPACE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAggregateRow,
-    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
-    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow,
-    PgDependRow, PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
-    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
-    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
-    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
-    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID,
-    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
+    PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, POINT_TYPE_OID,
+    POLYGON_TYPE_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgEventTriggerRow,
+    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, REGCONFIG_ARRAY_TYPE_OID,
+    REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID,
+    TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
+    UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
+    XML_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
     bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
     bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows, bootstrap_pg_conversion_rows,
     bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_foreign_server_rows,
@@ -144,6 +144,18 @@ fn namespace_row_prefer_replacement(
     replacement: &PgNamespaceRow,
 ) -> bool {
     replacement.nspacl.is_some() && existing.nspacl.is_none()
+}
+
+fn default_relreplident_for_catalog_entry(entry: &CatalogEntry) -> char {
+    if matches!(entry.relkind, 'r' | 'p') {
+        if entry.namespace_oid == PG_CATALOG_NAMESPACE_OID {
+            'n'
+        } else {
+            'd'
+        }
+    } else {
+        'n'
+    }
 }
 
 impl CatCache {
@@ -354,7 +366,7 @@ impl CatCache {
                 relpartbound: entry.relpartbound.clone(),
                 reloptions: entry.reloptions.clone(),
                 relacl: entry.relacl.clone(),
-                relreplident: 'd',
+                relreplident: default_relreplident_for_catalog_entry(entry),
                 reloftype: entry.of_type_oid,
             };
             cache.classes_by_name.insert(
@@ -827,7 +839,7 @@ impl CatCache {
                 relpartbound: None,
                 reloptions: None,
                 relacl: None,
-                relreplident: 'd',
+                relreplident: 'n',
                 reloftype: 0,
             };
             self.classes_by_name

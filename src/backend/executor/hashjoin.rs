@@ -18,6 +18,12 @@ pub(crate) struct HashJoinTable {
     pub(crate) entries: Vec<HashJoinTupleEntry>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct HashInstrumentation {
+    pub(crate) original_batches: usize,
+    pub(crate) final_batches: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HashJoinPhase {
     BuildHashTable,

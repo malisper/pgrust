@@ -302,23 +302,28 @@ fn validate_rule_action_returning_targets(
     relation_desc: &RelationDesc,
 ) -> Result<(), ParseError> {
     if targets.len() > relation_desc.columns.len() {
-        return Err(ParseError::FeatureNotSupported(
-            "RETURNING list has too many entries".into(),
-        ));
+        return Err(ParseError::UnexpectedToken {
+            expected: "rule action RETURNING list matching target relation",
+            actual: "RETURNING list has too many entries".into(),
+        });
     }
     if targets.len() < relation_desc.columns.len() {
-        return Err(ParseError::FeatureNotSupported(
-            "RETURNING list has too few entries".into(),
-        ));
+        return Err(ParseError::UnexpectedToken {
+            expected: "rule action RETURNING list matching target relation",
+            actual: "RETURNING list has too few entries".into(),
+        });
     }
 
     for (index, (target, column)) in targets.iter().zip(&relation_desc.columns).enumerate() {
         if target.sql_type != column.sql_type {
-            return Err(ParseError::FeatureNotSupported(format!(
-                "RETURNING list's entry {} has different type from column \"{}\"",
-                index + 1,
-                column.name
-            )));
+            return Err(ParseError::UnexpectedToken {
+                expected: "rule action RETURNING list matching target relation",
+                actual: format!(
+                    "RETURNING list's entry {} has different type from column \"{}\"",
+                    index + 1,
+                    column.name
+                ),
+            });
         }
     }
 

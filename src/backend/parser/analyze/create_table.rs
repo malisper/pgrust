@@ -82,24 +82,6 @@ pub fn lower_create_table(
     let constraint_actions = normalized.index_backed.clone();
     let mut owned_sequences = Vec::new();
 
-    let mut seen_keys = BTreeSet::new();
-    for action in &constraint_actions {
-        let key = action
-            .columns
-            .iter()
-            .map(|column| column.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-        if !seen_keys.insert(key) {
-            return Err(ParseError::UnexpectedToken {
-                expected: "distinct PRIMARY KEY/UNIQUE definitions",
-                actual: format!(
-                    "duplicate key definition on ({})",
-                    action.columns.join(", ")
-                ),
-            });
-        }
-    }
-
     let not_nulls_by_column = normalized
         .not_nulls
         .iter()

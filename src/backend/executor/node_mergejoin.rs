@@ -603,4 +603,11 @@ impl PlanNode for MergeJoinState {
             lines,
         );
     }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![
+            self.left.explain_json(analyze, indent),
+            self.right.explain_json(analyze, indent),
+        ]
+    }
 }
