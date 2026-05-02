@@ -18,7 +18,9 @@ use crate::include::catalog::{
     PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
     PG_TYPE_RELATION_OID, POINT_ARRAY_TYPE_OID, PgAggregateRow, TEXT_TYPE_OID,
 };
-use crate::include::nodes::datum::{ArrayValue, BitString, IntervalValue, RecordValue};
+use crate::include::nodes::datum::{
+    ArrayValue, BitString, IntervalValue, NumericValue, RecordValue,
+};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -3345,6 +3347,60 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn pg_lsn_wal_filename_offset_helpers_match_segment_boundaries() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let segment_size = crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES;
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select segment_number, file_offset \
+                 from pg_walfile_name_offset('0/0'::pg_lsn + {segment_size}), \
+                      pg_split_walfile_name(file_name)"
+            )
+        ),
+        vec![vec![
+            Value::Numeric(NumericValue::from_i64(1)),
+            Value::Int32(0),
+        ]]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select segment_number, file_offset \
+                 from pg_walfile_name_offset('0/0'::pg_lsn + {segment_size} + 1), \
+                      pg_split_walfile_name(file_name)"
+            )
+        ),
+        vec![vec![
+            Value::Numeric(NumericValue::from_i64(1)),
+            Value::Int32(1),
+        ]]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select segment_number, file_offset = {segment_size} - 1 \
+                 from pg_walfile_name_offset('0/0'::pg_lsn + {segment_size} - 1), \
+                      pg_split_walfile_name(file_name)"
+            )
+        ),
+        vec![vec![
+            Value::Numeric(NumericValue::from_i64(0)),
+            Value::Bool(true)
+        ]]
+    );
 }
 
 #[test]

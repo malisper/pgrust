@@ -1388,27 +1388,37 @@ fn eval_pg_show_all_settings(
         ("enable_sort", "on"),
         ("enable_tidscan", "on"),
     ];
+    let wal_segment_size = crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES.to_string();
     ENABLE_SETTINGS
         .iter()
+        .copied()
+        .chain(std::iter::once((
+            "wal_segment_size",
+            wal_segment_size.as_str(),
+        )))
         .map(|(name, setting)| {
             TupleSlot::virtual_row(
                 output_columns
                     .iter()
                     .map(|column| match column.name.as_str() {
-                        "name" => Value::Text((*name).into()),
-                        "setting" => Value::Text((*setting).into()),
+                        "name" => Value::Text(name.into()),
+                        "setting" => Value::Text(setting.into()),
                         "unit" => Value::Null,
                         "category" => {
-                            let category = if *name == "default_statistics_target" {
+                            let category = if name == "default_statistics_target" {
                                 "Query Tuning / Other Planner Options"
+                            } else if name == "wal_segment_size" {
+                                "Write-Ahead Log / Settings"
                             } else {
                                 "Query Tuning / Planner Method Configuration"
                             };
                             Value::Text(category.into())
                         }
                         "short_desc" => {
-                            let description = if *name == "default_statistics_target" {
+                            let description = if name == "default_statistics_target" {
                                 "Sets the default statistics target."
+                            } else if name == "wal_segment_size" {
+                                "Shows the size of write ahead log segments."
                             } else {
                                 "Enables a planner method."
                             };
@@ -1417,7 +1427,9 @@ fn eval_pg_show_all_settings(
                         "extra_desc" => Value::Null,
                         "context" => Value::Text("user".into()),
                         "vartype" => {
-                            let vartype = if *name == "default_statistics_target" {
+                            let vartype = if name == "default_statistics_target" {
+                                "integer"
+                            } else if name == "wal_segment_size" {
                                 "integer"
                             } else {
                                 "bool"
@@ -1428,8 +1440,8 @@ fn eval_pg_show_all_settings(
                         "min_val" => Value::Null,
                         "max_val" => Value::Null,
                         "enumvals" => Value::Null,
-                        "boot_val" => Value::Text((*setting).into()),
-                        "reset_val" => Value::Text((*setting).into()),
+                        "boot_val" => Value::Text(setting.into()),
+                        "reset_val" => Value::Text(setting.into()),
                         "sourcefile" => Value::Null,
                         "sourceline" => Value::Null,
                         "pending_restart" => Value::Bool(false),
@@ -2904,4 +2916,44 @@ fn eval_pg_options_to_table(
         ]));
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+
+    #[test]
+    fn pg_show_all_settings_includes_wal_segment_size() {
+        let output_columns = vec![
+            QueryColumn {
+                name: "name".into(),
+                sql_type: SqlType::new(SqlTypeKind::Text),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "setting".into(),
+                sql_type: SqlType::new(SqlTypeKind::Text),
+                wire_type_oid: None,
+            },
+        ];
+
+        let rows = eval_pg_show_all_settings(&output_columns);
+        let expected_setting = Value::Text(
+            crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES
+                .to_string()
+                .into(),
+        );
+
+        assert!(
+            rows.into_iter().any(|row| {
+                row.tts_values
+                    == vec![
+                        Value::Text("wal_segment_size".into()),
+                        expected_setting.clone(),
+                    ]
+            }),
+            "pg_show_all_settings should expose wal_segment_size for regression \\gset"
+        );
+    }
 }
