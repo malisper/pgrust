@@ -606,6 +606,7 @@ pub fn vacuum_system_catalog_indexes_for_kinds_in_db(
                 index_name: descriptor.relation_name.to_string(),
                 index_desc: system_catalog_index_desc(*descriptor),
                 index_meta: system_catalog_index_relcache(*descriptor),
+                expr_eval: None,
             };
             let scan = vacuum_relation_scan(pool, 0, ctx.heap_relation, txns).map_err(|err| {
                 CatalogError::Io(format!("catalog heap vacuum scan failed: {err:?}"))
@@ -659,6 +660,7 @@ pub fn vacuum_system_catalog_heaps_and_indexes_for_kinds_in_db(
                 index_name: descriptor.relation_name.to_string(),
                 index_desc: system_catalog_index_desc(*descriptor),
                 index_meta: system_catalog_index_relcache(*descriptor),
+                expr_eval: None,
             };
             let dead_item_callback = |tid| scan.dead_tids.contains(&tid);
             let Ok(stats) = index_bulk_delete(&ctx, BTREE_AM_OID, &dead_item_callback, None) else {

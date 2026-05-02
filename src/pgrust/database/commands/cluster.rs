@@ -919,13 +919,20 @@ fn cluster_rows_for_index(
     index: &BoundIndexRelation,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<ClusteredRow>, ExecError> {
+    let saved_current_user_oid = ctx.current_user_oid;
+    ctx.current_user_oid = relation.owner_oid;
     let mut rows = Vec::new();
-    for (_tid, values) in
-        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?
-    {
-        let key_values = index_key_values_for_row(index, &relation.desc, &values, ctx)?;
-        rows.push(ClusteredRow { key_values, values });
-    }
+    let result = (|| {
+        for (_tid, values) in
+            collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?
+        {
+            let key_values = index_key_values_for_row(index, &relation.desc, &values, ctx)?;
+            rows.push(ClusteredRow { key_values, values });
+        }
+        Ok::<(), ExecError>(())
+    })();
+    ctx.current_user_oid = saved_current_user_oid;
+    result?;
     pg_sql_sort_by(&mut rows, |left, right| {
         compare_cluster_index_keys(
             &left.key_values,
@@ -1052,7 +1059,7 @@ fn rebuild_cluster_index(
             session_stats: ctx.session_stats.clone(),
             current_database_name: ctx.current_database_name.clone(),
             session_user_oid: ctx.session_user_oid,
-            current_user_oid: ctx.current_user_oid,
+            current_user_oid: relation.owner_oid,
             current_xid: ctx.snapshot.current_xid,
             statement_lock_scope_id: ctx.statement_lock_scope_id,
             session_replication_role: ctx.session_replication_role,
