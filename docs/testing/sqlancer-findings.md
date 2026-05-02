@@ -55,6 +55,28 @@ existing blocker. Add one finding row per distinct blocker.
 | SQLANCER-012 | harness classification | scalar function typing | Seed 6 generated `to_hex(text)`, currently reported as a pgrust type mismatch during setup. Decide whether to narrow generator typing or add a compatibility ticket. |
 | SQLANCER-013 | fixed-in-adapter | JOIN scope error | The pgrust SQLancer adapter now allowlists generated invalid comma/explicit-JOIN scope references when pgrust reports them as qualified missing-column errors. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer013/seed-3`. |
 
+## Resume todos
+
+Use these as the next small, parallelizable blockers after the current pushed
+milestone.
+
+1. `SQLANCER-007`: minimize the seed 2 numeric expression that reset the server
+   connection, then decide whether the fix is overflow/error handling in pgrust
+   or an expected arithmetic-domain error in the adapter.
+2. `SQLANCER-011`: split the seed 5 table-DDL blocker into common useful
+   features (`TEMP TABLE`, `CHECK`, `NO INHERIT`) versus generated-column
+   self-reference noise. Keep common Postgres features visible as implementation
+   tickets.
+3. `SQLANCER-012`: fix or classify `to_hex(text)` generation. PostgreSQL's
+   common `to_hex` signatures are integer-shaped, so this is likely SQLancer
+   generator typing noise unless a smaller repro shows pgrust mishandles a valid
+   call.
+4. After one blocker is fixed or classified, rerun:
+
+```bash
+PGRUST_SQLANCER_TRIAGE_SEED_COUNT=10 PGRUST_SQLANCER_QUERIES=50 scripts/run_sqlancer_triage.sh
+```
+
 ## Next triage pass
 
 1. Run `PGRUST_SQLANCER_TRIAGE_SEED_COUNT=10 PGRUST_SQLANCER_QUERIES=50 scripts/run_sqlancer_triage.sh`.
