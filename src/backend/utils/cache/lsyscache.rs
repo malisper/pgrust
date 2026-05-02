@@ -2009,6 +2009,10 @@ fn append_missing_derived_not_null_constraints(
 }
 
 impl CatalogLookup for LazyCatalogLookup {
+    fn view_query_cache_scope(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.db.pool) as usize
+    }
+
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         lookup_any_relation(
             &self.db,

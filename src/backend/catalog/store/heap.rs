@@ -4844,7 +4844,8 @@ impl CatalogStore {
         ];
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         if let Some(query) = stored_view_query {
-            crate::backend::rewrite::register_stored_view_query(rewrite_row.oid, query);
+            let scope = crate::backend::rewrite::stored_view_query_cache_scope_for_pool(&ctx.pool);
+            crate::backend::rewrite::register_stored_view_query(scope, rewrite_row.oid, query);
         }
         self.control = control;
 

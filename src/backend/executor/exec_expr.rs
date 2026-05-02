@@ -9473,12 +9473,14 @@ fn currtid_view_source_relation(
             hint: None,
             sqlstate: "0A000",
         })?;
-    let query = stored_view_query_for_rule(rule.oid).ok_or_else(|| ExecError::DetailedError {
-        message: "currtid cannot handle views with no CTID".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "0A000",
-    })?;
+    let query = stored_view_query_for_rule(catalog.view_query_cache_scope(), rule.oid).ok_or_else(
+        || ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        },
+    )?;
     let target = query
         .target_list
         .iter()

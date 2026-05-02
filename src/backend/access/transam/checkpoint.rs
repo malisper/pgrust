@@ -164,6 +164,7 @@ struct CheckpointerState {
     completed_seq: u64,
     failed_seq: u64,
     last_error: Option<String>,
+    stop_requested: bool,
     shutdown_requested: bool,
     end_of_recovery_requested: bool,
     worker_exited: bool,
@@ -217,6 +218,7 @@ impl Checkpointer {
                 completed_seq: 0,
                 failed_seq: 0,
                 last_error: None,
+                stop_requested: false,
                 shutdown_requested: false,
                 end_of_recovery_requested: false,
                 worker_exited: false,
@@ -282,6 +284,17 @@ impl Checkpointer {
         result
     }
 
+    pub fn stop_and_join(&self) {
+        {
+            let mut state = self.state.lock();
+            state.stop_requested = true;
+            self.cv.notify_all();
+        }
+        if let Some(handle) = self.handle.lock().take() {
+            let _ = handle.join();
+        }
+    }
+
     fn worker_main(self: Arc<Self>) {
         let poll_interval = Duration::from_millis(250);
         let mut next_timed_checkpoint = Instant::now() + self.config.checkpoint_timeout;
@@ -296,6 +309,11 @@ impl Checkpointer {
                         state.requested_seq > state.completed_seq.max(state.failed_seq);
                     let timed_due = now >= next_timed_checkpoint;
                     let wal_due = self.wal_due(state.last_checkpoint_lsn);
+                    if state.stop_requested {
+                        state.worker_exited = true;
+                        self.cv.notify_all();
+                        return;
+                    }
                     if state.shutdown_requested {
                         break (
                             CheckpointTrigger::Shutdown,

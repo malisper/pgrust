@@ -174,14 +174,14 @@ impl OpenDatabaseState {
 
 impl Drop for ClusterShared {
     fn drop(&mut self) {
-        if !self.durable_shutdown {
-            self.autovacuum_runtime.shutdown_and_join();
-            return;
-        }
         self.autovacuum_runtime.shutdown_and_join();
         if let Some(checkpointer) = self.checkpointer.as_ref() {
-            let _ = checkpointer.shutdown_and_join();
-        } else {
+            if self.durable_shutdown {
+                let _ = checkpointer.shutdown_and_join();
+            } else {
+                checkpointer.stop_and_join();
+            }
+        } else if self.durable_shutdown {
             let _ = self.txns.write().flush_clog();
         }
     }

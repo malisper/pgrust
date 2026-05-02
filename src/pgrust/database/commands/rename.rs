@@ -964,8 +964,10 @@ impl Database {
             .into_iter()
             .find(|row| row.rulename == "_RETURN")
             .map(|row| row.oid)
-            && let Some(mut query) =
-                crate::backend::rewrite::stored_view_query_for_rule(rewrite_oid)
+            && let Some(mut query) = crate::backend::rewrite::stored_view_query_for_rule(
+                catalog.view_query_cache_scope(),
+                rewrite_oid,
+            )
         {
             if let Some(target) = query
                 .target_list
@@ -974,7 +976,11 @@ impl Database {
                 .nth(column_index)
             {
                 target.name = new_column_name.clone();
-                crate::backend::rewrite::register_stored_view_query(rewrite_oid, query);
+                crate::backend::rewrite::register_stored_view_query(
+                    catalog.view_query_cache_scope(),
+                    rewrite_oid,
+                    query,
+                );
             }
         }
         new_desc.columns[column_index].name = new_column_name.clone();

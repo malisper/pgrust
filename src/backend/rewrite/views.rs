@@ -31,39 +31,48 @@ use crate::include::nodes::primnodes::{
     expr_sql_type_hint, set_returning_call_exprs, user_attrno,
 };
 use crate::pgrust::session::ByteaOutputFormat;
+use crate::{BufferPool, SmgrStorageBackend};
 use std::collections::{HashMap, HashSet};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 const RETURN_RULE_NAME: &str = "_RETURN";
 const MAX_IDENTIFIER_BYTES: usize = 63;
 
-static STORED_VIEW_QUERIES: OnceLock<RwLock<HashMap<u32, Query>>> = OnceLock::new();
+type StoredViewQueryKey = (usize, u32);
 
-fn stored_view_queries() -> &'static RwLock<HashMap<u32, Query>> {
+static STORED_VIEW_QUERIES: OnceLock<RwLock<HashMap<StoredViewQueryKey, Query>>> = OnceLock::new();
+
+fn stored_view_queries() -> &'static RwLock<HashMap<StoredViewQueryKey, Query>> {
     STORED_VIEW_QUERIES.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-pub(crate) fn register_stored_view_query(rewrite_oid: u32, query: Query) {
+pub(crate) fn stored_view_query_cache_scope_for_pool(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+) -> usize {
+    Arc::as_ptr(pool) as usize
+}
+
+pub(crate) fn register_stored_view_query(scope: usize, rewrite_oid: u32, query: Query) {
     if let Ok(mut queries) = stored_view_queries().write() {
-        queries.insert(rewrite_oid, query);
+        queries.insert((scope, rewrite_oid), query);
     }
 }
 
-fn stored_view_query(rewrite_oid: u32) -> Option<Query> {
+fn stored_view_query(scope: usize, rewrite_oid: u32) -> Option<Query> {
     stored_view_queries()
         .read()
         .ok()
-        .and_then(|queries| queries.get(&rewrite_oid).cloned())
+        .and_then(|queries| queries.get(&(scope, rewrite_oid)).cloned())
 }
 
-pub(crate) fn stored_view_query_for_rule(rewrite_oid: u32) -> Option<Query> {
-    stored_view_query(rewrite_oid)
+pub(crate) fn stored_view_query_for_rule(scope: usize, rewrite_oid: u32) -> Option<Query> {
+    stored_view_query(scope, rewrite_oid)
 }
 
-pub(crate) fn has_stored_view_query(rewrite_oid: u32) -> bool {
+pub(crate) fn has_stored_view_query(scope: usize, rewrite_oid: u32) -> bool {
     stored_view_queries()
         .read()
-        .is_ok_and(|queries| queries.contains_key(&rewrite_oid))
+        .is_ok_and(|queries| queries.contains_key(&(scope, rewrite_oid)))
 }
 
 #[derive(Clone)]
@@ -1712,7 +1721,7 @@ pub(crate) fn load_view_return_query(
     }
     let rule = return_rule_row(catalog, relation_oid, &display_name)?;
     let allow_output_name_mismatch = relation_is_materialized_view(catalog, relation_oid);
-    if let Some(mut query) = stored_view_query(rule.oid) {
+    if let Some(mut query) = stored_view_query(catalog.view_query_cache_scope(), rule.oid) {
         refresh_query_relation_descriptors(&mut query, catalog);
         validate_view_shape(
             &mut query,
