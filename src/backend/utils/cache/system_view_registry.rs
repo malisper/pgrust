@@ -651,6 +651,7 @@ const PG_ROLES_COLUMNS: &[SyntheticSystemViewColumn] = &[
 const PG_STAT_ACTIVITY_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("pid", SqlType::new(SqlTypeKind::Int4)),
     SyntheticSystemViewColumn::text("datname"),
+    SyntheticSystemViewColumn::new("usesysid", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::text("usename"),
     SyntheticSystemViewColumn::text("state"),
     SyntheticSystemViewColumn::new("query_id", SqlType::new(SqlTypeKind::Int8)),

@@ -52,6 +52,8 @@ pub(crate) struct CompiledBlock {
 pub struct CompiledFunction {
     pub(crate) name: String,
     pub(crate) proc_oid: u32,
+    pub(crate) proowner: u32,
+    pub(crate) prosecdef: bool,
     pub(crate) provolatile: char,
     pub(crate) proconfig: Option<Vec<String>>,
     pub(crate) print_strict_params: Option<bool>,
@@ -965,6 +967,8 @@ pub(crate) fn compile_do_function(
     Ok(CompiledFunction {
         name: "inline_code_block".into(),
         proc_oid: 0,
+        proowner: catalog.current_user_oid(),
+        prosecdef: false,
         provolatile: 'v',
         proconfig: None,
         print_strict_params: None,
@@ -1100,6 +1104,8 @@ pub(crate) fn compile_function_from_proc(
     Ok(CompiledFunction {
         name: row.proname.clone(),
         proc_oid: row.oid,
+        proowner: row.proowner,
+        prosecdef: row.prosecdef,
         provolatile: row.provolatile,
         proconfig: row.proconfig.clone(),
         print_strict_params,
@@ -1204,6 +1210,8 @@ pub(crate) fn compile_trigger_function_from_proc(
     Ok(CompiledFunction {
         name: row.proname.clone(),
         proc_oid: row.oid,
+        proowner: row.proowner,
+        prosecdef: row.prosecdef,
         provolatile: row.provolatile,
         proconfig: row.proconfig.clone(),
         print_strict_params,
@@ -1234,6 +1242,8 @@ pub(crate) fn compile_event_trigger_function_from_proc(
     Ok(CompiledFunction {
         name: row.proname.clone(),
         proc_oid: row.oid,
+        proowner: row.proowner,
+        prosecdef: row.prosecdef,
         provolatile: row.provolatile,
         proconfig: row.proconfig.clone(),
         print_strict_params: None,

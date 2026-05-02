@@ -1322,6 +1322,36 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'r',
         ),
         proc_row(
+            2171,
+            "pg_cancel_backend",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "pg_cancel_backend",
+            1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        {
+            let mut row = proc_row(
+                2096,
+                "pg_terminate_backend",
+                BOOL_TYPE_OID,
+                &oid_argtypes(&[INT4_TYPE_OID, INT8_TYPE_OID]),
+                "pg_terminate_backend",
+                2,
+                false,
+                false,
+                'f',
+                'v',
+            );
+            row.pronargdefaults = 1;
+            row.proargnames = Some(vec!["pid".into(), "timeout".into()]);
+            row.proargdefaults = Some("0".into());
+            row
+        },
+        proc_row(
             3424,
             "pg_partition_root",
             REGCLASS_TYPE_OID,
@@ -12631,6 +12661,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
         ("current_schemas", BuiltinScalarFunction::CurrentSchemas),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
+        ("pg_cancel_backend", BuiltinScalarFunction::PgCancelBackend),
+        (
+            "pg_terminate_backend",
+            BuiltinScalarFunction::PgTerminateBackend,
+        ),
         ("pg_blocking_pids", BuiltinScalarFunction::PgBlockingPids),
         (
             "pg_isolation_test_session_is_blocked",

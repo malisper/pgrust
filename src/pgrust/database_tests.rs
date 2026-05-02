@@ -845,6 +845,65 @@ fn pg_backend_pid_returns_session_client_id() {
 }
 
 #[test]
+fn pg_stat_activity_exposes_usesysid_for_registered_backend() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.install_auth_state(41, AuthState::default());
+    db.set_session_query_active(41, "select 1", None);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            42,
+            "select usesysid from pg_stat_activity where pid = 41"
+        ),
+        vec![vec![Value::Int64(10)]]
+    );
+}
+
+#[test]
+fn pg_signal_backend_role_cannot_terminate_superuser_backend() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(41);
+    db.install_auth_state(43, AuthState::default());
+    db.install_interrupt_state(
+        43,
+        Arc::new(crate::backend::utils::misc::interrupts::InterruptState::new()),
+    );
+    db.set_session_query_active(43, "select 1", None);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            r#"CREATE OR REPLACE FUNCTION terminate_nothrow(pid int) RETURNS bool
+	LANGUAGE plpgsql SECURITY DEFINER SET client_min_messages = error AS $$
+BEGIN
+	RETURN pg_terminate_backend($1);
+EXCEPTION WHEN OTHERS THEN
+	RETURN false;
+END$$"#,
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "ALTER FUNCTION terminate_nothrow OWNER TO pg_signal_backend",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "SELECT backend_type FROM pg_stat_activity
+WHERE pid = 43
+  AND CASE WHEN COALESCE(usesysid, 10) = 10 THEN terminate_nothrow(pid) END"
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn txid_snapshot_type_round_trips_and_validates_visibility() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

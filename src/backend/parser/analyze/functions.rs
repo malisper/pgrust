@@ -2388,6 +2388,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::TxidCurrent
             | BuiltinScalarFunction::TxidCurrentIfAssigned
             | BuiltinScalarFunction::TxidCurrentSnapshot => args.is_empty(),
+            BuiltinScalarFunction::PgCancelBackend => args.len() == 1,
+            BuiltinScalarFunction::PgTerminateBackend => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgBlockingPids => args.len() == 1,
             BuiltinScalarFunction::PgIsolationTestSessionIsBlocked => args.len() == 2,
             BuiltinScalarFunction::CurrentSchemas => args.len() == 1,
@@ -3206,6 +3208,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::PgBlockingPids => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Int4)));
         }
+        BuiltinScalarFunction::PgCancelBackend | BuiltinScalarFunction::PgTerminateBackend => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
+        }
         BuiltinScalarFunction::PgIsolationTestSessionIsBlocked => {
             return Some(SqlType::new(SqlTypeKind::Bool));
         }
@@ -3687,6 +3692,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("version", BuiltinScalarFunction::Version),
         ("pgsql_version", BuiltinScalarFunction::Version),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
+        ("pg_cancel_backend", BuiltinScalarFunction::PgCancelBackend),
+        (
+            "pg_terminate_backend",
+            BuiltinScalarFunction::PgTerminateBackend,
+        ),
         ("pg_blocking_pids", BuiltinScalarFunction::PgBlockingPids),
         (
             "pg_isolation_test_session_is_blocked",
@@ -5829,6 +5839,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::CurrentDatabase
             | BuiltinScalarFunction::CurrentSchemas
             | BuiltinScalarFunction::PgBackendPid
+            | BuiltinScalarFunction::PgCancelBackend
+            | BuiltinScalarFunction::PgTerminateBackend
             | BuiltinScalarFunction::PgBlockingPids
             | BuiltinScalarFunction::PgIsolationTestSessionIsBlocked
             | BuiltinScalarFunction::PgPartitionRoot
@@ -6116,6 +6128,7 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray
             | BuiltinScalarFunction::JsonbPathQueryFirst
+            | BuiltinScalarFunction::PgTerminateBackend
             | BuiltinScalarFunction::TsVectorIn
             | BuiltinScalarFunction::TsQueryIn
     )

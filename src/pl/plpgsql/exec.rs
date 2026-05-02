@@ -1616,7 +1616,17 @@ fn execute_compiled_function_for_call(
     } else {
         None
     };
+    let saved_current_user_oid = if compiled.prosecdef {
+        let saved = ctx.current_user_oid;
+        ctx.current_user_oid = compiled.proowner;
+        Some(saved)
+    } else {
+        None
+    };
     let result = execute_compiled_function(compiled, arg_values, expected_record_shape, ctx);
+    if let Some(saved) = saved_current_user_oid {
+        ctx.current_user_oid = saved;
+    }
     if let Some(saved) = saved_snapshot_cid {
         ctx.snapshot.current_cid = saved;
     }
