@@ -486,6 +486,7 @@ dependencies = [
  "parking_lot",
  "pbkdf2",
  "pest",
+ "pgrust_core",
  "pgrust_plpgsql_grammar",
  "pgrust_sql_grammar",
  "quick-xml",
@@ -503,6 +504,10 @@ dependencies = [
  "wasm-bindgen",
  "web-time",
 ]
+
+[[package]]
+name = "pgrust_core"
+version = "0.1.0"
 
 [[package]]
 name = "pgrust_plpgsql_grammar"
