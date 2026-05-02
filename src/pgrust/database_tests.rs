@@ -6307,6 +6307,113 @@ fn dml_returning_old_new_pseudo_rows() {
 }
 
 #[test]
+fn dml_returning_old_new_system_columns_and_aliases() {
+    let dir = temp_dir("dml_returning_old_new_system_columns_and_aliases");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table returning_old_new_sys_tbl (id int4, name text)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returning_old_new_sys_tbl values (1, 'alice') \
+             returning with (old as o, new as n) \
+             o.tableoid is null, o.ctid is null, n.tableoid is not null, n.ctid is not null",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true)
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "update returning_old_new_sys_tbl set name = 'bob' \
+             returning old.tableoid is not null, old.ctid is not null, \
+                       new.tableoid is not null, new.ctid is not null",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true)
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "delete from returning_old_new_sys_tbl \
+             returning old.tableoid is not null, old.ctid is not null, \
+                       new.tableoid is null, new.ctid is null",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true)
+        ]]
+    );
+}
+
+#[test]
+fn partition_update_returning_old_new_system_columns() {
+    let dir = temp_dir("partition_update_returning_old_new_system_columns");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table part_returning_tbl (id int4, name text) partition by list (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_returning_tbl_1 partition of part_returning_tbl for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_returning_tbl_2 partition of part_returning_tbl for values in (2)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into part_returning_tbl values (1, 'alpha')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "update part_returning_tbl set id = 2 \
+             returning old.tableoid is not null, old.ctid is not null, old.id, \
+                       new.tableoid is not null, new.ctid is not null, new.id",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Int32(1),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Int32(2),
+        ]]
+    );
+}
+
+#[test]
 fn insert_on_conflict_returning_rows() {
     std::thread::Builder::new()
         .name("db-test-insert-on-conflict-returning".into())
@@ -22668,6 +22775,63 @@ fn view_dml_returning_routes_through_instead_rules() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn view_rule_returning_projects_statement_old_new() {
+    let base = temp_dir("rule_view_dml_returning_old_new");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view item_view as select id, name from base_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_ins as on insert to item_view do instead insert into base_items values (new.id, new.name) returning id, name",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_upd as on update to item_view do instead update base_items set id = new.id, name = new.name where id = old.id returning id, name",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_del as on delete to item_view do instead delete from base_items where id = old.id returning id, name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "insert into item_view values (1, 'alpha') returning old.name is null, new.name",
+        ),
+        vec![vec![Value::Bool(true), Value::Text("alpha".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update item_view set name = 'beta' where id = 1 returning old.name, new.name",
+        ),
+        vec![vec![
+            Value::Text("alpha".into()),
+            Value::Text("beta".into())
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "delete from item_view where id = 1 returning old.name, new.name",
+        ),
+        vec![vec![Value::Text("beta".into()), Value::Null]]
+    );
 }
 
 fn assert_rule_returning_error(err: ExecError, expected_message: &str, expected_hint: &str) {

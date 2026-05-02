@@ -22797,7 +22797,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut overriding = None;
     let mut source = None;
     let mut on_conflict = None;
-    let mut returning = Vec::new();
+    let mut returning = ReturningClause::default();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -22879,7 +22879,7 @@ fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
     let mut source = None;
     let mut join_condition = None;
     let mut when_clauses = Vec::new();
-    let mut returning = Vec::new();
+    let mut returning = ReturningClause::default();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -26016,7 +26016,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut from = None;
     let mut where_clause = None;
     let mut current_of = None;
-    let mut returning = Vec::new();
+    let mut returning = ReturningClause::default();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -26088,7 +26088,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut using = None;
     let mut where_clause = None;
     let mut current_of = None;
-    let mut returning = Vec::new();
+    let mut returning = ReturningClause::default();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -26245,39 +26245,24 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
     Ok(items)
 }
 
-fn build_returning_clause(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
-    let mut old_alias = None;
-    let mut new_alias = None;
+fn build_returning_clause(pair: Pair<'_, Rule>) -> Result<ReturningClause, ParseError> {
+    let mut options = Vec::new();
     let mut select_list = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::returning_with_clause => {
-                let (old, new) = build_returning_with_clause(part)?;
-                old_alias = old;
-                new_alias = new;
+                options = build_returning_with_clause(part)?;
             }
             Rule::select_list => select_list = Some(part),
             _ => {}
         }
     }
-    let mut items = build_select_list(select_list.ok_or(ParseError::UnexpectedEof)?)?;
-    if old_alias.is_some() || new_alias.is_some() {
-        for item in &mut items {
-            rewrite_returning_alias_expr(
-                &mut item.expr,
-                old_alias.as_deref(),
-                new_alias.as_deref(),
-            );
-        }
-    }
-    Ok(items)
+    let targets = build_select_list(select_list.ok_or(ParseError::UnexpectedEof)?)?;
+    Ok(ReturningClause::new(options, targets))
 }
 
-fn build_returning_with_clause(
-    pair: Pair<'_, Rule>,
-) -> Result<(Option<String>, Option<String>), ParseError> {
-    let mut old_alias = None;
-    let mut new_alias = None;
+fn build_returning_with_clause(pair: Pair<'_, Rule>) -> Result<Vec<ReturningAlias>, ParseError> {
+    let mut options = Vec::new();
     for option in pair
         .into_inner()
         .filter(|part| part.as_rule() == Rule::returning_option)
@@ -26287,57 +26272,19 @@ fn build_returning_with_clause(
             .filter(|part| part.as_rule() == Rule::identifier);
         let kind = build_identifier(identifiers.next().ok_or(ParseError::UnexpectedEof)?);
         let alias = build_identifier(identifiers.next().ok_or(ParseError::UnexpectedEof)?);
-        if kind.eq_ignore_ascii_case("old") {
-            old_alias = Some(alias);
+        let kind = if kind.eq_ignore_ascii_case("old") {
+            ReturningAliasKind::Old
         } else if kind.eq_ignore_ascii_case("new") {
-            new_alias = Some(alias);
+            ReturningAliasKind::New
         } else {
             return Err(ParseError::UnexpectedToken {
                 expected: "OLD or NEW in RETURNING WITH",
-                actual: kind,
+                actual: format!("syntax error at or near \"{kind}\""),
             });
-        }
-    }
-    Ok((old_alias, new_alias))
-}
-
-fn rewrite_returning_alias_expr(
-    expr: &mut SqlExpr,
-    old_alias: Option<&str>,
-    new_alias: Option<&str>,
-) {
-    match expr {
-        SqlExpr::Column(name) => {
-            if let Some(rewritten) = rewrite_returning_alias_name(name, old_alias, new_alias) {
-                *name = rewritten;
-            }
-        }
-        SqlExpr::FieldSelect { expr, .. } => {
-            rewrite_returning_alias_expr(expr, old_alias, new_alias);
-        }
-        _ => {}
-    }
-}
-
-fn rewrite_returning_alias_name(
-    name: &str,
-    old_alias: Option<&str>,
-    new_alias: Option<&str>,
-) -> Option<String> {
-    for (alias, replacement) in [(old_alias, "old"), (new_alias, "new")] {
-        let Some(alias) = alias else {
-            continue;
         };
-        if name.eq_ignore_ascii_case(alias) {
-            return Some(replacement.to_string());
-        }
-        if let Some(suffix) = name.strip_prefix(alias)
-            && suffix.starts_with('.')
-        {
-            return Some(format!("{replacement}{suffix}"));
-        }
+        options.push(ReturningAlias { kind, alias });
     }
-    None
+    Ok(options)
 }
 
 fn top_level_extract_expr(pair: Pair<'_, Rule>) -> bool {

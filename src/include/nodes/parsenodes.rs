@@ -2088,6 +2088,101 @@ pub struct SelectItem {
     pub location: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReturningAliasKind {
+    Old,
+    New,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturningAlias {
+    pub kind: ReturningAliasKind,
+    pub alias: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReturningClause {
+    pub options: Vec<ReturningAlias>,
+    pub targets: Vec<SelectItem>,
+}
+
+impl ReturningClause {
+    pub fn new(options: Vec<ReturningAlias>, targets: Vec<SelectItem>) -> Self {
+        Self { options, targets }
+    }
+
+    pub fn old_alias(&self) -> Option<&str> {
+        self.options.iter().find_map(|option| {
+            (option.kind == ReturningAliasKind::Old).then_some(option.alias.as_str())
+        })
+    }
+
+    pub fn new_alias(&self) -> Option<&str> {
+        self.options.iter().find_map(|option| {
+            (option.kind == ReturningAliasKind::New).then_some(option.alias.as_str())
+        })
+    }
+}
+
+impl From<Vec<SelectItem>> for ReturningClause {
+    fn from(targets: Vec<SelectItem>) -> Self {
+        Self {
+            options: Vec::new(),
+            targets,
+        }
+    }
+}
+
+impl FromIterator<SelectItem> for ReturningClause {
+    fn from_iter<T: IntoIterator<Item = SelectItem>>(iter: T) -> Self {
+        Self {
+            options: Vec::new(),
+            targets: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl std::ops::Deref for ReturningClause {
+    type Target = [SelectItem];
+
+    fn deref(&self) -> &Self::Target {
+        &self.targets
+    }
+}
+
+impl std::ops::DerefMut for ReturningClause {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.targets
+    }
+}
+
+impl<'a> IntoIterator for &'a ReturningClause {
+    type Item = &'a SelectItem;
+    type IntoIter = std::slice::Iter<'a, SelectItem>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.targets.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut ReturningClause {
+    type Item = &'a mut SelectItem;
+    type IntoIter = std::slice::IterMut<'a, SelectItem>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.targets.iter_mut()
+    }
+}
+
+impl IntoIterator for ReturningClause {
+    type Item = SelectItem;
+    type IntoIter = std::vec::IntoIter<SelectItem>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.targets.into_iter()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderByItem {
     pub expr: SqlExpr,
@@ -2159,7 +2254,7 @@ pub struct InsertStatement {
     pub overriding: Option<OverridingKind>,
     pub source: InsertSource,
     pub on_conflict: Option<OnConflictClause>,
-    pub returning: Vec<SelectItem>,
+    pub returning: ReturningClause,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2185,7 +2280,7 @@ pub struct MergeStatement {
     pub source: FromItem,
     pub join_condition: SqlExpr,
     pub when_clauses: Vec<MergeWhenClause>,
-    pub returning: Vec<SelectItem>,
+    pub returning: ReturningClause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5198,7 +5293,7 @@ pub struct UpdateStatement {
     pub from: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
     pub current_of: Option<String>,
-    pub returning: Vec<SelectItem>,
+    pub returning: ReturningClause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5211,7 +5306,7 @@ pub struct DeleteStatement {
     pub using: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
     pub current_of: Option<String>,
-    pub returning: Vec<SelectItem>,
+    pub returning: ReturningClause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
