@@ -4880,6 +4880,7 @@ fn sql_function_inline_args(
         .cloned()
         .enumerate()
         .map(|(index, expr)| SqlFunctionInlineArg {
+            function_name: Some(row.proname.clone()),
             name: names.get(index).cloned().flatten(),
             sql_type: declared_arg_types
                 .get(index)
