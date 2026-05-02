@@ -6,9 +6,10 @@ use crate::backend::executor::{
     eval_expr, execute_planned_stmt, execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
-    BoundCte, BoundModifyingCte, BoundWritableCte, CatalogLookup, CommonTableExpr, CteBody,
-    DeleteStatement, FromItem, InsertSource, InsertStatement, ParseOptions, PreparedExternalParam,
-    RuleEvent, SelectStatement, UpdateStatement, bind_delete_with_outer_scopes_and_ctes,
+    BoundCte, BoundIndexRelation, BoundModifyingCte, BoundRelation, BoundWritableCte,
+    CatalogLookup, CommonTableExpr, CteBody, DeleteStatement, FromItem, InsertSource,
+    InsertStatement, ParseOptions, PreparedExternalParam, RuleEvent, SelectStatement,
+    UpdateStatement, bind_delete_with_outer_scopes_and_ctes,
     bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope,
     bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_columns,
     cte_body_references_table, delete_statement_references_table,
@@ -139,6 +140,140 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
             2,
         ),
         fold_constants: true,
+    }
+}
+
+fn relation_name_for_replica_identity_error(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+fn replica_identity_wrong_object(message: impl Into<String>) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42809",
+    }
+}
+
+fn replica_identity_index_has_node_tree(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|sql| !sql.trim().is_empty())
+}
+
+fn validate_replica_identity_index(
+    index_name: &str,
+    index: &BoundIndexRelation,
+    relation: &BoundRelation,
+) -> Result<(), ExecError> {
+    if !index.index_meta.indisunique {
+        return Err(replica_identity_wrong_object(format!(
+            "cannot use non-unique index \"{}\" as replica identity",
+            index_name
+        )));
+    }
+    if !index.index_meta.indimmediate {
+        return Err(replica_identity_wrong_object(format!(
+            "cannot use non-immediate index \"{}\" as replica identity",
+            index_name
+        )));
+    }
+    if !index.index_exprs.is_empty()
+        || replica_identity_index_has_node_tree(&index.index_meta.indexprs)
+        || index.index_meta.indkey.iter().any(|attnum| *attnum == 0)
+    {
+        return Err(replica_identity_wrong_object(format!(
+            "cannot use expression index \"{}\" as replica identity",
+            index_name
+        )));
+    }
+    if index.index_predicate.is_some()
+        || replica_identity_index_has_node_tree(&index.index_meta.indpred)
+    {
+        return Err(replica_identity_wrong_object(format!(
+            "cannot use partial index \"{}\" as replica identity",
+            index_name
+        )));
+    }
+
+    let key_attnums = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or(0);
+    for attnum in index.index_meta.indkey.iter().take(key_attnums) {
+        if *attnum <= 0 {
+            return Err(replica_identity_wrong_object(format!(
+                "cannot use expression index \"{}\" as replica identity",
+                index_name
+            )));
+        }
+        let column_index = usize::try_from(*attnum - 1).map_err(|_| {
+            replica_identity_wrong_object(format!(
+                "cannot use expression index \"{}\" as replica identity",
+                index_name
+            ))
+        })?;
+        let Some(column) = relation.desc.columns.get(column_index) else {
+            return Err(replica_identity_wrong_object(format!(
+                "cannot use expression index \"{}\" as replica identity",
+                index_name
+            )));
+        };
+        if column.dropped {
+            return Err(replica_identity_wrong_object(format!(
+                "cannot use expression index \"{}\" as replica identity",
+                index_name
+            )));
+        }
+        if column.storage.nullable {
+            return Err(replica_identity_wrong_object(format!(
+                "index \"{}\" cannot be used as replica identity because column \"{}\" is nullable",
+                index_name, column.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn replica_identity_kind_for_alter_table(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    table_name: &str,
+    identity: &ReplicaIdentityKind,
+) -> Result<(char, Option<u32>), ExecError> {
+    match identity {
+        ReplicaIdentityKind::Default => Ok(('d', None)),
+        ReplicaIdentityKind::Full => Ok(('f', None)),
+        ReplicaIdentityKind::Nothing => Ok(('n', None)),
+        ReplicaIdentityKind::Index(index_name) => {
+            let indexes = catalog.index_relations_for_heap(relation.relation_oid);
+            if let Some(index) = indexes
+                .into_iter()
+                .find(|index| index.name.eq_ignore_ascii_case(index_name))
+            {
+                validate_replica_identity_index(index_name, &index, relation)?;
+                return Ok(('i', Some(index.relation_oid)));
+            }
+
+            if catalog
+                .lookup_any_relation(index_name)
+                .is_some_and(|entry| matches!(entry.relkind, 'i' | 'I'))
+            {
+                return Err(replica_identity_wrong_object(format!(
+                    "\"{}\" is not an index for table \"{}\"",
+                    index_name,
+                    relation_name_for_replica_identity_error(table_name)
+                )));
+            }
+
+            Err(ExecError::Parse(
+                crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "index on table",
+                    actual: format!(
+                        "index \"{}\" for table \"{}\" does not exist",
+                        index_name,
+                        relation_name_for_replica_identity_error(table_name)
+                    ),
+                },
+            ))
+        }
     }
 }
 
@@ -1351,40 +1486,12 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let (identity, index_oid) = match &stmt.identity {
-            ReplicaIdentityKind::Default => ('d', None),
-            ReplicaIdentityKind::Full => ('f', None),
-            ReplicaIdentityKind::Nothing => ('n', None),
-            ReplicaIdentityKind::Index(index_name) => {
-                let index = catalog
-                    .index_relations_for_heap(relation.relation_oid)
-                    .into_iter()
-                    .find(|index| index.name.eq_ignore_ascii_case(index_name))
-                    .ok_or_else(|| {
-                        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                            expected: "index on table",
-                            actual: format!(
-                                "index \"{}\" does not exist for table \"{}\"",
-                                index_name, stmt.table_name
-                            ),
-                        })
-                    })?;
-                if !index.index_meta.indisunique {
-                    return Err(ExecError::Parse(
-                        crate::backend::parser::ParseError::DetailedError {
-                            message: format!(
-                                "cannot use non-unique index \"{}\" as replica identity",
-                                index_name
-                            ),
-                            detail: None,
-                            hint: None,
-                            sqlstate: "42809",
-                        },
-                    ));
-                }
-                ('i', Some(index.relation_oid))
-            }
-        };
+        let (identity, index_oid) = replica_identity_kind_for_alter_table(
+            &catalog,
+            &relation,
+            &stmt.table_name,
+            &stmt.identity,
+        )?;
 
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -1432,40 +1539,12 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let (identity, index_oid) = match &stmt.identity {
-            ReplicaIdentityKind::Default => ('d', None),
-            ReplicaIdentityKind::Full => ('f', None),
-            ReplicaIdentityKind::Nothing => ('n', None),
-            ReplicaIdentityKind::Index(index_name) => {
-                let index = catalog
-                    .index_relations_for_heap(relation.relation_oid)
-                    .into_iter()
-                    .find(|index| index.name.eq_ignore_ascii_case(index_name))
-                    .ok_or_else(|| {
-                        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                            expected: "index on table",
-                            actual: format!(
-                                "index \"{}\" does not exist for table \"{}\"",
-                                index_name, stmt.table_name
-                            ),
-                        })
-                    })?;
-                if !index.index_meta.indisunique {
-                    return Err(ExecError::Parse(
-                        crate::backend::parser::ParseError::DetailedError {
-                            message: format!(
-                                "cannot use non-unique index \"{}\" as replica identity",
-                                index_name
-                            ),
-                            detail: None,
-                            hint: None,
-                            sqlstate: "42809",
-                        },
-                    ));
-                }
-                ('i', Some(index.relation_oid))
-            }
-        };
+        let (identity, index_oid) = replica_identity_kind_for_alter_table(
+            &catalog,
+            &relation,
+            &stmt.table_name,
+            &stmt.identity,
+        )?;
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),

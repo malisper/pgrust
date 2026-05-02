@@ -1860,6 +1860,7 @@ fn build_hash_state(
         column_names,
         table: None,
         built: false,
+        instrumentation: Default::default(),
         plan_info,
         stats: NodeExecStats::default(),
     }

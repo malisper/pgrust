@@ -192,7 +192,7 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         relpartbound: None,
         reloptions: None,
         relacl: None,
-        relreplident: 'd',
+        relreplident: 'n',
         reloftype: 0,
     }
 }

@@ -10578,6 +10578,13 @@ where
         };
         rows_for_new_relation_entry(&type_lookup, &relation_name, &new_entry)?
     };
+    if kinds.contains(&BootstrapCatalogKind::PgClass) {
+        for row in &mut new_rows.classes {
+            if row.oid == relation_oid {
+                row.relreplident = class_row.relreplident;
+            }
+        }
+    }
     if kinds.contains(&BootstrapCatalogKind::PgDepend) {
         let parent_oids = relation_inherits_mvcc(store, ctx, relation_oid)?
             .into_iter()
@@ -11262,6 +11269,18 @@ fn relation_object_name(relation_name: &str) -> &str {
         .unwrap_or(relation_name)
 }
 
+fn default_relreplident_for_catalog_entry(entry: &CatalogEntry) -> char {
+    if matches!(entry.relkind, 'r' | 'p') {
+        if entry.namespace_oid == crate::include::catalog::PG_CATALOG_NAMESPACE_OID {
+            'n'
+        } else {
+            'd'
+        }
+    } else {
+        'n'
+    }
+}
+
 fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgClassRow {
     PgClassRow {
         oid: entry.relation_oid,
@@ -11291,7 +11310,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relpartbound: entry.relpartbound.clone(),
         reloptions: entry.reloptions.clone(),
         relacl: entry.relacl.clone(),
-        relreplident: 'd',
+        relreplident: default_relreplident_for_catalog_entry(entry),
         reloftype: entry.of_type_oid,
     }
 }

@@ -14,12 +14,13 @@ use crate::include::nodes::execnodes::TupleSlot;
 use crate::pl::plpgsql::TriggerOperation;
 
 use super::tablecmds::{
-    WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
+    ReturningTuple, WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
     exclusion_arbiter_conflicts_with_existing_row, index_key_values_for_row,
     insert_index_entry_for_row, materialize_generated_columns, project_returning_row_with_old_new,
-    rollback_inserted_row, row_matches_index_predicate, slot_toast_context,
-    temporal_arbiter_conflicts_with_existing_row, validate_pending_no_action_checks,
-    validate_pending_outbound_foreign_key_checks, write_insert_heap_row, write_updated_row,
+    project_returning_row_with_old_new_metadata, rollback_inserted_row,
+    row_matches_index_predicate, slot_toast_context, temporal_arbiter_conflicts_with_existing_row,
+    validate_pending_no_action_checks, validate_pending_outbound_foreign_key_checks,
+    write_insert_heap_row, write_updated_row,
 };
 use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
 
@@ -32,6 +33,7 @@ enum ConflictActionResult {
     Updated {
         old_values: Vec<Value>,
         new_values: Vec<Value>,
+        old_tid: ItemPointerData,
         new_tid: ItemPointerData,
         relation_oid: u32,
     },
@@ -316,6 +318,7 @@ fn run_conflict_update(
             Ok(ConflictActionResult::Updated {
                 old_values: current_old_values,
                 new_values,
+                old_tid: conflict_tid,
                 new_tid,
                 relation_oid: write_info.relation_oid(),
             })
@@ -659,19 +662,28 @@ pub(crate) fn execute_insert_on_conflict_rows(
                         ConflictActionResult::Updated {
                             old_values,
                             new_values,
+                            old_tid,
                             new_tid,
                             relation_oid,
                         } => {
                             if stmt.returning.is_empty() {
                                 affected_rows.push(new_values);
                             } else {
-                                affected_rows.push(project_returning_row_with_old_new(
+                                affected_rows.push(project_returning_row_with_old_new_metadata(
                                     &stmt.returning,
                                     &new_values,
                                     Some(new_tid),
                                     Some(relation_oid),
-                                    Some(&old_values),
-                                    Some(&new_values),
+                                    Some(ReturningTuple {
+                                        values: &old_values,
+                                        tid: Some(old_tid),
+                                        table_oid: Some(stmt.relation_oid),
+                                    }),
+                                    Some(ReturningTuple {
+                                        values: &new_values,
+                                        tid: Some(new_tid),
+                                        table_oid: Some(relation_oid),
+                                    }),
                                     ctx,
                                 )?);
                             }

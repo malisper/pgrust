@@ -3277,7 +3277,12 @@ fn inbound_foreign_key_display_names(
 ) -> (String, String) {
     let default_child_name = relation_display_name(catalog, child_relation.relation_oid, "<child>");
     if is_referenced_side_foreign_key_clone(row, catalog) {
-        return (row.conname.clone(), default_child_name);
+        let root_row = root_constraint_row(row, catalog);
+        let display_child_name = catalog
+            .relation_by_oid(root_row.conrelid)
+            .map(|relation| relation_display_name(catalog, relation.relation_oid, "<child>"))
+            .unwrap_or(default_child_name);
+        return (root_row.conname, display_child_name);
     }
     let Some(parent_row) = (row.conparentid != 0)
         .then(|| catalog.constraint_row_by_oid(row.conparentid))
@@ -3315,6 +3320,20 @@ fn inbound_foreign_key_display_names(
         format!("{}_{}", parent_row.conname, ordinal),
         display_child_name,
     )
+}
+
+fn root_constraint_row(
+    row: &PgConstraintRow,
+    catalog: &dyn super::CatalogLookup,
+) -> PgConstraintRow {
+    let mut root = row.clone();
+    while root.conparentid != 0 {
+        let Some(parent) = catalog.constraint_row_by_oid(root.conparentid) else {
+            break;
+        };
+        root = parent;
+    }
+    root
 }
 
 fn partition_child_ordinal_for_relation(

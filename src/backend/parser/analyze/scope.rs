@@ -623,7 +623,13 @@ fn resolve_system_column_in_scope(
     let mut matches = scope
         .relations
         .iter()
-        .filter_map(|entry| entry.system_varno)
+        .filter_map(|entry| {
+            let varno = entry.system_varno?;
+            (!matches!(varno, RULE_OLD_VAR | RULE_NEW_VAR)
+                && varno != crate::include::nodes::primnodes::OUTER_VAR
+                && varno != crate::include::nodes::primnodes::INNER_VAR)
+                .then_some(varno)
+        })
         .map(|varno| ResolvedSystemColumn {
             varno,
             varlevelsup,

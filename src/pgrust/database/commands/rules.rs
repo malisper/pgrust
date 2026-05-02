@@ -2365,11 +2365,21 @@ fn with_rule_bindings<T>(
 ) -> Result<T, ExecError> {
     let saved_old = ctx.expr_bindings.rule_old_tuple.clone();
     let saved_new = ctx.expr_bindings.rule_new_tuple.clone();
+    let saved_outer = ctx.expr_bindings.outer_tuple.clone();
+    let saved_inner = ctx.expr_bindings.inner_tuple.clone();
+    let saved_outer_system_bindings = std::mem::take(&mut ctx.expr_bindings.outer_system_bindings);
+    let saved_inner_system_bindings = std::mem::take(&mut ctx.expr_bindings.inner_system_bindings);
     ctx.expr_bindings.rule_old_tuple = Some(old_values.to_vec());
     ctx.expr_bindings.rule_new_tuple = Some(new_values.to_vec());
+    ctx.expr_bindings.outer_tuple = Some(old_values.to_vec());
+    ctx.expr_bindings.inner_tuple = Some(new_values.to_vec());
     let result = f(ctx);
     ctx.expr_bindings.rule_old_tuple = saved_old;
     ctx.expr_bindings.rule_new_tuple = saved_new;
+    ctx.expr_bindings.outer_tuple = saved_outer;
+    ctx.expr_bindings.inner_tuple = saved_inner;
+    ctx.expr_bindings.outer_system_bindings = saved_outer_system_bindings;
+    ctx.expr_bindings.inner_system_bindings = saved_inner_system_bindings;
     result
 }
 

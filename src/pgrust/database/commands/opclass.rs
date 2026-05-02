@@ -2,6 +2,7 @@ use super::super::*;
 use std::collections::BTreeSet;
 
 use crate::backend::executor::expr_reg::format_type_text;
+use crate::backend::parser::gram::{parse_operator_argtypes, parse_operator_name};
 use crate::backend::parser::{
     AlterOperatorClassAction, AlterOperatorClassStatement, AlterOperatorFamilyAction,
     AlterOperatorFamilyStatement, CatalogLookup, CreateOperatorClassItem,
@@ -15,7 +16,7 @@ use crate::backend::utils::cache::syscache::{
 use crate::include::catalog::{
     BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID, INT4_TYPE_OID, INTERNAL_TYPE_OID,
     PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgOpclassRow,
-    PgOpfamilyRow, PgProcRow, VOID_TYPE_OID,
+    PgOperatorRow, PgOpfamilyRow, PgProcRow, VOID_TYPE_OID,
 };
 use crate::pgrust::database::ddl::ensure_can_set_role;
 
@@ -325,9 +326,10 @@ fn resolve_proc_oid(
                 && row.proargtypes == desired
                 && schema_name
                     .map(|schema| {
-                        (schema.eq_ignore_ascii_case("public")
-                            && row.pronamespace == PUBLIC_NAMESPACE_OID)
-                            || schema.eq_ignore_ascii_case("pg_catalog")
+                        catalog.namespace_rows().into_iter().any(|namespace| {
+                            namespace.nspname.eq_ignore_ascii_case(schema)
+                                && namespace.oid == row.pronamespace
+                        })
                     })
                     .unwrap_or(true)
         })
@@ -345,6 +347,83 @@ fn resolve_proc_oid(
                 sqlstate: "42883",
             })
         })
+}
+
+fn resolve_opclass_operator_type_oid(
+    catalog: &dyn CatalogLookup,
+    raw_type: Option<crate::include::nodes::parsenodes::RawTypeName>,
+    default_type_oid: u32,
+) -> Result<u32, ExecError> {
+    match raw_type {
+        Some(raw_type) => {
+            let sql_type = resolve_raw_type_name(&raw_type, catalog).map_err(ExecError::Parse)?;
+            catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnsupportedType(format!("{raw_type:?}")))
+            })
+        }
+        None => Ok(default_type_oid),
+    }
+}
+
+fn resolve_opclass_operator(
+    catalog: &dyn CatalogLookup,
+    operator_sql: &str,
+    default_left_type_oid: u32,
+    default_right_type_oid: u32,
+) -> Result<(PgOperatorRow, u32, u32), ExecError> {
+    let ((schema_name, operator_name), rest) =
+        parse_operator_name(operator_sql).map_err(ExecError::Parse)?;
+    let rest = rest.trim_start();
+    let (left_type_oid, right_type_oid) = if rest.is_empty() {
+        (default_left_type_oid, default_right_type_oid)
+    } else {
+        let ((left_type, right_type), rest) =
+            parse_operator_argtypes(rest).map_err(ExecError::Parse)?;
+        if !rest.trim().is_empty() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "operator class operator",
+                actual: operator_sql.into(),
+            }));
+        }
+        (
+            resolve_opclass_operator_type_oid(catalog, left_type, default_left_type_oid)?,
+            resolve_opclass_operator_type_oid(catalog, right_type, default_right_type_oid)?,
+        )
+    };
+    let namespace_oid = schema_name
+        .as_deref()
+        .map(|schema| {
+            catalog
+                .namespace_rows()
+                .into_iter()
+                .find(|namespace| namespace.nspname.eq_ignore_ascii_case(schema))
+                .map(|namespace| namespace.oid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("schema \"{schema}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3F000",
+                })
+        })
+        .transpose()?;
+    let operator = catalog
+        .operator_rows()
+        .into_iter()
+        .find(|row| {
+            row.oprname.eq_ignore_ascii_case(&operator_name)
+                && row.oprleft == left_type_oid
+                && row.oprright == right_type_oid
+                && namespace_oid.is_none_or(|oid| row.oprnamespace == oid)
+        })
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "existing operator",
+                actual: format!(
+                    "operator {operator_sql} for type oid {default_left_type_oid} does not exist"
+                ),
+            })
+        })?;
+    Ok((operator, left_type_oid, right_type_oid))
 }
 
 #[derive(Debug)]
@@ -1005,22 +1084,17 @@ impl Database {
                     strategy_number,
                     operator_name,
                 } => {
-                    let operator = catalog
-                        .operator_by_name_left_right(operator_name, input_type_oid, input_type_oid)
-                        .ok_or_else(|| {
-                            ExecError::Parse(ParseError::UnexpectedToken {
-                                expected: "existing operator",
-                                actual: format!(
-                                    "operator {} for type oid {} does not exist",
-                                    operator_name, input_type_oid
-                                ),
-                            })
-                        })?;
+                    let (operator, left_type_oid, right_type_oid) = resolve_opclass_operator(
+                        &catalog,
+                        operator_name,
+                        input_type_oid,
+                        input_type_oid,
+                    )?;
                     amop_rows.push(PgAmopRow {
                         oid: 0,
                         amopfamily: 0,
-                        amoplefttype: input_type_oid,
-                        amoprighttype: input_type_oid,
+                        amoplefttype: left_type_oid,
+                        amoprighttype: right_type_oid,
                         amopstrategy: *strategy_number,
                         amoppurpose: 's',
                         amopopr: operator.oid,

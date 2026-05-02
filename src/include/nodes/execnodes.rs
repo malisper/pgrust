@@ -1,6 +1,6 @@
 use crate::backend::access::heap::heapam::VisibleHeapScan;
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
-use crate::backend::executor::hashjoin::{HashJoinPhase, HashJoinTable};
+use crate::backend::executor::hashjoin::{HashInstrumentation, HashJoinPhase, HashJoinTable};
 use crate::backend::executor::mergejoin::MergeJoinBufferedRow;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
@@ -333,6 +333,7 @@ pub trait PlanNode: std::fmt::Debug {
                     stats.rows_removed_by_filter
                 ));
             }
+            lines.extend(self.explain_json_extra_fields(analyze, indent + 2));
         }
         let children = self.explain_json_children(analyze, indent + 2);
         if !children.is_empty() {
@@ -354,6 +355,10 @@ pub trait PlanNode: std::fmt::Debug {
     }
 
     fn explain_json_children(&self, _analyze: bool, _indent: usize) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn explain_json_extra_fields(&self, _analyze: bool, _indent: usize) -> Vec<String> {
         Vec::new()
     }
 }
@@ -841,6 +846,7 @@ pub struct HashState {
     pub(crate) column_names: Vec<String>,
     pub(crate) table: Option<HashJoinTable>,
     pub(crate) built: bool,
+    pub(crate) instrumentation: HashInstrumentation,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }

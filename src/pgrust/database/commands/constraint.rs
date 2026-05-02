@@ -5688,6 +5688,32 @@ impl Database {
                 ),
             }));
         }
+        if catalog
+            .index_relations_for_heap(relation.relation_oid)
+            .into_iter()
+            .any(|index| {
+                if !index.index_meta.indisreplident {
+                    return false;
+                }
+                let key_attnums = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or(0);
+                index
+                    .index_meta
+                    .indkey
+                    .iter()
+                    .take(key_attnums)
+                    .any(|key_attnum| *key_attnum == attnum)
+            })
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" is in index used as replica identity",
+                    relation.desc.columns[column_index].name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
         let existing_not_null = not_null_constraint_for_attnum(&existing_constraints, attnum)
             .cloned()
             .ok_or_else(|| {

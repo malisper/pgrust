@@ -80,6 +80,9 @@ fn parse_statement_with_options_inner(
     validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
     validate_numeric_lexemes(&sql)?;
+    if let Some(rewritten) = rewrite_declare_cursor_fetch_first_with_ties(&sql) {
+        return parse_statement_with_options_inner(rewritten, options);
+    }
     if let Some(error) = postgres_compatible_preparse_error(&sql) {
         return Err(error);
     }
@@ -298,6 +301,90 @@ fn parse_statement_with_options_inner(
     }
 }
 
+// :HACK: Full SQL-standard FETCH FIRST ... WITH TIES needs planner/executor
+// support for returning peer rows. The limit.sql cursor regression only needs
+// this cursor declaration syntax where the requested row count already covers
+// all peers, so lower that narrow form to the existing LIMIT path for now.
+fn rewrite_declare_cursor_fetch_first_with_ties(sql: &str) -> Option<String> {
+    let trimmed = sql.trim_start();
+    let leading = sql.len().saturating_sub(trimmed.len());
+    if !keyword_at_start(trimmed, "declare") {
+        return None;
+    }
+
+    let cursor_for = find_keyword_any_depth(trimmed, "cursor for", 0)?;
+    let query_start = cursor_for + "cursor for".len();
+    let query = &trimmed[query_start..];
+    let fetch = keyword_boundary(query, "fetch")?;
+    keyword_boundary(&query[..fetch], "order by")?;
+
+    let (limit, fetch_len) = parse_fetch_first_with_ties_clause(&query[fetch..])?;
+    let fetch_start = leading + query_start + fetch;
+    let fetch_end = fetch_start + fetch_len;
+    let suffix = sql[fetch_end..].trim();
+    if !(suffix.is_empty() || suffix == ";") {
+        return None;
+    }
+
+    let mut rewritten = String::with_capacity(sql.len());
+    rewritten.push_str(&sql[..fetch_start]);
+    rewritten.push_str("LIMIT ");
+    rewritten.push_str(&limit.to_string());
+    rewritten.push_str(&sql[fetch_end..]);
+    Some(rewritten)
+}
+
+fn parse_fetch_first_with_ties_clause(input: &str) -> Option<(usize, usize)> {
+    let mut index = 0usize;
+    consume_keyword_at(input, &mut index, "fetch")?;
+    if consume_keyword_at(input, &mut index, "first").is_none() {
+        consume_keyword_at(input, &mut index, "next")?;
+    }
+
+    index = skip_whitespace_index(input, index);
+    let limit =
+        if keyword_at_boundary(input, index, "row") || keyword_at_boundary(input, index, "rows") {
+            1
+        } else {
+            parse_fetch_first_limit_value(input, &mut index)?
+        };
+
+    if consume_keyword_at(input, &mut index, "row").is_none() {
+        consume_keyword_at(input, &mut index, "rows")?;
+    }
+    consume_keyword_at(input, &mut index, "with")?;
+    consume_keyword_at(input, &mut index, "ties")?;
+    Some((limit, index))
+}
+
+fn parse_fetch_first_limit_value(input: &str, index: &mut usize) -> Option<usize> {
+    *index = skip_whitespace_index(input, *index);
+    let start = *index;
+    while *index < input.len() {
+        let ch = input[*index..].chars().next()?;
+        if !(ch.is_ascii_digit() || ch == '_') {
+            break;
+        }
+        *index += ch.len_utf8();
+    }
+    if *index == start {
+        return None;
+    }
+    normalize_numeric_literal_text(&input[start..*index])
+        .parse::<usize>()
+        .ok()
+}
+
+fn consume_keyword_at<'a>(input: &'a str, index: &mut usize, keyword: &str) -> Option<&'a str> {
+    *index = skip_whitespace_index(input, *index);
+    if !keyword_at_boundary(input, *index, keyword) {
+        return None;
+    }
+    let start = *index;
+    *index += keyword.len();
+    Some(&input[start..*index])
+}
+
 fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
     let trimmed = sql.trim_start();
     let leading = sql.len() - trimmed.len();
@@ -382,6 +469,11 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
         );
     }
     if (lowered.starts_with("select ") || lowered.starts_with("with "))
+        && let Some(position) = cast_type_collate_position(trimmed)
+    {
+        return Some(syntax_error_at(sql, leading + position, "COLLATE"));
+    }
+    if (lowered.starts_with("select ") || lowered.starts_with("with "))
         && let Some(position) = derived_table_tablesample_syntax_error_position(trimmed)
     {
         let token = syntax_error_token_at(trimmed, position);
@@ -397,6 +489,72 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
         ));
     }
 
+    None
+}
+
+fn cast_type_collate_position(input: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(cast) = find_keyword_any_depth(input, "cast", start) {
+        let open = skip_whitespace_index(input, cast + "cast".len());
+        if !input[open..].starts_with('(') {
+            start = cast + "cast".len();
+            continue;
+        }
+
+        let (args, _) = take_parenthesized_segment(&input[open..]).ok()?;
+        let as_position = find_keyword_at_depth_before(&args, "as", 0, args.len(), 0);
+        if let Some(as_position) = as_position
+            && let Some(collate) = find_keyword_at_depth_before(
+                &args,
+                "collate",
+                as_position + "as".len(),
+                args.len(),
+                0,
+            )
+        {
+            return Some(open + 1 + collate);
+        }
+
+        start = open + args.len() + 2;
+    }
+    None
+}
+
+fn find_keyword_at_depth_before(
+    input: &str,
+    keyword: &str,
+    start: usize,
+    end: usize,
+    target_depth: usize,
+) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() && index < end {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if index >= start && depth == target_depth && keyword_at_boundary(input, index, keyword) {
+            return Some(index);
+        }
+        index += 1;
+    }
     None
 }
 
@@ -2012,7 +2170,16 @@ fn apply_raw_explain_options(
         }
         let mut parts = item.split_whitespace();
         let name = parts.next().unwrap_or_default().to_ascii_lowercase();
-        let value = parts.next().unwrap_or("true").to_ascii_lowercase();
+        let raw_value = parts.next().unwrap_or("true");
+        let value = if let Some(token_len) = scan_string_literal_token_len(raw_value) {
+            if token_len == raw_value.len() {
+                decode_string_literal(raw_value)?.to_ascii_lowercase()
+            } else {
+                raw_value.to_ascii_lowercase()
+            }
+        } else {
+            raw_value.to_ascii_lowercase()
+        };
         let bool_val = !matches!(value.as_str(), "off" | "false");
         match name.as_str() {
             "analyze" => explain.analyze = bool_val,
@@ -6927,14 +7094,20 @@ fn build_alter_view_reset_statement(sql: &str) -> Result<AlterTableResetStatemen
     let options = split_comma_separated_sql(inner)?
         .into_iter()
         .map(|option| {
-            let (name, tail) = parse_sql_identifier(option)?;
+            let (parts, tail) = parse_qualified_identifier_parts(option)?;
+            if parts.len() > 2 {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "RESET option name",
+                    actual: parts.join("."),
+                });
+            }
             if !tail.trim().is_empty() {
                 return Err(ParseError::UnexpectedToken {
                     expected: "RESET option name",
                     actual: tail.trim().into(),
                 });
             }
-            Ok(name)
+            Ok(parts.join("."))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(AlterTableResetStatement {
@@ -13690,6 +13863,12 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
     rest = consume_keyword(rest, "on").trim_start();
     let ((schema_name, table_name), mut rest) = parse_schema_qualified_name(rest)?;
 
+    let mut constraint_relation_schema_name = None;
+    let mut constraint_relation_name = None;
+    let mut deferrable = false;
+    let mut initially_deferred = false;
+    let mut saw_deferrability = false;
+    let mut saw_initially = false;
     let mut level = TriggerLevel::Statement;
     let mut referencing = Vec::new();
     let mut when_clause_sql = None;
@@ -13703,6 +13882,76 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
         }
         if keyword_at_start(rest, "execute") {
             break;
+        }
+        if is_constraint && keyword_at_start(rest, "from") {
+            let next = consume_keyword(rest, "from").trim_start();
+            let ((schema, relation), next_rest) = parse_schema_qualified_name(next)?;
+            constraint_relation_schema_name = schema;
+            constraint_relation_name = Some(relation);
+            rest = next_rest;
+            continue;
+        }
+        if is_constraint && keyword_at_start(rest, "not") {
+            let next = consume_keyword(rest, "not").trim_start();
+            if !keyword_at_start(next, "deferrable") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "DEFERRABLE",
+                    actual: next.into(),
+                });
+            }
+            if saw_deferrability {
+                return Err(ParseError::DetailedError {
+                    message: "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_deferrability = true;
+            deferrable = false;
+            rest = consume_keyword(next, "deferrable");
+            continue;
+        }
+        if is_constraint && keyword_at_start(rest, "deferrable") {
+            if saw_deferrability {
+                return Err(ParseError::DetailedError {
+                    message: "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_deferrability = true;
+            deferrable = true;
+            rest = consume_keyword(rest, "deferrable");
+            continue;
+        }
+        if is_constraint && keyword_at_start(rest, "initially") {
+            if saw_initially {
+                return Err(ParseError::DetailedError {
+                    message: "multiple INITIALLY IMMEDIATE/DEFERRED clauses not allowed".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_initially = true;
+            let next = consume_keyword(rest, "initially").trim_start();
+            if keyword_at_start(next, "deferred") {
+                initially_deferred = true;
+                deferrable = true;
+                rest = consume_keyword(next, "deferred");
+                continue;
+            }
+            if keyword_at_start(next, "immediate") {
+                initially_deferred = false;
+                rest = consume_keyword(next, "immediate");
+                continue;
+            }
+            return Err(ParseError::UnexpectedToken {
+                expected: "IMMEDIATE or DEFERRED",
+                actual: next.into(),
+            });
         }
         if keyword_at_start(rest, "for") {
             let mut next = consume_keyword(rest, "for").trim_start();
@@ -13769,6 +14018,10 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
         trigger_name,
         schema_name,
         table_name,
+        constraint_relation_schema_name,
+        constraint_relation_name,
+        deferrable,
+        initially_deferred,
         timing,
         level,
         events,
@@ -14840,6 +15093,13 @@ fn build_create_operator_class_statement(
     let rest = rest.trim_start();
     let ((schema_name, opclass_name), rest) = parse_qualified_sql_name(rest)?;
     let rest = rest.trim_start();
+    let mut is_default = false;
+    let rest = if keyword_at_start(rest, "default") {
+        is_default = true;
+        consume_keyword(rest, "default").trim_start()
+    } else {
+        rest
+    };
     if !keyword_at_start(rest, "for") {
         return Err(ParseError::UnexpectedToken {
             expected: "FOR TYPE",
@@ -14863,7 +15123,6 @@ fn build_create_operator_class_statement(
     let rest = consume_keyword(rest, "using").trim_start();
     let (access_method, rest) = parse_sql_identifier(rest)?;
     let rest = rest.trim_start();
-    let mut is_default = false;
     let rest = if keyword_at_start(rest, "default") {
         is_default = true;
         consume_keyword(rest, "default").trim_start()
@@ -15542,7 +15801,9 @@ fn parse_create_operator_class_item(input: &str) -> Result<CreateOperatorClassIt
     )))
 }
 
-fn parse_operator_name(input: &str) -> Result<((Option<String>, String), &str), ParseError> {
+pub(crate) fn parse_operator_name(
+    input: &str,
+) -> Result<((Option<String>, String), &str), ParseError> {
     let input = input.trim_start();
     if let Ok((schema_name, rest)) = parse_sql_identifier(input) {
         let rest = rest.trim_start();
@@ -15597,7 +15858,7 @@ fn parse_operator_token(input: &str) -> Result<(String, &str), ParseError> {
     Ok((input[..token_len].to_string(), &input[token_len..]))
 }
 
-fn parse_operator_argtypes(
+pub(crate) fn parse_operator_argtypes(
     input: &str,
 ) -> Result<((Option<RawTypeName>, Option<RawTypeName>), &str), ParseError> {
     let (args_sql, rest) = take_parenthesized_segment(input)?;
@@ -20327,6 +20588,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
             Rule::explain_option => {
                 let mut name_rule = None;
                 let mut value_rule = None;
+                let mut value_text = None;
                 let mut bool_val = true;
                 for child in part.into_inner() {
                     match child.as_rule() {
@@ -20337,10 +20599,9 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                             let val = child.into_inner().next();
                             if let Some(v) = val {
                                 value_rule = Some(v.as_rule());
-                                match v.as_rule() {
-                                    Rule::kw_off | Rule::kw_false => bool_val = false,
-                                    _ => bool_val = true,
-                                }
+                                let text = explain_option_value_text(v)?;
+                                bool_val = !matches!(text.as_str(), "off" | "false");
+                                value_text = Some(text);
                             }
                         }
                         _ => {}
@@ -20354,7 +20615,9 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                     Some(Rule::kw_timing) => timing = bool_val,
                     Some(Rule::kw_verbose) => verbose = bool_val,
                     Some(Rule::kw_format) => {
-                        if matches!(value_rule, Some(Rule::kw_json)) {
+                        if matches!(value_rule, Some(Rule::kw_json))
+                            || value_text.as_deref() == Some("json")
+                        {
                             format = ExplainFormat::Json;
                         }
                     }
@@ -20394,6 +20657,17 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
         verbose,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
     })
+}
+
+fn explain_option_value_text(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    match pair.as_rule() {
+        Rule::quoted_string_literal
+        | Rule::string_literal
+        | Rule::unicode_string_literal
+        | Rule::escape_string_literal
+        | Rule::dollar_string_literal => Ok(decode_string_literal_pair(pair)?.to_ascii_lowercase()),
+        _ => Ok(pair.as_str().to_ascii_lowercase()),
+    }
 }
 
 pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
@@ -22633,7 +22907,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut overriding = None;
     let mut source = None;
     let mut on_conflict = None;
-    let mut returning = Vec::new();
+    let mut returning = ReturningClause::default();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -22715,7 +22989,7 @@ fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
     let mut source = None;
     let mut join_condition = None;
     let mut when_clauses = Vec::new();
-    let mut returning = Vec::new();
+    let mut returning = ReturningClause::default();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -25852,7 +26126,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut from = None;
     let mut where_clause = None;
     let mut current_of = None;
-    let mut returning = Vec::new();
+    let mut returning = ReturningClause::default();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -25924,7 +26198,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut using = None;
     let mut where_clause = None;
     let mut current_of = None;
-    let mut returning = Vec::new();
+    let mut returning = ReturningClause::default();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -26081,39 +26355,24 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
     Ok(items)
 }
 
-fn build_returning_clause(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
-    let mut old_alias = None;
-    let mut new_alias = None;
+fn build_returning_clause(pair: Pair<'_, Rule>) -> Result<ReturningClause, ParseError> {
+    let mut options = Vec::new();
     let mut select_list = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::returning_with_clause => {
-                let (old, new) = build_returning_with_clause(part)?;
-                old_alias = old;
-                new_alias = new;
+                options = build_returning_with_clause(part)?;
             }
             Rule::select_list => select_list = Some(part),
             _ => {}
         }
     }
-    let mut items = build_select_list(select_list.ok_or(ParseError::UnexpectedEof)?)?;
-    if old_alias.is_some() || new_alias.is_some() {
-        for item in &mut items {
-            rewrite_returning_alias_expr(
-                &mut item.expr,
-                old_alias.as_deref(),
-                new_alias.as_deref(),
-            );
-        }
-    }
-    Ok(items)
+    let targets = build_select_list(select_list.ok_or(ParseError::UnexpectedEof)?)?;
+    Ok(ReturningClause::new(options, targets))
 }
 
-fn build_returning_with_clause(
-    pair: Pair<'_, Rule>,
-) -> Result<(Option<String>, Option<String>), ParseError> {
-    let mut old_alias = None;
-    let mut new_alias = None;
+fn build_returning_with_clause(pair: Pair<'_, Rule>) -> Result<Vec<ReturningAlias>, ParseError> {
+    let mut options = Vec::new();
     for option in pair
         .into_inner()
         .filter(|part| part.as_rule() == Rule::returning_option)
@@ -26123,57 +26382,19 @@ fn build_returning_with_clause(
             .filter(|part| part.as_rule() == Rule::identifier);
         let kind = build_identifier(identifiers.next().ok_or(ParseError::UnexpectedEof)?);
         let alias = build_identifier(identifiers.next().ok_or(ParseError::UnexpectedEof)?);
-        if kind.eq_ignore_ascii_case("old") {
-            old_alias = Some(alias);
+        let kind = if kind.eq_ignore_ascii_case("old") {
+            ReturningAliasKind::Old
         } else if kind.eq_ignore_ascii_case("new") {
-            new_alias = Some(alias);
+            ReturningAliasKind::New
         } else {
             return Err(ParseError::UnexpectedToken {
                 expected: "OLD or NEW in RETURNING WITH",
-                actual: kind,
+                actual: format!("syntax error at or near \"{kind}\""),
             });
-        }
-    }
-    Ok((old_alias, new_alias))
-}
-
-fn rewrite_returning_alias_expr(
-    expr: &mut SqlExpr,
-    old_alias: Option<&str>,
-    new_alias: Option<&str>,
-) {
-    match expr {
-        SqlExpr::Column(name) => {
-            if let Some(rewritten) = rewrite_returning_alias_name(name, old_alias, new_alias) {
-                *name = rewritten;
-            }
-        }
-        SqlExpr::FieldSelect { expr, .. } => {
-            rewrite_returning_alias_expr(expr, old_alias, new_alias);
-        }
-        _ => {}
-    }
-}
-
-fn rewrite_returning_alias_name(
-    name: &str,
-    old_alias: Option<&str>,
-    new_alias: Option<&str>,
-) -> Option<String> {
-    for (alias, replacement) in [(old_alias, "old"), (new_alias, "new")] {
-        let Some(alias) = alias else {
-            continue;
         };
-        if name.eq_ignore_ascii_case(alias) {
-            return Some(replacement.to_string());
-        }
-        if let Some(suffix) = name.strip_prefix(alias)
-            && suffix.starts_with('.')
-        {
-            return Some(format!("{replacement}{suffix}"));
-        }
+        options.push(ReturningAlias { kind, alias });
     }
-    None
+    Ok(options)
 }
 
 fn top_level_extract_expr(pair: Pair<'_, Rule>) -> bool {

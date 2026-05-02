@@ -1406,7 +1406,7 @@ fn expand_star_targets(
                     column
                         .relation_names
                         .iter()
-                        .any(|visible| visible.eq_ignore_ascii_case(relation_name))
+                        .any(|visible| relation_name_matches(visible, relation_name))
                 })
         })
         .map(|(index, column)| {
@@ -1427,11 +1427,32 @@ fn expand_star_targets(
             column
                 .relation_names
                 .iter()
-                .any(|visible| visible.eq_ignore_ascii_case(relation_name))
+                .any(|visible| relation_name_matches(visible, relation_name))
         })
     });
 
     if entries.is_empty() && relation.is_some() && !relation_exists {
+        let relation_name = relation.expect("checked above");
+        if scope.columns.iter().any(|column| {
+            column
+                .hidden_invalid_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(relation_name))
+        }) {
+            return Err(ParseError::InvalidFromClauseReference(
+                relation_name.to_ascii_lowercase(),
+            ));
+        }
+        if scope.columns.iter().any(|column| {
+            column
+                .hidden_missing_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(relation_name))
+        }) {
+            return Err(ParseError::MissingFromClauseEntry(
+                relation_name.to_ascii_lowercase(),
+            ));
+        }
         return Err(ParseError::UnknownColumn(
             relation
                 .map(|name| format!("{name}.*"))
@@ -1439,4 +1460,13 @@ fn expand_star_targets(
         ));
     }
     Ok(entries)
+}
+
+fn relation_name_matches(visible_relation: &str, requested_relation: &str) -> bool {
+    if visible_relation.eq_ignore_ascii_case(requested_relation) {
+        return true;
+    }
+    requested_relation
+        .rsplit_once('.')
+        .is_some_and(|(_, requested_base)| visible_relation.eq_ignore_ascii_case(requested_base))
 }
