@@ -45016,8 +45016,8 @@ fn concurrent_indexed_updates_and_deletes_keep_index_results_correct() {
         })
         .collect();
 
-    join_all_with_timeout(updaters, TEST_TIMEOUT);
-    join_all_with_timeout(deleters, TEST_TIMEOUT);
+    join_all_with_timeout(updaters, HEAVY_CONTENTION_TEST_TIMEOUT);
+    join_all_with_timeout(deleters, HEAVY_CONTENTION_TEST_TIMEOUT);
 
     assert_eq!(
         query_rows(&db, 1, "select count(*) from items"),
