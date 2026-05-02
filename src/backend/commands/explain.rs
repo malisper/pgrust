@@ -1,6 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use serde_json::Value as JsonValue;
+
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
@@ -145,6 +147,276 @@ pub(crate) fn format_explain_analyze_json(state: &dyn PlanNode) -> String {
     EXPLAIN_ANALYZE_PRINTED_INITPLANS.with(|printed| printed.borrow_mut().clear());
     let plan = format_explain_analyze_json_plan(state);
     format!("[\n  {{\n    \"Plan\": {}\n  }}\n]", plan.trim_start())
+}
+
+pub(crate) fn format_explain_json(state: &dyn PlanNode, analyze: bool) -> String {
+    if analyze {
+        return format_explain_analyze_json(state);
+    }
+    let plan = state.explain_json(false, 0);
+    let plan = indent_multiline_json(&plan, 4);
+    format!("[\n  {{\n    \"Plan\": {}\n  }}\n]", plan.trim_start())
+}
+
+pub(crate) fn format_explain_xml(state: &dyn PlanNode, analyze: bool) -> String {
+    let json = format_explain_json(state, analyze);
+    format_explain_xml_from_json(&json).unwrap_or_else(|| xml_text_node("Plan", &json))
+}
+
+pub(crate) fn format_explain_yaml(state: &dyn PlanNode, analyze: bool) -> String {
+    let json = format_explain_json(state, analyze);
+    format_explain_yaml_from_json(&json).unwrap_or(json)
+}
+
+pub(crate) fn format_explain_xml_from_json(json: &str) -> Option<String> {
+    let value = serde_json::from_str::<JsonValue>(json).ok()?;
+    Some(format_explain_xml_value(&value))
+}
+
+pub(crate) fn format_explain_yaml_from_json(json: &str) -> Option<String> {
+    let value = serde_json::from_str::<JsonValue>(json).ok()?;
+    let mut lines = Vec::new();
+    push_yaml_value(&value, 0, &mut lines);
+    Some(lines.join("\n"))
+}
+
+fn format_explain_xml_value(value: &JsonValue) -> String {
+    let mut lines = vec![r#"<explain xmlns="http://www.postgresql.org/2009/explain">"#.to_string()];
+    match value {
+        JsonValue::Array(items) => {
+            for item in items {
+                lines.push("  <Query>".into());
+                push_xml_value(item, "Query", 4, &mut lines);
+                lines.push("  </Query>".into());
+            }
+        }
+        other => {
+            lines.push("  <Query>".into());
+            push_xml_value(other, "Query", 4, &mut lines);
+            lines.push("  </Query>".into());
+        }
+    }
+    lines.push("</explain>".into());
+    lines.join("\n")
+}
+
+fn push_xml_value(value: &JsonValue, tag: &str, indent: usize, lines: &mut Vec<String>) {
+    match value {
+        JsonValue::Object(map) => {
+            for (key, child) in ordered_explain_json_entries(map) {
+                let child_tag = explain_xml_tag(key);
+                match child {
+                    JsonValue::Array(items) if key == "Plans" => {
+                        for item in items {
+                            push_xml_object_or_scalar(item, "Plan", indent, lines);
+                        }
+                    }
+                    _ => push_xml_object_or_scalar(child, &child_tag, indent, lines),
+                }
+            }
+        }
+        JsonValue::Array(items) => {
+            for item in items {
+                push_xml_object_or_scalar(item, tag, indent, lines);
+            }
+        }
+        other => {
+            push_xml_object_or_scalar(other, tag, indent, lines);
+        }
+    }
+}
+
+fn push_xml_object_or_scalar(value: &JsonValue, tag: &str, indent: usize, lines: &mut Vec<String>) {
+    let pad = " ".repeat(indent);
+    match value {
+        JsonValue::Object(_) | JsonValue::Array(_) => {
+            lines.push(format!("{pad}<{tag}>"));
+            push_xml_value(value, tag, indent + 2, lines);
+            lines.push(format!("{pad}</{tag}>"));
+        }
+        scalar => {
+            lines.push(format!(
+                "{pad}<{tag}>{}</{tag}>",
+                xml_escape(&json_scalar_text(scalar))
+            ));
+        }
+    }
+}
+
+fn explain_xml_tag(key: &str) -> String {
+    key.chars()
+        .map(|ch| match ch {
+            ' ' | '_' => '-',
+            ':' | '"' | '\'' | '(' | ')' | '[' | ']' => '-',
+            other => other,
+        })
+        .collect()
+}
+
+fn xml_text_node(tag: &str, value: &str) -> String {
+    format!("<{tag}>{}</{tag}>", xml_escape(value))
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn push_yaml_value(value: &JsonValue, indent: usize, lines: &mut Vec<String>) {
+    let pad = " ".repeat(indent);
+    match value {
+        JsonValue::Array(items) => {
+            for item in items {
+                match item {
+                    JsonValue::Object(map) if !map.is_empty() => {
+                        let ordered = ordered_explain_json_entries(map);
+                        let mut iter = ordered.into_iter();
+                        if let Some((key, child)) = iter.next() {
+                            push_yaml_array_object_head(key, child, indent, lines);
+                        }
+                        for (key, child) in iter {
+                            push_yaml_key_value(key, child, indent + 2, lines);
+                        }
+                    }
+                    scalar if is_yaml_scalar(scalar) => {
+                        lines.push(format!("{pad}- {}", yaml_scalar_text(scalar)));
+                    }
+                    other => {
+                        lines.push(format!("{pad}-"));
+                        push_yaml_value(other, indent + 2, lines);
+                    }
+                }
+            }
+        }
+        JsonValue::Object(map) => {
+            for (key, child) in ordered_explain_json_entries(map) {
+                push_yaml_key_value(key, child, indent, lines);
+            }
+        }
+        scalar => lines.push(format!("{pad}{}", yaml_scalar_text(scalar))),
+    }
+}
+
+fn push_yaml_array_object_head(
+    key: &str,
+    value: &JsonValue,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    let pad = " ".repeat(indent);
+    if is_yaml_scalar(value) {
+        lines.push(format!("{pad}- {key}: {}", yaml_scalar_text(value)));
+    } else {
+        lines.push(format!("{pad}- {key}:"));
+        push_yaml_value(value, indent + 4, lines);
+    }
+}
+
+fn push_yaml_key_value(key: &str, value: &JsonValue, indent: usize, lines: &mut Vec<String>) {
+    let pad = " ".repeat(indent);
+    if is_yaml_scalar(value) {
+        lines.push(format!("{pad}{key}: {}", yaml_scalar_text(value)));
+    } else {
+        lines.push(format!("{pad}{key}:"));
+        push_yaml_value(value, indent + 2, lines);
+    }
+}
+
+fn is_yaml_scalar(value: &JsonValue) -> bool {
+    !matches!(value, JsonValue::Array(_) | JsonValue::Object(_))
+}
+
+fn yaml_scalar_text(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(text) => serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into()),
+        other => json_scalar_text(other),
+    }
+}
+
+fn ordered_explain_json_entries<'a>(
+    map: &'a serde_json::Map<String, JsonValue>,
+) -> Vec<(&'a String, &'a JsonValue)> {
+    let mut entries = map.iter().collect::<Vec<_>>();
+    entries.sort_by(|(left, _), (right, _)| {
+        explain_json_key_order(left)
+            .cmp(&explain_json_key_order(right))
+            .then_with(|| left.cmp(right))
+    });
+    entries
+}
+
+fn explain_json_key_order(key: &str) -> usize {
+    [
+        "Plan",
+        "Node Type",
+        "Parallel Aware",
+        "Async Capable",
+        "Relation Name",
+        "Alias",
+        "Schema",
+        "Startup Cost",
+        "Total Cost",
+        "Plan Rows",
+        "Plan Width",
+        "Actual Startup Time",
+        "Actual Total Time",
+        "Actual Rows",
+        "Actual Loops",
+        "Disabled",
+        "Output",
+        "Sort Key",
+        "Filter",
+        "Recheck Cond",
+        "Index Cond",
+        "Hash Cond",
+        "Join Filter",
+        "Rows Removed by Filter",
+        "Rows Removed by Index Recheck",
+        "Time",
+        "Output Volume",
+        "Format",
+        "Shared Hit Blocks",
+        "Shared Read Blocks",
+        "Shared Dirtied Blocks",
+        "Shared Written Blocks",
+        "Local Hit Blocks",
+        "Local Read Blocks",
+        "Local Dirtied Blocks",
+        "Local Written Blocks",
+        "Temp Read Blocks",
+        "Temp Written Blocks",
+        "Shared I/O Read Time",
+        "Shared I/O Write Time",
+        "Local I/O Read Time",
+        "Local I/O Write Time",
+        "Temp I/O Read Time",
+        "Temp I/O Write Time",
+        "Plans",
+        "Planning",
+        "Memory Used",
+        "Memory Allocated",
+        "Planning Time",
+        "Triggers",
+        "Serialization",
+        "Execution Time",
+    ]
+    .iter()
+    .position(|candidate| *candidate == key)
+    .unwrap_or(usize::MAX)
+}
+
+fn json_scalar_text(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(text) => text.clone(),
+        JsonValue::Number(number) => number.to_string(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Null => "null".into(),
+        other => other.to_string(),
+    }
 }
 
 fn format_explain_analyze_json_plan(state: &dyn PlanNode) -> String {
@@ -11421,5 +11693,30 @@ fn collect_direct_project_set_target_subplans<'a>(
     match target {
         ProjectSetTarget::Scalar(entry) => collect_direct_expr_subplans(&entry.expr, out),
         ProjectSetTarget::Set { call, .. } => collect_direct_set_returning_call_subplans(call, out),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_explain_xml_from_json, format_explain_yaml_from_json};
+
+    #[test]
+    fn structured_explain_json_converts_to_xml() {
+        let json = r#"[{"Plan":{"Node Type":"Seq Scan","Plans":[{"Node Type":"Result"}]}}]"#;
+        let xml = format_explain_xml_from_json(json).unwrap();
+
+        assert!(xml.contains(r#"<explain xmlns="http://www.postgresql.org/2009/explain">"#));
+        assert!(xml.contains("<Node-Type>Seq Scan</Node-Type>"));
+        assert!(xml.contains("<Node-Type>Result</Node-Type>"));
+    }
+
+    #[test]
+    fn structured_explain_json_converts_to_yaml() {
+        let json = r#"[{"Plan":{"Node Type":"Seq Scan","Actual Rows":1.0}}]"#;
+        let yaml = format_explain_yaml_from_json(json).unwrap();
+
+        assert!(yaml.contains("- Plan:"));
+        assert!(yaml.contains("Node Type: \"Seq Scan\""));
+        assert!(yaml.contains("Actual Rows: 1.0"));
     }
 }

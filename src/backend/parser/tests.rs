@@ -11963,6 +11963,27 @@ fn parse_insert_update_delete() {
         })
     ));
     assert!(matches!(
+        parse_statement("explain (format 'xml') select name from people").unwrap(),
+        Statement::Explain(ExplainStatement {
+            format: ExplainFormat::Xml,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_statement("explain (format yaml) select name from people").unwrap(),
+        Statement::Explain(ExplainStatement {
+            format: ExplainFormat::Yaml,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_statement("explain (format 'text') select name from people").unwrap(),
+        Statement::Explain(ExplainStatement {
+            format: ExplainFormat::Text,
+            ..
+        })
+    ));
+    assert!(matches!(
         parse_statement("explain (costs off) select name from people").unwrap(),
         Statement::Explain(ExplainStatement {
             analyze: false,
@@ -11980,6 +12001,31 @@ fn parse_insert_update_delete() {
             verbose: true,
             ..
         })
+    ));
+    assert!(matches!(
+        parse_statement("explain verbose select name from people").unwrap(),
+        Statement::Explain(ExplainStatement { verbose: true, .. })
+    ));
+    assert!(matches!(
+        parse_statement("explain (analyze, serialize, format yaml) select name from people")
+            .unwrap(),
+        Statement::Explain(ExplainStatement {
+            analyze: true,
+            format: ExplainFormat::Yaml,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_statement("explain (settings, memory, serialize binary) select name from people")
+            .unwrap(),
+        Statement::Explain(ExplainStatement { .. })
+    ));
+    let err = parse_statement("explain (analyze, generic_plan) select name from people")
+        .expect_err("ANALYZE and GENERIC_PLAN should conflict");
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::DetailedError { message, .. }
+            if message == "EXPLAIN options ANALYZE and GENERIC_PLAN cannot be used together"
     ));
     assert!(matches!(
         parse_statement(

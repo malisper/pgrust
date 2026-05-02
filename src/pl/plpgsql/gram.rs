@@ -2315,6 +2315,54 @@ mod tests {
     }
 
     #[test]
+    fn parse_parenthesized_continue_when_stmt() {
+        let block = parse_block(
+            "
+            begin
+                for item in values (1), (2) loop
+                    continue when (item is null);
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::ForQuery { body, .. } = unline(&block.statements[0]) else {
+            panic!("expected query FOR loop");
+        };
+        assert!(matches!(
+            unline(&body[0]),
+            Stmt::Continue {
+                condition: Some(condition),
+            } if condition == "(item is null)"
+        ));
+    }
+
+    #[test]
+    fn parse_parenthesized_exit_when_stmt() {
+        let block = parse_block(
+            "
+            begin
+                loop
+                    exit when (not found);
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::Loop { body } = unline(&block.statements[0]) else {
+            panic!("expected loop");
+        };
+        assert!(matches!(
+            unline(&body[0]),
+            Stmt::Exit {
+                condition: Some(condition),
+            } if condition == "(not found)"
+        ));
+    }
+
+    #[test]
     fn parse_if_stmt_preserves_elsif_branches() {
         let block = parse_block(
             "

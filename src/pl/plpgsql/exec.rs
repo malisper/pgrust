@@ -2820,7 +2820,7 @@ fn exec_function_return(
         } => {
             state.scalar_return = Some(match expr {
                 Some(expr) => {
-                    let value = eval_function_expr_inner(expr, &state.values, ctx)?;
+                    let value = eval_function_expr(expr, &state.values, ctx)?;
                     cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)
                         .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?
                 }
@@ -7652,6 +7652,7 @@ fn exec_error_sqlstate(err: &ExecError) -> &'static str {
             sqlstate
         }
         ExecError::Parse(ParseError::DetailedError { sqlstate, .. }) => sqlstate,
+        ExecError::TypeMismatch { .. } => "42883",
         ExecError::Parse(ParseError::FeatureNotSupported(_))
         | ExecError::Parse(ParseError::FeatureNotSupportedMessage(_))
         | ExecError::Parse(ParseError::OuterLevelAggregateNestedCte(_)) => "0A000",
@@ -8219,10 +8220,59 @@ fn with_plpgsql_expression_context(err: ExecError, source: &str) -> ExecError {
     {
         return err;
     }
+    let context = plpgsql_expression_context(source, &err);
+    if plpgsql_expression_uses_internal_query(&err) {
+        return ExecError::WithInternalQueryContext {
+            position: plpgsql_expression_error_position(source, &err),
+            query: source.to_string(),
+            source: Box::new(err),
+            context,
+        };
+    }
     ExecError::WithContext {
         source: Box::new(err),
-        context: format!("PL/pgSQL expression \"{source}\""),
+        context,
     }
+}
+
+fn plpgsql_expression_context(source: &str, err: &ExecError) -> String {
+    match err {
+        // PostgreSQL reports undefined operator failures in PL/pgSQL scalar
+        // expressions with QUERY plus the function frame, but without an
+        // intermediate "PL/pgSQL expression" context line.
+        ExecError::TypeMismatch { op, .. } if type_mismatch_op_is_operator(op) => String::new(),
+        _ => format!("PL/pgSQL expression \"{source}\""),
+    }
+}
+
+fn plpgsql_expression_uses_internal_query(err: &ExecError) -> bool {
+    match err {
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => {
+            plpgsql_expression_uses_internal_query(source)
+        }
+        ExecError::Parse(_) => true,
+        ExecError::TypeMismatch { op, .. } if type_mismatch_op_is_operator(op) => true,
+        _ => false,
+    }
+}
+
+fn plpgsql_expression_error_position(source: &str, err: &ExecError) -> Option<usize> {
+    match err {
+        ExecError::WithContext { source: inner, .. }
+        | ExecError::WithInternalQueryContext { source: inner, .. } => {
+            plpgsql_expression_error_position(source, inner)
+        }
+        ExecError::Parse(ParseError::Positioned { position, .. }) => Some(*position),
+        ExecError::TypeMismatch { op, .. } if type_mismatch_op_is_operator(op) => {
+            source.find(*op).map(|index| index + 1)
+        }
+        _ => None,
+    }
+}
+
+fn type_mismatch_op_is_operator(op: &str) -> bool {
+    !op.is_empty() && op.chars().all(|ch| "!~+-*/<>=@#%^&|`?".contains(ch))
 }
 
 fn with_plpgsql_context_if_missing(
@@ -8285,6 +8335,7 @@ fn has_plpgsql_expression_context_for(err: &ExecError, source: &str) -> bool {
 fn has_any_context(err: &ExecError) -> bool {
     match err {
         ExecError::WithContext { .. }
+        | ExecError::WithInternalQueryContext { .. }
         | ExecError::JsonInput {
             context: Some(_), ..
         }
@@ -8476,6 +8527,44 @@ mod tests {
     use super::*;
     use crate::backend::parser::{TriggerLevel, TriggerTiming};
     use crate::pl::plpgsql::compile::{CompiledTriggerBindings, CompiledTriggerRelation};
+
+    #[test]
+    fn plpgsql_expression_runtime_errors_do_not_add_internal_query() {
+        let err = with_plpgsql_expression_context(ExecError::DivisionByZero("/"), "1/0");
+
+        match err {
+            ExecError::WithContext { context, source } => {
+                assert_eq!(context, "PL/pgSQL expression \"1/0\"");
+                assert!(matches!(*source, ExecError::DivisionByZero("/")));
+            }
+            other => panic!("expected PL/pgSQL context wrapper, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plpgsql_expression_parse_errors_keep_internal_query() {
+        let err = with_plpgsql_expression_context(
+            ExecError::Parse(ParseError::UnknownColumn("x".into())),
+            "x + 1",
+        );
+
+        match err {
+            ExecError::WithInternalQueryContext {
+                query,
+                context,
+                source,
+                ..
+            } => {
+                assert_eq!(query, "x + 1");
+                assert_eq!(context, "PL/pgSQL expression \"x + 1\"");
+                assert!(matches!(
+                    *source,
+                    ExecError::Parse(ParseError::UnknownColumn(_))
+                ));
+            }
+            other => panic!("expected internal query wrapper, got {other:?}"),
+        }
+    }
 
     #[test]
     fn seed_trigger_state_uses_zero_based_tg_argv() {
