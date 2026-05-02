@@ -4989,7 +4989,7 @@ impl UpdatedRowWriteInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PublicationDmlAction {
+pub(crate) enum PublicationDmlAction {
     Update,
     Delete,
 }
@@ -5263,7 +5263,7 @@ fn publication_generated_identity_is_published(
         )
 }
 
-fn enforce_publication_replica_identity(
+pub(crate) fn enforce_publication_replica_identity(
     relation_name: &str,
     relation_oid: u32,
     namespace_oid: u32,
@@ -5958,6 +5958,7 @@ pub(crate) fn rollback_inserted_row(
 
 struct PartitionUpdateDestination {
     relation_info: PartitionResultRelInfo,
+    parent_relation_oid: u32,
     parent_desc: RelationDesc,
     parent_values: Vec<Value>,
     values: Vec<Value>,
@@ -6023,10 +6024,76 @@ fn route_updated_partition_row(
     )?;
     Ok(Some(PartitionUpdateDestination {
         relation_info,
+        parent_relation_oid: root_relation.relation_oid,
         parent_desc: root_relation.desc,
         parent_values: root_values,
         values: routed_values,
     }))
+}
+
+fn partition_tree_contains_relation(
+    catalog: &dyn CatalogLookup,
+    root_oid: u32,
+    relation_oid: u32,
+) -> bool {
+    if root_oid == relation_oid {
+        return true;
+    }
+    catalog
+        .inheritance_children(root_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .any(|row| {
+            row.inhrelid == relation_oid
+                || partition_tree_contains_relation(catalog, row.inhrelid, relation_oid)
+        })
+}
+
+fn reject_root_update_with_direct_nonroot_fk_reference(
+    catalog: &dyn CatalogLookup,
+    root_oid: u32,
+    source_relation_oid: u32,
+    referenced_by_foreign_keys: &[BoundReferencedByForeignKey],
+) -> Result<(), ExecError> {
+    for constraint in referenced_by_foreign_keys {
+        if constraint.referenced_relation_oid == root_oid {
+            continue;
+        }
+        let Some(referenced_relation) = catalog.relation_by_oid(constraint.referenced_relation_oid)
+        else {
+            continue;
+        };
+        if referenced_relation.relkind != 'p'
+            || !partition_tree_contains_relation(
+                catalog,
+                constraint.referenced_relation_oid,
+                source_relation_oid,
+            )
+        {
+            continue;
+        }
+        let ancestor_name = catalog
+            .class_row_by_oid(constraint.referenced_relation_oid)
+            .map(|row| row.relname)
+            .unwrap_or_else(|| constraint.referenced_relation_oid.to_string());
+        let root_name = catalog
+            .class_row_by_oid(root_oid)
+            .map(|row| row.relname)
+            .unwrap_or_else(|| root_oid.to_string());
+        return Err(ExecError::DetailedError {
+            message: "cannot move tuple across partitions when a non-root ancestor of the source partition is directly referenced in a foreign key".into(),
+            detail: Some(format!(
+                "A foreign key points to ancestor \"{}\" but not the root ancestor \"{}\".",
+                ancestor_name, root_name
+            )),
+            hint: Some(format!(
+                "Consider defining the foreign key on table \"{}\".",
+                root_name
+            )),
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
 }
 
 fn enforce_direct_partition_update_constraint(
@@ -6107,6 +6174,16 @@ fn move_updated_row_to_partition(
     )>,
 ) -> Result<WriteUpdatedRowResult, ExecError> {
     let catalog = ctx.catalog.clone();
+    if let Some(catalog) = catalog.as_deref()
+        && destination.parent_desc != *desc
+    {
+        reject_root_update_with_direct_nonroot_fk_reference(
+            catalog,
+            destination.parent_relation_oid,
+            relation_oid,
+            referenced_by_foreign_keys,
+        )?;
+    }
     let delete_triggers = catalog
         .as_deref()
         .map(|catalog| {
@@ -6161,6 +6238,8 @@ fn move_updated_row_to_partition(
         &destination.relation_info.relation.desc,
         &destination.parent_desc,
     )?;
+    let source_layout_new_values =
+        remap_partition_row_to_child_layout(&projected_values, &destination.parent_desc, desc)?;
     if parent_rls_write_checks.is_empty() {
         crate::backend::executor::enforce_row_security_write_checks(
             rls_relation_name,
@@ -6187,7 +6266,7 @@ fn move_updated_row_to_partition(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        &projected_values,
+        &source_layout_new_values,
         ForeignKeyActionPhase::BeforeParentWrite,
         ctx,
         xid,
@@ -6331,7 +6410,7 @@ fn move_updated_row_to_partition(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        &projected_values,
+        &source_layout_new_values,
         ForeignKeyActionPhase::AfterParentWrite,
         ctx,
         xid,
@@ -6343,7 +6422,7 @@ fn move_updated_row_to_partition(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        &projected_values,
+        &source_layout_new_values,
         ctx,
     )?;
     Ok(WriteUpdatedRowResult::Updated(

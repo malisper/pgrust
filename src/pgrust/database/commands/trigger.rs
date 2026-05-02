@@ -244,6 +244,17 @@ impl Database {
         let relation_name = format_trigger_relation_name(stmt);
         let relation = lookup_trigger_relation_for_ddl(&catalog, &relation_name)?;
         ensure_relation_owner(self, client_id, &relation, &relation_name)?;
+        let constraint_relation_oid = stmt
+            .constraint_relation_name
+            .as_ref()
+            .map(|name| {
+                let lookup_name =
+                    qualified_relation_name(stmt.constraint_relation_schema_name.as_deref(), name);
+                lookup_trigger_relation_for_ddl(&catalog, &lookup_name)
+                    .map(|relation| relation.relation_oid)
+            })
+            .transpose()?
+            .unwrap_or(0);
 
         let trigger_name = stmt.trigger_name.to_ascii_lowercase();
         let trigger_function = resolve_trigger_function(
@@ -268,11 +279,11 @@ impl Database {
             tgtype,
             tgenabled: 'O',
             tgisinternal: false,
-            tgconstrrelid: 0,
+            tgconstrrelid: constraint_relation_oid,
             tgconstrindid: 0,
             tgconstraint: 0,
-            tgdeferrable: false,
-            tginitdeferred: false,
+            tgdeferrable: stmt.deferrable,
+            tginitdeferred: stmt.initially_deferred,
             tgnargs: stmt.func_args.len() as i16,
             tgattr,
             tgargs: stmt.func_args.clone(),
@@ -285,6 +296,22 @@ impl Database {
             .trigger_rows_for_relation(relation.relation_oid)
             .into_iter()
             .find(|row| row.tgname.eq_ignore_ascii_case(&trigger_name));
+        if let Some(existing) = existing.as_ref()
+            && (existing.tgparentid != 0 || existing.tgisinternal)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "trigger \"{}\" for relation \"{}\" is an internal or a child trigger",
+                    trigger_name, relation_name
+                ),
+                detail: None,
+                hint: Some(format!(
+                    "Use trigger \"{}\" on the partitioned table instead.",
+                    trigger_name
+                )),
+                sqlstate: "2BP01",
+            });
+        }
         if existing.is_some() && !stmt.replace_existing {
             return Err(ExecError::DetailedError {
                 message: format!(
@@ -306,22 +333,36 @@ impl Database {
             waiter: None,
             interrupts: Arc::clone(&interrupts),
         };
+        let inherited_to_drop = existing
+            .as_ref()
+            .filter(|row| relation.relkind == 'p' && trigger_row_is_row(row))
+            .map(|row| inherited_trigger_descendants(&catalog, relation.relation_oid, row.oid))
+            .unwrap_or_default();
         let (created_trigger, mut effects) = {
             let mut catalog_store = self.catalog.write();
+            let mut effects = Vec::new();
+            for row in inherited_to_drop.iter().rev() {
+                let (_removed, effect) = catalog_store
+                    .drop_trigger_mvcc(row.tgrelid, &row.tgname, &ctx)
+                    .map_err(map_catalog_error)?;
+                effects.push(effect);
+            }
             if let Some(existing) = existing {
                 let (oid, effect) = catalog_store
                     .replace_trigger_mvcc(&existing, trigger_row.clone(), &ctx)
                     .map_err(map_catalog_error)?;
                 let mut row = trigger_row.clone();
                 row.oid = oid;
-                (row, vec![effect])
+                effects.push(effect);
+                (row, effects)
             } else {
                 let (oid, effect) = catalog_store
                     .create_trigger_mvcc(trigger_row.clone(), &ctx)
                     .map_err(map_catalog_error)?;
                 let mut row = trigger_row.clone();
                 row.oid = oid;
-                (row, vec![effect])
+                effects.push(effect);
+                (row, effects)
             }
         };
         if relation.relkind == 'p' && trigger_row_is_row(&created_trigger) {
@@ -819,6 +860,20 @@ impl Database {
         ensure_relation_owner(self, client_id, &relation, &relation_name)?;
         let existing = lookup_trigger_row(&catalog, relation.relation_oid, &stmt.trigger_name)
             .ok_or_else(|| missing_trigger_error(&stmt.trigger_name, &relation_name))?;
+        if existing.tgparentid != 0 || existing.tgisinternal {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "trigger \"{}\" for relation \"{}\" is an internal or a child trigger",
+                    stmt.trigger_name, relation_name
+                ),
+                detail: None,
+                hint: Some(format!(
+                    "Use trigger \"{}\" on the partitioned table instead.",
+                    stmt.trigger_name
+                )),
+                sqlstate: "2BP01",
+            });
+        }
 
         let interrupts = self.interrupt_state(client_id);
         let ctx = CatalogWriteContext {
@@ -832,15 +887,32 @@ impl Database {
         };
         let mut updated = existing.clone();
         updated.tgname = stmt.new_trigger_name.to_ascii_lowercase();
-        let effect = self
-            .catalog
-            .write()
-            .replace_trigger_mvcc(&existing, updated, &ctx)
-            .map_err(map_catalog_error)?
-            .1;
-        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        let inherited = (relation.relkind == 'p' && trigger_row_is_row(&existing))
+            .then(|| inherited_trigger_descendants(&catalog, relation.relation_oid, existing.oid))
+            .unwrap_or_default();
+        let mut effects = Vec::new();
+        {
+            let mut catalog_store = self.catalog.write();
+            let effect = catalog_store
+                .replace_trigger_mvcc(&existing, updated, &ctx)
+                .map_err(map_catalog_error)?
+                .1;
+            effects.push(effect);
+            for row in inherited {
+                let mut updated = row.clone();
+                updated.tgname = stmt.new_trigger_name.to_ascii_lowercase();
+                let effect = catalog_store
+                    .replace_trigger_mvcc(&row, updated, &ctx)
+                    .map_err(map_catalog_error)?
+                    .1;
+                effects.push(effect);
+            }
+        }
+        for effect in &effects {
+            self.apply_catalog_mutation_effect_immediate(effect)?;
+        }
         self.plan_cache.invalidate_all();
-        catalog_effects.push(effect);
+        catalog_effects.extend(effects);
         Ok(StatementResult::AffectedRows(0))
     }
 }
@@ -1396,17 +1468,22 @@ fn validate_table_trigger_stmt(
             sqlstate: "42809",
         });
     }
-    if stmt.is_constraint {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "CONSTRAINT TRIGGER is not supported".into(),
-        )));
-    }
     if stmt.timing == TriggerTiming::Instead {
         return Err(ExecError::DetailedError {
             message: format!("\"{}\" is a table", relation_name),
             detail: Some("Tables cannot have INSTEAD OF triggers.".into()),
             hint: None,
             sqlstate: "42809",
+        });
+    }
+    if stmt.is_constraint
+        && (stmt.timing != TriggerTiming::After || stmt.level != TriggerLevel::Row)
+    {
+        return Err(ExecError::DetailedError {
+            message: "constraint triggers must be AFTER ROW triggers".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
         });
     }
     Ok(())

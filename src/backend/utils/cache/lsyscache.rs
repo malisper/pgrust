@@ -116,7 +116,7 @@ fn system_catalog_index_class_row(
         relpartbound: None,
         reloptions: None,
         relacl: None,
-        relreplident: 'd',
+        relreplident: 'n',
         reloftype: 0,
     }
 }

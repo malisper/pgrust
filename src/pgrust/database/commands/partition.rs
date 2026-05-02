@@ -10,6 +10,9 @@ use crate::backend::commands::partition::{
     validate_new_partition_bound, validate_partition_relation_compatibility,
     validate_relation_rows_for_partition_bound,
 };
+use crate::backend::commands::tablecmds::{
+    PublicationDmlAction, enforce_publication_replica_identity,
+};
 use crate::backend::executor::ExecutorContext;
 use crate::backend::executor::exec_expr::partition_constraint_conditions_for_catalog;
 use crate::backend::parser::{
@@ -44,6 +47,27 @@ fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> Stri
 
 fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
+}
+
+fn validate_attached_partition_publication_replica_identity(
+    catalog: &dyn CatalogLookup,
+    child: &BoundRelation,
+    partition_name: &str,
+) -> Result<(), ExecError> {
+    let indexes = catalog.index_relations_for_heap(child.relation_oid);
+    for action in [PublicationDmlAction::Update, PublicationDmlAction::Delete] {
+        enforce_publication_replica_identity(
+            relation_basename(partition_name),
+            child.relation_oid,
+            child.namespace_oid,
+            &child.desc,
+            &indexes,
+            catalog,
+            action,
+            true,
+        )?;
+    }
+    Ok(())
 }
 
 fn partition_subtree_oids(catalog: &dyn CatalogLookup, root_oid: u32) -> Vec<u32> {
@@ -726,6 +750,16 @@ impl Database {
                 catalog_effects,
             )?
         };
+        let validation_catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, next_cid)), configured_search_path);
+        let publication_child = validation_catalog
+            .relation_by_oid(updated_child.relation_oid)
+            .unwrap_or_else(|| updated_child.clone());
+        validate_attached_partition_publication_replica_identity(
+            &validation_catalog,
+            &publication_child,
+            &stmt.partition_table,
+        )?;
         let next_cid = self
             .reconcile_partitioned_parent_foreign_keys_for_attached_child_in_transaction(
                 client_id,

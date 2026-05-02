@@ -34190,6 +34190,74 @@ fn alter_table_replica_identity_using_index_works_in_transaction() {
 }
 
 #[test]
+fn replica_identity_validation_matches_pg_edge_cases() {
+    let base = temp_dir("replica_identity_validation_edges");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table replident_multi_unique (
+                keya int4 not null,
+                keyb int4 not null,
+                constraint replident_multi_unique_u1 unique (keya, keyb),
+                constraint replident_multi_unique_u2 unique (keya, keyb)
+            )",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_constraint
+              where conrelid = 'replident_multi_unique'::regclass and contype = 'u'",
+        ),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relreplident::text from pg_class
+              where oid in ('pg_class'::regclass, 'pg_constraint'::regclass)
+              order by relname",
+        ),
+        vec![vec![Value::Text("n".into())], vec![Value::Text("n".into())],]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table replident_guard (id int4 not null, value int4)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index replident_guard_id_idx on replident_guard (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table replident_guard replica identity using index replident_guard_id_idx",
+        )
+        .unwrap();
+    let err = session
+        .execute(
+            &db,
+            "alter table replident_guard alter column id drop not null",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "column \"id\" is in index used as replica identity"
+    ));
+}
+
+#[test]
 fn alter_table_add_unique_using_index_include_derives_key_conkey() {
     let base = temp_dir("alter_using_index_include");
     let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
@@ -35490,7 +35558,7 @@ fn referenced_partition_foreign_key_clones_validate_and_enforce() {
     );
     match db.execute(1, "delete from pk_items where a = 2") {
         Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
-            assert_eq!(constraint, "fk_items_a_fkey_2");
+            assert_eq!(constraint, "fk_items_a_fkey");
         }
         other => panic!("expected referenced partition foreign key violation, got {other:?}"),
     }
@@ -35935,7 +36003,7 @@ fn self_referencing_partitioned_foreign_key_matches_pg_catalog_rows() {
     .unwrap();
     match db.execute(1, "delete from parted_self_fk where id = 2") {
         Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
-            assert_eq!(constraint, "parted_self_fk_id_abc_fkey_5");
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey");
         }
         other => panic!("expected detached partition foreign key violation, got {other:?}"),
     }
@@ -36057,7 +36125,7 @@ fn referenced_partition_foreign_key_detach_checks_and_drops_clones() {
 
     match db.execute(1, "alter table pk_items detach partition pk_items_1") {
         Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
-            assert_eq!(constraint, "fk_items_a_fkey_1");
+            assert_eq!(constraint, "fk_items_a_fkey");
         }
         other => panic!("expected detach foreign key violation, got {other:?}"),
     }
@@ -36670,7 +36738,7 @@ fn detached_self_referencing_partition_still_blocks_root_delete() {
             detail,
             ..
         }) => {
-            assert_eq!(constraint, "parted_self_fk_id_abc_fkey_3");
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey");
             assert!(message.contains("on table \"part2_self_fk\""));
             assert!(
                 detail
@@ -60041,18 +60109,114 @@ $$",
         .unwrap_err();
     assert!(format!("{err:?}").contains("cannot drop trigger part_trig_ai"));
 
-    db.execute(1, "drop trigger part_trig_ai on part_trig")
+    db.execute(
+        1,
+        "create or replace trigger part_trig_ai after insert on part_trig for each row execute function part_trig_notice()",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*)::int4 from pg_trigger where tgname = 'part_trig_ai'",
+        ),
+        vec![vec![Value::Int32(5)]]
+    );
+
+    let err = db
+        .execute(
+            1,
+            "create or replace trigger part_trig_ai after insert on part_trig1 for each row execute function part_trig_notice()",
+        )
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("is an internal or a child trigger"));
+
+    db.execute(
+        1,
+        "alter trigger part_trig_ai on part_trig rename to part_trig_ai_renamed",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*)::int4 from pg_trigger where tgname = 'part_trig_ai_renamed'",
+        ),
+        vec![vec![Value::Int32(5)]]
+    );
+    let err = db
+        .execute(
+            1,
+            "alter trigger part_trig_ai_renamed on part_trig1 rename to part_trig_ai_child",
+        )
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("is an internal or a child trigger"));
+
+    db.execute(1, "drop trigger part_trig_ai_renamed on part_trig")
         .unwrap();
     assert_eq!(
         query_rows(
             &db,
             1,
             "select c.relname from pg_trigger t join pg_class c on c.oid = t.tgrelid
-              where t.tgname = 'part_trig_ai'
+              where t.tgname = 'part_trig_ai_renamed'
               order by c.relname",
         ),
         Vec::<Vec<Value>>::new()
     );
+}
+
+#[test]
+fn deferred_user_constraint_trigger_fires_at_commit() {
+    let dir = temp_dir("deferred_user_constraint_trigger");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table deferred_trig_items (id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function deferred_trig_notice() returns trigger language plpgsql as $$
+begin
+  raise notice 'deferred % on %', TG_OP, TG_TABLE_NAME;
+  return new;
+end;
+$$",
+        )
+        .unwrap();
+    let create_trigger = "create constraint trigger deferred_trig_ai
+        after insert on deferred_trig_items
+        initially deferred
+        for each row execute function deferred_trig_notice()";
+    session.execute(&db, create_trigger).unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into deferred_trig_items values (1)")
+        .unwrap();
+    assert_eq!(take_notice_messages(), Vec::<String>::new());
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("deferred INSERT on deferred_trig_items")]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into deferred_trig_items values (2)")
+        .unwrap();
+    assert_eq!(take_notice_messages(), Vec::<String>::new());
+    session
+        .execute(&db, "set constraints deferred_trig_ai immediate")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("deferred INSERT on deferred_trig_items")]
+    );
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(take_notice_messages(), Vec::<String>::new());
 }
 
 #[test]

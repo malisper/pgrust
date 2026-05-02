@@ -3917,6 +3917,69 @@ mod tests {
     }
 
     #[test]
+    fn attach_partition_under_published_root_requires_child_replica_identity() {
+        let base = temp_dir("publication_attach_partition_requires_ri");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(
+                &db,
+                "create table pub_attach_root (id int) partition by range (id)",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create publication pub for table pub_attach_root")
+            .unwrap();
+        session
+            .execute(&db, "create table pub_attach_child (id int)")
+            .unwrap();
+
+        let err = session
+            .execute(
+                &db,
+                "alter table pub_attach_root attach partition pub_attach_child
+                 for values from (0) to (10)",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, hint, .. } => {
+                assert_eq!(
+                    message,
+                    "cannot update table \"pub_attach_child\" because it does not have a replica identity and publishes updates"
+                );
+                assert_eq!(
+                    hint.as_deref(),
+                    Some("To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.")
+                );
+            }
+            other => panic!("expected missing replica identity attach error, got {other:?}"),
+        }
+
+        session
+            .execute(&db, "alter table pub_attach_child replica identity full")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "alter table pub_attach_root attach partition pub_attach_child
+                 for values from (0) to (10)",
+            )
+            .unwrap();
+        let result = session
+            .execute(
+                &db,
+                "select count(*)::int4 from pg_inherits
+                 where inhparent = 'pub_attach_root'::regclass
+                   and inhrelid = 'pub_attach_child'::regclass",
+            )
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+    }
+
+    #[test]
     fn virtual_generated_column_rejects_user_defined_function() {
         let base = temp_dir("virtual_generated_user_function");
         let db = Database::open(&base, 16).unwrap();

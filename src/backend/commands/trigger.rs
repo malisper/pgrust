@@ -378,6 +378,22 @@ impl RuntimeTriggers {
                 if !self.when_passes(trigger, old_row, new_row, ctx)? {
                     continue;
                 }
+                if trigger.row.tgdeferrable
+                    && ctx.constraint_timing(
+                        trigger.row.oid,
+                        trigger.row.tgdeferrable,
+                        trigger.row.tginitdeferred,
+                    ) == crate::backend::executor::ConstraintTiming::Deferred
+                    && let LoadedTriggerFunction::Plpgsql(proc_oid) = &trigger.function
+                    && let Some(tracker) = ctx.deferred_foreign_keys.as_ref()
+                {
+                    tracker.record_user_constraint_trigger(
+                        trigger.row.oid,
+                        *proc_oid,
+                        self.trigger_call_context(trigger, old_row, new_row, capture),
+                    );
+                    continue;
+                }
                 let _ = self.execute_trigger(trigger, old_row, new_row, capture, ctx)?;
             }
             Ok(())
@@ -437,7 +453,28 @@ impl RuntimeTriggers {
         capture: Option<&TriggerTransitionCapture>,
         ctx: &mut ExecutorContext,
     ) -> Result<TriggerFunctionResult, ExecError> {
-        let call = TriggerCallContext {
+        let call = self.trigger_call_context(trigger, old_row, new_row, capture);
+        ctx.trigger_depth = ctx.trigger_depth.saturating_add(1);
+        let result = match &trigger.function {
+            LoadedTriggerFunction::Plpgsql(proc_oid) => {
+                execute_user_defined_trigger_function(*proc_oid, &call, ctx)
+            }
+            LoadedTriggerFunction::Builtin(function) => {
+                execute_builtin_trigger_function(*function, &call)
+            }
+        };
+        ctx.trigger_depth = ctx.trigger_depth.saturating_sub(1);
+        result
+    }
+
+    fn trigger_call_context(
+        &self,
+        trigger: &LoadedTrigger,
+        old_row: Option<&[Value]>,
+        new_row: Option<&[Value]>,
+        capture: Option<&TriggerTransitionCapture>,
+    ) -> TriggerCallContext {
+        TriggerCallContext {
             relation_desc: self.relation_desc.clone(),
             relation_oid: self.relation_oid,
             table_name: self.table_name.clone(),
@@ -454,18 +491,7 @@ impl RuntimeTriggers {
             new_row: new_row.map(|row| row.to_vec()),
             old_row: old_row.map(|row| row.to_vec()),
             transition_tables: self.transition_tables_for_trigger(trigger, capture),
-        };
-        ctx.trigger_depth = ctx.trigger_depth.saturating_add(1);
-        let result = match trigger.function {
-            LoadedTriggerFunction::Plpgsql(proc_oid) => {
-                execute_user_defined_trigger_function(proc_oid, &call, ctx)
-            }
-            LoadedTriggerFunction::Builtin(function) => {
-                execute_builtin_trigger_function(function, &call)
-            }
-        };
-        ctx.trigger_depth = ctx.trigger_depth.saturating_sub(1);
-        result
+        }
     }
 
     fn transition_tables_for_trigger(
