@@ -242,10 +242,10 @@ fn resolve_proc_oid_for_name(
                     .schema_name
                     .as_deref()
                     .map(|schema| {
-                        (schema.eq_ignore_ascii_case("public")
-                            && row.pronamespace == PUBLIC_NAMESPACE_OID)
-                            || (schema.eq_ignore_ascii_case("pg_catalog")
-                                && row.pronamespace == PG_CATALOG_NAMESPACE_OID)
+                        catalog.namespace_rows().into_iter().any(|namespace| {
+                            namespace.nspname.eq_ignore_ascii_case(schema)
+                                && namespace.oid == row.pronamespace
+                        })
                     })
                     .unwrap_or(true)
         })

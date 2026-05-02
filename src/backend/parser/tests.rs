@@ -3767,6 +3767,31 @@ fn parse_create_operator_class_hash_support() {
 }
 
 #[test]
+fn parse_create_operator_class_default_before_for_type() {
+    let stmt = parse_statement(
+        "create operator class alter1.ctype_hash_ops default for type alter1.ctype using hash as operator 1 alter1.=(alter1.ctype, alter1.ctype)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateOperatorClass(CreateOperatorClassStatement {
+            schema_name: Some("alter1".into()),
+            opclass_name: "ctype_hash_ops".into(),
+            data_type: RawTypeName::Named {
+                name: "alter1.ctype".into(),
+                array_bounds: 0,
+            },
+            access_method: "hash".into(),
+            is_default: true,
+            items: vec![CreateOperatorClassItem::Operator {
+                strategy_number: 1,
+                operator_name: "alter1.=(alter1.ctype, alter1.ctype)".into(),
+            }],
+        })
+    );
+}
+
+#[test]
 fn parse_operator_family_and_class_alter_statements() {
     assert_eq!(
         parse_statement("create operator family alt_opf1 using hash").unwrap(),

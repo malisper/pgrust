@@ -15004,6 +15004,13 @@ fn build_create_operator_class_statement(
     let rest = rest.trim_start();
     let ((schema_name, opclass_name), rest) = parse_qualified_sql_name(rest)?;
     let rest = rest.trim_start();
+    let mut is_default = false;
+    let rest = if keyword_at_start(rest, "default") {
+        is_default = true;
+        consume_keyword(rest, "default").trim_start()
+    } else {
+        rest
+    };
     if !keyword_at_start(rest, "for") {
         return Err(ParseError::UnexpectedToken {
             expected: "FOR TYPE",
@@ -15027,7 +15034,6 @@ fn build_create_operator_class_statement(
     let rest = consume_keyword(rest, "using").trim_start();
     let (access_method, rest) = parse_sql_identifier(rest)?;
     let rest = rest.trim_start();
-    let mut is_default = false;
     let rest = if keyword_at_start(rest, "default") {
         is_default = true;
         consume_keyword(rest, "default").trim_start()
@@ -15706,7 +15712,9 @@ fn parse_create_operator_class_item(input: &str) -> Result<CreateOperatorClassIt
     )))
 }
 
-fn parse_operator_name(input: &str) -> Result<((Option<String>, String), &str), ParseError> {
+pub(crate) fn parse_operator_name(
+    input: &str,
+) -> Result<((Option<String>, String), &str), ParseError> {
     let input = input.trim_start();
     if let Ok((schema_name, rest)) = parse_sql_identifier(input) {
         let rest = rest.trim_start();
@@ -15761,7 +15769,7 @@ fn parse_operator_token(input: &str) -> Result<(String, &str), ParseError> {
     Ok((input[..token_len].to_string(), &input[token_len..]))
 }
 
-fn parse_operator_argtypes(
+pub(crate) fn parse_operator_argtypes(
     input: &str,
 ) -> Result<((Option<RawTypeName>, Option<RawTypeName>), &str), ParseError> {
     let (args_sql, rest) = take_parenthesized_segment(input)?;
