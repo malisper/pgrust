@@ -3,7 +3,7 @@ use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
-    reinitialize_index_relation, row_matches_index_predicate,
+    materialize_generated_columns, reinitialize_index_relation, row_matches_index_predicate,
 };
 use crate::backend::executor::value_io::{format_unique_key_detail, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
@@ -14,9 +14,11 @@ use crate::include::catalog::{
     BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow, PgStatisticRow,
     default_btree_opclass_oid,
 };
+use crate::include::nodes::primnodes::expr_sql_type_hint;
 use crate::pgrust::database::ddl::{
     lookup_table_or_partitioned_table_for_alter_table,
     reject_column_type_change_with_rule_dependencies, relation_kind_name,
+    validate_alter_table_add_column, validate_alter_table_alter_column_expression,
     validate_alter_table_alter_column_type,
 };
 use crate::pgrust::database::sequences::{
@@ -38,96 +40,335 @@ pub(super) struct RewrittenAlterColumnTypeRow {
     pub(super) values: Vec<Value>,
 }
 
+#[derive(Clone)]
+struct BatchRewriteExpr {
+    column_index: usize,
+    expr: crate::backend::executor::Expr,
+}
+
+fn batchable_alter_table_actions(
+    actions: &[crate::backend::parser::Statement],
+) -> Option<Vec<crate::backend::parser::Statement>> {
+    let mut flattened = Vec::new();
+    let mut saw_batch_action = false;
+    let mut saw_rewrite_action = false;
+    let mut saw_generated_add = false;
+    for action in actions {
+        match action {
+            crate::backend::parser::Statement::AlterTableAddColumns(add_columns) => {
+                saw_batch_action = true;
+                saw_generated_add |= add_columns
+                    .columns
+                    .iter()
+                    .any(|add_column| add_column.column.generated.is_some());
+                flattened.extend(
+                    add_columns
+                        .columns
+                        .iter()
+                        .cloned()
+                        .map(crate::backend::parser::Statement::AlterTableAddColumn),
+                );
+            }
+            crate::backend::parser::Statement::AlterTableAddColumn(add_column) => {
+                saw_batch_action = true;
+                saw_generated_add |= add_column.column.generated.is_some();
+                flattened.push(action.clone());
+            }
+            crate::backend::parser::Statement::AlterTableDropColumn(_) => {
+                saw_batch_action = true;
+                flattened.push(action.clone());
+            }
+            crate::backend::parser::Statement::AlterTableAlterColumnType(_)
+            | crate::backend::parser::Statement::AlterTableAlterColumnExpression(_) => {
+                saw_batch_action = true;
+                saw_rewrite_action = true;
+                flattened.push(action.clone());
+            }
+            _ => return None,
+        }
+    }
+    (saw_batch_action && (saw_rewrite_action || (saw_generated_add && flattened.len() > 1)))
+        .then_some(flattened)
+}
+
+fn batch_action_table_target(
+    action: &crate::backend::parser::Statement,
+) -> Option<(bool, bool, &str)> {
+    match action {
+        crate::backend::parser::Statement::AlterTableAddColumn(stmt) => {
+            Some((stmt.if_exists, stmt.only, stmt.table_name.as_str()))
+        }
+        crate::backend::parser::Statement::AlterTableDropColumn(stmt) => {
+            Some((stmt.if_exists, stmt.only, stmt.table_name.as_str()))
+        }
+        crate::backend::parser::Statement::AlterTableAlterColumnType(stmt) => {
+            Some((stmt.if_exists, stmt.only, stmt.table_name.as_str()))
+        }
+        crate::backend::parser::Statement::AlterTableAlterColumnExpression(stmt) => {
+            Some((stmt.if_exists, stmt.only, stmt.table_name.as_str()))
+        }
+        _ => None,
+    }
+}
+
+fn batch_table_target(
+    actions: &[crate::backend::parser::Statement],
+) -> Option<(bool, bool, String)> {
+    let mut iter = actions.iter();
+    let first = iter.next()?;
+    let (if_exists, only, table_name) = batch_action_table_target(first)?;
+    for action in iter {
+        let (next_if_exists, next_only, next_table_name) = batch_action_table_target(action)?;
+        if next_if_exists != if_exists || next_only != only || next_table_name != table_name {
+            return None;
+        }
+    }
+    Some((if_exists, only, table_name.to_string()))
+}
+
+fn visible_column_index_in_desc(desc: &RelationDesc, column_name: &str) -> Option<usize> {
+    desc.columns.iter().enumerate().find_map(|(index, column)| {
+        (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+    })
+}
+
+fn mark_column_dropped_for_alter_table_batch(
+    desc: &mut RelationDesc,
+    column_name: &str,
+) -> Result<(), ExecError> {
+    let column_index = visible_column_index_in_desc(desc, column_name)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+    let dropped_name = format!("........pg.dropped.{}........", column_index + 1);
+    let column = &mut desc.columns[column_index];
+    column.name = dropped_name.clone();
+    column.storage.name = dropped_name;
+    column.storage.nullable = true;
+    column.dropped = true;
+    column.attstattarget = -1;
+    column.not_null_constraint_oid = None;
+    column.not_null_constraint_name = None;
+    column.not_null_constraint_validated = false;
+    column.not_null_constraint_is_local = false;
+    column.not_null_constraint_inhcount = 0;
+    column.not_null_constraint_no_inherit = false;
+    column.not_null_primary_key_owned = false;
+    column.attrdef_oid = None;
+    column.default_expr = None;
+    column.default_sequence_oid = None;
+    column.generated = None;
+    column.missing_default_value = None;
+    Ok(())
+}
+
+fn original_binding_desc_for_alter_table_batch(
+    original_desc: &RelationDesc,
+    staged_desc: &RelationDesc,
+) -> RelationDesc {
+    let mut binding_desc = staged_desc.clone();
+    for (index, original_column) in original_desc.columns.iter().enumerate() {
+        let Some(binding_column) = binding_desc.columns.get_mut(index) else {
+            continue;
+        };
+        if binding_column.dropped || original_column.dropped {
+            continue;
+        }
+        binding_column.sql_type = original_column.sql_type;
+        binding_column.collation_oid = original_column.collation_oid;
+    }
+    binding_desc
+}
+
+fn default_value_for_batch_added_column(column: &crate::backend::executor::ColumnDesc) -> Value {
+    if column.generated.is_some() {
+        Value::Null
+    } else {
+        column.missing_default_value.clone().unwrap_or(Value::Null)
+    }
+}
+
+fn materialize_generated_columns_for_batch_validation(
+    desc: &RelationDesc,
+    values: &mut [Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    materialize_generated_columns(desc, values, ctx)?;
+    if !desc.columns.iter().any(|column| {
+        column.generated == Some(crate::include::nodes::parsenodes::ColumnGeneratedKind::Virtual)
+    }) {
+        return Ok(values.to_vec());
+    }
+    let generated_exprs = {
+        let catalog = ctx
+            .catalog
+            .as_deref()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "generated column evaluation failed".into(),
+                detail: Some("executor context missing visible catalog".into()),
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        desc.columns
+            .iter()
+            .enumerate()
+            .filter_map(|(column_index, column)| match column.generated {
+                Some(crate::include::nodes::parsenodes::ColumnGeneratedKind::Virtual) => Some(
+                    crate::backend::parser::bind_generated_expr(desc, column_index, catalog)
+                        .map_err(ExecError::Parse)
+                        .and_then(|expr| {
+                            expr.ok_or_else(|| {
+                                ExecError::Parse(ParseError::InvalidTableDefinition(format!(
+                                    "generation expression missing for column \"{}\"",
+                                    column.name
+                                )))
+                            })
+                        })
+                        .map(|expr| (column_index, expr)),
+                ),
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?
+    };
+    let mut validation_values = values.to_vec();
+    let mut slot = TupleSlot::virtual_row(validation_values.clone());
+    for (column_index, expr) in generated_exprs {
+        validation_values[column_index] = eval_expr(&expr, &mut slot, ctx)?.to_owned_value();
+    }
+    Ok(validation_values)
+}
+
+fn plan_rewritten_rows_for_alter_table_batch(
+    relation: &crate::backend::parser::BoundRelation,
+    relation_name: &str,
+    final_desc: &RelationDesc,
+    relation_constraints: &crate::backend::parser::BoundRelationConstraints,
+    rewrite_exprs: &[BatchRewriteExpr],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<RewrittenAlterColumnTypeRow>, ExecError> {
+    let target_rows =
+        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?;
+    let mut rewritten_rows = Vec::with_capacity(target_rows.len());
+    for (tid, original_values) in target_rows {
+        ctx.check_for_interrupts()?;
+        let mut values = original_values.clone();
+        for column in final_desc.columns.iter().skip(values.len()) {
+            values.push(default_value_for_batch_added_column(column));
+        }
+        let mut eval_slot = TupleSlot::virtual_row(original_values);
+        for rewrite in rewrite_exprs {
+            values[rewrite.column_index] = eval_expr(&rewrite.expr, &mut eval_slot, ctx)?;
+        }
+        let validation_values =
+            materialize_generated_columns_for_batch_validation(final_desc, &mut values, ctx)?;
+        crate::backend::executor::enforce_relation_constraints(
+            relation_name,
+            final_desc,
+            relation_constraints,
+            &validation_values,
+            ctx,
+        )?;
+        for constraint in &relation_constraints.foreign_keys {
+            crate::backend::executor::validate_outbound_foreign_key_for_ddl(
+                relation_name,
+                constraint,
+                &validation_values,
+                ctx,
+            )?;
+        }
+        tuple_from_values(final_desc, &values)?;
+        rewritten_rows.push(RewrittenAlterColumnTypeRow {
+            old_tid: tid,
+            values,
+        });
+    }
+    Ok(rewritten_rows)
+}
+
 fn reject_unsupported_alter_column_type_indexes(
     indexes: &[crate::backend::parser::BoundIndexRelation],
     _column_index: usize,
     from_type: crate::backend::parser::SqlType,
     to_type: crate::backend::parser::SqlType,
 ) -> Result<(), ExecError> {
-    let allow_expr_predicate_indexes =
-        alter_type_can_keep_expr_predicate_indexes(from_type, to_type);
-    let has_unsupported_dependency = indexes.iter().any(|index| {
-        if index
-            .index_meta
-            .indpred
-            .as_deref()
-            .is_some_and(|pred| !pred.is_empty())
-            || index
-                .index_meta
-                .indexprs
-                .as_deref()
-                .is_some_and(|exprs| !exprs.is_empty())
-        {
-            return !allow_expr_predicate_indexes;
-        }
-        false
-    });
-    if has_unsupported_dependency {
-        // :HACK: Plain column indexes can be rebuilt from rewritten heap rows,
-        // but expression and partial indexes still need proper expression
-        // rebinding against the replacement column type.
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "ALTER TABLE ALTER COLUMN TYPE with dependent indexes".into(),
-        )));
-    }
+    let _ = (indexes, from_type, to_type);
     Ok(())
-}
-
-fn alter_type_can_keep_expr_predicate_indexes(
-    from_type: crate::backend::parser::SqlType,
-    to_type: crate::backend::parser::SqlType,
-) -> bool {
-    if from_type.is_array || to_type.is_array {
-        return false;
-    }
-    // :HACK: The create_index regression changes a boolean column to text
-    // while a predicate index already casts that column to text. The stored
-    // predicate remains executable across the rewrite; longer term ALTER TYPE
-    // should rebind expression and partial indexes against the replacement
-    // column type instead of relying on this narrow compatibility path.
-    matches!(
-        (from_type.kind, to_type.kind),
-        (
-            crate::backend::parser::SqlTypeKind::Bool,
-            crate::backend::parser::SqlTypeKind::Text
-                | crate::backend::parser::SqlTypeKind::Varchar
-                | crate::backend::parser::SqlTypeKind::Char
-                | crate::backend::parser::SqlTypeKind::Name
-        )
-    )
 }
 
 fn rewrite_bound_indexes_for_alter_column_type(
     indexes: Vec<crate::backend::parser::BoundIndexRelation>,
-    column_index: usize,
-    new_column: &crate::backend::executor::ColumnDesc,
-) -> Vec<crate::backend::parser::BoundIndexRelation> {
-    let target_attnum = (column_index + 1) as i16;
-    let new_type_oid = sql_type_oid(new_column.sql_type);
+    new_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<crate::backend::parser::BoundIndexRelation>, ExecError> {
     indexes
         .into_iter()
         .map(|mut index| {
-            for index_column_index in 0..index.desc.columns.len() {
-                let attnum_matches = index
-                    .index_meta
-                    .indkey
-                    .get(index_column_index)
-                    .is_some_and(|attnum| *attnum == target_attnum);
-                let name_matches = index.desc.columns[index_column_index]
-                    .name
-                    .eq_ignore_ascii_case(&new_column.name);
-                if !attnum_matches && !name_matches {
+            index.index_meta.rd_indexprs = None;
+            index.index_meta.rd_indpred = None;
+            let rebound_exprs =
+                crate::backend::parser::bind_index_exprs(&index.index_meta, new_desc, catalog)
+                    .map_err(ExecError::Parse)?;
+            let relation_name = catalog
+                .class_row_by_oid(index.index_meta.indrelid)
+                .map(|row| row.relname);
+            let relation_name = relation_name
+                .as_deref()
+                .map(|name| name.rsplit('.').next().unwrap_or(name));
+            let rebound_predicate = index
+                .index_meta
+                .indpred
+                .as_deref()
+                .map(str::trim)
+                .filter(|predicate| !predicate.is_empty())
+                .map(|predicate| {
+                    crate::backend::parser::bind_index_predicate_sql_expr(
+                        predicate,
+                        relation_name,
+                        new_desc,
+                        catalog,
+                    )
+                })
+                .transpose()
+                .map_err(ExecError::Parse)?;
+            index.index_meta.rd_indexprs = Some(rebound_exprs.clone());
+            index.index_meta.rd_indpred = Some(rebound_predicate.clone());
+            index.index_exprs = rebound_exprs;
+            index.index_predicate = rebound_predicate;
+
+            let mut expr_index = 0usize;
+            for index_column_index in 0..index.index_meta.indkey.len() {
+                let Some(index_column) = index.desc.columns.get_mut(index_column_index) else {
                     continue;
-                }
-                index.desc.columns[index_column_index] = new_column.clone();
+                };
+                let Some(attnum) = index.index_meta.indkey.get(index_column_index).copied() else {
+                    continue;
+                };
+                let sql_type = if attnum > 0 {
+                    let Some(heap_column) = usize::try_from(attnum)
+                        .ok()
+                        .and_then(|attnum| attnum.checked_sub(1))
+                        .and_then(|column_index| new_desc.columns.get(column_index))
+                    else {
+                        continue;
+                    };
+                    *index_column = heap_column.clone();
+                    heap_column.sql_type
+                } else {
+                    let sql_type = index
+                        .index_exprs
+                        .get(expr_index)
+                        .and_then(expr_sql_type_hint)
+                        .unwrap_or(index_column.sql_type);
+                    index_column.sql_type = sql_type;
+                    expr_index = expr_index.saturating_add(1);
+                    sql_type
+                };
                 if index.index_meta.am_oid == BTREE_AM_OID
                     && index_column_index < index.index_meta.indclass.len()
-                    && let Some(opclass_oid) = default_btree_opclass_oid(new_type_oid)
+                    && let Some(opclass_oid) = default_btree_opclass_oid(sql_type_oid(sql_type))
                 {
                     index.index_meta.indclass[index_column_index] = opclass_oid;
                 }
             }
-            index
+            Ok(index)
         })
         .collect()
 }
@@ -699,11 +940,7 @@ fn collect_alter_column_type_targets(
         )?;
         let mut new_desc = target_relation.desc.clone();
         new_desc.columns[plan.column_index] = plan.new_column;
-        let indexes = rewrite_bound_indexes_for_alter_column_type(
-            indexes,
-            plan.column_index,
-            &new_desc.columns[plan.column_index],
-        );
+        let indexes = rewrite_bound_indexes_for_alter_column_type(indexes, &new_desc, catalog)?;
         targets.push(AlterColumnTypeTarget {
             fires_table_rewrite: alter_column_type_fires_table_rewrite(
                 target_relation.desc.columns[plan.column_index].sql_type,
@@ -723,6 +960,464 @@ fn collect_alter_column_type_targets(
 }
 
 impl Database {
+    pub(crate) fn try_execute_alter_table_batch_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        actions: &[crate::backend::parser::Statement],
+        configured_search_path: Option<&[String]>,
+        datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    ) -> Result<Option<StatementResult>, ExecError> {
+        let Some(actions) = batchable_alter_table_actions(actions) else {
+            return Ok(None);
+        };
+        let Some((if_exists, only, table_name)) = batch_table_target(&actions) else {
+            return Ok(None);
+        };
+        if only {
+            return Ok(None);
+        }
+
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) =
+            lookup_table_or_partitioned_table_for_alter_table(&catalog, &table_name, if_exists)?
+        else {
+            return Ok(Some(StatementResult::AffectedRows(0)));
+        };
+        if relation.relkind != 'r' {
+            return Ok(None);
+        }
+        self.table_locks.lock_table_interruptible(
+            crate::pgrust::database::relation_lock_tag(&relation),
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let mut sequence_effects = Vec::new();
+        let result = self.execute_alter_table_batch_stmt_in_transaction_with_search_path(
+            client_id,
+            &actions,
+            xid,
+            0,
+            configured_search_path,
+            datetime_config,
+            &mut catalog_effects,
+            &mut sequence_effects,
+        );
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            result,
+            &catalog_effects,
+            &[],
+            &sequence_effects,
+        );
+        guard.disarm();
+        self.table_locks.unlock_table(
+            crate::pgrust::database::relation_lock_tag(&relation),
+            client_id,
+        );
+        result.map(Some)
+    }
+
+    pub(crate) fn alter_table_batch_relation_for_lock_with_search_path(
+        &self,
+        client_id: ClientId,
+        actions: &[crate::backend::parser::Statement],
+        configured_search_path: Option<&[String]>,
+        txn_ctx: CatalogTxnContext,
+    ) -> Result<Option<crate::backend::parser::BoundRelation>, ExecError> {
+        let Some(actions) = batchable_alter_table_actions(actions) else {
+            return Ok(None);
+        };
+        let Some((if_exists, only, table_name)) = batch_table_target(&actions) else {
+            return Ok(None);
+        };
+        if only {
+            return Ok(None);
+        }
+
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let Some(relation) =
+            lookup_table_or_partitioned_table_for_alter_table(&catalog, &table_name, if_exists)?
+        else {
+            return Ok(None);
+        };
+        if relation.relkind != 'r' {
+            return Ok(None);
+        }
+        Ok(Some(relation))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_execute_alter_table_batch_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        actions: &[crate::backend::parser::Statement],
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
+    ) -> Result<Option<StatementResult>, ExecError> {
+        let Some(actions) = batchable_alter_table_actions(actions) else {
+            return Ok(None);
+        };
+        self.execute_alter_table_batch_stmt_in_transaction_with_search_path(
+            client_id,
+            &actions,
+            xid,
+            cid,
+            configured_search_path,
+            datetime_config,
+            catalog_effects,
+            sequence_effects,
+        )
+        .map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_alter_table_batch_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        actions: &[crate::backend::parser::Statement],
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let Some((if_exists, _only, table_name)) = batch_table_target(actions) else {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "single ALTER TABLE target",
+                actual: "mixed ALTER TABLE targets".into(),
+            }));
+        };
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let Some(relation) =
+            lookup_table_or_partitioned_table_for_alter_table(&catalog, &table_name, if_exists)?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        if relation.namespace_oid == PG_CATALOG_NAMESPACE_OID {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "user table for ALTER TABLE",
+                actual: "system catalog".into(),
+            }));
+        }
+        reject_typed_table_ddl(&relation, "alter")?;
+        ensure_relation_owner(self, client_id, &relation, &table_name)?;
+
+        let original_desc = relation.desc.clone();
+        let mut staged_desc = relation.desc.clone();
+        let mut rewrite_exprs = Vec::new();
+        let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
+
+        for action in actions {
+            match action {
+                crate::backend::parser::Statement::AlterTableDropColumn(drop_stmt) => {
+                    if drop_stmt.cascade {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                            "ALTER TABLE batch DROP COLUMN CASCADE".into(),
+                        )));
+                    }
+                    if visible_column_index_in_desc(&staged_desc, &drop_stmt.column_name).is_none()
+                    {
+                        if drop_stmt.missing_ok {
+                            continue;
+                        }
+                        return Err(ExecError::Parse(ParseError::UnknownColumn(
+                            drop_stmt.column_name.clone(),
+                        )));
+                    }
+                    mark_column_dropped_for_alter_table_batch(
+                        &mut staged_desc,
+                        &drop_stmt.column_name,
+                    )?;
+                }
+                crate::backend::parser::Statement::AlterTableAddColumn(add_stmt) => {
+                    let plan = validate_alter_table_add_column(
+                        relation_name_for_error(&catalog, relation.relation_oid).as_str(),
+                        &staged_desc,
+                        &add_stmt.column,
+                        &existing_constraints,
+                        &catalog,
+                    )?;
+                    if plan.owned_sequence.is_some() {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                            "ALTER TABLE batch ADD COLUMN with owned sequence".into(),
+                        )));
+                    }
+                    let mut column = plan.column;
+                    if plan.not_null_action.is_some() {
+                        column.storage.nullable = false;
+                    }
+                    if let Some(fdw_options) = &add_stmt.fdw_options {
+                        column.fdw_options = Some(
+                            fdw_options
+                                .iter()
+                                .map(|option| format!("{}={}", option.name, option.value))
+                                .collect(),
+                        );
+                    }
+                    staged_desc.columns.push(column);
+                }
+                crate::backend::parser::Statement::AlterTableAlterColumnType(alter_stmt) => {
+                    let Some(column_index) =
+                        visible_column_index_in_desc(&staged_desc, &alter_stmt.column_name)
+                    else {
+                        return Err(ExecError::Parse(ParseError::UnknownColumn(
+                            alter_stmt.column_name.clone(),
+                        )));
+                    };
+                    reject_partition_key_type_change(
+                        &relation,
+                        &relation_name_for_error(&catalog, relation.relation_oid),
+                        column_index,
+                    )?;
+                    let requested_type =
+                        crate::backend::parser::resolve_raw_type_name(&alter_stmt.ty, &catalog)
+                            .map_err(ExecError::Parse)?;
+                    reject_recursive_composite_column_type(
+                        &catalog,
+                        relation.relation_oid,
+                        requested_type,
+                    )?;
+                    reject_row_type_dependents_for_column_type_change(&catalog, &relation)?;
+                    reject_column_type_change_with_rule_dependencies(
+                        self,
+                        client_id,
+                        Some((xid, cid)),
+                        relation.relation_oid,
+                        &staged_desc.columns[column_index].name,
+                        (column_index + 1) as i16,
+                    )?;
+                    let binding_desc =
+                        original_binding_desc_for_alter_table_batch(&original_desc, &staged_desc);
+                    let plan = validate_alter_table_alter_column_type(
+                        &catalog,
+                        relation.relation_oid,
+                        &binding_desc,
+                        &alter_stmt.column_name,
+                        &alter_stmt.ty,
+                        alter_stmt.collation.as_deref(),
+                        alter_stmt.using_expr.as_ref(),
+                        false,
+                    )?;
+                    let current_column = staged_desc.columns[column_index].clone();
+                    let mut new_column = plan.new_column;
+                    new_column.default_expr = current_column.default_expr;
+                    new_column.default_sequence_oid = current_column.default_sequence_oid;
+                    new_column.attrdef_oid = current_column.attrdef_oid;
+                    new_column.generated = current_column.generated;
+                    new_column.identity = current_column.identity;
+                    new_column.fdw_options = current_column.fdw_options;
+                    staged_desc.columns[column_index] = new_column;
+                    rewrite_exprs.push(BatchRewriteExpr {
+                        column_index,
+                        expr: plan.rewrite_expr,
+                    });
+                }
+                crate::backend::parser::Statement::AlterTableAlterColumnExpression(alter_stmt) => {
+                    let plan = validate_alter_table_alter_column_expression(
+                        &catalog,
+                        relation.relation_oid,
+                        relation.namespace_oid,
+                        &staged_desc,
+                        &alter_stmt.column_name,
+                        &alter_stmt.action,
+                    )?;
+                    if plan.noop {
+                        continue;
+                    }
+                    let Some(column_index) =
+                        visible_column_index_in_desc(&staged_desc, &plan.column_name)
+                    else {
+                        return Err(ExecError::Parse(ParseError::UnknownColumn(
+                            plan.column_name.clone(),
+                        )));
+                    };
+                    let column = &mut staged_desc.columns[column_index];
+                    column.default_expr = plan.default_expr_sql;
+                    column.default_sequence_oid = None;
+                    column.generated = plan.generated;
+                    if column.default_expr.is_none() {
+                        column.attrdef_oid = None;
+                        column.missing_default_value = None;
+                    }
+                }
+                _ => unreachable!("batchable actions filtered earlier"),
+            }
+        }
+
+        crate::backend::parser::validate_generated_columns(&staged_desc, &catalog)
+            .map_err(ExecError::Parse)?;
+        let relation_name = relation_name_for_error(&catalog, relation.relation_oid);
+        let relation_constraints = crate::backend::parser::bind_relation_constraints(
+            Some(&relation_name),
+            relation.relation_oid,
+            &staged_desc,
+            &catalog,
+        )
+        .map_err(ExecError::Parse)?;
+        let indexes = rewrite_bound_indexes_for_alter_column_type(
+            catalog.index_relations_for_heap(relation.relation_oid),
+            &staged_desc,
+            &catalog,
+        )?;
+        let table_rewrite_trigger_may_fire =
+            self.table_rewrite_event_trigger_may_fire(client_id, Some((xid, cid)), "ALTER TABLE")?;
+        let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+        let mut ctx = ExecutorContext {
+            pool: std::sync::Arc::clone(&self.pool),
+            data_dir: None,
+            txns: self.txns.clone(),
+            txn_waiter: Some(self.txn_waiter.clone()),
+            lock_status_provider: Some(std::sync::Arc::new(self.clone())),
+            sequences: Some(self.sequences.clone()),
+            large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
+            async_notify_runtime: Some(self.async_notify_runtime.clone()),
+            advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+            row_locks: std::sync::Arc::clone(&self.row_locks),
+            checkpoint_stats: self.checkpoint_stats_snapshot(),
+            datetime_config: datetime_config.clone(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+            gucs: std::collections::HashMap::new(),
+            interrupts: std::sync::Arc::clone(&interrupts),
+            stats: std::sync::Arc::clone(&self.stats),
+            session_stats: self.session_stats_state(client_id),
+            snapshot,
+            write_xid_override: None,
+            transaction_state: None,
+            client_id,
+            current_database_name: self.current_database_name(),
+            session_user_oid: self.auth_state(client_id).session_user_oid(),
+            current_user_oid: self.auth_state(client_id).current_user_oid(),
+            active_role_oid: self.auth_state(client_id).active_role_oid(),
+            session_replication_role: self.session_replication_role(client_id),
+            statement_lock_scope_id: None,
+            transaction_lock_scope_id: None,
+            next_command_id: cid,
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
+            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+            case_test_values: Vec::new(),
+            system_bindings: Vec::new(),
+            active_grouping_refs: Vec::new(),
+            subplans: Vec::new(),
+            timed: false,
+            allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: Some(self.clone()),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
+            pending_portals: Vec::new(),
+            catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+            scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
+            plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+            pinned_cte_tables: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
+            trigger_depth: 0,
+        };
+        self.fire_table_rewrite_event_in_executor_context(
+            &mut ctx,
+            "ALTER TABLE",
+            relation.relation_oid,
+            4,
+        )?;
+        if !table_rewrite_trigger_may_fire {
+            let rewritten_rows = plan_rewritten_rows_for_alter_table_batch(
+                &relation,
+                &relation_name,
+                &staged_desc,
+                &relation_constraints,
+                &rewrite_exprs,
+                &mut ctx,
+            )?;
+            validate_unique_indexes_for_rewritten_rows(
+                &staged_desc,
+                &indexes,
+                &rewritten_rows,
+                &mut ctx,
+            )?;
+            let rewritten_rows = apply_rewritten_rows_for_alter_column_type(
+                &relation,
+                &staged_desc,
+                &rewritten_rows,
+                &mut ctx,
+                xid,
+                cid,
+            )?;
+            rebuild_relation_indexes_for_alter_column_type(
+                &relation,
+                &staged_desc,
+                &indexes,
+                &rewritten_rows,
+                &mut ctx,
+                xid,
+            )?;
+        }
+        drop(ctx);
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let mut store = self.catalog.write();
+        let effect = store
+            .replace_relation_desc_for_alter_table_batch_mvcc(
+                relation.relation_oid,
+                staged_desc.clone(),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        let effect = store
+            .replace_relation_statistics_mvcc(
+                relation.relation_oid,
+                Vec::<PgStatisticRow>::new(),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        for index in indexes {
+            let effect = store
+                .alter_index_relation_for_column_type_mvcc(
+                    index.relation_oid,
+                    index.desc.clone(),
+                    index.index_meta.clone(),
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
+        drop(store);
+        if relation.relpersistence == 't' {
+            self.replace_temp_entry_desc(client_id, relation.relation_oid, staged_desc)?;
+        }
+        let _ = sequence_effects;
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_alter_table_alter_column_type_stmt_with_search_path(
         &self,
         client_id: ClientId,

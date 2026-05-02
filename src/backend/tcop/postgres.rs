@@ -11185,6 +11185,23 @@ fn exclusion_constraint_def(
         def.push_str(&include_columns.join(", "));
         def.push(')');
     }
+    let catalog = db.lazy_catalog_lookup(session.client_id, session.catalog_txn_ctx(), None);
+    if let Some(index) = catalog
+        .index_relations_for_heap(row.conrelid)
+        .into_iter()
+        .find(|index| index.relation_oid == row.conindid)
+        && let Some(predicate) = index
+            .index_meta
+            .indpred
+            .as_deref()
+            .filter(|pred| !pred.is_empty())
+    {
+        let predicate = normalize_index_predicate_sql(predicate, Some(&relation.desc));
+        let predicate = normalize_numeric_index_expr_sql(&predicate, &relation.desc);
+        def.push_str(" WHERE (");
+        def.push_str(&predicate);
+        def.push(')');
+    }
     Some(def)
 }
 

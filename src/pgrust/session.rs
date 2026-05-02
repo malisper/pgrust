@@ -3896,6 +3896,15 @@ impl Session {
         statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
         validate_compound_alter_table_temporal_fk_actions(stmt)?;
+        let search_path = self.configured_search_path();
+        if let Some(result) = db.try_execute_alter_table_batch_stmt_with_search_path(
+            self.client_id,
+            &stmt.actions,
+            search_path.as_deref(),
+            &self.datetime_config,
+        )? {
+            return Ok(result);
+        }
         self.active_txn = Some(self.active_transaction_without_xid(db));
         self.stats_state.write().begin_top_level_xact();
         let result = stmt.actions.iter().try_for_each(|action| {
@@ -3919,6 +3928,42 @@ impl Session {
             self.portals.drop_transaction_portals(false);
         }
         result
+    }
+
+    fn try_execute_alter_table_batch_in_active_transaction(
+        &mut self,
+        db: &Database,
+        actions: &[Statement],
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<Option<StatementResult>, ExecError> {
+        let search_path = self.configured_search_path();
+        let Some(relation) = db.alter_table_batch_relation_for_lock_with_search_path(
+            self.client_id,
+            actions,
+            search_path.as_deref(),
+            Some((xid, cid)),
+        )?
+        else {
+            return Ok(None);
+        };
+        self.lock_table_if_needed(
+            db,
+            crate::pgrust::database::relation_lock_tag(&relation),
+            TableLockMode::AccessExclusive,
+        )?;
+        let datetime_config = self.datetime_config.clone();
+        let txn = self.active_txn.as_mut().unwrap();
+        db.try_execute_alter_table_batch_stmt_in_transaction_with_search_path(
+            self.client_id,
+            actions,
+            xid,
+            cid,
+            search_path.as_deref(),
+            &datetime_config,
+            &mut txn.catalog_effects,
+            &mut txn.sequence_effects,
+        )
     }
 
     fn executor_context_for_catalog(
@@ -7609,6 +7654,42 @@ impl Session {
                     max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
                 },
             )?;
+            let parsed_statements = statements
+                .iter()
+                .map(|sql| crate::backend::parser::parse_statement(sql))
+                .collect::<Result<Vec<_>, _>>()?;
+            let search_path = self.configured_search_path();
+            if self.active_txn.is_none() {
+                if let Some(result) = db.try_execute_alter_table_batch_stmt_with_search_path(
+                    self.client_id,
+                    &parsed_statements,
+                    search_path.as_deref(),
+                    &self.datetime_config,
+                )? {
+                    return Ok(result);
+                }
+            } else {
+                let txn_ctx = self
+                    .active_txn
+                    .as_ref()
+                    .and_then(|txn| txn.xid.map(|xid| (xid, txn.next_command_id)));
+                let catalog =
+                    db.lazy_catalog_lookup(self.client_id, txn_ctx, search_path.as_deref());
+                self.reject_restricted_views_in_statement(&stmt, &catalog)?;
+                if self.transaction_failed() {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "ROLLBACK",
+                        actual: "current transaction is aborted, commands ignored until end of transaction block".into(),
+                    }));
+                }
+                let result = self.execute_in_transaction(db, stmt.clone(), statement_lock_scope_id);
+                if result.is_err()
+                    && let Some(ref mut txn) = self.active_txn
+                {
+                    txn.failed = true;
+                }
+                return result;
+            }
             for sql in statements {
                 self.execute_internal(db, sql, statement_lock_scope_id)?;
             }
@@ -8955,6 +9036,15 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
+                    let actions = [Statement::AlterTableAddColumns(alter_stmt.clone())];
+                    if let Some(result) = db.try_execute_alter_table_batch_stmt_with_search_path(
+                        self.client_id,
+                        &actions,
+                        search_path.as_deref(),
+                        &self.datetime_config,
+                    )? {
+                        return Ok(result);
+                    }
                     db.execute_alter_table_add_columns_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
@@ -9028,6 +9118,17 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
+                    let actions = [Statement::AlterTableAlterColumnExpression(
+                        alter_stmt.clone(),
+                    )];
+                    if let Some(result) = db.try_execute_alter_table_batch_stmt_with_search_path(
+                        self.client_id,
+                        &actions,
+                        search_path.as_deref(),
+                        &self.datetime_config,
+                    )? {
+                        return Ok(result);
+                    }
                     db.execute_alter_table_alter_column_expression_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
@@ -14988,10 +15089,23 @@ impl Session {
                             max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
                         },
                     )?;
-                    for sql in statements {
-                        self.execute_internal(db, sql, _statement_lock_scope_id)?;
+                    let parsed_statements = statements
+                        .iter()
+                        .map(|sql| crate::backend::parser::parse_statement(sql))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if let Some(result) = self.try_execute_alter_table_batch_in_active_transaction(
+                        db,
+                        &parsed_statements,
+                        xid,
+                        cid,
+                    )? {
+                        Ok(result)
+                    } else {
+                        for sql in statements {
+                            self.execute_internal(db, sql, _statement_lock_scope_id)?;
+                        }
+                        Ok(StatementResult::AffectedRows(0))
                     }
-                    Ok(StatementResult::AffectedRows(0))
                 }
                 Statement::Do(ref do_stmt) => self.execute_plpgsql_do(db, do_stmt, xid, cid),
                 Statement::Prepare(ref prepare_stmt) => {
@@ -15040,11 +15154,24 @@ impl Session {
                 }
                 Statement::AlterTableCompound(ref compound_stmt) => {
                     validate_compound_alter_table_temporal_fk_actions(compound_stmt)?;
-                    compound_stmt.actions.iter().try_for_each(|action| {
-                        self.execute_in_transaction(db, action.clone(), _statement_lock_scope_id)
+                    if let Some(result) = self.try_execute_alter_table_batch_in_active_transaction(
+                        db,
+                        &compound_stmt.actions,
+                        xid,
+                        cid,
+                    )? {
+                        Ok(result)
+                    } else {
+                        compound_stmt.actions.iter().try_for_each(|action| {
+                            self.execute_in_transaction(
+                                db,
+                                action.clone(),
+                                _statement_lock_scope_id,
+                            )
                             .map(|_| ())
-                    })?;
-                    Ok(StatementResult::AffectedRows(0))
+                        })?;
+                        Ok(StatementResult::AffectedRows(0))
+                    }
                 }
                 Statement::CommentOnDomain(ref comment_stmt) => {
                     let search_path = self.configured_search_path();
@@ -16202,6 +16329,12 @@ impl Session {
                     )
                 }
                 Statement::AlterTableAddColumns(ref alter_stmt) => {
+                    let actions = [Statement::AlterTableAddColumns(alter_stmt.clone())];
+                    if let Some(result) = self.try_execute_alter_table_batch_in_active_transaction(
+                        db, &actions, xid, cid,
+                    )? {
+                        return Ok(result);
+                    }
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
                     let relation = catalog
                         .lookup_any_relation(&alter_stmt.table_name)
@@ -16307,6 +16440,14 @@ impl Session {
                 )
                 }
                 Statement::AlterTableAlterColumnExpression(ref alter_stmt) => {
+                    let actions = [Statement::AlterTableAlterColumnExpression(
+                        alter_stmt.clone(),
+                    )];
+                    if let Some(result) = self.try_execute_alter_table_batch_in_active_transaction(
+                        db, &actions, xid, cid,
+                    )? {
+                        return Ok(result);
+                    }
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
                     let relation = catalog
                         .lookup_any_relation(&alter_stmt.table_name)
