@@ -43,12 +43,23 @@ pub(crate) fn rte_slot_varno(slot_id: usize) -> Option<usize> {
     }
 }
 
-impl Path {
-    pub fn into_plan(self) -> Plan {
+pub(crate) trait PathMethods {
+    fn into_plan(self) -> Plan;
+    fn plan_info(&self) -> PlanEstimate;
+    fn columns(&self) -> Vec<QueryColumn>;
+    fn output_vars(&self) -> Vec<Expr>;
+    fn semantic_output_vars(&self) -> Vec<Expr>;
+    fn output_target(&self) -> PathTarget;
+    fn semantic_output_target(&self) -> PathTarget;
+    fn pathkeys(&self) -> Vec<PathKey>;
+}
+
+impl PathMethods for Path {
+    fn into_plan(self) -> Plan {
         super::setrefs::create_plan_without_root(self)
     }
 
-    pub fn plan_info(&self) -> PlanEstimate {
+    fn plan_info(&self) -> PlanEstimate {
         match self {
             Self::Result { plan_info, .. }
             | Self::Append { plan_info, .. }
@@ -83,7 +94,7 @@ impl Path {
         }
     }
 
-    pub fn columns(&self) -> Vec<QueryColumn> {
+    fn columns(&self) -> Vec<QueryColumn> {
         match self {
             Self::Result { .. } => Vec::new(),
             Self::Append { desc, .. } | Self::MergeAppend { desc, .. } => desc
@@ -162,7 +173,7 @@ impl Path {
         }
     }
 
-    pub fn output_vars(&self) -> Vec<Expr> {
+    fn output_vars(&self) -> Vec<Expr> {
         match self {
             Self::Result { .. } => Vec::new(),
             Self::Append {
@@ -287,11 +298,11 @@ impl Path {
         }
     }
 
-    pub fn semantic_output_vars(&self) -> Vec<Expr> {
+    fn semantic_output_vars(&self) -> Vec<Expr> {
         self.semantic_output_target().exprs
     }
 
-    pub fn output_target(&self) -> PathTarget {
+    fn output_target(&self) -> PathTarget {
         match self {
             Self::Unique { input, .. }
             | Self::Filter { input, .. }
@@ -329,7 +340,7 @@ impl Path {
         }
     }
 
-    pub fn semantic_output_target(&self) -> PathTarget {
+    fn semantic_output_target(&self) -> PathTarget {
         match self {
             Self::Result { pathtarget, .. }
             | Self::Append { pathtarget, .. }
@@ -364,7 +375,7 @@ impl Path {
         }
     }
 
-    pub fn pathkeys(&self) -> Vec<PathKey> {
+    fn pathkeys(&self) -> Vec<PathKey> {
         match self {
             Self::Result { .. }
             | Self::SeqScan { .. }

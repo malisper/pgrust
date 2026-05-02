@@ -56,12 +56,6 @@ pub(crate) fn tsquery_contains(left: &TsQuery, right: &TsQuery) -> bool {
     right_values.is_subset(&left_values)
 }
 
-impl From<TsQueryNode> for TsQuery {
-    fn from(root: TsQueryNode) -> Self {
-        Self { root }
-    }
-}
-
 fn empty_tsquery_node() -> TsQueryNode {
     TsQueryNode::Operand(TsQueryOperand::new(""))
 }

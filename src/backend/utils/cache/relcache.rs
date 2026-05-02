@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
@@ -10,11 +8,6 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{LoweredPartitionSpec, SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
-use crate::include::access::brin::BrinOptions;
-use crate::include::access::gin::GinOptions;
-use crate::include::access::gist::GistOptions;
-use crate::include::access::hash::HashOptions;
-use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::PgTypeRow;
 use crate::include::catalog::toasting::toast_relation_name;
 use crate::include::catalog::{
@@ -25,70 +18,7 @@ use crate::include::catalog::{
     builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
     builtin_scalar_function_for_proc_oid, system_catalog_index_by_oid,
 };
-use crate::include::nodes::primnodes::Expr;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IndexAmOpEntry {
-    pub strategy: i16,
-    pub purpose: char,
-    pub lefttype: u32,
-    pub righttype: u32,
-    pub operator_oid: u32,
-    pub operator_proc_oid: u32,
-    pub sortfamily_oid: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IndexAmProcEntry {
-    pub procnum: i16,
-    pub lefttype: u32,
-    pub righttype: u32,
-    pub proc_oid: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IndexRelCacheEntry {
-    pub indexrelid: u32,
-    pub indrelid: u32,
-    pub indnatts: i16,
-    pub indnkeyatts: i16,
-    pub indisunique: bool,
-    pub indnullsnotdistinct: bool,
-    pub indisprimary: bool,
-    pub indisexclusion: bool,
-    pub indimmediate: bool,
-    pub indisclustered: bool,
-    pub indisvalid: bool,
-    pub indcheckxmin: bool,
-    pub indisready: bool,
-    pub indislive: bool,
-    pub indisreplident: bool,
-    pub am_oid: u32,
-    pub am_handler_oid: Option<u32>,
-    pub indkey: Vec<i16>,
-    pub indclass: Vec<u32>,
-    #[serde(default)]
-    pub indclass_options: Vec<Vec<(String, String)>>,
-    pub indcollation: Vec<u32>,
-    pub indoption: Vec<i16>,
-    pub opfamily_oids: Vec<u32>,
-    pub opcintype_oids: Vec<u32>,
-    pub opckeytype_oids: Vec<u32>,
-    pub amop_entries: Vec<Vec<IndexAmOpEntry>>,
-    pub amproc_entries: Vec<Vec<IndexAmProcEntry>>,
-    pub indexprs: Option<String>,
-    pub indpred: Option<String>,
-    #[serde(skip)]
-    pub rd_indexprs: Option<Vec<Expr>>,
-    #[serde(skip)]
-    pub rd_indpred: Option<Option<Expr>>,
-    pub btree_options: Option<BtreeOptions>,
-    pub brin_options: Option<BrinOptions>,
-    #[serde(default)]
-    pub gist_options: Option<GistOptions>,
-    pub gin_options: Option<GinOptions>,
-    pub hash_options: Option<HashOptions>,
-}
+pub use pgrust_nodes::relcache::{IndexAmOpEntry, IndexAmProcEntry, IndexRelCacheEntry};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ResolvedIndexSupportMetadata {
@@ -192,202 +122,230 @@ impl IndexSupportLookup {
     }
 }
 
-impl IndexRelCacheEntry {
-    fn indexed_operator_type_oid(&self, desc: &RelationDesc, column_index: usize) -> Option<u32> {
-        self.opcintype_oids
-            .get(column_index)
-            .copied()
-            .filter(|oid| *oid != 0)
-            .filter(|oid| {
-                !matches!(
-                    *oid,
-                    crate::include::catalog::ANYOID
-                        | crate::include::catalog::ANYARRAYOID
-                        | crate::include::catalog::ANYRANGEOID
-                        | crate::include::catalog::ANYMULTIRANGEOID
-                )
-            })
-            .or_else(|| {
-                desc.columns
-                    .get(column_index)
-                    .map(|column| sql_type_oid(column.sql_type))
-            })
-    }
-
-    fn indexed_operand_type_oid(&self, desc: &RelationDesc, column_index: usize) -> Option<u32> {
-        self.opckeytype_oids
-            .get(column_index)
-            .copied()
-            .filter(|oid| *oid != 0)
-            .or_else(|| {
-                desc.columns
-                    .get(column_index)
-                    .map(|column| sql_type_oid(column.sql_type))
-            })
-    }
-
-    fn type_match_score(
-        entry_lefttype: u32,
-        entry_righttype: u32,
-        left_type_oid: Option<u32>,
-        right_type_oid: Option<u32>,
-    ) -> Option<u8> {
-        fn same_index_type_family(entry_type: u32, actual_type: u32) -> bool {
-            matches!(
-                (entry_type, actual_type),
-                (INET_TYPE_OID | CIDR_TYPE_OID, INET_TYPE_OID | CIDR_TYPE_OID)
-                    | (
-                        BIT_TYPE_OID | VARBIT_TYPE_OID,
-                        BIT_TYPE_OID | VARBIT_TYPE_OID
-                    )
-                    | (
-                        TIMESTAMP_TYPE_OID | TIMESTAMPTZ_TYPE_OID,
-                        TIMESTAMP_TYPE_OID | TIMESTAMPTZ_TYPE_OID
-                    )
+fn index_indexed_operator_type_oid(
+    index: &IndexRelCacheEntry,
+    desc: &RelationDesc,
+    column_index: usize,
+) -> Option<u32> {
+    index
+        .opcintype_oids
+        .get(column_index)
+        .copied()
+        .filter(|oid| *oid != 0)
+        .filter(|oid| {
+            !matches!(
+                *oid,
+                crate::include::catalog::ANYOID
+                    | crate::include::catalog::ANYARRAYOID
+                    | crate::include::catalog::ANYRANGEOID
+                    | crate::include::catalog::ANYMULTIRANGEOID
             )
-        }
+        })
+        .or_else(|| {
+            desc.columns
+                .get(column_index)
+                .map(|column| sql_type_oid(column.sql_type))
+        })
+}
 
-        fn component_score(entry_type: u32, actual_type: Option<u32>) -> Option<u8> {
-            match actual_type {
-                None => Some(0),
-                Some(actual) if entry_type == actual => Some(4),
-                Some(actual) if same_index_type_family(entry_type, actual) => Some(3),
-                Some(_) if entry_type == ANYOID => Some(1),
-                Some(actual)
-                    if entry_type == ANYRANGEOID && builtin_range_spec_by_oid(actual).is_some() =>
-                {
-                    Some(2)
-                }
-                Some(actual)
-                    if entry_type == ANYMULTIRANGEOID
-                        && builtin_range_spec_by_multirange_oid(actual).is_some() =>
-                {
-                    Some(2)
-                }
-                Some(_) if entry_type == ANYELEMENTOID => Some(1),
-                Some(_) => None,
-            }
-        }
+fn index_indexed_operand_type_oid(
+    index: &IndexRelCacheEntry,
+    desc: &RelationDesc,
+    column_index: usize,
+) -> Option<u32> {
+    index
+        .opckeytype_oids
+        .get(column_index)
+        .copied()
+        .filter(|oid| *oid != 0)
+        .or_else(|| {
+            desc.columns
+                .get(column_index)
+                .map(|column| sql_type_oid(column.sql_type))
+        })
+}
 
-        Some(
-            component_score(entry_lefttype, left_type_oid)?
-                + component_score(entry_righttype, right_type_oid)?,
+fn index_type_match_score(
+    entry_lefttype: u32,
+    entry_righttype: u32,
+    left_type_oid: Option<u32>,
+    right_type_oid: Option<u32>,
+) -> Option<u8> {
+    fn same_index_type_family(entry_type: u32, actual_type: u32) -> bool {
+        matches!(
+            (entry_type, actual_type),
+            (INET_TYPE_OID | CIDR_TYPE_OID, INET_TYPE_OID | CIDR_TYPE_OID)
+                | (
+                    BIT_TYPE_OID | VARBIT_TYPE_OID,
+                    BIT_TYPE_OID | VARBIT_TYPE_OID
+                )
+                | (
+                    TIMESTAMP_TYPE_OID | TIMESTAMPTZ_TYPE_OID,
+                    TIMESTAMP_TYPE_OID | TIMESTAMPTZ_TYPE_OID
+                )
         )
     }
 
-    pub fn amproc_oid(
-        &self,
-        desc: &RelationDesc,
-        column_index: usize,
-        procnum: i16,
-    ) -> Option<u32> {
-        let operand_type_oid = self.indexed_operand_type_oid(desc, column_index);
-        let operator_type_oid = self.indexed_operator_type_oid(desc, column_index);
-        let mut best: Option<(u8, u32)> = None;
-        for entry in self.amproc_entries.get(column_index)?.iter() {
-            if entry.procnum != procnum {
-                continue;
+    fn component_score(entry_type: u32, actual_type: Option<u32>) -> Option<u8> {
+        match actual_type {
+            None => Some(0),
+            Some(actual) if entry_type == actual => Some(4),
+            Some(actual) if same_index_type_family(entry_type, actual) => Some(3),
+            Some(_) if entry_type == ANYOID => Some(1),
+            Some(actual)
+                if entry_type == ANYRANGEOID && builtin_range_spec_by_oid(actual).is_some() =>
+            {
+                Some(2)
             }
-            let operand_score = Self::type_match_score(
-                entry.lefttype,
-                entry.righttype,
-                operand_type_oid,
-                operand_type_oid,
-            );
-            let operator_score = Self::type_match_score(
-                entry.lefttype,
-                entry.righttype,
-                operator_type_oid,
-                operator_type_oid,
-            );
-            let Some(score) = operand_score.or(operator_score) else {
-                continue;
-            };
-            if best.is_none_or(|(best_score, _)| score > best_score) {
-                best = Some((score, entry.proc_oid));
+            Some(actual)
+                if entry_type == ANYMULTIRANGEOID
+                    && builtin_range_spec_by_multirange_oid(actual).is_some() =>
+            {
+                Some(2)
             }
+            Some(_) if entry_type == ANYELEMENTOID => Some(1),
+            Some(_) => None,
         }
-        best.map(|(_, proc_oid)| proc_oid)
     }
 
-    pub fn amop_strategy_for_operator(
-        &self,
-        desc: &RelationDesc,
-        column_index: usize,
-        operator_oid: u32,
-        right_type_oid: Option<u32>,
-    ) -> Option<u16> {
-        self.amop_strategy_matching(desc, column_index, right_type_oid, Some('s'), |entry| {
-            entry.operator_oid == operator_oid
-        })
-    }
+    Some(
+        component_score(entry_lefttype, left_type_oid)?
+            + component_score(entry_righttype, right_type_oid)?,
+    )
+}
 
-    pub fn amop_ordering_strategy_for_operator(
-        &self,
-        desc: &RelationDesc,
-        column_index: usize,
-        operator_oid: u32,
-        right_type_oid: Option<u32>,
-    ) -> Option<u16> {
-        self.amop_strategy_matching(desc, column_index, right_type_oid, Some('o'), |entry| {
-            entry.operator_oid == operator_oid
-        })
-        .map(normalize_ordering_strategy)
-    }
-
-    pub fn amop_strategy_for_proc(
-        &self,
-        desc: &RelationDesc,
-        column_index: usize,
-        operator_proc_oid: u32,
-        right_type_oid: Option<u32>,
-    ) -> Option<u16> {
-        self.amop_strategy_matching(desc, column_index, right_type_oid, Some('s'), |entry| {
-            proc_oids_match(entry.operator_proc_oid, operator_proc_oid)
-        })
-    }
-
-    pub fn amop_ordering_strategy_for_proc(
-        &self,
-        desc: &RelationDesc,
-        column_index: usize,
-        operator_proc_oid: u32,
-        right_type_oid: Option<u32>,
-    ) -> Option<u16> {
-        self.amop_strategy_matching(desc, column_index, right_type_oid, Some('o'), |entry| {
-            proc_oids_match(entry.operator_proc_oid, operator_proc_oid)
-        })
-        .map(normalize_ordering_strategy)
-    }
-
-    fn amop_strategy_matching(
-        &self,
-        desc: &RelationDesc,
-        column_index: usize,
-        right_type_oid: Option<u32>,
-        purpose: Option<char>,
-        predicate: impl Fn(&IndexAmOpEntry) -> bool,
-    ) -> Option<u16> {
-        let left_type_oid = self.indexed_operator_type_oid(desc, column_index);
-        let mut best: Option<(u8, i16)> = None;
-        for entry in self.amop_entries.get(column_index)?.iter() {
-            if purpose.is_some_and(|purpose| entry.purpose != purpose) || !predicate(entry) {
-                continue;
-            }
-            let Some(score) = Self::type_match_score(
-                entry.lefttype,
-                entry.righttype,
-                left_type_oid,
-                right_type_oid,
-            ) else {
-                continue;
-            };
-            if best.is_none_or(|(best_score, _)| score > best_score) {
-                best = Some((score, entry.strategy));
-            }
+pub fn index_amproc_oid(
+    index: &IndexRelCacheEntry,
+    desc: &RelationDesc,
+    column_index: usize,
+    procnum: i16,
+) -> Option<u32> {
+    let operand_type_oid = index_indexed_operand_type_oid(index, desc, column_index);
+    let operator_type_oid = index_indexed_operator_type_oid(index, desc, column_index);
+    let mut best: Option<(u8, u32)> = None;
+    for entry in index.amproc_entries.get(column_index)?.iter() {
+        if entry.procnum != procnum {
+            continue;
         }
-        best.and_then(|(_, strategy)| u16::try_from(strategy).ok())
+        let operand_score = index_type_match_score(
+            entry.lefttype,
+            entry.righttype,
+            operand_type_oid,
+            operand_type_oid,
+        );
+        let operator_score = index_type_match_score(
+            entry.lefttype,
+            entry.righttype,
+            operator_type_oid,
+            operator_type_oid,
+        );
+        let Some(score) = operand_score.or(operator_score) else {
+            continue;
+        };
+        if best.is_none_or(|(best_score, _)| score > best_score) {
+            best = Some((score, entry.proc_oid));
+        }
     }
+    best.map(|(_, proc_oid)| proc_oid)
+}
+
+pub fn index_amop_strategy_for_operator(
+    index: &IndexRelCacheEntry,
+    desc: &RelationDesc,
+    column_index: usize,
+    operator_oid: u32,
+    right_type_oid: Option<u32>,
+) -> Option<u16> {
+    index_amop_strategy_matching(
+        index,
+        desc,
+        column_index,
+        right_type_oid,
+        Some('s'),
+        |entry| entry.operator_oid == operator_oid,
+    )
+}
+
+pub fn index_amop_ordering_strategy_for_operator(
+    index: &IndexRelCacheEntry,
+    desc: &RelationDesc,
+    column_index: usize,
+    operator_oid: u32,
+    right_type_oid: Option<u32>,
+) -> Option<u16> {
+    index_amop_strategy_matching(
+        index,
+        desc,
+        column_index,
+        right_type_oid,
+        Some('o'),
+        |entry| entry.operator_oid == operator_oid,
+    )
+    .map(normalize_ordering_strategy)
+}
+
+pub fn index_amop_strategy_for_proc(
+    index: &IndexRelCacheEntry,
+    desc: &RelationDesc,
+    column_index: usize,
+    operator_proc_oid: u32,
+    right_type_oid: Option<u32>,
+) -> Option<u16> {
+    index_amop_strategy_matching(
+        index,
+        desc,
+        column_index,
+        right_type_oid,
+        Some('s'),
+        |entry| proc_oids_match(entry.operator_proc_oid, operator_proc_oid),
+    )
+}
+
+pub fn index_amop_ordering_strategy_for_proc(
+    index: &IndexRelCacheEntry,
+    desc: &RelationDesc,
+    column_index: usize,
+    operator_proc_oid: u32,
+    right_type_oid: Option<u32>,
+) -> Option<u16> {
+    index_amop_strategy_matching(
+        index,
+        desc,
+        column_index,
+        right_type_oid,
+        Some('o'),
+        |entry| proc_oids_match(entry.operator_proc_oid, operator_proc_oid),
+    )
+    .map(normalize_ordering_strategy)
+}
+
+fn index_amop_strategy_matching(
+    index: &IndexRelCacheEntry,
+    desc: &RelationDesc,
+    column_index: usize,
+    right_type_oid: Option<u32>,
+    purpose: Option<char>,
+    predicate: impl Fn(&IndexAmOpEntry) -> bool,
+) -> Option<u16> {
+    let left_type_oid = index_indexed_operator_type_oid(index, desc, column_index);
+    let mut best: Option<(u8, i16)> = None;
+    for entry in index.amop_entries.get(column_index)?.iter() {
+        if purpose.is_some_and(|purpose| entry.purpose != purpose) || !predicate(entry) {
+            continue;
+        }
+        let Some(score) = index_type_match_score(
+            entry.lefttype,
+            entry.righttype,
+            left_type_oid,
+            right_type_oid,
+        ) else {
+            continue;
+        };
+        if best.is_none_or(|(best_score, _)| score > best_score) {
+            best = Some((score, entry.strategy));
+        }
+    }
+    best.and_then(|(_, strategy)| u16::try_from(strategy).ok())
 }
 
 fn proc_oids_match(left: u32, right: u32) -> bool {
@@ -1063,7 +1021,8 @@ mod tests {
         assert_eq!(index.am_oid, GIST_AM_OID);
         assert!(index.am_handler_oid.is_some());
         assert_eq!(
-            index.amproc_oid(
+            index_amproc_oid(
+                index,
                 &cache.get_by_name("boxes_b_gist").unwrap().desc,
                 0,
                 GIST_CONSISTENT_PROC
@@ -1142,11 +1101,11 @@ mod tests {
         let poly_index = poly_entry.index.as_ref().unwrap();
         assert_eq!(poly_index.opcintype_oids, vec![POLYGON_TYPE_OID]);
         assert_eq!(
-            poly_index.amproc_oid(&poly_entry.desc, 0, GIST_CONSISTENT_PROC),
+            index_amproc_oid(poly_index, &poly_entry.desc, 0, GIST_CONSISTENT_PROC),
             Some(GIST_POLY_CONSISTENT_PROC_OID)
         );
         assert_eq!(
-            poly_index.amproc_oid(&poly_entry.desc, 0, GIST_DISTANCE_PROC),
+            index_amproc_oid(poly_index, &poly_entry.desc, 0, GIST_DISTANCE_PROC),
             Some(GIST_POLY_DISTANCE_PROC_OID)
         );
 
@@ -1154,11 +1113,11 @@ mod tests {
         let circle_index = circle_entry.index.as_ref().unwrap();
         assert_eq!(circle_index.opcintype_oids, vec![CIRCLE_TYPE_OID]);
         assert_eq!(
-            circle_index.amproc_oid(&circle_entry.desc, 0, GIST_CONSISTENT_PROC),
+            index_amproc_oid(circle_index, &circle_entry.desc, 0, GIST_CONSISTENT_PROC),
             Some(GIST_CIRCLE_CONSISTENT_PROC_OID)
         );
         assert_eq!(
-            circle_index.amproc_oid(&circle_entry.desc, 0, GIST_DISTANCE_PROC),
+            index_amproc_oid(circle_index, &circle_entry.desc, 0, GIST_DISTANCE_PROC),
             Some(GIST_CIRCLE_DISTANCE_PROC_OID)
         );
     }
@@ -1270,15 +1229,21 @@ mod tests {
             .expect("int4range contains operator proc oid");
 
         assert_eq!(
-            index.amproc_oid(&desc, 0, GIST_CONSISTENT_PROC),
+            index_amproc_oid(&index, &desc, 0, GIST_CONSISTENT_PROC),
             Some(RANGE_GIST_CONSISTENT_PROC_OID)
         );
         assert_eq!(
-            index.amop_strategy_for_proc(&desc, 0, contains_proc_oid, Some(INT4RANGE_TYPE_OID),),
+            index_amop_strategy_for_proc(
+                &index,
+                &desc,
+                0,
+                contains_proc_oid,
+                Some(INT4RANGE_TYPE_OID),
+            ),
             Some(7)
         );
         assert_eq!(
-            index.amop_strategy_for_proc(&desc, 0, contains_proc_oid, Some(INT4_TYPE_OID),),
+            index_amop_strategy_for_proc(&index, &desc, 0, contains_proc_oid, Some(INT4_TYPE_OID),),
             Some(16)
         );
     }
@@ -1337,11 +1302,18 @@ mod tests {
             .expect("box distance operator row");
 
         assert_eq!(
-            index.amop_strategy_for_operator(&desc, 0, distance_operator.oid, Some(BOX_TYPE_OID)),
+            index_amop_strategy_for_operator(
+                &index,
+                &desc,
+                0,
+                distance_operator.oid,
+                Some(BOX_TYPE_OID)
+            ),
             None
         );
         assert_eq!(
-            index.amop_ordering_strategy_for_operator(
+            index_amop_ordering_strategy_for_operator(
+                &index,
                 &desc,
                 0,
                 distance_operator.oid,
@@ -1350,7 +1322,8 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            index.amop_ordering_strategy_for_proc(
+            index_amop_ordering_strategy_for_proc(
+                &index,
                 &desc,
                 0,
                 distance_operator.oprcode,

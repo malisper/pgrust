@@ -11,13 +11,8 @@ use crate::include::catalog::{
 use crate::include::catalog::{PgProcRow, PgRangeRow, PgTypeRow};
 use crate::include::nodes::datum::{MultirangeTypeRef, RangeTypeRef};
 use crate::include::nodes::primnodes::AggFunc;
+pub use pgrust_core::catalog::RangeCanonicalization;
 use std::collections::BTreeSet;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RangeCanonicalization {
-    Discrete,
-    Continuous,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinRangeSpec {

@@ -1,38 +1,7 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolicyCommand {
-    All,
-    Select,
-    Insert,
-    Update,
-    Delete,
-}
-
-impl PolicyCommand {
-    pub fn as_char(self) -> char {
-        match self {
-            Self::All => '*',
-            Self::Select => 'r',
-            Self::Insert => 'a',
-            Self::Update => 'w',
-            Self::Delete => 'd',
-        }
-    }
-
-    pub fn from_char(value: char) -> Option<Self> {
-        match value {
-            '*' => Some(Self::All),
-            'r' => Some(Self::Select),
-            'a' => Some(Self::Insert),
-            'w' => Some(Self::Update),
-            'd' => Some(Self::Delete),
-            _ => None,
-        }
-    }
-}
+pub use pgrust_core::catalog::PolicyCommand;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgPolicyRow {

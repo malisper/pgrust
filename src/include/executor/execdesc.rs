@@ -1,13 +1,5 @@
 use crate::include::nodes::plannodes::PlannedStmt;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandType {
-    Select,
-    Insert,
-    Update,
-    Delete,
-    Utility,
-}
+pub use pgrust_nodes::CommandType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryDesc {

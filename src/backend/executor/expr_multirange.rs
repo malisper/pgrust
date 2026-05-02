@@ -1182,9 +1182,3 @@ mod tests {
         }
     }
 }
-
-impl From<RangeValue> for Value {
-    fn from(value: RangeValue) -> Self {
-        Value::Range(value)
-    }
-}

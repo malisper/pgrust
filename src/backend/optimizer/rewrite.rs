@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::backend::optimizer::pathnodes::PathMethods;
 use crate::backend::parser::SqlType;
 use crate::include::nodes::pathnodes::{AppendRelInfo, Path, PlannerInfo};
 use crate::include::nodes::primnodes::{

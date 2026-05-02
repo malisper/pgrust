@@ -23,6 +23,7 @@ mod tests;
 mod upperrels;
 mod util;
 
+use crate::backend::optimizer::pathnodes::PathMethods;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType};
 use crate::backend::statistics::types::{
     PgDependenciesPayload, PgMcvListPayload, PgNdistinctPayload,

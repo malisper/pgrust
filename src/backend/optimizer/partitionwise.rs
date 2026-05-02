@@ -1,4 +1,5 @@
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::optimizer::pathnodes::PathMethods;
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::RangeTblEntryKind;
 use crate::include::nodes::pathnodes::{

@@ -2,6 +2,9 @@ use super::index_predicates::predicate_implies_index_predicate;
 use super::*;
 use crate::backend::executor::cast_value;
 use crate::backend::utils::cache::catcache::sql_type_oid;
+use crate::backend::utils::cache::relcache::{
+    index_amop_strategy_for_operator, index_amop_strategy_for_proc,
+};
 use crate::include::catalog::{
     BTREE_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
     SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows,
@@ -289,43 +292,41 @@ fn qual_strategy(
                     _ => None,
                 };
             }
-            index
-                .index_meta
-                .amop_strategy_for_operator(
-                    &index.desc,
-                    index_pos,
-                    oid,
-                    value_type_oid(&qual.argument),
-                )
-                .or_else(|| {
-                    (index.index_meta.am_oid == BTREE_AM_OID)
-                        .then(|| btree_builtin_strategy(kind))
-                        .flatten()
-                        .or_else(|| {
-                            (index.index_meta.am_oid == SPGIST_AM_OID)
-                                .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
-                                .flatten()
-                        })
-                        .or_else(|| {
-                            (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
-                                .then_some(1)
-                        })
-                        .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
-                })
-        }
-        IndexStrategyLookup::Proc(proc_oid) => index
-            .index_meta
-            .amop_strategy_for_proc(
+            index_amop_strategy_for_operator(
+                &index.index_meta,
                 &index.desc,
                 index_pos,
-                proc_oid,
+                oid,
                 value_type_oid(&qual.argument),
             )
             .or_else(|| {
-                (index.index_meta.am_oid == GIST_AM_OID || index.index_meta.am_oid == SPGIST_AM_OID)
-                    .then(|| gist_builtin_strategy(proc_oid, &qual.argument))
+                (index.index_meta.am_oid == BTREE_AM_OID)
+                    .then(|| btree_builtin_strategy(kind))
                     .flatten()
-            }),
+                    .or_else(|| {
+                        (index.index_meta.am_oid == SPGIST_AM_OID)
+                            .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
+                            .flatten()
+                    })
+                    .or_else(|| {
+                        (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
+                            .then_some(1)
+                    })
+                    .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
+            })
+        }
+        IndexStrategyLookup::Proc(proc_oid) => index_amop_strategy_for_proc(
+            &index.index_meta,
+            &index.desc,
+            index_pos,
+            proc_oid,
+            value_type_oid(&qual.argument),
+        )
+        .or_else(|| {
+            (index.index_meta.am_oid == GIST_AM_OID || index.index_meta.am_oid == SPGIST_AM_OID)
+                .then(|| gist_builtin_strategy(proc_oid, &qual.argument))
+                .flatten()
+        }),
     }
 }
 

@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use crate::backend::optimizer::pathnodes::PathMethods;
 use crate::include::nodes::pathnodes::{Path, PathKey, RelOptInfo};
 use crate::include::nodes::primnodes::Expr;
 use crate::include::nodes::primnodes::JoinType;

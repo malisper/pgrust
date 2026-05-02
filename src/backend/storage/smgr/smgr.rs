@@ -49,9 +49,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::include::catalog::GLOBAL_TABLESPACE_OID;
+pub use pgrust_core::storage::RelFileLocator;
 
 pub(crate) const TABLESPACE_VERSION_DIRECTORY: &str = "PG_18_202406281";
 
@@ -83,17 +82,6 @@ pub const MAX_IO_COMBINE_LIMIT: u32 = 64;
 
 /// 0-based index of a page within a relation fork.
 pub type BlockNumber = u32;
-
-/// Identifies the physical on-disk location of a relation.
-///
-/// In PostgreSQL this is `RelFileLocator` (struct with spcOid, dbOid,
-/// relNumber).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct RelFileLocator {
-    pub spc_oid: u32,
-    pub db_oid: u32,
-    pub rel_number: u32,
-}
 
 /// Which on-disk fork of a relation we are addressing.
 ///

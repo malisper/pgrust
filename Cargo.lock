@@ -487,6 +487,7 @@ dependencies = [
  "pbkdf2",
  "pest",
  "pgrust_core",
+ "pgrust_nodes",
  "pgrust_plpgsql_grammar",
  "pgrust_sql_grammar",
  "quick-xml",
@@ -508,6 +509,20 @@ dependencies = [
 [[package]]
 name = "pgrust_core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "pgrust_nodes"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "pgrust_core",
+ "serde",
+]
 
 [[package]]
 name = "pgrust_plpgsql_grammar"

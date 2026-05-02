@@ -1,5 +1,5 @@
 use crate::backend::catalog::CatalogError;
-use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, index_amproc_oid};
 use crate::include::access::gist::{
     GIST_CONSISTENT_PROC, GIST_DISTANCE_PROC, GIST_EQUAL_PROC, GIST_PENALTY_PROC,
     GIST_PICKSPLIT_PROC, GIST_SORTSUPPORT_PROC, GIST_TRANSLATE_CMPTYPE_PROC, GIST_UNION_PROC,
@@ -47,26 +47,37 @@ impl GistState {
         let mut columns = Vec::with_capacity(key_count);
         for column_index in 0..key_count.min(desc.columns.len()) {
             columns.push(GistColumnState {
-                consistent_proc: index_meta
-                    .amproc_oid(desc, column_index, GIST_CONSISTENT_PROC)
-                    .ok_or(CatalogError::Corrupt(
-                        "missing GiST consistent support proc",
-                    ))?,
-                union_proc: index_meta
-                    .amproc_oid(desc, column_index, GIST_UNION_PROC)
+                consistent_proc: index_amproc_oid(
+                    index_meta,
+                    desc,
+                    column_index,
+                    GIST_CONSISTENT_PROC,
+                )
+                .ok_or(CatalogError::Corrupt(
+                    "missing GiST consistent support proc",
+                ))?,
+                union_proc: index_amproc_oid(index_meta, desc, column_index, GIST_UNION_PROC)
                     .ok_or(CatalogError::Corrupt("missing GiST union support proc"))?,
-                penalty_proc: index_meta
-                    .amproc_oid(desc, column_index, GIST_PENALTY_PROC)
+                penalty_proc: index_amproc_oid(index_meta, desc, column_index, GIST_PENALTY_PROC)
                     .ok_or(CatalogError::Corrupt("missing GiST penalty support proc"))?,
-                picksplit_proc: index_meta
-                    .amproc_oid(desc, column_index, GIST_PICKSPLIT_PROC)
-                    .ok_or(CatalogError::Corrupt("missing GiST picksplit support proc"))?,
-                same_proc: index_meta
-                    .amproc_oid(desc, column_index, GIST_EQUAL_PROC)
+                picksplit_proc: index_amproc_oid(
+                    index_meta,
+                    desc,
+                    column_index,
+                    GIST_PICKSPLIT_PROC,
+                )
+                .ok_or(CatalogError::Corrupt("missing GiST picksplit support proc"))?,
+                same_proc: index_amproc_oid(index_meta, desc, column_index, GIST_EQUAL_PROC)
                     .ok_or(CatalogError::Corrupt("missing GiST same support proc"))?,
-                distance_proc: index_meta.amproc_oid(desc, column_index, GIST_DISTANCE_PROC),
-                sortsupport_proc: index_meta.amproc_oid(desc, column_index, GIST_SORTSUPPORT_PROC),
-                translate_cmptype_proc: index_meta.amproc_oid(
+                distance_proc: index_amproc_oid(index_meta, desc, column_index, GIST_DISTANCE_PROC),
+                sortsupport_proc: index_amproc_oid(
+                    index_meta,
+                    desc,
+                    column_index,
+                    GIST_SORTSUPPORT_PROC,
+                ),
+                translate_cmptype_proc: index_amproc_oid(
+                    index_meta,
                     desc,
                     column_index,
                     GIST_TRANSLATE_CMPTYPE_PROC,

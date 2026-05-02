@@ -12,6 +12,7 @@ autobins = false
 members = [
     ".",
     "crates/pgrust_core",
+    "crates/pgrust_nodes",
     "crates/pgrust_plpgsql_grammar",
     "crates/pgrust_sql_grammar",
 ]
@@ -185,6 +186,7 @@ parking_lot = "0.12"
 pest = "2.7"
 pbkdf2 = "0.12"
 pgrust_core = { path = "crates/pgrust_core" }
+pgrust_nodes = { path = "crates/pgrust_nodes" }
 pgrust_plpgsql_grammar = { path = "crates/pgrust_plpgsql_grammar" }
 pgrust_sql_grammar = { path = "crates/pgrust_sql_grammar" }
 rand = "0.8"

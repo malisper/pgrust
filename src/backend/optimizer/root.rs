@@ -1060,78 +1060,68 @@ fn prepare_expr_for_locking(expr: Expr) -> Result<Expr, ParseError> {
     })
 }
 
-impl PlannerInfo {
-    pub fn new(parse: Query, aggregate_layout: AggregateLayout) -> Self {
-        Self::new_with_config(parse, aggregate_layout, PlannerConfig::default())
-    }
+pub(crate) fn planner_info_new(parse: Query, aggregate_layout: AggregateLayout) -> PlannerInfo {
+    planner_info_new_with_config(parse, aggregate_layout, PlannerConfig::default())
+}
 
-    pub fn new_with_config(
-        parse: Query,
-        aggregate_layout: AggregateLayout,
-        mut config: PlannerConfig,
-    ) -> Self {
-        if !parse.row_marks.is_empty() {
-            config.retain_partial_index_filters = true;
-        }
-        let processed_tlist = make_processed_tlist(&parse);
-        let final_target = PathTarget::from_target_list(&parse.target_list);
-        let query_pathkeys = PathTarget::from_sort_clause(&parse.sort_clause, &processed_tlist);
-        let sort_input_target = make_sort_input_target(&parse, &processed_tlist, &final_target);
-        let group_input_target = if has_grouping(&parse) {
-            make_group_input_target(&parse, &aggregate_layout.group_by)
-        } else {
-            sort_input_target.clone()
-        };
-        let grouped_target = if has_grouping(&parse) {
-            build_grouped_target(&aggregate_layout, &parse.accumulators)
-        } else {
-            final_target.clone()
-        };
-        let window_input_target = if has_windowing(&parse) {
-            make_window_input_target(&parse, &processed_tlist, &grouped_target)
-        } else {
-            sort_input_target.clone()
-        };
-        let scanjoin_target = build_scanjoin_target(
-            &parse,
-            &group_input_target,
-            &window_input_target,
-            &sort_input_target,
-            &final_target,
-        );
-        let simple_rel_array = build_simple_rel_array(&parse.rtable);
-        let join_info_list = build_special_join_info(&parse);
-        Self {
-            config,
-            processed_tlist,
-            scanjoin_target,
-            group_input_target,
-            grouped_target,
-            window_input_target,
-            sort_input_target,
-            final_target,
-            query_pathkeys,
-            simple_rel_array,
-            append_rel_infos: vec![None; parse.rtable.len() + 1],
-            join_rel_list: Vec::new(),
-            upper_rels: Vec::new(),
-            join_info_list,
-            inner_join_clauses: Vec::new(),
-            aggregate_layout,
-            final_rel: None,
-            partition_spec_cache: Default::default(),
-            partition_child_bounds_cache: Default::default(),
-            index_expr_cache: Default::default(),
-            parse,
-        }
+pub(crate) fn planner_info_new_with_config(
+    parse: Query,
+    aggregate_layout: AggregateLayout,
+    mut config: PlannerConfig,
+) -> PlannerInfo {
+    if !parse.row_marks.is_empty() {
+        config.retain_partial_index_filters = true;
     }
-
-    pub fn aggregate_group_by(&self) -> &[Expr] {
-        &self.aggregate_layout.group_by
-    }
-
-    pub fn aggregate_passthrough_exprs(&self) -> &[Expr] {
-        &self.aggregate_layout.passthrough_exprs
+    let processed_tlist = make_processed_tlist(&parse);
+    let final_target = PathTarget::from_target_list(&parse.target_list);
+    let query_pathkeys = PathTarget::from_sort_clause(&parse.sort_clause, &processed_tlist);
+    let sort_input_target = make_sort_input_target(&parse, &processed_tlist, &final_target);
+    let group_input_target = if has_grouping(&parse) {
+        make_group_input_target(&parse, &aggregate_layout.group_by)
+    } else {
+        sort_input_target.clone()
+    };
+    let grouped_target = if has_grouping(&parse) {
+        build_grouped_target(&aggregate_layout, &parse.accumulators)
+    } else {
+        final_target.clone()
+    };
+    let window_input_target = if has_windowing(&parse) {
+        make_window_input_target(&parse, &processed_tlist, &grouped_target)
+    } else {
+        sort_input_target.clone()
+    };
+    let scanjoin_target = build_scanjoin_target(
+        &parse,
+        &group_input_target,
+        &window_input_target,
+        &sort_input_target,
+        &final_target,
+    );
+    let simple_rel_array = build_simple_rel_array(&parse.rtable);
+    let join_info_list = build_special_join_info(&parse);
+    PlannerInfo {
+        config,
+        processed_tlist,
+        scanjoin_target,
+        group_input_target,
+        grouped_target,
+        window_input_target,
+        sort_input_target,
+        final_target,
+        query_pathkeys,
+        simple_rel_array,
+        append_rel_infos: vec![None; parse.rtable.len() + 1],
+        join_rel_list: Vec::new(),
+        upper_rels: Vec::new(),
+        join_info_list,
+        inner_join_clauses: Vec::new(),
+        aggregate_layout,
+        final_rel: None,
+        partition_spec_cache: Default::default(),
+        partition_child_bounds_cache: Default::default(),
+        index_expr_cache: Default::default(),
+        parse,
     }
 }
 

@@ -18,6 +18,10 @@ use crate::backend::statistics::types::{
 use crate::backend::storage::page::bufpage::{ITEM_ID_SIZE, MAXALIGN, SIZE_OF_PAGE_HEADER_DATA};
 use crate::backend::storage::smgr::BLCKSZ;
 use crate::backend::utils::cache::catcache::sql_type_oid;
+use crate::backend::utils::cache::relcache::{
+    index_amop_ordering_strategy_for_operator, index_amop_ordering_strategy_for_proc,
+    index_amop_strategy_for_operator, index_amop_strategy_for_proc, index_amproc_oid,
+};
 use crate::include::access::brin::BRIN_DEFAULT_PAGES_PER_RANGE;
 use crate::include::access::brin_page::REVMAP_PAGE_MAXITEMS;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
@@ -55,7 +59,9 @@ use crate::include::nodes::primnodes::{
 
 use super::super::joininfo;
 use super::super::partition_cache;
-use super::super::pathnodes::{expr_sql_type, rte_slot_id, rte_slot_varno, slot_output_target};
+use super::super::pathnodes::{
+    PathMethods, expr_sql_type, rte_slot_id, rte_slot_varno, slot_output_target,
+};
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
     DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, ExtendedStatistic,
@@ -10032,10 +10038,13 @@ fn spgist_index_column_can_return(index: &BoundIndexRelation, index_pos: usize) 
         return true;
     }
 
-    index
-        .index_meta
-        .amproc_oid(&index.desc, index_pos, SPGIST_CONFIG_PROC)
-        .is_some_and(spgist_config_proc_can_return_data)
+    index_amproc_oid(
+        &index.index_meta,
+        &index.desc,
+        index_pos,
+        SPGIST_CONFIG_PROC,
+    )
+    .is_some_and(spgist_config_proc_can_return_data)
 }
 
 fn spgist_config_proc_can_return_data(proc_oid: u32) -> bool {
@@ -10700,41 +10709,48 @@ fn qual_strategy(
                     _ => None,
                 };
             }
-            index
-                .index_meta
-                .amop_strategy_for_operator(&index.desc, index_pos, oid, argument_type_oid)
-                .or_else(|| {
-                    ((index.index_meta.am_oid == BTREE_AM_OID
-                        || index.index_meta.am_oid == BRIN_AM_OID)
-                        && builtin_btree_strategy_type_compatible(
-                            index,
-                            index_pos,
-                            index_argument_sql_type_for_qual(qual),
-                        ))
-                    .then(|| btree_builtin_strategy(kind))
-                    .flatten()
-                    .or_else(|| {
-                        (index.index_meta.am_oid == SPGIST_AM_OID)
-                            .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
-                            .flatten()
-                    })
-                    .or_else(|| {
-                        (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
-                            .then_some(1)
-                    })
-                    .or_else(|| gin_array_builtin_strategy(index, index_pos, kind))
-                    .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
-                })
-        }
-        super::super::IndexStrategyLookup::Proc(proc_oid) => index
-            .index_meta
-            .amop_strategy_for_proc(&index.desc, index_pos, proc_oid, argument_type_oid)
+            index_amop_strategy_for_operator(
+                &index.index_meta,
+                &index.desc,
+                index_pos,
+                oid,
+                argument_type_oid,
+            )
             .or_else(|| {
-                let argument = qual.argument.as_const()?;
-                is_gist_like_am(index.index_meta.am_oid)
-                    .then(|| gist_builtin_strategy(proc_oid, argument))
-                    .flatten()
-            }),
+                ((index.index_meta.am_oid == BTREE_AM_OID
+                    || index.index_meta.am_oid == BRIN_AM_OID)
+                    && builtin_btree_strategy_type_compatible(
+                        index,
+                        index_pos,
+                        index_argument_sql_type_for_qual(qual),
+                    ))
+                .then(|| btree_builtin_strategy(kind))
+                .flatten()
+                .or_else(|| {
+                    (index.index_meta.am_oid == SPGIST_AM_OID)
+                        .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
+                        .flatten()
+                })
+                .or_else(|| {
+                    (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq).then_some(1)
+                })
+                .or_else(|| gin_array_builtin_strategy(index, index_pos, kind))
+                .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
+            })
+        }
+        super::super::IndexStrategyLookup::Proc(proc_oid) => index_amop_strategy_for_proc(
+            &index.index_meta,
+            &index.desc,
+            index_pos,
+            proc_oid,
+            argument_type_oid,
+        )
+        .or_else(|| {
+            let argument = qual.argument.as_const()?;
+            is_gist_like_am(index.index_meta.am_oid)
+                .then(|| gist_builtin_strategy(proc_oid, argument))
+                .flatten()
+        }),
         super::super::IndexStrategyLookup::RegexPrefix { exact } => {
             (index.index_meta.am_oid == BTREE_AM_OID && exact).then_some(3)
         }
@@ -11937,7 +11953,8 @@ fn gist_order_match(
                 .and_then(|(left_type_oid, right_type_oid)| {
                     gist_ordering_operator_oid(proc_oid, left_type_oid, right_type_oid).and_then(
                         |operator_oid| {
-                            index.index_meta.amop_ordering_strategy_for_operator(
+                            index_amop_ordering_strategy_for_operator(
+                                &index.index_meta,
                                 &index.desc,
                                 index_pos,
                                 operator_oid,
@@ -11947,7 +11964,8 @@ fn gist_order_match(
                     )
                 })
                 .or_else(|| {
-                    index.index_meta.amop_ordering_strategy_for_proc(
+                    index_amop_ordering_strategy_for_proc(
+                        &index.index_meta,
                         &index.desc,
                         index_pos,
                         proc_oid,

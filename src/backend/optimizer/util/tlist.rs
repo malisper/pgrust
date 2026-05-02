@@ -8,7 +8,8 @@ use crate::include::nodes::primnodes::{
 use super::super::expand_join_rte_vars;
 use super::super::optimize_path_with_config;
 use super::super::pathnodes::{
-    expr_sql_type, layout_candidate_for_expr, lower_agg_output_expr, lower_expr_to_path_output,
+    PathMethods, expr_sql_type, layout_candidate_for_expr, lower_agg_output_expr,
+    lower_expr_to_path_output,
 };
 use super::indexed_pathtarget::IndexedPathTarget;
 

@@ -11,6 +11,7 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::page::bufpage::{PageError, max_align, page_get_item, page_header};
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, RelFileLocator, StorageManager};
+use crate::backend::utils::cache::relcache::index_amproc_oid;
 use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::backend::utils::time::snapmgr::Snapshot;
 use crate::include::access::amapi::{
@@ -176,14 +177,12 @@ fn required_amproc(
     procnum: i16,
     label: &str,
 ) -> Result<u32, CatalogError> {
-    index_meta
-        .amproc_oid(index_desc, column_index, procnum)
-        .ok_or_else(|| {
-            CatalogError::Io(format!(
-                "missing BRIN {label} support proc for column {}",
-                column_index + 1
-            ))
-        })
+    index_amproc_oid(index_meta, index_desc, column_index, procnum).ok_or_else(|| {
+        CatalogError::Io(format!(
+            "missing BRIN {label} support proc for column {}",
+            column_index + 1
+        ))
+    })
 }
 
 fn optional_amproc(
@@ -192,7 +191,7 @@ fn optional_amproc(
     column_index: usize,
     procnum: i16,
 ) -> Option<u32> {
-    index_meta.amproc_oid(index_desc, column_index, procnum)
+    index_amproc_oid(index_meta, index_desc, column_index, procnum)
 }
 
 fn add_values_to_summary(

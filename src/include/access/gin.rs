@@ -5,6 +5,7 @@ use crate::backend::storage::page::bufpage::{
 };
 use crate::backend::storage::smgr::BLCKSZ;
 use crate::include::access::itemptr::ItemPointerData;
+pub use pgrust_nodes::access::GinOptions;
 
 pub const GIN_METAPAGE_BLKNO: u32 = 0;
 pub const GIN_ROOT_BLKNO: u32 = 1;
@@ -55,27 +56,6 @@ impl GinNullCategory {
             -1 => Some(Self::EmptyQuery),
             _ => None,
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GinOptions {
-    pub fastupdate: bool,
-    pub pending_list_limit_kb: u32,
-}
-
-impl Default for GinOptions {
-    fn default() -> Self {
-        Self {
-            fastupdate: true,
-            pending_list_limit_kb: 4096,
-        }
-    }
-}
-
-impl GinOptions {
-    pub fn pending_list_limit_bytes(&self) -> usize {
-        (self.pending_list_limit_kb as usize).saturating_mul(1024)
     }
 }
 

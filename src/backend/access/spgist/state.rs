@@ -1,5 +1,5 @@
 use crate::backend::catalog::CatalogError;
-use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, index_amproc_oid};
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::spgist::{
     SPGIST_CHOOSE_PROC, SPGIST_CONFIG_PROC, SPGIST_INNER_CONSISTENT_PROC,
@@ -37,27 +37,24 @@ impl SpgistState {
         }
         let mut columns = Vec::with_capacity(key_count);
         for column_index in 0..key_count {
-            let config_proc = index_meta
-                .amproc_oid(desc, column_index, SPGIST_CONFIG_PROC)
+            let config_proc = index_amproc_oid(index_meta, desc, column_index, SPGIST_CONFIG_PROC)
                 .ok_or(CatalogError::Corrupt("missing SP-GiST config support proc"))?;
-            let choose_proc = index_meta
-                .amproc_oid(desc, column_index, SPGIST_CHOOSE_PROC)
+            let choose_proc = index_amproc_oid(index_meta, desc, column_index, SPGIST_CHOOSE_PROC)
                 .ok_or(CatalogError::Corrupt("missing SP-GiST choose support proc"))?;
-            let picksplit_proc = index_meta
-                .amproc_oid(desc, column_index, SPGIST_PICKSPLIT_PROC)
-                .ok_or(CatalogError::Corrupt(
-                    "missing SP-GiST picksplit support proc",
-                ))?;
-            let inner_consistent_proc = index_meta
-                .amproc_oid(desc, column_index, SPGIST_INNER_CONSISTENT_PROC)
-                .ok_or(CatalogError::Corrupt(
-                    "missing SP-GiST inner consistent support proc",
-                ))?;
-            let leaf_consistent_proc = index_meta
-                .amproc_oid(desc, column_index, SPGIST_LEAF_CONSISTENT_PROC)
-                .ok_or(CatalogError::Corrupt(
-                    "missing SP-GiST leaf consistent support proc",
-                ))?;
+            let picksplit_proc =
+                index_amproc_oid(index_meta, desc, column_index, SPGIST_PICKSPLIT_PROC).ok_or(
+                    CatalogError::Corrupt("missing SP-GiST picksplit support proc"),
+                )?;
+            let inner_consistent_proc =
+                index_amproc_oid(index_meta, desc, column_index, SPGIST_INNER_CONSISTENT_PROC)
+                    .ok_or(CatalogError::Corrupt(
+                        "missing SP-GiST inner consistent support proc",
+                    ))?;
+            let leaf_consistent_proc =
+                index_amproc_oid(index_meta, desc, column_index, SPGIST_LEAF_CONSISTENT_PROC)
+                    .ok_or(CatalogError::Corrupt(
+                        "missing SP-GiST leaf consistent support proc",
+                    ))?;
             let config = support::config(config_proc)?;
             if !config.can_return_data {
                 return Err(CatalogError::Corrupt(

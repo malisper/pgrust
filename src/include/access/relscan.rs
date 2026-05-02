@@ -13,12 +13,7 @@ use crate::include::access::itup::IndexTuple;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::datum::Value;
 use crate::{BufferPool, ClientId};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScanDirection {
-    Forward,
-    Backward,
-}
+pub use pgrust_nodes::access::ScanDirection;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexOrderByDistance {

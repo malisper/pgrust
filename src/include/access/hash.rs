@@ -1,9 +1,8 @@
-use serde::{Deserialize, Serialize};
-
 use crate::backend::storage::page::bufpage::{
     MAXALIGN, PageError, SIZE_OF_PAGE_HEADER_DATA, page_init, page_special, page_special_mut,
 };
 use crate::backend::storage::smgr::BLCKSZ;
+pub use pgrust_nodes::access::HashOptions;
 
 pub const HASH_METAPAGE: u32 = 0;
 pub const HASH_MAGIC: u32 = 0x0644_0640;
@@ -30,19 +29,6 @@ pub const HASH_SPECIAL_SIZE: usize = 16;
 pub const HASH_PAGE_CONTENT_OFFSET: usize =
     (SIZE_OF_PAGE_HEADER_DATA + (MAXALIGN - 1)) & !(MAXALIGN - 1);
 const HASH_META_DATA_SIZE: usize = 4 * 6 + 8 + HASH_SPLITPOINTS * 4 + HASH_MAX_BUCKETS * 4;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HashOptions {
-    pub fillfactor: u16,
-}
-
-impl Default for HashOptions {
-    fn default() -> Self {
-        Self {
-            fillfactor: HASH_DEFAULT_FILLFACTOR,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HashPageOpaqueData {

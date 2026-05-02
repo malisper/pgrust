@@ -31,7 +31,9 @@ use super::super::path::{
     query_planner, relation_index_only_full_scan_paths, relation_ordered_index_paths,
     residual_where_qual,
 };
-use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id, window_output_columns};
+use super::super::pathnodes::{
+    PathMethods, expr_sql_type, next_synthetic_slot_id, window_output_columns,
+};
 use super::super::root;
 use super::super::upperrels;
 use super::super::util::{
@@ -1623,14 +1625,16 @@ fn make_aggregate_rel(
             path = const_false_aggregate_input(path, catalog, root.config);
         }
         let group_by = root
-            .aggregate_group_by()
+            .aggregate_layout
+            .group_by
             .iter()
             .cloned()
             .map(|expr| expand_join_rte_vars(root, expr))
             .collect::<Vec<_>>();
         let group_by_refs = root.aggregate_layout.group_by_refs.clone();
         let passthrough_exprs = root
-            .aggregate_passthrough_exprs()
+            .aggregate_layout
+            .passthrough_exprs
             .iter()
             .cloned()
             .map(|expr| expand_join_rte_vars(root, expr))
@@ -2907,7 +2911,8 @@ fn adjust_paths_for_srfs(
 }
 
 fn grouped_srf_targets(root: &PlannerInfo) -> Vec<TargetEntry> {
-    root.aggregate_group_by()
+    root.aggregate_layout
+        .group_by
         .iter()
         .enumerate()
         .filter_map(|(index, expr)| {
@@ -2935,7 +2940,7 @@ fn target_list_needs_project_set_after_grouping(
     root: &PlannerInfo,
     target_list: &[TargetEntry],
 ) -> bool {
-    let group_by = root.aggregate_group_by();
+    let group_by = &root.aggregate_layout.group_by;
     target_list
         .iter()
         .any(|target| expr_contains_set_returning(&target.expr) && !group_by.contains(&target.expr))
@@ -5144,7 +5149,7 @@ fn standard_planner_with_param_base(
     let query = pull_up_sublinks(query, catalog);
     let relation_privileges = collect_query_relation_privileges(&query);
     let aggregate_layout = groupby_rewrite::build_aggregate_layout(&query, catalog);
-    let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);
+    let mut root = root::planner_info_new_with_config(query, aggregate_layout, config);
     let command_type = root.parse.command_type;
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);

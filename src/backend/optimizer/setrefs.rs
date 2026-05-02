@@ -1,6 +1,7 @@
 use super::inherit::append_translation;
 use super::pathnodes::{
-    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_id, rte_slot_varno,
+    PathMethods, aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_id,
+    rte_slot_varno,
 };
 use super::plan::append_uncorrelated_planned_subquery;
 use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base_and_config};

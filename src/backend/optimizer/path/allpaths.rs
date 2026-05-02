@@ -51,7 +51,7 @@ use super::super::partition_prune::{
 };
 use super::super::partitionwise;
 use super::super::pathnodes::{
-    next_synthetic_slot_id, rte_slot_id, rte_slot_varno, slot_output_target,
+    PathMethods, next_synthetic_slot_id, rte_slot_id, rte_slot_varno, slot_output_target,
 };
 use super::super::plan::grouping_planner;
 use super::super::util::{
@@ -3089,7 +3089,8 @@ fn plan_query_path(
 ) -> (PlannerInfo, Path) {
     let query = prepare_query_path_input(query, catalog);
     let aggregate_layout = super::super::groupby_rewrite::build_aggregate_layout(&query, catalog);
-    let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);
+    let mut root =
+        super::super::root::planner_info_new_with_config(query, aggregate_layout, config);
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
     let required_pathkeys = required_query_pathkeys_for_rel(&root, &final_rel);
@@ -3710,7 +3711,11 @@ fn build_cte_scan_path(
         let aggregate_layout =
             super::super::groupby_rewrite::build_aggregate_layout(&planned_query, catalog);
         (
-            PlannerInfo::new_with_config(planned_query, aggregate_layout, config),
+            super::super::root::planner_info_new_with_config(
+                planned_query,
+                aggregate_layout,
+                config,
+            ),
             build_recursive_union_path(*recursive_union, catalog, config),
         )
     } else {
@@ -3762,7 +3767,11 @@ fn build_subquery_scan_path(
         let aggregate_layout =
             super::super::groupby_rewrite::build_aggregate_layout(&planned_query, catalog);
         (
-            PlannerInfo::new_with_config(planned_query, aggregate_layout, config),
+            super::super::root::planner_info_new_with_config(
+                planned_query,
+                aggregate_layout,
+                config,
+            ),
             build_recursive_union_path(*recursive_union, catalog, config),
         )
     } else {

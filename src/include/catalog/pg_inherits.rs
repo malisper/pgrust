@@ -1,14 +1,7 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PgInheritsRow {
-    pub inhrelid: u32,
-    pub inhparent: u32,
-    pub inhseqno: i32,
-    pub inhdetachpending: bool,
-}
+pub use pgrust_core::PgInheritsRow;
 
 pub fn pg_inherits_desc() -> RelationDesc {
     RelationDesc {

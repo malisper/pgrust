@@ -3,6 +3,7 @@ use crate::backend::storage::page::bufpage::{
 };
 use crate::backend::storage::smgr::BLCKSZ;
 use crate::include::access::itup::IndexTupleData;
+pub use pgrust_nodes::access::BtreeOptions;
 
 pub type BTCycleId = u16;
 
@@ -36,21 +37,6 @@ pub const BT_LESS_EQUAL_STRATEGY_NUMBER: u16 = 2;
 pub const BT_EQUAL_STRATEGY_NUMBER: u16 = 3;
 pub const BT_GREATER_EQUAL_STRATEGY_NUMBER: u16 = 4;
 pub const BT_GREATER_STRATEGY_NUMBER: u16 = 5;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BtreeOptions {
-    pub fillfactor: u16,
-    pub deduplicate_items: bool,
-}
-
-impl Default for BtreeOptions {
-    fn default() -> Self {
-        Self {
-            fillfactor: BTREE_DEFAULT_FILLFACTOR,
-            deduplicate_items: BTREE_DEFAULT_DEDUPLICATE_ITEMS,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BtPageType {

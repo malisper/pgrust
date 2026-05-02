@@ -138,6 +138,7 @@ pub use on_conflict::{BoundOnConflictAction, BoundOnConflictClause};
 pub(crate) use partition::*;
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
+pub use pgrust_nodes::partition::*;
 pub(crate) use query::analyze_select_query_with_outer;
 use query::{
     AnalyzedFrom, analyze_values_query_with_outer, identity_target_list, normalize_target_list,
