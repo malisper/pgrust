@@ -238,6 +238,9 @@ pub fn relation_inheritance_depend_rows(
     parent_oids: &[u32],
 ) -> Vec<PgDependRow> {
     let mut rows = if let Some(index_meta) = &entry.index_meta {
+        if parent_oids.is_empty() {
+            return Vec::new();
+        }
         let mut rows = parent_oids
             .iter()
             .copied()
