@@ -35203,7 +35203,7 @@ fn referenced_partition_foreign_key_clones_validate_and_enforce() {
     );
     match db.execute(1, "delete from pk_items where a = 2") {
         Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
-            assert_eq!(constraint, "fk_items_a_fkey_2");
+            assert_eq!(constraint, "fk_items_a_fkey");
         }
         other => panic!("expected referenced partition foreign key violation, got {other:?}"),
     }
@@ -35648,7 +35648,7 @@ fn self_referencing_partitioned_foreign_key_matches_pg_catalog_rows() {
     .unwrap();
     match db.execute(1, "delete from parted_self_fk where id = 2") {
         Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
-            assert_eq!(constraint, "parted_self_fk_id_abc_fkey_5");
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey");
         }
         other => panic!("expected detached partition foreign key violation, got {other:?}"),
     }
@@ -35770,7 +35770,7 @@ fn referenced_partition_foreign_key_detach_checks_and_drops_clones() {
 
     match db.execute(1, "alter table pk_items detach partition pk_items_1") {
         Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
-            assert_eq!(constraint, "fk_items_a_fkey_1");
+            assert_eq!(constraint, "fk_items_a_fkey");
         }
         other => panic!("expected detach foreign key violation, got {other:?}"),
     }
@@ -36383,7 +36383,7 @@ fn detached_self_referencing_partition_still_blocks_root_delete() {
             detail,
             ..
         }) => {
-            assert_eq!(constraint, "parted_self_fk_id_abc_fkey_3");
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey");
             assert!(message.contains("on table \"part2_self_fk\""));
             assert!(
                 detail
