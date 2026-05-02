@@ -21340,12 +21340,15 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             let anchor_end = anchor_pair.as_span().end();
             let anchor = build_cte_body(anchor_pair)?;
             let mut recursive = None;
+            let mut recursive_is_unparenthesized_set_operation = false;
             let mut recursive_start = None;
             for part in inner {
                 match part.as_rule() {
                     Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
                         recursive_start = Some(part.as_span().start());
-                        recursive = Some(build_select(part)?)
+                        let stmt = build_select(part)?;
+                        recursive_is_unparenthesized_set_operation = stmt.set_operation.is_some();
+                        recursive = Some(stmt)
                     }
                     Rule::parenthesized_set_operation_term => {
                         recursive_start = Some(part.as_span().start());
@@ -21361,7 +21364,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
                 .any(|token| token.eq_ignore_ascii_case("all"));
             Ok(CteBody::RecursiveUnion {
                 all,
-                left_nested: false,
+                left_nested: recursive_is_unparenthesized_set_operation,
                 anchor_with_is_subquery: true,
                 anchor: Box::new(anchor),
                 recursive: Box::new(recursive.ok_or(ParseError::UnexpectedEof)?),
