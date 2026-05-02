@@ -27,7 +27,6 @@ use super::state::GistState;
 use super::support::sortsupport;
 use super::tuple::{make_downlink_tuple, make_leaf_tuple, tuple_storage_size};
 
-const GIST_DEFAULT_FILLFACTOR: usize = 90;
 const GIST_BUFFERING_MIN_WORK_MEM_KB: usize = 64;
 const GIST_BUFFERING_MODE_SWITCH_CHECK_STEP: u64 = 256;
 const GIST_BUFFERING_MODE_TUPLE_SIZE_STATS_TARGET: usize = 4096;
@@ -90,7 +89,7 @@ pub(crate) fn gistbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cat
     let state = GistState::new(&ctx.index_desc, &ctx.index_meta)?;
     let options = ctx.index_meta.gist_options.unwrap_or_default();
     let result = match select_build_mode(&state, ctx.maintenance_work_mem_kb, options) {
-        GistBuildMode::Sorted => gistbuild_sorted(ctx, &state),
+        GistBuildMode::Sorted => gistbuild_sorted(ctx, &state, options.fillfactor),
         GistBuildMode::Buffering => gistbuild_buffered(ctx, &state, options.buffering_mode),
         GistBuildMode::RepeatedInsert => gistbuild_repeated(ctx, &state),
     }?;
@@ -267,6 +266,7 @@ fn gistinsert_build_tuple_entry(
 fn gistbuild_sorted(
     ctx: &IndexBuildContext,
     state: &GistState,
+    fillfactor: u16,
 ) -> Result<IndexBuildResult, CatalogError> {
     let mut build_tuples = Vec::new();
     let result = scan_visible_heap(ctx, |tid, key_values| {
@@ -281,7 +281,7 @@ fn gistbuild_sorted(
         &ctx.index_desc,
         state,
         &build_tuples,
-        page_fillfactor_reserve(GIST_DEFAULT_FILLFACTOR),
+        page_fillfactor_reserve(usize::from(fillfactor)),
     )?;
     write_sorted_build_plan(ctx, &plan)?;
     Ok(result)
@@ -781,6 +781,7 @@ mod tests {
                 &state,
                 GIST_BUFFERING_MIN_WORK_MEM_KB,
                 GistOptions {
+                    fillfactor: 90,
                     buffering_mode: GistBufferingMode::On,
                 },
             ),
@@ -812,6 +813,7 @@ mod tests {
                 &state,
                 GIST_BUFFERING_MIN_WORK_MEM_KB,
                 GistOptions {
+                    fillfactor: 90,
                     buffering_mode: GistBufferingMode::Off,
                 },
             ),

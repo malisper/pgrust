@@ -9241,16 +9241,26 @@ fn resolve_hash_options(options: &[RelOption]) -> Result<HashOptions, ExecError>
 fn resolve_gist_options(options: &[RelOption]) -> Result<GistOptions, ExecError> {
     let mut resolved = GistOptions::default();
     for option in options {
+        if option.name.eq_ignore_ascii_case("fillfactor") {
+            resolved.fillfactor = parse_index_fillfactor(option)?;
+            continue;
+        }
+
         if option.name.eq_ignore_ascii_case("buffering") {
             resolved.buffering_mode = match option.value.to_ascii_lowercase().as_str() {
                 "auto" => GistBufferingMode::Auto,
                 "on" => GistBufferingMode::On,
                 "off" => GistBufferingMode::Off,
                 _ => {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "GiST buffering option auto, on, or off",
-                        actual: option.value.clone(),
-                    }));
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "invalid value for enum option \"buffering\": {}",
+                            option.value
+                        ),
+                        detail: Some("Valid values are \"on\", \"off\", and \"auto\".".into()),
+                        hint: None,
+                        sqlstate: "22023",
+                    });
                 }
             };
             continue;
@@ -9262,6 +9272,41 @@ fn resolve_gist_options(options: &[RelOption]) -> Result<GistOptions, ExecError>
         ))));
     }
     Ok(resolved)
+}
+
+fn resolve_spgist_options(options: &[RelOption]) -> Result<(), ExecError> {
+    for option in options {
+        if option.name.eq_ignore_ascii_case("fillfactor") {
+            parse_index_fillfactor(option)?;
+            continue;
+        }
+
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+            "SP-GiST option \"{}\"",
+            option.name
+        ))));
+    }
+    Ok(())
+}
+
+fn parse_index_fillfactor(option: &RelOption) -> Result<u16, ExecError> {
+    let fillfactor = option
+        .value
+        .parse::<u16>()
+        .map_err(|_| invalid_fillfactor_error(&option.value))?;
+    if !(10..=100).contains(&fillfactor) {
+        return Err(invalid_fillfactor_error(&option.value));
+    }
+    Ok(fillfactor)
+}
+
+fn invalid_fillfactor_error(value: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("value {value} out of bounds for option \"fillfactor\""),
+        detail: Some("Valid values are between \"10\" and \"100\".".into()),
+        hint: None,
+        sqlstate: "22023",
+    }
 }
 
 fn index_reloptions(options: &[RelOption]) -> Option<Vec<String>> {
@@ -9358,10 +9403,13 @@ fn opclass_accepts_type(opclass: &PgOpclassRow, type_oid: u32, sql_type: SqlType
         || (matches!(
             opclass.opcintype,
             TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
-        ) && matches!(
+        ) && (matches!(
             type_oid,
             NAME_TYPE_OID | TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
-        ))
+        ) || matches!(
+            sql_type.kind,
+            SqlTypeKind::Name | SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
+        )))
         || (opclass.opcintype == INET_TYPE_OID && type_oid == CIDR_TYPE_OID)
         || (opclass.opcintype == ANYARRAYOID && sql_type.is_array)
         || (opclass.opcintype == ANYRANGEOID
@@ -9544,6 +9592,10 @@ fn resolve_create_index_build_options(
             GIST_AM_OID => (None, None, Some(resolve_gist_options(options)?), None, None),
             GIN_AM_OID => (None, None, None, Some(resolve_gin_options(options)?), None),
             HASH_AM_OID => (None, None, None, None, Some(resolve_hash_options(options)?)),
+            SPGIST_AM_OID => {
+                resolve_spgist_options(options)?;
+                (None, None, None, None, None)
+            }
             _ => {
                 if !options.is_empty() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
