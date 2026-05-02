@@ -648,6 +648,25 @@ fn parse_select_with_default_collation_keeps_raw_ast() {
 }
 
 #[test]
+fn parse_select_rejects_collate_inside_cast_type() {
+    let err = parse_select("select cast('42' as text collate \"C\")").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \"COLLATE\"");
+    assert_eq!(err.position(), Some(26));
+
+    let stmt = parse_select("select cast('42' as text) collate \"C\"").unwrap();
+    assert_eq!(
+        stmt.targets[0].expr,
+        SqlExpr::Collate {
+            expr: Box::new(SqlExpr::Cast(
+                Box::new(SqlExpr::Const(Value::Text("42".into()))),
+                RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+            )),
+            collation: "C".into(),
+        }
+    );
+}
+
+#[test]
 fn parse_create_collation_from_source() {
     match parse_statement("create collation regress_c from \"C\"").unwrap() {
         Statement::CreateCollation(stmt) => {
