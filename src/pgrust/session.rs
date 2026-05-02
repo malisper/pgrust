@@ -9593,6 +9593,10 @@ impl Session {
                         }
                     }
                     result
+                } else if set_stmt.is_local {
+                    Err(ExecError::Parse(ParseError::ActiveSqlTransaction(
+                        "SET LOCAL ROLE",
+                    )))
                 } else {
                     self.auth = db.execute_set_role_stmt(self.client_id, set_stmt)?;
                     self.apply_active_role_settings(db)?;
@@ -17258,6 +17262,9 @@ impl Session {
                 Statement::SetRole(ref set_stmt) => {
                     self.auth =
                         db.execute_set_role_stmt_in_transaction(client_id, set_stmt, xid, cid)?;
+                    if set_stmt.is_local {
+                        self.active_txn.as_mut().unwrap().local_auth_active = true;
+                    }
                     self.apply_active_role_settings(db)?;
                     Ok(StatementResult::AffectedRows(0))
                 }

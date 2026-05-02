@@ -161,6 +161,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_set_constraints_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_set_role_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_publication_statement(&sql)? {
         return Ok(stmt);
     }
@@ -4294,6 +4297,52 @@ fn try_parse_set_constraints_statement(sql: &str) -> Result<Option<Statement>, P
     Ok(Some(Statement::SetConstraints(SetConstraintsStatement {
         constraints,
         deferred,
+    })))
+}
+
+fn try_parse_set_role_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let mut rest = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(rest, "set") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "set").trim_start();
+    let mut is_local = false;
+    if keyword_at_start(rest, "local") {
+        is_local = true;
+        rest = consume_keyword(rest, "local").trim_start();
+    } else if keyword_at_start(rest, "session") {
+        rest = consume_keyword(rest, "session").trim_start();
+    }
+    if !keyword_at_start(rest, "role") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "role").trim_start();
+    if keyword_at_start(rest, "to") {
+        rest = consume_keyword(rest, "to").trim_start();
+    }
+
+    let role_name = if keyword_at_start(rest, "default") {
+        rest = consume_keyword(rest, "default");
+        None
+    } else if keyword_at_start(rest, "none") {
+        rest = consume_keyword(rest, "none");
+        None
+    } else {
+        let (role_name, tail) = parse_sql_identifier(rest)?;
+        rest = tail;
+        Some(role_name)
+    };
+
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.trim().into(),
+        });
+    }
+
+    Ok(Some(Statement::SetRole(SetRoleStatement {
+        role_name,
+        is_local,
     })))
 }
 
@@ -19944,11 +19993,19 @@ fn build_reset_session_authorization(
 }
 
 fn build_set_role(pair: Pair<'_, Rule>) -> Result<SetRoleStatement, ParseError> {
-    let role_name = pair
-        .into_inner()
-        .find(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
-    Ok(SetRoleStatement { role_name })
+    let mut role_name = None;
+    let mut is_local = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_local => is_local = true,
+            Rule::identifier => role_name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(SetRoleStatement {
+        role_name,
+        is_local,
+    })
 }
 
 fn build_reset_role(_pair: Pair<'_, Rule>) -> Result<ResetRoleStatement, ParseError> {
