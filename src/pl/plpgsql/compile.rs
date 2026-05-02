@@ -5606,8 +5606,8 @@ fn normalize_plpgsql_insert(mut stmt: InsertStatement, env: &CompileEnv) -> Inse
     stmt.on_conflict = stmt
         .on_conflict
         .map(|clause| normalize_plpgsql_on_conflict(clause, env));
-    stmt.returning = stmt
-        .returning
+    let returning_targets = std::mem::take(&mut stmt.returning.targets);
+    stmt.returning.targets = returning_targets
         .into_iter()
         .map(|item| normalize_plpgsql_select_item(item, env))
         .collect();
@@ -5632,8 +5632,8 @@ fn normalize_plpgsql_update(mut stmt: UpdateStatement, env: &CompileEnv) -> Upda
     stmt.where_clause = stmt
         .where_clause
         .map(|expr| normalize_plpgsql_expr(expr, env));
-    stmt.returning = stmt
-        .returning
+    let returning_targets = std::mem::take(&mut stmt.returning.targets);
+    stmt.returning.targets = returning_targets
         .into_iter()
         .map(|item| normalize_plpgsql_select_item(item, env))
         .collect();
@@ -5655,8 +5655,8 @@ fn normalize_plpgsql_delete(mut stmt: DeleteStatement, env: &CompileEnv) -> Dele
     stmt.using = stmt
         .using
         .map(|from| normalize_plpgsql_from_item(from, env));
-    stmt.returning = stmt
-        .returning
+    let returning_targets = std::mem::take(&mut stmt.returning.targets);
+    stmt.returning.targets = returning_targets
         .into_iter()
         .map(|item| normalize_plpgsql_select_item(item, env))
         .collect();
@@ -5716,8 +5716,8 @@ fn normalize_plpgsql_merge(mut stmt: MergeStatement, env: &CompileEnv) -> MergeS
             clause
         })
         .collect();
-    stmt.returning = stmt
-        .returning
+    let returning_targets = std::mem::take(&mut stmt.returning.targets);
+    stmt.returning.targets = returning_targets
         .into_iter()
         .map(|item| normalize_plpgsql_select_item(item, env))
         .collect();

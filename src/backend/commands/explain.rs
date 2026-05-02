@@ -74,6 +74,8 @@ pub(crate) fn format_explain_lines_with_options(
 thread_local! {
     static EXPLAIN_ANALYZE_INITPLAN_LINES: RefCell<HashMap<usize, Vec<String>>> =
         RefCell::new(HashMap::new());
+    static EXPLAIN_ANALYZE_INITPLAN_JSON: RefCell<HashMap<usize, String>> =
+        RefCell::new(HashMap::new());
     static EXPLAIN_ANALYZE_PRINTED_INITPLANS: RefCell<BTreeSet<usize>> =
         RefCell::new(BTreeSet::new());
     static EXPLAIN_ANALYZE_CAPTURE_INITPLANS: Cell<bool> = const { Cell::new(false) };
@@ -84,6 +86,7 @@ thread_local! {
 
 pub(crate) fn begin_explain_analyze_initplan_capture(show_costs: bool, show_timing: bool) {
     EXPLAIN_ANALYZE_INITPLAN_LINES.with(|lines| lines.borrow_mut().clear());
+    EXPLAIN_ANALYZE_INITPLAN_JSON.with(|json| json.borrow_mut().clear());
     EXPLAIN_ANALYZE_SUBPLAN_COSTS.with(|costs| costs.set(show_costs));
     EXPLAIN_ANALYZE_SUBPLAN_TIMING.with(|timing| timing.set(show_timing));
     EXPLAIN_ANALYZE_CAPTURE_INITPLANS.with(|capture| capture.set(true));
@@ -92,6 +95,7 @@ pub(crate) fn begin_explain_analyze_initplan_capture(show_costs: bool, show_timi
 pub(crate) fn end_explain_analyze_initplan_capture() {
     EXPLAIN_ANALYZE_CAPTURE_INITPLANS.with(|capture| capture.set(false));
     EXPLAIN_ANALYZE_INITPLAN_LINES.with(|lines| lines.borrow_mut().clear());
+    EXPLAIN_ANALYZE_INITPLAN_JSON.with(|json| json.borrow_mut().clear());
     EXPLAIN_ANALYZE_PRINTED_INITPLANS.with(|printed| printed.borrow_mut().clear());
 }
 
@@ -107,6 +111,11 @@ pub(crate) fn record_explain_analyze_initplan(plan_id: usize, state: &dyn PlanNo
     normalize_explain_analyze_initplan_lines(&mut lines);
     EXPLAIN_ANALYZE_INITPLAN_LINES.with(|stored| {
         stored.borrow_mut().insert(plan_id, lines);
+    });
+    EXPLAIN_ANALYZE_INITPLAN_JSON.with(|stored| {
+        stored
+            .borrow_mut()
+            .insert(plan_id, state.explain_json(true, 0));
     });
 }
 
@@ -133,8 +142,75 @@ fn normalize_explain_analyze_initplan_lines(lines: &mut Vec<String>) {
 }
 
 pub(crate) fn format_explain_analyze_json(state: &dyn PlanNode) -> String {
-    let plan = state.explain_json(true, 4);
+    EXPLAIN_ANALYZE_PRINTED_INITPLANS.with(|printed| printed.borrow_mut().clear());
+    let plan = format_explain_analyze_json_plan(state);
     format!("[\n  {{\n    \"Plan\": {}\n  }}\n]", plan.trim_start())
+}
+
+fn format_explain_analyze_json_plan(state: &dyn PlanNode) -> String {
+    let plan = state.explain_json(true, 0);
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&plan) else {
+        return state.explain_json(true, 4);
+    };
+    append_captured_initplans_to_json_plan(&mut value);
+    let rendered = serde_json::to_string_pretty(&value).unwrap_or(plan);
+    indent_multiline_json(&rendered, 4)
+}
+
+fn append_captured_initplans_to_json_plan(plan: &mut serde_json::Value) {
+    let mut initplans = EXPLAIN_ANALYZE_INITPLAN_JSON.with(|stored| {
+        stored
+            .borrow()
+            .iter()
+            .map(|(plan_id, json)| (*plan_id, json.clone()))
+            .collect::<Vec<_>>()
+    });
+    if initplans.is_empty() {
+        return;
+    }
+    initplans.sort_by_key(|(plan_id, _)| *plan_id);
+    let Some(plan_object) = plan.as_object_mut() else {
+        return;
+    };
+    let plans = plan_object
+        .entry("Plans")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let Some(plans) = plans.as_array_mut() else {
+        return;
+    };
+
+    for (plan_id, json) in initplans {
+        let already_printed =
+            EXPLAIN_ANALYZE_PRINTED_INITPLANS.with(|printed| !printed.borrow_mut().insert(plan_id));
+        if already_printed {
+            continue;
+        }
+        let Ok(mut child) = serde_json::from_str::<serde_json::Value>(&json) else {
+            continue;
+        };
+        if let Some(child_object) = child.as_object_mut() {
+            // :HACK: pgrust records executed InitPlans separately from the
+            // runtime PlanNode tree. Attach them at the JSON root so recursive
+            // EXPLAIN JSON consumers can still inspect the executed subplan.
+            child_object.insert(
+                "Parent Relationship".into(),
+                serde_json::Value::String("InitPlan".into()),
+            );
+            child_object.insert(
+                "Subplan Name".into(),
+                serde_json::Value::String(format!("InitPlan {}", plan_id + 1)),
+            );
+        }
+        plans.push(child);
+    }
+}
+
+fn indent_multiline_json(json: &str, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    json.lines()
+        .map(|line| format!("{pad}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_explain_lines_with_options_inner(
@@ -3539,7 +3615,8 @@ fn nonverbose_sort_items(
         && !((context_has_relation_aliases(ctx) || ctx.force_qualified_sort_keys)
             && display_items
                 .iter()
-                .all(|item| explain_display_item_is_bare_identifier(item)));
+                .all(|item| explain_display_item_is_bare_identifier(item))
+            && !ctx.qualify_window_base_names);
     if should_use_display_items {
         return display_items
             .iter()

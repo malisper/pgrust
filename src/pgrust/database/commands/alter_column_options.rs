@@ -60,20 +60,10 @@ fn normalize_view_reloption(
 }
 
 fn normalize_view_reset_reloption(option: &str) -> Result<String, ExecError> {
-    let name = option.to_ascii_lowercase();
-    if matches!(
-        name.as_str(),
-        "security_barrier" | "security_invoker" | "check_option"
-    ) {
-        Ok(name)
-    } else {
-        Err(ExecError::DetailedError {
-            message: format!("unrecognized parameter \"{option}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22023",
-        })
-    }
+    // PostgreSQL accepts RESET of reloptions that are not valid SET options for
+    // views, such as autovacuum_enabled, because only the resulting reloptions
+    // array is validated after matching entries are removed.
+    Ok(option.to_ascii_lowercase())
 }
 
 fn set_view_reloptions(

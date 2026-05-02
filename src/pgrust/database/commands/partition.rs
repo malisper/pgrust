@@ -1492,15 +1492,7 @@ impl Database {
         }
         let child_indexes = catalog.index_relations_for_heap(child_oid);
         let child_constraints = catalog.constraint_rows_for_relation(child_oid);
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: None,
-            interrupts: self.interrupt_state(client_id),
-        };
+        let mut next_cid = cid;
 
         for child_index in child_indexes {
             let parent_index_links = catalog
@@ -1510,6 +1502,15 @@ impl Database {
                 .map(|row| row.inhparent)
                 .collect::<Vec<_>>();
             for parent_index_oid in parent_index_links {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: self.interrupt_state(client_id),
+                };
                 let effect = self
                     .catalog
                     .write()
@@ -1522,6 +1523,31 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: self.interrupt_state(client_id),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .replace_relation_partitioning_mvcc(
+                        child_index.relation_oid,
+                        false,
+                        None,
+                        None,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
             }
 
             for constraint in child_constraints.iter().filter(|row| {
@@ -1529,6 +1555,15 @@ impl Database {
                     && row.conparentid != 0
                     && matches!(row.contype, CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE)
             }) {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: self.interrupt_state(client_id),
+                };
                 let effect = self
                     .catalog
                     .write()
@@ -1544,9 +1579,10 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
             }
         }
-        Ok(cid.saturating_add(1))
+        Ok(next_cid)
     }
 }
 
@@ -2674,6 +2710,28 @@ mod tests {
                    join pg_class child on child.oid = i.inhrelid \
                    join pg_class parent on parent.oid = i.inhparent \
                   where parent.relname = 'detach_cleanup_parent_pkey'",
+            ),
+            Vec::<Vec<Value>>::new()
+        );
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select relispartition \
+                   from pg_class \
+                  where relname = 'detach_cleanup_p1_pkey'",
+            ),
+            vec![vec![Value::Bool(false)]]
+        );
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select deptype::text \
+                   from pg_depend \
+                  where objid = 'detach_cleanup_p1_pkey'::regclass \
+                    and deptype::text in ('P', 'S') \
+                  order by deptype::text",
             ),
             Vec::<Vec<Value>>::new()
         );

@@ -29,12 +29,14 @@ use crate::include::nodes::parsenodes::{
     LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy, PublicationObjectSpec,
     PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
     RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, RelOption,
-    SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SubscriptionOptionValue,
-    TableConstraint, TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
+    ReturningAliasKind, SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs,
+    SubscriptionOptionValue, TableConstraint, TransactionEndOptions, TriggerEvent,
+    TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
-    AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
+    AttrNumber, INNER_VAR, JoinType, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var,
+    is_system_attr,
 };
 
 fn desc() -> RelationDesc {
@@ -643,6 +645,25 @@ fn parse_select_with_default_collation_keeps_raw_ast() {
         SqlExpr::Collate {
             expr: Box::new(SqlExpr::IntegerLiteral("1".into())),
             collation: "default".into(),
+        }
+    );
+}
+
+#[test]
+fn parse_select_rejects_collate_inside_cast_type() {
+    let err = parse_select("select cast('42' as text collate \"C\")").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \"COLLATE\"");
+    assert_eq!(err.position(), Some(26));
+
+    let stmt = parse_select("select cast('42' as text) collate \"C\"").unwrap();
+    assert_eq!(
+        stmt.targets[0].expr,
+        SqlExpr::Collate {
+            expr: Box::new(SqlExpr::Cast(
+                Box::new(SqlExpr::Const(Value::Text("42".into()))),
+                RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+            )),
+            collation: "C".into(),
         }
     );
 }
@@ -3746,6 +3767,31 @@ fn parse_create_operator_class_hash_support() {
 }
 
 #[test]
+fn parse_create_operator_class_default_before_for_type() {
+    let stmt = parse_statement(
+        "create operator class alter1.ctype_hash_ops default for type alter1.ctype using hash as operator 1 alter1.=(alter1.ctype, alter1.ctype)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateOperatorClass(CreateOperatorClassStatement {
+            schema_name: Some("alter1".into()),
+            opclass_name: "ctype_hash_ops".into(),
+            data_type: RawTypeName::Named {
+                name: "alter1.ctype".into(),
+                array_bounds: 0,
+            },
+            access_method: "hash".into(),
+            is_default: true,
+            items: vec![CreateOperatorClassItem::Operator {
+                strategy_number: 1,
+                operator_name: "alter1.=(alter1.ctype, alter1.ctype)".into(),
+            }],
+        })
+    );
+}
+
+#[test]
 fn parse_operator_family_and_class_alter_statements() {
     assert_eq!(
         parse_statement("create operator family alt_opf1 using hash").unwrap(),
@@ -4858,6 +4904,17 @@ fn parse_alter_table_set_statement() {
             only: false,
             table_name: "rw_view1".into(),
             options: vec!["security_barrier".into()],
+        })
+    );
+
+    let stmt = parse_statement("alter view rw_view1 reset (toast.autovacuum_enabled)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableReset(AlterTableResetStatement {
+            if_exists: false,
+            only: false,
+            table_name: "rw_view1".into(),
+            options: vec!["toast.autovacuum_enabled".into()],
         })
     );
 
@@ -11630,6 +11687,14 @@ fn parse_insert_update_delete() {
         })
     ));
     assert!(matches!(
+        parse_statement("explain (analyze, format 'json') select name from people").unwrap(),
+        Statement::Explain(ExplainStatement {
+            analyze: true,
+            format: ExplainFormat::Json,
+            ..
+        })
+    ));
+    assert!(matches!(
         parse_statement("explain (costs off) select name from people").unwrap(),
         Statement::Explain(ExplainStatement {
             analyze: false,
@@ -12532,13 +12597,24 @@ fn parse_merge_returning_with_old_new_aliases() {
         other => panic!("expected merge statement, got {other:?}"),
     };
     assert_eq!(stmt.returning.len(), 3);
+    assert_eq!(stmt.returning.options.len(), 2);
+    assert!(matches!(
+        stmt.returning.options[0].kind,
+        ReturningAliasKind::Old
+    ));
+    assert_eq!(stmt.returning.options[0].alias, "o");
+    assert!(matches!(
+        stmt.returning.options[1].kind,
+        ReturningAliasKind::New
+    ));
+    assert_eq!(stmt.returning.options[1].alias, "n");
     assert!(matches!(
         &stmt.returning[1].expr,
-        SqlExpr::Column(name) if name == "old.*"
+        SqlExpr::Column(name) if name == "o.*"
     ));
     assert!(matches!(
         &stmt.returning[2].expr,
-        SqlExpr::Column(name) if name == "new.*"
+        SqlExpr::Column(name) if name == "n.*"
     ));
 }
 
@@ -12690,7 +12766,7 @@ fn parse_create_rule_single_action() {
                         SqlExpr::Column("new.id".into()),
                     ]]),
                     on_conflict: None,
-                    returning: vec![],
+                    returning: vec![].into(),
                 }),
                 sql: "insert into pets values (new.id, new.id)".into(),
                 sql_position: Some(67),
@@ -12881,6 +12957,11 @@ fn assert_returning_var(expr: &Expr, varno: usize, attno: AttrNumber) {
     }
 }
 
+fn assert_returning_system_var(expr: &Expr, varno: usize, attno: AttrNumber) {
+    assert_returning_var(expr, varno, attno);
+    assert!(is_system_attr(attno));
+}
+
 fn returning_row_fields(expr: &Expr) -> &[(String, Expr)] {
     match expr {
         Expr::Row { fields, .. } => fields,
@@ -12990,6 +13071,84 @@ fn bind_update_and_delete_returning_expose_old_and_new_pseudo_rows() {
     let bound_delete = bind_delete(&delete, &catalog).unwrap();
     assert_returning_var(&bound_delete.returning[0].expr, OUTER_VAR, 1);
     assert_returning_var(&bound_delete.returning[1].expr, INNER_VAR, 1);
+}
+
+#[test]
+fn bind_returning_with_aliases_and_system_columns() {
+    let catalog = returning_test_catalog();
+    let stmt = match parse_statement(
+        "insert into people (id, name) values (1, 'alice') \
+         returning with (old as o, new as n) o.tableoid, o.ctid, o.*, n.name",
+    )
+    .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let bound = bind_insert(&stmt, &catalog).unwrap();
+    assert_returning_system_var(&bound.returning[0].expr, OUTER_VAR, TABLE_OID_ATTR_NO);
+    assert_returning_system_var(
+        &bound.returning[1].expr,
+        OUTER_VAR,
+        SELF_ITEM_POINTER_ATTR_NO,
+    );
+    for (target, attno) in bound.returning[2..5].iter().zip(1..) {
+        assert_returning_var(&target.expr, OUTER_VAR, attno);
+    }
+    assert_returning_var(&bound.returning[5].expr, INNER_VAR, 2);
+}
+
+#[test]
+fn bind_returning_with_rejects_duplicate_options_and_aliases() {
+    let catalog = returning_test_catalog();
+    let duplicate_old = match parse_statement(
+        "insert into people default values returning with (old as o, old as p) *",
+    )
+    .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let err = bind_insert(&duplicate_old, &catalog).unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken { actual, .. } if actual == "OLD cannot be specified multiple times"
+    ));
+
+    let duplicate_alias = match parse_statement(
+        "insert into people default values returning with (old as x, new as x) *",
+    )
+    .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let err = bind_insert(&duplicate_alias, &catalog).unwrap_err();
+    assert!(matches!(err, ParseError::DuplicateTableName(name) if name == "x"));
+}
+
+#[test]
+fn parse_returning_with_rejects_unknown_option_name() {
+    let err = parse_statement("insert into people default values returning with (nonsuch as x) *")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken { actual, .. }
+            if actual == "syntax error at or near \"nonsuch\""
+    ));
+}
+
+#[test]
+fn bind_insert_returning_alias_hides_base_table_name_for_star() {
+    let catalog = returning_test_catalog();
+    let stmt = match parse_statement("insert into people as p default values returning people.*")
+        .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let err = bind_insert(&stmt, &catalog).unwrap_err();
+    assert!(matches!(err, ParseError::InvalidFromClauseReference(name) if name == "people"));
 }
 
 #[test]
@@ -13143,7 +13302,7 @@ fn people_insert_with_on_conflict(
             assignments,
             where_clause,
         }),
-        returning: vec![],
+        returning: vec![].into(),
     }
 }
 
@@ -13178,7 +13337,8 @@ fn bind_insert_returning_relation_name_as_whole_row() {
         expr: SqlExpr::Column("people".into()),
         output_name: "people".into(),
         location: None,
-    }];
+    }]
+    .into();
 
     let bound =
         stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog)).unwrap();
@@ -20491,6 +20651,19 @@ fn parse_cursor_statements() {
         other => panic!("expected DECLARE CURSOR, got {:?}", other),
     }
 
+    match parse_statement(
+        "declare c cursor for select * from int8_tbl order by q1 fetch first 2 rows with ties",
+    )
+    .unwrap()
+    {
+        Statement::DeclareCursor(stmt) => {
+            assert_eq!(stmt.name, "c");
+            assert_eq!(stmt.query.limit, Some(2));
+            assert_eq!(stmt.query.order_by.len(), 1);
+        }
+        other => panic!("expected DECLARE CURSOR, got {:?}", other),
+    }
+
     assert!(matches!(
         parse_statement("fetch from c").unwrap(),
         Statement::Fetch(FetchStatement {
@@ -20538,7 +20711,7 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && select_items_without_locations(returning.clone()) == vec![SelectItem {
+            && select_items_without_locations(returning.targets.clone()) == vec![SelectItem {
                 output_name: "*".into(),
                 expr: SqlExpr::Column("*".into()),
                 location: None,
@@ -20553,7 +20726,7 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && select_items_without_locations(returning.clone()) == vec![
+            && select_items_without_locations(returning.targets.clone()) == vec![
                 SelectItem {
                     output_name: "id".into(),
                     expr: SqlExpr::Column("id".into()),
@@ -20587,7 +20760,7 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && select_items_without_locations(returning.clone()) == vec![
+            && select_items_without_locations(returning.targets.clone()) == vec![
                 SelectItem {
                     output_name: "id".into(),
                     expr: SqlExpr::Column("id".into()),

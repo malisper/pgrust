@@ -1,8 +1,9 @@
 use crate::backend::parser::{
     Assignment, AssignmentTarget, AssignmentTargetIndirection, CatalogLookup, InsertSource,
-    InsertStatement, OnConflictAction, OnConflictClause, OnConflictTarget, RawTypeName, SelectItem,
-    SelectStatement, SqlCallArgs, SqlExpr, SqlType, SqlTypeKind, Statement, UpdateStatement,
-    ValuesStatement, parse_statement, sql_type_name,
+    InsertStatement, OnConflictAction, OnConflictClause, OnConflictTarget, RawTypeName,
+    ReturningAliasKind, ReturningClause, SelectItem, SelectStatement, SqlCallArgs, SqlExpr,
+    SqlType, SqlTypeKind, Statement, UpdateStatement, ValuesStatement, parse_statement,
+    sql_type_name,
 };
 use crate::include::catalog::PgRewriteRow;
 use crate::include::nodes::datum::Value;
@@ -731,10 +732,29 @@ fn render_rule_on_conflict(
 }
 
 fn render_rule_returning_list(
-    returning: &[SelectItem],
+    returning: &ReturningClause,
     table_name: &str,
     target_columns: Option<&[(String, SqlType)]>,
 ) -> String {
+    let prefix = if returning.options.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "WITH ({}) ",
+            returning
+                .options
+                .iter()
+                .map(|option| {
+                    let name = match option.kind {
+                        ReturningAliasKind::Old => "OLD",
+                        ReturningAliasKind::New => "NEW",
+                    };
+                    format!("{name} AS {}", option.alias)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     if returning.len() == 1
         && matches!(
             &returning[0].expr,
@@ -742,17 +762,23 @@ fn render_rule_returning_list(
         )
         && let Some(columns) = target_columns
     {
-        return columns
-            .iter()
-            .map(|(column, _)| format!("{table_name}.{column}"))
-            .collect::<Vec<_>>()
-            .join(",\n    ");
+        return format!(
+            "{prefix}{}",
+            columns
+                .iter()
+                .map(|(column, _)| format!("{table_name}.{column}"))
+                .collect::<Vec<_>>()
+                .join(",\n    ")
+        );
     }
-    returning
-        .iter()
-        .map(|item| render_rule_expr(&item.expr, None))
-        .collect::<Vec<_>>()
-        .join(",\n    ")
+    format!(
+        "{prefix}{}",
+        returning
+            .iter()
+            .map(|item| render_rule_expr(&item.expr, None))
+            .collect::<Vec<_>>()
+            .join(",\n    ")
+    )
 }
 
 fn render_rule_expr_with_target_columns(

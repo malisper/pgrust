@@ -1802,6 +1802,15 @@ fn lookup_aggregate_support_proc_row(
                 .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("oid {oid}"))))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let exact_polymorphic_support = if arg_oids
+        .iter()
+        .copied()
+        .any(is_polymorphic_aggregate_signature_oid)
+    {
+        lookup_exact_aggregate_support_proc(catalog, proc_name, arg_oids)?
+    } else {
+        None
+    };
     let support = match resolve_function_call(catalog, proc_name, &actual_types, explicit_variadic)
     {
         Ok(resolved) => aggregate_support_from_resolved(catalog, proc_name, resolved)?,
@@ -1810,7 +1819,10 @@ fn lookup_aggregate_support_proc_row(
                 sqlstate: "42883", ..
             },
         ) => {
-            if let Some(retry_types) = aggregate_domain_base_retry_types(catalog, &actual_types)
+            if let Some(support) = exact_polymorphic_support.clone() {
+                support
+            } else if let Some(retry_types) =
+                aggregate_domain_base_retry_types(catalog, &actual_types)
                 && let Ok(resolved) =
                     resolve_function_call(catalog, proc_name, &retry_types, explicit_variadic)
             {
@@ -2540,7 +2552,7 @@ fn validate_sql_function_body_on_create(
         return Ok(());
     };
     if let Some(expected_columns) = sql_function_table_return_columns(create_stmt, catalog)? {
-        return validate_sql_function_table_return_columns(&columns, &expected_columns);
+        return validate_sql_function_table_return_columns(catalog, &columns, &expected_columns);
     }
     if columns.len() != 1 {
         return Err(sql_function_return_column_count_error(catalog, prorettype));
@@ -2644,6 +2656,7 @@ fn sql_function_table_return_columns(
 }
 
 fn validate_sql_function_table_return_columns(
+    catalog: &dyn CatalogLookup,
     actual: &[QueryColumn],
     expected: &[QueryColumn],
 ) -> Result<(), ExecError> {
@@ -2660,9 +2673,7 @@ fn validate_sql_function_table_return_columns(
         });
     }
     for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
-        if actual.sql_type.kind != expected.sql_type.kind
-            || actual.sql_type.is_array != expected.sql_type.is_array
-        {
+        if !sql_function_column_assignment_compatible(catalog, actual.sql_type, expected.sql_type) {
             return Err(ExecError::DetailedError {
                 message: "return type mismatch in function declared to return record".into(),
                 detail: Some(format!(
@@ -2677,6 +2688,31 @@ fn validate_sql_function_table_return_columns(
         }
     }
     Ok(())
+}
+
+fn sql_function_column_assignment_compatible(
+    catalog: &dyn CatalogLookup,
+    actual_type: SqlType,
+    expected_type: SqlType,
+) -> bool {
+    if actual_type.kind == expected_type.kind
+        && actual_type.is_array == expected_type.is_array
+        && (actual_type.type_oid == expected_type.type_oid
+            || actual_type.type_oid == 0
+            || expected_type.type_oid == 0)
+    {
+        return true;
+    }
+    let Some(actual_oid) = catalog.type_oid_for_sql_type(actual_type) else {
+        return false;
+    };
+    let Some(expected_oid) = catalog.type_oid_for_sql_type(expected_type) else {
+        return false;
+    };
+    actual_oid == expected_oid
+        || catalog
+            .cast_by_source_target(actual_oid, expected_oid)
+            .is_some_and(|row| matches!(row.castcontext, 'i' | 'a'))
 }
 
 fn sql_function_should_skip_quoted_body_return_validation(
@@ -5428,20 +5464,6 @@ impl Database {
                 existing.prokind,
                 None,
             ));
-        }
-        if create_stmt.window {
-            if let Some(existing) = existing_proc.as_ref()
-                && create_stmt.replace_existing
-            {
-                return Err(cannot_change_routine_kind_error(
-                    &function_name,
-                    existing.prokind,
-                    None,
-                ));
-            }
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "CREATE FUNCTION WINDOW".into(),
-            )));
         }
         if language_row.oid == PG_LANGUAGE_SQL_OID && create_stmt.link_symbol.is_some() {
             return Err(ExecError::DetailedError {
