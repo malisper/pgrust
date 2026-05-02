@@ -46,6 +46,7 @@ use crate::include::executor::execdesc::create_query_desc;
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow, SystemVarBinding};
 use crate::include::nodes::pathnodes::PlannerConfig;
+use crate::include::nodes::plannodes::EstimateValue;
 use crate::include::nodes::primnodes::{
     OpExprKind, QueryColumn, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint,
 };
@@ -4765,12 +4766,32 @@ fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerC
         retain_partial_index_filters: false,
         enable_hashagg: bool_executor_guc(gucs, "enable_hashagg", true),
         enable_sort: bool_executor_guc(gucs, "enable_sort", true),
+        enable_parallel_append: bool_executor_guc(gucs, "enable_parallel_append", true),
+        enable_parallel_hash: bool_executor_guc(gucs, "enable_parallel_hash", true),
         force_parallel_gather: bool_executor_guc(gucs, "debug_parallel_query", false),
+        max_parallel_workers: usize_executor_guc(gucs, "max_parallel_workers", 8),
         max_parallel_workers_per_gather: usize_executor_guc(
             gucs,
             "max_parallel_workers_per_gather",
             2,
         ),
+        parallel_leader_participation: bool_executor_guc(
+            gucs,
+            "parallel_leader_participation",
+            true,
+        ),
+        min_parallel_table_scan_size: size_executor_guc_bytes(
+            gucs,
+            "min_parallel_table_scan_size",
+            8 * 1024 * 1024,
+        ),
+        min_parallel_index_scan_size: size_executor_guc_bytes(
+            gucs,
+            "min_parallel_index_scan_size",
+            512 * 1024,
+        ),
+        parallel_setup_cost: EstimateValue(f64_executor_guc(gucs, "parallel_setup_cost", 1000.0)),
+        parallel_tuple_cost: EstimateValue(f64_executor_guc(gucs, "parallel_tuple_cost", 0.1)),
         fold_constants: true,
     }
 }
@@ -4789,6 +4810,43 @@ fn usize_executor_guc(gucs: &HashMap<String, String>, name: &str, default: usize
     gucs.get(name)
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(default)
+}
+
+fn f64_executor_guc(gucs: &HashMap<String, String>, name: &str, default: f64) -> f64 {
+    gucs.get(name)
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(default)
+}
+
+fn size_executor_guc_bytes(gucs: &HashMap<String, String>, name: &str, default: usize) -> usize {
+    gucs.get(name)
+        .and_then(|value| parse_executor_size_bytes(value))
+        .unwrap_or(default)
+}
+
+fn parse_executor_size_bytes(raw: &str) -> Option<usize> {
+    let trimmed = raw.trim().trim_matches('\'').trim();
+    let mut digits = String::new();
+    let mut unit = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            digits.push(ch);
+        } else if !ch.is_whitespace() {
+            unit.push(ch);
+        }
+    }
+    let value = digits.parse::<f64>().ok()?;
+    let multiplier = match unit.to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "kb" | "k" => 1024.0,
+        "mb" | "m" => 1024.0 * 1024.0,
+        "gb" | "g" => 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    value
+        .is_finite()
+        .then(|| (value * multiplier).ceil() as usize)
 }
 
 fn resolve_dynamic_prepared_statement(

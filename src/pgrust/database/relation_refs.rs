@@ -383,7 +383,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(expr, rels);
             }
         }
-        Plan::Gather { input, .. } => collect_rels_from_plan(input, rels),
+        Plan::Gather { input, .. } | Plan::GatherMerge { input, .. } => {
+            collect_rels_from_plan(input, rels)
+        }
         Plan::NestedLoopJoin {
             left,
             right,

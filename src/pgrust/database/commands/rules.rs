@@ -3045,12 +3045,14 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             plan_info,
             source_id,
             desc,
+            parallel_aware,
             partition_prune,
             children,
         } => Plan::Append {
             plan_info,
             source_id,
             desc,
+            parallel_aware,
             partition_prune: partition_prune
                 .map(|info| substitute_rule_partition_prune(info, old_values, new_values)),
             children: children
@@ -3105,6 +3107,7 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             keys,
             order_by_keys,
             direction,
+            parallel_aware,
         } => Plan::IndexOnlyScan {
             plan_info,
             source_id,
@@ -3127,6 +3130,7 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
                 .map(|key| substitute_rule_index_key(key, old_values, new_values))
                 .collect(),
             direction,
+            parallel_aware,
         },
         Plan::IndexScan {
             plan_info,
@@ -3145,6 +3149,7 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             order_by_keys,
             direction,
             index_only,
+            parallel_aware,
         } => Plan::IndexScan {
             plan_info,
             source_id,
@@ -3168,6 +3173,7 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
                 .collect(),
             direction,
             index_only,
+            parallel_aware,
         },
         Plan::BitmapIndexScan {
             plan_info,
@@ -3233,6 +3239,7 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             bitmapqual,
             recheck_qual,
             filter_qual,
+            parallel_aware,
         } => Plan::BitmapHeapScan {
             plan_info,
             source_id,
@@ -3250,6 +3257,7 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
                 .into_iter()
                 .map(|expr| substitute_rule_expr(expr, old_values, new_values))
                 .collect(),
+            parallel_aware,
         },
         Plan::Hash {
             plan_info,
@@ -3301,6 +3309,25 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
             workers_planned,
             single_copy,
+        },
+        Plan::GatherMerge {
+            plan_info,
+            input,
+            workers_planned,
+            items,
+            display_items,
+        } => Plan::GatherMerge {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            workers_planned,
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: substitute_rule_expr(item.expr, old_values, new_values),
+                    ..item
+                })
+                .collect(),
+            display_items,
         },
         Plan::NestedLoopJoin {
             plan_info,

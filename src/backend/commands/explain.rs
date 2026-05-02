@@ -246,7 +246,7 @@ fn push_explain_analyze_direct_subplans(
     lines: &mut Vec<String>,
 ) {
     for subplan in state.explain_direct_subplans() {
-        if !subplan.par_param.is_empty() {
+        if !subplan.renders_as_initplan() {
             continue;
         }
         let Some(subplan_lines) = EXPLAIN_ANALYZE_INITPLAN_LINES
@@ -315,7 +315,7 @@ pub(crate) fn format_modify_expr_subplans(
 ) {
     for subplan in direct_expr_subplans(expr) {
         let prefix = "  ".repeat(indent);
-        let label = if subplan.par_param.is_empty() {
+        let label = if subplan.renders_as_initplan() {
             format!("{prefix}InitPlan {}", subplan.plan_id + 1)
         } else {
             format!("{prefix}SubPlan {}", subplan.plan_id + 1)
@@ -403,6 +403,7 @@ fn annotate_modify_subplan_runtime_labels(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -960,6 +961,7 @@ pub(crate) fn apply_runtime_pruning_for_explain_plan(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::ProjectSet { input, .. }
         | Plan::Filter { input, .. } => prune_runtime_explain_box(input, ctx),
         Plan::NestedLoopJoin { left, right, .. }
@@ -1045,6 +1047,7 @@ fn renumber_append_child_aliases(plan: &mut Plan, ordinal: usize) {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::ProjectSet { input, .. }
         | Plan::Filter { input, .. } => renumber_append_child_aliases(input, ordinal),
         Plan::NestedLoopJoin { left, right, .. }
@@ -1357,7 +1360,15 @@ fn push_verbose_json_plan_with_output(
             };
             lines.push(format!("{pad}\"Node Type\": \"{node_type}\","));
             push_json_parent_relationship(parent_relationship, indent, lines);
-            lines.push(format!("{pad}\"Parallel Aware\": false,"));
+            let parallel_aware = matches!(
+                plan,
+                Plan::SeqScan {
+                    parallel_aware: true,
+                    tablesample: None,
+                    ..
+                }
+            );
+            lines.push(format!("{pad}\"Parallel Aware\": {parallel_aware},"));
             lines.push(format!("{pad}\"Async Capable\": false,"));
             lines.push(format!(
                 "{pad}\"Relation Name\": {},",
@@ -1718,7 +1729,7 @@ fn push_direct_plan_subplans(
 ) {
     for subplan in direct_plan_subplans(plan) {
         let prefix = "  ".repeat(indent + 1);
-        let label = if subplan.par_param.is_empty() {
+        let label = if subplan.renders_as_initplan() {
             format!("{prefix}InitPlan {}", subplan.plan_id + 1)
         } else {
             format!("{prefix}SubPlan {}", subplan.plan_id + 1)
@@ -1746,7 +1757,7 @@ fn subplan_explain_context(
     subplan: &SubPlan,
     ctx: &VerboseExplainContext,
 ) -> VerboseExplainContext {
-    if subplan.par_param.is_empty() || subplan.args.is_empty() {
+    if subplan.renders_as_initplan() || subplan.args.is_empty() {
         return ctx.clone();
     }
     let mut child_ctx = ctx.clone();
@@ -2242,10 +2253,13 @@ fn folded_tsearch_scan_label(plan: &Plan) -> Option<String> {
         Plan::SeqScan {
             relation_name,
             tablesample,
+            parallel_aware,
             ..
         } => {
             let scan_name = if tablesample.is_some() {
                 "Sample Scan"
+            } else if *parallel_aware {
+                "Parallel Seq Scan"
             } else {
                 "Seq Scan"
             };
@@ -2490,6 +2504,7 @@ fn plan_contains_cte_scan(plan: &Plan) -> bool {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2534,6 +2549,7 @@ fn plan_contains_window_agg(plan: &Plan) -> bool {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2578,6 +2594,7 @@ fn plan_contains_function_scan(plan: &Plan) -> bool {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2828,8 +2845,15 @@ fn push_nonverbose_plan_details(
             }
             true
         }
+        Plan::GatherMerge {
+            workers_planned, ..
+        } => {
+            lines.push(format!("{prefix}Workers Planned: {workers_planned}"));
+            true
+        }
         Plan::Aggregate {
             input,
+            phase,
             strategy,
             disabled,
             group_by,
@@ -2847,12 +2871,21 @@ fn push_nonverbose_plan_details(
                 && grouping_sets.is_empty()
                 && const_false_filter_result_plan(input).is_some();
             if !suppress_dummy_group_key {
+                let partial_display = finalize_partial_display_group_by(*phase, input);
+                let (display_group_by, display_input) =
+                    partial_display.unwrap_or((group_by, input.as_ref()));
                 let mut group_items_full = Vec::new();
                 let sort_group_names = context_has_relation_aliases(ctx)
-                    .then(|| aggregate_group_names_from_input_sort(input, group_by.len(), ctx))
+                    .then(|| {
+                        aggregate_group_names_from_input_sort(
+                            display_input,
+                            display_group_by.len(),
+                            ctx,
+                        )
+                    })
                     .flatten();
-                for (index, expr) in group_by.iter().enumerate() {
-                    let rendered = sort_group_names
+                for (index, expr) in display_group_by.iter().enumerate() {
+                    let mut rendered = sort_group_names
                         .as_ref()
                         .and_then(|names| names.get(index))
                         .cloned()
@@ -2866,13 +2899,19 @@ fn push_nonverbose_plan_details(
                         .unwrap_or_else(|| {
                             render_nonverbose_aggregate_group_key(
                                 expr,
-                                input,
+                                display_input,
                                 output_columns.get(index).map(|column| column.sql_type),
                                 ctx,
                                 *disabled,
                                 qualify_aggregate_group_keys,
                             )
                         });
+                    if partial_display.is_some()
+                        && !matches!(expr, Expr::Var(_))
+                        && !(rendered.starts_with('(') && rendered.ends_with(')'))
+                    {
+                        rendered = format!("({rendered})");
+                    }
                     group_items_full.push(rendered);
                 }
                 let mut group_items = Vec::new();
@@ -2882,7 +2921,7 @@ fn push_nonverbose_plan_details(
                     }
                 }
                 group_items = group_items_postgres_display_order(group_items);
-                let group_hashable = group_by
+                let group_hashable = display_group_by
                     .iter()
                     .map(grouping_expr_hashable)
                     .collect::<Vec<_>>();
@@ -3340,6 +3379,31 @@ fn push_nonverbose_grouping_set_keys(
     for _ in 0..empty_sets {
         lines.push(format!("{prefix}Group Key: ()"));
     }
+}
+
+fn finalize_partial_display_group_by<'a>(
+    phase: crate::include::nodes::plannodes::AggregatePhase,
+    input: &'a Plan,
+) -> Option<(&'a [Expr], &'a Plan)> {
+    if phase != crate::include::nodes::plannodes::AggregatePhase::Finalize {
+        return None;
+    }
+    let Some(input) = (match input {
+        Plan::Gather { input, .. } | Plan::GatherMerge { input, .. } => Some(input),
+        _ => None,
+    }) else {
+        return None;
+    };
+    let Plan::Aggregate {
+        phase: crate::include::nodes::plannodes::AggregatePhase::Partial,
+        input,
+        group_by,
+        ..
+    } = input.as_ref()
+    else {
+        return None;
+    };
+    Some((group_by, input.as_ref()))
 }
 
 fn push_nonverbose_sorted_grouping_set_keys(
@@ -4243,6 +4307,7 @@ fn nonverbose_window_input_names(input: &Plan, ctx: &VerboseExplainContext) -> V
         Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Limit { input, .. }
@@ -4324,6 +4389,7 @@ fn verbose_window_input_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<
         Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -5149,10 +5215,13 @@ fn nonverbose_plan_label(
         Plan::SeqScan {
             relation_name,
             tablesample,
+            parallel_aware,
             ..
         } => nonverbose_relation_scan_label(
             if tablesample.is_some() {
                 "Sample Scan"
+            } else if *parallel_aware {
+                "Parallel Seq Scan"
             } else {
                 "Seq Scan"
             },
@@ -5170,9 +5239,14 @@ fn nonverbose_plan_label(
             relation_name,
             index_name,
             direction,
+            parallel_aware,
             ..
         } => nonverbose_index_scan_label(
-            "Index Only Scan",
+            if *parallel_aware {
+                "Parallel Index Only Scan"
+            } else {
+                "Index Only Scan"
+            },
             relation_name,
             index_name,
             *direction,
@@ -5183,9 +5257,14 @@ fn nonverbose_plan_label(
             index_name,
             direction,
             index_only,
+            parallel_aware,
             ..
         } => {
-            let scan_name = if *index_only {
+            let scan_name = if *parallel_aware && *index_only {
+                "Parallel Index Only Scan"
+            } else if *parallel_aware {
+                "Parallel Index Scan"
+            } else if *index_only {
                 "Index Only Scan"
             } else {
                 "Index Scan"
@@ -5198,8 +5277,16 @@ fn nonverbose_plan_label(
                 context_relation_scan_alias(ctx, relation_name),
             )
         }
-        Plan::BitmapHeapScan { relation_name, .. } => nonverbose_relation_scan_label(
-            "Bitmap Heap Scan",
+        Plan::BitmapHeapScan {
+            relation_name,
+            parallel_aware,
+            ..
+        } => nonverbose_relation_scan_label(
+            if *parallel_aware {
+                "Parallel Bitmap Heap Scan"
+            } else {
+                "Bitmap Heap Scan"
+            },
             relation_name,
             context_relation_scan_alias(ctx, relation_name),
             is_child,
@@ -6532,8 +6619,20 @@ fn push_verbose_scan_details(
 fn verbose_scan_plan_label(input: &Plan, ctx: &VerboseExplainContext) -> Option<String> {
     match input {
         Plan::Filter { input, .. } => verbose_scan_plan_label(input, ctx),
-        Plan::SeqScan { relation_name, .. } => Some(format!(
-            "Seq Scan on {}",
+        Plan::SeqScan {
+            relation_name,
+            tablesample,
+            parallel_aware,
+            ..
+        } => Some(format!(
+            "{} on {}",
+            if tablesample.is_some() {
+                "Sample Scan"
+            } else if *parallel_aware {
+                "Parallel Seq Scan"
+            } else {
+                "Seq Scan"
+            },
             verbose_relation_name_with_alias(
                 relation_name,
                 context_relation_scan_alias(ctx, relation_name)
@@ -6543,8 +6642,14 @@ fn verbose_scan_plan_label(input: &Plan, ctx: &VerboseExplainContext) -> Option<
             relation_name,
             index_name,
             direction,
+            parallel_aware,
             ..
         } => {
+            let scan_name = if *parallel_aware {
+                "Parallel Index Only Scan"
+            } else {
+                "Index Only Scan"
+            };
             let direction = if matches!(
                 direction,
                 crate::include::access::relscan::ScanDirection::Backward
@@ -6554,7 +6659,7 @@ fn verbose_scan_plan_label(input: &Plan, ctx: &VerboseExplainContext) -> Option<
                 ""
             };
             Some(format!(
-                "Index Only Scan{direction} using {index_name} on {}",
+                "{scan_name}{direction} using {index_name} on {}",
                 verbose_relation_name_with_alias(
                     relation_name,
                     context_relation_scan_alias(ctx, relation_name)
@@ -6566,9 +6671,14 @@ fn verbose_scan_plan_label(input: &Plan, ctx: &VerboseExplainContext) -> Option<
             index_name,
             direction,
             index_only,
+            parallel_aware,
             ..
         } => {
-            let scan_name = if *index_only {
+            let scan_name = if *parallel_aware && *index_only {
+                "Parallel Index Only Scan"
+            } else if *parallel_aware {
+                "Parallel Index Scan"
+            } else if *index_only {
                 "Index Only Scan"
             } else {
                 "Index Scan"
@@ -7064,6 +7174,11 @@ fn push_verbose_plan_details(
             if *single_copy {
                 lines.push(format!("{prefix}Single Copy: true"));
             }
+        }
+        Plan::GatherMerge {
+            workers_planned, ..
+        } => {
+            lines.push(format!("{prefix}Workers Planned: {workers_planned}"));
         }
         Plan::Filter {
             input, predicate, ..
@@ -7887,6 +8002,7 @@ fn collect_inherited_relation_leaf_sources(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -7987,6 +8103,7 @@ fn child_leaf_scan_source(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -8288,6 +8405,7 @@ fn plan_join_output_exprs(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -8768,6 +8886,7 @@ fn verbose_plan_output_exprs(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -10491,6 +10610,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Unique { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -10780,7 +10900,7 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
                 collect_direct_expr_subplans(expr, &mut found);
             }
         }
-        Plan::Gather { .. } => {}
+        Plan::Gather { .. } | Plan::GatherMerge { .. } => {}
         Plan::NestedLoopJoin {
             join_qual, qual, ..
         } => {

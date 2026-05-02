@@ -3,13 +3,13 @@ use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapAndState, BitmapHeapScanState, BitmapIndexScanState,
-    BitmapOrState, BitmapQualState, CteScanState, FilterState, FunctionScanState, GatherState,
-    HashJoinState, HashState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState,
-    LockRowsState, MaterializeState, MemoizeState, MergeAppendState, MergeJoinState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
-    RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState, SetOpState,
-    SubqueryScanState, TableSampleState, TidScanState, UniqueState, ValuesState, WindowAggState,
-    WorkTableScanState,
+    BitmapOrState, BitmapQualState, CteScanState, FilterState, FunctionScanState, GatherMergeState,
+    GatherState, HashJoinState, HashState, IncrementalSortState, IndexOnlyScanState,
+    IndexScanState, LimitState, LockRowsState, MaterializeState, MemoizeState, MergeAppendState,
+    MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState,
+    ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState,
+    SetOpState, SubqueryScanState, TableSampleState, TidScanState, UniqueState, ValuesState,
+    WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
@@ -209,6 +209,7 @@ fn plan_depends_on_worktable(plan: &Plan, worktable_id: usize) -> bool {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -287,6 +288,7 @@ fn plan_references_worktable(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -354,6 +356,7 @@ fn collect_worktable_dependent_cte_ids(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -534,7 +537,9 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Memoize {
             input, cache_keys, ..
         } => plan_uses_outer_columns(input) || cache_keys.iter().any(expr_uses_outer_columns),
-        Plan::Gather { input, .. } => plan_uses_outer_columns(input),
+        Plan::Gather { input, .. } | Plan::GatherMerge { input, .. } => {
+            plan_uses_outer_columns(input)
+        }
         Plan::NestedLoopJoin {
             left,
             right,
@@ -665,12 +670,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             source_id,
             desc,
+            parallel_aware,
             partition_prune,
             children,
         } => Box::new(AppendState {
             source_id,
             children: children.into_iter().map(executor_start).collect(),
             current_child: 0,
+            parallel_aware,
             active_children: None,
             visible_children: None,
             subplans_removed: partition_prune
@@ -743,6 +750,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             relkind,
             relispopulated,
             disabled,
+            parallel_aware,
             toast,
             tablesample,
             desc,
@@ -763,11 +771,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relkind,
                 relispopulated,
                 disabled,
+                parallel_aware,
                 toast_relation: toast,
                 column_names,
                 desc,
                 attr_descs,
                 scan: None,
+                parallel_next_block: 0,
                 tablesample: tablesample.map(TableSampleState::new),
                 scan_rows: Vec::new(),
                 scan_index: 0,
@@ -847,6 +857,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             keys,
             order_by_keys,
             direction,
+            parallel_aware,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let desc = Rc::new(desc);
@@ -874,12 +885,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 keys,
                 order_by_keys,
                 direction,
+                parallel_aware,
                 scan: None,
                 pending_array_scan_keys: Vec::new(),
                 array_scan_seen_tids: Default::default(),
                 array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 vm_buf: None,
+                parallel_tuple_index: 0,
                 slot,
                 qual: None,
                 qual_expr: None,
@@ -907,6 +920,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             order_by_keys,
             direction,
             index_only,
+            parallel_aware,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let desc = Rc::new(desc);
@@ -935,11 +949,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 order_by_keys,
                 direction,
                 index_only,
+                parallel_aware,
                 scan: None,
                 pending_array_scan_keys: Vec::new(),
                 array_scan_seen_tids: Default::default(),
                 array_scan_keys_initialized: false,
                 scan_exhausted: false,
+                parallel_tuple_index: 0,
                 slot,
                 qual: None,
                 qual_expr: None,
@@ -1010,6 +1026,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             bitmapqual,
             recheck_qual,
             filter_qual,
+            parallel_aware,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let desc = Rc::new(desc);
@@ -1045,8 +1062,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 desc,
                 attr_descs,
                 bitmapqual: build_bitmap_qual_state(*bitmapqual),
+                parallel_aware,
                 bitmap_pages: Vec::new(),
                 current_page_index: 0,
+                parallel_page_index: 0,
                 current_page_offsets: Vec::new(),
                 current_offset_index: 0,
                 current_page_pin: None,
@@ -1116,9 +1135,48 @@ pub fn executor_start(plan: Plan) -> PlanState {
             workers_planned,
             single_copy,
         } => Box::new(GatherState {
+            slot: TupleSlot::empty(input.column_names().len()),
+            input_plan: (*input).clone(),
             input: executor_start(*input),
             workers_planned,
             single_copy,
+            initialized: false,
+            receiver: None,
+            worker_handles: Vec::new(),
+            current_bindings: Vec::new(),
+            current_grouping_refs: Vec::new(),
+            leader_index: None,
+            participant_count: 1,
+            leader_done: false,
+            parallel_runtime: None,
+            workers_launched: 0,
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::GatherMerge {
+            plan_info,
+            input,
+            workers_planned,
+            items,
+            display_items,
+        } => Box::new(GatherMergeState {
+            slot: TupleSlot::empty(input.column_names().len()),
+            input_plan: (*input).clone(),
+            input: executor_start(*input),
+            workers_planned,
+            items,
+            display_items,
+            initialized: false,
+            rows: Vec::new(),
+            next_row: 0,
+            worker_handles: Vec::new(),
+            current_bindings: Vec::new(),
+            current_grouping_refs: Vec::new(),
+            leader_index: None,
+            participant_count: 1,
+            leader_done: false,
+            parallel_runtime: None,
+            workers_launched: 0,
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -1336,6 +1394,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relkind,
                 relispopulated,
                 disabled,
+                parallel_aware,
                 toast,
                 tablesample,
                 desc,
@@ -1360,11 +1419,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relkind,
                 relispopulated,
                 disabled,
+                parallel_aware,
                 toast_relation: toast,
                 column_names,
                 desc,
                 attr_descs,
                 scan: None,
+                parallel_next_block: 0,
                 tablesample: tablesample.map(TableSampleState::new),
                 scan_rows: Vec::new(),
                 scan_index: 0,
@@ -1400,6 +1461,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 keys,
                 order_by_keys,
                 direction,
+                parallel_aware,
             } = *input
             else {
                 unreachable!()
@@ -1431,12 +1493,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 keys,
                 order_by_keys,
                 direction,
+                parallel_aware,
                 scan: None,
                 pending_array_scan_keys: Vec::new(),
                 array_scan_seen_tids: Default::default(),
                 array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 vm_buf: None,
+                parallel_tuple_index: 0,
                 slot,
                 qual: Some(qual),
                 qual_expr: Some(predicate),
@@ -1469,6 +1533,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 order_by_keys,
                 direction,
                 index_only,
+                parallel_aware,
             } = *input
             else {
                 unreachable!()
@@ -1501,11 +1566,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 order_by_keys,
                 direction,
                 index_only,
+                parallel_aware,
                 scan: None,
                 pending_array_scan_keys: Vec::new(),
                 array_scan_seen_tids: Default::default(),
                 array_scan_keys_initialized: false,
                 scan_exhausted: false,
+                parallel_tuple_index: 0,
                 slot,
                 qual: Some(qual),
                 qual_expr: Some(predicate),

@@ -8,6 +8,7 @@ use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
 };
 use crate::backend::parser::{CatalogLookup, SubqueryComparisonOp};
+use crate::include::catalog::{BTREE_AM_OID, builtin_aggregate_function_for_proc_oid};
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -17,16 +18,17 @@ use crate::include::nodes::pathnodes::{
     Path, PathTarget, PlannerInfo, PlannerSubroot, RestrictInfo,
 };
 use crate::include::nodes::plannodes::{
-    ExecParamSource, IndexScanKey, IndexScanKeyArgument, PartitionPruneChildDomain,
-    PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark, TidScanCond, TidScanSource,
+    AggregatePhase, AggregateStrategy, ExecParamSource, IndexScanKey, IndexScanKeyArgument,
+    PartitionPruneChildDomain, PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark, TidScanCond,
+    TidScanSource,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript,
-    FuncExpr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry, Param, ParamKind,
-    QueryColumn, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl,
-    SetReturningCall, SubPlan, TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind,
-    XmlExpr, attrno_index, is_executor_special_varno, is_rule_pseudo_varno, is_special_varno,
-    is_system_attr, set_returning_call_exprs, user_attrno,
+    AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, Expr,
+    ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
+    Param, ParamKind, QueryColumn, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr,
+    ScalarFunctionImpl, SetReturningCall, SubLinkType, SubPlan, TargetEntry, Var, WindowClause,
+    WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index, is_executor_special_varno,
+    is_rule_pseudo_varno, is_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -123,6 +125,27 @@ struct SetRefsContext<'a> {
     ext_params: Vec<ExecParamSource>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ParallelSafety {
+    Safe,
+    Restricted,
+    Unsafe,
+}
+
+impl ParallelSafety {
+    fn combine(self, other: Self) -> Self {
+        self.max(other)
+    }
+
+    fn is_unsafe(self) -> bool {
+        matches!(self, ParallelSafety::Unsafe)
+    }
+
+    fn is_worker_safe(self) -> bool {
+        matches!(self, ParallelSafety::Safe)
+    }
+}
+
 pub(super) fn create_plan(
     root: &PlannerInfo,
     path: Path,
@@ -148,13 +171,13 @@ pub(super) fn create_plan_with_param_base(
         ext_params: Vec::new(),
     };
     validate_planner_path(&path);
-    let plan = maybe_wrap_parallel_gather(root, set_plan_refs(&mut ctx, path));
+    let plan = maybe_wrap_parallel_gather(root, catalog, set_plan_refs(&mut ctx, path));
     let allowed_params = exec_param_sources(&ctx.ext_params);
     validate_executable_plan_with_params(&plan, &allowed_params);
     (plan, ctx.ext_params, ctx.next_param_id)
 }
 
-fn maybe_wrap_parallel_gather(root: &PlannerInfo, plan: Plan) -> Plan {
+fn maybe_wrap_parallel_gather(root: &PlannerInfo, catalog: &dyn CatalogLookup, plan: Plan) -> Plan {
     if root.config.force_parallel_gather
         && root.config.max_parallel_workers_per_gather > 0
         && root.parse.limit_count.is_some()
@@ -166,7 +189,1357 @@ fn maybe_wrap_parallel_gather(root: &PlannerInfo, plan: Plan) -> Plan {
             single_copy: true,
         };
     }
+    if root.config.max_parallel_workers_per_gather == 0
+        || !parallel_query_requested(root)
+        || matches!(plan, Plan::Gather { .. } | Plan::GatherMerge { .. })
+    {
+        return plan;
+    }
+    if let Some(plan) = maybe_parallelize_upper_node(root, catalog, &plan) {
+        return plan;
+    }
+    if !plan_parallel_safe(&plan, catalog) {
+        return plan;
+    }
+    if let Some(plan) = maybe_parallel_plain_aggregate(root, catalog, &plan) {
+        return plan;
+    }
+    if !plan_has_complete_aggregate(&plan)
+        && parallel_worker_safe_plan_shape(root, catalog, &plan)
+        && plan_contains_seqscan(&plan)
+    {
+        let mut input = plan;
+        mark_parallel_seq_scans(&mut input);
+        if plan_contains_parallel_aware_seqscan(&input) {
+            return Plan::Gather {
+                plan_info: input.plan_info(),
+                input: Box::new(input),
+                workers_planned: root.config.max_parallel_workers_per_gather,
+                single_copy: false,
+            };
+        }
+        return input;
+    }
     plan
+}
+
+fn maybe_parallelize_upper_node(
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+    plan: &Plan,
+) -> Option<Plan> {
+    match plan {
+        Plan::Projection {
+            plan_info,
+            input,
+            targets,
+        } if targets
+            .iter()
+            .all(|target| !expr_contains_parallel_global_unsafe(&target.expr)) =>
+        {
+            let input_plan = maybe_wrap_parallel_gather(root, catalog, (**input).clone());
+            (input_plan != **input).then(|| Plan::Projection {
+                plan_info: *plan_info,
+                input: Box::new(input_plan),
+                targets: targets.clone(),
+            })
+        }
+        Plan::OrderBy {
+            plan_info,
+            input,
+            items,
+            display_items,
+        } if items
+            .iter()
+            .all(|item| !expr_contains_parallel_global_unsafe(&item.expr)) =>
+        {
+            if items
+                .iter()
+                .all(|item| expr_parallel_safety(&item.expr, Some(catalog)).is_worker_safe())
+                && plan_parallel_safe(input, catalog)
+                && parallel_worker_safe_plan_shape(root, catalog, input)
+                && plan_contains_seqscan(input)
+            {
+                let mut partial_input = (**input).clone();
+                mark_parallel_seq_scans(&mut partial_input);
+                if plan_contains_parallel_aware_seqscan(&partial_input) {
+                    let worker_sort = Plan::OrderBy {
+                        plan_info: *plan_info,
+                        input: Box::new(partial_input),
+                        items: items.clone(),
+                        display_items: display_items.clone(),
+                    };
+                    return Some(Plan::GatherMerge {
+                        plan_info: *plan_info,
+                        input: Box::new(worker_sort),
+                        workers_planned: root.config.max_parallel_workers_per_gather,
+                        items: items.clone(),
+                        display_items: display_items.clone(),
+                    });
+                }
+            }
+            let input_plan = maybe_wrap_parallel_gather(root, catalog, (**input).clone());
+            (input_plan != **input).then(|| Plan::OrderBy {
+                plan_info: *plan_info,
+                input: Box::new(input_plan),
+                items: items.clone(),
+                display_items: display_items.clone(),
+            })
+        }
+        Plan::Limit {
+            plan_info,
+            input,
+            limit,
+            offset,
+        } if limit
+            .as_ref()
+            .is_none_or(|expr| !expr_contains_parallel_global_unsafe(expr))
+            && offset
+                .as_ref()
+                .is_none_or(|expr| !expr_contains_parallel_global_unsafe(expr)) =>
+        {
+            let input_plan = maybe_parallelize_upper_node(root, catalog, input)
+                .unwrap_or_else(|| maybe_wrap_parallel_gather(root, catalog, (**input).clone()));
+            (input_plan != **input).then(|| Plan::Limit {
+                plan_info: *plan_info,
+                input: Box::new(input_plan),
+                limit: limit.clone(),
+                offset: offset.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parallel_query_requested(root: &PlannerInfo) -> bool {
+    root.config.force_parallel_gather
+        || root.config.min_parallel_table_scan_size == 0
+        || root.config.parallel_setup_cost.as_f64() == 0.0
+        || root.config.parallel_tuple_cost.as_f64() == 0.0
+}
+
+fn maybe_parallel_plain_aggregate(
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+    plan: &Plan,
+) -> Option<Plan> {
+    if let Plan::Projection {
+        plan_info,
+        input,
+        targets,
+    } = plan
+        && let Some(input) = maybe_parallel_plain_aggregate(root, catalog, input)
+    {
+        return Some(Plan::Projection {
+            plan_info: *plan_info,
+            input: Box::new(input),
+            targets: targets.clone(),
+        });
+    }
+
+    let Plan::Aggregate {
+        plan_info,
+        strategy,
+        phase,
+        disabled,
+        input,
+        group_by,
+        group_by_refs,
+        grouping_sets,
+        passthrough_exprs,
+        accumulators,
+        semantic_accumulators,
+        semantic_output_names,
+        having,
+        output_columns,
+    } = plan
+    else {
+        return None;
+    };
+    if *phase != AggregatePhase::Complete
+        || *disabled
+        || !grouping_sets.is_empty()
+        || !passthrough_exprs.is_empty()
+        || having.is_some()
+        || semantic_accumulators.is_some()
+        || semantic_output_names.is_some()
+        || aggregate_expressions_contain_parallel_unsafe(
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having.as_ref(),
+            Some(catalog),
+        )
+    {
+        return None;
+    }
+
+    let Some(partial_input) = parallelized_worker_input(root, catalog, input) else {
+        return None;
+    };
+
+    if group_by.is_empty() != group_by_refs.is_empty()
+        || !matches!(
+            *strategy,
+            AggregateStrategy::Plain | AggregateStrategy::Hashed | AggregateStrategy::Sorted
+        )
+        || !all_aggregates_are_partial_safe(accumulators)
+        || !aggregate_expressions_worker_safe(
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having.as_ref(),
+            Some(catalog),
+        )
+    {
+        if matches!(
+            *strategy,
+            AggregateStrategy::Plain | AggregateStrategy::Hashed
+        ) {
+            return Some(Plan::Aggregate {
+                plan_info: *plan_info,
+                strategy: *strategy,
+                phase: *phase,
+                disabled: *disabled,
+                input: Box::new(Plan::Gather {
+                    plan_info: partial_input.plan_info(),
+                    input: Box::new(partial_input),
+                    workers_planned: root.config.max_parallel_workers_per_gather,
+                    single_copy: false,
+                }),
+                group_by: group_by.clone(),
+                group_by_refs: group_by_refs.clone(),
+                grouping_sets: grouping_sets.clone(),
+                passthrough_exprs: passthrough_exprs.clone(),
+                accumulators: accumulators.clone(),
+                semantic_accumulators: semantic_accumulators.clone(),
+                semantic_output_names: semantic_output_names.clone(),
+                having: having.clone(),
+                output_columns: output_columns.clone(),
+            });
+        }
+        return None;
+    }
+
+    let mut partial_output_columns = output_columns.clone();
+    for column in partial_output_columns
+        .iter_mut()
+        .skip(group_by.len() + passthrough_exprs.len())
+    {
+        column.sql_type =
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Record);
+        column.wire_type_oid = None;
+    }
+    let partial = Plan::Aggregate {
+        plan_info: *plan_info,
+        strategy: *strategy,
+        phase: AggregatePhase::Partial,
+        disabled: false,
+        input: Box::new(partial_input),
+        group_by: group_by.clone(),
+        group_by_refs: group_by_refs.clone(),
+        grouping_sets: Vec::new(),
+        passthrough_exprs: Vec::new(),
+        accumulators: accumulators.clone(),
+        semantic_accumulators: None,
+        semantic_output_names: None,
+        having: None,
+        output_columns: partial_output_columns,
+    };
+    let gather = if *strategy == AggregateStrategy::Sorted && !group_by.is_empty() {
+        Plan::GatherMerge {
+            plan_info: partial.plan_info(),
+            input: Box::new(partial),
+            workers_planned: root.config.max_parallel_workers_per_gather,
+            items: gather_merge_items_for_partial_group_by(group_by),
+            display_items: Vec::new(),
+        }
+    } else {
+        Plan::Gather {
+            plan_info: partial.plan_info(),
+            input: Box::new(partial),
+            workers_planned: root.config.max_parallel_workers_per_gather,
+            single_copy: false,
+        }
+    };
+    Some(Plan::Aggregate {
+        plan_info: *plan_info,
+        strategy: *strategy,
+        phase: AggregatePhase::Finalize,
+        disabled: false,
+        input: Box::new(gather),
+        group_by: final_group_by_for_partial(group_by),
+        group_by_refs: group_by_refs.clone(),
+        grouping_sets: Vec::new(),
+        passthrough_exprs: Vec::new(),
+        accumulators: final_accumulators_for_partial(accumulators),
+        semantic_accumulators: Some(accumulators.clone()),
+        semantic_output_names: None,
+        having: None,
+        output_columns: output_columns.clone(),
+    })
+}
+
+fn parallelized_worker_input(
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+    input: &Plan,
+) -> Option<Plan> {
+    if !plan_contains_seqscan(input) || !parallel_worker_safe_plan_shape(root, catalog, input) {
+        return None;
+    }
+    let mut partial_input = input.clone();
+    mark_parallel_seq_scans(&mut partial_input);
+    plan_contains_parallel_aware_seqscan(&partial_input).then_some(partial_input)
+}
+
+fn gather_merge_items_for_partial_group_by(group_by: &[Expr]) -> Vec<OrderByEntry> {
+    group_by
+        .iter()
+        .enumerate()
+        .map(|(index, expr)| OrderByEntry {
+            expr: slot_var_with_collation(
+                0,
+                user_attrno(index),
+                expr_sql_type(expr),
+                expr_collation_oid(expr),
+            ),
+            ressortgroupref: index + 1,
+            descending: false,
+            nulls_first: None,
+            collation_oid: expr_collation_oid(expr),
+        })
+        .collect()
+}
+
+fn final_group_by_for_partial(group_by: &[Expr]) -> Vec<Expr> {
+    group_by
+        .iter()
+        .enumerate()
+        .map(|(index, expr)| {
+            slot_var_with_collation(
+                0,
+                user_attrno(index),
+                expr_sql_type(expr),
+                expr_collation_oid(expr),
+            )
+        })
+        .collect()
+}
+
+fn plan_has_complete_aggregate(plan: &Plan) -> bool {
+    match plan {
+        Plan::Aggregate {
+            phase: AggregatePhase::Complete,
+            ..
+        } => true,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_has_complete_aggregate),
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_has_complete_aggregate(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_has_complete_aggregate(left) || plan_has_complete_aggregate(right)
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => plan_has_complete_aggregate(bitmapqual),
+        Plan::CteScan { cte_plan, .. } => plan_has_complete_aggregate(cte_plan),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => plan_has_complete_aggregate(anchor) || plan_has_complete_aggregate(recursive),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. } => false,
+    }
+}
+
+fn parallel_worker_safe_plan_shape(
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+    plan: &Plan,
+) -> bool {
+    match plan {
+        Plan::SeqScan {
+            relkind,
+            tablesample,
+            ..
+        } => tablesample.is_none() && matches!(*relkind, 'r' | 'p' | 'm'),
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            expr_parallel_safety(predicate, Some(catalog)).is_worker_safe()
+                && parallel_worker_safe_plan_shape(root, catalog, input)
+        }
+        Plan::Projection { input, targets, .. } => {
+            targets
+                .iter()
+                .all(|target| expr_parallel_safety(&target.expr, Some(catalog)).is_worker_safe())
+                && parallel_worker_safe_plan_shape(root, catalog, input)
+        }
+        Plan::SubqueryScan { input, filter, .. } => {
+            filter
+                .as_ref()
+                .is_none_or(|expr| expr_parallel_safety(expr, Some(catalog)).is_worker_safe())
+                && parallel_worker_safe_plan_shape(root, catalog, input)
+        }
+        Plan::OrderBy { input, items, .. } | Plan::IncrementalSort { input, items, .. } => {
+            items
+                .iter()
+                .all(|item| expr_parallel_safety(&item.expr, Some(catalog)).is_worker_safe())
+                && parallel_worker_safe_plan_shape(root, catalog, input)
+        }
+        Plan::Append { children, .. } if root.config.enable_parallel_append => children
+            .iter()
+            .all(|child| parallel_worker_safe_plan_shape(root, catalog, child)),
+        Plan::Materialize { input, .. } => parallel_worker_safe_plan_shape(root, catalog, input),
+        Plan::Hash {
+            input, hash_keys, ..
+        } => {
+            hash_keys
+                .iter()
+                .all(|expr| expr_parallel_safety(expr, Some(catalog)).is_worker_safe())
+                && parallel_worker_safe_plan_shape(root, catalog, input)
+        }
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            nest_params,
+            join_qual,
+            qual,
+            ..
+        } => {
+            nest_params.is_empty()
+                && join_qual
+                    .iter()
+                    .chain(qual.iter())
+                    .all(|expr| expr_parallel_safety(expr, Some(catalog)).is_worker_safe())
+                && parallel_worker_safe_plan_shape(root, catalog, left)
+                && parallel_worker_safe_plan_shape(root, catalog, right)
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            hash_clauses
+                .iter()
+                .chain(hash_keys.iter())
+                .chain(join_qual.iter())
+                .chain(qual.iter())
+                .all(|expr| expr_parallel_safety(expr, Some(catalog)).is_worker_safe())
+                && parallel_worker_safe_plan_shape(root, catalog, left)
+                && parallel_worker_safe_plan_shape(root, catalog, right)
+        }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            merge_clauses
+                .iter()
+                .chain(outer_merge_keys.iter())
+                .chain(inner_merge_keys.iter())
+                .chain(join_qual.iter())
+                .chain(qual.iter())
+                .all(|expr| expr_parallel_safety(expr, Some(catalog)).is_worker_safe())
+                && parallel_worker_safe_plan_shape(root, catalog, left)
+                && parallel_worker_safe_plan_shape(root, catalog, right)
+        }
+        Plan::IndexOnlyScan { am_oid, .. }
+        | Plan::IndexScan { am_oid, .. }
+        | Plan::BitmapIndexScan { am_oid, .. } => *am_oid == BTREE_AM_OID,
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            parallel_worker_safe_plan_shape(root, catalog, bitmapqual)
+        }
+        Plan::Result { .. }
+        | Plan::Append { .. }
+        | Plan::MergeAppend { .. }
+        | Plan::Unique { .. }
+        | Plan::TidScan { .. }
+        | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
+        | Plan::Memoize { .. }
+        | Plan::Gather { .. }
+        | Plan::GatherMerge { .. }
+        | Plan::Limit { .. }
+        | Plan::LockRows { .. }
+        | Plan::Aggregate { .. }
+        | Plan::WindowAgg { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::CteScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::RecursiveUnion { .. }
+        | Plan::SetOp { .. }
+        | Plan::ProjectSet { .. } => false,
+        Plan::Values { rows, .. } => rows
+            .iter()
+            .flatten()
+            .all(|expr| expr_parallel_safety(expr, Some(catalog)).is_worker_safe()),
+    }
+}
+
+fn aggregate_is_partial_safe(accum: &AggAccum) -> bool {
+    if accum.distinct
+        || !accum.direct_args.is_empty()
+        || !accum.order_by.is_empty()
+        || builtin_aggregate_function_for_proc_oid(accum.aggfnoid).is_none()
+    {
+        return false;
+    }
+    matches!(
+        builtin_aggregate_function_for_proc_oid(accum.aggfnoid),
+        Some(AggFunc::Count | AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max)
+    )
+}
+
+fn all_aggregates_are_partial_safe(accumulators: &[AggAccum]) -> bool {
+    accumulators.iter().all(aggregate_is_partial_safe)
+}
+
+fn aggregate_expressions_worker_safe(
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+    having: Option<&Expr>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> bool {
+    group_by
+        .iter()
+        .chain(passthrough_exprs.iter())
+        .all(|expr| expr_parallel_safety(expr, catalog).is_worker_safe())
+        && accumulators
+            .iter()
+            .all(|accum| accumulator_worker_safe(accum, catalog))
+        && having.is_none_or(|expr| expr_parallel_safety(expr, catalog).is_worker_safe())
+}
+
+fn aggregate_expressions_contain_parallel_unsafe(
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+    having: Option<&Expr>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> bool {
+    group_by
+        .iter()
+        .chain(passthrough_exprs.iter())
+        .any(|expr| expr_parallel_safety(expr, catalog).is_unsafe())
+        || accumulators
+            .iter()
+            .any(|accum| accumulator_contains_parallel_unsafe(accum, catalog))
+        || having.is_some_and(|expr| expr_parallel_safety(expr, catalog).is_unsafe())
+}
+
+fn final_accumulators_for_partial(accumulators: &[AggAccum]) -> Vec<AggAccum> {
+    accumulators
+        .iter()
+        .cloned()
+        .map(|mut accum| {
+            accum.distinct = false;
+            accum.direct_args.clear();
+            accum.args.clear();
+            accum.order_by.clear();
+            accum.filter = None;
+            accum
+        })
+        .collect()
+}
+
+fn mark_parallel_seq_scans(plan: &mut Plan) {
+    match plan {
+        Plan::SeqScan {
+            relkind,
+            tablesample,
+            parallel_aware,
+            ..
+        } if tablesample.is_none() && matches!(*relkind, 'r' | 'p' | 'm') => {
+            *parallel_aware = true;
+        }
+        Plan::IndexOnlyScan {
+            am_oid,
+            parallel_aware,
+            ..
+        }
+        | Plan::IndexScan {
+            am_oid,
+            parallel_aware,
+            ..
+        } if *am_oid == BTREE_AM_OID => {
+            *parallel_aware = true;
+        }
+        Plan::BitmapHeapScan {
+            bitmapqual,
+            parallel_aware,
+            ..
+        } => {
+            mark_parallel_seq_scans(bitmapqual);
+            *parallel_aware = plan_contains_seqscan(bitmapqual);
+        }
+        Plan::Append {
+            children,
+            parallel_aware,
+            ..
+        } => {
+            for child in children.iter_mut() {
+                mark_parallel_seq_scans(child);
+            }
+            *parallel_aware =
+                !children.is_empty() && children.iter().all(plan_contains_parallel_aware_seqscan);
+        }
+        Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => {
+            for child in children {
+                mark_parallel_seq_scans(child);
+            }
+        }
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => mark_parallel_seq_scans(input),
+        Plan::NestedLoopJoin { left, .. }
+        | Plan::HashJoin { left, .. }
+        | Plan::MergeJoin { left, .. } => {
+            // :HACK: This v1 parallel rewrite only models partial joins by
+            // dividing the outer side. The inner side stays worker-local and
+            // serial to avoid duplicate/missing join pairs until real partial
+            // path generation can choose both sides deliberately.
+            mark_parallel_seq_scans(left);
+        }
+        Plan::CteScan { cte_plan, .. } => mark_parallel_seq_scans(cte_plan),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            mark_parallel_seq_scans(anchor);
+            mark_parallel_seq_scans(recursive);
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. } => {}
+    }
+}
+
+fn plan_contains_seqscan(plan: &Plan) -> bool {
+    match plan {
+        Plan::SeqScan {
+            relkind,
+            tablesample,
+            ..
+        } => tablesample.is_none() && matches!(*relkind, 'r' | 'p' | 'm'),
+        Plan::IndexOnlyScan { am_oid, .. } | Plan::IndexScan { am_oid, .. } => {
+            *am_oid == BTREE_AM_OID
+        }
+        Plan::BitmapIndexScan { am_oid, .. } => *am_oid == BTREE_AM_OID,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_contains_seqscan),
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_contains_seqscan(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_seqscan(left) || plan_contains_seqscan(right)
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_seqscan(bitmapqual),
+        Plan::CteScan { cte_plan, .. } => plan_contains_seqscan(cte_plan),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => plan_contains_seqscan(anchor) || plan_contains_seqscan(recursive),
+        Plan::Result { .. }
+        | Plan::TidScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. } => false,
+    }
+}
+
+fn plan_contains_parallel_aware_seqscan(plan: &Plan) -> bool {
+    match plan {
+        Plan::SeqScan {
+            parallel_aware: true,
+            ..
+        } => true,
+        Plan::IndexOnlyScan {
+            parallel_aware: true,
+            ..
+        }
+        | Plan::IndexScan {
+            parallel_aware: true,
+            ..
+        }
+        | Plan::BitmapHeapScan {
+            parallel_aware: true,
+            ..
+        } => true,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_contains_parallel_aware_seqscan),
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_contains_parallel_aware_seqscan(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_parallel_aware_seqscan(left)
+                || plan_contains_parallel_aware_seqscan(right)
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_parallel_aware_seqscan(bitmapqual),
+        Plan::CteScan { cte_plan, .. } => plan_contains_parallel_aware_seqscan(cte_plan),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            plan_contains_parallel_aware_seqscan(anchor)
+                || plan_contains_parallel_aware_seqscan(recursive)
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. } => false,
+    }
+}
+
+fn plan_parallel_safe(plan: &Plan, catalog: &dyn CatalogLookup) -> bool {
+    match plan {
+        Plan::WindowAgg { .. }
+        | Plan::LockRows { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::ProjectSet { .. }
+        | Plan::CteScan { .. }
+        | Plan::RecursiveUnion { .. }
+        | Plan::WorkTableScan { .. } => false,
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::TidScan { filter: None, .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. } => true,
+        Plan::TidScan {
+            filter: Some(filter),
+            ..
+        } => !expr_parallel_safety(filter, Some(catalog)).is_unsafe(),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children
+            .iter()
+            .all(|plan| plan_parallel_safe(plan, catalog)),
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. } => plan_parallel_safe(input, catalog),
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => {
+            plan_parallel_safe(input, catalog)
+                && !cache_keys
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+        }
+        Plan::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            filter_qual,
+            ..
+        } => {
+            plan_parallel_safe(bitmapqual, catalog)
+                && !recheck_qual
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !filter_qual
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+        }
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            nest_params,
+            join_qual,
+            qual,
+            ..
+        } => {
+            nest_params.is_empty()
+                && plan_parallel_safe(left, catalog)
+                && plan_parallel_safe(right, catalog)
+                && !join_qual
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !qual
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_parallel_safe(left, catalog)
+                && plan_parallel_safe(right, catalog)
+                && !hash_clauses
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !hash_keys
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !join_qual
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !qual
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+        }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_parallel_safe(left, catalog)
+                && plan_parallel_safe(right, catalog)
+                && !merge_clauses
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !outer_merge_keys
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !inner_merge_keys
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !join_qual
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !qual
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+        }
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            plan_parallel_safe(input, catalog)
+                && !expr_parallel_safety(predicate, Some(catalog)).is_unsafe()
+        }
+        Plan::OrderBy { input, items, .. } | Plan::IncrementalSort { input, items, .. } => {
+            plan_parallel_safe(input, catalog)
+                && !items
+                    .iter()
+                    .any(|item| expr_parallel_safety(&item.expr, Some(catalog)).is_unsafe())
+        }
+        Plan::Limit {
+            input,
+            limit,
+            offset,
+            ..
+        } => {
+            plan_parallel_safe(input, catalog)
+                && !limit
+                    .as_ref()
+                    .is_some_and(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !offset
+                    .as_ref()
+                    .is_some_and(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+        }
+        Plan::Projection { input, targets, .. } => {
+            plan_parallel_safe(input, catalog)
+                && !targets
+                    .iter()
+                    .any(|target| expr_parallel_safety(&target.expr, Some(catalog)).is_unsafe())
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            ..
+        } => {
+            plan_parallel_safe(input, catalog)
+                && !group_by
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !passthrough_exprs
+                    .iter()
+                    .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+                && !accumulators
+                    .iter()
+                    .any(|accum| accumulator_contains_parallel_unsafe(accum, Some(catalog)))
+                && !having
+                    .as_ref()
+                    .is_some_and(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+        }
+        Plan::SubqueryScan { input, filter, .. } => {
+            plan_parallel_safe(input, catalog)
+                && !filter
+                    .as_ref()
+                    .is_some_and(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe())
+        }
+        Plan::Values { rows, .. } => !rows
+            .iter()
+            .flatten()
+            .any(|expr| expr_parallel_safety(expr, Some(catalog)).is_unsafe()),
+    }
+}
+
+fn accumulator_contains_parallel_unsafe(
+    accum: &AggAccum,
+    catalog: Option<&dyn CatalogLookup>,
+) -> bool {
+    accum
+        .direct_args
+        .iter()
+        .any(|expr| expr_parallel_safety(expr, catalog).is_unsafe())
+        || accum
+            .args
+            .iter()
+            .any(|expr| expr_parallel_safety(expr, catalog).is_unsafe())
+        || accum
+            .order_by
+            .iter()
+            .any(|item| expr_parallel_safety(&item.expr, catalog).is_unsafe())
+        || accum
+            .filter
+            .as_ref()
+            .is_some_and(|expr| expr_parallel_safety(expr, catalog).is_unsafe())
+}
+
+fn accumulator_worker_safe(accum: &AggAccum, catalog: Option<&dyn CatalogLookup>) -> bool {
+    accum
+        .direct_args
+        .iter()
+        .all(|expr| expr_parallel_safety(expr, catalog).is_worker_safe())
+        && accum
+            .args
+            .iter()
+            .all(|expr| expr_parallel_safety(expr, catalog).is_worker_safe())
+        && accum
+            .order_by
+            .iter()
+            .all(|item| expr_parallel_safety(&item.expr, catalog).is_worker_safe())
+        && accum
+            .filter
+            .as_ref()
+            .is_none_or(|expr| expr_parallel_safety(expr, catalog).is_worker_safe())
+}
+
+fn expr_contains_parallel_unsafe(expr: &Expr) -> bool {
+    expr_parallel_safety(expr, None).is_unsafe()
+}
+
+fn expr_parallel_safety(expr: &Expr, catalog: Option<&dyn CatalogLookup>) -> ParallelSafety {
+    match expr {
+        Expr::Random | Expr::SetReturning(_) | Expr::SubLink(_) => ParallelSafety::Unsafe,
+        Expr::SubPlan(subplan) => subplan_parallel_safety(subplan, catalog),
+        Expr::Func(func) => {
+            let mut safety = scalar_function_parallel_safety(func, catalog);
+            for arg in &func.args {
+                safety = safety.combine(expr_parallel_safety(arg, catalog));
+            }
+            if let Some(args) = &func.display_args {
+                for arg in args {
+                    safety = safety.combine(expr_parallel_safety(&arg.expr, catalog));
+                }
+            }
+            safety
+        }
+        Expr::Aggref(aggref) => {
+            let mut safety = ParallelSafety::Safe;
+            for arg in aggref.direct_args.iter().chain(aggref.args.iter()) {
+                safety = safety.combine(expr_parallel_safety(arg, catalog));
+            }
+            for entry in &aggref.aggorder {
+                safety = safety.combine(expr_parallel_safety(&entry.expr, catalog));
+            }
+            if let Some(filter) = &aggref.aggfilter {
+                safety = safety.combine(expr_parallel_safety(filter, catalog));
+            }
+            safety
+        }
+        Expr::GroupingKey(grouping_key) => expr_parallel_safety(&grouping_key.expr, catalog),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .fold(ParallelSafety::Safe, |safety, arg| {
+                safety.combine(expr_parallel_safety(arg, catalog))
+            }),
+        Expr::WindowFunc(_) => ParallelSafety::Unsafe,
+        Expr::Op(op) => op.args.iter().fold(ParallelSafety::Safe, |safety, arg| {
+            safety.combine(expr_parallel_safety(arg, catalog))
+        }),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .fold(ParallelSafety::Safe, |safety, arg| {
+                safety.combine(expr_parallel_safety(arg, catalog))
+            }),
+        Expr::Case(case_expr) => {
+            let mut safety = case_expr
+                .arg
+                .as_ref()
+                .map(|arg| expr_parallel_safety(arg, catalog))
+                .unwrap_or(ParallelSafety::Safe);
+            for arm in &case_expr.args {
+                safety = safety.combine(expr_parallel_safety(&arm.expr, catalog));
+                safety = safety.combine(expr_parallel_safety(&arm.result, catalog));
+            }
+            safety.combine(expr_parallel_safety(&case_expr.defresult, catalog))
+        }
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .fold(ParallelSafety::Safe, |safety, child| {
+                safety.combine(expr_parallel_safety(child, catalog))
+            }),
+        Expr::ScalarArrayOp(op) => expr_parallel_safety(&op.left, catalog)
+            .combine(expr_parallel_safety(&op.right, catalog)),
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .fold(ParallelSafety::Safe, |safety, child| {
+                safety.combine(expr_parallel_safety(child, catalog))
+            }),
+        Expr::Cast(inner, _) => expr_parallel_safety(inner, catalog),
+        Expr::Collate { expr, .. } => expr_parallel_safety(expr, catalog),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            let mut safety =
+                expr_parallel_safety(expr, catalog).combine(expr_parallel_safety(pattern, catalog));
+            if let Some(escape) = escape {
+                safety = safety.combine(expr_parallel_safety(escape, catalog));
+            }
+            safety
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_parallel_safety(inner, catalog),
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_parallel_safety(left, catalog).combine(expr_parallel_safety(right, catalog))
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .fold(ParallelSafety::Safe, |safety, element| {
+                safety.combine(expr_parallel_safety(element, catalog))
+            }),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .fold(ParallelSafety::Safe, |safety, (_, field)| {
+                safety.combine(expr_parallel_safety(field, catalog))
+            }),
+        Expr::FieldSelect { expr, .. } => expr_parallel_safety(expr, catalog),
+        Expr::Coalesce(left, right) => {
+            expr_parallel_safety(left, catalog).combine(expr_parallel_safety(right, catalog))
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            let mut safety = expr_parallel_safety(array, catalog);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    safety = safety.combine(expr_parallel_safety(lower, catalog));
+                }
+                if let Some(upper) = &subscript.upper {
+                    safety = safety.combine(expr_parallel_safety(upper, catalog));
+                }
+            }
+            safety
+        }
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => ParallelSafety::Safe,
+    }
+}
+
+fn subplan_parallel_safety(
+    subplan: &SubPlan,
+    catalog: Option<&dyn CatalogLookup>,
+) -> ParallelSafety {
+    if !subplan.par_param.is_empty() || !subplan.args.is_empty() {
+        return ParallelSafety::Unsafe;
+    }
+    subplan
+        .testexpr
+        .as_ref()
+        .map(|expr| expr_parallel_safety(expr, catalog))
+        .unwrap_or(ParallelSafety::Safe)
+}
+
+fn scalar_function_parallel_safety(
+    func: &FuncExpr,
+    catalog: Option<&dyn CatalogLookup>,
+) -> ParallelSafety {
+    match func.implementation {
+        ScalarFunctionImpl::Builtin(
+            BuiltinScalarFunction::Random
+            | BuiltinScalarFunction::RandomNormal
+            | BuiltinScalarFunction::GenRandomUuid,
+        ) => ParallelSafety::Unsafe,
+        ScalarFunctionImpl::UserDefined { proc_oid } => proc_parallel_safety(catalog, proc_oid),
+        ScalarFunctionImpl::Builtin(_) => {
+            if func.funcid == 0 || catalog.is_none() {
+                ParallelSafety::Safe
+            } else {
+                proc_parallel_safety(catalog, func.funcid)
+            }
+        }
+    }
+}
+
+fn proc_parallel_safety(catalog: Option<&dyn CatalogLookup>, proc_oid: u32) -> ParallelSafety {
+    match catalog.and_then(|catalog| catalog.proc_row_by_oid(proc_oid)) {
+        Some(row) => match row.proparallel {
+            's' => ParallelSafety::Safe,
+            'r' => ParallelSafety::Restricted,
+            _ => ParallelSafety::Unsafe,
+        },
+        None => ParallelSafety::Unsafe,
+    }
+}
+
+fn expr_contains_parallel_global_unsafe(expr: &Expr) -> bool {
+    match expr {
+        Expr::Random | Expr::SetReturning(_) | Expr::SubLink(_) => true,
+        Expr::SubPlan(subplan) => subplan_parallel_safety(subplan, None).is_unsafe(),
+        Expr::Func(func) => {
+            matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(
+                    BuiltinScalarFunction::Random
+                        | BuiltinScalarFunction::RandomNormal
+                        | BuiltinScalarFunction::GenRandomUuid
+                )
+            ) || func.args.iter().any(expr_contains_parallel_global_unsafe)
+                || func.display_args.as_ref().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| expr_contains_parallel_global_unsafe(&arg.expr))
+                })
+        }
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .any(expr_contains_parallel_global_unsafe)
+                || aggref.args.iter().any(expr_contains_parallel_global_unsafe)
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|entry| expr_contains_parallel_global_unsafe(&entry.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_parallel_global_unsafe)
+        }
+        Expr::GroupingKey(grouping_key) => expr_contains_parallel_global_unsafe(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(expr_contains_parallel_global_unsafe),
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(expr_contains_parallel_global_unsafe),
+        Expr::Op(op) => op.args.iter().any(expr_contains_parallel_global_unsafe),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(expr_contains_parallel_global_unsafe),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|arg| expr_contains_parallel_global_unsafe(arg))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_parallel_global_unsafe(&arm.expr)
+                        || expr_contains_parallel_global_unsafe(&arm.result)
+                })
+                || expr_contains_parallel_global_unsafe(&case_expr.defresult)
+        }
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(expr_contains_parallel_global_unsafe),
+        Expr::ScalarArrayOp(op) => {
+            expr_contains_parallel_global_unsafe(&op.left)
+                || expr_contains_parallel_global_unsafe(&op.right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_parallel_global_unsafe),
+        Expr::Cast(inner, _) => expr_contains_parallel_global_unsafe(inner),
+        Expr::Collate { expr, .. } => expr_contains_parallel_global_unsafe(expr),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_parallel_global_unsafe(expr)
+                || expr_contains_parallel_global_unsafe(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|escape| expr_contains_parallel_global_unsafe(escape))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_parallel_global_unsafe(inner),
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_contains_parallel_global_unsafe(left)
+                || expr_contains_parallel_global_unsafe(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().any(expr_contains_parallel_global_unsafe)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, field)| expr_contains_parallel_global_unsafe(field)),
+        Expr::FieldSelect { expr, .. } => expr_contains_parallel_global_unsafe(expr),
+        Expr::Coalesce(left, right) => {
+            expr_contains_parallel_global_unsafe(left)
+                || expr_contains_parallel_global_unsafe(right)
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_parallel_global_unsafe(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_parallel_global_unsafe)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_parallel_global_unsafe)
+                })
+        }
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 pub(super) fn create_plan_without_root(path: Path) -> Plan {
@@ -3662,7 +5035,16 @@ fn lower_sublink(
         .map(|target| target.sql_type);
     let target_width = sublink.subselect.target_list.len();
     let target_attnos = subplan_target_attnos(&sublink.subselect.target_list);
-    let config = ctx.root.map(|root| root.config).unwrap_or_default();
+    let sublink_type = sublink.sublink_type;
+    let plan_subquery_in_parallel = matches!(
+        sublink_type,
+        SubLinkType::ExprSubLink | SubLinkType::ArraySubLink
+    ) && sublink.testexpr.is_none();
+    let mut config = ctx.root.map(|root| root.config).unwrap_or_default();
+    if !plan_subquery_in_parallel {
+        config.max_parallel_workers_per_gather = 0;
+        config.force_parallel_gather = false;
+    }
     let (planned_stmt, next_param_id) =
         planner_with_param_base_and_config(*sublink.subselect, catalog, ctx.next_param_id, config)
             .expect("locking validation should complete before setrefs subplan lowering");
@@ -3710,7 +5092,7 @@ fn lower_sublink(
         .collect::<Vec<_>>();
     let plan_id = append_uncorrelated_planned_subquery(planned_stmt, ctx.subplans);
     Expr::SubPlan(Box::new(SubPlan {
-        sublink_type: sublink.sublink_type,
+        sublink_type,
         testexpr: sublink
             .testexpr
             .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
@@ -4537,6 +5919,7 @@ fn collect_plan_external_exec_paramids(
         Plan::Unique { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::CteScan {
@@ -5142,7 +6525,7 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
             });
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
-        Plan::Gather { input, .. } => {
+        Plan::Gather { input, .. } | Plan::GatherMerge { input, .. } => {
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::NestedLoopJoin {
@@ -5973,6 +7356,7 @@ fn set_filter_references(
                         toast,
                         tablesample,
                         desc,
+                        parallel_aware: false,
                     }),
                     predicate,
                 }
@@ -6201,6 +7585,7 @@ fn set_append_references(
         plan_info,
         source_id,
         desc,
+        parallel_aware: false,
         partition_prune,
         children,
     }
@@ -6723,6 +8108,7 @@ fn set_index_only_scan_references(
         keys,
         order_by_keys,
         direction,
+        parallel_aware: false,
     }
 }
 
@@ -6811,6 +8197,7 @@ fn set_seq_scan_references(
         toast,
         tablesample,
         desc,
+        parallel_aware: false,
     }
 }
 
@@ -6859,6 +8246,7 @@ fn set_index_scan_references(
         order_by_keys,
         direction,
         index_only,
+        parallel_aware: false,
     }
 }
 
@@ -6989,6 +8377,7 @@ fn set_bitmap_heap_scan_references(
         bitmapqual: Box::new(set_plan_refs(ctx, *bitmapqual)),
         recheck_qual,
         filter_qual,
+        parallel_aware: false,
     }
 }
 
@@ -7443,6 +8832,7 @@ fn plan_contains_tprt_runtime_index_scan(plan: &Plan) -> bool {
         | Plan::ProjectSet { input, .. }
         | Plan::SubqueryScan { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Hash { input, .. }
         | Plan::CteScan {
             cte_plan: input, ..
@@ -7493,6 +8883,7 @@ fn plan_contains_runtime_index_scan(plan: &Plan) -> bool {
         | Plan::ProjectSet { input, .. }
         | Plan::SubqueryScan { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Hash { input, .. }
         | Plan::CteScan {
             cte_plan: input, ..
@@ -7525,6 +8916,7 @@ fn plan_contains_values_scan(plan: &Plan) -> bool {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -7574,6 +8966,7 @@ fn plan_contains_sql_xml_table_scan(plan: &Plan) -> bool {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -7652,6 +9045,7 @@ fn annotate_runtime_index_labels(plan: &mut Plan, param_labels: &BTreeMap<usize,
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -7723,6 +9117,7 @@ fn runtime_label_for_single_param(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -7860,6 +9255,7 @@ fn memoize_uses_binary_mode(plan: &Plan) -> bool {
         | Plan::Materialize { input, .. }
         | Plan::SubqueryScan { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::LockRows { input, .. } => memoize_uses_binary_mode(input),
         Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
             children.iter().any(memoize_uses_binary_mode)
@@ -9129,7 +10525,8 @@ fn plan_contains_function_scan(plan: &Plan) -> bool {
         | Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
-        | Plan::Gather { input, .. } => plan_contains_function_scan(input),
+        | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. } => plan_contains_function_scan(input),
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::BitmapOr { children, .. }

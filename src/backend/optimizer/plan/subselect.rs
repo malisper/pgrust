@@ -131,6 +131,7 @@ fn plan_contains_volatile_expr(plan: &Plan) -> bool {
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::CteScan {
             cte_plan: input, ..
         } => plan_contains_volatile_expr(input),
@@ -1672,6 +1673,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             bitmapqual,
             recheck_qual,
             filter_qual,
+            parallel_aware,
         } => Plan::BitmapHeapScan {
             plan_info,
             source_id,
@@ -1689,17 +1691,20 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
+            parallel_aware,
         },
         Plan::Append {
             plan_info,
             source_id,
             desc,
+            parallel_aware,
             partition_prune,
             children,
         } => Plan::Append {
             plan_info,
             source_id,
             desc,
+            parallel_aware,
             partition_prune: partition_prune.map(|info| rebase_partition_prune_info(info, base)),
             children: children
                 .into_iter()
@@ -1772,6 +1777,25 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             workers_planned,
             single_copy,
+        },
+        Plan::GatherMerge {
+            plan_info,
+            input,
+            workers_planned,
+            items,
+            display_items,
+        } => Plan::GatherMerge {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            workers_planned,
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: rebase_expr_subplan_ids(item.expr, base),
+                    ..item
+                })
+                .collect(),
+            display_items: display_items.into_iter().collect(),
         },
         Plan::NestedLoopJoin {
             plan_info,
@@ -2259,6 +2283,7 @@ pub(super) fn finalize_plan_subqueries(
             bitmapqual,
             recheck_qual,
             filter_qual,
+            parallel_aware,
         } => Plan::BitmapHeapScan {
             plan_info,
             source_id,
@@ -2276,17 +2301,20 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
+            parallel_aware,
         },
         Plan::Append {
             plan_info,
             source_id,
             desc,
+            parallel_aware,
             partition_prune,
             children,
         } => Plan::Append {
             plan_info,
             source_id,
             desc,
+            parallel_aware,
             partition_prune: partition_prune
                 .map(|info| finalize_partition_prune_info(info, catalog, subplans)),
             children: children
@@ -2360,6 +2388,25 @@ pub(super) fn finalize_plan_subqueries(
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             workers_planned,
             single_copy,
+        },
+        Plan::GatherMerge {
+            plan_info,
+            input,
+            workers_planned,
+            items,
+            display_items,
+        } => Plan::GatherMerge {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            workers_planned,
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: finalize_expr_subqueries(item.expr, catalog, subplans),
+                    ..item
+                })
+                .collect(),
+            display_items: display_items.into_iter().collect(),
         },
         Plan::NestedLoopJoin {
             plan_info,

@@ -1297,7 +1297,7 @@ pub(crate) fn default_pg_settings_rows() -> Vec<Vec<Value>> {
     ]
 }
 
-pub trait CatalogLookup {
+pub trait CatalogLookup: Send + Sync {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation>;
 
     fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {

@@ -11925,6 +11925,7 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -11979,6 +11980,7 @@ fn plan_contains_lock_rows(plan: &Plan) -> bool {
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }

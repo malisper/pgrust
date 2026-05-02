@@ -438,6 +438,7 @@ fn people_scan_plan() -> Plan {
         relkind: 'r',
         relispopulated: true,
         disabled: false,
+        parallel_aware: false,
         toast: None,
         tablesample: None,
         desc: relation_desc(),
@@ -454,6 +455,7 @@ fn pets_scan_plan() -> Plan {
         relkind: 'r',
         relispopulated: true,
         disabled: false,
+        parallel_aware: false,
         toast: None,
         tablesample: None,
         desc: pets_relation_desc(),
@@ -1300,7 +1302,35 @@ fn run_sql_with_catalog(
     txns: &TransactionManager,
     xid: TransactionId,
     sql: &str,
+    catalog: Catalog,
+) -> Result<StatementResult, ExecError> {
+    run_sql_with_catalog_and_planner_config(base, txns, xid, sql, catalog, None)
+}
+
+fn run_readonly_sql_with_config(
+    base: &PathBuf,
+    txns: &TransactionManager,
+    sql: &str,
+    catalog: Catalog,
+    config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
+    run_sql_with_catalog_and_planner_config(
+        base,
+        txns,
+        INVALID_TRANSACTION_ID,
+        sql,
+        catalog,
+        Some(config),
+    )
+}
+
+fn run_sql_with_catalog_and_planner_config(
+    base: &PathBuf,
+    txns: &TransactionManager,
+    xid: TransactionId,
+    sql: &str,
     mut catalog: Catalog,
+    planner_config: Option<PlannerConfig>,
 ) -> Result<StatementResult, ExecError> {
     let base = base.clone();
     let txns = txns.clone();
@@ -1391,7 +1421,12 @@ fn run_sql_with_catalog(
             deferred_foreign_keys: None,
             trigger_depth: 0,
         };
-        execute_sql(&sql, &mut catalog, &mut ctx, xid)
+        if let Some(planner_config) = planner_config {
+            let stmt = crate::backend::parser::parse_statement(&sql)?;
+            execute_readonly_statement_with_config(stmt, &catalog, &mut ctx, planner_config)
+        } else {
+            execute_sql(&sql, &mut catalog, &mut ctx, xid)
+        }
     })
 }
 
@@ -1890,6 +1925,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
                 relkind: 'r',
                 relispopulated: true,
                 disabled: false,
+                parallel_aware: false,
                 toast: None,
                 tablesample: None,
                 desc: relation_desc(),
@@ -1928,6 +1964,87 @@ fn seqscan_filter_projection_returns_expected_rows() {
             ),
         ]
     );
+}
+
+#[test]
+fn parallel_gather_seqscan_returns_each_row_once() {
+    let base = temp_dir("parallel_gather_seqscan");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let pool = test_pool(&base);
+    let xid = txns.begin();
+    let mut blocks = Vec::new();
+    for id in 1..=1000 {
+        let row = tuple(id, &format!("p{id}"), Some("parallel"));
+        let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &row).unwrap();
+        blocks.push(tid.block_number);
+    }
+    txns.commit(xid).unwrap();
+    blocks.sort();
+    blocks.dedup();
+    for block in blocks {
+        heap_flush(&*pool, 1, rel(), block).unwrap();
+    }
+    drop(pool);
+
+    let mut input = people_scan_plan();
+    let Plan::SeqScan { parallel_aware, .. } = &mut input else {
+        unreachable!()
+    };
+    *parallel_aware = true;
+    let plan = Plan::Gather {
+        plan_info: crate::backend::executor::PlanEstimate::default(),
+        input: Box::new(input),
+        workers_planned: 2,
+        single_copy: false,
+    };
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    let mut ids = rows
+        .into_iter()
+        .map(|(_, values)| match values.first() {
+            Some(Value::Int32(id)) => *id,
+            other => panic!("expected int4 id, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    assert_eq!(ids, (1..=1000).collect::<Vec<_>>());
+}
+
+#[test]
+fn forced_parallel_count_sql_returns_serial_count() {
+    let base = temp_dir("parallel_count_sql");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    let values = (1..=300)
+        .map(|id| format!("({id}, 'p{id}', 'parallel')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        &format!("insert into people (id, name, note) values {values}"),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_readonly_sql_with_config(
+        &base,
+        &txns,
+        "select count(*) from people",
+        catalog(),
+        PlannerConfig {
+            min_parallel_table_scan_size: 0,
+            parallel_setup_cost: crate::include::nodes::plannodes::EstimateValue(0.0),
+            parallel_tuple_cost: crate::include::nodes::plannodes::EstimateValue(0.0),
+            max_parallel_workers_per_gather: 2,
+            ..PlannerConfig::default()
+        },
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(300)]]),
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1971,6 +2088,7 @@ fn seqscan_skips_superseded_versions() {
         relkind: 'r',
         relispopulated: true,
         disabled: false,
+        parallel_aware: false,
         toast: None,
         tablesample: None,
         desc: relation_desc(),
@@ -4738,6 +4856,7 @@ fn index_only_scan_uses_virtual_slot_and_falls_back_when_visibility_bit_cleared(
         order_by_keys: Vec::new(),
         direction: crate::include::access::relscan::ScanDirection::Forward,
         index_only: true,
+        parallel_aware: false,
     };
 
     let on_all_visible_page =
@@ -6059,6 +6178,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
             | Plan::Materialize { input, .. }
             | Plan::Memoize { input, .. }
             | Plan::Gather { input, .. }
+            | Plan::GatherMerge { input, .. }
             | Plan::Unique { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }

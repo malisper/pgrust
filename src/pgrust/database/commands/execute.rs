@@ -75,10 +75,18 @@ fn direct_guc_default(name: &str) -> Option<&'static str> {
         | "enable_material"
         | "enable_partition_pruning"
         | "enable_hashagg"
-        | "enable_sort" => Some("on"),
+        | "enable_sort"
+        | "enable_parallel_append"
+        | "enable_parallel_hash"
+        | "parallel_leader_participation" => Some("on"),
         "debug_parallel_query" => Some("off"),
         "lo_compat_privileges" => Some("off"),
+        "max_parallel_workers" => Some("8"),
         "max_parallel_workers_per_gather" => Some("2"),
+        "min_parallel_table_scan_size" => Some("8MB"),
+        "min_parallel_index_scan_size" => Some("512kB"),
+        "parallel_setup_cost" => Some("1000"),
+        "parallel_tuple_cost" => Some("0.1"),
         "default_tablespace" => Some(""),
         _ => None,
     }
@@ -102,6 +110,43 @@ fn direct_usize_config(
     gucs.get(name)
         .and_then(|value| value.trim().trim_matches('\'').parse::<usize>().ok())
         .unwrap_or(default)
+}
+
+fn direct_size_config(
+    gucs: &std::collections::HashMap<String, String>,
+    name: &str,
+    default: usize,
+) -> usize {
+    gucs.get(name)
+        .and_then(|value| parse_direct_size_guc(value))
+        .unwrap_or(default)
+}
+
+fn direct_f64_config(
+    gucs: &std::collections::HashMap<String, String>,
+    name: &str,
+    default: f64,
+) -> f64 {
+    gucs.get(name)
+        .and_then(|value| value.trim().trim_matches('\'').parse::<f64>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_direct_size_guc(value: &str) -> Option<usize> {
+    let value = value.trim().trim_matches('\'').trim();
+    let split = value
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(value.len());
+    let number = value[..split].parse::<usize>().ok()?;
+    let unit = value[split..].trim().to_ascii_lowercase();
+    let multiplier = match unit.as_str() {
+        "" | "b" => 1,
+        "kb" | "k" => 1024,
+        "mb" | "m" => 1024 * 1024,
+        "gb" | "g" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    number.checked_mul(multiplier)
 }
 
 fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> PlannerConfig {
@@ -134,12 +179,40 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
         retain_partial_index_filters: false,
         enable_hashagg: direct_bool_config(gucs, "enable_hashagg", true),
         enable_sort: direct_bool_config(gucs, "enable_sort", true),
+        enable_parallel_append: direct_bool_config(gucs, "enable_parallel_append", true),
+        enable_parallel_hash: direct_bool_config(gucs, "enable_parallel_hash", true),
         force_parallel_gather: direct_bool_config(gucs, "debug_parallel_query", false),
+        max_parallel_workers: direct_usize_config(gucs, "max_parallel_workers", 8),
         max_parallel_workers_per_gather: direct_usize_config(
             gucs,
             "max_parallel_workers_per_gather",
             2,
         ),
+        parallel_leader_participation: direct_bool_config(
+            gucs,
+            "parallel_leader_participation",
+            true,
+        ),
+        min_parallel_table_scan_size: direct_size_config(
+            gucs,
+            "min_parallel_table_scan_size",
+            8 * 1024 * 1024,
+        ),
+        min_parallel_index_scan_size: direct_size_config(
+            gucs,
+            "min_parallel_index_scan_size",
+            512 * 1024,
+        ),
+        parallel_setup_cost: crate::include::nodes::plannodes::EstimateValue(direct_f64_config(
+            gucs,
+            "parallel_setup_cost",
+            1000.0,
+        )),
+        parallel_tuple_cost: crate::include::nodes::plannodes::EstimateValue(direct_f64_config(
+            gucs,
+            "parallel_tuple_cost",
+            0.1,
+        )),
         fold_constants: true,
     }
 }
@@ -507,6 +580,7 @@ fn reject_restricted_views_in_plan(
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
         | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -1726,6 +1800,42 @@ impl Database {
                     let gucs = states.entry(client_id).or_default();
                     if let Some(value) = set_stmt.value.as_ref() {
                         if name == "default_tablespace" {
+                            gucs.insert(name, value.trim().trim_matches('\'').to_string());
+                        } else if matches!(
+                            name.as_str(),
+                            "max_parallel_workers" | "max_parallel_workers_per_gather"
+                        ) {
+                            value
+                                .trim()
+                                .trim_matches('\'')
+                                .parse::<usize>()
+                                .map_err(|_| {
+                                    ExecError::Parse(ParseError::UnrecognizedParameter(
+                                        value.clone(),
+                                    ))
+                                })?;
+                            gucs.insert(name, value.trim().trim_matches('\'').to_string());
+                        } else if matches!(
+                            name.as_str(),
+                            "min_parallel_table_scan_size" | "min_parallel_index_scan_size"
+                        ) {
+                            parse_direct_size_guc(value).ok_or_else(|| {
+                                ExecError::Parse(ParseError::UnrecognizedParameter(value.clone()))
+                            })?;
+                            gucs.insert(name, value.trim().trim_matches('\'').to_string());
+                        } else if matches!(
+                            name.as_str(),
+                            "parallel_setup_cost" | "parallel_tuple_cost"
+                        ) {
+                            value
+                                .trim()
+                                .trim_matches('\'')
+                                .parse::<f64>()
+                                .map_err(|_| {
+                                    ExecError::Parse(ParseError::UnrecognizedParameter(
+                                        value.clone(),
+                                    ))
+                                })?;
                             gucs.insert(name, value.trim().trim_matches('\'').to_string());
                         } else if parse_direct_bool_guc(value).is_none() {
                             return Err(ExecError::Parse(ParseError::UnrecognizedParameter(

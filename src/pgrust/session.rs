@@ -2840,9 +2840,17 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         | "enable_material"
         | "enable_partition_pruning"
         | "enable_hashagg"
-        | "enable_sort" => Some("on"),
+        | "enable_sort"
+        | "enable_parallel_append"
+        | "enable_parallel_hash"
+        | "parallel_leader_participation" => Some("on"),
         "debug_parallel_query" => Some("off"),
+        "max_parallel_workers" => Some("8"),
         "max_parallel_workers_per_gather" => Some("2"),
+        "min_parallel_table_scan_size" => Some("8MB"),
+        "min_parallel_index_scan_size" => Some("512kB"),
+        "parallel_setup_cost" => Some("1000"),
+        "parallel_tuple_cost" => Some("0.1"),
         "max_prepared_transactions" => Some("64"),
         _ => None,
     }
@@ -3581,16 +3589,58 @@ impl Session {
                 .get("enable_sort")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            enable_parallel_append: self
+                .gucs
+                .get("enable_parallel_append")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_parallel_hash: self
+                .gucs
+                .get("enable_parallel_hash")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
             force_parallel_gather: self
                 .gucs
                 .get("debug_parallel_query")
                 .map(|value| parse_bool_guc(value).unwrap_or(false))
                 .unwrap_or(false),
+            max_parallel_workers: self
+                .gucs
+                .get("max_parallel_workers")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(8),
             max_parallel_workers_per_gather: self
                 .gucs
                 .get("max_parallel_workers_per_gather")
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(2),
+            parallel_leader_participation: self
+                .gucs
+                .get("parallel_leader_participation")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            min_parallel_table_scan_size: self
+                .gucs
+                .get("min_parallel_table_scan_size")
+                .and_then(|value| parse_size_guc_bytes(value).ok())
+                .unwrap_or(8 * 1024 * 1024),
+            min_parallel_index_scan_size: self
+                .gucs
+                .get("min_parallel_index_scan_size")
+                .and_then(|value| parse_size_guc_bytes(value).ok())
+                .unwrap_or(512 * 1024),
+            parallel_setup_cost: crate::include::nodes::plannodes::EstimateValue(
+                self.gucs
+                    .get("parallel_setup_cost")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or(1000.0),
+            ),
+            parallel_tuple_cost: crate::include::nodes::plannodes::EstimateValue(
+                self.gucs
+                    .get("parallel_tuple_cost")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or(0.1),
+            ),
             fold_constants: true,
         }
     }
@@ -19514,8 +19564,16 @@ impl Session {
                 | "enable_material"
                 | "enable_hashagg"
                 | "enable_sort"
+                | "enable_parallel_append"
+                | "enable_parallel_hash"
                 | "debug_parallel_query"
+                | "max_parallel_workers"
                 | "max_parallel_workers_per_gather"
+                | "parallel_leader_participation"
+                | "min_parallel_table_scan_size"
+                | "min_parallel_index_scan_size"
+                | "parallel_setup_cost"
+                | "parallel_tuple_cost"
                 | "default_text_search_config"
         ) {
             db.plan_cache.invalidate_all();
@@ -21881,13 +21939,24 @@ fn apply_guc_value_to_state(
         | "enable_partition_pruning"
         | "enable_hashagg"
         | "enable_sort"
+        | "enable_parallel_append"
+        | "enable_parallel_hash"
+        | "parallel_leader_participation"
         | "debug_parallel_query" => {
             parse_bool_guc(value).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
             })?;
         }
-        "max_parallel_workers_per_gather" => {
+        "max_parallel_workers" | "max_parallel_workers_per_gather" => {
             value.parse::<usize>().map_err(|_| {
+                ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+            })?;
+        }
+        "min_parallel_table_scan_size" | "min_parallel_index_scan_size" => {
+            parse_size_guc_bytes(value)?;
+        }
+        "parallel_setup_cost" | "parallel_tuple_cost" => {
+            value.parse::<f64>().map_err(|_| {
                 ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
             })?;
         }
@@ -22177,6 +22246,41 @@ fn parse_bool_guc(value: &str) -> Option<bool> {
 
 fn bool_guc_value(value: bool) -> &'static str {
     if value { "on" } else { "off" }
+}
+
+fn parse_size_guc_bytes(value: &str) -> Result<usize, ExecError> {
+    let trimmed = value.trim().trim_matches('\'').trim();
+    if trimmed.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    let split_at = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let (number, suffix) = trimmed.split_at(split_at);
+    if number.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    let amount = number
+        .parse::<usize>()
+        .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
+    let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1usize,
+        "kb" | "k" => 1024usize,
+        "mb" | "m" => 1024usize * 1024usize,
+        "gb" | "g" => 1024usize * 1024usize * 1024usize,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                value.to_string(),
+            )));
+        }
+    };
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))
 }
 
 fn parse_max_stack_depth(value: &str) -> Result<u32, ExecError> {

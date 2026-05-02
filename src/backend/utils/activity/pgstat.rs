@@ -112,6 +112,8 @@ pub struct DatabaseStatsStore {
     pub(crate) io: BTreeMap<IoStatsKey, IoStatsEntry>,
     pub(crate) shared: SharedStatsState,
     pub(crate) database_sessions: i64,
+    pub(crate) parallel_workers_to_launch: i64,
+    pub(crate) parallel_workers_launched: i64,
 }
 
 impl Default for DatabaseStatsStore {
@@ -122,6 +124,8 @@ impl Default for DatabaseStatsStore {
             io: BTreeMap::new(),
             shared: SharedStatsState::default(),
             database_sessions: 0,
+            parallel_workers_to_launch: 0,
+            parallel_workers_launched: 0,
         }
     }
 }
