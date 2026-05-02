@@ -11,15 +11,14 @@ working on lock manager, MVCC, or transaction code.
 
 ## Status
 
-Gated off today. The upstream `isolationtester` binary requires two things
-pgrust does not yet expose:
+Available for manual runs. The upstream `isolationtester` binary requires two
+pgrust features that are now implemented:
 
 1. `pg_locks` rows with `granted = false` while a session is blocked
 2. `pg_catalog.pg_isolation_test_session_is_blocked(int, int[]) RETURNS bool`
 
-Without these, isolationtester never sees blocked sessions and tests hang
-or produce nonsense output. When both land in pgrust, flip
-`ISOLATION_REQUIRES_PG_LOCKS=0` in `scripts/run_isolation.sh` (one-line PR).
+`scripts/run_isolation.sh` keeps `ISOLATION_REQUIRES_PG_LOCKS=0`, so no
+override is needed for normal pgrust runs.
 
 ## Prerequisites
 
@@ -108,11 +107,10 @@ ourselves, same as `run_regression.sh` does with `psql` for `.sql` tests.
 the libpq we just built, not a system one. On Linux the same thing happens
 via `LD_LIBRARY_PATH`.
 
-## Iterating on the harness before pg_locks lands
+## Iterating on the harness against another server
 
-To bypass the gate for harness development (e.g. pointing at a real
-PostgreSQL instance instead of pgrust):
+To point the harness at a real PostgreSQL instance instead of pgrust:
 
 ```bash
-PGRUST_ISOLATION_OVERRIDE=1 scripts/run_isolation.sh --skip-server --port 5432
+scripts/run_isolation.sh --skip-server --port 5432
 ```

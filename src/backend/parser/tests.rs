@@ -19233,6 +19233,54 @@ fn analyze_pg_locks_uses_expected_columns_and_types() {
     }
 }
 
+#[test]
+fn analyze_pg_blocking_pids_returns_int4_array() {
+    let stmt = parse_select("select pg_blocking_pids(pg_backend_pid())").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query.columns()[0].sql_type,
+        SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+    );
+}
+
+#[test]
+fn analyze_pg_isolation_test_session_is_blocked_returns_bool() {
+    let stmt = parse_select(
+        "select pg_isolation_test_session_is_blocked(pg_backend_pid(), array[1]::int4[])",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert_eq!(query.columns()[0].sql_type, SqlType::new(SqlTypeKind::Bool));
+}
+
+#[test]
+fn analyze_pg_blocking_function_wrong_arities_fail() {
+    for sql in [
+        "select pg_blocking_pids()",
+        "select pg_blocking_pids(pg_backend_pid(), pg_backend_pid())",
+        "select pg_isolation_test_session_is_blocked(pg_backend_pid())",
+        "select pg_isolation_test_session_is_blocked(pg_backend_pid(), array[1]::int4[], 1)",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[])
+            .unwrap_err();
+        assert!(
+            matches!(
+                err.unpositioned(),
+                ParseError::UnexpectedToken {
+                    expected: "valid builtin function arity",
+                    ..
+                }
+            ),
+            "{sql}: {err:?}"
+        );
+    }
+}
+
 fn pg_locks_expected_columns_and_types() -> Vec<(String, SqlType)> {
     vec![
         ("locktype".into(), SqlType::new(SqlTypeKind::Text)),

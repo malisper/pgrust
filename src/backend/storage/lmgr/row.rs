@@ -365,6 +365,36 @@ impl RowLockManager {
         rows
     }
 
+    pub fn blocking_pids(&self, blocked_pid: ClientId) -> Vec<ClientId> {
+        let state = self.state.lock();
+        let mut blockers = Vec::new();
+        for tag_state in state.tags.values() {
+            for (wait_index, waiter) in tag_state
+                .waiting
+                .iter()
+                .enumerate()
+                .filter(|(_, waiter)| waiter.owner.client_id == blocked_pid)
+            {
+                blockers.extend(tag_state.granted.iter().filter_map(|entry| {
+                    (entry.owner.client_id != blocked_pid && entry.mode.conflicts_with(waiter.mode))
+                        .then_some(entry.owner.client_id)
+                }));
+                blockers.extend(
+                    tag_state
+                        .waiting
+                        .iter()
+                        .take(wait_index)
+                        .filter_map(|entry| {
+                            (entry.owner.client_id != blocked_pid
+                                && entry.mode.conflicts_with(waiter.mode))
+                            .then_some(entry.owner.client_id)
+                        }),
+                );
+            }
+        }
+        blockers
+    }
+
     fn unlock_matching(&self, predicate: impl Fn(RowLockOwner) -> bool) {
         let mut state = self.state.lock();
         let mut changed = false;

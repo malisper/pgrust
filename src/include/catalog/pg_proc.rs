@@ -1819,6 +1819,30 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
                 'v',
             )
         },
+        proc_row(
+            2561,
+            "pg_blocking_pids",
+            INT4_ARRAY_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "pg_blocking_pids",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            3378,
+            "pg_isolation_test_session_is_blocked",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID, INT4_ARRAY_TYPE_OID]),
+            "pg_isolation_test_session_is_blocked",
+            2,
+            false,
+            true,
+            'f',
+            'v',
+        ),
         PgProcRow {
             prorows: 3.0,
             proallargtypes: Some(vec![TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID]),
@@ -12607,6 +12631,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
         ("current_schemas", BuiltinScalarFunction::CurrentSchemas),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
+        ("pg_blocking_pids", BuiltinScalarFunction::PgBlockingPids),
+        (
+            "pg_isolation_test_session_is_blocked",
+            BuiltinScalarFunction::PgIsolationTestSessionIsBlocked,
+        ),
         (
             "pg_settings_get_flags",
             BuiltinScalarFunction::PgSettingsGetFlags,
@@ -20302,6 +20331,8 @@ mod tests {
         for func in [
             BuiltinScalarFunction::CurrentDatabase,
             BuiltinScalarFunction::PgBackendPid,
+            BuiltinScalarFunction::PgBlockingPids,
+            BuiltinScalarFunction::PgIsolationTestSessionIsBlocked,
             BuiltinScalarFunction::CurrentSetting,
             BuiltinScalarFunction::RegProcedureToText,
             BuiltinScalarFunction::RegRoleToText,

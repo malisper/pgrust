@@ -1911,6 +1911,30 @@ fn sql_function_set_config_updates_current_statement_guc() {
 }
 
 #[test]
+fn application_name_default_and_set_config_match_isolationtester() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select current_setting('application_name')"
+        ),
+        vec![vec![Value::Text(String::new().into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select set_config('application_name', \
+             current_setting('application_name') || '/' || 's1', false)"
+        ),
+        vec![vec![Value::Text("/s1".into())]]
+    );
+}
+
+#[test]
 fn set_config_row_security_returns_postgres_bool_text() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -6805,6 +6829,15 @@ fn typed_text_array_value(values: &[&str], element_type_oid: u32) -> Value {
     )
 }
 
+fn typed_int4_array_value(values: &[i32]) -> Value {
+    Value::PgArray(
+        crate::include::nodes::datum::ArrayValue::from_1d(
+            values.iter().copied().map(Value::Int32).collect(),
+        )
+        .with_element_type_oid(INT4_TYPE_OID),
+    )
+}
+
 fn relation_locator_for(db: &Database, client_id: u32, relname: &str) -> crate::RelFileLocator {
     crate::RelFileLocator {
         spc_oid: 0,
@@ -7383,6 +7416,62 @@ fn statement_timeout_interrupts_waiting_advisory_lock() {
 }
 
 #[test]
+fn pg_blocking_pids_returns_empty_int4_array_without_blockers() {
+    let dir = temp_dir("pg_blocking_pids_empty");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_blocking_pids(pg_backend_pid()), pg_blocking_pids(7777)"
+        ),
+        vec![vec![
+            typed_int4_array_value(&[]),
+            typed_int4_array_value(&[]),
+        ]]
+    );
+}
+
+#[test]
+fn pg_isolation_test_session_is_blocked_rejects_null_pid_array_entries() {
+    let dir = temp_dir("pg_isolation_blocked_null_array_entry");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "select pg_isolation_test_session_is_blocked(pg_backend_pid(), array[null]::int4[])",
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        root_error(&err),
+        ExecError::DetailedError {
+            message,
+            sqlstate: "22004",
+            ..
+        } if message == "array must not contain nulls"
+    ));
+}
+
+#[test]
+fn pg_isolation_test_session_is_blocked_accepts_text_array_literal() {
+    let dir = temp_dir("pg_isolation_blocked_text_array_literal");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_isolation_test_session_is_blocked(pg_backend_pid(), '{1,2}')"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
 fn advisory_waiters_appear_in_pg_locks_with_waitstart() {
     use std::sync::mpsc;
 
@@ -7442,6 +7531,59 @@ fn advisory_waiters_appear_in_pg_locks_with_waitstart() {
         )
         .is_empty()
     );
+}
+
+#[test]
+fn pg_blocking_pids_reports_advisory_lock_waiter() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_blocking_pids_advisory_waiter");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder.execute(&db, "select pg_advisory_lock(155)").unwrap();
+    db.install_interrupt_state(2, waiter.interrupts());
+
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(waiter.execute(&db2, "select pg_advisory_xact_lock(155)"))
+            .unwrap();
+    });
+
+    wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "advisory")
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+
+    assert_eq!(
+        query_rows(
+            &db,
+            3,
+            "select pg_blocking_pids(2), \
+                    pg_isolation_test_session_is_blocked(2, array[1]::int4[]), \
+                    pg_isolation_test_session_is_blocked(2, array[3]::int4[])"
+        ),
+        vec![vec![
+            typed_int4_array_value(&[1]),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+
+    holder
+        .execute(&db, "select pg_advisory_unlock(155)")
+        .unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Null]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    worker.join().unwrap();
 }
 
 #[test]
@@ -7651,6 +7793,63 @@ fn pg_locks_shows_granted_and_waiting_relation_locks() {
 }
 
 #[test]
+fn pg_blocking_pids_reports_relation_lock_waiter() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_blocking_pids_relation_waiter");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+
+    holder.execute(&db, "create table t (id int)").unwrap();
+    let relation_oid = relation_oid_for(&db, 1, "t");
+
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "comment on table t is 'held relation lock'")
+        .unwrap();
+
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let mut waiter = Session::new(2);
+        done_tx
+            .send(waiter.execute(&db2, "select count(*) from t"))
+            .unwrap();
+    });
+
+    wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "relation")
+            && row.get(2) == Some(&Value::Int64(relation_oid))
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+
+    assert_eq!(
+        query_rows(
+            &db,
+            3,
+            "select pg_blocking_pids(2), \
+                    pg_isolation_test_session_is_blocked(2, array[1]::int4[]), \
+                    pg_isolation_test_session_is_blocked(2, array[3]::int4[])"
+        ),
+        vec![vec![
+            typed_int4_array_value(&[1]),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+
+    holder.execute(&db, "rollback").unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    worker.join().unwrap();
+}
+
+#[test]
 fn pg_locks_reports_tuple_granted_and_waiting_rows() {
     use std::sync::mpsc;
 
@@ -7742,6 +7941,80 @@ fn pg_locks_reports_tuple_granted_and_waiting_rows() {
 }
 
 #[test]
+fn pg_blocking_pids_reports_tuple_lock_waiter() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_blocking_pids_tuple_waiter");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder
+        .execute(
+            &db,
+            "create table tuple_block_items (id int4 not null primary key)",
+        )
+        .unwrap();
+    holder
+        .execute(&db, "insert into tuple_block_items values (1)")
+        .unwrap();
+    let relation_oid = relation_oid_for(&db, 1, "tuple_block_items");
+
+    holder.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut holder,
+            &db,
+            "select id from tuple_block_items where id = 1 for update"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    db.install_interrupt_state(2, waiter.interrupts());
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(waiter.execute(
+                &db2,
+                "select id from tuple_block_items where id = 1 for share",
+            ))
+            .unwrap();
+    });
+
+    wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "tuple")
+            && row.get(2) == Some(&Value::Int64(relation_oid))
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+
+    assert_eq!(
+        query_rows(
+            &db,
+            3,
+            "select pg_blocking_pids(2), \
+                    pg_isolation_test_session_is_blocked(2, array[1]::int4[]), \
+                    pg_isolation_test_session_is_blocked(2, array[3]::int4[])"
+        ),
+        vec![vec![
+            typed_int4_array_value(&[1]),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+
+    holder.execute(&db, "rollback").unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    worker.join().unwrap();
+}
+
+#[test]
 fn pg_locks_reports_transactionid_holders_waiters_and_cleanup() {
     use std::sync::mpsc;
 
@@ -7819,6 +8092,74 @@ fn pg_locks_reports_transactionid_holders_waiters_and_cleanup() {
         )
         .is_empty()
     );
+}
+
+#[test]
+fn pg_blocking_pids_reports_transactionid_waiter() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_blocking_pids_transactionid_waiter");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder
+        .execute(
+            &db,
+            "create table transaction_block_items (id int4 not null primary key)",
+        )
+        .unwrap();
+    holder
+        .execute(&db, "insert into transaction_block_items values (1)")
+        .unwrap();
+
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(
+            &db,
+            "update transaction_block_items set id = 2 where id = 1",
+        )
+        .unwrap();
+
+    db.install_interrupt_state(2, waiter.interrupts());
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(waiter.execute(
+                &db2,
+                "update transaction_block_items set id = 3 where id = 1",
+            ))
+            .unwrap();
+    });
+
+    wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "transactionid")
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+
+    assert_eq!(
+        query_rows(
+            &db,
+            3,
+            "select pg_blocking_pids(2), \
+                    pg_isolation_test_session_is_blocked(2, array[1]::int4[]), \
+                    pg_isolation_test_session_is_blocked(2, array[3]::int4[])"
+        ),
+        vec![vec![
+            typed_int4_array_value(&[1]),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+
+    holder.execute(&db, "rollback").unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::AffectedRows(1) => {}
+        other => panic!("expected update result, got {other:?}"),
+    }
+    worker.join().unwrap();
 }
 
 #[test]

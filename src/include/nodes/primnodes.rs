@@ -490,6 +490,8 @@ pub enum BuiltinScalarFunction {
     CurrentSchemas,
     Version,
     PgBackendPid,
+    PgBlockingPids,
+    PgIsolationTestSessionIsBlocked,
     PgPartitionRoot,
     SatisfiesHashPartition,
     PgGetPartKeyDef,

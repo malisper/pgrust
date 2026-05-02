@@ -2815,6 +2815,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "transaction_deferrable" => Some("off"),
         "lo_compat_privileges" => Some("off"),
         "search_path" => Some("\"$user\", public"),
+        "application_name" => Some(""),
         "vacuum_cost_delay" => Some("0"),
         "password_encryption" => Some("scram-sha-256"),
         "scram_iterations" => Some("4096"),

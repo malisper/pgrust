@@ -28,19 +28,14 @@
 #
 # Environment:
 #   PGRUST_POSTGRES_DIR         Override postgres source discovery
-#   PGRUST_ISOLATION_OVERRIDE=1 Bypass the pg_locks gate (for harness iteration)
-#
-# The script is currently gated behind ISOLATION_REQUIRES_PG_LOCKS because
-# pgrust does not yet expose pg_locks wait rows or the
-# pg_isolation_test_session_is_blocked() catalog function. Once both land in
-# pgrust, flip ISOLATION_REQUIRES_PG_LOCKS=0 below (one-line PR).
+#   PGRUST_ISOLATION_OVERRIDE=1 Bypass the pg_locks/function gate if it is
+#                               re-enabled for harness iteration
 
 set -euo pipefail
 
-# Flip to 0 once pg_locks and pg_isolation_test_session_is_blocked() are real.
 # The gate itself fires after argument parsing so that --help and invalid
-# flags still produce the right messages.
-ISOLATION_REQUIRES_PG_LOCKS=1
+# flags still produce the right messages if the gate is re-enabled.
+ISOLATION_REQUIRES_PG_LOCKS=0
 
 # ---- paths + args ----------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -129,16 +124,13 @@ if [[ "$ISOLATION_REQUIRES_PG_LOCKS" == "1" && -z "${PGRUST_ISOLATION_OVERRIDE:-
     cat >&2 <<EOF
 ERROR: isolation tests cannot run yet.
 
-The upstream isolationtester harness needs two things that pgrust does not
-yet implement:
+The upstream isolationtester harness needs these pgrust features enabled:
   1. pg_locks wait rows (granted=false entries while a session is blocked)
   2. pg_catalog.pg_isolation_test_session_is_blocked(int, int[]) RETURNS bool
 
 Without these, isolationtester never sees blocked sessions and tests hang
-or produce nonsense output.
-
-Once both land in pgrust, edit this script and set:
-    ISOLATION_REQUIRES_PG_LOCKS=0
+or produce nonsense output. The default pgrust build now provides them; this
+message only appears if ISOLATION_REQUIRES_PG_LOCKS is manually re-enabled.
 
 To iterate on the harness itself (e.g. against real PostgreSQL), bypass
 the gate:
@@ -186,7 +178,9 @@ if [[ "$SKIP_BUILD" == false ]]; then
     }
 fi
 
-SERVER_BIN="$PGRUST_DIR/target/release/pgrust_server"
+CARGO_TARGET_DIR="$(cd "$PGRUST_DIR" && cargo metadata --no-deps --format-version=1 \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+SERVER_BIN="$CARGO_TARGET_DIR/release/pgrust_server"
 if [[ "$SKIP_SERVER" == false && ! -x "$SERVER_BIN" ]]; then
     echo "ERROR: $SERVER_BIN not found. Run without --skip-build." >&2
     exit 1
