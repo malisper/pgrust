@@ -1999,6 +1999,63 @@ fn sql_scalar_function_returning_composite_uses_first_row() {
 }
 
 #[test]
+fn sql_function_qualified_composite_arg_star_passes_whole_value() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table compos_arg_star(f1 int4, f2 text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function fcompos1(v compos_arg_star) returns void as $$
+             insert into compos_arg_star values (v.*)
+             $$ language sql",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function fcompos2(v compos_arg_star) returns void as $$
+             select fcompos1(v)
+             $$ language sql",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function fcompos3(v compos_arg_star) returns void as $$
+             select fcompos1(fcompos3.v.*)
+             $$ language sql",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "select fcompos1(row(1,'one'))")
+        .unwrap();
+    session
+        .execute(&db, "select fcompos2(row(2,'two'))")
+        .unwrap();
+    session
+        .execute(&db, "select fcompos3(row(3,'three'))")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select f1, f2 from compos_arg_star order by f1",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("one".into())],
+            vec![Value::Int32(2), Value::Text("two".into())],
+            vec![Value::Int32(3), Value::Text("three".into())],
+        ]
+    );
+}
+
+#[test]
 fn sql_function_from_item_resolves_qualified_utility_function() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

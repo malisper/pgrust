@@ -1317,20 +1317,51 @@ fn bind_sql_function_inline_named_field(
     name: &str,
     catalog: &dyn CatalogLookup,
 ) -> Result<Option<Expr>, ParseError> {
-    let Some((arg_name, field)) = name.split_once('.') else {
+    let Some((arg, field_path)) = resolve_sql_function_inline_arg_path(name) else {
         return Ok(None);
     };
-    let Some(arg) = current_sql_function_inline_named_arg(arg_name)
-        .or_else(current_sql_function_inline_single_arg)
-    else {
-        return Ok(None);
-    };
-    let field_type = resolve_bound_field_select_type(&arg.expr, field, catalog)?;
-    Ok(Some(Expr::FieldSelect {
-        expr: Box::new(arg.expr),
-        field: field.to_string(),
-        field_type,
-    }))
+    bind_sql_function_inline_arg_field_path(arg.expr, &field_path, catalog).map(Some)
+}
+
+fn bind_sql_function_inline_arg_field_path(
+    mut current: Expr,
+    field_path: &[&str],
+    catalog: &dyn CatalogLookup,
+) -> Result<Expr, ParseError> {
+    for field in field_path {
+        if *field == "*" {
+            continue;
+        }
+        let field_type = resolve_bound_field_select_type(&current, field, catalog)?;
+        current = Expr::FieldSelect {
+            expr: Box::new(current),
+            field: (*field).to_string(),
+            field_type,
+        };
+    }
+    Ok(current)
+}
+
+fn resolve_sql_function_inline_arg_path(name: &str) -> Option<(SqlFunctionInlineArg, Vec<&str>)> {
+    let parts = name
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return None;
+    }
+    if let Some(arg) = current_sql_function_inline_named_arg(parts[0]) {
+        return Some((arg, parts[1..].to_vec()));
+    }
+    for arg_index in 1..parts.len() {
+        if let Some(arg) =
+            current_sql_function_inline_qualified_arg(parts[arg_index - 1], parts[arg_index])
+        {
+            return Some((arg, parts[arg_index + 1..].to_vec()));
+        }
+    }
+    let arg = current_sql_function_inline_single_arg()?;
+    (parts.len() > 1).then(|| (arg, parts[1..].to_vec()))
 }
 
 fn bind_row_expr_fields(
@@ -3243,11 +3274,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         }
         SqlExpr::Column(name) => {
             if let Some(relation_name) = name.strip_suffix(".*") {
-                let resolved =
+                if let Some(resolved) =
                     resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, relation_name)
-                        .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
-                let named_row_type = relation_row_type_identity(catalog, resolved.relation_oid);
-                build_whole_row_expr(resolved.fields, named_row_type)
+                {
+                    let named_row_type = relation_row_type_identity(catalog, resolved.relation_oid);
+                    build_whole_row_expr(resolved.fields, named_row_type)
+                } else if let Some((arg, field_path)) =
+                    resolve_sql_function_inline_arg_path(relation_name)
+                {
+                    bind_sql_function_inline_arg_field_path(arg.expr, &field_path, catalog)?
+                } else {
+                    return Err(ParseError::UnknownColumn(name.clone()));
+                }
             } else if let Some(system_column) =
                 resolve_system_column_with_outer(scope, outer_scopes, name)?
             {
