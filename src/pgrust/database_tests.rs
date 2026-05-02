@@ -2578,6 +2578,44 @@ fn recursive_cte_search_cycle_clauses_parse_and_validate_names() {
         Some(ParseError::FeatureNotSupportedMessage(message))
             if message == "with a SEARCH or CYCLE clause, the recursive reference to WITH query \"x\" must be at the top level of its right-hand SELECT"
     ));
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive g(n) as (
+                select 1
+                union all
+                select 2
+                union all
+                select n + 1 from g
+            ) search depth first by n set seq
+            select * from g",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        exec_parse_error(&err),
+        Some(ParseError::FeatureNotSupportedMessage(message))
+            if message == "with a SEARCH or CYCLE clause, the left side of the UNION must be a SELECT"
+    ));
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive g(n) as (
+                select 1
+                union all
+                (select 2
+                 union all
+                 select n + 1 from g)
+            ) search depth first by n set seq
+            select * from g",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        exec_parse_error(&err),
+        Some(ParseError::FeatureNotSupportedMessage(message))
+            if message == "with a SEARCH or CYCLE clause, the right side of the UNION must be a SELECT"
+    ));
 }
 
 #[test]
@@ -2740,6 +2778,26 @@ fn recursive_cte_term_local_with_can_read_worktable() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn recursive_cte_nonrecursive_union_body_preserves_local_with_scope() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "with recursive x(n) as (
+            with x1 as (select 1 as n)
+            select 0
+            union
+            select * from x1
+        )
+        select * from x order by n",
+    );
+
+    assert_eq!(rows, vec![vec![Value::Int32(0)], vec![Value::Int32(1)]]);
 }
 
 #[test]

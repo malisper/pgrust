@@ -4632,39 +4632,67 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
         CteBody::RecursiveUnion {
             all,
             left_nested: _,
-            anchor_with_is_subquery: _,
+            anchor_with_is_subquery,
             anchor,
             recursive,
-        } => Ok(SelectStatement {
-            with_recursive: false,
-            with: Vec::new(),
-            with_from_recursive_union_outer: false,
-            distinct: false,
-            distinct_on: Vec::new(),
-            from: None,
-            targets: Vec::new(),
-            where_clause: None,
-            group_by: Vec::new(),
-            group_by_distinct: false,
-            having: None,
-            window_clauses: Vec::new(),
-            order_by: Vec::new(),
-            order_by_location: None,
-            limit: None,
-            limit_location: None,
-            offset: None,
-            offset_location: None,
-            locking_clause: None,
-            locking_location: None,
-            locking_targets: Vec::new(),
-            locking_nowait: false,
-            set_operation: Some(Box::new(SetOperationStatement {
-                op: SetOperator::Union { all: *all },
-                inputs: vec![cte_body_as_select(anchor)?, (**recursive).clone()],
-                location: None,
-            })),
-        }),
+        } => {
+            let mut left = cte_body_as_select(anchor)?;
+            let mut right = (**recursive).clone();
+            let (with_recursive, with) =
+                take_recursive_union_body_with(&mut left, &mut right, *anchor_with_is_subquery);
+            Ok(SelectStatement {
+                with_recursive,
+                with,
+                with_from_recursive_union_outer: false,
+                distinct: false,
+                distinct_on: Vec::new(),
+                from: None,
+                targets: Vec::new(),
+                where_clause: None,
+                group_by: Vec::new(),
+                group_by_distinct: false,
+                having: None,
+                window_clauses: Vec::new(),
+                order_by: Vec::new(),
+                order_by_location: None,
+                limit: None,
+                limit_location: None,
+                offset: None,
+                offset_location: None,
+                locking_clause: None,
+                locking_location: None,
+                locking_targets: Vec::new(),
+                locking_nowait: false,
+                set_operation: Some(Box::new(SetOperationStatement {
+                    op: SetOperator::Union { all: *all },
+                    inputs: vec![left, right],
+                    location: None,
+                })),
+            })
+        }
     }
+}
+
+fn take_recursive_union_body_with(
+    left: &mut SelectStatement,
+    right: &mut SelectStatement,
+    anchor_with_is_subquery: bool,
+) -> (bool, Vec<CommonTableExpr>) {
+    // The recursive-union CTE grammar can attach a set operation's leading
+    // WITH clause to the left term; hoist it back so every UNION input sees it.
+    if left.with.is_empty() || (!anchor_with_is_subquery && !left.with_from_recursive_union_outer) {
+        return (false, Vec::new());
+    }
+    let with_recursive = left.with_recursive || right.with_recursive;
+    let with = std::mem::take(&mut left.with);
+    if right.with_from_recursive_union_outer && right.with == with {
+        right.with.clear();
+        right.with_recursive = false;
+        right.with_from_recursive_union_outer = false;
+    }
+    left.with_recursive = false;
+    left.with_from_recursive_union_outer = false;
+    (with_recursive, with)
 }
 
 fn cte_body_outer_scopes(outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
@@ -6066,6 +6094,20 @@ impl<'a> RecursiveReferenceChecker<'a> {
         stmt: &SetOperationStatement,
         context: RecursiveReferenceContext,
     ) -> Result<(), ParseError> {
+        if context == RecursiveReferenceContext::Ok
+            && matches!(stmt.op, SetOperator::Except { .. })
+            && let Some(position) = stmt
+                .inputs
+                .iter()
+                .flat_map(|input| select_statement_table_reference_locations(input, self.cte_name))
+                .last()
+        {
+            return recursive_reference_error(
+                RecursiveReferenceContext::Except,
+                self.cte_name,
+                Some(position),
+            );
+        }
         if matches!(stmt.op, SetOperator::Intersect { .. })
             && stmt
                 .inputs
@@ -6599,11 +6641,8 @@ fn validate_recursive_cte_recursive_term_decorations(
         ));
     }
     if stmt.locking_clause.is_some() {
-        return Err(positioned_if_available(
-            ParseError::FeatureNotSupportedMessage(
-                "FOR UPDATE/SHARE in a recursive query is not implemented".into(),
-            ),
-            stmt.locking_location,
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "FOR UPDATE/SHARE in a recursive query is not implemented".into(),
         ));
     }
     Ok(())
