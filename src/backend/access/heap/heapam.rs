@@ -948,6 +948,11 @@ pub fn heap_delete_with_waiter_with_wal_policy(
                 let buffer_id2 = pin2.buffer_id();
                 let mut vmbuf2 = None;
                 visibilitymap_pin(pool, rel, tid.block_number, &mut vmbuf2)?;
+                // Keep pgrust's global transaction table lock ordered before
+                // heap content locks. PostgreSQL can consult pg_xact while a
+                // buffer is locked because it does not use a write-preferring
+                // process-wide RwLock for transaction status.
+                let txns_guard = txns.read();
                 let mut guard = pool.lock_buffer_exclusive(buffer_id2)?;
                 let mut new_page = *guard;
                 let mut recheck = heap_page_get_tuple(&new_page, tid.offset_number)?;
@@ -965,10 +970,9 @@ pub fn heap_delete_with_waiter_with_wal_policy(
                     &vmbuf2,
                     wal_policy,
                 )?;
-                let cmax = {
-                    let txns_guard = txns.read();
-                    delete_command_id(&txns_guard, &snapshot, &recheck, snapshot.current_cid)
-                };
+                let cmax =
+                    delete_command_id(&txns_guard, &snapshot, &recheck, snapshot.current_cid);
+                drop(txns_guard);
                 recheck.header.xmax = xid;
                 recheck.header.cid_or_xvac = cmax;
                 recheck.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
@@ -1079,6 +1083,9 @@ fn try_claim_tuple(
     let mut vmbuf = None;
     visibilitymap_pin(pool, rel, target_tid.block_number, &mut vmbuf)?;
 
+    // See `heap_delete_with_waiter_with_wal_policy`: transaction-table reads
+    // must not be taken while holding a heap content lock.
+    let txns_guard = txns.read();
     let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
     let mut new_page = *guard;
     let tuple = heap_page_get_tuple(&new_page, target_tid.offset_number)?;
@@ -1093,10 +1100,8 @@ fn try_claim_tuple(
             &mut new_page,
             &vmbuf,
         )?;
-        let cmax = {
-            let txns_guard = txns.read();
-            delete_command_id(&txns_guard, snapshot, &modified, cid)
-        };
+        let cmax = delete_command_id(&txns_guard, snapshot, &modified, cid);
+        drop(txns_guard);
         modified.header.xmax = xid;
         modified.header.cid_or_xvac = cmax;
         modified.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
@@ -1113,12 +1118,8 @@ fn try_claim_tuple(
     drop(guard);
     drop(pin);
 
-    // Check xmax status after releasing the buffer lock. Safe to use
-    // blocking read() here because the buffer lock is already dropped
-    // (lines 784-785), so there's no deadlock risk with the write-preferring
-    // RwLock. Previous code used try_read() with fallback to None, which
-    // caused an infinite busy-loop under contention (see bugs/005).
-    let xmax_status = txns.read().status(xmax);
+    let xmax_status = txns_guard.status(xmax);
+    drop(txns_guard);
 
     match xmax_status {
         Some(TransactionStatus::InProgress) | None => Ok((ClaimResult::WaitFor(xmax), target_tid)),
@@ -1127,6 +1128,9 @@ fn try_claim_tuple(
             let buffer_id2 = pin2.buffer_id();
             let mut vmbuf2 = None;
             visibilitymap_pin(pool, rel, target_tid.block_number, &mut vmbuf2)?;
+            // Preserve the same txns -> buffer order when claiming a tuple
+            // whose previous updater aborted.
+            let txns_guard = txns.read();
             let mut guard = pool.lock_buffer_exclusive(buffer_id2)?;
             let mut new_page = *guard;
             let mut modified = heap_page_get_tuple(&new_page, target_tid.offset_number)?;
@@ -1138,10 +1142,8 @@ fn try_claim_tuple(
                 &mut new_page,
                 &vmbuf2,
             )?;
-            let cmax = {
-                let txns_guard = txns.read();
-                delete_command_id(&txns_guard, snapshot, &modified, cid)
-            };
+            let cmax = delete_command_id(&txns_guard, snapshot, &modified, cid);
+            drop(txns_guard);
             modified.header.xmax = xid;
             modified.header.cid_or_xvac = cmax;
             modified.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
