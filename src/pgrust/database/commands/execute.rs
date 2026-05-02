@@ -2569,6 +2569,11 @@ impl Database {
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::SetRole(ref set_stmt) => {
+                if set_stmt.is_local {
+                    return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(
+                        "SET LOCAL ROLE",
+                    )));
+                }
                 self.execute_set_role_stmt(client_id, set_stmt)?;
                 Ok(StatementResult::AffectedRows(0))
             }

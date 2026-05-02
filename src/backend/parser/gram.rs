@@ -19848,11 +19848,19 @@ fn build_reset_session_authorization(
 }
 
 fn build_set_role(pair: Pair<'_, Rule>) -> Result<SetRoleStatement, ParseError> {
-    let role_name = pair
-        .into_inner()
-        .find(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier);
-    Ok(SetRoleStatement { role_name })
+    let mut role_name = None;
+    let mut is_local = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_local => is_local = true,
+            Rule::identifier => role_name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(SetRoleStatement {
+        role_name,
+        is_local,
+    })
 }
 
 fn build_reset_role(_pair: Pair<'_, Rule>) -> Result<ResetRoleStatement, ParseError> {

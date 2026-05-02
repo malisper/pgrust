@@ -6069,6 +6069,7 @@ fn parse_set_role_statement() {
         stmt,
         Statement::SetRole(SetRoleStatement {
             role_name: Some("regress_tenant".into()),
+            is_local: false,
         })
     );
 }
@@ -6078,7 +6079,46 @@ fn parse_set_role_none_statement() {
     let stmt = parse_statement("set role none").unwrap();
     assert_eq!(
         stmt,
-        Statement::SetRole(SetRoleStatement { role_name: None })
+        Statement::SetRole(SetRoleStatement {
+            role_name: None,
+            is_local: false,
+        })
+    );
+}
+
+#[test]
+fn parse_set_role_to_default_statement() {
+    let stmt = parse_statement("set role to default").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetRole(SetRoleStatement {
+            role_name: None,
+            is_local: false,
+        })
+    );
+}
+
+#[test]
+fn parse_set_local_role_statement() {
+    let stmt = parse_statement("set local role regress_tenant").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetRole(SetRoleStatement {
+            role_name: Some("regress_tenant".into()),
+            is_local: true,
+        })
+    );
+}
+
+#[test]
+fn parse_set_local_role_to_default_statement() {
+    let stmt = parse_statement("set local role to default").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetRole(SetRoleStatement {
+            role_name: None,
+            is_local: true,
+        })
     );
 }
 

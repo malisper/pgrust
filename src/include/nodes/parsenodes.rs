@@ -3989,6 +3989,7 @@ pub struct ResetSessionAuthorizationStatement;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetRoleStatement {
     pub role_name: Option<String>,
+    pub is_local: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
