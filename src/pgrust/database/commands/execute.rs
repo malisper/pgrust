@@ -171,7 +171,7 @@ fn validate_replica_identity_index(
             index_name
         )));
     }
-    if !index.index_meta.indimmediate {
+    if !index.index_meta.indimmediate || index.constraint_deferrable {
         return Err(replica_identity_wrong_object(format!(
             "cannot use non-immediate index \"{}\" as replica identity",
             index_name
@@ -179,7 +179,7 @@ fn validate_replica_identity_index(
     }
     if !index.index_exprs.is_empty()
         || replica_identity_index_has_node_tree(&index.index_meta.indexprs)
-        || index.index_meta.indkey.iter().any(|attnum| *attnum == 0)
+        || index.index_meta.indkey.iter().any(|attnum| *attnum <= 0)
     {
         return Err(replica_identity_wrong_object(format!(
             "cannot use expression index \"{}\" as replica identity",
@@ -2815,6 +2815,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    security_restricted: false,
                     pending_async_notifications: Vec::new(),
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
@@ -3148,6 +3149,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    security_restricted: false,
                     pending_async_notifications: Vec::new(),
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
@@ -3290,6 +3292,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    security_restricted: false,
                     pending_async_notifications: Vec::new(),
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
@@ -3501,6 +3504,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    security_restricted: false,
                     pending_async_notifications: Vec::new(),
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
@@ -3644,6 +3648,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    security_restricted: false,
                     pending_async_notifications: Vec::new(),
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
@@ -3845,6 +3850,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    security_restricted: false,
                     pending_async_notifications: Vec::new(),
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
@@ -4047,6 +4053,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    security_restricted: false,
                     pending_async_notifications: Vec::new(),
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
@@ -4640,6 +4647,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    security_restricted: false,
                     pending_async_notifications: Vec::new(),
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
@@ -4917,6 +4925,7 @@ impl Database {
             subplans: query_desc.planned_stmt.subplans,
             timed: false,
             allow_side_effects: true,
+            security_restricted: false,
             pending_async_notifications: Vec::new(),
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),

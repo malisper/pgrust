@@ -5150,7 +5150,12 @@ fn replica_identity_columns(
         ),
         'i' => indexes
             .iter()
-            .find(|index| index.index_meta.indisreplident)
+            .find(|index| {
+                catalog
+                    .index_row_by_oid(index.relation_oid)
+                    .map(|row| row.indisreplident)
+                    .unwrap_or(index.index_meta.indisreplident)
+            })
             .map(|index| {
                 (
                     ReplicaIdentityColumns::Columns,

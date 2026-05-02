@@ -760,17 +760,31 @@ impl<'a> PartitionedIndexInstaller<'a> {
     }
 
     fn validate_partitioned_index_upward(&mut self, index_oid: u32) -> Result<bool, ExecError> {
-        let index = self.index_by_oid(index_oid)?;
-        let relation = self.current_relation(index.index_meta.indrelid)?;
+        let index = {
+            let catalog = self.catalog();
+            catalog.index_row_by_oid(index_oid).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index catalog row",
+                    actual: format!("missing pg_index row for {index_oid}"),
+                })
+            })?
+        };
+        let relation = self.current_relation(index.indrelid)?;
         if relation.relkind != 'p' {
-            return Ok(index.index_meta.indisvalid);
+            return Ok(index.indisvalid);
         }
         let direct_partitions = self.direct_partition_children(relation.relation_oid)?;
-        let attached_indexes = self.direct_index_children(index_oid)?;
+        let attached_indexes = {
+            let catalog = self.catalog();
+            catalog
+                .inheritance_children(index_oid)
+                .into_iter()
+                .filter_map(|row| catalog.index_row_by_oid(row.inhrelid))
+                .collect::<Vec<_>>()
+        };
         let valid = direct_partitions.iter().all(|partition| {
             attached_indexes.iter().any(|child_index| {
-                child_index.index_meta.indrelid == partition.relation_oid
-                    && child_index.index_meta.indisvalid
+                child_index.indrelid == partition.relation_oid && child_index.indisvalid
             })
         });
         self.set_index_valid(index_oid, valid)?;

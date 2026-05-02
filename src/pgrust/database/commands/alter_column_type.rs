@@ -868,6 +868,7 @@ impl Database {
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: true,
+            security_restricted: false,
             pending_async_notifications: Vec::new(),
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),

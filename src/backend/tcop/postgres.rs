@@ -9856,6 +9856,10 @@ fn psql_describe_tableinfo_query(
         .ok()
         .and_then(|catcache| catcache.class_by_oid(oid).map(|row| row.reltablespace))
         .unwrap_or(entry.rel.spc_oid);
+    let relreplident = catalog
+        .class_row_by_oid(oid)
+        .map(|row| row.relreplident)
+        .unwrap_or('d');
     Some((
         vec![
             QueryColumn {
@@ -9936,7 +9940,7 @@ fn psql_describe_tableinfo_query(
             Value::Int32(reltablespace as i32),
             Value::Text(reloftype.into()),
             Value::InternalChar(entry.relpersistence as u8),
-            Value::InternalChar(b'd'),
+            Value::InternalChar(relreplident as u8),
             visible_amname
                 .map(|name| Value::Text(name.into()))
                 .unwrap_or(Value::Null),
@@ -11336,11 +11340,12 @@ fn psql_describe_indexes_query(
     let txn_ctx = session.catalog_txn_ctx();
     let relation = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
     let constraints = db.constraint_rows_for_relation(session.client_id, txn_ctx, oid);
-    let mut rows = session
-        .catalog_lookup(db)
+    let catalog = session.catalog_lookup(db);
+    let mut rows = catalog
         .index_relations_for_heap(oid)
         .into_iter()
         .map(|index| {
+            let index_row = catalog.index_row_by_oid(index.relation_oid);
             let reltablespace = db
                 .backend_catcache(session.client_id, txn_ctx)
                 .ok()
@@ -11368,16 +11373,41 @@ fn psql_describe_indexes_query(
                 .unwrap_or(Value::Null);
             vec![
                 Value::Text(index.name.clone().into()),
-                Value::Bool(index.index_meta.indisprimary),
-                Value::Bool(index.index_meta.indisunique),
-                Value::Bool(index.index_meta.indisclustered),
-                Value::Bool(index.index_meta.indisvalid),
+                Value::Bool(
+                    index_row
+                        .as_ref()
+                        .map(|row| row.indisprimary)
+                        .unwrap_or(index.index_meta.indisprimary),
+                ),
+                Value::Bool(
+                    index_row
+                        .as_ref()
+                        .map(|row| row.indisunique)
+                        .unwrap_or(index.index_meta.indisunique),
+                ),
+                Value::Bool(
+                    index_row
+                        .as_ref()
+                        .map(|row| row.indisclustered)
+                        .unwrap_or(index.index_meta.indisclustered),
+                ),
+                Value::Bool(
+                    index_row
+                        .as_ref()
+                        .map(|row| row.indisvalid)
+                        .unwrap_or(index.index_meta.indisvalid),
+                ),
                 Value::Text(format_psql_indexdef(db, session, &index).into()),
                 condef,
                 contype,
                 condeferrable,
                 condeferred,
-                Value::Bool(index.index_meta.indisreplident),
+                Value::Bool(
+                    index_row
+                        .as_ref()
+                        .map(|row| row.indisreplident)
+                        .unwrap_or(index.index_meta.indisreplident),
+                ),
                 Value::Int32(reltablespace as i32),
                 constraint
                     .map(|row| Value::Bool(row.conperiod))

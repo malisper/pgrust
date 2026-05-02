@@ -1,6 +1,6 @@
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, RelationDesc, SessionReplicationRole, TupleSlot, Value,
-    eval_expr,
+    ConstraintTiming, ExecError, ExecutorContext, Expr, RelationDesc, SessionReplicationRole,
+    TupleSlot, Value, eval_expr,
 };
 use crate::backend::parser::{
     CatalogLookup, JsonTableBehavior, RawWindowFrameBound, SqlCallArgs, SqlExpr, SqlType,
@@ -375,6 +375,23 @@ impl RuntimeTriggers {
                     && trigger_is_row(trigger.row.tgtype)
                     && trigger_uses_transition_tables(&trigger.row) == transition_only
             }) {
+                if ctx.security_restricted
+                    && trigger.row.tgdeferrable
+                    && ctx.constraint_timing(
+                        trigger.row.tgconstraint,
+                        trigger.row.tgdeferrable,
+                        trigger.row.tginitdeferred,
+                    ) == ConstraintTiming::Deferred
+                {
+                    return Err(ExecError::DetailedError {
+                        message:
+                            "cannot fire deferred trigger within security-restricted operation"
+                                .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
                 if !self.when_passes(trigger, old_row, new_row, ctx)? {
                     continue;
                 }
