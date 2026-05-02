@@ -2100,23 +2100,41 @@ fn shared_role_dependency_details_for_roles(
         details.push("privileges for database regression".into());
     }
 
+    let snapshot = db
+        .txns
+        .read()
+        .snapshot_for_command(xid, cid)
+        .map_err(|err| {
+            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(err))
+        })?;
+    let default_acl_rows = db.scan_default_acl_rows(client_id, &snapshot)?;
+    let namespace_names = catcache
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
     let mut default_privilege_details = Vec::new();
-    for row in db.object_addresses.read().default_acls.iter() {
-        if !role_oids.contains(&row.role_oid) {
+    for row in default_acl_rows {
+        if !role_oids.contains(&row.defaclrole) {
             continue;
         }
-        let object_kind = default_acl_object_kind_for_role_deps(row.objtype);
+        let object_kind = default_acl_object_kind_for_role_deps(row.defaclobjtype);
         let role_name = role_names
-            .get(&row.role_oid)
+            .get(&row.defaclrole)
             .copied()
-            .unwrap_or(row.role_name.as_str());
-        let detail = match &row.namespace_name {
-            Some(namespace_name) => format!(
+            .unwrap_or("unknown");
+        let detail = if row.defaclnamespace != 0 {
+            let namespace_name = namespace_names
+                .get(&row.defaclnamespace)
+                .map(String::as_str)
+                .unwrap_or("unknown");
+            format!(
                 "owner of default privileges on new {object_kind} belonging to role {role_name} in schema {namespace_name}"
-            ),
-            None => format!(
+            )
+        } else {
+            format!(
                 "owner of default privileges on new {object_kind} belonging to role {role_name}"
-            ),
+            )
         };
         default_privilege_details.push(detail);
     }
