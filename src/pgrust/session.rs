@@ -1222,6 +1222,28 @@ struct CopyInsertOptions<'a> {
     progress: Option<CopyProgressOptions>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CopyInputRow {
+    fields: Vec<String>,
+    raw_line: Option<String>,
+}
+
+impl CopyInputRow {
+    fn parsed(fields: Vec<String>) -> Self {
+        Self {
+            fields,
+            raw_line: None,
+        }
+    }
+
+    fn with_raw(fields: Vec<String>, raw_line: String) -> Self {
+        Self {
+            fields,
+            raw_line: Some(raw_line),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CopyProgressOptions {
     source: CopyProgressSource,
@@ -20063,7 +20085,7 @@ impl Session {
             }),
             _ => None,
         };
-        self.copy_from_rows_into_internal_with_options(
+        self.copy_from_input_rows_into_internal_with_options(
             db,
             name,
             columns.as_deref(),
@@ -20172,7 +20194,7 @@ impl Session {
         table_name: &str,
         target_columns: Option<&[String]>,
         options: &CopyOptions,
-        rows: &mut Vec<Vec<String>>,
+        rows: &mut Vec<CopyInputRow>,
     ) -> Result<(), ExecError> {
         if matches!(options.header, CopyHeader::None) {
             return Ok(());
@@ -20180,7 +20202,7 @@ impl Session {
         let header = if rows.is_empty() {
             Vec::new()
         } else {
-            rows.remove(0)
+            rows.remove(0).fields
         };
         if !matches!(options.header, CopyHeader::Match) {
             return Ok(());
@@ -20310,11 +20332,16 @@ impl Session {
         rows: &[Vec<String>],
         null_marker: &str,
     ) -> Result<usize, ExecError> {
-        self.copy_from_rows_into_internal_with_options(
+        let input_rows = rows
+            .iter()
+            .cloned()
+            .map(CopyInputRow::parsed)
+            .collect::<Vec<_>>();
+        self.copy_from_input_rows_into_internal_with_options(
             db,
             table_name,
             target_columns,
-            rows,
+            &input_rows,
             CopyInsertOptions {
                 format: CopyFormat::Text,
                 null_marker,
@@ -20333,12 +20360,12 @@ impl Session {
         )
     }
 
-    fn copy_from_rows_into_internal_with_options(
+    fn copy_from_input_rows_into_internal_with_options(
         &mut self,
         db: &Database,
         table_name: &str,
         target_columns: Option<&[String]>,
-        rows: &[Vec<String>],
+        rows: &[CopyInputRow],
         options: CopyInsertOptions<'_>,
     ) -> Result<usize, ExecError> {
         stacker::grow(32 * 1024 * 1024, || {
@@ -20484,8 +20511,9 @@ impl Session {
                     let mut excluded = 0usize;
                     let mut parsed_rows = Vec::with_capacity(rows.len());
                     for (row_index, row) in rows.iter().enumerate() {
+                        let fields = &row.fields;
                         let parsed = (|| -> Result<Option<Vec<Value>>, ExecError> {
-                            if row.len() > target_indexes.len() {
+                            if fields.len() > target_indexes.len() {
                                 return Err(copy_extra_data_error());
                             }
 
@@ -20498,8 +20526,7 @@ impl Session {
                                     &mut ctx,
                                 )?;
                             }
-                            for (raw, target_index) in
-                                row.iter().zip(target_indexes.iter().copied())
+                            for (raw, target_index) in fields.iter().zip(target_indexes.iter().copied())
                             {
                                 let column = &desc.columns[target_index];
                                 let force_not_null =
@@ -20677,8 +20704,8 @@ impl Session {
                                 };
                                 values[target_index] = value;
                             }
-                            if row.len() < target_indexes.len() {
-                                let missing_index = target_indexes[row.len()];
+                            if fields.len() < target_indexes.len() {
+                                let missing_index = target_indexes[fields.len()];
                                 return Err(copy_missing_data_error(
                                     &desc.columns[missing_index].name,
                                 ));
@@ -20704,7 +20731,7 @@ impl Session {
                                     push_copy_skip_notice(
                                         table_name,
                                         row_index,
-                                        row,
+                                        fields,
                                         &target_indexes,
                                         &desc,
                                         &catalog,
@@ -23608,7 +23635,7 @@ pub(crate) fn parse_copy_input_rows(
     options: &CopyOptions,
     table_name: Option<&str>,
     stop_on_copy_marker: bool,
-) -> Result<Vec<Vec<String>>, ExecError> {
+) -> Result<Vec<CopyInputRow>, ExecError> {
     let delimiter = effective_copy_delimiter(options);
     match options.format {
         CopyFormat::Text => parse_copy_text_rows(
@@ -23641,7 +23668,7 @@ fn parse_copy_text_rows(
     default_marker: Option<&str>,
     table_name: Option<&str>,
     stop_on_copy_marker: bool,
-) -> Result<Vec<Vec<String>>, ExecError> {
+) -> Result<Vec<CopyInputRow>, ExecError> {
     let mut rows = Vec::new();
     for (line_idx, line) in text.lines().enumerate() {
         let line = line.trim_end_matches('\r');
@@ -23663,7 +23690,10 @@ fn parse_copy_text_rows(
                 None => err,
             });
         }
-        let row = parse_copy_text_line(line, delimiter, null_marker, default_marker);
+        let row = CopyInputRow::with_raw(
+            parse_copy_text_line(line, delimiter, null_marker, default_marker),
+            line.to_string(),
+        );
         rows.push(row);
     }
     Ok(rows)
@@ -23918,7 +23948,7 @@ fn push_copy_skip_notice(
 fn copy_row_error_context(
     table_name: &str,
     row_index: usize,
-    row: Option<&Vec<String>>,
+    row: Option<&CopyInputRow>,
     target_indexes: &[usize],
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
@@ -23926,9 +23956,10 @@ fn copy_row_error_context(
 ) -> String {
     let line_no = row_index + 1;
     if let Some(row) = row {
+        let fields = &row.fields;
         if matches!(err, ExecError::StringDataRightTruncation { .. })
             && let Some((column, raw)) =
-                copy_character_typmod_context_column(row, target_indexes, desc, catalog)
+                copy_character_typmod_context_column(fields, target_indexes, desc, catalog)
         {
             return format!(
                 "COPY {table_name}, line {line_no}, column {column}: \"{}\"",
@@ -23937,21 +23968,24 @@ fn copy_row_error_context(
         }
         if copy_error_is_domain_null(err)
             && let Some((column, _raw)) =
-                copy_null_domain_context_column(row, target_indexes, desc, catalog)
+                copy_null_domain_context_column(fields, target_indexes, desc, catalog)
         {
             return format!("COPY {table_name}, line {line_no}, column {column}: null input");
         }
         if let Some((column, raw)) =
-            copy_error_context_column(row, target_indexes, desc, catalog, err)
+            copy_error_context_column(fields, target_indexes, desc, catalog, err)
         {
             return format!(
                 "COPY {table_name}, line {line_no}, column {column}: \"{}\"",
                 copy_display_field(&raw)
             );
         }
+        if let Some(raw_line) = row.raw_line.as_deref() {
+            return format!("COPY {table_name}, line {line_no}: \"{raw_line}\"");
+        }
         return format!(
             "COPY {table_name}, line {line_no}: \"{}\"",
-            copy_display_row(row)
+            copy_display_row(fields)
         );
     }
     format!("COPY {table_name}, line {line_no}")
@@ -24102,9 +24136,10 @@ fn parse_copy_csv_rows(
     null_marker: &str,
     default_marker: Option<&str>,
     stop_on_copy_marker: bool,
-) -> Result<Vec<Vec<String>>, ExecError> {
+) -> Result<Vec<CopyInputRow>, ExecError> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
+    let mut raw_line = String::new();
     let mut field = String::new();
     let mut in_quotes = false;
     let mut quoted_field = false;
@@ -24112,9 +24147,12 @@ fn parse_copy_csv_rows(
 
     while let Some(ch) = chars.next() {
         if in_quotes {
+            raw_line.push(ch);
             if ch == escape {
                 if matches!(chars.peek(), Some(next) if *next == quote || *next == escape) {
-                    field.push(chars.next().unwrap());
+                    let next = chars.next().unwrap();
+                    raw_line.push(next);
+                    field.push(next);
                 } else if ch == quote {
                     in_quotes = false;
                 } else {
@@ -24135,10 +24173,12 @@ fn parse_copy_csv_rows(
 
         match ch {
             c if c == quote && field.is_empty() => {
+                raw_line.push(c);
                 in_quotes = true;
                 quoted_field = true;
             }
             c if c == delimiter => {
+                raw_line.push(c);
                 push_copy_csv_field(
                     &mut row,
                     mem::take(&mut field),
@@ -24156,7 +24196,7 @@ fn parse_copy_csv_rows(
                     null_marker,
                     default_marker,
                 );
-                push_copy_csv_row(&mut rows, &mut row, stop_on_copy_marker);
+                push_copy_csv_row(&mut rows, &mut row, &mut raw_line, stop_on_copy_marker);
                 quoted_field = false;
             }
             '\r' => {
@@ -24170,10 +24210,13 @@ fn parse_copy_csv_rows(
                     null_marker,
                     default_marker,
                 );
-                push_copy_csv_row(&mut rows, &mut row, stop_on_copy_marker);
+                push_copy_csv_row(&mut rows, &mut row, &mut raw_line, stop_on_copy_marker);
                 quoted_field = false;
             }
-            _ => field.push(ch),
+            _ => {
+                raw_line.push(ch);
+                field.push(ch);
+            }
         }
     }
     if in_quotes {
@@ -24182,9 +24225,9 @@ fn parse_copy_csv_rows(
             actual: text.into(),
         }));
     }
-    if !field.is_empty() || !row.is_empty() {
+    if !field.is_empty() || !row.is_empty() || !raw_line.is_empty() {
         push_copy_csv_field(&mut row, field, quoted_field, null_marker, default_marker);
-        push_copy_csv_row(&mut rows, &mut row, stop_on_copy_marker);
+        push_copy_csv_row(&mut rows, &mut row, &mut raw_line, stop_on_copy_marker);
     }
     Ok(rows)
 }
@@ -24210,15 +24253,17 @@ fn push_copy_csv_field(
 }
 
 fn push_copy_csv_row(
-    rows: &mut Vec<Vec<String>>,
+    rows: &mut Vec<CopyInputRow>,
     row: &mut Vec<String>,
+    raw_line: &mut String,
     stop_on_copy_marker: bool,
 ) {
     if stop_on_copy_marker && row.len() == 1 && row[0] == "\\." {
+        raw_line.clear();
         row.clear();
         return;
     }
-    rows.push(mem::take(row));
+    rows.push(CopyInputRow::with_raw(mem::take(row), mem::take(raw_line)));
 }
 
 pub(crate) fn render_copy_output(
@@ -24744,6 +24789,36 @@ mod tests {
             copy.relation,
             CopyRelation::Table { ref name, .. } if name == "copy_table"
         ));
+    }
+
+    #[test]
+    fn parse_copy_input_rows_preserves_raw_context_lines() {
+        let mut csv = super::CopyOptions {
+            format: CopyFormat::Csv,
+            default_marker: Some("\\D".into()),
+            ..super::CopyOptions::default()
+        };
+        csv.delimiter = ',';
+        let rows = super::parse_copy_input_rows(
+            "3,,\"\"\n\\D,value,2022-07-04\n\\.\n",
+            &csv,
+            Some("copy_default"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(rows[0].fields.len(), 3);
+        assert_eq!(rows[0].raw_line.as_deref(), Some("3,,\"\""));
+        assert_eq!(rows[1].raw_line.as_deref(), Some("\\D,value,2022-07-04"));
+
+        let text = super::parse_copy_input_rows(
+            "a\t\\N\n\\.\n",
+            &super::CopyOptions::default(),
+            Some("copy_text"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(text[0].fields.len(), 2);
+        assert_eq!(text[0].raw_line.as_deref(), Some("a\t\\N"));
     }
 
     #[test]

@@ -62,12 +62,12 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
-    apply_runtime_pruning_for_explain_plan, begin_explain_analyze_initplan_capture,
-    end_explain_analyze_initplan_capture, format_buffer_usage, format_explain_analyze_json,
-    format_explain_child_plan_with_subplans, format_explain_json, format_explain_lines_with_costs,
-    format_explain_lines_with_options, format_explain_plan_with_subplans,
-    format_explain_plan_with_subplans_and_catalog, format_explain_xml_from_json,
-    format_explain_yaml_from_json, format_modify_expr_subplans,
+    apply_remaining_verbose_explain_text_compat, apply_runtime_pruning_for_explain_plan,
+    begin_explain_analyze_initplan_capture, end_explain_analyze_initplan_capture,
+    format_buffer_usage, format_explain_analyze_json, format_explain_child_plan_with_subplans,
+    format_explain_json, format_explain_lines_with_costs, format_explain_lines_with_options,
+    format_explain_plan_with_subplans, format_explain_plan_with_subplans_and_catalog,
+    format_explain_xml_from_json, format_explain_yaml_from_json, format_modify_expr_subplans,
     format_verbose_explain_child_plan_with_catalog, format_verbose_explain_plan_json_with_catalog,
     format_verbose_explain_plan_with_catalog, push_explain_line, render_modify_join_expr,
 };
@@ -778,6 +778,10 @@ pub(crate) fn execute_explain(
         } else {
             format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
             end_explain_analyze_initplan_capture();
+            if verbose {
+                let compute_query_id = explain_guc_enabled(&ctx.gucs, "compute_query_id");
+                apply_remaining_verbose_explain_text_compat(&mut lines, compute_query_id);
+            }
             if memory {
                 insert_explain_memory_line(&mut lines);
             }
@@ -858,6 +862,8 @@ pub(crate) fn execute_explain(
                 format_verbose_explain_plan_with_catalog(
                     &plan_tree, &subplans, 0, costs, catalog, &mut lines,
                 );
+                let compute_query_id = explain_guc_enabled(&ctx.gucs, "compute_query_id");
+                apply_remaining_verbose_explain_text_compat(&mut lines, compute_query_id);
             } else {
                 format_explain_plan_with_subplans_and_catalog(
                     &plan_tree, &subplans, 0, costs, catalog, &mut lines,

@@ -5,9 +5,10 @@ use crate::backend::catalog::persistence::{
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::commands::rolecmds::{
-    PasswordSettings, build_alter_role_spec, build_create_role_spec, can_rename_role,
-    grant_membership_authorized, membership_row, normalize_drop_role_names,
-    parse_createrole_self_grant, role_management_error, store_role_setting,
+    GrantMembershipAuthorizationError, PasswordSettings, build_alter_role_spec,
+    build_create_role_spec, can_rename_role, grant_membership_authorized_with_detail,
+    membership_row, normalize_drop_role_names, parse_createrole_self_grant, role_management_error,
+    store_role_setting,
 };
 use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,
@@ -154,8 +155,8 @@ impl Database {
             let live_catalog = self
                 .auth_catalog(client_id, Some((xid, current_cid)))
                 .map_err(map_role_catalog_error)?;
-            let parent = grant_membership_authorized(&auth, &live_catalog, role_name)
-                .map_err(ExecError::Parse)?;
+            let parent = grant_membership_authorized_with_detail(&auth, &live_catalog, role_name)
+                .map_err(grant_membership_authorization_exec_error)?;
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -1458,6 +1459,20 @@ fn map_role_catalog_error(err: crate::backend::catalog::CatalogError) -> ExecErr
             role_management_error(format!("role \"{name}\" does not exist")),
         ),
         other => ExecError::Parse(role_management_error(format!("{other:?}"))),
+    }
+}
+
+fn grant_membership_authorization_exec_error(err: GrantMembershipAuthorizationError) -> ExecError {
+    match err {
+        GrantMembershipAuthorizationError::Parse(err) => ExecError::Parse(err),
+        GrantMembershipAuthorizationError::PermissionDenied { role_name, detail } => {
+            ExecError::DetailedError {
+                message: format!("permission denied to grant role \"{role_name}\""),
+                detail,
+                hint: None,
+                sqlstate: "42501",
+            }
+        }
     }
 }
 

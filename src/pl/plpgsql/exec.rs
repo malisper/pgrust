@@ -8378,6 +8378,10 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::Loop { .. } => "LOOP",
         CompiledStmt::Exit { .. } => "EXIT",
         CompiledStmt::ForInt { .. } => "FOR with integer loop variable",
+        CompiledStmt::ForQuery {
+            source: CompiledForQuerySource::Dynamic { .. },
+            ..
+        } => "FOR over EXECUTE statement",
         CompiledStmt::ForQuery { .. } => "FOR over SELECT rows",
         CompiledStmt::ForEach { .. } => "FOREACH over array",
         CompiledStmt::Raise { .. } => "RAISE",
