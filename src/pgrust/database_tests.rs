@@ -46931,6 +46931,124 @@ fn create_operator_class_uses_schema_qualified_composite_operator() {
 }
 
 #[test]
+fn alter_operator_class_and_family_set_schema_updates_catalog_rows() {
+    let base = temp_dir("alter_operator_class_family_set_schema");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create schema alt_nsp1").unwrap();
+    db.execute(1, "create schema alt_nsp2").unwrap();
+    db.execute(
+        1,
+        "create operator class alt_nsp1.alt_opc1 for type uuid using hash as storage uuid",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter operator class alt_nsp1.alt_opc1 using hash set schema alt_nsp2",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select n.nspname, c.opcname from pg_opclass c \
+             join pg_namespace n on n.oid = c.opcnamespace \
+             where c.opcname = 'alt_opc1'",
+        ),
+        vec![vec![
+            Value::Text("alt_nsp2".into()),
+            Value::Text("alt_opc1".into()),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "alter operator family alt_nsp1.alt_opc1 using hash set schema alt_nsp2",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select n.nspname, f.opfname from pg_opfamily f \
+             join pg_namespace n on n.oid = f.opfnamespace \
+             where f.opfname = 'alt_opc1'",
+        ),
+        vec![vec![
+            Value::Text("alt_nsp2".into()),
+            Value::Text("alt_opc1".into()),
+        ]]
+    );
+}
+
+#[test]
+fn alter_operator_class_set_schema_after_schema_qualified_operator_item() {
+    let base = temp_dir("alter_opclass_schema_qualified_operator");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create schema alter1").unwrap();
+    db.execute(1, "create schema alter2").unwrap();
+    db.execute(1, "create type alter1.ctype as (f1 int, f2 text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function alter1.same(alter1.ctype, alter1.ctype) returns boolean language sql \
+         as 'select $1.f1 is not distinct from $2.f1 and $1.f2 is not distinct from $2.f2'",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator alter1.=(procedure = alter1.same, leftarg = alter1.ctype, rightarg = alter1.ctype)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator class alter1.ctype_hash_ops default for type alter1.ctype using hash as \
+         operator 1 alter1.=(alter1.ctype, alter1.ctype)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter operator class alter1.ctype_hash_ops using hash set schema alter2",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter operator family alter1.ctype_hash_ops using hash set schema alter2",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select n.nspname, c.opcname from pg_opclass c \
+             join pg_namespace n on n.oid = c.opcnamespace \
+             where c.opcname = 'ctype_hash_ops'",
+        ),
+        vec![vec![
+            Value::Text("alter2".into()),
+            Value::Text("ctype_hash_ops".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select n.nspname, f.opfname from pg_opfamily f \
+             join pg_namespace n on n.oid = f.opfnamespace \
+             where f.opfname = 'ctype_hash_ops'",
+        ),
+        vec![vec![
+            Value::Text("alter2".into()),
+            Value::Text("ctype_hash_ops".into()),
+        ]]
+    );
+}
+
+#[test]
 fn create_operator_bool_bool_regression_debug() {
     let base = temp_dir("create_operator_bool_bool_regression");
     let db = Database::open(&base, 16).unwrap();

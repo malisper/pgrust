@@ -227,6 +227,13 @@ fn resolve_proc_oid_for_name(
     arg_type_oids: &[u32],
     missing_message: String,
 ) -> Result<u32, ExecError> {
+    let target_namespace_oid = target.schema_name.as_deref().and_then(|schema| {
+        catalog
+            .namespace_rows()
+            .into_iter()
+            .find(|row| row.nspname.eq_ignore_ascii_case(schema))
+            .map(|row| row.oid)
+    });
     let desired = arg_type_oids
         .iter()
         .map(u32::to_string)
@@ -240,13 +247,8 @@ fn resolve_proc_oid_for_name(
                 && row.proargtypes == desired
                 && target
                     .schema_name
-                    .as_deref()
-                    .map(|schema| {
-                        catalog.namespace_rows().into_iter().any(|namespace| {
-                            namespace.nspname.eq_ignore_ascii_case(schema)
-                                && namespace.oid == row.pronamespace
-                        })
-                    })
+                    .as_ref()
+                    .map(|_| target_namespace_oid == Some(row.pronamespace))
                     .unwrap_or(true)
         })
         .map(|row| row.oid)
