@@ -6,8 +6,9 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, DEPENDENCY_NORMAL, INT4_TYPE_OID, PG_CAST_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_TYPE_RELATION_OID, PgCastRow, PgDependRow, PgProcRow, PgTypeRow, builtin_type_name_for_oid,
+    BOOL_TYPE_OID, DEPENDENCY_NORMAL, INT4_TYPE_OID, PG_CAST_RELATION_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgCastRow, PgDependRow,
+    PgProcRow, PgTypeRow, builtin_type_name_for_oid,
 };
 
 fn cast_context_code(context: CastContext) -> char {
@@ -134,24 +135,32 @@ fn resolve_cast_function_row(
         .iter()
         .map(|arg| resolve_cast_type_oid(catalog, arg))
         .collect::<Result<Vec<_>, _>>()?;
-    let matches = catalog
+    let mut matches = catalog
         .proc_rows_by_name(function_name)
         .into_iter()
         .filter(|row| row.prokind == 'f')
-        .filter(|row| {
-            namespace_oid
-                .map(|namespace_oid| row.pronamespace == namespace_oid)
-                .unwrap_or(true)
+        .filter_map(|row| {
+            cast_function_namespace_rank(catalog, &row, namespace_oid).map(|rank| (rank, row))
         })
         .filter(|row| {
-            row.proargtypes
+            row.1
+                .proargtypes
                 .split_whitespace()
                 .filter_map(|oid| oid.parse::<u32>().ok())
                 .eq(arg_oids.iter().copied())
         })
         .collect::<Vec<_>>();
+    matches.sort_by_key(|(rank, row)| (*rank, row.oid));
     match matches.as_slice() {
-        [row] => Ok(row.clone()),
+        [(rank, row)] | [(rank, row), ..]
+            if matches
+                .iter()
+                .filter(|(candidate_rank, _)| candidate_rank == rank)
+                .count()
+                == 1 =>
+        {
+            Ok(row.clone())
+        }
         [] => {
             let _ = configured_search_path;
             Err(ExecError::DetailedError {
@@ -168,6 +177,50 @@ fn resolve_cast_function_row(
             sqlstate: "42725",
         }),
     }
+}
+
+fn cast_function_namespace_rank(
+    catalog: &dyn CatalogLookup,
+    row: &PgProcRow,
+    namespace_oid: Option<u32>,
+) -> Option<usize> {
+    if let Some(namespace_oid) = namespace_oid {
+        return (row.pronamespace == namespace_oid).then_some(0);
+    }
+    if cast_namespace_is_temp(catalog, row.pronamespace) {
+        return None;
+    }
+    if row.pronamespace == PG_CATALOG_NAMESPACE_OID {
+        return Some(0);
+    }
+
+    let mut rank = 1usize;
+    for schema in catalog.search_path() {
+        if matches!(schema.as_str(), "" | "$user" | "pg_temp" | "pg_catalog") {
+            continue;
+        }
+        let Some(namespace) = catalog.namespace_row_by_name(&schema) else {
+            continue;
+        };
+        if cast_namespace_is_temp(catalog, namespace.oid) {
+            continue;
+        }
+        if namespace.oid == row.pronamespace {
+            return Some(rank);
+        }
+        rank = rank.saturating_add(1);
+    }
+    None
+}
+
+fn cast_namespace_is_temp(catalog: &dyn CatalogLookup, namespace_oid: u32) -> bool {
+    catalog
+        .namespace_row_by_oid(namespace_oid)
+        .map(|row| row.nspname)
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("pg_temp")
+                || name.to_ascii_lowercase().starts_with("pg_temp_")
+        })
 }
 
 fn binary_coercible_cast_row(

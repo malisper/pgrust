@@ -4635,6 +4635,34 @@ impl Database {
         create_stmt: &CreateDomainStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let explicit_pg_temp =
+            create_stmt
+                .domain_name
+                .split_once('.')
+                .is_some_and(|(schema, object)| {
+                    !object.is_empty() && schema.eq_ignore_ascii_case("pg_temp")
+                });
+        if explicit_pg_temp && self.owned_temp_namespace(client_id).is_none() {
+            let xid = self.txns.write().begin();
+            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+            let mut cid = 0;
+            let mut catalog_effects = Vec::new();
+            let mut temp_effects = Vec::new();
+            let result = self
+                .ensure_temp_namespace(
+                    client_id,
+                    xid,
+                    &mut cid,
+                    &mut catalog_effects,
+                    &mut temp_effects,
+                )
+                .map(|_| StatementResult::AffectedRows(0));
+            let result =
+                self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
+            guard.disarm();
+            result?;
+        }
+
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let sql_type = crate::backend::parser::resolve_raw_type_name(&create_stmt.ty, &catalog)
             .map_err(ExecError::Parse)?;

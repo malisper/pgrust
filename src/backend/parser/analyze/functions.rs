@@ -111,17 +111,17 @@ pub(crate) fn resolve_function_call(
     actual_types: &[SqlType],
     func_variadic: bool,
 ) -> Result<ResolvedFunctionCall, ParseError> {
-    let mut best: Option<(ResolvedFunctionCall, usize, bool, bool)> = None;
+    let mut best: Option<(ResolvedFunctionCall, usize, usize, bool, bool)> = None;
     let mut ambiguous = false;
     let Some((lookup_name, namespace_oid)) = function_lookup_name_and_namespace(catalog, name)
     else {
         return Err(undefined_function_error(catalog, name, actual_types));
     };
-
     for row in catalog.proc_rows_by_name(lookup_name) {
-        if namespace_oid.is_some_and(|oid| row.pronamespace != oid) {
+        let Some(namespace_rank) = function_candidate_namespace_rank(catalog, &row, namespace_oid)
+        else {
             continue;
-        }
+        };
         let Some(candidate) = match_proc_signature(catalog, &row, actual_types, func_variadic)
         else {
             continue;
@@ -136,14 +136,31 @@ pub(crate) fn resolve_function_call(
         let expanded = row.provariadic != 0 && !func_variadic && candidate.nvargs > 0;
         match &best {
             None => {
-                best = Some((resolved, candidate.cost, is_variadic, expanded));
+                best = Some((
+                    resolved,
+                    namespace_rank,
+                    candidate.cost,
+                    is_variadic,
+                    expanded,
+                ));
                 ambiguous = false;
             }
-            Some((_, best_cost, best_variadic, best_expanded)) => {
-                let current_rank = (candidate.cost, is_variadic, expanded);
-                let best_rank = (*best_cost, *best_variadic, *best_expanded);
+            Some((_, best_namespace_rank, best_cost, best_variadic, best_expanded)) => {
+                let current_rank = (namespace_rank, candidate.cost, is_variadic, expanded);
+                let best_rank = (
+                    *best_namespace_rank,
+                    *best_cost,
+                    *best_variadic,
+                    *best_expanded,
+                );
                 if current_rank < best_rank {
-                    best = Some((resolved, candidate.cost, is_variadic, expanded));
+                    best = Some((
+                        resolved,
+                        namespace_rank,
+                        candidate.cost,
+                        is_variadic,
+                        expanded,
+                    ));
                     ambiguous = false;
                 } else if current_rank == best_rank {
                     ambiguous = true;
@@ -159,7 +176,7 @@ pub(crate) fn resolve_function_call(
         });
     }
 
-    best.map(|(resolved, _, _, _)| resolved).ok_or_else(|| {
+    best.map(|(resolved, _, _, _, _)| resolved).ok_or_else(|| {
         polymorphic_resolution_error_for_candidates(
             catalog,
             lookup_name,
@@ -231,12 +248,13 @@ pub(crate) fn resolve_function_call_with_arg_defaults(
         return Err(undefined_function_error(catalog, name, actual_types));
     };
 
-    let mut best: Option<(ResolvedFunctionCallWithArgs, usize, bool, bool)> = None;
+    let mut best: Option<(ResolvedFunctionCallWithArgs, usize, usize, bool, bool)> = None;
     let mut ambiguous = false;
     for row in catalog.proc_rows_by_name(lookup_name) {
-        if namespace_oid.is_some_and(|oid| row.pronamespace != oid) {
+        let Some(namespace_rank) = function_candidate_namespace_rank(catalog, &row, namespace_oid)
+        else {
             continue;
-        }
+        };
         let Some(normalized) =
             normalize_function_call_args(catalog, &row, args, actual_types, func_variadic)?
         else {
@@ -268,14 +286,31 @@ pub(crate) fn resolve_function_call_with_arg_defaults(
         };
         match &best {
             None => {
-                best = Some((normalized_call, total_cost, is_variadic, expanded));
+                best = Some((
+                    normalized_call,
+                    namespace_rank,
+                    total_cost,
+                    is_variadic,
+                    expanded,
+                ));
                 ambiguous = false;
             }
-            Some((_, best_cost, best_variadic, best_expanded)) => {
-                let current_rank = (total_cost, is_variadic, expanded);
-                let best_rank = (*best_cost, *best_variadic, *best_expanded);
+            Some((_, best_namespace_rank, best_cost, best_variadic, best_expanded)) => {
+                let current_rank = (namespace_rank, total_cost, is_variadic, expanded);
+                let best_rank = (
+                    *best_namespace_rank,
+                    *best_cost,
+                    *best_variadic,
+                    *best_expanded,
+                );
                 if current_rank < best_rank {
-                    best = Some((normalized_call, total_cost, is_variadic, expanded));
+                    best = Some((
+                        normalized_call,
+                        namespace_rank,
+                        total_cost,
+                        is_variadic,
+                        expanded,
+                    ));
                     ambiguous = false;
                 } else if current_rank == best_rank {
                     ambiguous = true;
@@ -287,7 +322,7 @@ pub(crate) fn resolve_function_call_with_arg_defaults(
     if ambiguous {
         return Err(ambiguous_function_error(catalog, name, actual_types));
     }
-    best.map(|(resolved, _, _, _)| resolved).ok_or_else(|| {
+    best.map(|(resolved, _, _, _, _)| resolved).ok_or_else(|| {
         polymorphic_resolution_error_for_candidates(
             catalog,
             lookup_name,
@@ -504,28 +539,91 @@ fn function_lookup_name_and_namespace<'a>(
         return Some((name, None));
     };
     if schema_name.eq_ignore_ascii_case("pg_temp")
+        && let Some(namespace_oid) = catalog
+            .proc_rows_by_name(base_name)
+            .into_iter()
+            .find(|row| namespace_is_temp(catalog, row.pronamespace))
+            .map(|row| row.pronamespace)
+    {
+        return Some((base_name, Some(namespace_oid)));
+    }
+    if schema_name.eq_ignore_ascii_case("pg_temp")
         && let Some(namespace_oid) = catalog.search_path().into_iter().find_map(|schema| {
-            schema
-                .to_ascii_lowercase()
-                .starts_with("pg_temp_")
-                .then(|| {
-                    catalog
-                        .namespace_rows()
-                        .into_iter()
-                        .find(|row| row.nspname.eq_ignore_ascii_case(&schema))
-                        .map(|row| row.oid)
-                })
-                .flatten()
+            schema_is_temp(&schema).then(|| {
+                catalog
+                    .namespace_row_by_name(&schema)
+                    .or_else(|| {
+                        catalog
+                            .namespace_rows()
+                            .into_iter()
+                            .find(|row| row.nspname.eq_ignore_ascii_case(&schema))
+                    })
+                    .map(|row| row.oid)
+            })?
         })
     {
         return Some((base_name, Some(namespace_oid)));
     }
-    let namespace_oid = catalog
-        .namespace_rows()
-        .into_iter()
-        .find(|row| row.nspname.eq_ignore_ascii_case(schema_name))
-        .map(|row| row.oid);
-    namespace_oid.map(|oid| (base_name, Some(oid)))
+    if schema_name.eq_ignore_ascii_case("pg_temp")
+        && let Some(namespace_oid) = catalog
+            .namespace_rows()
+            .into_iter()
+            .find(|row| schema_is_temp(&row.nspname))
+            .map(|row| row.oid)
+    {
+        return Some((base_name, Some(namespace_oid)));
+    }
+    catalog
+        .namespace_row_by_name(schema_name)
+        .map(|row| (base_name, Some(row.oid)))
+}
+
+fn function_candidate_namespace_rank(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgProcRow,
+    namespace_oid: Option<u32>,
+) -> Option<usize> {
+    if let Some(namespace_oid) = namespace_oid {
+        return (row.pronamespace == namespace_oid).then_some(0);
+    }
+    function_search_path_namespace_rank(catalog, row.pronamespace)
+}
+
+fn function_search_path_namespace_rank(
+    catalog: &dyn CatalogLookup,
+    namespace_oid: u32,
+) -> Option<usize> {
+    if namespace_is_temp(catalog, namespace_oid) {
+        return None;
+    }
+    let search_path = catalog.search_path();
+    if search_path.is_empty() {
+        return Some(if namespace_oid == PG_CATALOG_NAMESPACE_OID {
+            0
+        } else {
+            1
+        });
+    }
+    search_path
+        .iter()
+        .enumerate()
+        .filter(|(_, schema)| !schema_is_temp(schema) && schema.as_str() != "$user")
+        .find_map(|(rank, schema)| {
+            catalog
+                .namespace_row_by_name(schema)
+                .is_some_and(|namespace| namespace.oid == namespace_oid)
+                .then_some(rank)
+        })
+}
+
+fn namespace_is_temp(catalog: &dyn CatalogLookup, namespace_oid: u32) -> bool {
+    catalog
+        .namespace_row_by_oid(namespace_oid)
+        .is_some_and(|row| schema_is_temp(&row.nspname))
+}
+
+fn schema_is_temp(schema: &str) -> bool {
+    schema.eq_ignore_ascii_case("pg_temp") || schema.to_ascii_lowercase().starts_with("pg_temp_")
 }
 
 fn undefined_function_error(
@@ -569,7 +667,7 @@ pub(crate) fn sql_function_anyarray_return_resolution_error(
 ) -> Option<ParseError> {
     let (lookup_name, namespace_oid) = function_lookup_name_and_namespace(catalog, name)?;
     for row in catalog.proc_rows_by_name(lookup_name) {
-        if namespace_oid.is_some_and(|oid| row.pronamespace != oid) {
+        if function_candidate_namespace_rank(catalog, &row, namespace_oid).is_none() {
             continue;
         }
         if row.prokind != 'f' || row.prolang != PG_LANGUAGE_SQL_OID || row.prorettype != ANYARRAYOID
@@ -615,7 +713,7 @@ fn polymorphic_resolution_error_for_candidates(
 ) -> Option<ParseError> {
     let saw_unknown = actual_types.iter().copied().any(is_unknown_sql_type);
     for row in catalog.proc_rows_by_name(lookup_name) {
-        if namespace_oid.is_some_and(|oid| row.pronamespace != oid) {
+        if function_candidate_namespace_rank(catalog, &row, namespace_oid).is_none() {
             continue;
         }
         let Some(declared_oids) = parse_proc_argtype_oids(&row.proargtypes) else {
@@ -965,7 +1063,7 @@ pub(super) fn resolve_function_cast_type(
     name: &str,
 ) -> Option<SqlType> {
     let normalized = normalize_builtin_function_name(name);
-    if let Some(row) = catalog.type_by_name(normalized) {
+    if let Some(row) = function_cast_type_row(catalog, normalized) {
         if row.typrelid != 0 {
             return None;
         }
@@ -983,6 +1081,31 @@ pub(super) fn resolve_function_cast_type(
         }
     }
     None
+}
+
+fn function_cast_type_row(catalog: &dyn CatalogLookup, name: &str) -> Option<PgTypeRow> {
+    if name.contains('.') {
+        return catalog.type_by_name(name);
+    }
+    let normalized = normalize_catalog_lookup_name(name);
+    let mut best: Option<(usize, PgTypeRow)> = None;
+    for row in catalog.type_rows() {
+        if !row.typname.eq_ignore_ascii_case(normalized) {
+            continue;
+        }
+        let Some(namespace_rank) = function_search_path_namespace_rank(catalog, row.typnamespace)
+        else {
+            continue;
+        };
+        match &best {
+            None => best = Some((namespace_rank, row)),
+            Some((best_rank, _)) if namespace_rank < *best_rank => {
+                best = Some((namespace_rank, row));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(_, row)| row)
 }
 
 pub(super) fn explicit_text_input_cast_exists(

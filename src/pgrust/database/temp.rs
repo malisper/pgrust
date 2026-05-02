@@ -3,8 +3,9 @@ use crate::backend::catalog::persistence::delete_catalog_rows_subset_mvcc;
 use crate::backend::catalog::rows::{PhysicalCatalogRows, drop_relation_delete_kinds};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::include::catalog::{
-    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_POLICY_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID, PG_REWRITE_RELATION_OID,
+    BootstrapCatalogKind, PG_ATTRDEF_RELATION_OID, PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID,
+    PG_CONSTRAINT_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_POLICY_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID, PG_REWRITE_RELATION_OID,
     PG_STATISTIC_EXT_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
     relkind_has_storage,
 };
@@ -26,6 +27,12 @@ fn push_oid(target: &mut Vec<u32>, oid: u32) {
     if oid != 0 && !target.contains(&oid) {
         target.push(oid);
     }
+}
+
+fn proc_argtype_oids(argtypes: &str) -> impl Iterator<Item = u32> + '_ {
+    argtypes
+        .split_whitespace()
+        .filter_map(|part| part.parse::<u32>().ok())
 }
 
 fn temp_namespace_catalog_rows(
@@ -144,6 +151,38 @@ fn temp_namespace_catalog_rows(
             push_unique(&mut rows.statistics_ext_data, row);
         }
     }
+    for row in catcache.proc_rows() {
+        if namespace_set.contains(&row.pronamespace)
+            || type_oids.contains(&row.prorettype)
+            || proc_argtype_oids(&row.proargtypes).any(|oid| type_oids.contains(&oid))
+        {
+            push_unique(&mut rows.procs, row);
+        }
+    }
+    let proc_oids = rows
+        .procs
+        .iter()
+        .map(|row| row.oid)
+        .collect::<BTreeSet<_>>();
+    for row in catcache.operator_rows() {
+        if namespace_set.contains(&row.oprnamespace)
+            || type_oids.contains(&row.oprleft)
+            || type_oids.contains(&row.oprright)
+            || proc_oids.contains(&row.oprcode)
+            || proc_oids.contains(&row.oprrest)
+            || proc_oids.contains(&row.oprjoin)
+        {
+            push_unique(&mut rows.operators, row);
+        }
+    }
+    for row in catcache.cast_rows() {
+        if type_oids.contains(&row.castsource)
+            || type_oids.contains(&row.casttarget)
+            || proc_oids.contains(&row.castfunc)
+        {
+            push_unique(&mut rows.casts, row);
+        }
+    }
 
     let mut object_keys = rows
         .classes
@@ -186,6 +225,13 @@ fn temp_namespace_catalog_rows(
             .iter()
             .map(|row| (PG_STATISTIC_EXT_RELATION_OID, row.oid)),
     );
+    object_keys.extend(rows.procs.iter().map(|row| (PG_PROC_RELATION_OID, row.oid)));
+    object_keys.extend(
+        rows.operators
+            .iter()
+            .map(|row| (PG_OPERATOR_RELATION_OID, row.oid)),
+    );
+    object_keys.extend(rows.casts.iter().map(|row| (PG_CAST_RELATION_OID, row.oid)));
 
     for row in catcache.depend_rows() {
         if object_keys.contains(&(row.classid, row.objid))
@@ -196,7 +242,7 @@ fn temp_namespace_catalog_rows(
     }
 
     let mut effect = CatalogMutationEffect {
-        touched_catalogs: drop_relation_delete_kinds(),
+        touched_catalogs: temp_namespace_delete_kinds(),
         ..CatalogMutationEffect::default()
     };
     for row in &rows.classes {
@@ -223,6 +269,20 @@ fn temp_namespace_catalog_rows(
     }
 
     (rows, effect)
+}
+
+fn temp_namespace_delete_kinds() -> Vec<BootstrapCatalogKind> {
+    let mut kinds = drop_relation_delete_kinds();
+    for kind in [
+        BootstrapCatalogKind::PgProc,
+        BootstrapCatalogKind::PgOperator,
+        BootstrapCatalogKind::PgCast,
+    ] {
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
 }
 
 impl Database {
@@ -419,6 +479,9 @@ impl Database {
             Self::temp_namespace_oid(temp_backend_id),
             Self::temp_toast_namespace_oid(temp_backend_id),
         ];
+        if self.remove_temp_dynamic_entries(namespace_oids[0]) {
+            self.refresh_catalog_store_dynamic_type_rows(client_id, None);
+        }
         let catcache = self
             .txn_backend_catcache(client_id, xid, *cid)
             .map_err(map_catalog_error)?;
@@ -427,7 +490,13 @@ impl Database {
             &namespace_oids,
             Self::temp_db_oid(temp_backend_id),
         );
-        if rows.classes.is_empty() {
+        if rows.classes.is_empty()
+            && rows.types.is_empty()
+            && rows.procs.is_empty()
+            && rows.operators.is_empty()
+            && rows.casts.is_empty()
+            && rows.depends.is_empty()
+        {
             return Ok(());
         }
         let ctx = CatalogWriteContext {
@@ -443,7 +512,7 @@ impl Database {
             &ctx,
             &rows,
             self.database_oid,
-            &drop_relation_delete_kinds(),
+            &temp_namespace_delete_kinds(),
         )
         .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
@@ -451,7 +520,74 @@ impl Database {
         Ok(())
     }
 
-    pub(super) fn ensure_temp_namespace(
+    fn remove_temp_dynamic_entries(&self, namespace_oid: u32) -> bool {
+        let mut removed_type_oids = BTreeSet::new();
+        let mut changed = false;
+        {
+            let mut domains = self.domains.write();
+            let before = domains.len();
+            domains.retain(|_, domain| {
+                if domain.namespace_oid == namespace_oid {
+                    removed_type_oids.insert(domain.oid);
+                    removed_type_oids.insert(domain.array_oid);
+                    return false;
+                }
+                true
+            });
+            changed |= domains.len() != before;
+        }
+        {
+            let mut enum_types = self.enum_types.write();
+            let before = enum_types.len();
+            enum_types.retain(|_, entry| {
+                if entry.namespace_oid == namespace_oid {
+                    removed_type_oids.insert(entry.oid);
+                    removed_type_oids.insert(entry.array_oid);
+                    return false;
+                }
+                true
+            });
+            changed |= enum_types.len() != before;
+        }
+        {
+            let mut range_types = self.range_types.write();
+            let before = range_types.len();
+            range_types.retain(|_, entry| {
+                if entry.namespace_oid == namespace_oid {
+                    removed_type_oids.insert(entry.oid);
+                    removed_type_oids.insert(entry.array_oid);
+                    removed_type_oids.insert(entry.multirange_oid);
+                    removed_type_oids.insert(entry.multirange_array_oid);
+                    return false;
+                }
+                true
+            });
+            changed |= range_types.len() != before;
+        }
+        if !removed_type_oids.is_empty() {
+            let mut base_types = self.base_types.write();
+            let before = base_types.len();
+            base_types.retain(|oid, entry| {
+                !removed_type_oids.contains(oid) && !removed_type_oids.contains(&entry.array_oid)
+            });
+            changed |= base_types.len() != before;
+        }
+        {
+            let mut conversions = self.conversions.write();
+            let before = conversions.len();
+            conversions.retain(|_, entry| entry.namespace_oid != namespace_oid);
+            changed |= conversions.len() != before;
+        }
+        {
+            let mut statistics_objects = self.statistics_objects.write();
+            let before = statistics_objects.len();
+            statistics_objects.retain(|_, entry| entry.namespace_oid != namespace_oid);
+            changed |= statistics_objects.len() != before;
+        }
+        changed
+    }
+
+    pub(crate) fn ensure_temp_namespace(
         &self,
         client_id: ClientId,
         xid: TransactionId,
@@ -462,6 +598,9 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let temp_backend_id = self.temp_backend_id(client_id);
         if let Some(namespace) = self.owned_temp_namespace(client_id) {
+            temp_effects.push(TempMutationEffect::TouchNamespace {
+                name: namespace.name.clone(),
+            });
             return Ok(namespace);
         }
 
@@ -569,6 +708,21 @@ impl Database {
         });
         self.invalidate_backend_cache_state(client_id);
         Ok(namespace)
+    }
+
+    pub(crate) fn record_temp_namespace_touch(
+        &self,
+        client_id: ClientId,
+        namespace_oid: u32,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) {
+        if let Some(namespace) = self.owned_temp_namespace(client_id)
+            && namespace.oid == namespace_oid
+        {
+            temp_effects.push(TempMutationEffect::TouchNamespace {
+                name: namespace.name,
+            });
+        }
     }
 
     pub(super) fn create_temp_relation_in_transaction(

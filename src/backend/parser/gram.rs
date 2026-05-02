@@ -30057,6 +30057,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_catalog => Ok(SqlExpr::CurrentCatalog),
+        Rule::current_schema_func => Ok(SqlExpr::CurrentSchema),
         Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
         Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
         Rule::kw_user_value => Ok(SqlExpr::User),

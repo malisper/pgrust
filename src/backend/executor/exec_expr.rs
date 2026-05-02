@@ -10199,9 +10199,19 @@ fn configured_current_schema_search_path(ctx: &ExecutorContext) -> Vec<String> {
         .unwrap_or_else(|| vec!["public".into()])
 }
 
-fn current_schema_value(ctx: &ExecutorContext) -> Value {
+fn current_schema_value(ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+    if configured_current_schema_search_path(ctx)
+        .into_iter()
+        .find(|schema| schema != "$user" && schema != "pg_catalog")
+        .is_some_and(|schema| current_schema_is_temp(&schema))
+    {
+        if let Some(namespace_name) = ensure_current_schema_temp_namespace(ctx)? {
+            return Ok(Value::Text(namespace_name.into()));
+        }
+    }
+
     let Some(catalog) = ctx.catalog.as_deref() else {
-        return Value::Text("public".into());
+        return Ok(Value::Text("public".into()));
     };
     let namespaces = catalog.namespace_rows();
     let catalog_search_path = catalog.search_path();
@@ -10219,14 +10229,38 @@ fn current_schema_value(ctx: &ExecutorContext) -> Value {
     }
     search_path
         .into_iter()
-        .filter(|schema| schema != "$user" && schema != "pg_temp")
+        .filter(|schema| schema != "$user" && !current_schema_is_temp(schema))
         .find(|schema| {
             namespaces
                 .iter()
                 .any(|namespace| namespace.nspname.eq_ignore_ascii_case(schema))
         })
         .map(|schema| Value::Text(schema.into()))
-        .unwrap_or(Value::Null)
+        .map(Ok)
+        .unwrap_or(Ok(Value::Null))
+}
+
+fn ensure_current_schema_temp_namespace(
+    ctx: &mut ExecutorContext,
+) -> Result<Option<String>, ExecError> {
+    let Some(db) = ctx.database.clone() else {
+        return Ok(current_temp_namespace_name(ctx).map(|name| name.to_string()));
+    };
+    let xid = ctx.ensure_write_xid()?;
+    let mut cid = ctx.next_command_id;
+    let namespace = db.ensure_temp_namespace(
+        ctx.client_id,
+        xid,
+        &mut cid,
+        &mut ctx.catalog_effects,
+        &mut ctx.temp_effects,
+    )?;
+    ctx.next_command_id = cid.saturating_add(1);
+    Ok(Some(namespace.name))
+}
+
+fn current_schema_is_temp(schema: &str) -> bool {
+    schema.eq_ignore_ascii_case("pg_temp") || schema.to_ascii_lowercase().starts_with("pg_temp_")
 }
 
 fn current_schemas_value(include_implicit: bool, ctx: &ExecutorContext) -> Value {
@@ -10865,7 +10899,7 @@ pub fn eval_expr(
             ctx.statement_timestamp_usecs,
         )),
         Expr::CurrentCatalog => Ok(Value::Text(ctx.current_database_name.clone().into())),
-        Expr::CurrentSchema => Ok(current_schema_value(ctx)),
+        Expr::CurrentSchema => current_schema_value(ctx),
         Expr::CurrentUser | Expr::User | Expr::CurrentRole => {
             auth_role_name(ctx, ctx.current_user_oid)
         }

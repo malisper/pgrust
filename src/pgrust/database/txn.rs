@@ -216,6 +216,7 @@ impl Database {
                         namespace.generation = namespace.generation.saturating_add(1);
                     }
                 }
+                TempMutationEffect::TouchNamespace { .. } => {}
             }
         }
         drop(namespaces);

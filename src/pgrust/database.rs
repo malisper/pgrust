@@ -916,6 +916,9 @@ pub enum TempMutationEffect {
         old_rel: crate::backend::storage::smgr::RelFileLocator,
         new_rel: crate::backend::storage::smgr::RelFileLocator,
     },
+    TouchNamespace {
+        name: String,
+    },
 }
 
 impl Database {
@@ -1203,10 +1206,17 @@ impl Database {
                     return Err(ParseError::UnsupportedQualifiedName(name.to_string()));
                 }
                 if is_temp_schema_name(&schema) {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "permanent type",
-                        actual: "temporary type".into(),
-                    });
+                    let Some(namespace) = temp_namespace.as_ref() else {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "active temporary namespace",
+                            actual: "temporary type".into(),
+                        });
+                    };
+                    return Ok((
+                        format!("{}.{}", namespace.name, object),
+                        object,
+                        namespace.oid,
+                    ));
                 }
                 let namespace_oid = self
                     .visible_namespace_oid_by_name(client_id, None, &schema)

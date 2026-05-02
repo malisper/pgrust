@@ -48416,6 +48416,193 @@ fn create_function_uses_search_path_for_unqualified_creation() {
 }
 
 #[test]
+fn pg_temp_function_and_function_style_domain_cast_require_qualification() {
+    let base = temp_dir("pg_temp_function_domain_lookup");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function whoami() returns text language sql as $$ select 'public' $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function pg_temp.whoami() returns text language sql as $$ select 'temp' $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select n.nspname, p.proname \
+             from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
+             where p.proname = 'whoami' \
+             order by n.nspname",
+        ),
+        vec![
+            vec![
+                Value::Text("pg_temp_1".into()),
+                Value::Text("whoami".into())
+            ],
+            vec![Value::Text("public".into()), Value::Text("whoami".into())],
+        ]
+    );
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select whoami()"),
+        vec![vec![Value::Text("public".into())]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_temp.whoami()"),
+        vec![vec![Value::Text("temp".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create domain pg_temp.nonempty as text check (value <> '')",
+        )
+        .unwrap();
+
+    assert!(
+        session.execute(&db, "select nonempty('')").is_err(),
+        "unqualified function-style cast must not search pg_temp"
+    );
+    assert!(
+        session.execute(&db, "select pg_temp.nonempty('')").is_err(),
+        "qualified function-style cast should resolve pg_temp domain and enforce check"
+    );
+    assert!(
+        session.execute(&db, "select ''::nonempty").is_err(),
+        "normal casts should use relation/type search path and enforce temp domain check"
+    );
+}
+
+#[test]
+fn create_domain_pg_temp_creates_temp_namespace() {
+    let base = temp_dir("pg_temp_domain_creates_namespace");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create domain pg_temp.nonempty as text check (value <> '')",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select n.nspname, t.typname \
+             from pg_type t join pg_namespace n on n.oid = t.typnamespace \
+             where t.typname = 'nonempty'",
+        ),
+        vec![vec![
+            Value::Text("pg_temp_1".into()),
+            Value::Text("nonempty".into())
+        ]]
+    );
+    assert!(
+        session.execute(&db, "select pg_temp.nonempty('')").is_err(),
+        "qualified function-style cast should resolve the temp domain"
+    );
+}
+
+#[test]
+fn create_cast_function_lookup_skips_implicit_pg_temp() {
+    let base = temp_dir("pg_temp_create_cast_function_lookup");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create domain cast_target as text check (value <> '')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function to_cast_target(x int4) returns cast_target \
+             language sql as $$ select x::text::cast_target $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function pg_temp.to_cast_target(x int4) returns cast_target \
+             language sql as $$ select 'temp'::cast_target $$",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "create cast (int4 as cast_target) with function to_cast_target(int4)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select n.nspname \
+             from pg_cast c \
+             join pg_proc p on p.oid = c.castfunc \
+             join pg_namespace n on n.oid = p.pronamespace \
+             where c.casttarget = 'cast_target'::regtype",
+        ),
+        vec![vec![Value::Text("public".into())]]
+    );
+}
+
+#[test]
+fn pg_temp_function_drop_and_operator_create_reject_prepare() {
+    let base = temp_dir("pg_temp_prepare_touch_namespace");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function pg_temp.twophase_func() returns void language sql as $$ select '2pc_func'::text $$",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "drop function pg_temp.twophase_func()")
+        .unwrap();
+    let err = session
+        .execute(&db, "prepare transaction 'twophase_func'")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "cannot PREPARE a transaction that has operated on temporary objects"
+    ));
+    assert!(!session.in_transaction());
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create operator pg_temp.@@ (leftarg = int4, rightarg = int4, procedure = int4mi)",
+        )
+        .unwrap();
+    let err = session
+        .execute(&db, "prepare transaction 'twophase_operator'")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "cannot PREPARE a transaction that has operated on temporary objects"
+    ));
+}
+
+#[test]
 fn create_language_c_function_uses_link_symbol_as_rust_backing_function() {
     let base = temp_dir("language_c_function_link_symbol");
     let db = Database::open(&base, 16).unwrap();
@@ -49117,6 +49304,66 @@ fn create_table_as_uses_pg_temp_search_path_for_unqualified_creation() {
 }
 
 #[test]
+fn pg_temp_relation_lookup_respects_explicit_search_path_position() {
+    let base = temp_dir("pg_temp_relation_search_path_order");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table whereami (label text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into whereami values ('public')")
+        .unwrap();
+    session
+        .execute(&db, "create temp table whereami (label text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into whereami values ('temp')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select label from whereami"),
+        vec![vec![Value::Text("temp".into())]]
+    );
+
+    session
+        .execute(&db, "set search_path = public, pg_temp")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select label from whereami"),
+        vec![vec![Value::Text("public".into())]]
+    );
+
+    session
+        .execute(&db, "set search_path = pg_temp, public")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select label from whereami"),
+        vec![vec![Value::Text("temp".into())]]
+    );
+}
+
+#[test]
+fn current_schema_call_creates_and_returns_temp_namespace_when_configured() {
+    let base = temp_dir("current_schema_pg_temp");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set search_path = pg_temp").unwrap();
+    let rows = session_query_rows(&mut session, &db, "select current_schema()");
+    let schema = match rows.as_slice() {
+        [row] => match row.as_slice() {
+            [Value::Text(schema)] => schema,
+            _ => panic!("expected current_schema text row, got {rows:?}"),
+        },
+        _ => panic!("expected current_schema text row, got {rows:?}"),
+    };
+    assert!(schema.starts_with("pg_temp_"));
+    assert!(db.has_active_temp_namespace(1));
+}
+
+#[test]
 fn create_index_supports_qualified_public_target_under_temp_shadowing() {
     let base = temp_dir("qualified_create_index_public");
     let db = Database::open(&base, 16).unwrap();
@@ -49166,6 +49413,49 @@ fn create_index_supports_temp_tables_when_temp_is_first_visible() {
     let temp_index = db.temp_entry(1, "items_temp_idx").unwrap();
     let index_meta = temp_index.index.as_ref().unwrap();
     assert_eq!(index_meta.indrelid, temp_table.relation_oid);
+}
+
+#[test]
+fn drop_index_drops_temp_index_before_public_index() {
+    let base = temp_dir("drop_index_temp_before_public");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table temptest (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "create index i_temptest on temptest (id)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table temptest (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "create index i_temptest on temptest (id)")
+        .unwrap();
+    assert!(db.temp_entry(1, "i_temptest").is_some());
+
+    session.execute(&db, "drop index i_temptest").unwrap();
+    assert!(db.temp_entry(1, "i_temptest").is_none());
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_class where relname = 'i_temptest' and relpersistence = 'p'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    session.execute(&db, "drop table temptest").unwrap();
+    session.execute(&db, "drop index i_temptest").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_class where relname = 'i_temptest'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
 }
 
 #[test]
@@ -50279,6 +50569,68 @@ fn stale_temp_cleanup_skips_dependents_dropped_with_parent() {
              order by relname",
         ),
         vec![vec![Value::Text("fresh_temp".into())]]
+    );
+}
+
+#[test]
+fn temp_slot_reuse_cleans_stale_temp_function_domain_and_index_rows() {
+    let base = temp_dir("temp_cleanup_functions_domains_indexes");
+    {
+        let db = Database::open(&base, 16).unwrap();
+        let mut first_session = Session::with_temp_backend_id(10, 1);
+
+        first_session
+            .execute(&db, "create temp table stale_temp (payload text)")
+            .unwrap();
+        first_session
+            .execute(&db, "create index stale_temp_idx on stale_temp (payload)")
+            .unwrap();
+        first_session
+            .execute(
+                &db,
+                "create function pg_temp.stale_temp_func() returns int4 language sql as $$ select 1 $$",
+            )
+            .unwrap();
+        first_session
+            .execute(
+                &db,
+                "create domain pg_temp.stale_temp_domain as text check (value <> '')",
+            )
+            .unwrap();
+    }
+
+    let db = Database::open(&base, 16).unwrap();
+    let mut reused_session = Session::with_temp_backend_id(11, 1);
+    reused_session
+        .execute(&db, "create temp table fresh_temp (id int4)")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut reused_session,
+            &db,
+            "select count(*) from pg_class \
+             where relpersistence = 't' and relname in ('stale_temp', 'stale_temp_idx')",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut reused_session,
+            &db,
+            "select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
+             where n.nspname = 'pg_temp_1' and p.proname = 'stale_temp_func'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut reused_session,
+            &db,
+            "select count(*) from pg_type t join pg_namespace n on n.oid = t.typnamespace \
+             where n.nspname = 'pg_temp_1' and t.typname = 'stale_temp_domain'",
+        ),
+        vec![vec![Value::Int64(0)]]
     );
 }
 
