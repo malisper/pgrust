@@ -29,12 +29,14 @@ use crate::include::nodes::parsenodes::{
     LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy, PublicationObjectSpec,
     PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
     RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, RelOption,
-    SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SubscriptionOptionValue,
-    TableConstraint, TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
+    ReturningAliasKind, SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs,
+    SubscriptionOptionValue, TableConstraint, TransactionEndOptions, TriggerEvent,
+    TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
-    AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
+    AttrNumber, INNER_VAR, JoinType, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var,
+    is_system_attr,
 };
 
 fn desc() -> RelationDesc {
@@ -12532,13 +12534,24 @@ fn parse_merge_returning_with_old_new_aliases() {
         other => panic!("expected merge statement, got {other:?}"),
     };
     assert_eq!(stmt.returning.len(), 3);
+    assert_eq!(stmt.returning.options.len(), 2);
+    assert!(matches!(
+        stmt.returning.options[0].kind,
+        ReturningAliasKind::Old
+    ));
+    assert_eq!(stmt.returning.options[0].alias, "o");
+    assert!(matches!(
+        stmt.returning.options[1].kind,
+        ReturningAliasKind::New
+    ));
+    assert_eq!(stmt.returning.options[1].alias, "n");
     assert!(matches!(
         &stmt.returning[1].expr,
-        SqlExpr::Column(name) if name == "old.*"
+        SqlExpr::Column(name) if name == "o.*"
     ));
     assert!(matches!(
         &stmt.returning[2].expr,
-        SqlExpr::Column(name) if name == "new.*"
+        SqlExpr::Column(name) if name == "n.*"
     ));
 }
 
@@ -12690,7 +12703,7 @@ fn parse_create_rule_single_action() {
                         SqlExpr::Column("new.id".into()),
                     ]]),
                     on_conflict: None,
-                    returning: vec![],
+                    returning: vec![].into(),
                 }),
                 sql: "insert into pets values (new.id, new.id)".into(),
                 sql_position: Some(67),
@@ -12881,6 +12894,11 @@ fn assert_returning_var(expr: &Expr, varno: usize, attno: AttrNumber) {
     }
 }
 
+fn assert_returning_system_var(expr: &Expr, varno: usize, attno: AttrNumber) {
+    assert_returning_var(expr, varno, attno);
+    assert!(is_system_attr(attno));
+}
+
 fn returning_row_fields(expr: &Expr) -> &[(String, Expr)] {
     match expr {
         Expr::Row { fields, .. } => fields,
@@ -12990,6 +13008,84 @@ fn bind_update_and_delete_returning_expose_old_and_new_pseudo_rows() {
     let bound_delete = bind_delete(&delete, &catalog).unwrap();
     assert_returning_var(&bound_delete.returning[0].expr, OUTER_VAR, 1);
     assert_returning_var(&bound_delete.returning[1].expr, INNER_VAR, 1);
+}
+
+#[test]
+fn bind_returning_with_aliases_and_system_columns() {
+    let catalog = returning_test_catalog();
+    let stmt = match parse_statement(
+        "insert into people (id, name) values (1, 'alice') \
+         returning with (old as o, new as n) o.tableoid, o.ctid, o.*, n.name",
+    )
+    .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let bound = bind_insert(&stmt, &catalog).unwrap();
+    assert_returning_system_var(&bound.returning[0].expr, OUTER_VAR, TABLE_OID_ATTR_NO);
+    assert_returning_system_var(
+        &bound.returning[1].expr,
+        OUTER_VAR,
+        SELF_ITEM_POINTER_ATTR_NO,
+    );
+    for (target, attno) in bound.returning[2..5].iter().zip(1..) {
+        assert_returning_var(&target.expr, OUTER_VAR, attno);
+    }
+    assert_returning_var(&bound.returning[5].expr, INNER_VAR, 2);
+}
+
+#[test]
+fn bind_returning_with_rejects_duplicate_options_and_aliases() {
+    let catalog = returning_test_catalog();
+    let duplicate_old = match parse_statement(
+        "insert into people default values returning with (old as o, old as p) *",
+    )
+    .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let err = bind_insert(&duplicate_old, &catalog).unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken { actual, .. } if actual == "OLD cannot be specified multiple times"
+    ));
+
+    let duplicate_alias = match parse_statement(
+        "insert into people default values returning with (old as x, new as x) *",
+    )
+    .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let err = bind_insert(&duplicate_alias, &catalog).unwrap_err();
+    assert!(matches!(err, ParseError::DuplicateTableName(name) if name == "x"));
+}
+
+#[test]
+fn parse_returning_with_rejects_unknown_option_name() {
+    let err = parse_statement("insert into people default values returning with (nonsuch as x) *")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken { actual, .. }
+            if actual == "syntax error at or near \"nonsuch\""
+    ));
+}
+
+#[test]
+fn bind_insert_returning_alias_hides_base_table_name_for_star() {
+    let catalog = returning_test_catalog();
+    let stmt = match parse_statement("insert into people as p default values returning people.*")
+        .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let err = bind_insert(&stmt, &catalog).unwrap_err();
+    assert!(matches!(err, ParseError::InvalidFromClauseReference(name) if name == "people"));
 }
 
 #[test]
@@ -13143,7 +13239,7 @@ fn people_insert_with_on_conflict(
             assignments,
             where_clause,
         }),
-        returning: vec![],
+        returning: vec![].into(),
     }
 }
 
@@ -13178,7 +13274,8 @@ fn bind_insert_returning_relation_name_as_whole_row() {
         expr: SqlExpr::Column("people".into()),
         output_name: "people".into(),
         location: None,
-    }];
+    }]
+    .into();
 
     let bound =
         stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog)).unwrap();
@@ -20535,7 +20632,7 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && select_items_without_locations(returning.clone()) == vec![SelectItem {
+            && select_items_without_locations(returning.targets.clone()) == vec![SelectItem {
                 output_name: "*".into(),
                 expr: SqlExpr::Column("*".into()),
                 location: None,
@@ -20550,7 +20647,7 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && select_items_without_locations(returning.clone()) == vec![
+            && select_items_without_locations(returning.targets.clone()) == vec![
                 SelectItem {
                     output_name: "id".into(),
                     expr: SqlExpr::Column("id".into()),
@@ -20584,7 +20681,7 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && select_items_without_locations(returning.clone()) == vec![
+            && select_items_without_locations(returning.targets.clone()) == vec![
                 SelectItem {
                     output_name: "id".into(),
                     expr: SqlExpr::Column("id".into()),

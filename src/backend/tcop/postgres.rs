@@ -4301,6 +4301,7 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
             .is_some_and(|hint| hint.contains("table alias"))
         && let Some(table_name) = invalid_from_clause_reference_table(e)
         && delete_target_alias_for_table(sql, table_name).is_none()
+        && insert_target_alias_for_table(sql, table_name).is_none()
     {
         response.detail = Some(format!(
             "There is an entry for table \"{table_name}\", but it cannot be referenced from this part of the query."
@@ -4309,6 +4310,14 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
     if response.hint.is_none()
         && let Some(table_name) = invalid_from_clause_reference_table(e)
         && let Some(alias) = delete_target_alias_for_table(sql, table_name)
+    {
+        response.hint = Some(format!(
+            "Perhaps you meant to reference the table alias \"{alias}\"."
+        ));
+    }
+    if response.hint.is_none()
+        && let Some(table_name) = invalid_from_clause_reference_table(e)
+        && let Some(alias) = insert_target_alias_for_table(sql, table_name)
     {
         response.hint = Some(format!(
             "Perhaps you meant to reference the table alias \"{alias}\"."
@@ -4515,6 +4524,32 @@ fn delete_target_alias_for_table(sql: &str, table_name: &str) -> Option<String> 
     };
     let alias_lower = alias.to_ascii_lowercase();
     if matches!(alias_lower.as_str(), "where" | "using" | "returning") {
+        return None;
+    }
+    Some(alias.trim_matches('"').to_string())
+}
+
+fn insert_target_alias_for_table(sql: &str, table_name: &str) -> Option<String> {
+    let trimmed = sql.trim_start();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("insert into ") {
+        return None;
+    }
+    let rest = trimmed.get("insert into ".len()..)?.trim_start();
+    let mut parts = rest.split_whitespace();
+    let table = parts.next()?.trim_matches('"');
+    if !table.eq_ignore_ascii_case(table_name) {
+        return None;
+    }
+    let alias = match parts.next()? {
+        word if word.eq_ignore_ascii_case("as") => parts.next()?,
+        word => word,
+    };
+    let alias_lower = alias.to_ascii_lowercase();
+    if matches!(
+        alias_lower.as_str(),
+        "(" | "values" | "default" | "select" | "overriding" | "on" | "returning"
+    ) {
         return None;
     }
     Some(alias.trim_matches('"').to_string())
