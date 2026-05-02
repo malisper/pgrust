@@ -11687,6 +11687,14 @@ fn parse_insert_update_delete() {
         })
     ));
     assert!(matches!(
+        parse_statement("explain (analyze, format 'json') select name from people").unwrap(),
+        Statement::Explain(ExplainStatement {
+            analyze: true,
+            format: ExplainFormat::Json,
+            ..
+        })
+    ));
+    assert!(matches!(
         parse_statement("explain (costs off) select name from people").unwrap(),
         Statement::Explain(ExplainStatement {
             analyze: false,

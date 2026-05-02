@@ -2170,7 +2170,16 @@ fn apply_raw_explain_options(
         }
         let mut parts = item.split_whitespace();
         let name = parts.next().unwrap_or_default().to_ascii_lowercase();
-        let value = parts.next().unwrap_or("true").to_ascii_lowercase();
+        let raw_value = parts.next().unwrap_or("true");
+        let value = if let Some(token_len) = scan_string_literal_token_len(raw_value) {
+            if token_len == raw_value.len() {
+                decode_string_literal(raw_value)?.to_ascii_lowercase()
+            } else {
+                raw_value.to_ascii_lowercase()
+            }
+        } else {
+            raw_value.to_ascii_lowercase()
+        };
         let bool_val = !matches!(value.as_str(), "off" | "false");
         match name.as_str() {
             "analyze" => explain.analyze = bool_val,
@@ -20499,6 +20508,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
             Rule::explain_option => {
                 let mut name_rule = None;
                 let mut value_rule = None;
+                let mut value_text = None;
                 let mut bool_val = true;
                 for child in part.into_inner() {
                     match child.as_rule() {
@@ -20509,10 +20519,9 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                             let val = child.into_inner().next();
                             if let Some(v) = val {
                                 value_rule = Some(v.as_rule());
-                                match v.as_rule() {
-                                    Rule::kw_off | Rule::kw_false => bool_val = false,
-                                    _ => bool_val = true,
-                                }
+                                let text = explain_option_value_text(v)?;
+                                bool_val = !matches!(text.as_str(), "off" | "false");
+                                value_text = Some(text);
                             }
                         }
                         _ => {}
@@ -20526,7 +20535,9 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                     Some(Rule::kw_timing) => timing = bool_val,
                     Some(Rule::kw_verbose) => verbose = bool_val,
                     Some(Rule::kw_format) => {
-                        if matches!(value_rule, Some(Rule::kw_json)) {
+                        if matches!(value_rule, Some(Rule::kw_json))
+                            || value_text.as_deref() == Some("json")
+                        {
                             format = ExplainFormat::Json;
                         }
                     }
@@ -20566,6 +20577,17 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
         verbose,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
     })
+}
+
+fn explain_option_value_text(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    match pair.as_rule() {
+        Rule::quoted_string_literal
+        | Rule::string_literal
+        | Rule::unicode_string_literal
+        | Rule::escape_string_literal
+        | Rule::dollar_string_literal => Ok(decode_string_literal_pair(pair)?.to_ascii_lowercase()),
+        _ => Ok(pair.as_str().to_ascii_lowercase()),
+    }
 }
 
 pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
