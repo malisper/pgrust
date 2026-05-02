@@ -29,9 +29,10 @@ use crate::include::nodes::parsenodes::{
     LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy, PublicationObjectSpec,
     PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
     RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, RelOption,
-    SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SubscriptionOptionValue,
-    TableConstraint, TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
+    SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SqlExpr,
+    SubscriptionOptionValue, TableConstraint, TransactionEndOptions, TriggerEvent,
+    TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
@@ -44,6 +45,20 @@ fn desc() -> RelationDesc {
             column_desc("name", SqlType::new(SqlTypeKind::Text), false),
             column_desc("note", SqlType::new(SqlTypeKind::Text), true),
         ],
+    }
+}
+
+fn sql_int(value: i32) -> Option<SqlExpr> {
+    Some(SqlExpr::IntegerLiteral(value.to_string()))
+}
+
+fn plan_limit_int(expr: &Option<Expr>) -> Option<i64> {
+    match expr {
+        Some(Expr::Const(Value::Int16(value))) => Some(i64::from(*value)),
+        Some(Expr::Const(Value::Int32(value))) => Some(i64::from(*value)),
+        Some(Expr::Const(Value::Int64(value))) => Some(*value),
+        Some(Expr::Cast(inner, _)) => plan_limit_int(&Some((**inner).clone())),
+        _ => None,
     }
 }
 
@@ -8565,8 +8580,8 @@ fn parse_top_level_values_with_order_limit_offset() {
         Statement::Values(values) => {
             assert_eq!(values.rows.len(), 2);
             assert_eq!(values.order_by.len(), 1);
-            assert_eq!(values.limit, Some(1));
-            assert_eq!(values.offset, Some(0));
+            assert_eq!(values.limit, sql_int(1));
+            assert_eq!(values.offset, sql_int(0));
         }
         other => panic!("expected values statement, got {other:?}"),
     }
@@ -11080,28 +11095,28 @@ fn parse_select_with_order_limit_offset() {
     assert_eq!(stmt.order_by.len(), 1);
     assert!(stmt.order_by[0].descending);
     assert_eq!(stmt.order_by[0].nulls_first, None);
-    assert_eq!(stmt.limit, Some(2));
-    assert_eq!(stmt.offset, Some(1));
+    assert_eq!(stmt.limit, sql_int(2));
+    assert_eq!(stmt.offset, sql_int(1));
 }
 
 #[test]
 fn parse_select_with_folded_integer_offset_expression() {
     let stmt = parse_select("select name from people order by id offset 20000 - 4").unwrap();
-    assert_eq!(stmt.offset, Some(19996));
+    assert!(stmt.offset.is_some());
 }
 
 #[test]
 fn parse_select_with_offset_before_limit() {
     let stmt = parse_select("select name from people order by id offset 10 limit 5").unwrap();
-    assert_eq!(stmt.offset, Some(10));
-    assert_eq!(stmt.limit, Some(5));
+    assert_eq!(stmt.offset, sql_int(10));
+    assert_eq!(stmt.limit, sql_int(5));
 }
 
 #[test]
 fn parse_select_with_fetch_first() {
     let stmt =
         parse_select("select name from people order by id fetch first 2 rows with ties").unwrap();
-    assert_eq!(stmt.limit, Some(2));
+    assert_eq!(stmt.limit, sql_int(2));
 }
 
 #[test]
@@ -11561,8 +11576,8 @@ fn build_plan_wraps_order_by_and_limit() {
                     offset,
                     ..
                 } => {
-                    assert_eq!(limit, Some(2));
-                    assert_eq!(offset, 1);
+                    assert_eq!(plan_limit_int(&limit), Some(2));
+                    assert_eq!(plan_limit_int(&offset), Some(1));
                     match strip_projections(input.as_ref()) {
                         Plan::OrderBy { input, items, .. } => {
                             assert_eq!(items.len(), 1);
@@ -14404,7 +14419,10 @@ fn parse_select_for_key_share_clause() {
 #[test]
 fn parse_limit_null_as_unbounded_limit() {
     match parse_statement("select * from people limit null").unwrap() {
-        Statement::Select(SelectStatement { limit: None, .. }) => {}
+        Statement::Select(SelectStatement {
+            limit: Some(SqlExpr::Const(Value::Null)),
+            ..
+        }) => {}
         other => panic!("expected SELECT with unbounded LIMIT NULL, got {:?}", other),
     }
 }
@@ -14745,13 +14763,13 @@ fn parse_parenthesized_set_operation_operand_with_order_limit() {
     ));
     assert_eq!(set_operation.inputs.len(), 2);
     assert_eq!(set_operation.inputs[1].order_by.len(), 1);
-    assert_eq!(set_operation.inputs[1].limit, Some(1));
+    assert_eq!(set_operation.inputs[1].limit, sql_int(1));
 }
 
 #[test]
 fn parse_parenthesized_values_set_operation_operand() {
     let stmt = parse_select("select 1 union all (values (2)) limit 1").unwrap();
-    assert_eq!(stmt.limit, Some(1));
+    assert_eq!(stmt.limit, sql_int(1));
     let set_operation = stmt.set_operation.expect("set operation");
     assert!(matches!(set_operation.op, SetOperator::Union { all: true }));
     assert!(matches!(

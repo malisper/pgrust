@@ -73,6 +73,16 @@ use super::{
 
 type PlannerIndexExprCache = RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>;
 
+fn const_limit_usize(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Const(Value::Int16(value)) if *value >= 0 => Some(*value as usize),
+        Expr::Const(Value::Int32(value)) if *value >= 0 => Some(*value as usize),
+        Expr::Const(Value::Int64(value)) if *value >= 0 => usize::try_from(*value).ok(),
+        Expr::Cast(inner, _) => const_limit_usize(inner),
+        _ => None,
+    }
+}
+
 fn spec_prefers_plain_index_scan(spec: &IndexPathSpec) -> bool {
     spec_prefers_plain_network_btree_scan(spec) || hash_index_gettuple_supported(&spec.index)
 }
@@ -490,7 +500,7 @@ fn restrict_info_with_nullability_simplification(
 
 fn is_minmax_null_boundary_restriction(root: &PlannerInfo, expr: &Expr) -> bool {
     matches!(expr, Expr::IsNotNull(_))
-        && root.parse.limit_count == Some(1)
+        && root.parse.limit_count.as_ref().and_then(const_limit_usize) == Some(1)
         && !root.parse.sort_clause.is_empty()
 }
 
@@ -2576,13 +2586,13 @@ fn collect_relation_access_paths(
         let ordered_index_items = query_order_items.as_ref().or(window_order_items.as_ref());
         if config.enable_indexscan
             && let Some(order_items) = ordered_index_items
+            && access_method_supports_index_scan_for_index(index)
             && let Some(spec) = build_index_path_spec(
                 filter.as_ref(),
                 Some(order_items),
                 index,
                 config.retain_partial_index_filters,
             )
-            && access_method_supports_index_scan_for_index(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -6830,8 +6840,9 @@ fn translate_restrict_clauses_to_child(
 }
 
 fn best_path(root: &PlannerInfo, paths: Vec<Path>) -> Option<Path> {
-    let prefer_startup = root.parse.limit_count.is_some_and(|limit| limit <= 100);
-    let prefer_runtime_index_nested_loop = root.parse.limit_count.is_some_and(|limit| limit == 100)
+    let const_limit = root.parse.limit_count.as_ref().and_then(const_limit_usize);
+    let prefer_startup = const_limit.is_some_and(|limit| limit <= 100);
+    let prefer_runtime_index_nested_loop = const_limit.is_some_and(|limit| limit == 100)
         || root.query_pathkeys.iter().any(|pathkey| pathkey.descending);
     paths.into_iter().min_by(|left, right| {
         if prefer_runtime_index_nested_loop {

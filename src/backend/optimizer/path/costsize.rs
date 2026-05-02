@@ -69,6 +69,16 @@ use super::regex_prefix::{RegexFixedPrefix, regex_fixed_prefix, regex_prefix_upp
 const DEFAULT_STATISTICS_TARGET: usize = 100;
 const SMALL_FULL_MERGE_JOIN_ROW_LIMIT: f64 = 5_000.0;
 
+fn const_usize_expr(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Const(Value::Int16(value)) if *value >= 0 => Some(*value as usize),
+        Expr::Const(Value::Int32(value)) if *value >= 0 => Some(*value as usize),
+        Expr::Const(Value::Int64(value)) if *value >= 0 => usize::try_from(*value).ok(),
+        Expr::Cast(inner, _) => const_usize_expr(inner),
+        _ => None,
+    }
+}
+
 fn is_gist_like_am(am_oid: u32) -> bool {
     am_oid == GIST_AM_OID || am_oid == SPGIST_AM_OID
 }
@@ -620,19 +630,21 @@ pub(super) fn optimize_path_with_config(
                 let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let input_rows = input_info.plan_rows.as_f64();
-                let requested = limit
-                    .map(|limit| limit.saturating_add(offset) as f64)
+                let limit_rows = limit.as_ref().and_then(const_usize_expr);
+                let offset_rows = offset.as_ref().and_then(const_usize_expr).unwrap_or(0);
+                let requested = limit_rows
+                    .map(|limit| limit.saturating_add(offset_rows) as f64)
                     .unwrap_or(input_rows);
                 let fraction = if input_rows <= 0.0 {
                     1.0
                 } else {
                     (requested / input_rows).clamp(0.0, 1.0)
                 };
-                let rows = limit
+                let rows = limit_rows
                     .map(|limit| {
-                        clamp_rows((input_rows - offset as f64).max(0.0).min(limit as f64))
+                        clamp_rows((input_rows - offset_rows as f64).max(0.0).min(limit as f64))
                     })
-                    .unwrap_or_else(|| clamp_rows((input_rows - offset as f64).max(0.0)));
+                    .unwrap_or_else(|| clamp_rows((input_rows - offset_rows as f64).max(0.0)));
                 let total = input_info.startup_cost.as_f64()
                     + (input_info.total_cost.as_f64() - input_info.startup_cost.as_f64())
                         * fraction;
@@ -3866,8 +3878,8 @@ fn parameterized_inner_index_path(
                     plan_info: *plan_info,
                     pathtarget: pathtarget.clone(),
                     input: Box::new(input),
-                    limit: *limit,
-                    offset: *offset,
+                    limit: limit.clone(),
+                    offset: offset.clone(),
                 },
                 remaining,
             ));

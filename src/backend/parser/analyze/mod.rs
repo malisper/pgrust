@@ -4614,9 +4614,9 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             window_clauses: Vec::new(),
             order_by: values.order_by.clone(),
             order_by_location: None,
-            limit: values.limit,
+            limit: values.limit.clone(),
             limit_location: None,
-            offset: values.offset,
+            offset: values.offset.clone(),
             offset_location: None,
             locking_clause: None,
             locking_location: None,
@@ -7796,6 +7796,80 @@ pub fn build_values_plan(
     Ok(pg_plan_values_query(stmt, catalog)?.plan_tree)
 }
 
+fn bind_limit_count_expr(
+    expr: &SqlExpr,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    visible_ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    reject_window_clause(expr, "LIMIT")?;
+    let scope = empty_scope();
+    let raw_type = infer_sql_expr_type_with_ctes(
+        expr,
+        &scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        visible_ctes,
+    );
+    let bound = bind_expr_with_outer_and_ctes(
+        expr,
+        &scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        visible_ctes,
+    )?;
+    if expr_contains_set_returning(&bound) {
+        return Err(ParseError::FeatureNotSupported(
+            "set-returning functions are not allowed in LIMIT".into(),
+        ));
+    }
+    Ok(coerce_bound_expr(
+        bound,
+        raw_type,
+        SqlType::new(SqlTypeKind::Int8),
+    ))
+}
+
+fn bind_limit_offset_expr(
+    expr: &SqlExpr,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    visible_ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    reject_window_clause(expr, "OFFSET")?;
+    let scope = empty_scope();
+    let raw_type = infer_sql_expr_type_with_ctes(
+        expr,
+        &scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        visible_ctes,
+    );
+    let bound = bind_expr_with_outer_and_ctes(
+        expr,
+        &scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        visible_ctes,
+    )?;
+    if expr_contains_set_returning(&bound) {
+        return Err(ParseError::FeatureNotSupported(
+            "set-returning functions are not allowed in OFFSET".into(),
+        ));
+    }
+    Ok(coerce_bound_expr(
+        bound,
+        raw_type,
+        SqlType::new(SqlTypeKind::Int8),
+    ))
+}
+
 fn bind_values_query_with_outer(
     stmt: &ValuesStatement,
     catalog: &dyn CatalogLookup,
@@ -7815,6 +7889,32 @@ fn bind_values_query_with_outer(
     )?;
     let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
+    let limit_count = stmt
+        .limit
+        .as_ref()
+        .map(|expr| {
+            bind_limit_count_expr(
+                expr,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+            )
+        })
+        .transpose()?;
+    let limit_offset = stmt
+        .offset
+        .as_ref()
+        .map(|expr| {
+            bind_limit_offset_expr(
+                expr,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+            )
+        })
+        .transpose()?;
     let (base, scope) = bind_values_rows(
         &stmt.rows,
         None,
@@ -7866,8 +7966,8 @@ fn bind_values_query_with_outer(
             having_qual: None,
             sort_clause,
             constraint_deps: Vec::new(),
-            limit_count: stmt.limit,
-            limit_offset: stmt.offset,
+            limit_count,
+            limit_offset,
             locking_clause: None,
             locking_targets: Vec::new(),
             locking_nowait: false,
@@ -7929,6 +8029,32 @@ fn bind_select_query_with_outer(
         )?;
         let mut visible_ctes = local_ctes.clone();
         visible_ctes.extend_from_slice(outer_ctes);
+        let limit_count = stmt
+            .limit
+            .as_ref()
+            .map(|expr| {
+                bind_limit_count_expr(
+                    expr,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.as_ref(),
+                    &visible_ctes,
+                )
+            })
+            .transpose()?;
+        let limit_offset = stmt
+            .offset
+            .as_ref()
+            .map(|expr| {
+                bind_limit_offset_expr(
+                    expr,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.as_ref(),
+                    &visible_ctes,
+                )
+            })
+            .transpose()?;
 
         if stmt.set_operation.is_some() {
             return bind_set_operation_query_with_outer(
@@ -7936,6 +8062,8 @@ fn bind_select_query_with_outer(
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                limit_count,
+                limit_offset,
                 &visible_ctes,
                 expanded_views,
             );
@@ -8920,8 +9048,8 @@ fn bind_select_query_with_outer(
                             having_qual: having,
                             sort_clause,
                             constraint_deps,
-                            limit_count: stmt.limit,
-                            limit_offset: stmt.offset,
+                            limit_count: limit_count.clone(),
+                            limit_offset: limit_offset.clone(),
                             locking_clause: stmt.locking_clause,
                             locking_targets: stmt.locking_targets.clone(),
                             locking_nowait: stmt.locking_nowait,
@@ -9030,8 +9158,8 @@ fn bind_select_query_with_outer(
                         having_qual: None,
                         sort_clause,
                         constraint_deps: Vec::new(),
-                        limit_count: stmt.limit,
-                        limit_offset: stmt.offset,
+                        limit_count: limit_count.clone(),
+                        limit_offset: limit_offset.clone(),
                         locking_clause: stmt.locking_clause,
                         locking_targets: stmt.locking_targets.clone(),
                         locking_nowait: stmt.locking_nowait,
@@ -9096,6 +9224,8 @@ fn bind_set_operation_query_with_outer(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
+    limit_count: Option<Expr>,
+    limit_offset: Option<Expr>,
     visible_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
@@ -9274,8 +9404,8 @@ fn bind_set_operation_query_with_outer(
             having_qual: None,
             sort_clause,
             constraint_deps: Vec::new(),
-            limit_count: stmt.limit,
-            limit_offset: stmt.offset,
+            limit_count,
+            limit_offset,
             locking_clause: stmt.locking_clause,
             locking_targets: stmt.locking_targets.clone(),
             locking_nowait: stmt.locking_nowait,

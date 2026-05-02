@@ -1577,8 +1577,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             offset,
         } => Box::new(LimitState {
             input: executor_start(*input),
-            limit,
-            offset,
+            limit_expr: limit,
+            offset_expr: offset,
+            limit: None,
+            offset: 0,
+            limits_ready: false,
             skipped: 0,
             returned: 0,
             plan_info,
