@@ -382,6 +382,11 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
         );
     }
     if (lowered.starts_with("select ") || lowered.starts_with("with "))
+        && let Some(position) = cast_type_collate_position(trimmed)
+    {
+        return Some(syntax_error_at(sql, leading + position, "COLLATE"));
+    }
+    if (lowered.starts_with("select ") || lowered.starts_with("with "))
         && let Some(position) = derived_table_tablesample_syntax_error_position(trimmed)
     {
         let token = syntax_error_token_at(trimmed, position);
@@ -397,6 +402,72 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
         ));
     }
 
+    None
+}
+
+fn cast_type_collate_position(input: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(cast) = find_keyword_any_depth(input, "cast", start) {
+        let open = skip_whitespace_index(input, cast + "cast".len());
+        if !input[open..].starts_with('(') {
+            start = cast + "cast".len();
+            continue;
+        }
+
+        let (args, _) = take_parenthesized_segment(&input[open..]).ok()?;
+        let as_position = find_keyword_at_depth_before(&args, "as", 0, args.len(), 0);
+        if let Some(as_position) = as_position
+            && let Some(collate) = find_keyword_at_depth_before(
+                &args,
+                "collate",
+                as_position + "as".len(),
+                args.len(),
+                0,
+            )
+        {
+            return Some(open + 1 + collate);
+        }
+
+        start = open + args.len() + 2;
+    }
+    None
+}
+
+fn find_keyword_at_depth_before(
+    input: &str,
+    keyword: &str,
+    start: usize,
+    end: usize,
+    target_depth: usize,
+) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() && index < end {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if index >= start && depth == target_depth && keyword_at_boundary(input, index, keyword) {
+            return Some(index);
+        }
+        index += 1;
+    }
     None
 }
 
