@@ -63,7 +63,10 @@ use crate::backend::rewrite::{
     load_view_return_query, relation_has_security_invoker,
     relation_row_security_is_enabled_for_user,
 };
-use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
+use crate::backend::storage::lmgr::{
+    SafeSnapshotWaitResult, SerializableRegistration, SerializableXactId, TableLockManager,
+    TableLockMode, unlock_relations,
+};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::checkpoint::is_checkpoint_guc;
@@ -1830,6 +1833,7 @@ pub(crate) struct ActiveTransaction {
     started_at_usecs: i64,
     pub(crate) advisory_scope_id: u64,
     pub(crate) failed: bool,
+    ssi_canceled: bool,
     auth_at_start: AuthState,
     pub(crate) local_auth_active: bool,
     pub(crate) held_table_locks: BTreeMap<RelFileLocator, TableLockMode>,
@@ -1840,6 +1844,7 @@ pub(crate) struct ActiveTransaction {
     deferrable: bool,
     snapshot_taken: bool,
     transaction_snapshot: Option<Snapshot>,
+    serializable_xact: Option<SerializableXactId>,
     pub(crate) catalog_effects: Vec<CatalogMutationEffect>,
     pub(crate) current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
     pub(crate) prior_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
@@ -3113,6 +3118,28 @@ impl Session {
         }
     }
 
+    fn exec_error_is_ssi_cancel(err: &ExecError) -> bool {
+        matches!(
+            err,
+            ExecError::DetailedError {
+                sqlstate: "40001",
+                detail: Some(detail),
+                ..
+            } if detail.contains("Canceled on identification as a pivot")
+        )
+    }
+
+    fn mark_transaction_error(&mut self, err: &ExecError) {
+        let Some(txn) = self.active_txn.as_mut() else {
+            return;
+        };
+        if Self::exec_error_is_ssi_cancel(err) {
+            txn.ssi_canceled = true;
+        } else {
+            txn.failed = true;
+        }
+    }
+
     pub fn begin_implicit_query_transaction(&mut self, db: &Database) {
         if self.active_txn.is_none() {
             self.active_txn =
@@ -3991,6 +4018,10 @@ impl Session {
                             .is_some_and(|txn| txn.isolation_level.uses_transaction_snapshot())
                             .then_some(snapshot.clone())
                     }),
+                serializable_xact: self
+                    .active_txn
+                    .as_ref()
+                    .and_then(|txn| txn.serializable_xact),
             },
         )));
         let statement_timestamp_usecs =
@@ -4296,6 +4327,7 @@ impl Session {
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             advisory_scope_id: db.allocate_statement_lock_scope_id(),
             failed: false,
+            ssi_canceled: false,
             auth_at_start: self.auth.clone(),
             local_auth_active: false,
             held_table_locks: BTreeMap::new(),
@@ -4312,6 +4344,7 @@ impl Session {
                 .unwrap_or_else(|| self.default_transaction_deferrable()),
             snapshot_taken: false,
             transaction_snapshot: None,
+            serializable_xact: None,
             catalog_effects: Vec::new(),
             current_cmd_catalog_invalidations: Vec::new(),
             prior_cmd_catalog_invalidations: Vec::new(),
@@ -4378,6 +4411,9 @@ impl Session {
         let xid = db.txns.write().begin();
         txn.xid = Some(xid);
         db.txn_waiter.register_holder(xid, self.client_id);
+        if let Some(serializable_xact) = txn.serializable_xact {
+            let _ = db.predicate_locks.register_xid(serializable_xact, xid);
+        }
         xid
     }
 
@@ -4394,6 +4430,9 @@ impl Session {
         txn.current_write_xid = Some(xid);
         txn.subxids.push(xid);
         db.txn_waiter.register_holder(xid, self.client_id);
+        if let Some(serializable_xact) = txn.serializable_xact {
+            let _ = db.predicate_locks.register_subxid(serializable_xact, xid);
+        }
         xid
     }
 
@@ -4565,6 +4604,8 @@ impl Session {
         xid: TransactionId,
         cid: CommandId,
     ) -> Result<Snapshot, ExecError> {
+        let client_id = self.client_id;
+        let interrupts = Arc::clone(&self.interrupts);
         let Some(txn) = self.active_txn.as_mut() else {
             return db
                 .txns
@@ -4583,8 +4624,64 @@ impl Session {
             return Ok(snapshot);
         }
         if txn.transaction_snapshot.is_none() {
-            let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-            txn.transaction_snapshot = Some(snapshot);
+            loop {
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                if txn.isolation_level
+                    == crate::backend::parser::TransactionIsolationLevel::Serializable
+                    && txn.serializable_xact.is_none()
+                {
+                    match db.predicate_locks.begin_serializable_xact(
+                        client_id,
+                        &snapshot,
+                        txn.read_only,
+                        txn.deferrable,
+                    ) {
+                        SerializableRegistration::SafeReadOnly => {
+                            txn.transaction_snapshot = Some(snapshot);
+                            break;
+                        }
+                        SerializableRegistration::Tracked(serializable_xact) => {
+                            if let Err(err) = Self::register_serializable_xids(
+                                db,
+                                serializable_xact,
+                                txn.xid,
+                                &txn.subxids,
+                            ) {
+                                db.predicate_locks.rollback(serializable_xact);
+                                return Err(err);
+                            }
+                            txn.serializable_xact = Some(serializable_xact);
+                            txn.transaction_snapshot = Some(snapshot);
+                            break;
+                        }
+                        SerializableRegistration::WaitForSafeSnapshot(serializable_xact) => {
+                            if let Err(err) = Self::register_serializable_xids(
+                                db,
+                                serializable_xact,
+                                txn.xid,
+                                &txn.subxids,
+                            ) {
+                                db.predicate_locks.rollback(serializable_xact);
+                                return Err(err);
+                            }
+                            match db
+                                .predicate_locks
+                                .wait_for_safe_snapshot(serializable_xact, interrupts.as_ref())
+                                .map_err(ExecError::from)?
+                            {
+                                SafeSnapshotWaitResult::Safe => {
+                                    txn.transaction_snapshot = Some(snapshot);
+                                    break;
+                                }
+                                SafeSnapshotWaitResult::Retry => continue,
+                            }
+                        }
+                    }
+                } else {
+                    txn.transaction_snapshot = Some(snapshot);
+                    break;
+                }
+            }
         }
         let mut snapshot = txn
             .transaction_snapshot
@@ -4600,6 +4697,25 @@ impl Session {
             snapshot.clone(),
         );
         Ok(snapshot)
+    }
+
+    fn register_serializable_xids(
+        db: &Database,
+        serializable_xact: SerializableXactId,
+        xid: Option<TransactionId>,
+        subxids: &[TransactionId],
+    ) -> Result<(), ExecError> {
+        if let Some(xid) = xid {
+            db.predicate_locks
+                .register_xid(serializable_xact, xid)
+                .map_err(ExecError::from)?;
+        }
+        for subxid in subxids {
+            db.predicate_locks
+                .register_subxid(serializable_xact, *subxid)
+                .map_err(ExecError::from)?;
+        }
+        Ok(())
     }
 
     fn install_transaction_own_xids(txn: &ActiveTransaction, snapshot: &mut Snapshot) {
@@ -6776,6 +6892,10 @@ impl Session {
                 sqlstate: "25P01",
             });
         }
+        if self.active_txn.as_ref().is_some_and(|txn| txn.ssi_canceled) {
+            self.abort_active_transaction_after_failed_prepare(db);
+            return Ok(StatementResult::AffectedRows(0));
+        }
         let result = self.apply_prepare_transaction_inner(db, gid);
         if result.is_err() {
             self.abort_active_transaction_after_failed_prepare(db);
@@ -6837,6 +6957,14 @@ impl Session {
         let (record, wal_data) = {
             let txn = self.active_txn.as_ref().unwrap();
             let prepared_client_id = Self::prepared_xact_client_id(xid);
+            let predicate_state = txn
+                .serializable_xact
+                .map(|serializable_xact| {
+                    db.predicate_locks
+                        .prepare(serializable_xact, prepared_client_id)
+                })
+                .transpose()
+                .map_err(ExecError::from)?;
             let record = PreparedTransactionRecord {
                 gid: gid.to_string(),
                 xid,
@@ -6864,6 +6992,7 @@ impl Session {
                 advisory_locks: db
                     .advisory_locks
                     .granted_transaction_locks(self.client_id, txn.advisory_scope_id),
+                predicate_state,
                 catalog_effects: txn.catalog_effects.clone(),
                 prior_cmd_catalog_invalidations: txn.prior_cmd_catalog_invalidations.clone(),
                 current_cmd_catalog_invalidations: txn.current_cmd_catalog_invalidations.clone(),
@@ -6984,6 +7113,9 @@ impl Session {
             .unlock_all_transaction(record.prepared_client_id, record.advisory_scope_id);
         db.advisory_locks
             .unlock_all_transaction(record.prepared_client_id, record.advisory_scope_id);
+        db.predicate_locks
+            .commit_prepared_xid(record.xid)
+            .map_err(ExecError::from)?;
         db.prepared_xacts.forget(record.xid)?;
         Ok(StatementResult::AffectedRows(0))
     }
@@ -7040,6 +7172,7 @@ impl Session {
             .unlock_all_transaction(record.prepared_client_id, record.advisory_scope_id);
         db.advisory_locks
             .unlock_all_transaction(record.prepared_client_id, record.advisory_scope_id);
+        db.predicate_locks.rollback_prepared_xid(record.xid);
         db.prepared_xacts.forget(record.xid)?;
         Ok(StatementResult::AffectedRows(0))
     }
@@ -7053,6 +7186,11 @@ impl Session {
         let result = match result {
             Ok(r) => {
                 (|| {
+                    if let Some(serializable_xact) = txn.serializable_xact {
+                        db.predicate_locks
+                            .pre_commit(serializable_xact)
+                            .map_err(ExecError::from)?;
+                    }
                     let live_xids = txn.live_xids();
                     if !live_xids.is_empty() {
                         let _checkpoint_guard = db.checkpoint_commit_guard();
@@ -7100,6 +7238,11 @@ impl Session {
                         debug_assert!(txn.catalog_effects.is_empty());
                         debug_assert!(txn.temp_effects.is_empty());
                         debug_assert!(txn.sequence_effects.is_empty());
+                    }
+                    if let Some(serializable_xact) = txn.serializable_xact {
+                        db.predicate_locks
+                            .commit(serializable_xact)
+                            .map_err(ExecError::from)?;
                     }
                     db.finalize_committed_catalog_effects(
                         self.client_id,
@@ -7172,6 +7315,9 @@ impl Session {
             .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
         db.row_locks
             .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+        if let Some(serializable_xact) = txn.serializable_xact {
+            db.predicate_locks.rollback(serializable_xact);
+        }
         db.large_objects.close_all(self.client_id);
         crate::backend::utils::time::snapmgr::clear_transaction_snapshot_override(
             db,
@@ -7243,8 +7389,8 @@ impl Session {
             StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb)
                 .run(|| self.execute_internal(db, sql, statement_lock_scope.scope_id()))
         });
-        if result.is_err() && self.active_txn.is_some() {
-            self.mark_transaction_failed();
+        if let Err(err) = &result {
+            self.mark_transaction_error(err);
         }
         if matches!(result, Err(ExecError::Interrupted(_))) {
             self.interrupts.reset_statement_state();
@@ -7762,10 +7908,8 @@ impl Session {
                 {
                     result = Err(err);
                 }
-                if result.is_err() {
-                    if let Some(ref mut txn) = self.active_txn {
-                        txn.failed = true;
-                    }
+                if let Err(err) = &result {
+                    self.mark_transaction_error(err);
                 }
                 return result;
             }
@@ -14645,6 +14789,10 @@ impl Session {
         let mut datetime_config = self.datetime_config.clone();
         datetime_config.transaction_timestamp_usecs = Some(transaction_timestamp_usecs);
         datetime_config.statement_timestamp_usecs = Some(statement_timestamp_usecs);
+        let serializable_xact = self
+            .active_txn
+            .as_ref()
+            .and_then(|txn| txn.serializable_xact);
         let mut guard = db.execute_streaming_with_config_and_random_state(
             self.client_id,
             select_stmt,
@@ -14655,6 +14803,7 @@ impl Session {
             &datetime_config,
             &self.effective_gucs_for_execution(),
             snapshot_override,
+            serializable_xact,
             self.planner_config(),
             Arc::clone(&self.random_state),
         )?;

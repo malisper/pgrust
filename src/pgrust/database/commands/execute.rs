@@ -18,6 +18,7 @@ use crate::backend::parser::{
     plan_merge_with_outer_ctes, resolve_raw_type_name, select_statement_references_table,
     update_statement_references_table, with_external_param_types,
 };
+use crate::backend::storage::lmgr::SerializableXactId;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::notices::push_warning_with_hint;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
@@ -3533,6 +3534,7 @@ impl Database {
                         xid: None,
                         cid: 0,
                         transaction_snapshot: None,
+                        serializable_xact: None,
                     }));
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
@@ -4855,6 +4857,7 @@ impl Database {
             datetime_config,
             &std::collections::HashMap::new(),
             None,
+            None,
             PlannerConfig::default(),
         )
     }
@@ -4870,6 +4873,7 @@ impl Database {
         datetime_config: &DateTimeConfig,
         gucs: &std::collections::HashMap<String, String>,
         snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
+        serializable_xact: Option<SerializableXactId>,
         planner_config: PlannerConfig,
     ) -> Result<SelectGuard, ExecError> {
         self.execute_streaming_with_config_and_random_state(
@@ -4882,6 +4886,7 @@ impl Database {
             datetime_config,
             gucs,
             snapshot_override,
+            serializable_xact,
             planner_config,
             crate::backend::executor::PgPrngState::shared(),
         )
@@ -4898,6 +4903,7 @@ impl Database {
         datetime_config: &DateTimeConfig,
         gucs: &std::collections::HashMap<String, String>,
         snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
+        serializable_xact: Option<SerializableXactId>,
         planner_config: PlannerConfig,
         random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     ) -> Result<SelectGuard, ExecError> {
@@ -4955,6 +4961,7 @@ impl Database {
                     .then_some(snapshot.current_xid),
                 cid: command_id,
                 transaction_snapshot,
+                serializable_xact,
             }));
         let columns = query_desc.columns();
         let column_names = query_desc.column_names();
