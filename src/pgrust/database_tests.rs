@@ -4804,6 +4804,61 @@ fn sql_cursor_fetch_move_close_and_cleanup() {
 }
 
 #[test]
+fn sql_cursor_fetch_first_with_ties_uses_limit_cursor_path() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table cursor_ties (k int4, v int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cursor_ties values (1, 10), (1, 20), (2, 30)",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c cursor for select k, v from cursor_ties order by k fetch first 2 rows with ties",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from c"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(20)]
+        ]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch 1 from c"),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch backward 1 from c"),
+        vec![vec![Value::Int32(1), Value::Int32(20)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch backward 1 from c"),
+        vec![vec![Value::Int32(1), Value::Int32(10)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from c"),
+        vec![vec![Value::Int32(1), Value::Int32(20)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch backward all from c"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(20)],
+            vec![Value::Int32(1), Value::Int32(10)]
+        ]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn update_where_current_of_uses_cursor_tuple() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
