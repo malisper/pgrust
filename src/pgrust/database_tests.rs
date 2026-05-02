@@ -9659,6 +9659,43 @@ fn autovacuum_once_skips_locked_table_without_blocking() {
 }
 
 #[test]
+fn autovacuum_once_respects_autovacuum_enabled_false() {
+    let dir = temp_dir("autovacuum_enabled_false");
+    let db = Database::open_with_options(
+        &dir,
+        DatabaseOpenOptions::for_tests(128).with_autovacuum_config(autovacuum_test_config()),
+    )
+    .unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table av_disabled_items(id int4) with (autovacuum_enabled = off)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into av_disabled_items values (1), (2), (3)")
+        .unwrap();
+    session
+        .execute(&db, "delete from av_disabled_items where id <= 2")
+        .unwrap();
+
+    db.run_autovacuum_once().unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select autovacuum_count, n_dead_tup
+             from pg_stat_user_tables
+             where relname = 'av_disabled_items'",
+        ),
+        vec![vec![Value::Int64(0), Value::Int64(2)]]
+    );
+}
+
+#[test]
 fn analyze_without_targets_scans_permitted_heap_relations() {
     let dir = temp_dir("analyze_permitted_relations");
     let db = Database::open(&dir, 128).unwrap();

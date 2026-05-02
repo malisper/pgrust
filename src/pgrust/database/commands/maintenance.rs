@@ -415,6 +415,22 @@ fn autovacuum_namespace_allowed(namespace_name: &str) -> bool {
         && !namespace_name.starts_with("pg_toast_temp_")
 }
 
+fn autovacuum_enabled(reloptions: Option<&[String]>) -> bool {
+    reloptions
+        .and_then(|options| {
+            options.iter().find_map(|option| {
+                let (name, value) = option.split_once('=')?;
+                name.eq_ignore_ascii_case("autovacuum_enabled").then(|| {
+                    !matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "false" | "off" | "no" | "0"
+                    )
+                })
+            })
+        })
+        .unwrap_or(true)
+}
+
 fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
@@ -2170,6 +2186,9 @@ impl Database {
         let mut targets = Vec::new();
         for class in class_rows {
             if class.relkind != 'r' || class.relpersistence != 'p' || class.relispartition {
+                continue;
+            }
+            if !autovacuum_enabled(class.reloptions.as_deref()) {
                 continue;
             }
             let Some(namespace_name) = namespace_names.get(&class.relnamespace) else {

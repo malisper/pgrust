@@ -5704,6 +5704,7 @@ fn should_bulk_rebuild_insert_indexes(
 ) -> bool {
     if rows_len < BULK_REBUILD_INSERT_INDEX_THRESHOLD
         || indexes.is_empty()
+        || ctx.transaction_lock_scope_id.is_some()
         || has_triggers
         || returning.is_some_and(|returning| !returning.is_empty())
         || !rls_write_checks.is_empty()
@@ -5722,6 +5723,13 @@ fn should_bulk_rebuild_insert_indexes(
         .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
         .is_some_and(|row| row.relpages <= 1)
     {
+        return false;
+    }
+    if !indexes.iter().all(|index| {
+        ctx.pool
+            .with_storage_mut(|storage| storage.smgr.nblocks(index.rel, ForkNumber::Main))
+            .is_ok_and(|nblocks| nblocks <= 2)
+    }) {
         return false;
     }
     indexes.iter().all(|index| {
