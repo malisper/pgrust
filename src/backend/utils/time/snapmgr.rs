@@ -10,6 +10,7 @@ use crate::pgrust::database::Database;
 pub struct Snapshot {
     pub current_xid: TransactionId,
     pub current_cid: CommandId,
+    pub(crate) heap_current_cid: Option<CommandId>,
     pub xmin: TransactionId,
     pub xmax: TransactionId,
     pub(crate) in_progress: BTreeSet<TransactionId>,
@@ -21,6 +22,7 @@ impl Snapshot {
         Self {
             current_xid: INVALID_TRANSACTION_ID,
             current_cid: CommandId::MAX,
+            heap_current_cid: None,
             xmin: 1,
             xmax: 1,
             in_progress: BTreeSet::new(),
@@ -38,6 +40,14 @@ impl Snapshot {
 
     pub fn transaction_is_own(&self, xid: TransactionId) -> bool {
         xid != INVALID_TRANSACTION_ID && (xid == self.current_xid || self.own_xids.contains(&xid))
+    }
+
+    pub fn heap_current_cid(&self) -> Option<CommandId> {
+        self.heap_current_cid
+    }
+
+    pub fn set_heap_current_cid(&mut self, cid: CommandId) {
+        self.heap_current_cid = Some(cid);
     }
 }
 

@@ -22,6 +22,7 @@ use crate::include::access::htup::{
 use crate::include::access::visibilitymapdefs::{
     VISIBILITYMAP_ALL_FROZEN, VISIBILITYMAP_ALL_VISIBLE,
 };
+use crate::include::catalog::is_bootstrap_catalog_storage_oid;
 use crate::include::storage::buf_internals::BufferId;
 use crate::pgrust::database::TransactionWaiter;
 use crate::{
@@ -267,7 +268,7 @@ pub fn heap_scan_begin_visible(
 ) -> Result<VisibleHeapScan, HeapError> {
     Ok(VisibleHeapScan {
         scan: heap_scan_begin(pool, rel)?,
-        snapshot,
+        snapshot: relation_snapshot(&snapshot, rel),
         pinned_buffer: None,
         pool: std::sync::Arc::clone(pool),
         vis_tuples: [0; MAX_HEAP_TUPLES_PER_PAGE],
@@ -531,6 +532,16 @@ fn heap_scan_prepare_current_page<E: From<HeapError>>(
     Ok(None)
 }
 
+fn relation_snapshot(snapshot: &Snapshot, rel: RelFileLocator) -> Snapshot {
+    let mut snapshot = snapshot.clone();
+    if !is_bootstrap_catalog_storage_oid(rel.rel_number)
+        && let Some(cid) = snapshot.heap_current_cid()
+    {
+        snapshot.current_cid = cid;
+    }
+    snapshot
+}
+
 /// Return the next visible tuple on the current page. The caller must hold
 /// the shared content lock on the page (via `pool.lock_buffer_shared`).
 /// Returns None when all visible tuples on this page have been consumed.
@@ -723,6 +734,7 @@ pub fn heap_fetch_visible(
     txns: &TransactionManager,
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
+    let snapshot = relation_snapshot(snapshot, rel);
     heap_fetch_visible_impl(pool, client_id, rel, tid, |tuple| {
         snapshot.tuple_visible(txns, tuple)
     })
@@ -737,6 +749,7 @@ pub fn heap_fetch_visible_with_txns(
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
     let txns_guard = txns.read();
+    let snapshot = relation_snapshot(snapshot, rel);
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let buffer_id = pin.buffer_id();
     let guard = pool.lock_buffer_shared(buffer_id)?;
@@ -869,6 +882,7 @@ pub fn heap_delete_with_waiter_with_wal_policy(
 ) -> Result<(), HeapError> {
     loop {
         let txns_guard = txns.read();
+        let snapshot = relation_snapshot(snapshot, rel);
         let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
         let buffer_id = pin.buffer_id();
         let mut vmbuf = None;
@@ -893,7 +907,7 @@ pub fn heap_delete_with_waiter_with_wal_policy(
                 &vmbuf,
                 wal_policy,
             )?;
-            let cmax = delete_command_id(&txns_guard, snapshot, &tuple, snapshot.current_cid);
+            let cmax = delete_command_id(&txns_guard, &snapshot, &tuple, snapshot.current_cid);
             drop(txns_guard);
             tuple.header.xmax = xid;
             tuple.header.cid_or_xvac = cmax;
@@ -953,7 +967,7 @@ pub fn heap_delete_with_waiter_with_wal_policy(
                 )?;
                 let cmax = {
                     let txns_guard = txns.read();
-                    delete_command_id(&txns_guard, snapshot, &recheck, snapshot.current_cid)
+                    delete_command_id(&txns_guard, &snapshot, &recheck, snapshot.current_cid)
                 };
                 recheck.header.xmax = xid;
                 recheck.header.cid_or_xvac = cmax;

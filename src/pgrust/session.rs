@@ -4576,9 +4576,11 @@ impl Session {
         waited_for_lock: bool,
     ) -> Result<(), ExecError> {
         if waited_for_lock {
-            let heap_current_cid = ctx.snapshot.current_cid;
+            let heap_current_cid = ctx.snapshot.heap_current_cid();
             ctx.snapshot = self.snapshot_for_command(db, xid, cid)?;
-            ctx.snapshot.current_cid = heap_current_cid;
+            if let Some(heap_current_cid) = heap_current_cid {
+                ctx.snapshot.set_heap_current_cid(heap_current_cid);
+            }
         }
         Ok(())
     }
@@ -5273,6 +5275,8 @@ impl Session {
             | Statement::Update(_)
             | Statement::Delete(_)
             | Statement::Merge(_)
+            | Statement::CreateTableAs(_)
+            | Statement::RefreshMaterializedView(_)
             | Statement::CopyFrom(_)
             | Statement::TruncateTable(_) => true,
             Statement::Select(select) => {
@@ -6322,6 +6326,9 @@ impl Session {
             txn.catalog_effects.extend(catalog_effects);
             txn.temp_effects.extend(temp_effects);
             txn.next_command_id = txn.next_command_id.max(next_command_id);
+            if let Some(next_heap_command_id) = ctx.snapshot.heap_current_cid() {
+                txn.next_heap_command_id = txn.next_heap_command_id.max(next_heap_command_id);
+            }
             for rel in pending_table_locks {
                 txn.held_table_locks
                     .entry(rel)
@@ -14501,7 +14508,7 @@ impl Session {
         let snapshot_override = match txn_ctx {
             Some((snapshot_xid, snapshot_cid)) if self.active_txn.is_some() => {
                 let mut snapshot = self.snapshot_for_command(db, snapshot_xid, snapshot_cid)?;
-                snapshot.current_cid = heap_snapshot_cid;
+                snapshot.set_heap_current_cid(heap_snapshot_cid);
                 Some(snapshot)
             }
             _ => None,
@@ -17681,7 +17688,7 @@ impl Session {
                 }
                 Statement::Merge(ref merge_stmt) => {
                     let mut snapshot = self.snapshot_for_command(db, xid, cid)?;
-                    snapshot.current_cid = heap_snapshot_cid;
+                    snapshot.set_heap_current_cid(heap_snapshot_cid);
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
                     let mut ctx =
                         self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
@@ -17734,7 +17741,7 @@ impl Session {
                         }
                         None => self.snapshot_for_command(db, INVALID_TRANSACTION_ID, cid)?,
                     };
-                    snapshot.current_cid = heap_snapshot_cid;
+                    snapshot.set_heap_current_cid(heap_snapshot_cid);
                     let catalog =
                         db.lazy_catalog_lookup(client_id, txn_ctx, search_path.as_deref());
                     let deferred_foreign_keys = self
@@ -17860,7 +17867,7 @@ impl Session {
                 }
                 Statement::Insert(ref insert_stmt) => {
                     let mut snapshot = self.snapshot_for_command(db, xid, cid)?;
-                    snapshot.current_cid = heap_snapshot_cid;
+                    snapshot.set_heap_current_cid(heap_snapshot_cid);
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
                     let deferred_foreign_keys = self
                         .active_txn
@@ -17970,7 +17977,7 @@ impl Session {
                 }
                 Statement::Update(ref update_stmt) => {
                     let mut snapshot = self.snapshot_for_command(db, xid, cid)?;
-                    snapshot.current_cid = heap_snapshot_cid;
+                    snapshot.set_heap_current_cid(heap_snapshot_cid);
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
                     let interrupts = self.interrupts();
                     let deferred_foreign_keys = self
@@ -18066,7 +18073,7 @@ impl Session {
                 }
                 Statement::Delete(ref delete_stmt) => {
                     let mut snapshot = self.snapshot_for_command(db, xid, cid)?;
-                    snapshot.current_cid = heap_snapshot_cid;
+                    snapshot.set_heap_current_cid(heap_snapshot_cid);
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
                     let interrupts = self.interrupts();
                     let deferred_foreign_keys = self
@@ -18562,6 +18569,7 @@ impl Session {
                         &create_stmt,
                         xid,
                         cid,
+                        write_cid,
                         search_path.as_deref(),
                         planner_config,
                         Some(&self.gucs),
@@ -18577,6 +18585,7 @@ impl Session {
                         refresh_stmt,
                         xid,
                         cid,
+                        write_cid,
                         search_path.as_deref(),
                         &mut txn.catalog_effects,
                     )
@@ -18800,7 +18809,7 @@ impl Session {
                     }
                     let search_path = self.configured_search_path();
                     let mut snapshot = self.snapshot_for_command(db, xid, cid)?;
-                    snapshot.current_cid = heap_snapshot_cid;
+                    snapshot.set_heap_current_cid(heap_snapshot_cid);
                     let deferred_foreign_keys = self
                         .active_txn
                         .as_ref()
@@ -20230,7 +20239,7 @@ impl Session {
                     self.lock_table_requests_if_needed(db, &lock_requests)?;
 
                     let mut snapshot = self.snapshot_for_command(db, xid, cid)?;
-                    snapshot.current_cid = heap_cid;
+                    snapshot.set_heap_current_cid(heap_cid);
                     let interrupts = self.interrupts();
                     let deferred_foreign_keys = self
                         .active_txn

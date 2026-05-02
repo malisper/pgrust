@@ -986,12 +986,14 @@ fn execute_explain_analyze_create_table_as(
         })?;
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
+    let heap_cid = ctx.snapshot.heap_current_cid().unwrap_or(cid);
     let effect_start = ctx.catalog_effects.len();
     db.execute_create_table_as_stmt_in_transaction_with_search_path(
         ctx.client_id,
         stmt,
         xid,
         cid,
+        heap_cid,
         None,
         planner_config,
         Some(&ctx.gucs),

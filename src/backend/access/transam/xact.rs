@@ -296,6 +296,7 @@ impl TransactionManager {
         Ok(Snapshot {
             current_xid,
             current_cid,
+            heap_current_cid: None,
             xmin,
             xmax,
             in_progress,

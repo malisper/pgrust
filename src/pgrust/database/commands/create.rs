@@ -7301,6 +7301,7 @@ impl Database {
         create_stmt: &CreateTableAsStatement,
         xid: TransactionId,
         cid: CommandId,
+        heap_cid: CommandId,
         configured_search_path: Option<&[String]>,
         planner_config: crate::include::nodes::pathnodes::PlannerConfig,
         gucs: Option<&std::collections::HashMap<String, String>>,
@@ -7315,6 +7316,7 @@ impl Database {
                 create_stmt,
                 xid,
                 cid,
+                heap_cid,
                 configured_search_path,
                 gucs,
                 catalog_effects,
@@ -7369,7 +7371,8 @@ impl Database {
             }
         };
 
-        let snapshot = self.txns.read().snapshot_for_command(xid, table_cid)?;
+        let mut snapshot = self.txns.read().snapshot_for_command(xid, table_cid)?;
+        snapshot.set_heap_current_cid(heap_cid);
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
             data_dir: None,
@@ -7631,7 +7634,8 @@ impl Database {
 
         let insert_catalog =
             self.lazy_catalog_lookup(client_id, Some((xid, table_cid)), configured_search_path);
-        let snapshot = self.txns.read().snapshot_for_command(xid, table_cid)?;
+        let mut snapshot = self.txns.read().snapshot_for_command(xid, table_cid)?;
+        snapshot.set_heap_current_cid(heap_cid);
         let mut insert_ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
             data_dir: None,
@@ -7707,7 +7711,7 @@ impl Database {
             None,
             &mut insert_ctx,
             xid,
-            cid,
+            heap_cid,
         )?;
         {
             let stats_state = self.session_stats_state(client_id);
@@ -7744,6 +7748,7 @@ impl Database {
                 create_stmt,
                 xid,
                 cid,
+                cid,
                 configured_search_path,
                 planner_config,
                 gucs,
@@ -7759,6 +7764,7 @@ impl Database {
             client_id,
             create_stmt,
             xid,
+            cid,
             cid,
             configured_search_path,
             planner_config,

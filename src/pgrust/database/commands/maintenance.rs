@@ -908,13 +908,19 @@ where
     if matches!(relation.relkind, 'f' | 'p') {
         return Ok(());
     }
+    let Some(column) = relation.desc.columns.get(column_index).cloned() else {
+        return Ok(());
+    };
+    if catalog
+        .domain_by_type_oid(column.sql_type.type_oid)
+        .is_none()
+    {
+        return Ok(());
+    }
     let mut ctx =
         add_column_validation_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
-    let Some(column) = relation.desc.columns.get(column_index).cloned() else {
-        return Ok(());
-    };
     for (_, values) in rows {
         ctx.check_for_interrupts()?;
         let value = match values.get(column_index) {
@@ -4092,7 +4098,7 @@ impl Database {
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
                 random_state: crate::backend::executor::PgPrngState::shared(),
                 timed: false,
-                allow_side_effects: false,
+                allow_side_effects: true,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),

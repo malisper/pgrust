@@ -3753,6 +3753,7 @@ fn exec_dynamic_create_table_as(
     })?;
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
+    let heap_cid = ctx.snapshot.heap_current_cid().unwrap_or(cid);
     let search_path = plpgsql_configured_search_path(ctx);
     let effect_start = ctx.catalog_effects.len();
     let result = db.execute_create_table_as_stmt_in_transaction_with_search_path(
@@ -3760,6 +3761,7 @@ fn exec_dynamic_create_table_as(
         stmt,
         xid,
         cid,
+        heap_cid,
         search_path.as_deref(),
         planner_config_from_executor_gucs(&ctx.gucs),
         Some(&ctx.gucs),
@@ -3767,6 +3769,7 @@ fn exec_dynamic_create_table_as(
         &mut ctx.temp_effects,
     );
     if result.is_ok() {
+        advance_plpgsql_heap_command_id(ctx, heap_cid.saturating_add(1));
         let consumed_catalog_cids = ctx
             .catalog_effects
             .len()
@@ -4232,6 +4235,12 @@ fn advance_plpgsql_command_id(ctx: &mut ExecutorContext) {
 fn advance_plpgsql_command_id_by(ctx: &mut ExecutorContext, count: CommandId) {
     ctx.next_command_id = ctx.next_command_id.saturating_add(count);
     ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
+}
+
+fn advance_plpgsql_heap_command_id(ctx: &mut ExecutorContext, next_heap_cid: CommandId) {
+    let current = ctx.snapshot.heap_current_cid().unwrap_or(0);
+    ctx.snapshot
+        .set_heap_current_cid(current.max(next_heap_cid));
 }
 
 fn refresh_plpgsql_executor_catalog(
