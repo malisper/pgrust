@@ -1554,8 +1554,8 @@ fn eval_pg_show_all_settings(
                 output_columns
                     .iter()
                     .map(|column| match column.name.as_str() {
-                        "name" => Value::Text(name.into()),
-                        "setting" => Value::Text(setting.into()),
+                        "name" => Value::Text((*name).into()),
+                        "setting" => Value::Text((*setting).into()),
                         "unit" => Value::Null,
                         "category" => Value::Text((*category).into()),
                         "short_desc" => Value::Text((*description).into()),
@@ -1566,8 +1566,8 @@ fn eval_pg_show_all_settings(
                         "min_val" => Value::Null,
                         "max_val" => Value::Null,
                         "enumvals" => Value::Null,
-                        "boot_val" => Value::Text(setting.into()),
-                        "reset_val" => Value::Text(setting.into()),
+                        "boot_val" => Value::Text((*setting).into()),
+                        "reset_val" => Value::Text((*setting).into()),
                         "sourcefile" => Value::Null,
                         "sourceline" => Value::Null,
                         "pending_restart" => Value::Bool(false),
