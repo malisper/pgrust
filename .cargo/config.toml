@@ -18,7 +18,9 @@ codegen-backend = "llvm"
 codegen-backend = "llvm"
 
 [target.aarch64-apple-darwin]
-linker = "scripts/macos-rust-lld-linker.sh"
+# rust-lld can emit malformed release Mach-O binaries for pgrust_server on
+# aarch64 macOS; dyld aborts before main while loading rebase opcodes.
+linker = "cc"
 
 [target.x86_64-apple-darwin]
-linker = "scripts/macos-rust-lld-linker.sh"
+linker = "cc"
