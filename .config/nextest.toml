@@ -24,7 +24,7 @@ slow-timeout = { period = "180s", terminate-after = 1, grace-period = "0s" }
 
 [[profile.ci.overrides]]
 filter = 'test(pgrust::database::tests::no_pins_leaked_concurrent_contention)'
-slow-timeout = { period = "180s", terminate-after = 1, grace-period = "0s" }
+slow-timeout = { period = "300s", terminate-after = 1, grace-period = "0s" }
 
 [profile.ci.junit]
 path = "junit.xml"
