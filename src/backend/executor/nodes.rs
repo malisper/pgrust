@@ -9795,6 +9795,53 @@ fn enum_order_key_by_label_oid(value: Value, ctx: &ExecutorContext) -> Value {
         .unwrap_or(Value::EnumOid(label_oid))
 }
 
+fn eval_limit_bound(
+    expr: &Option<Expr>,
+    clause: &'static str,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<usize>, ExecError> {
+    let Some(expr) = expr else {
+        return Ok(None);
+    };
+    let mut slot = TupleSlot::empty(0);
+    match eval_expr(expr, &mut slot, ctx)? {
+        Value::Null => Ok(None),
+        Value::Int16(value) if value >= 0 => Ok(Some(value as usize)),
+        Value::Int32(value) if value >= 0 => Ok(Some(value as usize)),
+        Value::Int64(value) if value >= 0 => usize::try_from(value)
+            .ok()
+            .map(Some)
+            .ok_or_else(|| limit_bound_error(clause)),
+        _ => Err(limit_bound_error(clause)),
+    }
+}
+
+fn limit_bound_error(clause: &'static str) -> ExecError {
+    let sqlstate = match clause {
+        "OFFSET" => "2201X",
+        _ => "2201W",
+    };
+    ExecError::DetailedError {
+        message: format!("{clause} must not be negative"),
+        detail: None,
+        hint: None,
+        sqlstate,
+    }
+}
+
+fn recompute_limit_bounds(
+    state: &mut LimitState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if state.limits_ready {
+        return Ok(());
+    }
+    state.offset = eval_limit_bound(&state.offset_expr, "OFFSET", ctx)?.unwrap_or(0);
+    state.limit = eval_limit_bound(&state.limit_expr, "LIMIT", ctx)?;
+    state.limits_ready = true;
+    Ok(())
+}
+
 impl PlanNode for LimitState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -9805,6 +9852,7 @@ impl PlanNode for LimitState {
         } else {
             None
         };
+        recompute_limit_bounds(self, ctx)?;
         if let Some(limit) = self.limit {
             if self.returned >= limit {
                 finish_eof(&mut self.stats, start, ctx);
@@ -9839,6 +9887,9 @@ impl PlanNode for LimitState {
     fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
         self.returned = 0;
         self.skipped = 0;
+        self.limit = None;
+        self.offset = 0;
+        self.limits_ready = false;
         self.input.rescan(ctx)
     }
     fn column_names(&self) -> &[String] {

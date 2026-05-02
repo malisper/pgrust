@@ -4,7 +4,7 @@ use super::value_io::{coerce_assignment_value_with_config, format_array_value_te
 use crate::backend::commands::tablecmds::execute_merge;
 use crate::backend::executor::exec_expr::append_array_value;
 use crate::backend::executor::execute_readonly_statement;
-use crate::backend::executor::function_guc::execute_with_sql_function_gucs;
+use crate::backend::executor::function_guc::execute_with_sql_function_context;
 use crate::backend::executor::{
     ExecError, ExecutorContext, QueryColumn, StatementResult, TupleSlot, Value,
     render_datetime_value_text_with_config, render_geometry_text, render_interval_text_with_config,
@@ -27,6 +27,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::{ArrayValue, RecordDescriptor, RecordValue};
 use crate::include::nodes::primnodes::{Expr, expr_sql_type_hint};
+use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::commands::rules::execute_bound_insert_with_rules;
 use crate::pgrust::session::ByteaOutputFormat;
 
@@ -78,7 +79,7 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values_with_arg_type_oids
 
     validate_sql_polymorphic_runtime_args(row, arg_values)?;
 
-    execute_with_sql_function_gucs(row.proconfig.as_deref(), ctx, |ctx| {
+    execute_with_sql_function_context(row, ctx, |ctx| {
         if let Some(value) = execute_known_lightweight_sql_function(row, arg_values)? {
             return Ok(value);
         }
@@ -197,7 +198,7 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
         .iter()
         .map(|arg| crate::backend::executor::eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
-    execute_with_sql_function_gucs(row.proconfig.as_deref(), ctx, |ctx| {
+    execute_with_sql_function_context(row, ctx, |ctx| {
         let catalog = ctx.catalog.clone().ok_or_else(|| {
             sql_function_runtime_error(
                 "LANGUAGE sql functions require executor catalog context",
@@ -653,7 +654,10 @@ fn execute_sql_function_query(
 
 fn sql_function_statement_needs_database_executor(statement: &str) -> bool {
     let lower = statement.trim_start().to_ascii_lowercase();
-    starts_with_sql_command(&lower, "create") || starts_with_sql_command(&lower, "alter")
+    starts_with_sql_command(&lower, "create")
+        || starts_with_sql_command(&lower, "alter")
+        || starts_with_sql_command(&lower, "grant")
+        || starts_with_sql_command(&lower, "revoke")
 }
 
 fn normalize_sql_function_statement_for_execution(statement: &str) -> std::borrow::Cow<'_, str> {
@@ -691,13 +695,24 @@ fn execute_sql_function_statement_with_database(
         },
     )?;
     let search_path = configured_search_path_from_gucs(&ctx.gucs);
-    db.execute_statement_with_search_path_datetime_config_and_gucs(
+    let saved_auth = db.auth_state(ctx.client_id);
+    db.install_auth_state(
+        ctx.client_id,
+        AuthState::from_executor_identity(
+            ctx.session_user_oid,
+            ctx.current_user_oid,
+            ctx.active_role_oid,
+        ),
+    );
+    let result = db.execute_statement_with_search_path_datetime_config_and_gucs(
         ctx.client_id,
         stmt,
         search_path.as_deref(),
         &ctx.datetime_config,
         &ctx.gucs,
-    )
+    );
+    db.install_auth_state(ctx.client_id, saved_auth);
+    result
 }
 
 fn configured_search_path_from_gucs(

@@ -4,14 +4,15 @@ use crate::backend::commands::rolecmds::{membership_row, role_management_error};
 use crate::backend::parser::{
     CatalogLookup, GrantObjectPrivilege, GrantObjectStatement, GrantRoleMembershipStatement,
     ParseError, RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec, RoutineKind,
-    parse_type_name, resolve_raw_type_name,
+    SqlType, TypePrivilegeObjectKind, parse_type_name, resolve_raw_type_name,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::pg_proc::{is_bootstrap_proc_oid, set_bootstrap_proc_execute_acl};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID, PgAuthIdRow,
-    PgForeignDataWrapperRow, PgForeignServerRow,
+    PgForeignDataWrapperRow, PgForeignServerRow, PgTypeRow,
 };
+use crate::include::nodes::primnodes::RelationDesc;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
@@ -76,7 +77,7 @@ fn object_privilege_chars(privilege: GrantObjectPrivilege) -> Option<&'static st
         GrantObjectPrivilege::AllPrivilegesOnSchema => Some(SCHEMA_ALL_PRIVILEGE_CHARS),
         GrantObjectPrivilege::CreateOnSchema => Some(SCHEMA_CREATE_PRIVILEGE_CHARS),
         GrantObjectPrivilege::UsageOnSchema => Some(SCHEMA_USAGE_PRIVILEGE_CHARS),
-        GrantObjectPrivilege::UsageOnType => Some(TYPE_USAGE_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::UsageOnType(_) => Some(TYPE_USAGE_PRIVILEGE_CHARS),
         GrantObjectPrivilege::ExecuteOnFunction
         | GrantObjectPrivilege::ExecuteOnProcedure
         | GrantObjectPrivilege::ExecuteOnRoutine => Some(FUNCTION_EXECUTE_PRIVILEGE_CHARS),
@@ -566,6 +567,101 @@ fn revoke_acl_entry(acl: &mut Vec<String>, grantee: &str, privilege_chars: &str,
         true
     });
 }
+
+fn revoke_acl_entry_by_grantor(
+    acl: &mut Vec<String>,
+    grantee: &str,
+    grantor_name: &str,
+    privilege_chars: &str,
+    allowed: &str,
+) -> bool {
+    let before = acl.clone();
+    acl.retain_mut(|item| {
+        let Some((item_grantee, existing_privileges, grantor)) = parse_acl_item(item) else {
+            return true;
+        };
+        if item_grantee != grantee || grantor != grantor_name {
+            return true;
+        }
+        let remaining: String = existing_privileges
+            .chars()
+            .filter(|ch| !privilege_chars.contains(*ch))
+            .collect();
+        let remaining = canonicalize_acl_privileges(&remaining, allowed);
+        if remaining.is_empty() {
+            return false;
+        }
+        *item = format!("{grantee}={remaining}/{grantor}");
+        true
+    });
+    *acl != before
+}
+
+fn type_row_is_true_array(row: &PgTypeRow) -> bool {
+    row.typelem != 0 && row.typtype == 'b'
+}
+
+fn type_row_is_domain(row: &PgTypeRow) -> bool {
+    row.typtype == 'd'
+}
+
+fn range_row_for_multirange_oid(
+    catalog: &dyn CatalogLookup,
+    multirange_oid: u32,
+) -> Option<PgTypeRow> {
+    let range_oid = catalog
+        .range_rows()
+        .into_iter()
+        .find(|row| row.rngmultitypid == multirange_oid)?
+        .rngtypid;
+    catalog.type_by_oid(range_oid)
+}
+
+fn type_usage_acl_target(
+    catalog: &dyn CatalogLookup,
+    type_oid: u32,
+) -> Result<(PgTypeRow, String), ExecError> {
+    let row = catalog
+        .type_by_oid(type_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("type with OID {type_oid} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        })?;
+    if type_row_is_true_array(&row) {
+        let element = catalog
+            .type_by_oid(row.typelem)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("type with OID {} does not exist", row.typelem),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        let display_name = element.typname.clone();
+        if element.typtype == 'm'
+            && let Some(range_row) = range_row_for_multirange_oid(catalog, element.oid)
+        {
+            return Ok((range_row, display_name));
+        }
+        return Ok((element, display_name));
+    }
+    if row.typtype == 'm'
+        && let Some(range_row) = range_row_for_multirange_oid(catalog, row.oid)
+    {
+        return Ok((range_row, row.typname));
+    }
+    Ok((row.clone(), row.typname))
+}
+
+fn cannot_set_array_privileges_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot set privileges of array types".into(),
+        detail: None,
+        hint: Some("Set the privileges of the element type instead.".into()),
+        sqlstate: "42809",
+    }
+}
 fn single_object_name<'a>(
     object_names: &'a [String],
     statement_name: &'static str,
@@ -831,11 +927,12 @@ impl Database {
             | GrantObjectPrivilege::CreateOnTablespace => {
                 self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
             }
-            GrantObjectPrivilege::UsageOnType => self.execute_grant_type_acl_stmt_with_search_path(
-                client_id,
-                stmt,
-                configured_search_path,
-            ),
+            GrantObjectPrivilege::UsageOnType(_) => self
+                .execute_grant_type_acl_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
             GrantObjectPrivilege::UsageOnLanguage
             | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
                 client_id,
@@ -919,7 +1016,7 @@ impl Database {
             | GrantObjectPrivilege::CreateOnTablespace => {
                 self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
             }
-            GrantObjectPrivilege::UsageOnType => self
+            GrantObjectPrivilege::UsageOnType(_) => self
                 .execute_type_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
@@ -930,6 +1027,7 @@ impl Database {
                     configured_search_path,
                     catalog_effects,
                     true,
+                    false,
                 ),
             GrantObjectPrivilege::UsageOnLanguage
             | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
@@ -1036,7 +1134,7 @@ impl Database {
             | GrantObjectPrivilege::CreateOnTablespace => {
                 self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
             }
-            GrantObjectPrivilege::UsageOnType => self
+            GrantObjectPrivilege::UsageOnType(_) => self
                 .execute_type_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
@@ -1047,6 +1145,7 @@ impl Database {
                     configured_search_path,
                     catalog_effects,
                     false,
+                    stmt.with_grant_option,
                 ),
             GrantObjectPrivilege::UsageOnLanguage
             | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
@@ -1141,7 +1240,7 @@ impl Database {
             | GrantObjectPrivilege::CreateOnTablespace => {
                 self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
             }
-            GrantObjectPrivilege::UsageOnType => self
+            GrantObjectPrivilege::UsageOnType(_) => self
                 .execute_revoke_type_acl_stmt_with_search_path(
                     client_id,
                     stmt,
@@ -1922,6 +2021,7 @@ impl Database {
             &stmt.grantee_names,
             configured_search_path,
             false,
+            stmt.with_grant_option,
         )
     }
 
@@ -1938,6 +2038,7 @@ impl Database {
             &stmt.grantee_names,
             configured_search_path,
             true,
+            false,
         )
     }
 
@@ -1949,6 +2050,7 @@ impl Database {
         grantee_names: &[String],
         configured_search_path: Option<&[String]>,
         revoke: bool,
+        with_grant_option: bool,
     ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -1963,6 +2065,7 @@ impl Database {
             configured_search_path,
             &mut catalog_effects,
             revoke,
+            with_grant_option,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
@@ -1980,9 +2083,14 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         revoke: bool,
+        with_grant_option: bool,
     ) -> Result<StatementResult, ExecError> {
         let privilege_chars = object_privilege_chars(privilege.clone())
             .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+        let object_kind = match privilege {
+            GrantObjectPrivilege::UsageOnType(kind) => kind,
+            _ => return Err(ExecError::Parse(ParseError::UnexpectedEof)),
+        };
         let auth = self.auth_state(client_id);
         let auth_catalog = self
             .auth_catalog(client_id, Some((xid, cid)))
@@ -2017,11 +2125,6 @@ impl Database {
                     sqlstate: "42704",
                 }
             })?;
-            if let Some(entry) = self.range_types.read().values().find(|entry| {
-                entry.multirange_oid == type_oid || entry.multirange_array_oid == type_oid
-            }) {
-                return Err(cannot_set_multirange_privileges_error(&entry.name));
-            }
             let row = catalog
                 .type_by_oid(type_oid)
                 .ok_or_else(|| ExecError::DetailedError {
@@ -2030,18 +2133,29 @@ impl Database {
                     hint: None,
                     sqlstate: "42704",
                 })?;
-            if !auth_catalog
-                .role_by_oid(auth.current_user_oid())
-                .is_some_and(|entry| entry.rolsuper)
-                && !auth.has_effective_membership(row.typowner, &auth_catalog)
+            if type_row_is_true_array(&row) {
+                return Err(cannot_set_array_privileges_error());
+            }
+            if let Some(entry) = self
+                .range_types
+                .read()
+                .values()
+                .find(|entry| entry.multirange_oid == type_oid)
             {
+                return Err(cannot_set_multirange_privileges_error(&entry.name));
+            }
+            if object_kind == TypePrivilegeObjectKind::Domain && !type_row_is_domain(&row) {
                 return Err(ExecError::DetailedError {
-                    message: format!("must be owner of type {object_name}"),
+                    message: format!("\"{object_name}\" is not a domain"),
                     detail: None,
                     hint: None,
-                    sqlstate: "42501",
+                    sqlstate: "42809",
                 });
             }
+            let current_user_can_grant_as_owner = auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .is_some_and(|entry| entry.rolsuper)
+                || auth.has_effective_membership(row.typowner, &auth_catalog);
             let owner_name = auth_catalog
                 .role_by_oid(row.typowner)
                 .map(|entry| entry.rolname.clone())
@@ -2055,6 +2169,38 @@ impl Database {
                 .typacl
                 .clone()
                 .unwrap_or_else(|| type_owner_default_acl(&owner_name));
+            let effective_names = (!current_user_can_grant_as_owner)
+                .then(|| effective_acl_grantee_names(&auth, &auth_catalog));
+            let effective_privilege_chars;
+            let grant_privilege_chars = if current_user_can_grant_as_owner || revoke {
+                privilege_chars
+            } else {
+                effective_privilege_chars = grantable_acl_privilege_chars(
+                    &acl,
+                    effective_names.as_ref().expect("effective names"),
+                    privilege_chars,
+                );
+                warn_grant_privileges(object_name, privilege_chars, &effective_privilege_chars);
+                if effective_privilege_chars.is_empty() {
+                    continue;
+                }
+                effective_privilege_chars.as_str()
+            };
+            if revoke
+                && !current_user_can_grant_as_owner
+                && !acl_grants_privilege(
+                    &acl,
+                    effective_names.as_ref().expect("effective names"),
+                    'U',
+                )
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!("permission denied for type {object_name}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
             for grantee_name in grantee_names {
                 let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
                     String::new()
@@ -2070,19 +2216,37 @@ impl Database {
                         })?
                 };
                 if revoke {
-                    revoke_acl_entry(
-                        &mut acl,
-                        &grantee_acl_name,
-                        privilege_chars,
-                        TYPE_USAGE_PRIVILEGE_CHARS,
-                    );
+                    let changed = if current_user_can_grant_as_owner {
+                        let before = acl.clone();
+                        revoke_acl_entry(
+                            &mut acl,
+                            &grantee_acl_name,
+                            privilege_chars,
+                            TYPE_USAGE_PRIVILEGE_CHARS,
+                        );
+                        acl != before
+                    } else {
+                        revoke_acl_entry_by_grantor(
+                            &mut acl,
+                            &grantee_acl_name,
+                            &grantor_name,
+                            privilege_chars,
+                            TYPE_USAGE_PRIVILEGE_CHARS,
+                        )
+                    };
+                    if !changed {
+                        push_warning(format!(
+                            "no privileges could be revoked for \"{object_name}\""
+                        ));
+                    }
                 } else {
-                    grant_acl_entry(
+                    grant_table_acl_entry(
                         &mut acl,
                         &grantee_acl_name,
                         &grantor_name,
-                        privilege_chars,
+                        grant_privilege_chars,
                         TYPE_USAGE_PRIVILEGE_CHARS,
+                        with_grant_option,
                     );
                 }
             }
@@ -2131,6 +2295,117 @@ impl Database {
             }
         }
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn default_acl_for_new_type(
+        &self,
+        owner_oid: u32,
+        namespace_oid: u32,
+    ) -> Option<Vec<String>> {
+        let mut acl_items = None;
+        for row in &self.object_addresses.read().default_acls {
+            if row.role_oid == owner_oid
+                && row.objtype == 'T'
+                && row
+                    .namespace_oid
+                    .is_none_or(|default_namespace_oid| default_namespace_oid == namespace_oid)
+                && !row.acl_items.is_empty()
+            {
+                acl_items = Some(row.acl_items.clone());
+            }
+        }
+        acl_items
+    }
+
+    pub(crate) fn ensure_sql_type_usage_privilege(
+        &self,
+        client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        configured_search_path: Option<&[String]>,
+        sql_type: SqlType,
+    ) -> Result<(), ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let type_oid =
+            catalog
+                .type_oid_for_sql_type(sql_type)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("type {:?} does not exist", sql_type.kind),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?;
+        self.ensure_type_usage_privilege_by_oid(
+            client_id,
+            txn_ctx,
+            configured_search_path,
+            type_oid,
+        )
+    }
+
+    pub(crate) fn ensure_type_usage_privilege_by_oid(
+        &self,
+        client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        configured_search_path: Option<&[String]>,
+        type_oid: u32,
+    ) -> Result<(), ExecError> {
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, txn_ctx)
+            .map_err(map_catalog_error)?;
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let (row, display_name) = type_usage_acl_target(&catalog, type_oid)?;
+        // Preserve existing range/multirange behavior: owners can revoke their own USAGE.
+        let owner_has_implicit_usage = row.typtype != 'r';
+        if auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .is_some_and(|entry| entry.rolsuper)
+            || (owner_has_implicit_usage
+                && auth.has_effective_membership(row.typowner, &auth_catalog))
+        {
+            return Ok(());
+        }
+        let owner_name = auth_catalog
+            .role_by_oid(row.typowner)
+            .map(|entry| entry.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("owner for type \"{display_name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let acl = row
+            .typacl
+            .clone()
+            .unwrap_or_else(|| type_owner_default_acl(&owner_name));
+        let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
+        if acl_grants_privilege(&acl, &effective_names, 'U') {
+            return Ok(());
+        }
+        Err(ExecError::DetailedError {
+            message: format!("permission denied for type {display_name}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42501",
+        })
+    }
+
+    pub(crate) fn ensure_relation_desc_type_usage_privileges(
+        &self,
+        client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        configured_search_path: Option<&[String]>,
+        desc: &RelationDesc,
+    ) -> Result<(), ExecError> {
+        for column in desc.columns.iter().filter(|column| !column.dropped) {
+            self.ensure_sql_type_usage_privilege(
+                client_id,
+                txn_ctx,
+                configured_search_path,
+                column.sql_type,
+            )?;
+        }
+        Ok(())
     }
 
     fn execute_grant_function_acl_stmt_with_search_path(
@@ -3628,6 +3903,7 @@ fn role_does_not_exist_error(role_name: &str) -> ExecError {
 mod tests {
     use super::*;
     use crate::backend::executor::StatementResult;
+    use crate::include::nodes::datum::Value;
     use crate::pgrust::session::Session;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3667,6 +3943,13 @@ mod tests {
             .into_iter()
             .find(|row| row.relname == relname)
             .and_then(|row| row.relacl)
+    }
+
+    fn query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Vec<Value>> {
+        match session.execute(db, sql).unwrap() {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4281,5 +4564,151 @@ mod tests {
         assert!(!rows.iter().any(|row| {
             row.roleid == parent_oid && row.member == child_oid && row.grantor == grantee_oid
         }));
+    }
+
+    #[test]
+    fn type_usage_privilege_blocks_and_allows_table_column_type() {
+        let base = temp_dir("type_usage_table_column");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role type_acl_user").unwrap();
+        session
+            .execute(&db, "grant create on schema public to type_acl_user")
+            .unwrap();
+        session
+            .execute(&db, "create type type_acl_composite as (a int)")
+            .unwrap();
+        session
+            .execute(&db, "revoke usage on type type_acl_composite from public")
+            .unwrap();
+        session
+            .execute(&db, "set session authorization type_acl_user")
+            .unwrap();
+
+        let err = session
+            .execute(&db, "create table type_acl_denied (c type_acl_composite)")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, .. } => {
+                assert_eq!(message, "permission denied for type type_acl_composite");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        session.execute(&db, "reset session authorization").unwrap();
+        session
+            .execute(
+                &db,
+                "grant usage on type type_acl_composite to type_acl_user with grant option",
+            )
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_type_privilege('type_acl_user', 'type_acl_composite', 'USAGE'),
+                        has_type_privilege('type_acl_user', 'type_acl_composite', 'USAGE WITH GRANT OPTION')"
+            ),
+            vec![vec![Value::Bool(true), Value::Bool(true)]]
+        );
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_type_privilege(999999::oid, 'USAGE')"
+            ),
+            vec![vec![Value::Null]]
+        );
+        session
+            .execute(&db, "set session authorization type_acl_user")
+            .unwrap();
+        session
+            .execute(&db, "create table type_acl_allowed (c type_acl_composite)")
+            .unwrap();
+    }
+
+    #[test]
+    fn type_acl_rejects_array_targets_and_domain_kind_mismatch() {
+        let base = temp_dir("type_acl_object_kind");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role type_acl_user").unwrap();
+        session
+            .execute(&db, "create type type_acl_composite as (a int)")
+            .unwrap();
+
+        let err = session
+            .execute(
+                &db,
+                "grant usage on type type_acl_composite[] to type_acl_user",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, hint, .. } => {
+                assert_eq!(message, "cannot set privileges of array types");
+                assert_eq!(
+                    hint.as_deref(),
+                    Some("Set the privileges of the element type instead.")
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let err = session
+            .execute(
+                &db,
+                "grant usage on domain type_acl_composite to type_acl_user",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, .. } => {
+                assert_eq!(message, "\"type_acl_composite\" is not a domain");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_type_privileges_apply_to_new_domains() {
+        let base = temp_dir("default_type_privileges");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role type_acl_user").unwrap();
+        session.execute(&db, "create schema type_acl_ns").unwrap();
+        session
+            .execute(
+                &db,
+                "alter default privileges in schema type_acl_ns revoke usage on types from public",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create domain type_acl_ns.private_domain as int")
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_type_privilege('type_acl_user', 'type_acl_ns.private_domain', 'USAGE')"
+            ),
+            vec![vec![Value::Bool(false)]]
+        );
+
+        session
+            .execute(
+                &db,
+                "alter default privileges in schema type_acl_ns grant usage on types to public",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create domain type_acl_ns.public_domain as int")
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_type_privilege('type_acl_user', 'type_acl_ns.public_domain', 'USAGE')"
+            ),
+            vec![vec![Value::Bool(true)]]
+        );
     }
 }

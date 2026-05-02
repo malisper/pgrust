@@ -145,6 +145,12 @@ impl Database {
                 let catalog =
                     self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
                 let desc = lower_create_composite_type_desc(stmt, &catalog)?;
+                self.ensure_relation_desc_type_usage_privileges(
+                    client_id,
+                    Some((xid, cid)),
+                    configured_search_path,
+                    &desc,
+                )?;
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -161,8 +167,19 @@ impl Database {
                     self.auth_state(client_id).current_user_oid(),
                     &ctx,
                 ) {
-                    Ok((_entry, effect)) => {
+                    Ok((entry, effect)) => {
                         catalog_effects.push(effect);
+                        if let Some(typacl) = self.default_acl_for_new_type(
+                            self.auth_state(client_id).current_user_oid(),
+                            namespace_oid,
+                        ) {
+                            let effect = self
+                                .catalog
+                                .write()
+                                .alter_type_acl_mvcc(entry.row_type_oid, Some(typacl), &ctx)
+                                .map_err(map_catalog_error)?;
+                            catalog_effects.push(effect);
+                        }
                         Ok(StatementResult::AffectedRows(0))
                     }
                     Err(CatalogError::TableAlreadyExists(_)) => Err(type_already_exists_error(
@@ -927,6 +944,29 @@ impl Database {
         let original_type_desc = type_relation.desc.clone();
         let mut type_desc = original_type_desc.clone();
         for action in &stmt.actions {
+            match action {
+                AlterCompositeTypeAction::AddAttribute { attribute, .. } => {
+                    let sql_type =
+                        resolve_raw_type_name(&attribute.ty, &catalog).map_err(ExecError::Parse)?;
+                    self.ensure_sql_type_usage_privilege(
+                        client_id,
+                        Some((xid, cid)),
+                        configured_search_path,
+                        sql_type,
+                    )?;
+                }
+                AlterCompositeTypeAction::AlterAttributeType { ty, .. } => {
+                    let sql_type = resolve_raw_type_name(ty, &catalog).map_err(ExecError::Parse)?;
+                    self.ensure_sql_type_usage_privilege(
+                        client_id,
+                        Some((xid, cid)),
+                        configured_search_path,
+                        sql_type,
+                    )?;
+                }
+                AlterCompositeTypeAction::DropAttribute { .. }
+                | AlterCompositeTypeAction::RenameAttribute { .. } => {}
+            }
             apply_composite_attribute_action(
                 &mut type_desc,
                 action,
@@ -2869,6 +2909,7 @@ impl Database {
                 creating_xid: None,
             })
             .collect();
+        let owner_oid = self.auth_state(client_id).current_user_oid();
         enum_types.insert(
             normalized,
             EnumTypeEntry {
@@ -2876,10 +2917,10 @@ impl Database {
                 array_oid,
                 name: object_name,
                 namespace_oid,
-                owner_oid: self.auth_state(client_id).current_user_oid(),
+                owner_oid,
                 labels,
                 creating_xid: Some(xid),
-                typacl: None,
+                typacl: self.default_acl_for_new_type(owner_oid, namespace_oid),
                 comment: None,
             },
         );
@@ -3182,6 +3223,12 @@ impl Database {
         let subtype_oid = catalog
             .type_oid_for_sql_type(resolved_subtype)
             .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(stmt.type_name.clone())))?;
+        self.ensure_type_usage_privilege_by_oid(
+            client_id,
+            Some((xid, cid)),
+            configured_search_path,
+            subtype_oid,
+        )?;
         let domain_subtype = self
             .domains
             .read()
@@ -3287,6 +3334,7 @@ impl Database {
         let array_oid = oid.saturating_add(1);
         let multirange_oid = oid.saturating_add(2);
         let multirange_array_oid = oid.saturating_add(3);
+        let owner_oid = self.auth_state(client_id).current_user_oid();
         range_types.insert(
             normalized,
             RangeTypeEntry {
@@ -3297,7 +3345,7 @@ impl Database {
                 name: object_name,
                 multirange_name,
                 namespace_oid,
-                owner_oid: self.auth_state(client_id).current_user_oid(),
+                owner_oid,
                 public_usage: true,
                 owner_usage: true,
                 subtype,
@@ -3305,7 +3353,7 @@ impl Database {
                 subtype_opclass: stmt.subtype_opclass.clone(),
                 subtype_diff: stmt.subtype_diff.clone(),
                 collation: stmt.collation.clone(),
-                typacl: None,
+                typacl: self.default_acl_for_new_type(owner_oid, namespace_oid),
                 comment: None,
             },
         );

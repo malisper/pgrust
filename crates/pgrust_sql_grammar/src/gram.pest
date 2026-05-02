@@ -98,11 +98,10 @@ order_by_clause = { kw_order ~ kw_by ~ order_by_item ~ ("," ~ order_by_item)* }
 operator_token = @{ ("!" | "#" | "%" | "&" | "*" | "+" | "-" | "/" | "<" | "=" | ">" | "?" | "@" | "^" | "|" | "~")+ }
 order_by_item = { expr ~ ((kw_using ~ operator_token) | (kw_asc | kw_desc))? ~ nulls_ordering? }
 nulls_ordering = { kw_nulls ~ (kw_first | kw_last) }
-limit_clause = { kw_limit ~ (integer_const_expr | kw_null | kw_all) }
-offset_clause = { kw_offset ~ integer_const_expr }
-fetch_select_clause = { kw_fetch ~ (kw_first | kw_next) ~ integer_const_expr? ~ (kw_row | kw_rows) ~ (kw_only | (kw_with ~ kw_ties)) }
+limit_clause = { kw_limit ~ (kw_all | expr) }
+offset_clause = { kw_offset ~ expr }
+fetch_select_clause = { kw_fetch ~ (kw_first | kw_next) ~ expr? ~ (kw_row | kw_rows) ~ (kw_only | (kw_with ~ kw_ties)) }
 select_limit_clause = _{ ((limit_clause | fetch_select_clause) ~ offset_clause?) | (offset_clause ~ (limit_clause | fetch_select_clause)?) }
-integer_const_expr = { integer ~ (("+" | "-") ~ integer)* }
 locking_clause = { kw_for ~ ((kw_no ~ kw_key ~ kw_update) | (kw_key ~ kw_share) | kw_update | kw_share) ~ locking_of_clause? ~ lock_nowait_clause? }
 locking_of_clause = { kw_of ~ identifier ~ ("," ~ identifier)* }
 set_stmt = { kw_set ~ set_scope? ~ (set_time_zone_clause | set_xml_option_clause | set_standard_clause) }

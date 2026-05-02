@@ -3807,6 +3807,12 @@ impl Database {
                 debug_assert!(owned_sequence.is_none());
                 debug_assert!(not_null_action.is_none());
                 debug_assert!(check_actions.is_empty());
+                self.ensure_sql_type_usage_privilege(
+                    client_id,
+                    Some((xid, cid)),
+                    configured_search_path,
+                    column.sql_type,
+                )?;
                 if item.expected_parents > 0 {
                     column.attinhcount = item.expected_parents;
                     column.attislocal = false;
@@ -4001,6 +4007,12 @@ impl Database {
             not_null_action,
             check_actions,
         } = plan;
+        self.ensure_sql_type_usage_privilege(
+            client_id,
+            Some((xid, cid)),
+            configured_search_path,
+            column.sql_type,
+        )?;
         if owned_sequence.as_ref().is_some_and(|sequence| {
             sequence.kind == crate::backend::parser::OwnedSequenceKind::Identity
         }) && relation.relkind != 'p'

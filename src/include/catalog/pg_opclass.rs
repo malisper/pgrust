@@ -1141,10 +1141,16 @@ pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType)
                     || (matches!(
                         row.opcintype,
                         TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
-                    ) && matches!(
+                    ) && (matches!(
                         type_oid,
                         NAME_TYPE_OID | TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
-                    ))
+                    ) || matches!(
+                        sql_type.kind,
+                        SqlTypeKind::Name
+                            | SqlTypeKind::Text
+                            | SqlTypeKind::Char
+                            | SqlTypeKind::Varchar
+                    )))
                     || (row.opcintype == ANYARRAYOID && sql_type.is_array)
                     || (row.opcintype == ANYRANGEOID && is_range)
                     || (row.opcintype == ANYMULTIRANGEOID && is_multirange)

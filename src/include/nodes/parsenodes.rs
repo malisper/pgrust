@@ -630,8 +630,8 @@ pub struct Query {
     pub having_qual: Option<Expr>,
     pub sort_clause: Vec<SortGroupClause>,
     pub constraint_deps: Vec<u32>,
-    pub limit_count: Option<usize>,
-    pub limit_offset: Option<usize>,
+    pub limit_count: Option<Expr>,
+    pub limit_offset: Option<Expr>,
     pub locking_clause: Option<SelectLockingClause>,
     pub locking_targets: Vec<String>,
     pub locking_nowait: bool,
@@ -1660,9 +1660,9 @@ pub struct SelectStatement {
     pub window_clauses: Vec<RawWindowClause>,
     pub order_by: Vec<OrderByItem>,
     pub order_by_location: Option<usize>,
-    pub limit: Option<usize>,
+    pub limit: Option<SqlExpr>,
     pub limit_location: Option<usize>,
-    pub offset: Option<usize>,
+    pub offset: Option<SqlExpr>,
     pub offset_location: Option<usize>,
     pub locking_clause: Option<SelectLockingClause>,
     pub locking_location: Option<usize>,
@@ -1747,8 +1747,8 @@ pub struct ValuesStatement {
     pub with: Vec<CommonTableExpr>,
     pub rows: Vec<Vec<SqlExpr>>,
     pub order_by: Vec<OrderByItem>,
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
+    pub limit: Option<SqlExpr>,
+    pub offset: Option<SqlExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4062,7 +4062,7 @@ pub enum GrantObjectPrivilege {
     UsageOnSchema,
     AllPrivilegesOnTablespace,
     CreateOnTablespace,
-    UsageOnType,
+    UsageOnType(TypePrivilegeObjectKind),
     UsageOnLanguage,
     AllPrivilegesOnLanguage,
     ExecuteOnFunction,
@@ -4076,6 +4076,12 @@ pub enum GrantObjectPrivilege {
     UsageOnForeignServer,
     AllPrivilegesOnForeignDataWrapper,
     AllPrivilegesOnForeignServer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypePrivilegeObjectKind {
+    Type,
+    Domain,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

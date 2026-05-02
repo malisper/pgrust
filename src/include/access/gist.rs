@@ -21,6 +21,8 @@ impl Default for GistBufferingMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GistOptions {
+    #[serde(default = "default_gist_fillfactor")]
+    pub fillfactor: u16,
     #[serde(default)]
     pub buffering_mode: GistBufferingMode,
 }
@@ -28,9 +30,14 @@ pub struct GistOptions {
 impl Default for GistOptions {
     fn default() -> Self {
         Self {
+            fillfactor: default_gist_fillfactor(),
             buffering_mode: GistBufferingMode::Auto,
         }
     }
+}
+
+const fn default_gist_fillfactor() -> u16 {
+    90
 }
 
 pub const GIST_ROOT_BLKNO: u32 = 0;

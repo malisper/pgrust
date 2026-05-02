@@ -4055,8 +4055,8 @@ fn make_distinct_rel(
                     plan_info: PlanEstimate::default(),
                     pathtarget: path.semantic_output_target(),
                     input: Box::new(path),
-                    limit: Some(1),
-                    offset: 0,
+                    limit: Some(Expr::Const(Value::Int64(1))),
+                    offset: None,
                 },
                 catalog,
                 root.config,
@@ -4182,8 +4182,8 @@ fn make_distinct_on_rel(
                     plan_info: PlanEstimate::default(),
                     pathtarget: path.semantic_output_target(),
                     input: Box::new(path),
-                    limit: Some(1),
-                    offset: 0,
+                    limit: Some(Expr::Const(Value::Int64(1))),
+                    offset: None,
                 },
                 catalog,
                 root.config,
@@ -4235,8 +4235,8 @@ fn make_distinct_on_rel(
 fn make_limit_rel(
     root: &PlannerInfo,
     input_rel: RelOptInfo,
-    limit: Option<usize>,
-    offset: usize,
+    limit: Option<Expr>,
+    offset: Option<Expr>,
     catalog: &dyn CatalogLookup,
 ) -> RelOptInfo {
     let mut rel = RelOptInfo::new(
@@ -4250,8 +4250,8 @@ fn make_limit_rel(
                 plan_info: PlanEstimate::default(),
                 pathtarget: path.semantic_output_target(),
                 input: Box::new(path),
-                limit,
-                offset,
+                limit: limit.clone(),
+                offset: offset.clone(),
             },
             catalog,
             root.config,
@@ -5117,8 +5117,8 @@ pub(super) fn grouping_planner(
         current_rel = make_limit_rel(
             root,
             current_rel,
-            root.parse.limit_count,
-            root.parse.limit_offset.unwrap_or(0),
+            root.parse.limit_count.clone(),
+            root.parse.limit_offset.clone(),
             catalog,
         );
     }

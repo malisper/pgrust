@@ -967,7 +967,7 @@ pub(crate) fn compile_do_function(
     Ok(CompiledFunction {
         name: "inline_code_block".into(),
         proc_oid: 0,
-        proowner: catalog.current_user_oid(),
+        proowner: 0,
         prosecdef: false,
         provolatile: 'v',
         proconfig: None,

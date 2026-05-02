@@ -3006,6 +3006,9 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         }
         return Ok(Value::Text("none".into()));
     }
+    if name == "session_authorization" {
+        return auth_role_name(ctx, ctx.session_user_oid);
+    }
     if name == "timezone" {
         return Ok(Value::Text(format_timezone(&ctx.datetime_config).into()));
     }
@@ -7907,6 +7910,126 @@ fn eval_has_function_privilege(
         acl_item_parts(item).is_some_and(|(grantee, privileges, _)| {
             effective_names.contains(grantee) && privileges.contains('X')
         })
+    })))
+}
+
+fn type_oid_from_name_for_privilege(
+    name: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<u32, ExecError> {
+    let raw = parse_type_name(name).map_err(ExecError::Parse)?;
+    let sql_type = resolve_raw_type_name(&raw, catalog).map_err(|_| ExecError::DetailedError {
+        message: format!("type \"{name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    })?;
+    catalog
+        .type_oid_for_sql_type(sql_type)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("type \"{name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        })
+}
+
+fn type_row_for_privilege_value(
+    value: &Value,
+    catalog: &dyn CatalogLookup,
+) -> Result<(Option<PgTypeRow>, bool), ExecError> {
+    if let Some(name) = value.as_text() {
+        let oid = type_oid_from_name_for_privilege(name, catalog)?;
+        return Ok((catalog.type_by_oid(oid), false));
+    }
+    let oid = oid_arg_to_u32(value, "has_type_privilege type")?;
+    Ok((catalog.type_by_oid(oid), true))
+}
+
+fn type_privilege_acl_row(catalog: &dyn CatalogLookup, row: PgTypeRow) -> PgTypeRow {
+    if row.typelem != 0 && row.typtype == 'b' {
+        if let Some(element) = catalog.type_by_oid(row.typelem) {
+            return type_privilege_acl_row(catalog, element);
+        }
+    }
+    if row.typtype == 'm'
+        && let Some(range_row) = catalog
+            .range_rows()
+            .into_iter()
+            .find(|range| range.rngmultitypid == row.oid)
+            .and_then(|range| catalog.type_by_oid(range.rngtypid))
+    {
+        return range_row;
+    }
+    row
+}
+
+fn type_acl_allows_role(
+    catalog: &dyn CatalogLookup,
+    role_oid: u32,
+    type_row: &PgTypeRow,
+    spec: PrivilegeSpec,
+) -> bool {
+    let authid_rows = catalog.authid_rows();
+    let auth_members_rows = catalog.auth_members_rows();
+    if role_is_superuser(&authid_rows, role_oid)
+        || role_has_effective_membership(
+            role_oid,
+            type_row.typowner,
+            &authid_rows,
+            &auth_members_rows,
+        )
+    {
+        return true;
+    }
+    let owner_name = authid_rows
+        .iter()
+        .find(|row| row.oid == type_row.typowner)
+        .map(|row| row.rolname.clone())
+        .unwrap_or_else(|| "postgres".into());
+    let acl = type_row.typacl.clone().unwrap_or_else(|| {
+        vec![
+            format!("{owner_name}=U/{owner_name}"),
+            format!("=U/{owner_name}"),
+        ]
+    });
+    acl_grants_privilege_to_names(&acl, &effective_role_names_for_oid(catalog, role_oid), spec)
+}
+
+fn eval_has_type_privilege(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let function_name = "has_type_privilege";
+    let catalog = privilege_catalog(ctx, function_name)?;
+    let (role_oid, type_value, privilege_value) = match values {
+        [type_value, privilege_value] => (ctx.current_user_oid, type_value, privilege_value),
+        [role_value, type_value, privilege_value] => (
+            role_oid_from_value(role_value, ctx, function_name)?,
+            type_value,
+            privilege_value,
+        ),
+        _ => return Err(malformed_expr_error(function_name)),
+    };
+    let specs = parse_privilege_specs(
+        privilege_value,
+        function_name,
+        &[
+            ("USAGE", 'U', false),
+            ("USAGE WITH GRANT OPTION", 'U', true),
+        ],
+    )?;
+    let (type_row, oid_lookup) = type_row_for_privilege_value(type_value, catalog)?;
+    let Some(type_row) = type_row else {
+        return if oid_lookup {
+            Ok(Value::Null)
+        } else {
+            unreachable!("type name lookup errors before returning None")
+        };
+    };
+    let acl_row = type_privilege_acl_row(catalog, type_row);
+    Ok(Value::Bool(specs.into_iter().any(|spec| {
+        type_acl_allows_role(catalog, role_oid, &acl_row, spec)
     })))
 }
 
@@ -13539,6 +13662,7 @@ pub(crate) fn eval_native_builtin_scalar_typed_value_call(
             eval_pg_log_backend_memory_contexts(values)
         }
         BuiltinScalarFunction::HasFunctionPrivilege => eval_has_function_privilege(values, ctx),
+        BuiltinScalarFunction::HasTypePrivilege => eval_has_type_privilege(values, ctx),
         BuiltinScalarFunction::HasTablePrivilege => {
             eval_has_relation_privilege(PrivilegeRelationKind::Table, values, ctx)
         }
@@ -14775,6 +14899,7 @@ pub(crate) fn eval_builtin_function(
             eval_pg_log_backend_memory_contexts(&values)
         }
         BuiltinScalarFunction::HasFunctionPrivilege => eval_has_function_privilege(&values, ctx),
+        BuiltinScalarFunction::HasTypePrivilege => eval_has_type_privilege(&values, ctx),
         BuiltinScalarFunction::HasTablePrivilege => {
             eval_has_relation_privilege(PrivilegeRelationKind::Table, &values, ctx)
         }

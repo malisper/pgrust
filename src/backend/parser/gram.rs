@@ -9844,11 +9844,11 @@ fn build_grant_schema_create(sql: &str) -> Result<GrantObjectStatement, ParseErr
 }
 
 fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let rest = type_usage_prefix(sql, "grant")?;
+    let (rest, object_kind) = type_usage_prefix(sql, "grant")?;
     let (object_names, rest) = split_once_keyword(rest, "to")?;
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::UsageOnType,
+        privilege: GrantObjectPrivilege::UsageOnType(object_kind),
         columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
@@ -9857,32 +9857,43 @@ fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError>
 }
 
 fn is_type_usage_grant(lowered: &str) -> bool {
-    type_usage_prefix_len(lowered, "grant").is_some()
+    type_usage_prefix_match(lowered, "grant").is_some()
 }
 
 fn is_type_usage_revoke(lowered: &str) -> bool {
-    type_usage_prefix_len(lowered, "revoke").is_some()
+    type_usage_prefix_match(lowered, "revoke").is_some()
 }
 
-fn type_usage_prefix<'a>(sql: &'a str, command: &'static str) -> Result<&'a str, ParseError> {
+fn type_usage_prefix<'a>(
+    sql: &'a str,
+    command: &'static str,
+) -> Result<(&'a str, TypePrivilegeObjectKind), ParseError> {
     let lower = sql.to_ascii_lowercase();
-    let prefix_len =
-        type_usage_prefix_len(&lower, command).ok_or_else(|| ParseError::UnexpectedToken {
+    let (prefix_len, object_kind) =
+        type_usage_prefix_match(&lower, command).ok_or_else(|| ParseError::UnexpectedToken {
             expected: "type privilege",
             actual: sql.into(),
         })?;
-    Ok(sql
-        .get(prefix_len..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start())
+    Ok((
+        sql.get(prefix_len..)
+            .ok_or(ParseError::UnexpectedEof)?
+            .trim_start(),
+        object_kind,
+    ))
 }
 
-fn type_usage_prefix_len(lowered: &str, command: &'static str) -> Option<usize> {
-    for object in ["type", "domain"] {
+fn type_usage_prefix_match(
+    lowered: &str,
+    command: &'static str,
+) -> Option<(usize, TypePrivilegeObjectKind)> {
+    for (object, object_kind) in [
+        ("type", TypePrivilegeObjectKind::Type),
+        ("domain", TypePrivilegeObjectKind::Domain),
+    ] {
         for privilege in ["usage", "all", "all privileges"] {
             let prefix = format!("{command} {privilege} on {object} ");
             if lowered.starts_with(&prefix) {
-                return Some(prefix.len());
+                return Some((prefix.len(), object_kind));
             }
         }
     }
@@ -10192,11 +10203,11 @@ fn build_revoke_tablespace_create(sql: &str) -> Result<RevokeObjectStatement, Pa
 }
 
 fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let rest = type_usage_prefix(sql, "revoke")?;
+    let (rest, object_kind) = type_usage_prefix(sql, "revoke")?;
     let (object_names, rest) = split_once_keyword(rest, "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
-        privilege: GrantObjectPrivilege::UsageOnType,
+        privilege: GrantObjectPrivilege::UsageOnType(object_kind),
         columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
@@ -20775,6 +20786,13 @@ fn build_simple_select_statement(
                             order_by_location = Some(inner.as_span().start() + 1);
                             order_by = build_order_by_clause(inner)?;
                         }
+                        Rule::select_limit_clause => build_select_limit_clause(
+                            inner,
+                            &mut limit,
+                            &mut limit_location,
+                            &mut offset,
+                            &mut offset_location,
+                        )?,
                         Rule::limit_clause => {
                             limit_location = Some(inner.as_span().start() + 1);
                             limit = build_limit_clause(inner)?;
@@ -20812,6 +20830,13 @@ fn build_simple_select_statement(
                 order_by_location = Some(part.as_span().start() + 1);
                 order_by = build_order_by_clause(part)?;
             }
+            Rule::select_limit_clause => build_select_limit_clause(
+                part,
+                &mut limit,
+                &mut limit_location,
+                &mut offset,
+                &mut offset_location,
+            )?,
             Rule::limit_clause => {
                 limit_location = Some(part.as_span().start() + 1);
                 limit = build_limit_clause(part)?;
@@ -20877,6 +20902,7 @@ fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, Par
             Rule::cte_clause
             | Rule::window_clause
             | Rule::order_by_clause
+            | Rule::select_limit_clause
             | Rule::limit_clause
             | Rule::fetch_select_clause
             | Rule::offset_clause
@@ -21012,6 +21038,13 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
                 order_by_location = Some(part.as_span().start() + 1);
                 order_by = build_order_by_clause(part)?;
             }
+            Rule::select_limit_clause => build_select_limit_clause(
+                part,
+                &mut limit,
+                &mut limit_location,
+                &mut offset,
+                &mut offset_location,
+            )?,
             Rule::limit_clause => {
                 limit_location = Some(part.as_span().start() + 1);
                 limit = build_limit_clause(part)?;
@@ -21162,6 +21195,17 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
             }
             Rule::values_row => rows.push(build_values_row(part)?),
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
+            Rule::select_limit_clause => {
+                let mut limit_location = None;
+                let mut offset_location = None;
+                build_select_limit_clause(
+                    part,
+                    &mut limit,
+                    &mut limit_location,
+                    &mut offset,
+                    &mut offset_location,
+                )?;
+            }
             Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::fetch_select_clause => limit = build_fetch_select_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
@@ -21482,9 +21526,9 @@ fn attach_cte_body_select_context(
     with: &[CommonTableExpr],
     order_by: Vec<OrderByItem>,
     order_by_location: Option<usize>,
-    limit: Option<usize>,
+    limit: Option<SqlExpr>,
     limit_location: Option<usize>,
-    offset: Option<usize>,
+    offset: Option<SqlExpr>,
     offset_location: Option<usize>,
     locking_clause: Option<SelectLockingClause>,
     locking_location: Option<usize>,
@@ -21558,8 +21602,8 @@ fn wrapped_values_statement(stmt: &SelectStatement) -> Option<ValuesStatement> {
         with: stmt.with.clone(),
         rows: rows.clone(),
         order_by: stmt.order_by.clone(),
-        limit: stmt.limit,
-        offset: stmt.offset,
+        limit: stmt.limit.clone(),
+        offset: stmt.offset.clone(),
     })
 }
 
@@ -21739,84 +21783,60 @@ fn order_by_using_operator_direction(operator: &str) -> Option<bool> {
     }
 }
 
-fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<Option<usize>, ParseError> {
-    let text = pair.as_str().trim_start();
-    let value = text["limit".len()..].trim();
-    if value.eq_ignore_ascii_case("all") || value.eq_ignore_ascii_case("null") {
-        return Ok(None);
+fn build_select_limit_clause(
+    pair: Pair<'_, Rule>,
+    limit: &mut Option<SqlExpr>,
+    limit_location: &mut Option<usize>,
+    offset: &mut Option<SqlExpr>,
+    offset_location: &mut Option<usize>,
+) -> Result<(), ParseError> {
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::limit_clause => {
+                *limit_location = Some(part.as_span().start() + 1);
+                *limit = build_limit_clause(part)?;
+            }
+            Rule::fetch_select_clause => {
+                *limit_location = Some(part.as_span().start() + 1);
+                *limit = build_fetch_select_clause(part)?;
+            }
+            Rule::offset_clause => {
+                *offset_location = Some(part.as_span().start() + 1);
+                *offset = Some(build_offset_clause(part)?);
+            }
+            _ => {}
+        }
     }
+    Ok(())
+}
+
+fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<Option<SqlExpr>, ParseError> {
     if pair
         .clone()
         .into_inner()
-        .any(|part| matches!(part.as_rule(), Rule::kw_null | Rule::kw_all))
+        .any(|part| part.as_rule() == Rule::kw_all)
     {
         return Ok(None);
     }
-    build_usize_clause(pair, "LIMIT").map(Some)
+    pair.into_inner()
+        .find(|part| part.as_rule() == Rule::expr)
+        .map(build_expr)
+        .transpose()
 }
 
-fn build_fetch_select_clause(pair: Pair<'_, Rule>) -> Result<Option<usize>, ParseError> {
-    let Some(expr) = pair
-        .clone()
-        .into_inner()
-        .find(|part| matches!(part.as_rule(), Rule::integer_const_expr | Rule::integer))
-    else {
-        return Ok(Some(1));
+fn build_fetch_select_clause(pair: Pair<'_, Rule>) -> Result<Option<SqlExpr>, ParseError> {
+    let Some(expr) = pair.into_inner().find(|part| part.as_rule() == Rule::expr) else {
+        return Ok(Some(SqlExpr::IntegerLiteral("1".into())));
     };
-    parse_usize_const_expr(expr.as_str())
-        .map(Some)
-        .map_err(|_| ParseError::UnexpectedToken {
-            expected: "FETCH",
-            actual: expr.as_str().into(),
-        })
+    build_expr(expr).map(Some)
 }
 
-fn build_offset_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
-    build_usize_clause(pair, "OFFSET")
-}
-
-fn build_usize_clause(pair: Pair<'_, Rule>, expected: &'static str) -> Result<usize, ParseError> {
-    let expr = pair
-        .into_inner()
-        .find(|part| matches!(part.as_rule(), Rule::integer_const_expr | Rule::integer))
-        .ok_or(ParseError::UnexpectedEof)?;
-    parse_usize_const_expr(expr.as_str()).map_err(|_| ParseError::UnexpectedToken {
-        expected,
-        actual: expr.as_str().into(),
-    })
-}
-
-fn parse_usize_const_expr(text: &str) -> Result<usize, ()> {
-    let mut spaced = String::with_capacity(text.len() + 8);
-    for ch in text.chars() {
-        if ch == '+' || ch == '-' {
-            spaced.push(' ');
-            spaced.push(ch);
-            spaced.push(' ');
-        } else {
-            spaced.push(ch);
-        }
-    }
-    let mut parts = spaced.split_whitespace();
-    let first = parts.next().ok_or(())?;
-    let mut value = normalize_numeric_literal_text(first)
-        .parse::<i128>()
-        .map_err(|_| ())?;
-    while let Some(op) = parts.next() {
-        let rhs = parts.next().ok_or(())?;
-        let rhs = normalize_numeric_literal_text(rhs)
-            .parse::<i128>()
-            .map_err(|_| ())?;
-        match op {
-            "+" => value = value.checked_add(rhs).ok_or(())?,
-            "-" => value = value.checked_sub(rhs).ok_or(())?,
-            _ => return Err(()),
-        }
-    }
-    if parts.next().is_some() || value < 0 {
-        return Err(());
-    }
-    usize::try_from(value).map_err(|_| ())
+fn build_offset_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    pair.into_inner()
+        .find(|part| part.as_rule() == Rule::expr)
+        .map(build_expr)
+        .transpose()?
+        .ok_or(ParseError::UnexpectedEof)
 }
 
 fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {

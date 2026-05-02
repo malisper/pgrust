@@ -5247,7 +5247,21 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
             });
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
-        Plan::Limit { input, .. } | Plan::LockRows { input, .. } => {
+        Plan::Limit {
+            input,
+            limit,
+            offset,
+            ..
+        } => {
+            if let Some(limit) = limit {
+                validate_executable_expr(limit, "Limit", "limit", allowed_exec_params);
+            }
+            if let Some(offset) = offset {
+                validate_executable_expr(offset, "Limit", "offset", allowed_exec_params);
+            }
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::LockRows { input, .. } => {
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::Projection { input, targets, .. } => {
@@ -8202,9 +8216,11 @@ fn set_limit_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     input: Box<Path>,
-    limit: Option<usize>,
-    offset: usize,
+    limit: Option<Expr>,
+    offset: Option<Expr>,
 ) -> Plan {
+    let limit = limit.map(|expr| lower_expr(ctx, expr, LowerMode::Scalar));
+    let offset = offset.map(|expr| lower_expr(ctx, expr, LowerMode::Scalar));
     Plan::Limit {
         plan_info,
         input: Box::new(set_plan_refs(ctx, *input)),
