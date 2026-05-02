@@ -1039,6 +1039,7 @@ impl Database {
                 client_id,
                 xid,
                 cid,
+                None,
                 Arc::clone(&interrupts),
                 Some(crate::backend::executor::executor_catalog(catalog.clone())),
                 true,

@@ -2664,7 +2664,9 @@ pub type AttrNumber = i32;
 
 pub const SELF_ITEM_POINTER_ATTR_NO: AttrNumber = -1;
 pub const XMIN_ATTR_NO: AttrNumber = -2;
-pub const XMAX_ATTR_NO: AttrNumber = -3;
+pub const CMIN_ATTR_NO: AttrNumber = -3;
+pub const XMAX_ATTR_NO: AttrNumber = -4;
+pub const CMAX_ATTR_NO: AttrNumber = -5;
 pub const TABLE_OID_ATTR_NO: AttrNumber = -6;
 pub const OUTER_VAR: usize = usize::MAX;
 pub const INNER_VAR: usize = usize::MAX - 1;

@@ -74,6 +74,7 @@ impl Database {
             client_id,
             xid,
             cid,
+            None,
             Arc::clone(&interrupts),
             Some(crate::backend::executor::executor_catalog(catalog.clone())),
             true,
@@ -96,6 +97,7 @@ impl Database {
         create_stmt: &CreateTableAsStatement,
         xid: TransactionId,
         cid: CommandId,
+        heap_cid: CommandId,
         configured_search_path: Option<&[String]>,
         gucs: Option<&HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -183,6 +185,7 @@ impl Database {
                 client_id,
                 xid,
                 cid,
+                heap_cid,
                 Arc::clone(&interrupts),
                 &catalog,
                 Statement::Select(select_query.clone()),
@@ -291,6 +294,7 @@ impl Database {
                 client_id,
                 xid,
                 cid,
+                Some(heap_cid),
                 Arc::clone(&interrupts),
                 Some(crate::backend::executor::executor_catalog(catalog.clone())),
                 true,
@@ -309,7 +313,7 @@ impl Database {
                 None,
                 &mut insert_ctx,
                 xid,
-                create_cid,
+                heap_cid,
             )?;
         }
 
@@ -322,6 +326,7 @@ impl Database {
         refresh_stmt: &RefreshMaterializedViewStatement,
         xid: TransactionId,
         cid: CommandId,
+        heap_cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
@@ -361,6 +366,7 @@ impl Database {
                     client_id,
                     xid,
                     cid,
+                    heap_cid,
                     Arc::clone(&interrupts),
                     &catalog,
                     Statement::Select(select),
@@ -394,6 +400,7 @@ impl Database {
                 client_id,
                 xid,
                 refresh_cid,
+                heap_cid,
                 &refresh_relation,
                 &refresh_catalog,
             )?;
@@ -403,6 +410,7 @@ impl Database {
                     client_id,
                     xid,
                     refresh_cid,
+                    heap_cid,
                     Arc::clone(&interrupts),
                     &refresh_relation,
                     &refresh_catalog,
@@ -455,6 +463,7 @@ impl Database {
                 refresh_stmt,
                 xid,
                 cid,
+                cid,
                 configured_search_path,
                 &mut catalog_effects,
             );
@@ -467,6 +476,7 @@ impl Database {
             client_id,
             refresh_stmt,
             xid,
+            cid,
             cid,
             configured_search_path,
             &mut catalog_effects,
@@ -541,10 +551,15 @@ impl Database {
         client_id: ClientId,
         xid: TransactionId,
         cid: CommandId,
+        heap_cid: Option<CommandId>,
         interrupts: Arc<InterruptState>,
         catalog: Option<crate::backend::executor::ExecutorCatalog>,
         allow_side_effects: bool,
     ) -> Result<ExecutorContext, ExecError> {
+        let mut snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+        if let Some(heap_cid) = heap_cid {
+            snapshot.set_heap_current_cid(heap_cid);
+        }
         Ok(ExecutorContext {
             pool: Arc::clone(&self.pool),
             data_dir: None,
@@ -565,7 +580,7 @@ impl Database {
             interrupts,
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
-            snapshot: self.txns.read().snapshot_for_command(xid, cid)?,
+            snapshot,
             write_xid_override: None,
             transaction_state: None,
             client_id,
@@ -894,6 +909,7 @@ fn execute_matview_select_rows(
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
+    heap_cid: CommandId,
     interrupts: Arc<InterruptState>,
     catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
     stmt: Statement,
@@ -903,6 +919,7 @@ fn execute_matview_select_rows(
         client_id,
         xid,
         cid,
+        Some(heap_cid),
         interrupts,
         Some(crate::backend::executor::executor_catalog(catalog.clone())),
         allow_side_effects,
@@ -923,11 +940,13 @@ fn truncate_matview_storage(
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
+    heap_cid: CommandId,
     relation: &crate::backend::parser::BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
     let interrupts = db.interrupt_state(client_id);
-    let mut ctx = db.matview_executor_context(client_id, xid, cid, interrupts, None, true)?;
+    let mut ctx =
+        db.matview_executor_context(client_id, xid, cid, Some(heap_cid), interrupts, None, true)?;
     let indexes = catalog.index_relations_for_heap(relation.relation_oid);
     let _ = ctx.pool.invalidate_relation(relation.rel);
     ctx.pool
@@ -957,6 +976,7 @@ fn insert_matview_rows(
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
+    heap_cid: CommandId,
     interrupts: Arc<InterruptState>,
     relation: &crate::backend::parser::BoundRelation,
     catalog: &dyn CatalogLookup,
@@ -969,7 +989,8 @@ fn insert_matview_rows(
             .into_iter()
             .next()
     });
-    let mut ctx = db.matview_executor_context(client_id, xid, cid, interrupts, None, true)?;
+    let mut ctx =
+        db.matview_executor_context(client_id, xid, cid, Some(heap_cid), interrupts, None, true)?;
     let relation_name = catalog
         .class_row_by_oid(relation.relation_oid)
         .map(|row| row.relname)
@@ -988,6 +1009,6 @@ fn insert_matview_rows(
         None,
         &mut ctx,
         xid,
-        cid,
+        heap_cid,
     )
 }

@@ -8,7 +8,10 @@ use crate::include::nodes::parsenodes::{
     ColumnConstraint, ConstraintAttributes, CreateTableStatement, ForeignKeyAction,
     ForeignKeyMatchType, IndexColumnDef, TableConstraint, TablePersistence,
 };
-use crate::include::nodes::primnodes::{Expr, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO};
+use crate::include::nodes::primnodes::{
+    CMAX_ATTR_NO, CMIN_ATTR_NO, Expr, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, XMAX_ATTR_NO,
+    XMIN_ATTR_NO,
+};
 
 use super::ParseError;
 
@@ -4383,6 +4386,10 @@ fn system_column_name(varattno: i32) -> Option<&'static str> {
     match varattno {
         TABLE_OID_ATTR_NO => Some("tableoid"),
         SELF_ITEM_POINTER_ATTR_NO => Some("ctid"),
+        XMIN_ATTR_NO => Some("xmin"),
+        CMIN_ATTR_NO => Some("cmin"),
+        XMAX_ATTR_NO => Some("xmax"),
+        CMAX_ATTR_NO => Some("cmax"),
         _ => None,
     }
 }

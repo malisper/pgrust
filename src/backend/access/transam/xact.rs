@@ -8,6 +8,7 @@ use crate::backend::access::transam::clog::{
     load_status_file_from_bytes, status_to_bits,
 };
 pub use crate::backend::utils::time::snapmgr::Snapshot;
+use parking_lot::Mutex;
 
 pub type TransactionId = u32;
 pub type CommandId = u32;
@@ -49,6 +50,13 @@ pub struct TransactionManager {
     /// In-memory CLOG page buffer, matching PostgreSQL's SLRU approach.
     /// All reads/writes go through this buffer; flushed to disk on checkpoint.
     clog_buf: Vec<u8>,
+    combo_cids: Mutex<BTreeMap<TransactionId, ComboCidState>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ComboCidState {
+    by_pair: BTreeMap<(CommandId, CommandId), CommandId>,
+    by_combo: BTreeMap<CommandId, (CommandId, CommandId)>,
 }
 
 impl Clone for TransactionManager {
@@ -60,6 +68,7 @@ impl Clone for TransactionManager {
             status_path: self.status_path.clone(),
             status_file: self.status_file.as_ref().and_then(|f| f.try_clone().ok()),
             clog_buf: self.clog_buf.clone(),
+            combo_cids: Mutex::new(self.combo_cids.lock().clone()),
         }
     }
 }
@@ -75,6 +84,7 @@ impl TransactionManager {
             status_path: None,
             status_file: None,
             clog_buf,
+            combo_cids: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -103,6 +113,7 @@ impl TransactionManager {
                 in_progress,
                 status_path: Some(path),
                 status_file: Some(file),
+                combo_cids: Mutex::new(BTreeMap::new()),
                 clog_buf: raw,
             })
         } else {
@@ -123,6 +134,7 @@ impl TransactionManager {
                 status_path: Some(path),
                 status_file: Some(file),
                 clog_buf,
+                combo_cids: Mutex::new(BTreeMap::new()),
             })
         }
     }
@@ -152,6 +164,7 @@ impl TransactionManager {
                 *status = TransactionStatus::Committed;
                 self.in_progress.retain(|&x| x != xid);
                 self.write_status_bits(xid, TransactionStatus::Committed);
+                self.combo_cids.lock().remove(&xid);
                 Ok(())
             }
             Some(_) => Err(MvccError::TransactionNotInProgress(xid)),
@@ -165,6 +178,7 @@ impl TransactionManager {
                 *status = TransactionStatus::Aborted;
                 self.in_progress.retain(|&x| x != xid);
                 self.write_status_bits(xid, TransactionStatus::Aborted);
+                self.combo_cids.lock().remove(&xid);
                 Ok(())
             }
             Some(_) => Err(MvccError::TransactionNotInProgress(xid)),
@@ -184,6 +198,7 @@ impl TransactionManager {
         self.statuses.insert(xid, TransactionStatus::Committed);
         self.in_progress.retain(|&x| x != xid);
         self.write_status_bits(xid, TransactionStatus::Committed);
+        self.combo_cids.lock().remove(&xid);
     }
 
     /// Mark a transaction as aborted during WAL replay cleanup.
@@ -197,6 +212,7 @@ impl TransactionManager {
         self.statuses.insert(xid, TransactionStatus::Aborted);
         self.in_progress.retain(|&x| x != xid);
         self.write_status_bits(xid, TransactionStatus::Aborted);
+        self.combo_cids.lock().remove(&xid);
     }
 
     pub fn replay_prepare(&mut self, xid: TransactionId) {
@@ -216,6 +232,34 @@ impl TransactionManager {
             return Some(TransactionStatus::Committed);
         }
         self.statuses.get(&xid).copied()
+    }
+
+    pub fn combo_command_id(
+        &self,
+        xid: TransactionId,
+        cmin: CommandId,
+        cmax: CommandId,
+    ) -> CommandId {
+        let mut states = self.combo_cids.lock();
+        let state = states.entry(xid).or_default();
+        if let Some(existing) = state.by_pair.get(&(cmin, cmax)) {
+            return *existing;
+        }
+        let combocid = state.by_pair.len() as CommandId;
+        state.by_pair.insert((cmin, cmax), combocid);
+        state.by_combo.insert(combocid, (cmin, cmax));
+        combocid
+    }
+
+    pub fn combo_command_pair(
+        &self,
+        xid: TransactionId,
+        combocid: CommandId,
+    ) -> Option<(CommandId, CommandId)> {
+        self.combo_cids
+            .lock()
+            .get(&xid)
+            .and_then(|state| state.by_combo.get(&combocid).copied())
     }
 
     pub fn snapshot(&self, current_xid: TransactionId) -> Result<Snapshot, MvccError> {
@@ -252,6 +296,7 @@ impl TransactionManager {
         Ok(Snapshot {
             current_xid,
             current_cid,
+            heap_current_cid: None,
             xmin,
             xmax,
             in_progress,

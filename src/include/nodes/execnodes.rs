@@ -72,6 +72,7 @@ pub struct SystemVarBinding {
     pub(crate) table_oid: u32,
     pub(crate) tid: Option<ItemPointerData>,
     pub(crate) xmin: Option<u32>,
+    pub(crate) cmin: Option<u32>,
     pub(crate) xmax: Option<u32>,
 }
 
@@ -1329,6 +1330,24 @@ impl TupleSlot {
                 }
                 let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
                 Some(u32::from_le_bytes(bytes[0..4].try_into().ok()?))
+            }
+            SlotKind::Virtual | SlotKind::Empty => None,
+        }
+    }
+
+    pub fn cmin(&self) -> Option<u32> {
+        match &self.kind {
+            SlotKind::HeapTuple { tuple, .. } => Some(tuple.header.cid_or_xvac),
+            SlotKind::BufferHeapTuple {
+                tuple_ptr,
+                tuple_len,
+                ..
+            } => {
+                if *tuple_len < 12 {
+                    return None;
+                }
+                let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
+                Some(u32::from_le_bytes(bytes[8..12].try_into().ok()?))
             }
             SlotKind::Virtual | SlotKind::Empty => None,
         }

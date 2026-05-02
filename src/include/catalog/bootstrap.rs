@@ -688,6 +688,12 @@ pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 57] {
     CORE_BOOTSTRAP_KINDS
 }
 
+pub fn is_bootstrap_catalog_storage_oid(oid: u32) -> bool {
+    CORE_BOOTSTRAP_KINDS
+        .iter()
+        .any(|kind| kind.relation_oid() == oid || kind.toast_relation_oid() == oid)
+}
+
 pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
     match kind {
         BootstrapCatalogKind::PgNamespace => pg_namespace_desc(),

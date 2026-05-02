@@ -22,6 +22,7 @@ use crate::include::access::htup::{
 use crate::include::access::visibilitymapdefs::{
     VISIBILITYMAP_ALL_FROZEN, VISIBILITYMAP_ALL_VISIBLE,
 };
+use crate::include::catalog::is_bootstrap_catalog_storage_oid;
 use crate::include::storage::buf_internals::BufferId;
 use crate::pgrust::database::TransactionWaiter;
 use crate::{
@@ -267,7 +268,7 @@ pub fn heap_scan_begin_visible(
 ) -> Result<VisibleHeapScan, HeapError> {
     Ok(VisibleHeapScan {
         scan: heap_scan_begin(pool, rel)?,
-        snapshot,
+        snapshot: relation_snapshot(&snapshot, rel),
         pinned_buffer: None,
         pool: std::sync::Arc::clone(pool),
         vis_tuples: [0; MAX_HEAP_TUPLES_PER_PAGE],
@@ -531,6 +532,16 @@ fn heap_scan_prepare_current_page<E: From<HeapError>>(
     Ok(None)
 }
 
+fn relation_snapshot(snapshot: &Snapshot, rel: RelFileLocator) -> Snapshot {
+    let mut snapshot = snapshot.clone();
+    if !is_bootstrap_catalog_storage_oid(rel.rel_number)
+        && let Some(cid) = snapshot.heap_current_cid()
+    {
+        snapshot.current_cid = cid;
+    }
+    snapshot
+}
+
 /// Return the next visible tuple on the current page. The caller must hold
 /// the shared content lock on the page (via `pool.lock_buffer_shared`).
 /// Returns None when all visible tuples on this page have been consumed.
@@ -723,6 +734,7 @@ pub fn heap_fetch_visible(
     txns: &TransactionManager,
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
+    let snapshot = relation_snapshot(snapshot, rel);
     heap_fetch_visible_impl(pool, client_id, rel, tid, |tuple| {
         snapshot.tuple_visible(txns, tuple)
     })
@@ -737,6 +749,7 @@ pub fn heap_fetch_visible_with_txns(
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
     let txns_guard = txns.read();
+    let snapshot = relation_snapshot(snapshot, rel);
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let buffer_id = pin.buffer_id();
     let guard = pool.lock_buffer_shared(buffer_id)?;
@@ -804,11 +817,25 @@ pub fn heap_delete(
         &vmbuf,
     )?;
     tuple.header.xmax = xid;
+    tuple.header.cid_or_xvac = delete_command_id(txns, &snapshot, &tuple, snapshot.current_cid);
     // Clear HEAP_XMAX_INVALID — xmax is now a real transaction.
     tuple.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
     heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
     pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
     Ok(())
+}
+
+fn delete_command_id(
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    tuple: &HeapTuple,
+    cmax: CommandId,
+) -> CommandId {
+    if snapshot.transaction_is_own(tuple.header.xmin) {
+        txns.combo_command_id(tuple.header.xmin, tuple.header.cid_or_xvac, cmax)
+    } else {
+        cmax
+    }
 }
 
 pub fn heap_delete_with_waiter(
@@ -855,6 +882,7 @@ pub fn heap_delete_with_waiter_with_wal_policy(
 ) -> Result<(), HeapError> {
     loop {
         let txns_guard = txns.read();
+        let snapshot = relation_snapshot(snapshot, rel);
         let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
         let buffer_id = pin.buffer_id();
         let mut vmbuf = None;
@@ -867,7 +895,6 @@ pub fn heap_delete_with_waiter_with_wal_policy(
         if !snapshot.tuple_visible(&txns_guard, &tuple) {
             return Err(HeapError::TupleNotVisible(tid));
         }
-        drop(txns_guard);
 
         let xmax = tuple.header.xmax;
         if xmax == 0 {
@@ -880,12 +907,16 @@ pub fn heap_delete_with_waiter_with_wal_policy(
                 &vmbuf,
                 wal_policy,
             )?;
+            let cmax = delete_command_id(&txns_guard, &snapshot, &tuple, snapshot.current_cid);
+            drop(txns_guard);
             tuple.header.xmax = xid;
+            tuple.header.cid_or_xvac = cmax;
             tuple.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
             heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
             write_heap_page_locked(pool, buffer_id, xid, &new_page, &mut guard, wal_policy)?;
             return Ok(());
         }
+        drop(txns_guard);
         if xmax == xid {
             return Err(HeapError::TupleAlreadyModified(tid));
         }
@@ -934,7 +965,12 @@ pub fn heap_delete_with_waiter_with_wal_policy(
                     &vmbuf2,
                     wal_policy,
                 )?;
+                let cmax = {
+                    let txns_guard = txns.read();
+                    delete_command_id(&txns_guard, &snapshot, &recheck, snapshot.current_cid)
+                };
                 recheck.header.xmax = xid;
+                recheck.header.cid_or_xvac = cmax;
                 recheck.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
                 heap_page_replace_tuple(&mut new_page, tid.offset_number, &recheck)?;
                 write_heap_page_locked(pool, buffer_id2, xid, &new_page, &mut guard, wal_policy)?;
@@ -1010,6 +1046,7 @@ pub fn heap_update_with_cid(
         &vmbuf,
     )?;
     old_version.header.xmax = xid;
+    old_version.header.cid_or_xvac = delete_command_id(txns, &snapshot, &old_version, cid);
     old_version.header.ctid = new_tid;
     // Clear HEAP_XMAX_INVALID — xmax is now a real transaction, not invalid.
     old_version.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
@@ -1033,6 +1070,8 @@ fn try_claim_tuple(
     rel: RelFileLocator,
     txns: &RwLock<TransactionManager>,
     xid: TransactionId,
+    cid: CommandId,
+    snapshot: &Snapshot,
     target_tid: ItemPointerData,
 ) -> Result<(ClaimResult, ItemPointerData), HeapError> {
     let pin = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
@@ -1054,7 +1093,12 @@ fn try_claim_tuple(
             &mut new_page,
             &vmbuf,
         )?;
+        let cmax = {
+            let txns_guard = txns.read();
+            delete_command_id(&txns_guard, snapshot, &modified, cid)
+        };
         modified.header.xmax = xid;
+        modified.header.cid_or_xvac = cmax;
         modified.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
         heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
         pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
@@ -1094,7 +1138,12 @@ fn try_claim_tuple(
                 &mut new_page,
                 &vmbuf2,
             )?;
+            let cmax = {
+                let txns_guard = txns.read();
+                delete_command_id(&txns_guard, snapshot, &modified, cid)
+            };
             modified.header.xmax = xid;
+            modified.header.cid_or_xvac = cmax;
             modified.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
             heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
             pool.write_page_image_locked(buffer_id2, xid, &new_page, &mut guard)?;
@@ -1144,8 +1193,39 @@ pub fn heap_update_with_waiter(
         &crate::backend::utils::misc::interrupts::InterruptState,
     )>,
 ) -> Result<ItemPointerData, HeapError> {
+    let snapshot = txns.read().snapshot_for_command(xid, cid)?;
+    heap_update_with_waiter_with_snapshot(
+        pool,
+        client_id,
+        rel,
+        txns,
+        xid,
+        cid,
+        tid,
+        replacement,
+        &snapshot,
+        waiter,
+    )
+}
+
+pub fn heap_update_with_waiter_with_snapshot(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    txns: &RwLock<TransactionManager>,
+    xid: TransactionId,
+    cid: CommandId,
+    tid: ItemPointerData,
+    replacement: &HeapTuple,
+    snapshot: &Snapshot,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<ItemPointerData, HeapError> {
     loop {
-        let (result, _) = try_claim_tuple(pool, client_id, rel, txns, xid, tid)?;
+        let (result, _) = try_claim_tuple(pool, client_id, rel, txns, xid, cid, snapshot, tid)?;
 
         match result {
             ClaimResult::Claimed => {

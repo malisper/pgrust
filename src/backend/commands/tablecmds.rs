@@ -9,7 +9,7 @@ use crate::backend::access::heap::heapam::{
     HeapError, heap_delete_with_waiter, heap_delete_with_waiter_with_wal_policy, heap_fetch,
     heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid_and_fillfactor,
     heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
-    heap_update_with_waiter,
+    heap_update_with_waiter_with_snapshot,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
@@ -1012,12 +1012,14 @@ fn execute_explain_analyze_create_table_as(
         })?;
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
+    let heap_cid = ctx.snapshot.heap_current_cid().unwrap_or(cid);
     let effect_start = ctx.catalog_effects.len();
     db.execute_create_table_as_stmt_in_transaction_with_search_path(
         ctx.client_id,
         stmt,
         xid,
         cid,
+        heap_cid,
         None,
         planner_config,
         Some(&ctx.gucs),
@@ -6633,7 +6635,7 @@ pub(crate) fn write_updated_row(
     );
     let (replacement, toasted) =
         toast_tuple_for_write(desc, &current_values, toast, toast_index, ctx, xid, cid)?;
-    match heap_update_with_waiter(
+    match heap_update_with_waiter_with_snapshot(
         &*ctx.pool,
         ctx.client_id,
         rel,
@@ -6642,6 +6644,7 @@ pub(crate) fn write_updated_row(
         cid,
         current_tid,
         &replacement,
+        &ctx.snapshot,
         waiter,
     ) {
         Ok(new_tid) => {
@@ -15357,12 +15360,16 @@ pub(crate) fn project_returning_row_with_old_new_metadata(
             .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
     );
     let xid = ctx.transaction_xid();
+    let cmin = ctx
+        .snapshot
+        .heap_current_cid()
+        .unwrap_or(ctx.next_command_id);
     ctx.expr_bindings.outer_system_bindings =
-        returning_tuple_system_binding(OUTER_VAR, old_tuple, xid, false)
+        returning_tuple_system_binding(OUTER_VAR, old_tuple, xid, cmin, false)
             .into_iter()
             .collect();
     ctx.expr_bindings.inner_system_bindings =
-        returning_tuple_system_binding(INNER_VAR, new_tuple, xid, true)
+        returning_tuple_system_binding(INNER_VAR, new_tuple, xid, cmin, true)
             .into_iter()
             .collect();
     let saved_system_bindings = ctx.system_bindings.clone();
@@ -15372,6 +15379,7 @@ pub(crate) fn project_returning_row_with_old_new_metadata(
             table_oid,
             tid,
             xmin: xid,
+            cmin: Some(cmin),
             xmax: xid.map(|_| 0),
         }];
     }
@@ -15393,6 +15401,7 @@ fn returning_tuple_system_binding(
     varno: usize,
     tuple: Option<ReturningTuple<'_>>,
     xid: Option<u32>,
+    cmin: u32,
     is_new: bool,
 ) -> Option<SystemVarBinding> {
     let tuple = tuple?;
@@ -15401,6 +15410,7 @@ fn returning_tuple_system_binding(
         table_oid: tuple.table_oid?,
         tid: tuple.tid,
         xmin: is_new.then_some(xid).flatten(),
+        cmin: is_new.then_some(cmin),
         xmax: if is_new { xid.map(|_| 0) } else { xid },
     })
 }
@@ -17597,7 +17607,7 @@ pub(crate) fn apply_base_update_row(
             xid,
             cid,
         )?;
-        match heap_update_with_waiter(
+        match heap_update_with_waiter_with_snapshot(
             &*ctx.pool,
             ctx.client_id,
             target.rel,
@@ -17606,6 +17616,7 @@ pub(crate) fn apply_base_update_row(
             cid,
             current_tid,
             &current_replacement,
+            &ctx.snapshot,
             waiter,
         ) {
             Ok(new_tid) => {

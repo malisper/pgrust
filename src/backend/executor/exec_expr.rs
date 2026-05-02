@@ -199,10 +199,10 @@ use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, NumericValue, RecordDescriptor, RecordValue,
 };
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
-    OpExprKind, RULE_NEW_VAR, RULE_OLD_VAR, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr,
-    SubLinkType, TABLE_OID_ATTR_NO, XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index,
-    is_executor_special_varno, is_system_attr,
+    BoolExpr, BoolExprType, CMAX_ATTR_NO, CMIN_ATTR_NO, FuncExpr, HashFunctionKind, INDEX_VAR,
+    INNER_VAR, OUTER_VAR, OpExpr, OpExprKind, RULE_NEW_VAR, RULE_OLD_VAR,
+    SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO, XMAX_ATTR_NO,
+    XMIN_ATTR_NO, attrno_index, is_executor_special_varno, is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::SequenceData;
@@ -2925,6 +2925,21 @@ fn lookup_xmin_binding(
         .map(|xmin| Value::Xid8(u64::from(xmin)))
 }
 
+fn command_id_value(cid: u32) -> Value {
+    Value::Int32(cid as i32)
+}
+
+fn lookup_cmin_binding(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Option<Value> {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .and_then(|binding| binding.cmin)
+        .map(command_id_value)
+}
+
 fn lookup_xmax_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
@@ -2934,6 +2949,17 @@ fn lookup_xmax_binding(
         .find(|binding| binding.varno == varno)
         .and_then(|binding| binding.xmax)
         .map(|xmax| Value::Xid8(u64::from(xmax)))
+}
+
+fn lookup_cmax_binding(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Option<Value> {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .and_then(|binding| binding.cmin)
+        .map(command_id_value)
 }
 
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
@@ -10381,7 +10407,9 @@ fn eval_bound_system_var(
         TABLE_OID_ATTR_NO => lookup_system_binding(bindings, var.varno),
         SELF_ITEM_POINTER_ATTR_NO => lookup_ctid_binding(bindings, var.varno),
         XMIN_ATTR_NO => lookup_xmin_binding(bindings, var.varno),
+        CMIN_ATTR_NO => lookup_cmin_binding(bindings, var.varno),
         XMAX_ATTR_NO => lookup_xmax_binding(bindings, var.varno),
+        CMAX_ATTR_NO => lookup_cmax_binding(bindings, var.varno),
         _ => None,
     }
 }
@@ -10570,11 +10598,23 @@ pub fn eval_expr(
                     .map(|xmin| Value::Xid8(u64::from(xmin)))
                     .or_else(|| lookup_xmin_binding(&ctx.system_bindings, var.varno))
                     .unwrap_or(Value::Null))
+            } else if var.varattno == CMIN_ATTR_NO {
+                Ok(slot
+                    .cmin()
+                    .map(command_id_value)
+                    .or_else(|| lookup_cmin_binding(&ctx.system_bindings, var.varno))
+                    .unwrap_or(Value::Null))
             } else if var.varattno == XMAX_ATTR_NO {
                 Ok(slot
                     .xmax()
                     .map(|xmax| Value::Xid8(u64::from(xmax)))
                     .or_else(|| lookup_xmax_binding(&ctx.system_bindings, var.varno))
+                    .unwrap_or(Value::Null))
+            } else if var.varattno == CMAX_ATTR_NO {
+                Ok(slot
+                    .cmin()
+                    .map(command_id_value)
+                    .or_else(|| lookup_cmax_binding(&ctx.system_bindings, var.varno))
                     .unwrap_or(Value::Null))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
