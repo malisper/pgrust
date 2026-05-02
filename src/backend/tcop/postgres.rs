@@ -15135,7 +15135,6 @@ fn sql_parameter_refs(sql: &str, standard_conforming_strings: bool) -> Vec<usize
             if delimiter[1..delimiter.len() - 1]
                 .chars()
                 .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-                && delimiter.len() > 2
                 && !delimiter.as_bytes()[1].is_ascii_digit()
             {
                 dollar_quote = Some(delimiter.to_string());

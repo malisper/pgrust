@@ -161,6 +161,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_set_constraints_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_set_role_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_publication_statement(&sql)? {
         return Ok(stmt);
     }
@@ -4198,6 +4201,52 @@ fn try_parse_set_constraints_statement(sql: &str) -> Result<Option<Statement>, P
     Ok(Some(Statement::SetConstraints(SetConstraintsStatement {
         constraints,
         deferred,
+    })))
+}
+
+fn try_parse_set_role_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let mut rest = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(rest, "set") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "set").trim_start();
+    let mut is_local = false;
+    if keyword_at_start(rest, "local") {
+        is_local = true;
+        rest = consume_keyword(rest, "local").trim_start();
+    } else if keyword_at_start(rest, "session") {
+        rest = consume_keyword(rest, "session").trim_start();
+    }
+    if !keyword_at_start(rest, "role") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "role").trim_start();
+    if keyword_at_start(rest, "to") {
+        rest = consume_keyword(rest, "to").trim_start();
+    }
+
+    let role_name = if keyword_at_start(rest, "default") {
+        rest = consume_keyword(rest, "default");
+        None
+    } else if keyword_at_start(rest, "none") {
+        rest = consume_keyword(rest, "none");
+        None
+    } else {
+        let (role_name, tail) = parse_sql_identifier(rest)?;
+        rest = tail;
+        Some(role_name)
+    };
+
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.trim().into(),
+        });
+    }
+
+    Ok(Some(Statement::SetRole(SetRoleStatement {
+        role_name,
+        is_local,
     })))
 }
 
