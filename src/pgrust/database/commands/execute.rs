@@ -1578,7 +1578,7 @@ impl Database {
         use crate::backend::commands::tablecmds::{
             check_truncate_relation_privileges, fire_after_truncate_triggers,
             fire_before_truncate_triggers, owned_sequence_oids_for_truncate,
-            resolve_truncate_relations,
+            reinitialize_index_relation, resolve_truncate_relations,
         };
 
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
@@ -1587,6 +1587,7 @@ impl Database {
         let triggers = fire_before_truncate_triggers(&targets, &catalog, ctx)?;
 
         let mut rewrite_oids = Vec::new();
+        let mut rewritten_index_oids = Vec::new();
         let mut truncated_relation_oids = Vec::new();
         for target in targets.iter().filter(|target| target.relkind == 'r') {
             if !truncated_relation_oids.contains(&target.relation_oid) {
@@ -1600,6 +1601,9 @@ impl Database {
                 if !rewrite_oids.contains(&index.relation_oid) {
                     rewrite_oids.push(index.relation_oid);
                 }
+                if !rewritten_index_oids.contains(&index.relation_oid) {
+                    rewritten_index_oids.push(index.relation_oid);
+                }
             }
             if let Some(toast) = target.toast {
                 if !rewrite_oids.contains(&toast.relation_oid) {
@@ -1608,6 +1612,9 @@ impl Database {
                 for index in catalog.index_relations_for_heap(toast.relation_oid) {
                     if !rewrite_oids.contains(&index.relation_oid) {
                         rewrite_oids.push(index.relation_oid);
+                    }
+                    if !rewritten_index_oids.contains(&index.relation_oid) {
+                        rewritten_index_oids.push(index.relation_oid);
                     }
                 }
             }
@@ -1639,6 +1646,31 @@ impl Database {
             ctx.next_command_id = ctx.next_command_id.max(cid.saturating_add(1));
             ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
         }
+        let refreshed_catalog = self.lazy_catalog_lookup(
+            client_id,
+            Some((xid, cid.saturating_add(1))),
+            configured_search_path,
+        );
+        for target in targets.iter().filter(|target| target.relkind == 'r') {
+            for index in refreshed_catalog.index_relations_for_heap(target.relation_oid) {
+                if rewritten_index_oids.contains(&index.relation_oid)
+                    && index.index_meta.indisvalid
+                    && index.index_meta.indisready
+                {
+                    reinitialize_index_relation(&index, ctx, xid)?;
+                }
+            }
+            if let Some(toast) = target.toast {
+                for index in refreshed_catalog.index_relations_for_heap(toast.relation_oid) {
+                    if rewritten_index_oids.contains(&index.relation_oid)
+                        && index.index_meta.indisvalid
+                        && index.index_meta.indisready
+                    {
+                        reinitialize_index_relation(&index, ctx, xid)?;
+                    }
+                }
+            }
+        }
         if stmt.restart_identity {
             for sequence_oid in owned_sequence_oids_for_truncate(&targets, &catalog) {
                 let Some(mut data) = self.sequences.sequence_data(sequence_oid) else {
@@ -1653,11 +1685,6 @@ impl Database {
                 sequence_effects.push(self.sequences.apply_upsert(sequence_oid, data, persistent));
             }
         }
-        let refreshed_catalog = self.lazy_catalog_lookup(
-            client_id,
-            Some((xid, cid.saturating_add(1))),
-            configured_search_path,
-        );
         ctx.catalog = Some(crate::backend::executor::executor_catalog(
             refreshed_catalog.clone(),
         ));

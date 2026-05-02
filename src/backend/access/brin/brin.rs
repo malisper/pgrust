@@ -40,7 +40,10 @@ use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::primnodes::RelationDesc;
 use crate::{BufferPool, ClientId, PinnedBuffer};
 
-use super::minmax::{BrinMinmaxStrategy, minmax_add_value, minmax_consistent, minmax_union};
+use super::minmax::{
+    BrinMinmaxStrategy, minmax_add_value, minmax_consistent, minmax_multi_add_value,
+    minmax_multi_consistent, minmax_multi_union, minmax_union,
+};
 use super::pageops::{
     brin_can_do_samepage_update, brin_page_get_freespace, brin_page_init,
     brin_regular_page_add_item, page_index_tuple_delete_no_compact, page_index_tuple_overwrite,
@@ -51,7 +54,8 @@ use super::revmap::{
     brin_revmap_get_tuple_bytes, brin_revmap_initialize, brin_revmap_set_location,
 };
 use super::tuple::{
-    brin_build_desc, brin_deform_tuple, brin_form_placeholder_tuple, brin_form_tuple,
+    brin_build_desc_with_meta, brin_deform_tuple, brin_form_placeholder_tuple, brin_form_tuple,
+    brin_opfamily_is_minmax_multi,
 };
 
 fn pin_brin_block<'a>(
@@ -213,6 +217,14 @@ fn add_values_to_summary(
             continue;
         }
 
+        if brin_opfamily_is_minmax_multi(index_meta.opfamily_oids.get(column_index).copied()) {
+            modified |= minmax_multi_add_value(column, value, false)?;
+            if had_nulls && !(column.has_nulls || column.all_nulls) {
+                column.has_nulls = true;
+            }
+            continue;
+        }
+
         let Some(add_value_proc) =
             optional_amproc(index_meta, index_desc, column_index, BRIN_PROCNUM_ADDVALUE)
         else {
@@ -250,11 +262,18 @@ fn union_memtuples(
         else {
             continue;
         };
-        minmax_union(
-            union_proc,
-            &mut left.columns[column_index],
-            &right.columns[column_index],
-        )?;
+        if brin_opfamily_is_minmax_multi(index_meta.opfamily_oids.get(column_index).copied()) {
+            minmax_multi_union(
+                &mut left.columns[column_index],
+                &right.columns[column_index],
+            )?;
+        } else {
+            minmax_union(
+                union_proc,
+                &mut left.columns[column_index],
+                &right.columns[column_index],
+            )?;
+        }
     }
     left.empty_range = false;
     Ok(())
@@ -440,7 +459,7 @@ fn summarize_unsummarized_ranges(
 ) -> Result<(Vec<[u8; BLCKSZ]>, u64), CatalogError> {
     let mut index_pages = read_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation)?;
     let mut revmap = brin_revmap_initialize(&index_pages)?;
-    let desc = brin_build_desc(&ctx.index_desc);
+    let desc = brin_build_desc_with_meta(&ctx.index_desc, Some(&ctx.index_meta));
     let heap_blocks = relation_nblocks(&ctx.pool, ctx.heap_relation)?;
     let mut target_ranges = BTreeSet::new();
     for range_start in (0..heap_blocks).step_by(pages_per_range as usize) {
@@ -540,7 +559,7 @@ pub(crate) fn brin_summarize_range(
         return Ok(0);
     }
 
-    let desc = brin_build_desc(&ctx.index_desc);
+    let desc = brin_build_desc_with_meta(&ctx.index_desc, Some(&ctx.index_meta));
     let placeholder = brin_form_placeholder_tuple(&desc, range_start)?;
     upsert_summary_tuple(
         &mut index_pages,
@@ -628,6 +647,12 @@ fn range_matches_scan(
             continue;
         }
         let strategy = BrinMinmaxStrategy::try_from(key.strategy as i16)?;
+        if brin_opfamily_is_minmax_multi(opfamily_oid) {
+            if !minmax_multi_consistent(column, strategy, &key.argument)? {
+                return Ok(false);
+            }
+            continue;
+        }
         let Some(consistent_proc) = optional_amproc(
             &scan.index_meta,
             &scan.index_desc,
@@ -705,7 +730,7 @@ pub(crate) fn brinbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cat
     let pages_per_range = read_brin_metapage(&ctx.pool, ctx.client_id, ctx.index_relation)
         .map(|meta| meta.pages_per_range)
         .or_else(|_| brin_pages_per_range_from_meta(&ctx.index_meta))?;
-    let desc = brin_build_desc(&ctx.index_desc);
+    let desc = brin_build_desc_with_meta(&ctx.index_desc, Some(&ctx.index_meta));
     let mut projector = BrinBuildProjector::new_from_build(ctx)?;
     let mut summaries = (0..heap_blocks)
         .step_by(pages_per_range as usize)
@@ -752,31 +777,22 @@ pub(crate) fn brinbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cat
 
 pub(crate) fn brinbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
     let pages_per_range = brin_pages_per_range_from_meta(&ctx.index_meta)?;
-    ctx.pool
-        .ensure_relation_fork(ctx.index_relation, ForkNumber::Main)
-        .map_err(|err| CatalogError::Io(format!("brin ensure relation failed: {err:?}")))?;
+    let mut metapage = [0u8; BLCKSZ];
+    brin_metapage_init(
+        &mut metapage,
+        pages_per_range,
+        crate::include::access::brin_page::BRIN_CURRENT_VERSION,
+    )
+    .map_err(|err| CatalogError::Io(format!("brin metapage init failed: {err:?}")))?;
     ctx.pool
         .with_storage_mut(|storage| {
             storage
                 .smgr
                 .truncate(ctx.index_relation, ForkNumber::Main, 0)?;
-            let mut metapage = [0u8; BLCKSZ];
-            brin_metapage_init(
-                &mut metapage,
-                pages_per_range,
-                crate::include::access::brin_page::BRIN_CURRENT_VERSION,
-            )
-            .map_err(|err| {
-                crate::backend::storage::smgr::SmgrError::Io(std::io::Error::other(format!(
-                    "{err:?}"
-                )))
-            })?;
-            storage
-                .smgr
-                .extend(ctx.index_relation, ForkNumber::Main, 0, &metapage, true)?;
             Ok::<(), crate::backend::storage::smgr::SmgrError>(())
         })
-        .map_err(|err| CatalogError::Io(format!("brin buildempty failed: {err:?}")))
+        .map_err(|err| CatalogError::Io(format!("brin buildempty truncate failed: {err:?}")))?;
+    write_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation, &[metapage])
 }
 
 pub(crate) fn brininsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
@@ -786,7 +802,7 @@ pub(crate) fn brininsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError>
             .or_else(|_| brin_pages_per_range_from_meta(&ctx.index_meta))?,
         ctx.heap_tid.block_number,
     );
-    let desc = brin_build_desc(&ctx.index_desc);
+    let desc = brin_build_desc_with_meta(&ctx.index_desc, Some(&ctx.index_meta));
     let mut index_pages = read_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation)?;
     let mut revmap = brin_revmap_initialize(&index_pages)?;
     let Some((_location, bytes)) = brin_revmap_get_tuple_bytes(&index_pages, &revmap, range_start)?
@@ -897,7 +913,7 @@ pub(crate) fn bringetbitmap(
     let heap_blocks = relation_nblocks(&scan.pool, heap_relation)?;
     let index_pages = read_index_pages(&scan.pool, scan.client_id, scan.index_relation)?;
     let revmap = brin_revmap_initialize(&index_pages)?;
-    let desc = brin_build_desc(&scan.index_desc);
+    let desc = brin_build_desc_with_meta(&scan.index_desc, Some(&scan.index_meta));
     let pages_per_range = {
         let IndexScanOpaque::Brin(state) = &mut scan.opaque else {
             return Err(CatalogError::Corrupt("BRIN scan state missing opaque"));
@@ -961,6 +977,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::backend::access::brin::tuple::brin_build_desc;
     use crate::backend::access::heap::heapam::heap_insert;
     use crate::backend::access::transam::xact::TransactionManager;
     use crate::backend::catalog::catalog::column_desc;

@@ -55,7 +55,7 @@ fn ensure_summary_shape(column: &BrinValues) -> Result<(), CatalogError> {
     }
 }
 
-fn compare_minmax_values(left: &Value, right: &Value) -> Result<Ordering, CatalogError> {
+pub(crate) fn compare_minmax_values(left: &Value, right: &Value) -> Result<Ordering, CatalogError> {
     match (left, right) {
         (Value::Int16(a), Value::Int16(b)) => Ok(a.cmp(b)),
         (Value::InternalChar(a), Value::InternalChar(b)) => Ok(a.cmp(b)),
@@ -65,6 +65,231 @@ fn compare_minmax_values(left: &Value, right: &Value) -> Result<Ordering, Catalo
         _ => compare_order_values(left, right, None, Some(false), false)
             .map_err(|err| CatalogError::Io(format!("BRIN minmax comparison failed: {err:?}"))),
     }
+}
+
+fn interval_contains_value(
+    lower: &Value,
+    upper: &Value,
+    value: &Value,
+) -> Result<bool, CatalogError> {
+    Ok(compare_minmax_values(lower, value)? != Ordering::Greater
+        && compare_minmax_values(upper, value)? != Ordering::Less)
+}
+
+fn normalize_interval(lower: Value, upper: Value) -> Result<(Value, Value), CatalogError> {
+    if compare_minmax_values(&lower, &upper)? == Ordering::Greater {
+        Ok((upper, lower))
+    } else {
+        Ok((lower, upper))
+    }
+}
+
+fn minmax_multi_intervals(column: &BrinValues) -> Result<Vec<(Value, Value)>, CatalogError> {
+    if column.values.len() < 2 {
+        return Err(CatalogError::Corrupt(
+            "BRIN minmax-multi summary columns must store at least two values",
+        ));
+    }
+    let mut intervals = Vec::new();
+    for pair in column.values.chunks(2) {
+        let [lower, upper] = pair else {
+            continue;
+        };
+        if matches!(lower, Value::Null) || matches!(upper, Value::Null) {
+            continue;
+        }
+        let interval = normalize_interval(lower.clone(), upper.clone())?;
+        if !intervals
+            .iter()
+            .any(|existing: &(Value, Value)| existing.0 == interval.0 && existing.1 == interval.1)
+        {
+            intervals.push(interval);
+        }
+    }
+    intervals.sort_by(|left, right| {
+        compare_minmax_values(&left.0, &right.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| compare_minmax_values(&left.1, &right.1).unwrap_or(Ordering::Equal))
+    });
+    Ok(intervals)
+}
+
+fn merge_interval_at(
+    intervals: &mut Vec<(Value, Value)>,
+    index: usize,
+) -> Result<(), CatalogError> {
+    let right = intervals.remove(index + 1);
+    let left = &mut intervals[index];
+    if compare_minmax_values(&right.1, &left.1)? == Ordering::Greater {
+        left.1 = right.1;
+    }
+    Ok(())
+}
+
+fn minmax_multi_distance_key(value: &Value) -> Option<i128> {
+    match value {
+        Value::Int16(value) => Some(i128::from(*value)),
+        Value::Int32(value) => Some(i128::from(*value)),
+        Value::EnumOid(value) => Some(i128::from(*value)),
+        Value::Int64(value) | Value::Money(value) => Some(i128::from(*value)),
+        Value::Date(value) => Some(i128::from(value.0)),
+        Value::Time(value) => Some(i128::from(value.0)),
+        Value::Timestamp(value) => Some(i128::from(value.0)),
+        Value::TimestampTz(value) => Some(i128::from(value.0)),
+        Value::Interval(value) => Some(value.cmp_key()),
+        Value::PgLsn(value) => Some(i128::from(*value)),
+        Value::Tid(value) => Some(
+            i128::from(value.block_number) * i128::from(u16::MAX) + i128::from(value.offset_number),
+        ),
+        Value::Uuid(bytes) => Some(u128::from_be_bytes(*bytes).min(i128::MAX as u128) as i128),
+        _ => None,
+    }
+}
+
+fn minmax_multi_gap(left: &(Value, Value), right: &(Value, Value)) -> Option<i128> {
+    let upper = minmax_multi_distance_key(&left.1)?;
+    let lower = minmax_multi_distance_key(&right.0)?;
+    Some(lower.saturating_sub(upper).max(0))
+}
+
+fn closest_interval_pair(intervals: &[(Value, Value)]) -> usize {
+    intervals
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| minmax_multi_gap(&pair[0], &pair[1]).map(|gap| (index, gap)))
+        .min_by_key(|(_, gap)| *gap)
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn compact_intervals(
+    intervals: &mut Vec<(Value, Value)>,
+    capacity: usize,
+) -> Result<(), CatalogError> {
+    intervals.sort_by(|left, right| {
+        compare_minmax_values(&left.0, &right.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| compare_minmax_values(&left.1, &right.1).unwrap_or(Ordering::Equal))
+    });
+    let mut index = 0;
+    while index + 1 < intervals.len() {
+        if compare_minmax_values(&intervals[index + 1].0, &intervals[index].1)? != Ordering::Greater
+        {
+            merge_interval_at(intervals, index)?;
+        } else {
+            index += 1;
+        }
+    }
+    while intervals.len() > capacity {
+        let index = closest_interval_pair(intervals);
+        merge_interval_at(intervals, index)?;
+    }
+    Ok(())
+}
+
+fn store_minmax_multi_intervals(column: &mut BrinValues, intervals: &[(Value, Value)]) {
+    if intervals.is_empty() {
+        column.all_nulls = true;
+        column.values.fill(Value::Null);
+        return;
+    }
+    let mut stored = Vec::with_capacity(column.values.len());
+    for (lower, upper) in intervals {
+        if stored.len() + 1 >= column.values.len() {
+            break;
+        }
+        stored.push(lower.clone());
+        stored.push(upper.clone());
+    }
+    while stored.len() < column.values.len() {
+        let (lower, upper) = intervals.last().expect("intervals is not empty");
+        stored.push(lower.clone());
+        if stored.len() < column.values.len() {
+            stored.push(upper.clone());
+        }
+    }
+    column.values = stored;
+    column.all_nulls = false;
+}
+
+pub(crate) fn minmax_multi_add_value(
+    column: &mut BrinValues,
+    new_value: &Value,
+    is_null: bool,
+) -> Result<bool, CatalogError> {
+    if is_null || matches!(new_value, Value::Null) {
+        return Err(CatalogError::Corrupt(
+            "BRIN minmax-multi add_value received NULL input",
+        ));
+    }
+    let capacity = (column.values.len() / 2).max(1);
+    if column.all_nulls {
+        store_minmax_multi_intervals(column, &[(new_value.clone(), new_value.clone())]);
+        return Ok(true);
+    }
+
+    let mut intervals = minmax_multi_intervals(column)?;
+    for (lower, upper) in &intervals {
+        if interval_contains_value(lower, upper, new_value)? {
+            return Ok(false);
+        }
+    }
+    intervals.push((new_value.clone(), new_value.clone()));
+    compact_intervals(&mut intervals, capacity)?;
+    store_minmax_multi_intervals(column, &intervals);
+    Ok(true)
+}
+
+pub(crate) fn minmax_multi_consistent(
+    column: &BrinValues,
+    strategy: BrinMinmaxStrategy,
+    scan_value: &Value,
+) -> Result<bool, CatalogError> {
+    if column.all_nulls {
+        return Ok(false);
+    }
+    for (lower, upper) in minmax_multi_intervals(column)? {
+        let matches = match strategy {
+            BrinMinmaxStrategy::Less => {
+                compare_minmax_values(&lower, scan_value)? == Ordering::Less
+            }
+            BrinMinmaxStrategy::LessEqual => {
+                compare_minmax_values(&lower, scan_value)? != Ordering::Greater
+            }
+            BrinMinmaxStrategy::Equal => interval_contains_value(&lower, &upper, scan_value)?,
+            BrinMinmaxStrategy::GreaterEqual => {
+                compare_minmax_values(&upper, scan_value)? != Ordering::Less
+            }
+            BrinMinmaxStrategy::Greater => {
+                compare_minmax_values(&upper, scan_value)? == Ordering::Greater
+            }
+        };
+        if matches {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn minmax_multi_union(
+    left: &mut BrinValues,
+    right: &BrinValues,
+) -> Result<(), CatalogError> {
+    left.has_nulls |= right.has_nulls;
+    if right.all_nulls {
+        return Ok(());
+    }
+    if left.all_nulls {
+        left.values = right.values.clone();
+        left.all_nulls = false;
+        return Ok(());
+    }
+    let capacity = (left.values.len() / 2).max(1);
+    let mut intervals = minmax_multi_intervals(left)?;
+    intervals.extend(minmax_multi_intervals(right)?);
+    compact_intervals(&mut intervals, capacity)?;
+    store_minmax_multi_intervals(left, &intervals);
+    Ok(())
 }
 
 pub(crate) fn minmax_opcinfo(proc_oid: u32) -> Result<(usize, bool), CatalogError> {
@@ -279,6 +504,33 @@ mod tests {
                 &Value::Int32(2),
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn minmax_multi_eliminates_values_between_disjoint_points() {
+        let mut column = BrinValues {
+            attno: 1,
+            has_nulls: false,
+            all_nulls: true,
+            values: vec![Value::Null; 8],
+        };
+
+        minmax_multi_add_value(&mut column, &Value::Int32(1000), false).unwrap();
+        minmax_multi_add_value(&mut column, &Value::Int32(2000), false).unwrap();
+        minmax_multi_add_value(&mut column, &Value::Int32(1_000_000), false).unwrap();
+
+        assert!(
+            minmax_multi_consistent(&column, BrinMinmaxStrategy::Equal, &Value::Int32(1000))
+                .unwrap()
+        );
+        assert!(
+            !minmax_multi_consistent(&column, BrinMinmaxStrategy::Equal, &Value::Int32(500_000))
+                .unwrap()
+        );
+        assert!(
+            minmax_multi_consistent(&column, BrinMinmaxStrategy::Greater, &Value::Int32(500_000))
+                .unwrap()
         );
     }
 
