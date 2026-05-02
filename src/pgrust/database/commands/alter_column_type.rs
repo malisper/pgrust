@@ -33,9 +33,9 @@ struct AlterColumnTypeTarget {
     fires_table_rewrite: bool,
 }
 
-struct RewrittenAlterColumnTypeRow {
+pub(super) struct RewrittenAlterColumnTypeRow {
     old_tid: ItemPointerData,
-    values: Vec<Value>,
+    pub(super) values: Vec<Value>,
 }
 
 fn reject_unsupported_alter_column_type_indexes(
@@ -132,7 +132,7 @@ fn rewrite_bound_indexes_for_alter_column_type(
         .collect()
 }
 
-fn plan_rewritten_rows_for_alter_column_type(
+pub(super) fn plan_rewritten_rows_for_alter_column_type(
     relation: &crate::backend::parser::BoundRelation,
     new_desc: &RelationDesc,
     column_index: usize,
@@ -177,7 +177,7 @@ fn unique_index_rewrite_violation(
     }
 }
 
-fn validate_unique_indexes_for_rewritten_rows(
+pub(super) fn validate_unique_indexes_for_rewritten_rows(
     new_desc: &RelationDesc,
     indexes: &[crate::backend::parser::BoundIndexRelation],
     rewritten_rows: &[RewrittenAlterColumnTypeRow],
@@ -214,7 +214,7 @@ fn validate_unique_indexes_for_rewritten_rows(
     Ok(())
 }
 
-fn apply_rewritten_rows_for_alter_column_type(
+pub(super) fn apply_rewritten_rows_for_alter_column_type(
     relation: &crate::backend::parser::BoundRelation,
     new_desc: &RelationDesc,
     rewritten_rows: &[RewrittenAlterColumnTypeRow],
@@ -242,7 +242,7 @@ fn apply_rewritten_rows_for_alter_column_type(
     Ok(applied_rows)
 }
 
-fn rebuild_relation_indexes_for_alter_column_type(
+pub(super) fn rebuild_relation_indexes_for_alter_column_type(
     relation: &crate::backend::parser::BoundRelation,
     new_desc: &RelationDesc,
     indexes: &[crate::backend::parser::BoundIndexRelation],

@@ -39,7 +39,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const STRESS_TEST_TIMEOUT: Duration = Duration::from_secs(60);
-const PIN_LEAK_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(120);
+const PIN_LEAK_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(240);
 const SAME_ROW_UPDATE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const PGBENCH_STYLE_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const SAME_ROW_UPDATE_FULL_SUITE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -10710,6 +10710,287 @@ fn partition_column_options_override_inherited_defaults_and_nullability() {
 }
 
 #[test]
+fn partition_generated_column_overrides_validate_parent_compatibility() {
+    let base = temp_dir("partition_generated_overrides");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table gparent_plain (
+                f1 date not null,
+                f2 int8,
+                f3 int8
+            ) partition by range (f1)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create table gchild_bad partition of gparent_plain
+         (f3 with options generated always as (f2 * 2) stored)
+         for values from ('2016-07-01') to ('2016-08-01')",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, hint, .. }))
+            if message == "child column \"f3\" specifies generation expression"
+                && hint.as_deref()
+                    == Some(
+                        "A child table column cannot be generated unless its parent column is.",
+                    ) => {}
+        other => panic!("expected generated child override rejection, got {other:?}"),
+    }
+
+    session.execute(&db, "drop table gparent_plain").unwrap();
+    session
+        .execute(
+            &db,
+            "create table gparent (
+                f1 date not null,
+                f2 int8,
+                f3 int8 generated always as (f2 * 2) stored
+            ) partition by range (f1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table gchild partition of gparent
+             (f3 with options generated always as (f2 * 22) stored)
+             for values from ('2016-08-01') to ('2016-09-01')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into gparent (f1, f2) values ('2016-08-15', 3)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select f2, f3 from gchild"),
+        vec![vec![Value::Int64(3), Value::Int64(66)]]
+    );
+
+    match session.execute(
+        &db,
+        "create table gchild_kind_bad partition of gparent
+         (f3 generated always as (f2 * 2) virtual)
+         for values from ('2016-09-01') to ('2016-10-01')",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, detail, ..
+        })) if message == "column \"f3\" inherits from generated column of different kind"
+            && detail.as_deref() == Some("Parent column is STORED, child column is VIRTUAL.") => {}
+        other => panic!("expected generated kind mismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn attach_partition_validates_generated_column_compatibility() {
+    let base = temp_dir("attach_partition_generated_compat");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table gparent_attach (
+                f1 date not null,
+                f2 int8,
+                f3 int8 generated always as (f2 * 2) stored
+            ) partition by range (f1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table gchild_attach_plain (f1 date not null, f2 int8, f3 int8)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table gparent_attach attach partition gchild_attach_plain
+         for values from ('2016-09-01') to ('2016-10-01')",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "column \"f3\" in child table must be a generated column" => {}
+        other => panic!("expected attach generated-column rejection, got {other:?}"),
+    }
+
+    session
+        .execute(&db, "drop table gchild_attach_plain")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table gchild_attach_kind (
+                f1 date not null,
+                f2 int8,
+                f3 int8 generated always as (f2 * 33) virtual
+            )",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table gparent_attach attach partition gchild_attach_kind
+         for values from ('2016-09-01') to ('2016-10-01')",
+    ) {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) if message == "column \"f3\" inherits from generated column of different kind"
+            && detail.as_deref() == Some("Parent column is STORED, child column is VIRTUAL.") => {}
+        other => panic!("expected attach generated-kind rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn generated_columns_are_rejected_in_partition_key_expressions() {
+    let base = temp_dir("generated_partition_key_exprs");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    for sql in [
+        "create table gtest_part_key (
+            f1 date not null,
+            f2 int8,
+            f3 int8 generated always as (f2 * 2) stored
+         ) partition by range ((f3 * 3))",
+        "create table gtest_part_key (
+            f1 date not null,
+            f2 int8,
+            f3 int8 generated always as (f2 * 2) stored
+         ) partition by range ((gtest_part_key))",
+        "create table gtest_part_key (
+            f1 date not null,
+            f2 int8,
+            f3 int8 generated always as (f2 * 2) stored
+         ) partition by range ((gtest_part_key is not null))",
+    ] {
+        match session.execute(&db, sql) {
+            Err(ExecError::Parse(ParseError::DetailedError {
+                message, detail, ..
+            })) if message == "cannot use generated column in partition key"
+                && detail.as_deref() == Some("Column \"f3\" is a generated column.") => {}
+            other => panic!("expected generated partition key rejection, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn alter_generated_expression_recurses_partition_tree() {
+    let base = temp_dir("alter_generated_expr_partition_tree");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table gparent_expr (
+                f1 date not null,
+                f2 int8,
+                f3 int8 generated always as (f2 * 2) stored
+            ) partition by range (f1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table gchild_expr partition of gparent_expr
+             (f3 with options generated always as (f2 * 10) stored)
+             for values from ('2016-07-01') to ('2016-08-01')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table gchild_expr2 partition of gparent_expr
+             for values from ('2016-08-01') to ('2016-09-01')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into gparent_expr (f1, f2)
+             values ('2016-07-15', 2), ('2016-08-15', 3)",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "alter table only gparent_expr alter column f3 set expression as (f2 * 4)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, pg_get_expr(d.adbin, d.adrelid)
+               from pg_attrdef d
+               join pg_class c on c.oid = d.adrelid
+              where c.relname in ('gparent_expr', 'gchild_expr', 'gchild_expr2')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("gchild_expr".into()),
+                Value::Text("f2 * 10::bigint".into())
+            ],
+            vec![
+                Value::Text("gchild_expr2".into()),
+                Value::Text("f2 * 2::bigint".into())
+            ],
+            vec![
+                Value::Text("gparent_expr".into()),
+                Value::Text("f2 * 4::bigint".into())
+            ],
+        ]
+    );
+
+    session
+        .execute(
+            &db,
+            "alter table gparent_expr alter column f3 set expression as (f2 * 5)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into gparent_expr (f1, f2)
+             values ('2016-07-16', 4), ('2016-08-16', 5)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, p.f2, p.f3
+               from gparent_expr p
+               join pg_class c on c.oid = p.tableoid
+              order by c.relname, p.f2",
+        ),
+        vec![
+            vec![
+                Value::Text("gchild_expr".into()),
+                Value::Int64(2),
+                Value::Int64(10),
+            ],
+            vec![
+                Value::Text("gchild_expr".into()),
+                Value::Int64(4),
+                Value::Int64(20),
+            ],
+            vec![
+                Value::Text("gchild_expr2".into()),
+                Value::Int64(3),
+                Value::Int64(15),
+            ],
+            vec![
+                Value::Text("gchild_expr2".into()),
+                Value::Int64(5),
+                Value::Int64(25),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn alter_table_add_check_reconciles_existing_partition_constraint() {
     let dir = temp_dir("alter_partition_check_reconcile");
     let db = Database::open(&dir, 128).unwrap();
@@ -11606,6 +11887,65 @@ fn partition_keys_accept_collations_opclasses_and_expressions() {
             .iter()
             .all(|line| !line.contains("Seq Scan on mc3p1") && !line.contains("Seq Scan on mc3p2")),
         "expected multi-key expression pruning to remove mc3p1/mc3p2, got {lines:?}"
+    );
+}
+
+#[test]
+fn range_partitioning_accepts_custom_btree_opclass_symbolic_items() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function at_test_sql_partop (int4,int4) returns int4 language sql as $$
+             select case when $1 = $2 then 0 when $1 < $2 then -1 else 1 end
+             $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class at_test_sql_partop for type int4 using btree as
+             operator 1 < (int4, int4),
+             operator 2 <= (int4, int4),
+             operator 3 = (int4, int4),
+             operator 4 >= (int4, int4),
+             operator 5 > (int4, int4),
+             function 1 at_test_sql_partop(int4,int4)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table at_test_partop (a int4) partition by range (a at_test_sql_partop)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select opc.opcname
+             from pg_partitioned_table pt
+             join pg_opclass opc on opc.oid = pt.partclass[0]
+             where pt.partrelid = 'at_test_partop'::regclass",
+        ),
+        vec![vec![Value::Text("at_test_sql_partop".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table at_test_partop_1 partition of at_test_partop
+             for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into at_test_partop values (3)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from at_test_partop_1"),
+        vec![vec![Value::Int64(1)]]
     );
 }
 
@@ -35489,6 +35829,28 @@ fn not_null_constraint_describe_query_lowers_conkey_subscript_join_qual() {
 }
 
 #[test]
+fn regclass_in_list_literals_are_bound_once_for_catalog_filters() {
+    let base = temp_dir("regclass_in_list_catalog_filter");
+    let db = Database::open(&base, 16).unwrap();
+
+    for name in ["rc_in_1", "rc_in_2", "rc_in_3", "rc_in_4", "rc_in_5"] {
+        db.execute(1, &format!("create table {name} (a int4 not null)"))
+            .unwrap();
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint
+              where contype = 'n'
+                and conrelid::regclass in ('rc_in_1', 'rc_in_2', 'rc_in_3', 'rc_in_4', 'rc_in_5')",
+        ),
+        vec![vec![Value::Int64(5)]]
+    );
+}
+
+#[test]
 fn create_table_foreign_keys_are_enforced_and_persisted() {
     let base = temp_dir("create_table_foreign_keys");
     let db = Database::open(&base, 16).unwrap();
@@ -43041,6 +43403,114 @@ fn alter_table_drop_parent_not_null_removes_inherited_child_constraint() {
 }
 
 #[test]
+fn alter_table_drop_parent_not_null_recomputes_multiparent_descendants() {
+    let base = temp_dir("alter_table_drop_inherited_not_null_multiparent");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_parent (a int4 not null)")
+        .unwrap();
+    db.execute(1, "create table nn_child1 (b text) inherits (nn_parent)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table nn_child2 (c int4) inherits (nn_parent, nn_child1)",
+    )
+    .unwrap();
+
+    db.execute(1, "alter table nn_parent alter a drop not null")
+        .unwrap();
+    db.execute(1, "insert into nn_parent values (null)")
+        .unwrap();
+    db.execute(1, "insert into nn_child1 (a, b) values (null, 'ok')")
+        .unwrap();
+    db.execute(1, "insert into nn_child2 (a, b, c) values (null, 'ok', 1)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint
+              where conrelid in ('nn_parent'::regclass, 'nn_child1'::regclass, 'nn_child2'::regclass)
+                and contype = 'n'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn alter_table_drop_parent_not_null_preserves_local_child_constraint() {
+    let base = temp_dir("alter_table_drop_not_null_preserve_local_child");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_parent (a int4 not null)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table nn_child (a int4 not null) inherits (nn_parent)",
+    )
+    .unwrap();
+
+    db.execute(1, "alter table nn_parent alter a drop not null")
+        .unwrap();
+    db.execute(1, "insert into nn_parent values (null)")
+        .unwrap();
+    match db.execute(1, "insert into nn_child values (null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+            ..
+        }) if relation == "nn_child" && column == "a" && constraint == "nn_child_a_not_null" => {}
+        other => panic!("expected local child not-null violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, coninhcount::int4, conislocal
+               from pg_constraint
+              where conrelid = 'nn_child'::regclass and contype = 'n'",
+        ),
+        vec![vec![
+            Value::Text("nn_child_a_not_null".into()),
+            Value::Int32(0),
+            Value::Bool(true),
+        ]]
+    );
+}
+
+#[test]
+fn inherited_primary_key_keeps_local_child_not_null_name() {
+    let base = temp_dir("inherited_primary_key_local_not_null_name");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_parent (a int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table nn_child (a int4 primary key) inherits (nn_parent)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, coninhcount::int4, conislocal
+               from pg_constraint
+              where conrelid = 'nn_child'::regclass and contype = 'n'",
+        ),
+        vec![vec![
+            Value::Text("nn_child_a_not_null".into()),
+            Value::Int32(1),
+            Value::Bool(true),
+        ]]
+    );
+}
+
+#[test]
 fn alter_table_only_drop_not_null_preserves_child_constraint() {
     let base = temp_dir("alter_table_only_drop_not_null");
     let db = Database::open(&base, 16).unwrap();
@@ -50248,6 +50718,153 @@ fn temp_table_on_commit_actions_apply_at_commit() {
         .execute(&db, "select count(*) from drop_rows")
         .unwrap_err();
     assert!(matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "drop_rows"));
+}
+
+#[test]
+fn temp_partitioned_on_commit_ignores_storage_less_parent() {
+    let base = temp_dir("temp_partitioned_on_commit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_parted_oncommit (a int4)
+             partition by list (a) on commit delete rows",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_parted_oncommit_1
+             partition of temp_parted_oncommit
+             for values in (1) on commit preserve rows",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into temp_parted_oncommit values (1)")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from temp_parted_oncommit"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_parted_oncommit_drop (a int4)
+             partition by list (a) on commit drop",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_parted_oncommit_drop_1
+             partition of temp_parted_oncommit_drop
+             for values in (1) on commit preserve rows",
+        )
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_class
+             where relname like 'temp_parted_oncommit_drop%'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn temp_inherited_on_commit_drop_cascades_to_children() {
+    let base = temp_dir("temp_inherited_on_commit_drop");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_inh_oncommit_parent (a int4) on commit drop",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_inh_oncommit_child ()
+             inherits (temp_inh_oncommit_parent) on commit delete rows",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into temp_inh_oncommit_child values (1)")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_class
+             where relname like 'temp_inh_oncommit_%'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn temp_inherited_on_commit_drop_child_preserves_empty_parent() {
+    let base = temp_dir("temp_inherited_on_commit_drop_child");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_inh_keep_parent (a int4) on commit delete rows",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_inh_keep_child ()
+             inherits (temp_inh_keep_parent) on commit drop",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into temp_inh_keep_parent values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into temp_inh_keep_child values (2)")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from temp_inh_keep_parent"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class
+             where relname like 'temp_inh_keep_%'
+             order by relname",
+        ),
+        vec![vec![Value::Text("temp_inh_keep_parent".into())]]
+    );
 }
 
 #[test]

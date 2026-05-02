@@ -6590,6 +6590,8 @@ impl CatalogStore {
                 column.not_null_constraint_name = None;
                 column.not_null_constraint_validated = false;
                 column.not_null_constraint_no_inherit = false;
+                column.not_null_constraint_is_local = true;
+                column.not_null_constraint_inhcount = 0;
                 column.not_null_primary_key_owned = false;
                 Ok((
                     (),
@@ -7645,6 +7647,10 @@ impl CatalogStore {
         for row in &mut new_indexes {
             row.indisreplident = Some(row.indexrelid) == index_oid;
         }
+        let changed_index_oids = new_indexes
+            .iter()
+            .map(|row| row.indexrelid)
+            .collect::<Vec<_>>();
 
         let control = self.control_state()?;
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
@@ -7674,7 +7680,7 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
-        if let Some(index_oid) = index_oid {
+        for index_oid in changed_index_oids {
             effect_record_oid(&mut effect.relation_oids, index_oid);
         }
         Ok(effect)
@@ -8047,7 +8053,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'p') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;

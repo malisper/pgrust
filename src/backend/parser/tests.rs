@@ -3781,6 +3781,60 @@ fn parse_create_operator_class_hash_support() {
 }
 
 #[test]
+fn parse_create_operator_class_symbolic_operator_with_argtypes() {
+    assert_eq!(
+        parse_statement(
+            "create operator class at_test_sql_partop for type int4 using btree as \
+             operator 1 < (int4, int4), \
+             operator 2 <= (int4, int4), \
+             operator 3 = (int4, int4), \
+             operator 4 >= (int4, int4), \
+             operator 5 > (int4, int4), \
+             function 1 at_test_sql_partop(int4,int4)"
+        )
+        .unwrap(),
+        Statement::CreateOperatorClass(CreateOperatorClassStatement {
+            schema_name: None,
+            opclass_name: "at_test_sql_partop".into(),
+            is_default: false,
+            data_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            access_method: "btree".into(),
+            items: vec![
+                CreateOperatorClassItem::Operator {
+                    strategy_number: 1,
+                    operator_name: "< (int4, int4)".into(),
+                },
+                CreateOperatorClassItem::Operator {
+                    strategy_number: 2,
+                    operator_name: "<= (int4, int4)".into(),
+                },
+                CreateOperatorClassItem::Operator {
+                    strategy_number: 3,
+                    operator_name: "= (int4, int4)".into(),
+                },
+                CreateOperatorClassItem::Operator {
+                    strategy_number: 4,
+                    operator_name: ">= (int4, int4)".into(),
+                },
+                CreateOperatorClassItem::Operator {
+                    strategy_number: 5,
+                    operator_name: "> (int4, int4)".into(),
+                },
+                CreateOperatorClassItem::Function {
+                    support_number: 1,
+                    schema_name: None,
+                    function_name: "at_test_sql_partop".into(),
+                    arg_types: vec![
+                        RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                        RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    ],
+                },
+            ],
+        })
+    );
+}
+
+#[test]
 fn parse_create_operator_class_default_before_for_type() {
     let stmt = parse_statement(
         "create operator class alter1.ctype_hash_ops default for type alter1.ctype using hash as operator 1 alter1.=(alter1.ctype, alter1.ctype)",
@@ -14307,6 +14361,84 @@ fn parse_create_table_partition_of_with_column_options() {
                             matches!(constraint, ColumnConstraint::NotNull { .. })
                         })
             ));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_partition_of_with_generated_column_override() {
+    match parse_statement(
+        "create table part_b partition of parted \
+         (b with options generated always as (a + 1) stored) \
+         for values in ('b')",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("parted"));
+            assert_eq!(ct.elements.len(), 1);
+            assert!(matches!(
+                &ct.elements[0],
+                CreateTableElement::PartitionColumnOverride(override_)
+                    if override_.name == "b"
+                        && override_.generated.as_ref().is_some_and(|generated| {
+                            generated.kind == ColumnGeneratedKind::Stored
+                                && generated.expr_sql == "a + 1"
+                        })
+            ));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_temp_partitioned_table_on_commit() {
+    match parse_statement(
+        "create temp table temp_parted_oncommit (a int) \
+         partition by list (a) on commit delete rows",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.persistence, TablePersistence::Temporary);
+            assert_eq!(ct.on_commit, OnCommitAction::DeleteRows);
+            assert!(ct.partition_spec.is_some());
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_temp_partition_of_on_commit() {
+    match parse_statement(
+        "create temp table temp_parted_oncommit_1 \
+         partition of temp_parted_oncommit \
+         for values in (1) on commit drop",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.persistence, TablePersistence::Temporary);
+            assert_eq!(ct.on_commit, OnCommitAction::Drop);
+            assert_eq!(ct.partition_of.as_deref(), Some("temp_parted_oncommit"));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_temp_inherits_on_commit_after_inherits() {
+    match parse_statement(
+        "create temp table temp_inh_oncommit_test1 () \
+         inherits(temp_inh_oncommit_test) on commit delete rows",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.persistence, TablePersistence::Temporary);
+            assert_eq!(ct.on_commit, OnCommitAction::DeleteRows);
+            assert_eq!(ct.inherits, vec!["temp_inh_oncommit_test"]);
         }
         other => panic!("expected CreateTable, got {:?}", other),
     }

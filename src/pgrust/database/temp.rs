@@ -35,6 +35,30 @@ fn proc_argtype_oids(argtypes: &str) -> impl Iterator<Item = u32> + '_ {
         .filter_map(|part| part.parse::<u32>().ok())
 }
 
+fn collect_temp_on_commit_drop_names(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    namespace: &TempNamespace,
+    relation_oid: u32,
+    seen: &mut BTreeSet<u32>,
+    names: &mut Vec<String>,
+) {
+    if !seen.insert(relation_oid) {
+        return;
+    }
+    let mut children = catalog.inheritance_children(relation_oid);
+    children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    for child in children.into_iter().filter(|row| !row.inhdetachpending) {
+        collect_temp_on_commit_drop_names(catalog, namespace, child.inhrelid, seen, names);
+    }
+    if let Some(name) = namespace
+        .tables
+        .iter()
+        .find_map(|(name, entry)| (entry.entry.relation_oid == relation_oid).then(|| name.clone()))
+    {
+        names.push(name);
+    }
+}
+
 fn temp_namespace_catalog_rows(
     catcache: &CatCache,
     namespace_oids: &[u32],
@@ -1083,11 +1107,23 @@ impl Database {
         {
             let namespaces = self.temp_relations.read();
             if let Some(namespace) = namespaces.get(&temp_backend_id) {
-                for (name, entry) in &namespace.tables {
+                let catalog = self.lazy_catalog_lookup(client_id, None, None);
+                let mut drop_seen = BTreeSet::new();
+                for entry in namespace.tables.values() {
                     match entry.on_commit {
                         OnCommitAction::PreserveRows => {}
-                        OnCommitAction::DeleteRows => to_delete.push(entry.entry.rel),
-                        OnCommitAction::Drop => to_drop.push(name.clone()),
+                        OnCommitAction::DeleteRows => {
+                            if !matches!(entry.entry.relkind, 'p' | 'I') {
+                                to_delete.push(entry.entry.rel);
+                            }
+                        }
+                        OnCommitAction::Drop => collect_temp_on_commit_drop_names(
+                            &catalog,
+                            namespace,
+                            entry.entry.relation_oid,
+                            &mut drop_seen,
+                            &mut to_drop,
+                        ),
                     }
                 }
             }

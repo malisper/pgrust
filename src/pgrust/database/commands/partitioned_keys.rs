@@ -9,8 +9,8 @@ use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
 use crate::backend::catalog::{CatalogEntry, CatalogIndexBuildOptions};
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{
-    BoundRelation, CatalogLookup, IndexBackedConstraintAction, IndexColumnDef, OnCommitAction,
-    ParseError,
+    BoundIndexRelation, BoundRelation, CatalogLookup, IndexBackedConstraintAction, IndexColumnDef,
+    OnCommitAction, ParseError,
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::include::catalog::{
@@ -235,6 +235,56 @@ impl<'a> PartitionedKeyInstaller<'a> {
             .direct_partition_children(relation_oid)?
             .into_iter()
             .any(|child| child.relkind == 'f'))
+    }
+
+    fn index_heap_oid(&self, index_oid: u32) -> Result<u32, ExecError> {
+        crate::backend::utils::cache::lsyscache::index_row_by_indexrelid(
+            self.db,
+            self.client_id,
+            Some((self.xid, self.visible_cid())),
+            index_oid,
+        )
+        .map(|row| row.indrelid)
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "index metadata",
+                actual: format!("missing index metadata for {index_oid}"),
+            })
+        })
+    }
+
+    fn index_by_oid(&self, index_oid: u32) -> Result<BoundIndexRelation, ExecError> {
+        let heap_oid = self.index_heap_oid(index_oid)?;
+        self.db
+            .lazy_catalog_lookup(
+                self.client_id,
+                Some((self.xid, self.visible_cid())),
+                self.configured_search_path,
+            )
+            .index_relations_for_heap(heap_oid)
+            .into_iter()
+            .find(|index| index.relation_oid == index_oid)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index metadata",
+                    actual: format!("missing index metadata for {index_oid}"),
+                })
+            })
+    }
+
+    fn direct_index_children(&self, index_oid: u32) -> Result<Vec<BoundIndexRelation>, ExecError> {
+        let catalog = self.db.lazy_catalog_lookup(
+            self.client_id,
+            Some((self.xid, self.visible_cid())),
+            self.configured_search_path,
+        );
+        let mut inherits = catalog.inheritance_children(index_oid);
+        inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+        inherits
+            .into_iter()
+            .filter(|row| !row.inhdetachpending)
+            .map(|row| self.index_by_oid(row.inhrelid))
+            .collect()
     }
 
     fn column_attnums_for_names(
@@ -705,6 +755,26 @@ impl<'a> PartitionedKeyInstaller<'a> {
             .write()
             .create_relation_inheritance_mvcc(child_index_oid, &[parent_index_oid], &ctx)
             .map_err(map_catalog_error)?;
+        self.apply_effect(effect)?;
+
+        let child_index = self.current_relation(child_index_oid)?;
+        if child_index.relispartition {
+            return Ok(());
+        }
+        let cid = self.take_cid();
+        let ctx = self.write_ctx(cid);
+        let effect = self
+            .db
+            .catalog
+            .write()
+            .replace_relation_partitioning_mvcc(
+                child_index_oid,
+                true,
+                child_index.relpartbound.clone(),
+                child_index.partitioned_table.clone(),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
         self.apply_effect(effect)
     }
 
@@ -739,6 +809,37 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 }),
             })?;
         self.apply_effect(effect)
+    }
+
+    fn validate_partitioned_key_index_upward(&mut self, index_oid: u32) -> Result<bool, ExecError> {
+        let index = self.index_by_oid(index_oid)?;
+        let relation = self.current_relation(index.index_meta.indrelid)?;
+        if relation.relkind != 'p' {
+            return Ok(index.index_meta.indisvalid);
+        }
+        let direct_partitions = self.direct_partition_children(relation.relation_oid)?;
+        let attached_indexes = self.direct_index_children(index_oid)?;
+        let valid = direct_partitions.iter().all(|partition| {
+            attached_indexes.iter().any(|child_index| {
+                child_index.index_meta.indrelid == partition.relation_oid
+                    && child_index.index_meta.indisvalid
+            })
+        });
+        self.set_index_valid(index_oid, valid)?;
+        let catalog = self.db.lazy_catalog_lookup(
+            self.client_id,
+            Some((self.xid, self.visible_cid())),
+            self.configured_search_path,
+        );
+        let parent_oids = catalog
+            .inheritance_parents(index_oid)
+            .into_iter()
+            .map(|row| row.inhparent)
+            .collect::<Vec<_>>();
+        for parent_oid in parent_oids {
+            let _ = self.validate_partitioned_key_index_upward(parent_oid)?;
+        }
+        Ok(valid)
     }
 
     fn validate_direct_partition_primary_key_not_nulls(
@@ -1001,7 +1102,9 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     let _ =
                         self.reconcile_relation_key_tree(child, Some(&existing), spec, None, true)?;
                 }
+                let _ = self.validate_partitioned_key_index_upward(existing.index_oid)?;
             }
+            let _ = self.validate_partitioned_key_index_upward(parent.index_oid)?;
             return Ok(existing);
         }
 
@@ -1032,7 +1135,9 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     let _ =
                         self.reconcile_relation_key_tree(child, Some(&attached), spec, None, true)?;
                 }
+                let _ = self.validate_partitioned_key_index_upward(attached.index_oid)?;
             }
+            let _ = self.validate_partitioned_key_index_upward(parent.index_oid)?;
             return Ok(attached);
         }
 
@@ -1044,6 +1149,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     let _ =
                         self.reconcile_relation_key_tree(child, Some(&existing), spec, None, true)?;
                 }
+                let _ = self.validate_partitioned_key_index_upward(existing.index_oid)?;
             }
             return Ok(existing);
         }
@@ -1186,12 +1292,16 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     let _ =
                         self.reconcile_relation_key_tree(child, Some(&attached), spec, None, true)?;
                 }
+                let _ = self.validate_partitioned_key_index_upward(attached.index_oid)?;
             } else if !self
                 .direct_partition_children(relation.relation_oid)?
                 .is_empty()
             {
                 self.set_index_valid(attached.index_oid, false)?;
             }
+        }
+        if let Some(parent) = parent {
+            let _ = self.validate_partitioned_key_index_upward(parent.index_oid)?;
         }
         Ok(attached)
     }
@@ -1238,7 +1348,11 @@ impl Database {
                 .map_err(ExecError::Parse)?;
             }
             let spec = PartitionedKeySpec::from_action(action);
-            let parent = installer.parent_key_for_spec(&relation, &spec)?;
+            let parent = if recurse {
+                installer.parent_key_for_spec(&relation, &spec)?
+            } else {
+                None
+            };
             let _ = installer.reconcile_relation_key_tree(
                 relation,
                 parent.as_ref(),

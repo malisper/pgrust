@@ -3181,9 +3181,19 @@ fn build_partition_create_table_statement(
         };
         let (partition_spec, rest) = parse_partition_spec_clause(partition_clause)?;
         let mut rest = rest.trim();
+        if keyword_at_start(rest, "on") {
+            let (on_commit, next) = parse_on_commit_clause_text(rest)?;
+            create_stmt.on_commit = on_commit;
+            rest = next.trim();
+        }
         if keyword_at_start(rest, "tablespace") {
             let (tablespace_name, next) = parse_partition_tablespace_clause(rest)?;
             create_stmt.tablespace = Some(tablespace_name);
+            rest = next.trim();
+        }
+        if keyword_at_start(rest, "on") {
+            let (on_commit, next) = parse_on_commit_clause_text(rest)?;
+            create_stmt.on_commit = on_commit;
             rest = next.trim();
         }
         if !rest.is_empty() {
@@ -3209,7 +3219,7 @@ fn build_partition_create_table_statement(
         return Err(PartitionStatementParseError::Unsupported);
     };
     create_stmt.inherits.clear();
-    let (parent_name, elements, partition_bound, partition_spec, tablespace, rest) =
+    let (parent_name, elements, partition_bound, partition_spec, tablespace, on_commit, rest) =
         parse_partition_of_clause(partition_clause, options)?;
     if !rest.trim().is_empty() {
         return Err(PartitionStatementParseError::Unsupported);
@@ -3219,6 +3229,7 @@ fn build_partition_create_table_statement(
     create_stmt.partition_bound = Some(partition_bound);
     create_stmt.partition_spec = partition_spec;
     create_stmt.tablespace = tablespace;
+    create_stmt.on_commit = on_commit;
     Ok(Statement::CreateTable(create_stmt))
 }
 
@@ -3232,6 +3243,7 @@ fn parse_partition_of_clause(
         RawPartitionBoundSpec,
         Option<RawPartitionSpec>,
         Option<String>,
+        OnCommitAction,
         &str,
     ),
     PartitionStatementParseError,
@@ -3250,6 +3262,12 @@ fn parse_partition_of_clause(
     };
     let (bound, next) = parse_partition_bound_clause(rest)?;
     rest = next.trim_start();
+    let mut on_commit = OnCommitAction::PreserveRows;
+    if keyword_at_start(rest, "on") {
+        let (parsed_on_commit, next) = parse_on_commit_clause_text(rest)?;
+        on_commit = parsed_on_commit;
+        rest = next.trim_start();
+    }
     let partition_spec = if rest.is_empty() {
         None
     } else if keyword_at_start(rest, "partition") {
@@ -3269,14 +3287,73 @@ fn parse_partition_of_clause(
     } else {
         None
     };
+    if keyword_at_start(rest, "on") {
+        let (parsed_on_commit, next) = parse_on_commit_clause_text(rest)?;
+        on_commit = parsed_on_commit;
+        rest = next.trim_start();
+    }
     Ok((
         parts.join("."),
         elements,
         bound,
         partition_spec,
         tablespace,
+        on_commit,
         rest,
     ))
+}
+
+fn parse_on_commit_clause_text(
+    input: &str,
+) -> Result<(OnCommitAction, &str), PartitionStatementParseError> {
+    let mut rest = consume_keyword(input.trim_start(), "on").trim_start();
+    if !keyword_at_start(rest, "commit") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMIT",
+            actual: rest.to_string(),
+        }
+        .into());
+    }
+    rest = consume_keyword(rest, "commit").trim_start();
+    if keyword_at_start(rest, "drop") {
+        return Ok((
+            OnCommitAction::Drop,
+            consume_keyword(rest, "drop").trim_start(),
+        ));
+    }
+    if keyword_at_start(rest, "delete") {
+        rest = consume_keyword(rest, "delete").trim_start();
+        if !keyword_at_start(rest, "rows") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ROWS",
+                actual: rest.to_string(),
+            }
+            .into());
+        }
+        return Ok((
+            OnCommitAction::DeleteRows,
+            consume_keyword(rest, "rows").trim_start(),
+        ));
+    }
+    if keyword_at_start(rest, "preserve") {
+        rest = consume_keyword(rest, "preserve").trim_start();
+        if !keyword_at_start(rest, "rows") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ROWS",
+                actual: rest.to_string(),
+            }
+            .into());
+        }
+        return Ok((
+            OnCommitAction::PreserveRows,
+            consume_keyword(rest, "rows").trim_start(),
+        ));
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "ON COMMIT action",
+        actual: rest.to_string(),
+    }
+    .into())
 }
 
 fn parse_partition_tablespace_clause(
@@ -3331,7 +3408,7 @@ fn parse_partition_of_elements(
     {
         if looks_like_partition_column_override(&item) {
             elements.push(CreateTableElement::PartitionColumnOverride(
-                parse_partition_column_override(&item)?,
+                parse_partition_column_override(&item, options)?,
             ));
             continue;
         }
@@ -3342,7 +3419,7 @@ fn parse_partition_of_elements(
             }
             Ok(_) => return Err(PartitionStatementParseError::Unsupported),
             Err(_) => elements.push(CreateTableElement::PartitionColumnOverride(
-                parse_partition_column_override(&item)?,
+                parse_partition_column_override(&item, options)?,
             )),
         }
     }
@@ -3360,6 +3437,7 @@ fn looks_like_partition_column_override(item: &str) -> bool {
         || keyword_at_start(rest, "not")
         || keyword_at_start(rest, "null")
         || keyword_at_start(rest, "default")
+        || keyword_at_start(rest, "generated")
         || keyword_at_start(rest, "check")
         || keyword_at_start(rest, "primary")
         || keyword_at_start(rest, "unique")
@@ -3367,6 +3445,7 @@ fn looks_like_partition_column_override(item: &str) -> bool {
 
 fn parse_partition_column_override(
     item: &str,
+    options: ParseOptions,
 ) -> Result<PartitionColumnOverride, PartitionStatementParseError> {
     let (name, mut rest) = parse_unqualified_identifier(item.trim_start(), "partition column name")
         .map_err(PartitionStatementParseError::Parse)?;
@@ -3384,6 +3463,7 @@ fn parse_partition_column_override(
     }
 
     let mut default_expr = None;
+    let mut generated = None;
     let mut constraints = Vec::new();
     while !rest.is_empty() {
         if keyword_at_start(rest, "not") {
@@ -3440,13 +3520,28 @@ fn parse_partition_column_override(
             default_expr = Some(rest.to_string());
             rest = "";
         } else if keyword_at_start(rest, "generated") {
-            return Err(ParseError::DetailedError {
-                message: "identity columns are not supported on partitions".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "0A000",
+            let synthetic = format!("create table __pgrust_partition_override__ (__c int4 {rest})");
+            let Statement::CreateTable(create_stmt) =
+                parse_statement_with_options_inner(synthetic, options)
+                    .map_err(PartitionStatementParseError::Parse)?
+            else {
+                return Err(PartitionStatementParseError::Unsupported);
+            };
+            let Some(CreateTableElement::Column(column)) = create_stmt.elements.into_iter().next()
+            else {
+                return Err(PartitionStatementParseError::Unsupported);
+            };
+            if column.identity.is_some() {
+                return Err(ParseError::DetailedError {
+                    message: "identity columns are not supported on partitions".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                }
+                .into());
             }
-            .into());
+            generated = column.generated;
+            rest = "";
         } else {
             return Err(ParseError::UnexpectedToken {
                 expected: "partition column option",
@@ -3459,6 +3554,7 @@ fn parse_partition_column_override(
     Ok(PartitionColumnOverride {
         name,
         default_expr,
+        generated,
         constraints,
     })
 }
@@ -23475,6 +23571,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                     .map(|inner| inner.into_inner().map(build_identifier).collect())
                     .unwrap_or_default();
             }
+            Rule::on_commit_clause => on_commit = build_on_commit_action(part)?,
             Rule::table_storage_clause => {
                 options.extend(build_table_storage_options(part)?);
             }

@@ -1,9 +1,15 @@
 use super::super::*;
+use super::alter_column_type::{
+    apply_rewritten_rows_for_alter_column_type, plan_rewritten_rows_for_alter_column_type,
+    rebuild_relation_indexes_for_alter_column_type, validate_unique_indexes_for_rewritten_rows,
+};
 use super::alter_table_work_queue::{build_alter_table_work_queue, relation_name_for_alter_error};
+use crate::backend::parser::{bind_generated_expr, bind_relation_constraints};
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
+use crate::include::nodes::parsenodes::ColumnGeneratedKind;
 use crate::pgrust::database::ddl::{
-    ensure_relation_owner, lookup_heap_relation_for_alter_table,
-    validate_alter_table_alter_column_default, validate_alter_table_alter_column_expression,
+    ensure_relation_owner, validate_alter_table_alter_column_default,
+    validate_alter_table_alter_column_expression,
 };
 
 fn lookup_relation_for_alter_column_default(
@@ -25,6 +31,87 @@ fn lookup_relation_for_alter_column_default(
         }
         None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
     }
+}
+
+fn rewrite_stored_generated_column_rows<C>(
+    db: &Database,
+    relation: &crate::backend::parser::BoundRelation,
+    relation_name: &str,
+    new_desc: &crate::backend::executor::RelationDesc,
+    column_index: usize,
+    catalog: &C,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+) -> Result<(), ExecError>
+where
+    C: CatalogLookup + Clone + 'static,
+{
+    if relation.relkind != 'r' {
+        return Ok(());
+    }
+    if new_desc.columns[column_index].generated != Some(ColumnGeneratedKind::Stored) {
+        return Ok(());
+    }
+    let Some(rewrite_expr) =
+        bind_generated_expr(new_desc, column_index, catalog).map_err(ExecError::Parse)?
+    else {
+        return Ok(());
+    };
+    let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
+    let mut ctx = super::constraint::ddl_executor_context(
+        db,
+        catalog,
+        client_id,
+        xid,
+        cid,
+        &datetime_config,
+        interrupts,
+    )?;
+    ctx.catalog = Some(crate::backend::executor::executor_catalog(catalog.clone()));
+    let rewritten_rows = plan_rewritten_rows_for_alter_column_type(
+        relation,
+        new_desc,
+        column_index,
+        &rewrite_expr,
+        &mut ctx,
+    )?;
+    let relation_constraints = bind_relation_constraints(
+        Some(relation_name),
+        relation.relation_oid,
+        new_desc,
+        catalog,
+    )
+    .map_err(ExecError::Parse)?;
+    for row in &rewritten_rows {
+        crate::backend::executor::enforce_relation_constraints(
+            relation_name,
+            new_desc,
+            &relation_constraints,
+            &row.values,
+            &mut ctx,
+        )?;
+    }
+    let indexes = catalog.index_relations_for_heap(relation.relation_oid);
+    validate_unique_indexes_for_rewritten_rows(new_desc, &indexes, &rewritten_rows, &mut ctx)?;
+    let rewritten_rows = apply_rewritten_rows_for_alter_column_type(
+        relation,
+        new_desc,
+        &rewritten_rows,
+        &mut ctx,
+        xid,
+        cid,
+    )?;
+    rebuild_relation_indexes_for_alter_column_type(
+        relation,
+        new_desc,
+        &indexes,
+        &rewritten_rows,
+        &mut ctx,
+        xid,
+    )?;
+    Ok(())
 }
 
 impl Database {
@@ -102,7 +189,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
-            interrupts,
+            interrupts: std::sync::Arc::clone(&interrupts),
         };
         let work_queue = build_alter_table_work_queue(&catalog, &relation, alter_stmt.only)?;
         for item in work_queue {
@@ -158,7 +245,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_relation_for_alter_column_default(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -166,8 +253,9 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -186,7 +274,7 @@ impl Database {
             );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -201,7 +289,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_relation_for_alter_column_default(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -216,18 +304,6 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        let plan = validate_alter_table_alter_column_expression(
-            &catalog,
-            relation.relation_oid,
-            relation.namespace_oid,
-            &relation.desc,
-            &alter_stmt.column_name,
-            &alter_stmt.action,
-        )?;
-        if plan.noop {
-            return Ok(StatementResult::AffectedRows(0));
-        }
-
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -235,40 +311,88 @@ impl Database {
             cid,
             client_id,
             waiter: None,
-            interrupts,
+            interrupts: std::sync::Arc::clone(&interrupts),
         };
-        let default_expr_sql = plan.default_expr_sql.clone();
-        let generated = plan.generated;
-        let effect = self
-            .catalog
-            .write()
-            .alter_table_set_column_generation_mvcc(
-                relation.relation_oid,
-                &plan.column_name,
-                default_expr_sql.clone(),
-                generated,
-                &ctx,
-            )
-            .map_err(map_catalog_error)?;
-        if relation.relpersistence == 't' {
-            let mut temp_desc = relation.desc.clone();
-            let column = temp_desc
+        let work_queue = build_alter_table_work_queue(&catalog, &relation, alter_stmt.only)?;
+        for item in work_queue {
+            let plan = validate_alter_table_alter_column_expression(
+                &catalog,
+                item.relation.relation_oid,
+                item.relation.namespace_oid,
+                &item.relation.desc,
+                &alter_stmt.column_name,
+                &alter_stmt.action,
+            )?;
+            if plan.noop {
+                continue;
+            }
+
+            let default_expr_sql = plan.default_expr_sql.clone();
+            let generated = plan.generated;
+            let column_index = item
+                .relation
+                .desc
                 .columns
-                .iter_mut()
-                .find(|column| column.name.eq_ignore_ascii_case(&plan.column_name))
+                .iter()
+                .position(|column| column.name.eq_ignore_ascii_case(&plan.column_name))
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::UnknownColumn(plan.column_name.clone()))
                 })?;
-            column.default_expr = default_expr_sql;
-            column.default_sequence_oid = None;
-            column.generated = generated;
-            if column.default_expr.is_none() {
-                column.attrdef_oid = None;
-                column.missing_default_value = None;
+            let mut new_desc = item.relation.desc.clone();
+            {
+                let column = &mut new_desc.columns[column_index];
+                column.default_expr = default_expr_sql.clone();
+                column.default_sequence_oid = None;
+                column.generated = generated;
+                if column.default_expr.is_none() {
+                    column.attrdef_oid = None;
+                    column.missing_default_value = None;
+                }
             }
-            self.replace_temp_entry_desc(client_id, relation.relation_oid, temp_desc)?;
+            let relation_name = relation_name_for_alter_error(&catalog, item.relation.relation_oid);
+            rewrite_stored_generated_column_rows(
+                self,
+                &item.relation,
+                &relation_name,
+                &new_desc,
+                column_index,
+                &catalog,
+                client_id,
+                xid,
+                cid,
+                std::sync::Arc::clone(&interrupts),
+            )?;
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_set_column_generation_mvcc(
+                    item.relation.relation_oid,
+                    &plan.column_name,
+                    default_expr_sql.clone(),
+                    generated,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            if item.relation.relpersistence == 't' {
+                let mut temp_desc = item.relation.desc.clone();
+                let column = temp_desc
+                    .columns
+                    .iter_mut()
+                    .find(|column| column.name.eq_ignore_ascii_case(&plan.column_name))
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownColumn(plan.column_name.clone()))
+                    })?;
+                column.default_expr = default_expr_sql;
+                column.default_sequence_oid = None;
+                column.generated = generated;
+                if column.default_expr.is_none() {
+                    column.attrdef_oid = None;
+                    column.missing_default_value = None;
+                }
+                self.replace_temp_entry_desc(client_id, item.relation.relation_oid, temp_desc)?;
+            }
+            catalog_effects.push(effect);
         }
-        catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
 }
