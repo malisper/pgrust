@@ -3004,6 +3004,9 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         }
         return Ok(Value::Text("none".into()));
     }
+    if name == "session_authorization" {
+        return auth_role_name(ctx, ctx.session_user_oid);
+    }
     if name == "timezone" {
         return Ok(Value::Text(format_timezone(&ctx.datetime_config).into()));
     }
