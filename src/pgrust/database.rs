@@ -56,7 +56,8 @@ use crate::backend::parser::{
 };
 use crate::backend::storage::lmgr::{
     AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockPreparedEntry, AdvisoryLockSnapshotRow,
-    RowLockManager, RowLockPreparedEntry, RowLockSnapshotRow, TableLockManager, TableLockMode,
+    PredicateLockManager, PredicateLockSnapshotRow, PreparedPredicateState, RowLockManager,
+    RowLockPreparedEntry, RowLockSnapshotRow, TableLockManager, TableLockMode,
     TableLockPreparedEntry, TableLockSnapshotRow, TransactionLockSnapshotRow,
     lock_relations_interruptible, lock_tables_interruptible, unlock_relations,
 };
@@ -268,6 +269,8 @@ pub(crate) struct PreparedTransactionRecord {
     pub held_table_locks: Vec<TableLockPreparedEntry>,
     pub row_locks: Vec<RowLockPreparedEntry>,
     pub advisory_locks: Vec<AdvisoryLockPreparedEntry>,
+    #[serde(default)]
+    pub predicate_state: Option<PreparedPredicateState>,
     pub catalog_effects: Vec<CatalogMutationEffect>,
     pub prior_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
     pub current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
@@ -567,6 +570,7 @@ pub struct Database {
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) advisory_locks: Arc<AdvisoryLockManager>,
     pub(crate) row_locks: Arc<RowLockManager>,
+    pub(crate) predicate_locks: Arc<PredicateLockManager>,
     pub(crate) async_notify_runtime: Arc<AsyncNotifyRuntime>,
     pub(crate) stats: Arc<RwLock<DatabaseStatsStore>>,
     pub(crate) large_objects: Arc<LargeObjectRuntime>,
@@ -2114,6 +2118,11 @@ impl Database {
         for state in states {
             blockers.extend(state.advisory_locks.blocking_pids(blocked_pid));
             blockers.extend(state.row_locks.blocking_pids(blocked_pid));
+            blockers.extend(
+                state
+                    .predicate_locks
+                    .safe_snapshot_blocking_pids(blocked_pid),
+            );
         }
 
         blockers.extend(self.txn_waiter.blocking_pids(blocked_pid));
@@ -2178,6 +2187,18 @@ impl Database {
                         row.granted
                     ),
                     row_lock_row_to_values(db_oid, row),
+                ));
+            }
+            for row in state.predicate_locks.snapshot() {
+                rows.push((
+                    format!(
+                        "predicate/{db_oid}/{}/{:?}/{:?}/{}",
+                        row.target.relation_oid,
+                        row.target.block_number,
+                        row.target.offset_number,
+                        row.client_id
+                    ),
+                    predicate_lock_row_to_values(row),
                 ));
             }
         }
@@ -2535,6 +2556,40 @@ fn row_lock_row_to_values(database_oid: u32, row: RowLockSnapshotRow) -> Vec<Val
         Value::Bool(row.granted),
         Value::Bool(false),
         row.waitstart.map(Value::TimestampTz).unwrap_or(Value::Null),
+    ]
+}
+
+fn predicate_lock_row_to_values(row: PredicateLockSnapshotRow) -> Vec<Value> {
+    let locktype = if row.target.offset_number.is_some() {
+        "tuple"
+    } else if row.target.block_number.is_some() {
+        "page"
+    } else {
+        "relation"
+    };
+    vec![
+        Value::Text(locktype.into()),
+        oid_value(row.target.db_oid),
+        oid_value(row.target.relation_oid),
+        row.target
+            .block_number
+            .map(|block| Value::Int32(block as i32))
+            .unwrap_or(Value::Null),
+        row.target
+            .offset_number
+            .map(|offset| Value::Int16(offset as i16))
+            .unwrap_or(Value::Null),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Text(format!("{}/serializable", row.client_id).into()),
+        Value::Int32(row.client_id as i32),
+        Value::Text("SIReadLock".into()),
+        Value::Bool(row.granted),
+        Value::Bool(false),
+        Value::Null,
     ]
 }
 

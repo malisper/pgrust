@@ -8380,6 +8380,76 @@ fn pg_blocking_pids_returns_empty_int4_array_without_blockers() {
 }
 
 #[test]
+fn pg_blocking_pids_reports_serializable_safe_snapshot_waiter() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_blocking_pids_safe_snapshot_waiter");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    writer
+        .execute(&db, "create table ssi_wait_items (id int4 primary key)")
+        .unwrap();
+    writer
+        .execute(&db, "insert into ssi_wait_items values (1)")
+        .unwrap();
+    writer
+        .execute(&db, "begin isolation level serializable")
+        .unwrap();
+    writer
+        .execute(&db, "update ssi_wait_items set id = id where id = 1")
+        .unwrap();
+
+    reader
+        .execute(
+            &db,
+            "begin isolation level serializable read only deferrable",
+        )
+        .unwrap();
+    db.install_interrupt_state(2, reader.interrupts());
+
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(reader.execute(&db2, "select count(*) from ssi_wait_items"))
+            .unwrap();
+    });
+
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    loop {
+        if query_rows(&db, 3, "select pg_blocking_pids(2)")
+            == vec![vec![typed_int4_array_value(&[1])]]
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for safe snapshot blocker");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    writer.execute(&db, "commit").unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    worker.join().unwrap();
+
+    assert!(
+        query_rows(
+            &db,
+            3,
+            "select locktype from pg_locks where mode = 'SIReadLock' and pid = 2"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
 fn pg_isolation_test_session_is_blocked_rejects_null_pid_array_entries() {
     let dir = temp_dir("pg_isolation_blocked_null_array_entry");
     let db = Database::open(&dir, 64).unwrap();

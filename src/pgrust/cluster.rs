@@ -17,7 +17,7 @@ use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{ExecError, SessionReplicationRole};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::{
-    AdvisoryLockManager, RowLockManager, TableLockManager, TransactionWaiter,
+    AdvisoryLockManager, PredicateLockManager, RowLockManager, TableLockManager, TransactionWaiter,
 };
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::backend::storage::sync::SyncQueue;
@@ -122,6 +122,7 @@ pub(crate) struct OpenDatabaseState {
     pub sequences: Arc<SequenceRuntime>,
     pub advisory_locks: Arc<AdvisoryLockManager>,
     pub row_locks: Arc<RowLockManager>,
+    pub predicate_locks: Arc<PredicateLockManager>,
     pub async_notify_runtime: Arc<AsyncNotifyRuntime>,
     pub next_statement_lock_scope_id: AtomicU64,
     pub stats: Arc<RwLock<DatabaseStatsStore>>,
@@ -162,6 +163,7 @@ impl OpenDatabaseState {
             sequences,
             advisory_locks: Arc::new(AdvisoryLockManager::new()),
             row_locks: Arc::new(RowLockManager::new()),
+            predicate_locks: Arc::new(PredicateLockManager::new()),
             async_notify_runtime: Arc::new(AsyncNotifyRuntime::new()),
             next_statement_lock_scope_id: AtomicU64::new(1),
             stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
@@ -365,6 +367,14 @@ impl Cluster {
                     record.advisory_scope_id,
                     &record.advisory_locks,
                 );
+                if let Some(predicate_state) = &record.predicate_state {
+                    state.predicate_locks.restore_prepared(
+                        record.prepared_client_id,
+                        record.xid,
+                        &record.subxids,
+                        predicate_state.clone(),
+                    );
+                }
             }
         }
         autovacuum_runtime.start(Arc::downgrade(&shared), options.autovacuum);
@@ -439,6 +449,7 @@ impl Cluster {
                 sequences: Arc::new(SequenceRuntime::new_ephemeral()),
                 advisory_locks: Arc::new(AdvisoryLockManager::new()),
                 row_locks: Arc::new(RowLockManager::new()),
+                predicate_locks: Arc::new(PredicateLockManager::new()),
                 async_notify_runtime: Arc::new(AsyncNotifyRuntime::new()),
                 next_statement_lock_scope_id: AtomicU64::new(1),
                 stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
@@ -546,6 +557,7 @@ impl Cluster {
             sequences: Arc::clone(&state.sequences),
             advisory_locks: Arc::clone(&state.advisory_locks),
             row_locks: Arc::clone(&state.row_locks),
+            predicate_locks: Arc::clone(&state.predicate_locks),
             async_notify_runtime: Arc::clone(&state.async_notify_runtime),
             stats: Arc::clone(&state.stats),
             large_objects: Arc::clone(&state.large_objects),

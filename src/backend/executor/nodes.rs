@@ -2706,6 +2706,7 @@ impl PlanNode for SeqScanState {
         }
 
         if self.scan.is_none() {
+            ctx.predicate_lock_relation(self.relation_oid)?;
             self.scan = Some(heap_scan_begin_visible(
                 &ctx.pool,
                 ctx.client_id,
@@ -2756,6 +2757,7 @@ impl PlanNode for SeqScanState {
                     let xmin = self.slot.xmin();
                     let cmin = self.slot.cmin();
                     let xmax = self.slot.xmax();
+                    ctx.check_serializable_visible_tuple_xmax(xmax)?;
                     self.current_bindings = vec![SystemVarBinding {
                         varno: self.source_id,
                         table_oid: self.relation_oid,
@@ -3063,6 +3065,7 @@ impl PlanNode for IndexOnlyScanState {
                     xmax: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
+                ctx.predicate_lock_tuple(self.relation_oid, tid)?;
 
                 if needs_index_recheck && !recheck_lossy_index_only_scan_tuple(self, ctx)? {
                     note_filtered_row(&mut self.stats);
@@ -3117,6 +3120,8 @@ impl PlanNode for IndexOnlyScanState {
             let xmin = self.slot.xmin();
             let cmin = self.slot.cmin();
             let xmax = self.slot.xmax();
+            ctx.predicate_lock_tuple(self.relation_oid, tid)?;
+            ctx.check_serializable_visible_tuple_xmax(xmax)?;
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
@@ -3308,9 +3313,6 @@ impl PlanNode for TidScanState {
             else {
                 continue;
             };
-            if tid_scan_should_record_serializable_lock(ctx) {
-                let _ = ctx.try_acquire_row_lock(self.relation_oid, tid, RowLockMode::SIRead);
-            }
             {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_tuple_fetched(self.relation_oid);
@@ -3333,6 +3335,8 @@ impl PlanNode for TidScanState {
             let xmin = self.slot.xmin();
             let cmin = self.slot.cmin();
             let xmax = self.slot.xmax();
+            ctx.predicate_lock_tuple(self.relation_oid, tid)?;
+            ctx.check_serializable_visible_tuple_xmax(xmax)?;
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
@@ -3422,12 +3426,6 @@ impl PlanNode for TidScanState {
         _lines: &mut Vec<String>,
     ) {
     }
-}
-
-fn tid_scan_should_record_serializable_lock(ctx: &ExecutorContext) -> bool {
-    ctx.gucs
-        .get("transaction_isolation")
-        .is_some_and(|value| value.eq_ignore_ascii_case("serializable"))
 }
 
 fn tid_scan_candidates(
@@ -3599,6 +3597,7 @@ impl PlanNode for IndexScanState {
                         xmax: None,
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
+                    ctx.predicate_lock_tuple(self.relation_oid, tid)?;
 
                     if let Some(qual) = &self.qual {
                         let outer_values = materialize_slot_values(&mut self.slot)?;
@@ -3650,6 +3649,8 @@ impl PlanNode for IndexScanState {
             let xmin = self.slot.xmin();
             let cmin = self.slot.cmin();
             let xmax = self.slot.xmax();
+            ctx.predicate_lock_tuple(self.relation_oid, tid)?;
+            ctx.check_serializable_visible_tuple_xmax(xmax)?;
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
@@ -4718,13 +4719,17 @@ impl PlanNode for BitmapHeapScanState {
             let xmin = self.slot.xmin();
             let cmin = self.slot.cmin();
             let xmax = self.slot.xmax();
+            let tid = crate::include::access::itemptr::ItemPointerData {
+                block_number: self.bitmap_pages[self.current_page_index - 1],
+                offset_number: offset,
+            };
+            ctx.predicate_lock_page(self.relation_oid, tid.block_number)?;
+            ctx.predicate_lock_tuple(self.relation_oid, tid)?;
+            ctx.check_serializable_visible_tuple_xmax(xmax)?;
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
-                tid: Some(crate::include::access::itemptr::ItemPointerData {
-                    block_number: self.bitmap_pages[self.current_page_index - 1],
-                    offset_number: offset,
-                }),
+                tid: Some(tid),
                 xmin,
                 cmin,
                 xmax,

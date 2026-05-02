@@ -6029,6 +6029,7 @@ pub(crate) fn write_insert_heap_row(
         crate::backend::executor::InsertForeignKeyCheckPhase::BeforeHeapInsert,
         ctx,
     )?;
+    ctx.check_serializable_write_relation(relation_oid)?;
     let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
     let fillfactor = heap_fillfactor_for_relation(relation_oid, ctx);
     heap_insert_mvcc_with_cid_and_fillfactor(
@@ -6770,6 +6771,7 @@ pub(crate) fn write_updated_row(
     );
     let (replacement, toasted) =
         toast_tuple_for_write(desc, &current_values, toast, toast_index, ctx, xid, cid)?;
+    ctx.check_serializable_write_tuple(relation_oid, current_tid)?;
     match heap_update_with_waiter_with_snapshot(
         &*ctx.pool,
         ctx.client_id,
@@ -6941,6 +6943,9 @@ pub(crate) fn collect_matching_rows_heap_with_table_oid(
     // Per-row timeout polling makes PostgreSQL's btree regression delete tests
     // time out in dev builds; restore finer-grained checks when DELETE can use
     // streaming/index range deletion for these paths.
+    if let Some(table_oid) = table_oid {
+        ctx.predicate_lock_relation(table_oid)?;
+    }
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, rel, ctx.snapshot.clone())?;
 
     let desc = Rc::new(desc.clone());
@@ -6980,6 +6985,7 @@ pub(crate) fn collect_matching_rows_heap_with_table_oid(
             slot.tts_nvalid = 0;
             slot.tts_values.clear();
             slot.decode_offset = 0;
+            ctx.check_serializable_visible_tuple_xmax(slot.xmax())?;
             slot.values()?;
             Value::materialize_all(&mut slot.tts_values);
             page_rows.push((tid, slot.tts_values.clone()));
@@ -7775,6 +7781,10 @@ pub(crate) fn collect_matching_rows_index(
             TupleSlot::from_heap_tuple(Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple);
         slot.table_oid = table_oid;
         slot.toast = slot_toast_context(toast, ctx);
+        if let Some(table_oid) = table_oid {
+            ctx.predicate_lock_tuple(table_oid, tid)?;
+            ctx.check_serializable_visible_tuple_xmax(slot.xmax())?;
+        }
         if let Some(q) = &qual {
             if !q(&mut slot, ctx)? {
                 continue;
@@ -13404,6 +13414,7 @@ fn execute_merge_delete_row(
     } else {
         None
     };
+    ctx.check_serializable_write_tuple(target_relation_oid, target_tid)?;
     match heap_delete_with_waiter(
         &*ctx.pool,
         ctx.client_id,
@@ -17238,6 +17249,7 @@ fn execute_delete_from_joined_input(
                 } else {
                     None
                 };
+                ctx.check_serializable_write_tuple(target.relation_oid, current_tid)?;
                 match heap_delete_with_waiter_with_wal_policy(
                     &*ctx.pool,
                     ctx.client_id,
@@ -17511,6 +17523,7 @@ pub fn execute_delete_with_waiter(
                     } else {
                         None
                     };
+                    ctx.check_serializable_write_tuple(target.relation_oid, current_tid)?;
                     match heap_delete_with_waiter_with_wal_policy(
                         &*ctx.pool,
                         ctx.client_id,
@@ -17905,6 +17918,7 @@ pub(crate) fn apply_base_update_row(
             xid,
             cid,
         )?;
+        ctx.check_serializable_write_tuple(target.relation_oid, current_tid)?;
         match heap_update_with_waiter_with_snapshot(
             &*ctx.pool,
             ctx.client_id,
@@ -18182,6 +18196,7 @@ pub(crate) fn apply_base_delete_row(
         } else {
             None
         };
+        ctx.check_serializable_write_tuple(target.relation_oid, current_tid)?;
         match heap_delete_with_waiter_with_wal_policy(
             &*ctx.pool,
             ctx.client_id,

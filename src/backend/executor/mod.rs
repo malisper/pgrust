@@ -166,9 +166,12 @@ use crate::backend::parser::{
     CatalogLookup, ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement,
     pg_plan_query, pg_plan_values_query,
 };
-use crate::backend::storage::lmgr::TableLockError;
 use crate::backend::storage::lmgr::{
     AdvisoryLockManager, RowLockError, RowLockManager, RowLockMode, RowLockOwner, RowLockTag,
+};
+use crate::backend::storage::lmgr::{
+    PredicateFailureReason, PredicateLockError, PredicateLockTarget, SerializableXactId,
+    TableLockError,
 };
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
@@ -656,6 +659,7 @@ pub struct ExecutorTransactionState {
     pub xid: Option<TransactionId>,
     pub cid: CommandId,
     pub transaction_snapshot: Option<Snapshot>,
+    pub serializable_xact: Option<SerializableXactId>,
 }
 
 pub type SharedExecutorTransactionState = Arc<parking_lot::Mutex<ExecutorTransactionState>>;
@@ -704,6 +708,19 @@ impl ExecutorContext {
             .is_some_and(|state| state.lock().transaction_snapshot.is_some())
     }
 
+    pub fn serializable_xact_id(&self) -> Option<SerializableXactId> {
+        if !self
+            .gucs
+            .get("transaction_isolation")
+            .is_some_and(|value| value.eq_ignore_ascii_case("serializable"))
+        {
+            return None;
+        }
+        self.transaction_state
+            .as_ref()
+            .and_then(|state| state.lock().serializable_xact)
+    }
+
     pub fn constraint_timing(
         &self,
         constraint_oid: u32,
@@ -745,6 +762,13 @@ impl ExecutorContext {
                 state.xid = Some(xid);
                 if let Some(waiter) = &self.txn_waiter {
                     waiter.register_holder(xid, self.client_id);
+                }
+                if let (Some(db), Some(serializable_xact)) =
+                    (self.database.as_ref(), state.serializable_xact)
+                {
+                    db.predicate_locks
+                        .register_xid(serializable_xact, xid)
+                        .map_err(ExecError::from)?;
                 }
                 xid
             }
@@ -814,6 +838,124 @@ impl ExecutorContext {
             mode,
             self.row_lock_owner(),
         )
+    }
+
+    pub fn predicate_lock_relation(&self, relation_oid: u32) -> Result<(), ExecError> {
+        let Some(serializable_xact) = self.serializable_xact_id() else {
+            return Ok(());
+        };
+        let Some(db) = self.database.as_ref() else {
+            return Ok(());
+        };
+        db.predicate_locks
+            .predicate_lock(
+                serializable_xact,
+                PredicateLockTarget::relation(db.database_oid, relation_oid),
+            )
+            .map_err(ExecError::from)
+    }
+
+    pub fn predicate_lock_page(
+        &self,
+        relation_oid: u32,
+        block_number: u32,
+    ) -> Result<(), ExecError> {
+        let Some(serializable_xact) = self.serializable_xact_id() else {
+            return Ok(());
+        };
+        let Some(db) = self.database.as_ref() else {
+            return Ok(());
+        };
+        db.predicate_locks
+            .predicate_lock(
+                serializable_xact,
+                PredicateLockTarget::page(db.database_oid, relation_oid, block_number),
+            )
+            .map_err(ExecError::from)
+    }
+
+    pub fn predicate_lock_tuple(
+        &self,
+        relation_oid: u32,
+        tid: crate::include::access::itemptr::ItemPointerData,
+    ) -> Result<(), ExecError> {
+        let Some(serializable_xact) = self.serializable_xact_id() else {
+            return Ok(());
+        };
+        let Some(db) = self.database.as_ref() else {
+            return Ok(());
+        };
+        db.predicate_locks
+            .predicate_lock(
+                serializable_xact,
+                PredicateLockTarget::tuple(
+                    db.database_oid,
+                    relation_oid,
+                    tid.block_number,
+                    tid.offset_number,
+                ),
+            )
+            .map_err(ExecError::from)
+    }
+
+    pub fn check_serializable_visible_tuple_xmax(
+        &self,
+        xmax: Option<TransactionId>,
+    ) -> Result<(), ExecError> {
+        let Some(serializable_xact) = self.serializable_xact_id() else {
+            return Ok(());
+        };
+        let Some(db) = self.database.as_ref() else {
+            return Ok(());
+        };
+        let Some(xmax) = xmax else {
+            return Ok(());
+        };
+        if xmax == INVALID_TRANSACTION_ID || self.snapshot.transaction_is_own(xmax) {
+            return Ok(());
+        }
+        db.predicate_locks
+            .check_conflict_out(serializable_xact, xmax)
+            .map_err(ExecError::from)
+    }
+
+    pub fn check_serializable_write_relation(&self, relation_oid: u32) -> Result<(), ExecError> {
+        let Some(serializable_xact) = self.serializable_xact_id() else {
+            return Ok(());
+        };
+        let Some(db) = self.database.as_ref() else {
+            return Ok(());
+        };
+        db.predicate_locks
+            .check_conflict_in(
+                serializable_xact,
+                PredicateLockTarget::relation(db.database_oid, relation_oid),
+            )
+            .map_err(ExecError::from)
+    }
+
+    pub fn check_serializable_write_tuple(
+        &self,
+        relation_oid: u32,
+        tid: crate::include::access::itemptr::ItemPointerData,
+    ) -> Result<(), ExecError> {
+        let Some(serializable_xact) = self.serializable_xact_id() else {
+            return Ok(());
+        };
+        let Some(db) = self.database.as_ref() else {
+            return Ok(());
+        };
+        db.predicate_locks
+            .check_conflict_in(
+                serializable_xact,
+                PredicateLockTarget::tuple(
+                    db.database_oid,
+                    relation_oid,
+                    tid.block_number,
+                    tid.offset_number,
+                ),
+            )
+            .map_err(ExecError::from)
     }
 
     pub fn record_catalog_effect(&mut self, effect: CatalogMutationEffect) {
@@ -1063,6 +1205,33 @@ impl From<TableLockError> for ExecError {
         match value {
             TableLockError::Interrupted(reason) => Self::Interrupted(reason),
         }
+    }
+}
+
+impl From<PredicateLockError> for ExecError {
+    fn from(value: PredicateLockError) -> Self {
+        match value {
+            PredicateLockError::SerializationFailure(reason) => {
+                serialization_failure_for_ssi(reason)
+            }
+            PredicateLockError::UnknownSerializableTransaction(id) => Self::DetailedError {
+                message: format!("unknown serializable transaction {:?}", id),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            },
+            PredicateLockError::Interrupted(reason) => Self::Interrupted(reason),
+        }
+    }
+}
+
+fn serialization_failure_for_ssi(reason: PredicateFailureReason) -> ExecError {
+    ExecError::DetailedError {
+        message: "could not serialize access due to read/write dependencies among transactions"
+            .into(),
+        detail: Some(reason.detail().into()),
+        hint: Some("The transaction might succeed if retried.".into()),
+        sqlstate: "40001",
     }
 }
 
