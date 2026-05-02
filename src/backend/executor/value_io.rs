@@ -333,7 +333,7 @@ fn format_exclusion_key_detail_with_existing_label(
 ) -> String {
     let names = columns
         .iter()
-        .map(|column| column.name.as_str())
+        .map(|column| format_exclusion_column_name(&column.name))
         .collect::<Vec<_>>()
         .join(", ");
     let proposed = proposed
@@ -352,6 +352,21 @@ fn format_exclusion_key_detail_with_existing_label(
         format!("Key ({names})=({proposed}) conflicts with existing key ({names})=({existing}).")
     } else {
         format!("Key ({names})=({proposed}) conflicts with key ({names})=({existing}).")
+    }
+}
+
+fn format_exclusion_column_name(name: &str) -> String {
+    if name.starts_with('(') && name.ends_with(')') {
+        return name.to_string();
+    }
+    if name.contains("::")
+        || name
+            .chars()
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '+' | '-' | '*' | '/' | '(' | ')'))
+    {
+        format!("({name})")
+    } else {
+        name.to_string()
     }
 }
 
@@ -2817,6 +2832,39 @@ mod tests {
         let decoded = decode_value(&desc.columns[0], raw[0]).unwrap();
 
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn exclusion_key_detail_parenthesizes_expression_columns() {
+        let columns = vec![
+            column_desc("c1", SqlType::new(SqlTypeKind::Circle), false),
+            column_desc("c2::circle", SqlType::new(SqlTypeKind::Circle), false),
+        ];
+        let proposed = vec![
+            Value::Circle(crate::include::nodes::datum::GeoCircle {
+                center: crate::include::nodes::datum::GeoPoint { x: 20.0, y: 20.0 },
+                radius: 10.0,
+            }),
+            Value::Circle(crate::include::nodes::datum::GeoCircle {
+                center: crate::include::nodes::datum::GeoPoint { x: 0.0, y: 0.0 },
+                radius: 4.0,
+            }),
+        ];
+        let existing = vec![
+            Value::Circle(crate::include::nodes::datum::GeoCircle {
+                center: crate::include::nodes::datum::GeoPoint { x: 10.0, y: 10.0 },
+                radius: 10.0,
+            }),
+            Value::Circle(crate::include::nodes::datum::GeoCircle {
+                center: crate::include::nodes::datum::GeoPoint { x: 0.0, y: 0.0 },
+                radius: 5.0,
+            }),
+        ];
+
+        let detail = format_exclusion_key_detail(&columns, &proposed, &existing);
+
+        assert!(detail.contains("Key (c1, (c2::circle))="));
+        assert!(detail.contains("existing key (c1, (c2::circle))="));
     }
 
     #[test]

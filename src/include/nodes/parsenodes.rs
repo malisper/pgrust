@@ -1524,6 +1524,9 @@ pub struct ExplainStatement {
     pub costs: bool,
     pub summary: bool,
     pub format: ExplainFormat,
+    pub serialize: Option<ExplainSerializeFormat>,
+    pub settings: bool,
+    pub memory: bool,
     pub timing: bool,
     pub verbose: bool,
     pub statement: Box<Statement>,
@@ -1533,6 +1536,14 @@ pub struct ExplainStatement {
 pub enum ExplainFormat {
     Text,
     Json,
+    Xml,
+    Yaml,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplainSerializeFormat {
+    Text,
+    Binary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

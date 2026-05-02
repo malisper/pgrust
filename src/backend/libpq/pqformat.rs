@@ -163,6 +163,13 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
                 format!("{arg} value cannot be {issue}")
             }
         }
+        ExecError::TypeMismatch { op, left, right } if type_mismatch_op_is_operator(op) => {
+            format!(
+                "operator does not exist: {} {op} {}",
+                value_type_name(left),
+                value_type_name(right)
+            )
+        }
         ExecError::Heap(HeapError::Tuple(TupleError::Oversized { size, max_size })) => {
             format!("row is too big: size {size}, maximum size {max_size}")
         }
@@ -190,6 +197,9 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => Some(
             "No operator matches the given name and argument types. You might need to add explicit type casts.".into(),
         ),
+        ExecError::TypeMismatch { op, .. } if type_mismatch_op_is_operator(op) => Some(
+            "No operator matches the given name and argument types. You might need to add explicit type casts.".into(),
+        ),
         ExecError::RaiseException(message)
             if message.starts_with("unrecognized format() type specifier")
                 || message == "unterminated format() type specifier" =>
@@ -202,6 +212,61 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
         ExecError::CardinalityViolation { hint, .. } => hint.clone(),
         _ => None,
     }
+}
+
+fn type_mismatch_op_is_operator(op: &str) -> bool {
+    !op.is_empty() && op.chars().all(|ch| "!~+-*/<>=@#%^&|`?".contains(ch))
+}
+
+fn value_type_name(value: &Value) -> String {
+    match value {
+        Value::Int16(_) => "smallint",
+        Value::Int32(_) => "integer",
+        Value::Int64(_) => "bigint",
+        Value::Xid8(_) => "xid8",
+        Value::Money(_) => "money",
+        Value::Date(_) => "date",
+        Value::Time(_) => "time without time zone",
+        Value::TimeTz(_) => "time with time zone",
+        Value::Timestamp(_) => "timestamp without time zone",
+        Value::TimestampTz(_) => "timestamp with time zone",
+        Value::Interval(_) => "interval",
+        Value::Bit(_) => "bit",
+        Value::Bytea(_) => "bytea",
+        Value::Uuid(_) => "uuid",
+        Value::Inet(_) => "inet",
+        Value::Cidr(_) => "cidr",
+        Value::MacAddr(_) => "macaddr",
+        Value::MacAddr8(_) => "macaddr8",
+        Value::Point(_) => "point",
+        Value::Lseg(_) => "lseg",
+        Value::Path(_) => "path",
+        Value::Line(_) => "line",
+        Value::Box(_) => "box",
+        Value::Polygon(_) => "polygon",
+        Value::Circle(_) => "circle",
+        Value::Range(_) => "anyrange",
+        Value::Multirange(_) => "anymultirange",
+        Value::Float64(_) => "double precision",
+        Value::Numeric(_) => "numeric",
+        Value::Json(_) => "json",
+        Value::Jsonb(_) => "jsonb",
+        Value::JsonPath(_) => "jsonpath",
+        Value::Xml(_) => "xml",
+        Value::TsVector(_) => "tsvector",
+        Value::TsQuery(_) => "tsquery",
+        Value::PgLsn(_) => "pg_lsn",
+        Value::Tid(_) => "tid",
+        Value::Text(_) | Value::TextRef(_, _) => "text",
+        Value::EnumOid(_) => "anyenum",
+        Value::InternalChar(_) => "\"char\"",
+        Value::Bool(_) => "boolean",
+        Value::Array(_) | Value::PgArray(_) => "anyarray",
+        Value::Record(_) => "record",
+        Value::IndirectVarlena(_) => "text",
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } | Value::Null => "unknown",
+    }
+    .into()
 }
 
 fn enum_array_type_oid(
@@ -2466,6 +2531,7 @@ mod tests {
     };
     use crate::backend::executor::{ExecError, QueryColumn, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::datum::GeoPoint;
     use crate::pgrust::session::ByteaOutputFormat;
     use std::collections::HashMap;
 
@@ -2522,6 +2588,26 @@ mod tests {
         assert_eq!(
             format_float4_text(f64::NEG_INFINITY, FloatFormatOptions::default()),
             "-Infinity"
+        );
+    }
+
+    #[test]
+    fn operator_type_mismatch_uses_postgres_message() {
+        let err = ExecError::TypeMismatch {
+            op: "+",
+            left: Value::Point(GeoPoint { x: 0.0, y: 0.0 }),
+            right: Value::Int32(1),
+        };
+
+        assert_eq!(
+            format_exec_error(&err),
+            "operator does not exist: point + integer"
+        );
+        assert_eq!(
+            format_exec_error_hint(&err).as_deref(),
+            Some(
+                "No operator matches the given name and argument types. You might need to add explicit type casts."
+            )
         );
     }
 

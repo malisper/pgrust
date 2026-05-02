@@ -2193,6 +2193,9 @@ fn build_raw_explain_execute_statement(sql: &str) -> Result<Option<Statement>, P
         costs: true,
         summary: true,
         format: ExplainFormat::Text,
+        serialize: None,
+        settings: false,
+        memory: false,
         timing: true,
         verbose: false,
         statement: Box::new(Statement::Unsupported(UnsupportedStatement {
@@ -2245,13 +2248,36 @@ fn apply_raw_explain_options(
             "buffers" => explain.buffers = bool_val,
             "costs" => explain.costs = bool_val,
             "summary" => explain.summary = bool_val,
+            "memory" => explain.memory = bool_val,
+            "settings" => explain.settings = bool_val,
+            "serialize" => {
+                explain.serialize = explain_serialize_option(bool_val, Some(value.as_str()));
+            }
             "timing" => explain.timing = bool_val,
             "verbose" => explain.verbose = bool_val,
-            "format" if value == "json" => explain.format = ExplainFormat::Json,
+            "format" => {
+                explain.format = match value.as_str() {
+                    "json" => ExplainFormat::Json,
+                    "xml" => ExplainFormat::Xml,
+                    "yaml" => ExplainFormat::Yaml,
+                    "text" => ExplainFormat::Text,
+                    _ => explain.format,
+                }
+            }
             _ => {}
         }
     }
     Ok(())
+}
+
+fn explain_serialize_option(enabled: bool, value: Option<&str>) -> Option<ExplainSerializeFormat> {
+    if !enabled {
+        return None;
+    }
+    match value.unwrap_or("text") {
+        "binary" => Some(ExplainSerializeFormat::Binary),
+        _ => Some(ExplainSerializeFormat::Text),
+    }
 }
 
 fn substitute_prepared_parameter_refs(
@@ -21242,20 +21268,27 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut costs = true;
     let mut summary = true;
     let mut format = ExplainFormat::Text;
+    let mut generic_plan = false;
+    let mut serialize = None;
+    let mut memory = false;
+    let mut settings = false;
     let mut timing = true;
     let mut verbose = false;
     let mut statement = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::kw_analyze => analyze = true,
+            Rule::kw_verbose => verbose = true,
             Rule::explain_option => {
                 let mut name_rule = None;
+                let mut name_text = None;
                 let mut value_rule = None;
                 let mut value_text = None;
                 let mut bool_val = true;
                 for child in part.into_inner() {
                     match child.as_rule() {
                         Rule::explain_option_name => {
+                            name_text = Some(child.as_str().trim().to_ascii_lowercase());
                             name_rule = child.into_inner().next().map(|r| r.as_rule());
                         }
                         Rule::explain_option_value => {
@@ -21270,21 +21303,46 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                         _ => {}
                     }
                 }
-                match name_rule {
-                    Some(Rule::kw_analyze) => analyze = bool_val,
-                    Some(Rule::kw_buffers) => buffers = bool_val,
-                    Some(Rule::kw_costs) => costs = bool_val,
-                    Some(Rule::kw_summary) => summary = bool_val,
-                    Some(Rule::kw_timing) => timing = bool_val,
-                    Some(Rule::kw_verbose) => verbose = bool_val,
-                    Some(Rule::kw_format) => {
-                        if matches!(value_rule, Some(Rule::kw_json))
-                            || value_text.as_deref() == Some("json")
-                        {
-                            format = ExplainFormat::Json;
-                        }
+                match name_text.as_deref() {
+                    Some("analyze") => analyze = bool_val,
+                    Some("buffers") => buffers = bool_val,
+                    Some("costs") => costs = bool_val,
+                    Some("summary") => summary = bool_val,
+                    Some("memory") => memory = bool_val,
+                    Some("settings") => settings = bool_val,
+                    Some("serialize") => {
+                        serialize = explain_serialize_option(bool_val, value_text.as_deref());
                     }
-                    _ => {} // Non-JSON FORMAT variants are parsed but ignored.
+                    Some("timing") => timing = bool_val,
+                    Some("verbose") => verbose = bool_val,
+                    Some("generic_plan") => generic_plan = bool_val,
+                    Some("format") => {
+                        format = match (value_rule, value_text.as_deref()) {
+                            (Some(Rule::kw_json), _) | (_, Some("json")) => ExplainFormat::Json,
+                            (Some(Rule::kw_xml), _) | (_, Some("xml")) => ExplainFormat::Xml,
+                            (Some(Rule::kw_yaml), _) | (_, Some("yaml")) => ExplainFormat::Yaml,
+                            (Some(Rule::kw_text), _) | (_, Some("text")) => ExplainFormat::Text,
+                            _ => format,
+                        };
+                    }
+                    _ => match name_rule {
+                        Some(Rule::kw_analyze) => analyze = bool_val,
+                        Some(Rule::kw_buffers) => buffers = bool_val,
+                        Some(Rule::kw_costs) => costs = bool_val,
+                        Some(Rule::kw_summary) => summary = bool_val,
+                        Some(Rule::kw_timing) => timing = bool_val,
+                        Some(Rule::kw_verbose) => verbose = bool_val,
+                        Some(Rule::kw_format) => {
+                            format = match (value_rule, value_text.as_deref()) {
+                                (Some(Rule::kw_json), _) | (_, Some("json")) => ExplainFormat::Json,
+                                (Some(Rule::kw_xml), _) | (_, Some("xml")) => ExplainFormat::Xml,
+                                (Some(Rule::kw_yaml), _) | (_, Some("yaml")) => ExplainFormat::Yaml,
+                                (Some(Rule::kw_text), _) | (_, Some("text")) => ExplainFormat::Text,
+                                _ => format,
+                            };
+                        }
+                        _ => {}
+                    },
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
@@ -21310,12 +21368,23 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
             _ => {}
         }
     }
+    if analyze && generic_plan {
+        return Err(ParseError::DetailedError {
+            message: "EXPLAIN options ANALYZE and GENERIC_PLAN cannot be used together".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
     Ok(ExplainStatement {
         analyze,
         buffers,
         costs,
         summary,
         format,
+        serialize,
+        settings,
+        memory,
         timing,
         verbose,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),

@@ -1,5 +1,9 @@
 use pest::Parser as _;
 
+// Keep Cargo's dependency tracking tied to grammar edits in addition to the
+// derive macro input, so parser changes are rebuilt reliably.
+const _: &str = include_str!("gram.pest");
+
 #[derive(pest_derive::Parser)]
 #[grammar = "gram.pest"]
 pub struct SqlParser;
