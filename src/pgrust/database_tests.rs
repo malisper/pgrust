@@ -46530,6 +46530,52 @@ fn create_operator_class_persists_catalog_rows() {
 }
 
 #[test]
+fn create_operator_class_uses_schema_qualified_composite_operator() {
+    let base = temp_dir("create_operator_class_composite_operator");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create schema alter1").unwrap();
+    db.execute(1, "create type alter1.ctype as (f1 int, f2 text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function alter1.same(alter1.ctype, alter1.ctype) returns boolean language sql as $$
+         select $1.f1 is not distinct from $2.f1 and $1.f2 is not distinct from $2.f2
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator alter1.=(procedure = alter1.same, leftarg = alter1.ctype, rightarg = alter1.ctype)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator class alter1.ctype_hash_ops default for type alter1.ctype using hash as
+         operator 1 alter1.=(alter1.ctype, alter1.ctype)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select o.oprname, c.opcname, c.opcdefault
+             from pg_operator o
+             join pg_amop a on a.amopopr = o.oid
+             join pg_opclass c on c.opcfamily = a.amopfamily
+             join pg_namespace n on n.oid = c.opcnamespace
+             where n.nspname = 'alter1' and c.opcname = 'ctype_hash_ops'",
+        ),
+        vec![vec![
+            Value::Text("=".into()),
+            Value::Text("ctype_hash_ops".into()),
+            Value::Bool(true),
+        ]]
+    );
+}
+
+#[test]
 fn create_operator_bool_bool_regression_debug() {
     let base = temp_dir("create_operator_bool_bool_regression");
     let db = Database::open(&base, 16).unwrap();
