@@ -19271,8 +19271,8 @@ fn analyze_pg_blocking_function_wrong_arities_fail() {
         assert!(
             matches!(
                 err.unpositioned(),
-                ParseError::DetailedError {
-                    sqlstate: "42883",
+                ParseError::UnexpectedToken {
+                    expected: "valid builtin function arity",
                     ..
                 }
             ),
