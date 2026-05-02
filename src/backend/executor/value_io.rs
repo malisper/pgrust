@@ -2311,7 +2311,9 @@ pub(crate) fn decode_value_with_toast(
         return Ok(Value::Null);
     };
     let owned = if column.storage.attlen == -1 {
-        if crate::include::varatt::is_indirect_toast_pointer(bytes) {
+        if bytes.len() == crate::include::varatt::INDIRECT_POINTER_SIZE
+            && crate::include::varatt::is_indirect_toast_pointer(bytes)
+        {
             return Err(ExecError::InvalidStorageValue {
                 column: column.name.clone(),
                 details: "indirect toast pointer found in stored tuple".into(),
@@ -2910,6 +2912,36 @@ mod tests {
         let raw = tuple.deform(&desc.attribute_descs()).unwrap();
         let decoded = decode_value(&desc.columns[0], raw[0]).unwrap();
 
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn record_payload_starting_like_indirect_tag_is_not_rejected() {
+        let desc = RelationDesc {
+            columns: vec![column_desc(
+                "v",
+                SqlType::record(crate::include::catalog::RECORD_TYPE_OID),
+                true,
+            )],
+        };
+        let descriptor = RecordDescriptor::named(
+            1,
+            0,
+            -1,
+            vec![("a".into(), SqlType::new(SqlTypeKind::Int4))],
+        );
+        let value = Value::Record(RecordValue::from_descriptor(
+            descriptor,
+            vec![Value::Int32(42)],
+        ));
+
+        let tuple = tuple_from_values(&desc, std::slice::from_ref(&value)).unwrap();
+        let raw = tuple.deform(&desc.attribute_descs()).unwrap();
+        let payload = raw[0].expect("record payload");
+        assert_eq!(payload[0], crate::include::varatt::VARATT_EXTERNAL_HEADER);
+        assert_eq!(payload[1], crate::include::varatt::VARTAG_INDIRECT);
+
+        let decoded = decode_value(&desc.columns[0], Some(payload)).unwrap();
         assert_eq!(decoded, value);
     }
 
