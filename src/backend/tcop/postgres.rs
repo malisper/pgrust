@@ -13796,7 +13796,12 @@ fn describe_sql(
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             Ok(Some(columns))
         }
-        Statement::Explain(_) => Ok(Some(vec![QueryColumn::text("QUERY PLAN")])),
+        Statement::Explain(explain) => Ok(Some(vec![
+            crate::backend::commands::tablecmds::explain_query_column(matches!(
+                explain.format,
+                crate::backend::parser::ExplainFormat::Json
+            )),
+        ])),
         _ => Ok(None),
     }
 }

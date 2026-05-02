@@ -27869,8 +27869,15 @@ fn explain_analyze_json_reports_gin_bitmap_stats() {
     let StatementResult::Query { rows, .. } = result else {
         panic!("expected EXPLAIN query result");
     };
-    let Some(Value::Text(json)) = rows.first().and_then(|row| row.first()) else {
-        panic!("expected JSON EXPLAIN text row, got {rows:?}");
+    let Some(json) = rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|value| match value {
+            Value::Json(json) | Value::Text(json) => Some(json),
+            _ => None,
+        })
+    else {
+        panic!("expected JSON EXPLAIN row, got {rows:?}");
     };
     let parsed: serde_json::Value =
         serde_json::from_str(json.as_str()).expect("EXPLAIN JSON must parse");

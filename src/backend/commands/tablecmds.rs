@@ -751,8 +751,8 @@ pub(crate) fn execute_explain(
             }
         };
         if matches!(format, ExplainFormat::Json) {
-            end_explain_analyze_initplan_capture();
             lines.push(format_explain_analyze_json(state.as_ref()));
+            end_explain_analyze_initplan_capture();
         } else {
             format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
             end_explain_analyze_initplan_capture();
@@ -812,14 +812,40 @@ pub(crate) fn execute_explain(
         }
     }
 
+    let json_output = explain_lines_are_single_json_value(format, &lines);
     Ok(StatementResult::Query {
-        columns: vec![QueryColumn::text("QUERY PLAN")],
+        columns: vec![explain_query_column(json_output)],
         column_names: vec!["QUERY PLAN".into()],
         rows: lines
             .into_iter()
-            .map(|line| vec![Value::Text(line.into())])
+            .map(|line| {
+                if json_output {
+                    vec![Value::Json(line.into())]
+                } else {
+                    vec![Value::Text(line.into())]
+                }
+            })
             .collect(),
     })
+}
+
+fn explain_lines_are_single_json_value(format: ExplainFormat, lines: &[String]) -> bool {
+    if !matches!(format, ExplainFormat::Json) || lines.len() != 1 {
+        return false;
+    }
+    matches!(lines[0].trim_start().as_bytes().first(), Some(b'[' | b'{'))
+}
+
+pub(crate) fn explain_query_column(json_output: bool) -> QueryColumn {
+    if json_output {
+        QueryColumn {
+            name: "QUERY PLAN".into(),
+            sql_type: SqlType::new(SqlTypeKind::Json),
+            wire_type_oid: None,
+        }
+    } else {
+        QueryColumn::text("QUERY PLAN")
+    }
 }
 
 fn explain_merge_target_name(target_name: &str, verbose: bool) -> String {
