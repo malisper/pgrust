@@ -7,17 +7,18 @@ use crate::backend::parser::SqlType;
 use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
     BootstrapCatalogKind, PG_CATALOG_NAMESPACE_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
-    PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow,
-    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
-    PgDatabaseRow, PgDefaultAclRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow,
-    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
-    PgLanguageRow, PgLargeobjectMetadataRow, PgLargeobjectRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
-    PgShdependRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
-    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_row_by_oid,
-    composite_array_type_row_with_owner, composite_type_row_with_owner,
+    PG_TOAST_NAMESPACE_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDefaultAclRow, PgDependRow,
+    PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow,
+    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgLargeobjectMetadataRow,
+    PgLargeobjectRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgShdependRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
+    bootstrap_composite_type_rows, builtin_type_row_by_oid, composite_array_type_row_with_owner,
+    composite_type_row_with_owner,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -395,7 +396,10 @@ fn documented_operator_description(oid: u32) -> Option<String> {
 
 fn default_relreplident_for_catalog_entry(entry: &CatalogEntry) -> char {
     if matches!(entry.relkind, 'r' | 'p') {
-        if entry.namespace_oid == PG_CATALOG_NAMESPACE_OID {
+        if matches!(
+            entry.namespace_oid,
+            PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
+        ) {
             'n'
         } else {
             'd'
