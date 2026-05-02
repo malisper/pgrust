@@ -187,14 +187,15 @@ fn check_visibility(
         };
     }
     if snapshot.transaction_is_own(xmin) {
-        if xmin == snapshot.current_xid && cid >= snapshot.current_cid {
+        let (cmin, cmax) = own_tuple_command_ids(txns, xmin, cid);
+        if cmin >= snapshot.current_cid {
             return false;
         }
         if xmax == INVALID_TRANSACTION_ID {
             return true;
         }
         if snapshot.transaction_is_own(xmax) {
-            return false;
+            return cmax >= snapshot.current_cid;
         }
         if xmax >= snapshot.xmax {
             return true;
@@ -224,7 +225,7 @@ fn check_visibility(
         return true;
     }
     if snapshot.transaction_is_own(xmax) {
-        return false;
+        return cid >= snapshot.current_cid;
     }
     if xmax >= snapshot.xmax {
         return true;
@@ -236,4 +237,12 @@ fn check_visibility(
         Some(TransactionStatus::Committed) => false,
         Some(TransactionStatus::Aborted) | Some(TransactionStatus::InProgress) | None => true,
     }
+}
+
+fn own_tuple_command_ids(
+    txns: &TransactionManager,
+    xmin: TransactionId,
+    cid: CommandId,
+) -> (CommandId, CommandId) {
+    txns.combo_command_pair(xmin, cid).unwrap_or((cid, cid))
 }

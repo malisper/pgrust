@@ -9,7 +9,7 @@ use crate::backend::access::heap::heapam::{
     HeapError, heap_delete_with_waiter, heap_delete_with_waiter_with_wal_policy, heap_fetch,
     heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid_and_fillfactor,
     heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
-    heap_update_with_waiter,
+    heap_update_with_waiter_with_snapshot,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
@@ -6528,7 +6528,7 @@ pub(crate) fn write_updated_row(
     );
     let (replacement, toasted) =
         toast_tuple_for_write(desc, &current_values, toast, toast_index, ctx, xid, cid)?;
-    match heap_update_with_waiter(
+    match heap_update_with_waiter_with_snapshot(
         &*ctx.pool,
         ctx.client_id,
         rel,
@@ -6537,6 +6537,7 @@ pub(crate) fn write_updated_row(
         cid,
         current_tid,
         &replacement,
+        &ctx.snapshot,
         waiter,
     ) {
         Ok(new_tid) => {
@@ -15181,6 +15182,7 @@ pub(crate) fn project_returning_row_with_old_new(
             table_oid,
             tid,
             xmin: has_new.then_some(xid),
+            cmin: Some(ctx.next_command_id),
             xmax: if has_old { Some(xid) } else { Some(0) },
         }];
     }
@@ -17377,7 +17379,7 @@ pub(crate) fn apply_base_update_row(
             xid,
             cid,
         )?;
-        match heap_update_with_waiter(
+        match heap_update_with_waiter_with_snapshot(
             &*ctx.pool,
             ctx.client_id,
             target.rel,
@@ -17386,6 +17388,7 @@ pub(crate) fn apply_base_update_row(
             cid,
             current_tid,
             &current_replacement,
+            &ctx.snapshot,
             waiter,
         ) {
             Ok(new_tid) => {

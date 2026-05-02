@@ -5,16 +5,16 @@ use crate::backend::parser::parse_statement;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::{
-    ANYOID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PG_TYPE_RELATION_OID,
+    ANYOID, CID_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PG_TYPE_RELATION_OID,
     PgPartitionedTableRow, PgProcRow, VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
-    AttrNumber, BoolExpr, BuiltinScalarFunction, CaseExpr, CaseWhen, ColumnDesc, FuncExpr,
-    JoinType, JsonRecordFunction, RULE_NEW_VAR, RULE_OLD_VAR, RowsFromItem, RowsFromSource,
-    SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
-    SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan, SqlJsonTableQuotes,
-    SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
+    AttrNumber, BoolExpr, BuiltinScalarFunction, CMAX_ATTR_NO, CMIN_ATTR_NO, CaseExpr, CaseWhen,
+    ColumnDesc, FuncExpr, JoinType, JsonRecordFunction, RULE_NEW_VAR, RULE_OLD_VAR, RowsFromItem,
+    RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable, SqlJsonTableBehavior,
+    SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan,
+    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
     SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, expr_sql_type_hint,
     user_attrno,
 };
@@ -567,8 +567,18 @@ fn resolve_system_column_in_scope(
         (SELF_ITEM_POINTER_ATTR_NO, SqlType::new(SqlTypeKind::Tid))
     } else if column_name.eq_ignore_ascii_case("xmin") {
         (XMIN_ATTR_NO, SqlType::new(SqlTypeKind::Xid))
+    } else if column_name.eq_ignore_ascii_case("cmin") {
+        (
+            CMIN_ATTR_NO,
+            SqlType::new(SqlTypeKind::Int4).with_identity(CID_TYPE_OID, 0),
+        )
     } else if column_name.eq_ignore_ascii_case("xmax") {
         (XMAX_ATTR_NO, SqlType::new(SqlTypeKind::Xid))
+    } else if column_name.eq_ignore_ascii_case("cmax") {
+        (
+            CMAX_ATTR_NO,
+            SqlType::new(SqlTypeKind::Int4).with_identity(CID_TYPE_OID, 0),
+        )
     } else {
         return Ok(None);
     };

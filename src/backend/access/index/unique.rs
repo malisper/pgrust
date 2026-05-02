@@ -120,7 +120,7 @@ fn tid_reachable_from_same_transaction_update_chain(
         }
         let tuple = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, current_tid)
             .map_err(|err| CatalogError::Io(format!("heap unique chain probe failed: {err:?}")))?;
-        if tuple.header.xmax != ctx.snapshot.current_xid || tuple.header.ctid == current_tid {
+        if !ctx.snapshot.transaction_is_own(tuple.header.xmax) || tuple.header.ctid == current_tid {
             return Ok(false);
         }
         if tuple.header.ctid == target_tid {
@@ -151,12 +151,12 @@ pub(crate) fn classify_unique_candidate(
     if xmin == INVALID_TRANSACTION_ID {
         return Ok(UniqueCandidateResult::NoConflict);
     }
-    if xmin == ctx.snapshot.current_xid
+    if ctx.snapshot.transaction_is_own(xmin)
         && tid_reachable_from_same_transaction_update_chain(ctx, tid)?
     {
         return Ok(UniqueCandidateResult::NoConflict);
     }
-    if xmin != ctx.snapshot.current_xid {
+    if !ctx.snapshot.transaction_is_own(xmin) {
         match txns.status(xmin) {
             Some(TransactionStatus::Committed) => {}
             Some(TransactionStatus::Aborted) => return Ok(UniqueCandidateResult::NoConflict),
@@ -169,7 +169,7 @@ pub(crate) fn classify_unique_candidate(
     if xmax == INVALID_TRANSACTION_ID {
         return Ok(UniqueCandidateResult::Conflict(tuple));
     }
-    if xmax == ctx.snapshot.current_xid {
+    if ctx.snapshot.transaction_is_own(xmax) {
         return Ok(UniqueCandidateResult::NoConflict);
     }
     match txns.status(xmax) {

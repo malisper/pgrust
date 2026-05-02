@@ -20,8 +20,8 @@ use crate::include::nodes::execnodes::*;
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, BoolExprType, BuiltinScalarFunction, Expr, INNER_VAR, JoinType, OUTER_VAR,
-    OpExprKind, ParamKind, ProjectSetTarget, QueryColumn, RowsFromSource,
+    AggAccum, BoolExprType, BuiltinScalarFunction, CMAX_ATTR_NO, CMIN_ATTR_NO, Expr, INNER_VAR,
+    JoinType, OUTER_VAR, OpExprKind, ParamKind, ProjectSetTarget, QueryColumn, RowsFromSource,
     SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SetReturningCall, SqlJsonTable,
     SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePlan,
     SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumnKind, SubPlan,
@@ -10131,7 +10131,9 @@ fn render_system_var_name(
         TABLE_OID_ATTR_NO => "tableoid",
         SELF_ITEM_POINTER_ATTR_NO => "ctid",
         XMIN_ATTR_NO => "xmin",
+        CMIN_ATTR_NO => "cmin",
         XMAX_ATTR_NO => "xmax",
+        CMAX_ATTR_NO => "cmax",
         _ => return None,
     };
     relation_qualifier_from_output_names(names)

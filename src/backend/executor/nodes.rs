@@ -68,10 +68,10 @@ use crate::include::nodes::plannodes::{
     Plan, TidScanSource,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, BuiltinScalarFunction, CaseExpr, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType,
-    OUTER_VAR, OpExprKind, OrderByEntry, ParamKind, RelationDesc, SELF_ITEM_POINTER_ATTR_NO,
-    ScalarFunctionImpl, SetReturningCall, SubLinkType, SubPlan, TABLE_OID_ATTR_NO, Var,
-    XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, is_special_varno,
+    AggAccum, BuiltinScalarFunction, CMAX_ATTR_NO, CMIN_ATTR_NO, CaseExpr, Expr, FuncExpr,
+    INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, OpExprKind, OrderByEntry, ParamKind, RelationDesc,
+    SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SetReturningCall, SubLinkType, SubPlan,
+    TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1534,6 +1534,7 @@ impl AppendState {
                             table_oid: binding.table_oid,
                             tid: binding.tid,
                             xmin: binding.xmin,
+                            cmin: binding.cmin,
                             xmax: binding.xmax,
                         }]
                     })
@@ -2036,6 +2037,7 @@ impl PlanNode for MergeAppendState {
         let table_oid = row.slot.table_oid;
         let tid = row.slot.tid();
         let xmin = row.system_bindings.first().and_then(|binding| binding.xmin);
+        let cmin = row.system_bindings.first().and_then(|binding| binding.cmin);
         let xmax = row.system_bindings.first().and_then(|binding| binding.xmax);
         self.current_bindings = table_oid
             .map(|table_oid| {
@@ -2044,6 +2046,7 @@ impl PlanNode for MergeAppendState {
                     table_oid,
                     tid,
                     xmin,
+                    cmin,
                     xmax,
                 }]
             })
@@ -2531,6 +2534,7 @@ impl PlanNode for SeqScanState {
                     table_oid: self.relation_oid,
                     tid: None,
                     xmin: None,
+                    cmin: None,
                     xmax: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
@@ -2591,6 +2595,7 @@ impl PlanNode for SeqScanState {
                     table_oid: self.relation_oid,
                     tid: None,
                     xmin: None,
+                    cmin: None,
                     xmax: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
@@ -2635,6 +2640,7 @@ impl PlanNode for SeqScanState {
                 table_oid: self.relation_oid,
                 tid: None,
                 xmin: None,
+                cmin: None,
                 xmax: None,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
@@ -2718,12 +2724,14 @@ impl PlanNode for SeqScanState {
                     self.slot.decode_offset = 0;
                     self.slot.table_oid = Some(self.relation_oid);
                     let xmin = self.slot.xmin();
+                    let cmin = self.slot.cmin();
                     let xmax = self.slot.xmax();
                     self.current_bindings = vec![SystemVarBinding {
                         varno: self.source_id,
                         table_oid: self.relation_oid,
                         tid: Some(tid),
                         xmin,
+                        cmin,
                         xmax,
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
@@ -3021,6 +3029,7 @@ impl PlanNode for IndexOnlyScanState {
                     table_oid: self.relation_oid,
                     tid: Some(tid),
                     xmin: None,
+                    cmin: None,
                     xmax: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
@@ -3076,12 +3085,14 @@ impl PlanNode for IndexOnlyScanState {
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
             let xmin = self.slot.xmin();
+            let cmin = self.slot.cmin();
             let xmax = self.slot.xmax();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
                 tid: Some(tid),
                 xmin,
+                cmin,
                 xmax,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
@@ -3290,12 +3301,14 @@ impl PlanNode for TidScanState {
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
             let xmin = self.slot.xmin();
+            let cmin = self.slot.cmin();
             let xmax = self.slot.xmax();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
                 tid: Some(tid),
                 xmin,
+                cmin,
                 xmax,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
@@ -3552,6 +3565,7 @@ impl PlanNode for IndexScanState {
                         table_oid: self.relation_oid,
                         tid: Some(tid),
                         xmin: None,
+                        cmin: None,
                         xmax: None,
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
@@ -3604,12 +3618,14 @@ impl PlanNode for IndexScanState {
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
             let xmin = self.slot.xmin();
+            let cmin = self.slot.cmin();
             let xmax = self.slot.xmax();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
                 tid: Some(tid),
                 xmin,
+                cmin,
                 xmax,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
@@ -4614,6 +4630,7 @@ impl PlanNode for BitmapHeapScanState {
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
             let xmin = self.slot.xmin();
+            let cmin = self.slot.cmin();
             let xmax = self.slot.xmax();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
@@ -4623,6 +4640,7 @@ impl PlanNode for BitmapHeapScanState {
                     offset_number: offset,
                 }),
                 xmin,
+                cmin,
                 xmax,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
@@ -4850,7 +4868,9 @@ fn render_explain_system_var_name(
         TABLE_OID_ATTR_NO => "tableoid",
         SELF_ITEM_POINTER_ATTR_NO => "ctid",
         XMIN_ATTR_NO => "xmin",
+        CMIN_ATTR_NO => "cmin",
         XMAX_ATTR_NO => "xmax",
+        CMAX_ATTR_NO => "cmax",
         _ => return None,
     };
     relation_qualifier_from_column_names(column_names)
