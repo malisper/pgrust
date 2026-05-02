@@ -130,6 +130,7 @@ pub struct IndexVacuumContext {
     pub index_name: String,
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
+    pub expr_eval: Option<IndexBuildExprContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
