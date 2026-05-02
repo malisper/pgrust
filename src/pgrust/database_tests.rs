@@ -4165,6 +4165,90 @@ fn materialized_view_create_refresh_metadata_and_drop() {
 }
 
 #[test]
+fn materialized_view_base_column_rename_preserves_alias_dependencies() {
+    let db = Database::open_ephemeral(64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table mvtest_v (i int4, j int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mvtest_mv_v (ii, jj) as select i, j from mvtest_v",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mvtest_mv_v_2 (ii) as select i, j from mvtest_v",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mvtest_mv_v_3 (ii, jj) as \
+             select i, j from mvtest_v with no data",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mvtest_mv_v_4 (ii) as \
+             select i, j from mvtest_v with no data",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "alter table mvtest_v rename column i to x")
+        .unwrap();
+    session
+        .execute(&db, "insert into mvtest_v values (1, 2)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index mvtest_mv_v_ii on mvtest_mv_v (ii)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view mvtest_mv_v")
+        .unwrap();
+    session
+        .execute(&db, "update mvtest_v set j = 3 where x = 1")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view concurrently mvtest_mv_v")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view mvtest_mv_v_2")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view mvtest_mv_v_3")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view mvtest_mv_v_4")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select * from mvtest_v"),
+        vec![vec![Value::Int32(1), Value::Int32(3)]]
+    );
+    for matview in [
+        "mvtest_mv_v",
+        "mvtest_mv_v_2",
+        "mvtest_mv_v_3",
+        "mvtest_mv_v_4",
+    ] {
+        assert_eq!(
+            session_query_rows(&mut session, &db, &format!("select * from {matview}")),
+            vec![vec![Value::Int32(1), Value::Int32(3)]],
+            "{matview}"
+        );
+    }
+}
+
+#[test]
 fn materialized_view_with_no_data_refreshes_and_rejects_writes() {
     let dir = temp_dir("matview_no_data");
     let db = Database::open(&dir, 64).unwrap();
