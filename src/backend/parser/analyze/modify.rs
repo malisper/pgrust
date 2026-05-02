@@ -5862,9 +5862,6 @@ fn bind_insert_column_defaults(
                 };
                 return Ok(expr);
             }
-            if let Some(value) = column.missing_default_value.clone() {
-                return Ok(Expr::Const(value));
-            }
             let default_expr = column.default_expr.clone().or_else(|| {
                 catalog
                     .type_oid_for_sql_type(column.sql_type)
@@ -5890,9 +5887,7 @@ fn bind_insert_column_defaults(
 }
 
 fn column_has_stored_default(column: &crate::include::nodes::primnodes::ColumnDesc) -> bool {
-    column.default_expr.is_some()
-        || column.default_sequence_oid.is_some()
-        || column.missing_default_value.is_some()
+    column.default_expr.is_some() || column.default_sequence_oid.is_some()
 }
 
 fn visible_assignment_targets(desc: &RelationDesc) -> Vec<BoundAssignmentTarget> {

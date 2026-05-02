@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry, catalog_attribute_collation_oid};
+use crate::backend::catalog::catalog::{
+    Catalog, CatalogEntry, catalog_attmissingval_for_column, catalog_attribute_collation_oid,
+};
 use crate::backend::parser::SqlType;
 use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
@@ -495,8 +497,10 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                 attacl: column.attacl.clone(),
                 attoptions: None,
                 attfdwoptions: column.fdw_options.clone(),
-                attmissingval: None,
+                attmissingval: catalog_attmissingval_for_column(column),
                 attbyval: type_row.as_ref().is_some_and(|row| row.typbyval),
+                atthasdef: column.default_expr.is_some(),
+                atthasmissing: column.missing_default_value.is_some(),
                 sql_type: column.sql_type,
             }
         }));

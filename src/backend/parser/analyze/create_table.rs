@@ -832,7 +832,7 @@ fn constraint_column_names(attnums: Option<&[i16]>, desc: &RelationDesc) -> Opti
         .collect()
 }
 
-fn validate_column_default_expr(
+pub(crate) fn validate_column_default_expr(
     default_sql: &str,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {

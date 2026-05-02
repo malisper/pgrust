@@ -556,6 +556,16 @@ impl RelCache {
                             attr.attgenerated,
                         );
                     desc.dropped = attr.attisdropped;
+                    desc.missing_default_value =
+                        attr.attmissingval
+                            .as_ref()
+                            .and_then(|values| values.first().cloned())
+                            .map(|value| {
+                                crate::backend::catalog::catalog::missing_default_value_from_attmissingval(
+                                    value,
+                                    desc.sql_type,
+                                )
+                            });
                     if let Some(constraint) = not_null_constraints.get(&(class.oid, attr.attnum)) {
                         desc.not_null_constraint_oid = Some(constraint.oid);
                         desc.not_null_constraint_name = Some(constraint.conname.clone());
@@ -574,9 +584,6 @@ impl RelCache {
                             crate::pgrust::database::default_sequence_oid_from_default_expr(
                                 &attrdef.adbin,
                             );
-                        // Avoid reparsing every catalog default during relcache rebuilds.
-                        // `missing_column_value` can still derive literal defaults lazily.
-                        desc.missing_default_value = None;
                     }
                     Ok(desc)
                 })

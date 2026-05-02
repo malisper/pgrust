@@ -4035,6 +4035,25 @@ pub(crate) fn split_named_type_typmod(name: &str) -> (&str, Option<Vec<i32>>) {
 }
 
 fn resolve_named_type_typmod(type_name: &str, args: Vec<i32>) -> Result<i32, ParseError> {
+    let base_type_name = type_name
+        .rsplit_once('.')
+        .map(|(_, base)| base)
+        .unwrap_or(type_name);
+    if matches!(
+        base_type_name.to_ascii_lowercase().as_str(),
+        "bpchar" | "character" | "varchar" | "character varying"
+    ) {
+        return match args.as_slice() {
+            [len] => Ok(SqlType::VARHDRSZ + *len),
+            _ => Err(ParseError::DetailedError {
+                message: "invalid type modifier".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            }),
+        };
+    }
+
     match args.as_slice() {
         [precision] => Ok(SqlType::VARHDRSZ + (*precision << 16)),
         [precision, scale] => Ok(SqlType::VARHDRSZ + ((*precision << 16) | (*scale & 0xffff))),

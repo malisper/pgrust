@@ -9,10 +9,9 @@ use crate::backend::executor::{ColumnDesc, ExecError, Expr, RelationDesc};
 use crate::backend::parser::{
     AlterColumnExpressionAction, BoundRelation, CatalogLookup, CheckConstraintAction, ColumnDef,
     NotNullConstraintAction, OwnedSequenceSpec, ParseError, RawTypeName, SerialKind, SqlExpr,
-    SqlType, SqlTypeKind, bind_generated_expr, bind_scalar_expr_in_scope,
-    derive_literal_default_value, expr_references_column, is_collatable_type,
-    normalize_alter_table_add_column_constraints, parse_expr, raw_type_name_hint,
-    resolve_collation_oid, resolve_raw_type_name, sql_type_name,
+    SqlType, SqlTypeKind, bind_generated_expr, bind_scalar_expr_in_scope, expr_references_column,
+    is_collatable_type, normalize_alter_table_add_column_constraints, parse_expr,
+    raw_type_name_hint, resolve_collation_oid, resolve_raw_type_name, sql_type_name,
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
@@ -1378,14 +1377,20 @@ pub(super) fn validate_alter_table_add_column(
         desc.identity = Some(identity.kind);
     } else if serial_kind.is_none() {
         desc.default_expr = column.default_expr.clone();
-        if desc.default_expr.is_none()
+        let inherited_type_default = if desc.default_expr.is_none()
             && let Some(type_oid) = catalog.type_oid_for_sql_type(sql_type)
-            && let Some(type_default) = catalog.type_default_sql(type_oid)
         {
-            desc.default_expr = Some(type_default);
-        }
-        if let Some(sql) = desc.default_expr.as_deref() {
-            desc.missing_default_value = derive_literal_default_value(sql, desc.sql_type).ok();
+            catalog.type_default_sql(type_oid)
+        } else {
+            None
+        };
+        if let Some(sql) = desc
+            .default_expr
+            .as_deref()
+            .or(inherited_type_default.as_deref())
+        {
+            crate::backend::parser::validate_column_default_expr(sql, catalog)
+                .map_err(ExecError::Parse)?;
         }
     }
     if let Some(storage) = column.storage {
@@ -1732,7 +1737,9 @@ pub(super) fn automatic_alter_type_cast_allowed(
         && !to.is_array
         && matches!(
             (from.kind, to.kind),
-            (SqlTypeKind::Timestamp, SqlTypeKind::TimestampTz)
+            (SqlTypeKind::Date, SqlTypeKind::Timestamp)
+                | (SqlTypeKind::Date, SqlTypeKind::TimestampTz)
+                | (SqlTypeKind::Timestamp, SqlTypeKind::TimestampTz)
                 | (SqlTypeKind::TimestampTz, SqlTypeKind::Timestamp)
         )
     {
@@ -2381,14 +2388,11 @@ pub(super) fn validate_alter_table_alter_column_type(
     new_column.identity = current_column.identity;
     new_column.fdw_options = current_column.fdw_options.clone();
     new_column.generated = current_column.generated;
-    new_column.missing_default_value = if current_column.default_sequence_oid.is_some() {
-        None
-    } else {
-        current_column
-            .default_expr
-            .as_deref()
-            .and_then(|sql| derive_literal_default_value(sql, target_sql_type).ok())
-    };
+    new_column.missing_default_value = current_column
+        .missing_default_value
+        .clone()
+        .map(|value| crate::backend::executor::cast_value(value, target_sql_type))
+        .transpose()?;
 
     let mut desc_with_new_type = desc.clone();
     desc_with_new_type.columns[column_index] = new_column.clone();

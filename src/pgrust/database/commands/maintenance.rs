@@ -28,13 +28,15 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::{
     AlterTableSetPersistenceStatement, AlterTableSetTablespaceStatement, BoundRelation,
-    CatalogLookup, SqlType, TablePersistence, parse_type_name, resolve_raw_type_name,
+    CatalogLookup, SqlType, TablePersistence, bind_scalar_expr_in_scope, parse_type_name,
+    resolve_raw_type_name,
 };
 use crate::backend::storage::smgr::{ForkNumber, segment_path};
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL,
-    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID, relkind_is_analyzable,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID, relkind_has_storage,
+    relkind_is_analyzable,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -43,7 +45,9 @@ use crate::include::nodes::parsenodes::{
     CommentOnIndexStatement, CommentOnOperatorStatement, CommentOnSequenceStatement,
     CommentOnViewStatement, MaintenanceTarget, TableConstraint, VacuumStatement,
 };
-use crate::include::nodes::primnodes::user_attrno;
+use crate::include::nodes::primnodes::{
+    BuiltinScalarFunction, Expr, ScalarFunctionImpl, user_attrno,
+};
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::{AutovacuumRelationInput, relation_needs_vacanalyze};
 use crate::pgrust::database::ddl::{
@@ -63,6 +67,7 @@ struct AddColumnTarget {
     new_desc: RelationDesc,
     column_index: usize,
     append_column: bool,
+    rewrite_existing_rows: bool,
     direct_parent_count: i16,
 }
 
@@ -819,6 +824,243 @@ fn rewrite_heap_rows_for_added_serial_column(
     Ok(())
 }
 
+fn added_column_default_sql(
+    column: &crate::backend::executor::ColumnDesc,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    if column.generated.is_some() || column.default_sequence_oid.is_some() {
+        return None;
+    }
+    column.default_expr.clone().or_else(|| {
+        catalog
+            .type_oid_for_sql_type(column.sql_type)
+            .and_then(|type_oid| catalog.type_default_sql(type_oid))
+    })
+}
+
+fn bind_added_column_default_expr(
+    column: &crate::backend::executor::ColumnDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ExecError> {
+    let Some(default_sql) = added_column_default_sql(column, catalog) else {
+        return Ok(None);
+    };
+    let parsed = crate::backend::parser::parse_expr(&default_sql).map_err(ExecError::Parse)?;
+    let (bound, _) = bind_scalar_expr_in_scope(&parsed, &[], catalog).map_err(ExecError::Parse)?;
+    Ok(Some(bound))
+}
+
+fn added_column_default_is_volatile(
+    column: &crate::backend::executor::ColumnDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<bool, ExecError> {
+    Ok(bind_added_column_default_expr(column, catalog)?
+        .as_ref()
+        .is_some_and(|expr| expr_contains_volatile_default(expr, catalog)))
+}
+
+fn proc_is_volatile_default(proc_oid: u32, catalog: &dyn CatalogLookup) -> bool {
+    catalog
+        .proc_row_by_oid(proc_oid)
+        .is_none_or(|row| row.provolatile == 'v')
+}
+
+fn builtin_scalar_function_is_volatile_default(func: BuiltinScalarFunction) -> bool {
+    matches!(
+        func,
+        BuiltinScalarFunction::Random
+            | BuiltinScalarFunction::RandomNormal
+            | BuiltinScalarFunction::ClockTimestamp
+            | BuiltinScalarFunction::TimeOfDay
+            | BuiltinScalarFunction::NextVal
+            | BuiltinScalarFunction::IdentityNextVal
+            | BuiltinScalarFunction::SetVal
+            | BuiltinScalarFunction::SetConfig
+            | BuiltinScalarFunction::PgNotify
+            | BuiltinScalarFunction::GenRandomUuid
+            | BuiltinScalarFunction::UuidV7
+    )
+}
+
+fn expr_contains_volatile_default(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
+    match expr {
+        Expr::Random => true,
+        Expr::Func(func) => {
+            match func.implementation {
+                ScalarFunctionImpl::Builtin(func)
+                    if builtin_scalar_function_is_volatile_default(func) =>
+                {
+                    return true;
+                }
+                ScalarFunctionImpl::UserDefined { proc_oid }
+                    if proc_is_volatile_default(proc_oid, catalog) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+            func.args
+                .iter()
+                .any(|arg| expr_contains_volatile_default(arg, catalog))
+        }
+        Expr::Op(op) => {
+            let proc_oid = (op.opfuncid != 0)
+                .then_some(op.opfuncid)
+                .or_else(|| catalog.operator_by_oid(op.opno).map(|row| row.oprcode));
+            proc_oid.is_some_and(|oid| proc_is_volatile_default(oid, catalog))
+                || op
+                    .args
+                    .iter()
+                    .any(|arg| expr_contains_volatile_default(arg, catalog))
+        }
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_contains_volatile_default(arg, catalog)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|arg| expr_contains_volatile_default(arg, catalog))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_volatile_default(&arm.expr, catalog)
+                        || expr_contains_volatile_default(&arm.result, catalog)
+                })
+                || expr_contains_volatile_default(&case_expr.defresult, catalog)
+        }
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|arg| expr_contains_volatile_default(arg, catalog)),
+        Expr::ScalarArrayOp(op) => {
+            expr_contains_volatile_default(&op.left, catalog)
+                || expr_contains_volatile_default(&op.right, catalog)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|arg| expr_contains_volatile_default(arg, catalog)),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_volatile_default(inner, catalog)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_volatile_default(expr, catalog)
+                || expr_contains_volatile_default(pattern, catalog)
+                || escape
+                    .as_ref()
+                    .is_some_and(|arg| expr_contains_volatile_default(arg, catalog))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) | Expr::FieldSelect { expr: inner, .. } => {
+            expr_contains_volatile_default(inner, catalog)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_volatile_default(left, catalog)
+                || expr_contains_volatile_default(right, catalog)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|arg| expr_contains_volatile_default(arg, catalog)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, field)| expr_contains_volatile_default(field, catalog)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_volatile_default(array, catalog)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|arg| expr_contains_volatile_default(arg, catalog))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|arg| expr_contains_volatile_default(arg, catalog))
+                })
+        }
+        Expr::Aggref(_)
+        | Expr::GroupingKey(_)
+        | Expr::GroupingFunc(_)
+        | Expr::WindowFunc(_)
+        | Expr::SetReturning(_)
+        | Expr::SubLink(_)
+        | Expr::SubPlan(_) => true,
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn evaluate_added_column_default_value(
+    desc: &RelationDesc,
+    column_index: usize,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let value = evaluate_default_value(desc, column_index, ctx)?;
+    coerce_assignment_value(&value, desc.columns[column_index].sql_type)
+}
+
+fn rewrite_heap_rows_for_added_default_column(
+    relation: &crate::backend::parser::BoundRelation,
+    new_desc: &RelationDesc,
+    column_index: usize,
+    indexes: &[crate::backend::parser::BoundIndexRelation],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<(), ExecError> {
+    let target_rows =
+        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?;
+    for (tid, mut values) in target_rows {
+        ctx.check_for_interrupts()?;
+        while values.len() < column_index {
+            let column = &new_desc.columns[values.len()];
+            values.push(crate::backend::executor::value_io::missing_column_value(
+                column,
+            ));
+        }
+        let value = evaluate_added_column_default_value(new_desc, column_index, ctx)?;
+        values.push(value);
+        let replacement = tuple_from_values(new_desc, &values)?;
+        let new_tid = heap_update_with_waiter(
+            &*ctx.pool,
+            ctx.client_id,
+            relation.rel,
+            &ctx.txns,
+            xid,
+            cid,
+            tid,
+            &replacement,
+            None,
+        )?;
+        maintain_indexes_for_row(relation.rel, new_desc, indexes, &values, new_tid, ctx)?;
+    }
+    Ok(())
+}
+
 fn add_column_validation_executor_context<C>(
     db: &Database,
     catalog: C,
@@ -1526,6 +1768,7 @@ fn collect_add_column_targets(
                 new_desc,
                 column_index: existing_index,
                 append_column: false,
+                rewrite_existing_rows: false,
                 direct_parent_count,
             });
         } else {
@@ -1550,6 +1793,7 @@ fn collect_add_column_targets(
                 new_desc,
                 column_index,
                 append_column: true,
+                rewrite_existing_rows: false,
                 direct_parent_count,
             });
         }
@@ -4044,7 +4288,8 @@ impl Database {
             column.default_sequence_oid = Some(created.sequence_oid);
             created_owned_sequence = Some(created);
         }
-        let targets = collect_add_column_targets(&catalog, &relation, &column, alter_stmt.only)?;
+        let mut targets =
+            collect_add_column_targets(&catalog, &relation, &column, alter_stmt.only)?;
         let indexes = targets
             .iter()
             .map(|target| {
@@ -4054,6 +4299,65 @@ impl Database {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
+        let mut default_ctx = None;
+        for target in &mut targets {
+            if target.relation.relkind == 'f'
+                || !target.append_column
+                || target.column.default_sequence_oid.is_some()
+                || added_column_default_sql(&target.column, &catalog).is_none()
+            {
+                continue;
+            }
+            let ctx = match default_ctx.as_mut() {
+                Some(ctx) => ctx,
+                None => {
+                    let mut ctx = add_column_validation_executor_context(
+                        self,
+                        catalog.clone(),
+                        client_id,
+                        xid,
+                        cid,
+                        std::sync::Arc::clone(&interrupts),
+                    )?;
+                    ctx.allow_side_effects = true;
+                    default_ctx.insert(ctx)
+                }
+            };
+            if added_column_default_is_volatile(&target.column, &catalog)? {
+                self.fire_table_rewrite_event_in_executor_context(
+                    ctx,
+                    "ALTER TABLE",
+                    target.relation.relation_oid,
+                    2,
+                )?;
+                if relkind_has_storage(target.relation.relkind) {
+                    rewrite_heap_rows_for_added_default_column(
+                        &target.relation,
+                        &target.new_desc,
+                        target.column_index,
+                        indexes
+                            .get(&target.relation.relation_oid)
+                            .expect("indexes for add-column target"),
+                        ctx,
+                        xid,
+                        cid,
+                    )?;
+                }
+                target.rewrite_existing_rows = true;
+                target.column.missing_default_value = None;
+                for column in &mut target.new_desc.columns {
+                    column.missing_default_value = None;
+                }
+            } else {
+                let value = evaluate_added_column_default_value(
+                    &target.new_desc,
+                    target.column_index,
+                    ctx,
+                )?;
+                target.column.missing_default_value = Some(value.clone());
+                target.new_desc.columns[target.column_index].missing_default_value = Some(value);
+            }
+        }
         if let Some(sequence_oid) = column.default_sequence_oid {
             let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
             let mut ctx = ExecutorContext {
@@ -4150,6 +4454,7 @@ impl Database {
                     .alter_table_add_column_mvcc(
                         target.relation.relation_oid,
                         target.column.clone(),
+                        target.rewrite_existing_rows,
                         &ctx,
                     )
                     .map_err(map_catalog_error)?
@@ -4167,6 +4472,17 @@ impl Database {
                     )
                     .map_err(map_catalog_error)?
             };
+            for old_rel in &effect.dropped_rels {
+                self.pool
+                    .flush_relation(*old_rel)
+                    .map_err(|err| ExecError::DetailedError {
+                        message: format!("could not flush relation before table rewrite: {err:?}"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "58030",
+                    })?;
+            }
+            copy_rewritten_relation_storage(&self.cluster.base_dir, &effect)?;
             self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
             if target.relation.relation_oid == relation.relation_oid

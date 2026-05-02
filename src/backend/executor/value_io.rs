@@ -2653,18 +2653,7 @@ pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
     if column.generated.is_some() {
         return Value::Null;
     }
-    column
-        .missing_default_value
-        .clone()
-        .or_else(|| {
-            (column.default_sequence_oid.is_none())
-                .then_some(column.default_expr.as_deref())
-                .flatten()
-                .and_then(|sql| {
-                    crate::backend::parser::derive_literal_default_value(sql, column.sql_type).ok()
-                })
-        })
-        .unwrap_or(Value::Null)
+    column.missing_default_value.clone().unwrap_or(Value::Null)
 }
 
 #[cfg(test)]

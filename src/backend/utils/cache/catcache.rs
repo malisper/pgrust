@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::backend::catalog::CatalogError;
-use crate::backend::catalog::catalog::{Catalog, catalog_attribute_collation_oid};
+use crate::backend::catalog::catalog::{
+    Catalog, catalog_attmissingval_for_column, catalog_attribute_collation_oid,
+};
 use crate::backend::catalog::loader::load_physical_catalog_rows;
 use crate::backend::catalog::pg_aggregate::sort_pg_aggregate_rows;
 use crate::backend::catalog::pg_am::sort_pg_am_rows;
@@ -446,8 +448,10 @@ impl CatCache {
                         attacl: None,
                         attoptions: None,
                         attfdwoptions: column.fdw_options.clone(),
-                        attmissingval: None,
+                        attmissingval: catalog_attmissingval_for_column(column),
                         attbyval: type_row.is_some_and(|row| row.typbyval),
+                        atthasdef: column.default_expr.is_some(),
+                        atthasmissing: column.missing_default_value.is_some(),
                         sql_type: column.sql_type,
                     }
                 })
@@ -1342,6 +1346,8 @@ fn bootstrap_toast_attribute_rows(attrelid: u32) -> Vec<PgAttributeRow> {
             attfdwoptions: None,
             attmissingval: None,
             attbyval,
+            atthasdef: false,
+            atthasmissing: false,
             sql_type,
         },
     )

@@ -386,6 +386,16 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         attr.attgenerated,
                     );
                 desc.dropped = attr.attisdropped;
+                desc.missing_default_value = attr
+                    .attmissingval
+                    .as_ref()
+                    .and_then(|values| values.first().cloned())
+                    .map(|value| {
+                        crate::backend::catalog::catalog::missing_default_value_from_attmissingval(
+                            value,
+                            desc.sql_type,
+                        )
+                    });
                 if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
                     desc.attrdef_oid = Some(attrdef.oid);
                     desc.default_expr = Some(attrdef.adbin.clone());
@@ -393,7 +403,6 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         crate::pgrust::database::default_sequence_oid_from_default_expr(
                             &attrdef.adbin,
                         );
-                    desc.missing_default_value = None;
                 } else if let Some(expr) = legacy_default_exprs.get(&(row.oid, attr.attnum)) {
                     desc.default_expr = Some(expr.clone());
                     desc.attrdef_oid = Some(catalog.next_oid);
