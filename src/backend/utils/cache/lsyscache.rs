@@ -911,6 +911,27 @@ fn visible_type_row_for_sql_type(
         })
 }
 
+fn visible_type_row_for_sql_type_allowing_typmod(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    sql_type: SqlType,
+) -> Option<PgTypeRow> {
+    visible_type_row_for_sql_type(db, client_id, txn_ctx, search_path, sql_type).or_else(|| {
+        if sql_type.typmod == SqlType::NO_TYPEMOD {
+            return None;
+        }
+        visible_type_row_for_sql_type(
+            db,
+            client_id,
+            txn_ctx,
+            search_path,
+            sql_type.with_typmod(SqlType::NO_TYPEMOD),
+        )
+    })
+}
+
 fn visible_type_oid_for_sql_type(
     db: &Database,
     client_id: ClientId,
@@ -929,7 +950,14 @@ fn visible_type_oid_for_sql_type(
         let element_oid = if element.type_oid != 0 {
             element.type_oid
         } else {
-            visible_type_row_for_sql_type(db, client_id, txn_ctx, search_path, element)?.oid
+            visible_type_row_for_sql_type_allowing_typmod(
+                db,
+                client_id,
+                txn_ctx,
+                search_path,
+                element,
+            )?
+            .oid
         };
         return visible_type_row_by_oid(db, client_id, txn_ctx, search_path, element_oid)
             .and_then(|row| (row.typarray != 0).then_some(row.typarray));
