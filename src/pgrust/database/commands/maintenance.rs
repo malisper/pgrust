@@ -4354,8 +4354,11 @@ impl Database {
                     target.column_index,
                     ctx,
                 )?;
-                target.column.missing_default_value = Some(value.clone());
-                target.new_desc.columns[target.column_index].missing_default_value = Some(value);
+                if !matches!(value, Value::Null) {
+                    target.column.missing_default_value = Some(value.clone());
+                    target.new_desc.columns[target.column_index].missing_default_value =
+                        Some(value);
+                }
             }
         }
         if let Some(sequence_oid) = column.default_sequence_oid {

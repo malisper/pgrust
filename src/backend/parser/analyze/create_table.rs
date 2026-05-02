@@ -272,10 +272,6 @@ pub fn lower_create_table(
                     {
                         validate_column_default_expr(default_sql, catalog)?;
                     }
-                    desc.missing_default_value = desc
-                        .default_expr
-                        .as_deref()
-                        .and_then(|sql| super::derive_literal_default_value(sql, sql_type).ok());
                 }
                 if let Some(serial_kind) = serial_kind {
                     desc.default_expr = None;
