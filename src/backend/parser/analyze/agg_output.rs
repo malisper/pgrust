@@ -1243,7 +1243,16 @@ fn bind_grouped_window_func_call(
         resolution_types[0] = common_type;
         resolution_types[2] = common_type;
     }
-    let resolved = resolve_function_call(catalog, name, &resolution_types, func_variadic)?;
+    let normalized = resolve_function_call_with_arg_defaults(
+        catalog,
+        name,
+        args,
+        &resolution_types,
+        func_variadic,
+    )?;
+    let resolved = normalized.resolved;
+    let call_args = normalized.args;
+    let call_actual_types = normalized.actual_types;
     if resolved.proretset || !matches!(resolved.prokind, 'w' | 'a') {
         return Err(ParseError::UnexpectedToken {
             expected: "window or aggregate function",
@@ -1265,17 +1274,12 @@ fn bind_grouped_window_func_call(
     })?;
     if let Some(window_impl) = resolved.window_impl {
         let ignore_nulls = window_ignore_nulls_for_builtin(window_impl, null_treatment)?;
-        if args.iter().any(|arg| arg.name.is_some()) {
-            return Err(ParseError::FeatureNotSupported(
-                "named arguments are not supported for window functions".into(),
-            ));
-        }
-        let bound_args = args
+        let bound_args = call_args
             .iter()
             .map(|arg| {
                 with_windows_disallowed(|| {
                     bind_agg_output_expr(
-                        &arg.value,
+                        arg,
                         group_by_exprs,
                         group_key_exprs,
                         input_scope,
@@ -1288,9 +1292,12 @@ fn bind_grouped_window_func_call(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if bound_args.iter().any(expr_contains_set_returning) {
+            return Err(set_returning_not_allowed_error("window function arguments"));
+        }
         let coerced_args = bound_args
             .into_iter()
-            .zip(actual_types.iter().copied())
+            .zip(call_actual_types.iter().copied())
             .zip(resolved.declared_arg_types.iter().copied())
             .map(|((arg, actual_type), declared_type)| {
                 coerce_bound_expr(arg, actual_type, declared_type)

@@ -21600,6 +21600,78 @@ fn custom_aggregate_window_execution_is_rejected() {
 }
 
 #[test]
+fn polymorphic_moving_aggregate_window_frames_work() {
+    let base = temp_dir("polymorphic_moving_aggregate_window");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        r#"create function logging_sfunc_nonstrict(text, anyelement) returns text
+           as $$ select coalesce($1, '') || '*' || quote_nullable($2) $$
+           language sql immutable"#,
+    )
+    .unwrap();
+    db.execute(
+        1,
+        r#"create function logging_msfunc_nonstrict(text, anyelement) returns text
+           as $$ select coalesce($1, '') || '+' || quote_nullable($2) $$
+           language sql immutable"#,
+    )
+    .unwrap();
+    db.execute(
+        1,
+        r#"create function logging_minvfunc_nonstrict(text, anyelement) returns text
+           as $$ select $1 || '-' || quote_nullable($2) $$
+           language sql immutable"#,
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate logging_agg_nonstrict (anyelement)
+         (
+             stype = text,
+             sfunc = logging_sfunc_nonstrict,
+             mstype = text,
+             msfunc = logging_msfunc_nonstrict,
+             minvfunc = logging_minvfunc_nonstrict
+         )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select logging_agg_nonstrict(v) over wnd
+             from (values (1, 'a'::text), (2, 'b'::text), (3, 'c'::text)) t(i, v)
+             window wnd as (order by i rows between 1 preceding and current row)
+             order by i",
+        ),
+        vec![
+            vec![Value::Text("+'a'".into())],
+            vec![Value::Text("+'a'+'b'".into())],
+            vec![Value::Text("+'a'+'b'-'a'+'c'".into())],
+        ]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select logging_agg_nonstrict(''::text) over fwd
+             from (values (1), (2), (3)) vs(i)
+             window fwd as (order by i rows between current row and unbounded following)
+             order by i",
+        ),
+        vec![
+            vec![Value::Text("+''+''+''".into())],
+            vec![Value::Text("+''+''+''-''".into())],
+            vec![Value::Text("+''+''+''-''-''".into())],
+        ]
+    );
+}
+
+#[test]
 fn comment_on_constraint_upserts_and_clears_pg_description() {
     let base = temp_dir("comment_on_constraint");
     let db = Database::open(&base, 16).unwrap();
@@ -55012,6 +55084,92 @@ fn create_function_defaults_and_named_calls_work() {
             if message == "argument name \"a\" used more than once" => {}
         other => panic!("expected duplicate named argument error, got {other:?}"),
     }
+}
+
+#[test]
+fn create_sql_function_window_frames_keep_unbounded_keyword() {
+    let dir = temp_dir("create_function_window_frames");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function frame_arg(x int4) returns table (a int4, b int4, c int4)
+         language sql
+         begin atomic
+           select sum(v) over (order by v rows between x preceding and x following), v, g
+           from (values (1, 0), (2, 0), (3, 1), (4, 1)) s(v, g)
+           order by v;
+         end",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from frame_arg(1)"),
+        vec![
+            vec![Value::Int32(3), Value::Int32(1), Value::Int32(0)],
+            vec![Value::Int32(6), Value::Int32(2), Value::Int32(0)],
+            vec![Value::Int32(9), Value::Int32(3), Value::Int32(1)],
+            vec![Value::Int32(7), Value::Int32(4), Value::Int32(1)],
+        ]
+    );
+
+    db.execute(
+        1,
+        "create function frame_unbounded(unbounded int4) returns table (a int4, b int4, c int4)
+         language sql
+         begin atomic
+           select sum(v) over (
+                    order by v rows between unbounded preceding and unbounded following
+                  ),
+                  v,
+                  g
+           from (values (1, 0), (2, 0), (3, 1), (4, 1)) s(v, g)
+           order by v;
+         end",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from frame_unbounded(99)"),
+        vec![
+            vec![Value::Int32(10), Value::Int32(1), Value::Int32(0)],
+            vec![Value::Int32(10), Value::Int32(2), Value::Int32(0)],
+            vec![Value::Int32(10), Value::Int32(3), Value::Int32(1)],
+            vec![Value::Int32(10), Value::Int32(4), Value::Int32(1)],
+        ]
+    );
+}
+
+#[test]
+fn create_window_function_named_and_default_args_work_in_grouped_query() {
+    let dir = temp_dir("create_window_function_defaults_named");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function nth_value_def(val anyelement, n integer = 1) returns anyelement
+         language internal window immutable strict as 'window_nth_value'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select g,
+                    nth_value_def(n := 2, val := sum(v)::int4) over (
+                        order by g rows between unbounded preceding and unbounded following
+                    ),
+                    nth_value_def(sum(v)::int4) over (
+                        order by g rows between unbounded preceding and unbounded following
+                    )
+             from (values (0, 1), (0, 2), (1, 3), (1, 4)) s(g, v)
+             group by g
+             order by g",
+        ),
+        vec![
+            vec![Value::Int32(0), Value::Int32(7), Value::Int32(3)],
+            vec![Value::Int32(1), Value::Int32(7), Value::Int32(3)],
+        ]
+    );
 }
 
 #[test]
