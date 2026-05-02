@@ -1235,6 +1235,16 @@ fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalar
         return Some(BuiltinScalarFunction::PgRustTestAtomicOps);
     }
     if row.pronamespace != PG_CATALOG_NAMESPACE_OID {
+        // :HACK: PostgreSQL regressions define a small number of C helper
+        // functions in public with symbols that pgrust implements natively.
+        // Keep this whitelist explicit so arbitrary user C symbols still fail
+        // as unsupported internal functions.
+        if matches!(
+            row.prosrc.to_ascii_lowercase().as_str(),
+            "test_canonicalize_path" | "test_relpath"
+        ) {
+            return builtin_by_src;
+        }
         return builtin_by_src.filter(|func| is_dynamic_range_scalar_function(*func));
     }
     if row.proname.eq_ignore_ascii_case("timestamptz")

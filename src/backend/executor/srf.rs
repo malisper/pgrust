@@ -1361,87 +1361,213 @@ fn text_search_table_function_for_proc_src(prosrc: &str) -> Option<TextSearchTab
 fn eval_pg_show_all_settings(
     output_columns: &[crate::include::nodes::primnodes::QueryColumn],
 ) -> Vec<TupleSlot> {
-    const ENABLE_SETTINGS: &[(&str, &str)] = &[
-        ("default_statistics_target", "100"),
-        ("enable_async_append", "on"),
-        ("enable_bitmapscan", "on"),
-        ("enable_distinct_reordering", "on"),
-        ("enable_gathermerge", "on"),
-        ("enable_group_by_reordering", "on"),
-        ("enable_hashagg", "on"),
-        ("enable_hashjoin", "on"),
-        ("enable_incremental_sort", "on"),
-        ("enable_indexonlyscan", "on"),
-        ("enable_indexscan", "on"),
-        ("enable_material", "on"),
-        ("enable_memoize", "on"),
-        ("enable_mergejoin", "on"),
-        ("enable_nestloop", "on"),
-        ("enable_parallel_append", "on"),
-        ("enable_parallel_hash", "on"),
-        ("enable_partition_pruning", "on"),
-        ("enable_partitionwise_aggregate", "off"),
-        ("enable_partitionwise_join", "off"),
-        ("enable_presorted_aggregate", "on"),
-        ("enable_self_join_elimination", "on"),
-        ("enable_seqscan", "on"),
-        ("enable_sort", "on"),
-        ("enable_tidscan", "on"),
-    ];
     let wal_segment_size = crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES.to_string();
-    ENABLE_SETTINGS
+    let mut settings = vec![(
+        "wal_segment_size",
+        wal_segment_size.as_str(),
+        "Write-Ahead Log / Settings",
+        "Sets the size of WAL files held for WAL records.",
+        "integer",
+    )];
+    const ENABLE_SETTINGS: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "default_statistics_target",
+            "100",
+            "Query Tuning / Other Planner Options",
+            "Sets the default statistics target.",
+            "integer",
+        ),
+        (
+            "enable_async_append",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_bitmapscan",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_distinct_reordering",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_gathermerge",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_group_by_reordering",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_hashagg",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_hashjoin",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_incremental_sort",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_indexonlyscan",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_indexscan",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_material",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_memoize",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_mergejoin",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_nestloop",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_parallel_append",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_parallel_hash",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_partition_pruning",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_partitionwise_aggregate",
+            "off",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_partitionwise_join",
+            "off",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_presorted_aggregate",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_self_join_elimination",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_seqscan",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_sort",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+        (
+            "enable_tidscan",
+            "on",
+            "Query Tuning / Planner Method Configuration",
+            "Enables a planner method.",
+            "bool",
+        ),
+    ];
+    settings.extend(ENABLE_SETTINGS.iter().copied());
+    settings
         .iter()
-        .copied()
-        .chain(std::iter::once((
-            "wal_segment_size",
-            wal_segment_size.as_str(),
-        )))
-        .map(|(name, setting)| {
+        .map(|(name, setting, category, description, vartype)| {
             TupleSlot::virtual_row(
                 output_columns
                     .iter()
                     .map(|column| match column.name.as_str() {
-                        "name" => Value::Text(name.into()),
-                        "setting" => Value::Text(setting.into()),
+                        "name" => Value::Text((*name).into()),
+                        "setting" => Value::Text((*setting).into()),
                         "unit" => Value::Null,
-                        "category" => {
-                            let category = if name == "default_statistics_target" {
-                                "Query Tuning / Other Planner Options"
-                            } else if name == "wal_segment_size" {
-                                "Write-Ahead Log / Settings"
-                            } else {
-                                "Query Tuning / Planner Method Configuration"
-                            };
-                            Value::Text(category.into())
-                        }
-                        "short_desc" => {
-                            let description = if name == "default_statistics_target" {
-                                "Sets the default statistics target."
-                            } else if name == "wal_segment_size" {
-                                "Shows the size of write ahead log segments."
-                            } else {
-                                "Enables a planner method."
-                            };
-                            Value::Text(description.into())
-                        }
+                        "category" => Value::Text((*category).into()),
+                        "short_desc" => Value::Text((*description).into()),
                         "extra_desc" => Value::Null,
                         "context" => Value::Text("user".into()),
-                        "vartype" => {
-                            let vartype = if name == "default_statistics_target" {
-                                "integer"
-                            } else if name == "wal_segment_size" {
-                                "integer"
-                            } else {
-                                "bool"
-                            };
-                            Value::Text(vartype.into())
-                        }
+                        "vartype" => Value::Text((*vartype).into()),
                         "source" => Value::Text("default".into()),
                         "min_val" => Value::Null,
                         "max_val" => Value::Null,
                         "enumvals" => Value::Null,
-                        "boot_val" => Value::Text(setting.into()),
-                        "reset_val" => Value::Text(setting.into()),
+                        "boot_val" => Value::Text((*setting).into()),
+                        "reset_val" => Value::Text((*setting).into()),
                         "sourcefile" => Value::Null,
                         "sourceline" => Value::Null,
                         "pending_restart" => Value::Bool(false),

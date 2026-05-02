@@ -148,7 +148,10 @@ fn namespace_row_prefer_replacement(
 
 fn default_relreplident_for_catalog_entry(entry: &CatalogEntry) -> char {
     if matches!(entry.relkind, 'r' | 'p') {
-        if entry.namespace_oid == PG_CATALOG_NAMESPACE_OID {
+        if matches!(
+            entry.namespace_oid,
+            PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
+        ) {
             'n'
         } else {
             'd'

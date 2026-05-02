@@ -5150,7 +5150,12 @@ fn replica_identity_columns(
         ),
         'i' => indexes
             .iter()
-            .find(|index| index.index_meta.indisreplident)
+            .find(|index| {
+                catalog
+                    .index_row_by_oid(index.relation_oid)
+                    .map(|row| row.indisreplident)
+                    .unwrap_or(index.index_meta.indisreplident)
+            })
             .map(|index| {
                 (
                     ReplicaIdentityColumns::Columns,
@@ -9052,6 +9057,7 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
                 index_name: index.name.clone(),
                 index_desc: index.desc.clone(),
                 index_meta: index.index_meta.clone(),
+                expr_eval: None,
             };
             let dead_item_callback = |tid| dead_items.contains(&tid);
             let stats = indexam::index_bulk_delete(

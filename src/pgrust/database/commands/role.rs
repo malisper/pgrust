@@ -1647,6 +1647,7 @@ fn owned_objects_for_roles(
             .into_iter()
             .filter(|row| role_oids.contains(&row.nspowner))
             .filter(|row| !matches!(row.nspname.as_str(), "pg_catalog" | "information_schema"))
+            .filter(|row| !is_temp_namespace_owned_object(&row.nspname))
             .map(|row| OwnedObject {
                 oid: row.oid,
                 kind: OwnedObjectKind::Schema,
@@ -1688,6 +1689,10 @@ fn owned_objects_for_roles(
     );
     objects.sort_by(|left, right| left.oid.cmp(&right.oid).then(left.kind.cmp(&right.kind)));
     Ok(objects)
+}
+
+fn is_temp_namespace_owned_object(namespace: &str) -> bool {
+    namespace.starts_with("pg_temp_") || namespace.starts_with("pg_toast_temp_")
 }
 
 fn owned_user_mapping_name(
@@ -2300,6 +2305,38 @@ mod tests {
                 .authid_rows()
                 .into_iter()
                 .all(|row| row.rolname != "app_owner")
+        );
+    }
+
+    #[test]
+    fn drop_role_ignores_owned_temp_schemas() {
+        let base = temp_dir("drop_role_temp_schema");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create role temp_owner").unwrap();
+        session
+            .execute(&db, "set session authorization temp_owner")
+            .unwrap();
+        session
+            .execute(&db, "create temp table temp_owner_docs (body text)")
+            .unwrap();
+        assert_eq!(schema_owner_name(&db, "pg_temp_1"), "temp_owner");
+        assert_eq!(schema_owner_name(&db, "pg_toast_temp_1"), "temp_owner");
+
+        session.execute(&db, "reset session authorization").unwrap();
+        assert_eq!(
+            session.execute(&db, "drop role temp_owner").unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+        assert!(
+            db.shared_catalog
+                .read()
+                .catcache()
+                .unwrap()
+                .authid_rows()
+                .into_iter()
+                .all(|row| row.rolname != "temp_owner")
         );
     }
 

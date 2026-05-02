@@ -8310,6 +8310,7 @@ fn brin_maintenance_context(
             sqlstate: "42809",
         });
     }
+    let heap_owner_oid = heap_relation.owner_oid;
 
     Ok(crate::include::access::amapi::IndexVacuumContext {
         pool: ctx.pool.clone(),
@@ -8323,6 +8324,22 @@ fn brin_maintenance_context(
         index_name: index_relation.name,
         index_desc: index_relation.desc,
         index_meta: index_relation.index_meta,
+        expr_eval: Some(crate::include::access::amapi::IndexBuildExprContext {
+            txn_waiter: ctx.txn_waiter.clone(),
+            sequences: ctx.sequences.clone(),
+            large_objects: ctx.large_objects.clone(),
+            advisory_locks: ctx.advisory_locks.clone(),
+            datetime_config: ctx.datetime_config.clone(),
+            stats: ctx.stats.clone(),
+            session_stats: ctx.session_stats.clone(),
+            current_database_name: ctx.current_database_name.clone(),
+            session_user_oid: ctx.session_user_oid,
+            current_user_oid: heap_owner_oid,
+            current_xid: ctx.snapshot.current_xid,
+            statement_lock_scope_id: ctx.statement_lock_scope_id,
+            session_replication_role: ctx.session_replication_role,
+            visible_catalog: ctx.catalog.clone(),
+        }),
     })
 }
 
@@ -8402,6 +8419,7 @@ fn gin_maintenance_context(
         index_name: index_relation.name,
         index_desc: index_relation.desc,
         index_meta: index_relation.index_meta,
+        expr_eval: None,
     })
 }
 

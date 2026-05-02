@@ -795,6 +795,15 @@ fn execute_sql_function_statement(
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     match stmt {
+        Statement::DeclareCursor(stmt) if ctx.security_restricted && stmt.hold => {
+            Err(ExecError::DetailedError {
+                message: "cannot create a cursor WITH HOLD within security-restricted operation"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            })
+        }
         Statement::Insert(stmt) => {
             if !ctx.allow_side_effects {
                 return Err(ExecError::DetailedError {
@@ -831,8 +840,50 @@ fn execute_sql_function_statement(
             ctx.next_command_id = ctx.next_command_id.saturating_add(1);
             result
         }
+        Statement::GrantRoleMembership(stmt) => {
+            if !ctx.allow_side_effects {
+                return Err(ExecError::DetailedError {
+                    message: "GRANT is not allowed in a read-only execution context".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "25006",
+                });
+            }
+            let db = ctx.database.clone().ok_or_else(|| {
+                sql_function_runtime_error(
+                    "GRANT in a LANGUAGE sql function requires database context",
+                    None,
+                    "0A000",
+                )
+            })?;
+            let xid = ctx.ensure_write_xid()?;
+            let cid = ctx.next_command_id;
+            let saved_auth = db.auth_state(ctx.client_id);
+            db.install_auth_state(ctx.client_id, sql_function_effective_auth_state(ctx));
+            let result = db.execute_grant_role_membership_stmt_in_transaction(
+                ctx.client_id,
+                &stmt,
+                xid,
+                cid,
+                &mut ctx.catalog_effects,
+            );
+            db.install_auth_state(ctx.client_id, saved_auth);
+            ctx.next_command_id = ctx.next_command_id.saturating_add(1);
+            result
+        }
         stmt => execute_readonly_statement(stmt, catalog, ctx),
     }
+}
+
+fn sql_function_effective_auth_state(ctx: &ExecutorContext) -> AuthState {
+    let mut auth = AuthState::default();
+    auth.set_session_authorization(ctx.session_user_oid);
+    if let Some(role_oid) = ctx.active_role_oid {
+        auth.set_role(role_oid);
+    } else if ctx.current_user_oid != ctx.session_user_oid {
+        auth.set_session_authorization(ctx.current_user_oid);
+    }
+    auth
 }
 
 fn sql_scalar_function_result_value(

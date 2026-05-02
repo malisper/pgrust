@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::access::index::buildkeys::{
-    materialize_heap_row_values_with_toast, project_index_key_values,
+    IndexBuildKeyProjector, materialize_heap_row_values_with_toast, project_index_key_values,
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
@@ -294,6 +294,7 @@ fn scan_visible_heap_summaries(
     summaries: &mut BTreeMap<u32, BrinMemTuple>,
     desc: &BrinDesc,
     toast: Option<&ToastFetchContext>,
+    mut projector: Option<&mut BrinBuildProjector<'_>>,
 ) -> Result<u64, CatalogError> {
     let mut scan = heap_scan_begin_visible(pool, client_id, heap_relation, snapshot)
         .map_err(|err| CatalogError::Io(format!("brin heap scan begin failed: {err:?}")))?;
@@ -319,14 +320,69 @@ fn scan_visible_heap_summaries(
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("brin heap deform failed: {err:?}")))?;
         let row_values = materialize_heap_row_values_with_toast(heap_desc, &datums, toast)?;
-        let key_values =
-            project_index_key_values(index_desc, &index_meta.indkey, &row_values, &[])?;
+        let key_values = if let Some(projector) = projector.as_deref_mut() {
+            let Some(key_values) = projector.project(&row_values, tid)? else {
+                continue;
+            };
+            key_values
+        } else {
+            project_index_key_values(index_desc, &index_meta.indkey, &row_values, &[])?
+        };
         let summary = summaries
             .entry(range_start)
             .or_insert_with(|| BrinMemTuple::new(desc, range_start));
         add_values_to_summary(index_meta, index_desc, desc, summary, &key_values)?;
     }
     Ok(visible)
+}
+
+struct BrinBuildProjector<'a> {
+    ctx: IndexBuildContext,
+    projector: IndexBuildKeyProjector,
+    _marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl BrinBuildProjector<'_> {
+    fn new_from_build(ctx: &IndexBuildContext) -> Result<Self, CatalogError> {
+        let projector = IndexBuildKeyProjector::new(ctx)?;
+        Ok(Self {
+            ctx: ctx.clone(),
+            projector,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    fn new_from_vacuum(ctx: &IndexVacuumContext) -> Result<Option<Self>, CatalogError> {
+        let Some(expr_eval) = ctx.expr_eval.clone() else {
+            return Ok(None);
+        };
+        let build_ctx = IndexBuildContext {
+            pool: ctx.pool.clone(),
+            txns: ctx.txns.clone(),
+            client_id: ctx.client_id,
+            interrupts: ctx.interrupts.clone(),
+            snapshot: Snapshot::bootstrap(),
+            heap_relation: ctx.heap_relation,
+            heap_desc: ctx.heap_desc.clone(),
+            heap_toast: ctx.heap_toast,
+            index_relation: ctx.index_relation,
+            index_name: ctx.index_name.clone(),
+            index_desc: ctx.index_desc.clone(),
+            index_meta: ctx.index_meta.clone(),
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            maintenance_work_mem_kb: 65_536,
+            expr_eval: Some(expr_eval),
+        };
+        Ok(Some(Self::new_from_build(&build_ctx)?))
+    }
+
+    fn project(
+        &mut self,
+        row_values: &[Value],
+        heap_tid: ItemPointerData,
+    ) -> Result<Option<Vec<Value>>, CatalogError> {
+        self.projector.project(&self.ctx, row_values, heap_tid)
+    }
 }
 
 fn range_page_count(range_start: u32, pages_per_range: u32, heap_blocks: u32) -> u32 {
@@ -429,6 +485,7 @@ fn summarize_unsummarized_ranges(
         .iter()
         .map(|range_start| (*range_start, BrinMemTuple::new(&desc, *range_start)))
         .collect::<BTreeMap<_, _>>();
+    let mut projector = BrinBuildProjector::new_from_vacuum(ctx)?;
     let toast_ctx = ctx.heap_toast.map(|relation| ToastFetchContext {
         relation,
         pool: ctx.pool.clone(),
@@ -451,6 +508,7 @@ fn summarize_unsummarized_ranges(
         &mut summaries,
         &desc,
         toast_ctx.as_ref(),
+        projector.as_mut(),
     )?;
     for (range_start, summary) in summaries {
         let tuple = brin_form_tuple(&desc, &summary)?;
@@ -513,6 +571,7 @@ pub(crate) fn brin_summarize_range(
     let mut target_ranges = BTreeSet::new();
     target_ranges.insert(range_start);
     let mut summaries = BTreeMap::from([(range_start, BrinMemTuple::new(&desc, range_start))]);
+    let mut projector = BrinBuildProjector::new_from_vacuum(ctx)?;
     let toast_ctx = ctx.heap_toast.map(|relation| ToastFetchContext {
         relation,
         pool: ctx.pool.clone(),
@@ -535,6 +594,7 @@ pub(crate) fn brin_summarize_range(
         &mut summaries,
         &desc,
         toast_ctx.as_ref(),
+        projector.as_mut(),
     )?;
     let summary = summaries
         .remove(&range_start)
@@ -671,6 +731,7 @@ pub(crate) fn brinbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cat
         .map(|meta| meta.pages_per_range)
         .or_else(|_| brin_pages_per_range_from_meta(&ctx.index_meta))?;
     let desc = brin_build_desc_with_meta(&ctx.index_desc, Some(&ctx.index_meta));
+    let mut projector = BrinBuildProjector::new_from_build(ctx)?;
     let mut summaries = (0..heap_blocks)
         .step_by(pages_per_range as usize)
         .map(|range_start| (range_start, BrinMemTuple::new(&desc, range_start)))
@@ -697,6 +758,7 @@ pub(crate) fn brinbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cat
         &mut summaries,
         &desc,
         toast_ctx.as_ref(),
+        Some(&mut projector),
     )?;
 
     let mut index_pages = read_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation)?;
@@ -1386,6 +1448,7 @@ mod tests {
                 index_name: "brin_idx".into(),
                 index_desc: index_desc(),
                 index_meta: meta.clone(),
+                expr_eval: None,
             },
             None,
         )

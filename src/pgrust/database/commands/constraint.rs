@@ -389,6 +389,7 @@ fn ddl_executor_context(
         subplans: Vec::new(),
         timed: false,
         allow_side_effects: false,
+        security_restricted: false,
         pending_async_notifications: Vec::new(),
         catalog_effects: Vec::new(),
         temp_effects: Vec::new(),
@@ -1460,6 +1461,27 @@ fn not_null_constraint_for_attnum<'a>(
                 .as_ref()
                 .is_some_and(|keys| keys.contains(&attnum))
     })
+}
+
+fn replica_identity_index_contains_attnum(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    attnum: i16,
+) -> bool {
+    if !catalog
+        .class_row_by_oid(relation_oid)
+        .is_some_and(|row| row.relreplident == 'i')
+    {
+        return false;
+    }
+    catalog
+        .index_relations_for_heap(relation_oid)
+        .into_iter()
+        .any(|index| {
+            catalog
+                .index_row_by_oid(index.relation_oid)
+                .is_some_and(|row| row.indisreplident && row.indkey.contains(&attnum))
+        })
 }
 
 fn relation_column_index_by_name(
@@ -5688,22 +5710,7 @@ impl Database {
                 ),
             }));
         }
-        if catalog
-            .index_relations_for_heap(relation.relation_oid)
-            .into_iter()
-            .any(|index| {
-                if !index.index_meta.indisreplident {
-                    return false;
-                }
-                let key_attnums = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or(0);
-                index
-                    .index_meta
-                    .indkey
-                    .iter()
-                    .take(key_attnums)
-                    .any(|key_attnum| *key_attnum == attnum)
-            })
-        {
+        if replica_identity_index_contains_attnum(&catalog, relation.relation_oid, attnum) {
             return Err(ExecError::DetailedError {
                 message: format!(
                     "column \"{}\" is in index used as replica identity",

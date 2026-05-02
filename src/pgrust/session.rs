@@ -3994,6 +3994,7 @@ impl Session {
             random_state: Arc::clone(&self.random_state),
             timed: false,
             allow_side_effects: true,
+            security_restricted: false,
             pending_async_notifications: Vec::new(),
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),
@@ -18604,6 +18605,7 @@ impl Session {
                         write_cid,
                         search_path.as_deref(),
                         &mut txn.catalog_effects,
+                        Some(txn.deferred_foreign_keys.clone()),
                     )
                 }
                 Statement::Cluster(ref cluster_stmt) => {
