@@ -1,5 +1,2 @@
-use crate::include::catalog::PgIndexRow;
-
-pub fn sort_pg_index_rows(rows: &mut [PgIndexRow]) {
-    rows.sort_by_key(|row| (row.indrelid, row.indexrelid));
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_index::*;

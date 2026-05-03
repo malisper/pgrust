@@ -1,5 +1,2 @@
-use crate::include::catalog::PgOpfamilyRow;
-
-pub fn sort_pg_opfamily_rows(rows: &mut [PgOpfamilyRow]) {
-    rows.sort_by_key(|row| (row.opfmethod, row.opfname.clone()));
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_opfamily::*;

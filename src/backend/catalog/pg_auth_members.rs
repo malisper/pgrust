@@ -1,5 +1,2 @@
-use crate::include::catalog::PgAuthMembersRow;
-
-pub fn sort_pg_auth_members_rows(rows: &mut [PgAuthMembersRow]) {
-    rows.sort_by_key(|row| (row.oid, row.roleid, row.member, row.grantor));
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_auth_members::*;

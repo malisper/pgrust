@@ -12,6 +12,7 @@ autobins = false
 members = [
     ".",
     "crates/pgrust_analyze",
+    "crates/pgrust_catalog_store",
     "crates/pgrust_catalog_data",
     "crates/pgrust_catalog_ids",
     "crates/pgrust_core",
@@ -193,6 +194,7 @@ pest = "2.7"
 pbkdf2 = "0.12"
 pgrust_analyze = { path = "crates/pgrust_analyze" }
 pgrust_catalog_data = { path = "crates/pgrust_catalog_data" }
+pgrust_catalog_store = { path = "crates/pgrust_catalog_store" }
 pgrust_core = { path = "crates/pgrust_core" }
 pgrust_expr = { path = "crates/pgrust_expr" }
 pgrust_nodes = { path = "crates/pgrust_nodes" }

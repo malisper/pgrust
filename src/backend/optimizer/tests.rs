@@ -1482,9 +1482,10 @@ fn catalog_with_inherited_indexed_items()
             .expect("seed inherited index stats");
     }
 
-    catalog
-        .materialize_visible_catalog()
-        .expect("materialize inherited optimizer test catalog")
+    crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(
+        crate::backend::utils::cache::relcache::RelCache::from_catalog(&catalog),
+        Some(crate::backend::utils::cache::catcache::CatCache::from_catalog(&catalog)),
+    )
 }
 
 fn catalog_with_people_and_pets() -> Catalog {

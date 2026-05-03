@@ -1,5 +1,2 @@
-use crate::include::catalog::PgDatabaseRow;
-
-pub fn sort_pg_database_rows(rows: &mut [PgDatabaseRow]) {
-    rows.sort_by_key(|row| (row.oid, row.datname.clone()));
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_database::*;

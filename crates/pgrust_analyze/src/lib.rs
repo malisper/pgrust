@@ -2,6 +2,7 @@ mod agg;
 mod agg_output;
 mod agg_output_special;
 mod agg_scope;
+mod catalog_store_lookup;
 mod coerce;
 mod collation;
 mod constraints;

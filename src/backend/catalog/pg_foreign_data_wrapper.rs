@@ -1,9 +1,2 @@
-use crate::include::catalog::PgForeignDataWrapperRow;
-
-pub fn sort_pg_foreign_data_wrapper_rows(rows: &mut [PgForeignDataWrapperRow]) {
-    rows.sort_by(|left, right| {
-        left.fdwname
-            .cmp(&right.fdwname)
-            .then_with(|| left.oid.cmp(&right.oid))
-    });
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_foreign_data_wrapper::*;

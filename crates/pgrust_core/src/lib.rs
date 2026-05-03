@@ -1,6 +1,7 @@
 pub mod access;
 pub mod catalog;
 pub mod compact_string;
+pub mod interrupts;
 pub mod stack_depth;
 pub mod storage;
 
@@ -12,4 +13,5 @@ pub use catalog::{
     RangeCanonicalization, XID8_TYPE_OID,
 };
 pub use compact_string::CompactString;
+pub use interrupts::InterruptReason;
 pub use storage::{OffsetNumber, RelFileLocator};

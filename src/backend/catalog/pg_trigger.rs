@@ -1,5 +1,2 @@
-use crate::include::catalog::PgTriggerRow;
-
-pub fn sort_pg_trigger_rows(rows: &mut [PgTriggerRow]) {
-    rows.sort_by_key(|row| (row.tgrelid, row.tgname.clone(), row.oid))
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_trigger::*;

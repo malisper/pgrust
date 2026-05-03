@@ -488,6 +488,7 @@ dependencies = [
  "pest",
  "pgrust_analyze",
  "pgrust_catalog_data",
+ "pgrust_catalog_store",
  "pgrust_core",
  "pgrust_expr",
  "pgrust_nodes",
@@ -516,6 +517,7 @@ version = "0.1.0"
 dependencies = [
  "pgrust_catalog_data",
  "pgrust_catalog_ids",
+ "pgrust_catalog_store",
  "pgrust_core",
  "pgrust_expr",
  "pgrust_nodes",
@@ -537,6 +539,21 @@ dependencies = [
 [[package]]
 name = "pgrust_catalog_ids"
 version = "0.1.0"
+
+[[package]]
+name = "pgrust_catalog_store"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "pgrust_catalog_data",
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pgrust_core"

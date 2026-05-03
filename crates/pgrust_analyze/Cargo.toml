@@ -14,6 +14,7 @@ lz4 = []
 [dependencies]
 pgrust_catalog_data = { path = "../pgrust_catalog_data" }
 pgrust_catalog_ids = { path = "../pgrust_catalog_ids" }
+pgrust_catalog_store = { path = "../pgrust_catalog_store" }
 pgrust_core = { path = "../pgrust_core" }
 pgrust_expr = { path = "../pgrust_expr" }
 pgrust_nodes = { path = "../pgrust_nodes" }

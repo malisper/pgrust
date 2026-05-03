@@ -1,5 +1,2 @@
-use crate::include::catalog::PgTypeRow;
-
-pub fn is_composite_type(row: &PgTypeRow) -> bool {
-    row.typrelid != 0
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_type::*;
