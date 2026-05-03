@@ -3,9 +3,15 @@ use std::collections::BTreeSet;
 use pgrust_core::{INVALID_TRANSACTION_ID, RelFileLocator, Snapshot, TransactionId};
 use pgrust_nodes::datum::Value;
 
+use crate::access::amapi::{IndexBeginScanContext, IndexInsertContext, IndexUniqueCheck};
 use crate::access::htup::HeapTuple;
 use crate::access::itemptr::ItemPointerData;
+use crate::access::relscan::ScanDirection;
+use crate::access::scankey::ScanKeyData;
+use crate::{AccessError, AccessScalarServices};
 use crate::{AccessHeapServices, AccessResult, AccessTransactionServices};
+
+use super::indexam;
 
 #[derive(Debug, Clone)]
 pub struct UniqueCandidateContext {
@@ -22,14 +28,101 @@ pub enum UniqueCandidateResult {
     WaitFor(TransactionId),
 }
 
+#[derive(Debug, Clone)]
+pub struct UniqueProbeConflict {
+    pub tid: ItemPointerData,
+    pub tuple: HeapTuple,
+}
+
 pub fn keys_contain_null(values: &[Value]) -> bool {
     values.iter().any(|value| matches!(value, Value::Null))
+}
+
+pub fn probe_unique_conflict<R>(
+    ctx: &IndexInsertContext,
+    key_values: &[Value],
+    runtime: &R,
+    scalar: &dyn AccessScalarServices,
+) -> AccessResult<Option<UniqueProbeConflict>>
+where
+    R: AccessHeapServices + AccessTransactionServices + ?Sized,
+{
+    let key_count = usize::try_from(ctx.index_meta.indnkeyatts.max(0))
+        .unwrap_or_default()
+        .min(key_values.len());
+    let key_values = &key_values[..key_count];
+    if !matches!(ctx.unique_check, IndexUniqueCheck::Yes)
+        || (!ctx.index_meta.indnullsnotdistinct && keys_contain_null(key_values))
+    {
+        return Ok(None);
+    }
+
+    loop {
+        let begin = IndexBeginScanContext {
+            pool: ctx.pool.clone(),
+            client_id: ctx.client_id,
+            snapshot: ctx.snapshot.clone(),
+            heap_relation: ctx.heap_relation,
+            index_relation: ctx.index_relation,
+            index_desc: ctx.index_desc.clone(),
+            index_meta: ctx.index_meta.clone(),
+            key_data: key_values
+                .iter()
+                .enumerate()
+                .map(|(idx, value)| ScanKeyData {
+                    attribute_number: idx as i16 + 1,
+                    strategy: 3,
+                    argument: value.clone(),
+                })
+                .collect(),
+            order_by_data: Vec::new(),
+            direction: ScanDirection::Forward,
+            want_itup: false,
+        };
+        let mut scan = indexam::index_beginscan(&begin, ctx.index_meta.am_oid, scalar)?;
+        let mut wait_for_xid = None;
+        while indexam::index_getnext(&mut scan, ctx.index_meta.am_oid, scalar)? {
+            let tid = scan
+                .xs_heaptid
+                .ok_or(AccessError::Corrupt("index scan tuple missing heap tid"))?;
+            match classify_unique_candidate_for_insert(ctx, tid, runtime)? {
+                UniqueCandidateResult::NoConflict => {}
+                UniqueCandidateResult::Conflict(tuple) => {
+                    let _ = indexam::index_endscan(scan, ctx.index_meta.am_oid);
+                    return Ok(Some(UniqueProbeConflict { tid, tuple }));
+                }
+                UniqueCandidateResult::WaitFor(xid) => {
+                    wait_for_xid = Some(xid);
+                    break;
+                }
+            }
+        }
+        indexam::index_endscan(scan, ctx.index_meta.am_oid)?;
+        let Some(xid) = wait_for_xid else {
+            return Ok(None);
+        };
+        runtime.wait_for_transaction(xid)?;
+    }
+}
+
+pub fn classify_unique_candidate_for_insert(
+    ctx: &IndexInsertContext,
+    tid: ItemPointerData,
+    services: &(impl AccessHeapServices + AccessTransactionServices + ?Sized),
+) -> AccessResult<UniqueCandidateResult> {
+    let access_ctx = UniqueCandidateContext {
+        snapshot: ctx.snapshot.clone(),
+        heap_relation: ctx.heap_relation,
+        heap_tid: ctx.heap_tid,
+        old_heap_tid: ctx.old_heap_tid,
+    };
+    classify_unique_candidate(&access_ctx, tid, services)
 }
 
 pub fn classify_unique_candidate(
     ctx: &UniqueCandidateContext,
     tid: ItemPointerData,
-    services: &(impl AccessHeapServices + AccessTransactionServices),
+    services: &(impl AccessHeapServices + AccessTransactionServices + ?Sized),
 ) -> AccessResult<UniqueCandidateResult> {
     if tid == ctx.heap_tid || ctx.old_heap_tid == Some(tid) {
         return Ok(UniqueCandidateResult::NoConflict);
@@ -76,7 +169,7 @@ pub fn classify_unique_candidate(
 fn tid_reachable_from_same_transaction_update_chain(
     ctx: &UniqueCandidateContext,
     target_tid: ItemPointerData,
-    heap: &impl AccessHeapServices,
+    heap: &(impl AccessHeapServices + ?Sized),
 ) -> AccessResult<bool> {
     if !item_pointer_is_valid(ctx.heap_tid) || !item_pointer_is_valid(target_tid) {
         return Ok(false);
