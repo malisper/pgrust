@@ -11,7 +11,7 @@ Key decisions:
 Files touched:
 - `crates/pgrust_access/src/error.rs`
 - `crates/pgrust_access/src/services.rs`
-- `crates/pgrust_access/src/nbtree/{mod.rs,nbtcompare.rs,nbtpreprocesskeys.rs}`
+- `crates/pgrust_access/src/nbtree/{mod.rs,nbtcompare.rs,nbtpreprocesskeys.rs,tuple.rs}`
 - `crates/pgrust_access/src/brin/{mod.rs,minmax.rs,tuple.rs}`
 - `crates/pgrust_access/src/gin/{mod.rs,jsonb_ops.rs}`
 - `crates/pgrust_access/src/gist/{mod.rs,support/*,tuple.rs}`
@@ -26,6 +26,7 @@ Tests run:
 - `scripts/cargo_isolated.sh test -p pgrust_storage --quiet`
 - `scripts/cargo_isolated.sh check --features lz4 --message-format short`
 - `scripts/cargo_isolated.sh test --lib --quiet btree`
+- `scripts/cargo_isolated.sh test --lib --quiet large_text_index_keys_use_inline_compression`
 - `scripts/cargo_isolated.sh test --lib --quiet brin`
 - `scripts/cargo_isolated.sh test --lib --quiet gist`
 - `scripts/cargo_isolated.sh test --lib --quiet spgist`
@@ -34,7 +35,6 @@ Tests run:
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.
 
 Remaining:
-- Move remaining btree tuple/key payload helpers.
 - Wire `AccessIndexServices`/`AccessToastServices` into runtime index build paths.
 - Move index runtime only after expression/partial index projection is represented by `AccessIndexServices`.
 - Move lock/transam/WAL/checkpoint and heap/table runtime in separate slices; those need storage/runtime traits and careful recovery byte-preservation checks.

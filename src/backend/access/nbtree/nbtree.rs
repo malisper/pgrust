@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use parking_lot::RwLockWriteGuard;
 
-use crate::backend::access::common::toast_compression::compress_inline_datum;
+use pgrust_access::nbtree::tuple as access_tuple;
+use pgrust_access::{AccessError, AccessResult};
+
+use crate::backend::access::RootAccessServices;
 use crate::backend::access::heap::heapam::{
     heap_fetch, heap_scan_begin_visible, heap_scan_next_visible,
 };
@@ -25,12 +28,11 @@ use crate::backend::access::transam::xlog::{
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::value_io::{
-    decode_value, encode_value, format_unique_key_detail, format_vector_array_storage_text,
+    format_unique_key_detail, format_vector_array_storage_text,
 };
 use crate::backend::storage::fsm::get_free_index_page;
 use crate::backend::storage::page::bufpage::{
-    ITEM_ID_SIZE, MAX_HEAP_TUPLE_SIZE, PageError, PageHeaderData, SIZE_OF_PAGE_HEADER_DATA,
-    max_align, page_header,
+    ITEM_ID_SIZE, PageError, PageHeaderData, SIZE_OF_PAGE_HEADER_DATA, max_align, page_header,
 };
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
@@ -38,7 +40,7 @@ use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
     IndexBuildResult, IndexInsertContext,
 };
-use crate::include::access::htup::{AttributeCompression, AttributeStorage, TupleValue};
+use crate::include::access::htup::AttributeCompression;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
 use crate::include::access::nbtree::{
@@ -79,7 +81,6 @@ fn check_insert_split_interrupts(ctx: &IndexInsertContext) -> Result<(), Catalog
     check_catalog_interrupts(ctx.interrupts.as_ref())
 }
 
-const TOAST_INDEX_TARGET: usize = MAX_HEAP_TUPLE_SIZE / 16;
 pub(crate) const UNIQUE_BUILD_DETAIL_SEPARATOR: &str = "\nDETAIL: ";
 const INDEX_TUPLE_HEADER_SIZE: usize = crate::include::access::itup::SIZE_OF_INDEX_TUPLE_DATA;
 
@@ -124,36 +125,17 @@ enum LockedUniqueCheckResult {
     Restart { split_block: Option<u32> },
 }
 
-fn decode_index_value(column: &ColumnDesc, bytes: &[u8]) -> Result<Value, CatalogError> {
-    decode_value(column, Some(bytes)).map_err(|err| CatalogError::Io(format!("{err:?}")))
+fn catalog_error(error: AccessError) -> CatalogError {
+    match error {
+        AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        AccessError::Scalar(message) | AccessError::Unsupported(message) => {
+            CatalogError::Io(message)
+        }
+    }
 }
 
-fn maybe_compress_index_value(
-    column: &ColumnDesc,
-    bytes: Vec<u8>,
-    default_toast_compression: AttributeCompression,
-) -> Result<Vec<u8>, CatalogError> {
-    if column.storage.attlen != -1
-        || bytes.len() <= TOAST_INDEX_TARGET
-        || !matches!(
-            column.storage.attstorage,
-            AttributeStorage::Extended | AttributeStorage::Main
-        )
-    {
-        return Ok(bytes);
-    }
-
-    match compress_inline_datum(
-        &bytes,
-        column.storage.attcompression,
-        default_toast_compression,
-    ) {
-        Ok(Some(compressed)) => Ok(compressed.encoded),
-        Ok(None) => Ok(bytes),
-        Err(err) => Err(CatalogError::Io(format!(
-            "btree index key compression failed: {err:?}"
-        ))),
-    }
+fn catalog_result<T>(result: AccessResult<T>) -> Result<T, CatalogError> {
+    result.map_err(catalog_error)
 }
 
 pub(crate) fn encode_key_payload(
@@ -161,65 +143,23 @@ pub(crate) fn encode_key_payload(
     values: &[Value],
     default_toast_compression: AttributeCompression,
 ) -> Result<Vec<u8>, CatalogError> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&(values.len() as u16).to_le_bytes());
-    for (column, value) in desc.columns.iter().zip(values.iter()) {
-        match value {
-            Value::Null => {
-                payload.push(1);
-                payload.extend_from_slice(&0u32.to_le_bytes());
-            }
-            _ => {
-                payload.push(0);
-                let encoded = encode_value(column, value).map_err(|err| {
-                    CatalogError::Io(format!("btree index value encode failed: {err:?}"))
-                })?;
-                let bytes = match encoded {
-                    TupleValue::Null => Vec::new(),
-                    TupleValue::Bytes(bytes) | TupleValue::EncodedVarlena(bytes) => bytes,
-                };
-                let bytes = maybe_compress_index_value(column, bytes, default_toast_compression)?;
-                payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                payload.extend_from_slice(&bytes);
-            }
-        }
-    }
-    Ok(payload)
+    catalog_result(access_tuple::encode_key_payload(
+        desc,
+        values,
+        default_toast_compression,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn decode_key_payload(
     desc: &RelationDesc,
     payload: &[u8],
 ) -> Result<Vec<Value>, CatalogError> {
-    if payload.len() < 2 {
-        return Err(CatalogError::Corrupt("index tuple payload too short"));
-    }
-    let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-    let mut offset = 2usize;
-    let mut values = Vec::with_capacity(count);
-    for column in desc.columns.iter().take(count) {
-        if offset + 5 > payload.len() {
-            return Err(CatalogError::Corrupt("index tuple payload truncated"));
-        }
-        let is_null = payload[offset] != 0;
-        offset += 1;
-        let len = u32::from_le_bytes(
-            payload[offset..offset + 4]
-                .try_into()
-                .map_err(|_| CatalogError::Corrupt("index tuple payload length"))?,
-        ) as usize;
-        offset += 4;
-        if is_null {
-            values.push(Value::Null);
-            continue;
-        }
-        if offset + len > payload.len() {
-            return Err(CatalogError::Corrupt("index tuple payload overflow"));
-        }
-        values.push(decode_index_value(column, &payload[offset..offset + len])?);
-        offset += len;
-    }
-    Ok(values)
+    catalog_result(access_tuple::decode_key_payload(
+        desc,
+        payload,
+        &RootAccessServices,
+    ))
 }
 
 fn parse_fixed_vector_text(text: &str) -> Option<Vec<i64>> {
@@ -3015,6 +2955,7 @@ mod tests {
     use super::*;
     use crate::backend::catalog::column_desc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::access::htup::AttributeStorage;
 
     #[test]
     fn large_text_index_keys_use_inline_compression() {
