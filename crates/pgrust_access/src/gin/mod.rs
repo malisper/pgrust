@@ -1,5 +1,6 @@
 pub mod jsonb_ops;
 mod runtime;
+pub mod wal;
 
 pub use runtime::{
     gin_clean_pending_list, gin_update_options, ginbeginscan, ginbuild_projected, ginbuildempty,

@@ -7,6 +7,7 @@ pub mod state;
 pub mod support;
 pub mod tuple;
 pub mod vacuum;
+pub mod wal;
 
 pub use build::{GistBuildRowSource, gistbuild, gistbuildempty};
 pub use insert::gistinsert;

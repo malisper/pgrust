@@ -11,8 +11,11 @@ use super::{
 };
 use crate::BLCKSZ;
 use crate::access::heapam_xlog::XLOG_HEAP2_VISIBLE;
+use crate::gin::wal::gin_redo;
+use crate::gist::wal::gist_redo;
+use crate::hash::wal::hash_redo;
+use crate::nbtree::nbtxlog::btree_redo;
 use crate::transam::xact::TransactionManager;
-use crate::transam::xlogreader::DecodedXLogRecord;
 use pgrust_storage::page::bufpage::page_add_item;
 use pgrust_storage::smgr::md::MdStorageManager;
 use pgrust_storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
@@ -26,84 +29,6 @@ pub struct RecoveryStats {
     pub aborted: u64,
 }
 
-pub trait AccessRedoServices {
-    fn btree_redo(
-        &self,
-        smgr: &mut MdStorageManager,
-        record_lsn: Lsn,
-        record: &DecodedXLogRecord,
-    ) -> Result<(), WalError>;
-
-    fn gist_redo(
-        &self,
-        smgr: &mut MdStorageManager,
-        record_lsn: Lsn,
-        record: &DecodedXLogRecord,
-    ) -> Result<(), WalError>;
-
-    fn gin_redo(
-        &self,
-        smgr: &mut MdStorageManager,
-        record_lsn: Lsn,
-        record: &DecodedXLogRecord,
-    ) -> Result<(), WalError>;
-
-    fn hash_redo(
-        &self,
-        smgr: &mut MdStorageManager,
-        record_lsn: Lsn,
-        record: &DecodedXLogRecord,
-    ) -> Result<(), WalError>;
-}
-
-struct NoopRedoServices;
-
-impl AccessRedoServices for NoopRedoServices {
-    fn btree_redo(
-        &self,
-        _smgr: &mut MdStorageManager,
-        _record_lsn: Lsn,
-        _record: &DecodedXLogRecord,
-    ) -> Result<(), WalError> {
-        Err(WalError::Corrupt(
-            "btree WAL redo services not installed".into(),
-        ))
-    }
-
-    fn gist_redo(
-        &self,
-        _smgr: &mut MdStorageManager,
-        _record_lsn: Lsn,
-        _record: &DecodedXLogRecord,
-    ) -> Result<(), WalError> {
-        Err(WalError::Corrupt(
-            "GiST WAL redo services not installed".into(),
-        ))
-    }
-
-    fn gin_redo(
-        &self,
-        _smgr: &mut MdStorageManager,
-        _record_lsn: Lsn,
-        _record: &DecodedXLogRecord,
-    ) -> Result<(), WalError> {
-        Err(WalError::Corrupt(
-            "GIN WAL redo services not installed".into(),
-        ))
-    }
-
-    fn hash_redo(
-        &self,
-        _smgr: &mut MdStorageManager,
-        _record_lsn: Lsn,
-        _record: &DecodedXLogRecord,
-    ) -> Result<(), WalError> {
-        Err(WalError::Corrupt(
-            "hash WAL redo services not installed".into(),
-        ))
-    }
-}
-
 /// Replay all WAL records from the log file, applying page changes and
 /// updating the CLOG. Called during `Database::open` before the buffer
 /// pool is created.
@@ -112,8 +37,7 @@ pub fn perform_wal_recovery(
     smgr: &mut MdStorageManager,
     txns: &mut TransactionManager,
 ) -> Result<RecoveryStats, WalError> {
-    let redo = NoopRedoServices;
-    perform_wal_recovery_from_with_redo(wal_dir, smgr, txns, INVALID_LSN, &redo)
+    perform_wal_recovery_from(wal_dir, smgr, txns, INVALID_LSN)
 }
 
 pub fn perform_wal_recovery_from(
@@ -122,15 +46,7 @@ pub fn perform_wal_recovery_from(
     txns: &mut TransactionManager,
     start_lsn: Lsn,
 ) -> Result<RecoveryStats, WalError> {
-    let redo = NoopRedoServices;
-    perform_wal_recovery_from_preserving_xids_with_redo(
-        wal_dir,
-        smgr,
-        txns,
-        start_lsn,
-        &HashSet::new(),
-        &redo,
-    )
+    perform_wal_recovery_from_preserving_xids(wal_dir, smgr, txns, start_lsn, &HashSet::new())
 }
 
 pub fn perform_wal_recovery_from_preserving_xids(
@@ -139,42 +55,6 @@ pub fn perform_wal_recovery_from_preserving_xids(
     txns: &mut TransactionManager,
     start_lsn: Lsn,
     preserve_in_progress_xids: &HashSet<u32>,
-) -> Result<RecoveryStats, WalError> {
-    let redo = NoopRedoServices;
-    perform_wal_recovery_from_preserving_xids_with_redo(
-        wal_dir,
-        smgr,
-        txns,
-        start_lsn,
-        preserve_in_progress_xids,
-        &redo,
-    )
-}
-
-pub fn perform_wal_recovery_from_with_redo(
-    wal_dir: &Path,
-    smgr: &mut MdStorageManager,
-    txns: &mut TransactionManager,
-    start_lsn: Lsn,
-    redo: &dyn AccessRedoServices,
-) -> Result<RecoveryStats, WalError> {
-    perform_wal_recovery_from_preserving_xids_with_redo(
-        wal_dir,
-        smgr,
-        txns,
-        start_lsn,
-        &HashSet::new(),
-        redo,
-    )
-}
-
-pub fn perform_wal_recovery_from_preserving_xids_with_redo(
-    wal_dir: &Path,
-    smgr: &mut MdStorageManager,
-    txns: &mut TransactionManager,
-    start_lsn: Lsn,
-    preserve_in_progress_xids: &HashSet<u32>,
-    redo: &dyn AccessRedoServices,
 ) -> Result<RecoveryStats, WalError> {
     let mut reader = if start_lsn == INVALID_LSN {
         WalReader::open(wal_dir)?
@@ -222,7 +102,7 @@ pub fn perform_wal_recovery_from_preserving_xids_with_redo(
                     .iter()
                     .filter(|block| block.image.is_some())
                     .count() as u64;
-                redo.btree_redo(smgr, record_lsn, &record)?;
+                btree_redo(smgr, record_lsn, &record)?;
             }
             (RM_GIST_ID, _) => {
                 stats.fpis += record
@@ -230,7 +110,7 @@ pub fn perform_wal_recovery_from_preserving_xids_with_redo(
                     .iter()
                     .filter(|block| block.image.is_some())
                     .count() as u64;
-                redo.gist_redo(smgr, record_lsn, &record)?;
+                gist_redo(smgr, record_lsn, &record)?;
             }
             (RM_GIN_ID, _) => {
                 stats.fpis += record
@@ -238,7 +118,7 @@ pub fn perform_wal_recovery_from_preserving_xids_with_redo(
                     .iter()
                     .filter(|block| block.image.is_some())
                     .count() as u64;
-                redo.gin_redo(smgr, record_lsn, &record)?;
+                gin_redo(smgr, record_lsn, &record)?;
             }
             (RM_HASH_ID, _) => {
                 stats.fpis += record
@@ -246,7 +126,7 @@ pub fn perform_wal_recovery_from_preserving_xids_with_redo(
                     .iter()
                     .filter(|block| block.image.is_some())
                     .count() as u64;
-                redo.hash_redo(smgr, record_lsn, &record)?;
+                hash_redo(smgr, record_lsn, &record)?;
             }
             (RM_HEAP_ID, XLOG_HEAP_INSERT) => {
                 let block = record

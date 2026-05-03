@@ -7,6 +7,7 @@ pub mod nbtsort;
 pub mod nbtsplitloc;
 pub mod nbtutils;
 pub mod nbtvacuum;
+pub mod nbtxlog;
 mod runtime;
 pub mod tuple;
 

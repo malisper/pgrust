@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::sync::{Mutex, OnceLock};
 
+pub mod wal;
+
 use pgrust_core::{
     INVALID_TRANSACTION_ID, REGBUF_FORCE_IMAGE, REGBUF_STANDARD, REGBUF_WILL_INIT, RM_HASH_ID,
     XLOG_HASH_ADD_OVFL_PAGE, XLOG_HASH_DELETE, XLOG_HASH_INIT_META_PAGE, XLOG_HASH_INSERT,
