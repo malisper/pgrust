@@ -2129,6 +2129,165 @@ pub trait CatalogLookup: Send + Sync {
     }
 }
 
+fn expr_bound_relation(
+    catalog: &(dyn CatalogLookup + '_),
+    relation: BoundRelation,
+) -> pgrust_expr::BoundRelation {
+    let name = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    pgrust_expr::BoundRelation {
+        relation_oid: relation.relation_oid,
+        oid: Some(relation.relation_oid),
+        name,
+        relkind: relation.relkind,
+        desc: relation.desc,
+    }
+}
+
+impl pgrust_expr::ExprCatalogLookup for dyn CatalogLookup + '_ {
+    fn lookup_any_relation(&self, name: &str) -> Option<pgrust_expr::BoundRelation> {
+        CatalogLookup::lookup_any_relation(self, name)
+            .map(|relation| expr_bound_relation(self, relation))
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<pgrust_expr::BoundRelation> {
+        CatalogLookup::lookup_relation_by_oid(self, relation_oid)
+            .map(|relation| expr_bound_relation(self, relation))
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<pgrust_expr::BoundRelation> {
+        CatalogLookup::relation_by_oid(self, relation_oid)
+            .map(|relation| expr_bound_relation(self, relation))
+    }
+
+    fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
+        CatalogLookup::namespace_rows(self)
+    }
+
+    fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
+        CatalogLookup::namespace_row_by_oid(self, oid)
+    }
+
+    fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
+        CatalogLookup::proc_rows_by_name(self, name)
+    }
+
+    fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
+        CatalogLookup::proc_row_by_oid(self, oid)
+    }
+
+    fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<PgOperatorRow> {
+        CatalogLookup::operator_by_name_left_right(self, name, left_type_oid, right_type_oid)
+    }
+
+    fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
+        CatalogLookup::operator_by_oid(self, oid)
+    }
+
+    fn operator_rows(&self) -> Vec<PgOperatorRow> {
+        CatalogLookup::operator_rows(self)
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        CatalogLookup::authid_rows(self)
+    }
+
+    fn collation_rows(&self) -> Vec<PgCollationRow> {
+        CatalogLookup::collation_rows(self)
+    }
+
+    fn ts_config_rows(&self) -> Vec<PgTsConfigRow> {
+        CatalogLookup::ts_config_rows(self)
+    }
+
+    fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
+        CatalogLookup::ts_dict_rows(self)
+    }
+
+    fn ts_config_map_rows(&self) -> Vec<PgTsConfigMapRow> {
+        CatalogLookup::ts_config_map_rows(self)
+    }
+
+    fn type_rows(&self) -> Vec<PgTypeRow> {
+        CatalogLookup::type_rows(self)
+    }
+
+    fn type_by_oid(&self, oid: u32) -> Option<PgTypeRow> {
+        CatalogLookup::type_by_oid(self, oid)
+    }
+
+    fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
+        CatalogLookup::type_by_name(self, name)
+    }
+
+    fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        CatalogLookup::type_oid_for_sql_type(self, sql_type)
+    }
+
+    fn domain_by_type_oid(&self, domain_oid: u32) -> Option<pgrust_expr::DomainLookup> {
+        CatalogLookup::domain_by_type_oid(self, domain_oid).map(|domain| {
+            pgrust_expr::DomainLookup {
+                name: domain.name,
+                sql_type: domain.sql_type,
+                not_null: domain.not_null,
+                check: domain.check,
+                constraints: domain
+                    .constraints
+                    .into_iter()
+                    .map(|constraint| pgrust_expr::DomainConstraintLookup {
+                        name: constraint.name,
+                        kind: match constraint.kind {
+                            DomainConstraintLookupKind::Check => {
+                                pgrust_expr::DomainConstraintLookupKind::Check
+                            }
+                            DomainConstraintLookupKind::NotNull => {
+                                pgrust_expr::DomainConstraintLookupKind::NotNull
+                            }
+                        },
+                        expr: constraint.expr,
+                        enforced: constraint.enforced,
+                    })
+                    .collect(),
+            }
+        })
+    }
+
+    fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        CatalogLookup::enum_label_oid(self, type_oid, label)
+    }
+
+    fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        CatalogLookup::enum_label(self, type_oid, label_oid)
+    }
+
+    fn enum_label_by_oid(&self, label_oid: u32) -> Option<String> {
+        CatalogLookup::enum_label_by_oid(self, label_oid)
+    }
+
+    fn enum_label_is_committed(&self, type_oid: u32, label_oid: u32) -> bool {
+        CatalogLookup::enum_label_is_committed(self, type_oid, label_oid)
+    }
+
+    fn domain_allowed_enum_label_oids(&self, domain_oid: u32) -> Option<Vec<u32>> {
+        CatalogLookup::domain_allowed_enum_label_oids(self, domain_oid)
+    }
+
+    fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
+        CatalogLookup::domain_check_name(self, domain_oid)
+    }
+
+    fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
+        CatalogLookup::class_row_by_oid(self, relation_oid)
+    }
+}
+
 struct IndexExpressionCatalogLookup<'a> {
     inner: &'a dyn CatalogLookup,
 }

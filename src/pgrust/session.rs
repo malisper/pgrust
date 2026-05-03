@@ -2187,11 +2187,9 @@ pub struct Session {
     protocol_prepared_statements: Vec<SessionPreparedStatementViewRow>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ByteaOutputFormat {
-    Hex,
-    Escape,
-}
+// :HACK: Preserve the old session path while bytea scalar formatting config
+// lives in pgrust_expr.
+pub use pgrust_expr::compat::pgrust::session::ByteaOutputFormat;
 
 #[derive(Debug, Clone)]
 pub(crate) enum LargeObjectFastpathCall {

@@ -11,9 +11,10 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    PgAttributeRow, PgClassRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOperatorRow, PgPartitionedTableRow, PgTypeRow, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_operator_rows, builtin_type_rows,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgConstraintRow, PgDatabaseRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOperatorRow, PgPartitionedTableRow,
+    PgTablespaceRow, PgTypeRow, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_operator_rows, builtin_type_rows,
 };
 use crate::include::nodes::parsenodes::{ParseError, SqlType};
 use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
@@ -132,6 +133,22 @@ impl CatalogLookup for Catalog {
 
     fn constraint_rows(&self) -> Vec<PgConstraintRow> {
         CatalogLookup::constraint_rows(&visible_catalog_from_catalog(self))
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        self.authid_rows().to_vec()
+    }
+
+    fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        self.auth_members_rows().to_vec()
+    }
+
+    fn database_rows(&self) -> Vec<PgDatabaseRow> {
+        self.database_rows().to_vec()
+    }
+
+    fn tablespace_rows(&self) -> Vec<PgTablespaceRow> {
+        self.tablespace_rows().to_vec()
     }
 
     fn rewrite_rows_for_relation(

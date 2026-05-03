@@ -489,6 +489,7 @@ dependencies = [
  "pgrust_analyze",
  "pgrust_catalog_data",
  "pgrust_core",
+ "pgrust_expr",
  "pgrust_nodes",
  "pgrust_optimizer",
  "pgrust_parser",
@@ -516,6 +517,7 @@ dependencies = [
  "pgrust_catalog_data",
  "pgrust_catalog_ids",
  "pgrust_core",
+ "pgrust_expr",
  "pgrust_nodes",
  "pgrust_parser",
  "serde_json",
@@ -546,6 +548,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgrust_expr"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "chrono-tz",
+ "crc32fast",
+ "encoding_rs",
+ "lz4_flex",
+ "md-5",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "pgrust_catalog_data",
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "quick-xml",
+ "regex",
+ "rust-stemmers",
+ "ryu",
+ "serde_json",
+ "sha2",
+ "unicode-general-category",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "pgrust_nodes"
 version = "0.1.0"
 dependencies = [
@@ -565,6 +596,7 @@ dependencies = [
  "pgrust_catalog_data",
  "pgrust_catalog_ids",
  "pgrust_core",
+ "pgrust_expr",
  "pgrust_nodes",
  "pgrust_parser",
  "serde_json",

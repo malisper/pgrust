@@ -1,0 +1,39 @@
+[package]
+name = "pgrust_expr"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+lz4 = []
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
+crc32fast = "1.4"
+encoding_rs = "0.8"
+md-5 = "0.10"
+num-bigint = "0.4.6"
+num-integer = "0.1.46"
+num-traits = "0.2.19"
+pgrust_catalog_data = { path = "../pgrust_catalog_data" }
+pgrust_catalog_ids = { path = "../pgrust_catalog_ids" }
+pgrust_core = { path = "../pgrust_core" }
+pgrust_nodes = { path = "../pgrust_nodes" }
+pgrust_parser = { path = "../pgrust_parser" }
+quick-xml = "0.38"
+regex = "1"
+rust-stemmers = "1"
+ryu = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+sha2 = "0.10"
+unicode-general-category = "1.1.0"
+unicode-normalization = "0.1.25"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+lz4_flex = { version = "0.11", optional = true }

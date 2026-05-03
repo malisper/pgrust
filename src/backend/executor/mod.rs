@@ -1185,6 +1185,181 @@ impl From<ParseError> for ExecError {
     }
 }
 
+impl From<pgrust_expr::ExprError> for ExecError {
+    fn from(value: pgrust_expr::ExprError) -> Self {
+        match value {
+            pgrust_expr::ExprError::WithContext { source, context } => Self::WithContext {
+                source: Box::new((*source).into()),
+                context,
+            },
+            pgrust_expr::ExprError::Parse(error) => Self::Parse(error),
+            pgrust_expr::ExprError::TypeMismatch { op, left, right } => {
+                Self::TypeMismatch { op, left, right }
+            }
+            pgrust_expr::ExprError::NonBoolQual(value) => Self::NonBoolQual(value),
+            pgrust_expr::ExprError::UnsupportedStorageType {
+                column,
+                ty,
+                attlen,
+                actual_len,
+            } => Self::UnsupportedStorageType {
+                column,
+                ty,
+                attlen,
+                actual_len,
+            },
+            pgrust_expr::ExprError::InvalidStorageValue { column, details } => {
+                Self::InvalidStorageValue { column, details }
+            }
+            pgrust_expr::ExprError::JsonInput {
+                raw_input,
+                message,
+                detail,
+                context,
+                sqlstate,
+            } => Self::JsonInput {
+                raw_input,
+                message,
+                detail,
+                context,
+                sqlstate,
+            },
+            pgrust_expr::ExprError::XmlInput {
+                raw_input,
+                message,
+                detail,
+                context,
+                sqlstate,
+            } => Self::XmlInput {
+                raw_input,
+                message,
+                detail,
+                context,
+                sqlstate,
+            },
+            pgrust_expr::ExprError::ArrayInput {
+                message,
+                value,
+                detail,
+                sqlstate,
+            } => Self::ArrayInput {
+                message,
+                value,
+                detail,
+                sqlstate,
+            },
+            pgrust_expr::ExprError::DetailedError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+            } => Self::DetailedError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+            },
+            pgrust_expr::ExprError::DiagnosticError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+                column_name,
+                constraint_name,
+                datatype_name,
+                table_name,
+                schema_name,
+            } => Self::DiagnosticError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+                column_name,
+                constraint_name,
+                datatype_name,
+                table_name,
+                schema_name,
+            },
+            pgrust_expr::ExprError::StringDataRightTruncation { ty } => {
+                Self::StringDataRightTruncation { ty }
+            }
+            pgrust_expr::ExprError::MissingRequiredColumn(column) => {
+                Self::MissingRequiredColumn(column)
+            }
+            pgrust_expr::ExprError::Regex(error) => Self::Regex(RegexError {
+                sqlstate: error.sqlstate,
+                message: error.message,
+                detail: error.detail,
+                hint: error.hint,
+                context: error.context,
+            }),
+            pgrust_expr::ExprError::InvalidRegex(message) => Self::InvalidRegex(message),
+            pgrust_expr::ExprError::RaiseException(message) => Self::RaiseException(message),
+            pgrust_expr::ExprError::DivisionByZero(op) => Self::DivisionByZero(op),
+            pgrust_expr::ExprError::InvalidIntegerInput { ty, value } => {
+                Self::InvalidIntegerInput { ty, value }
+            }
+            pgrust_expr::ExprError::IntegerOutOfRange { ty, value } => {
+                Self::IntegerOutOfRange { ty, value }
+            }
+            pgrust_expr::ExprError::InvalidNumericInput(value) => Self::InvalidNumericInput(value),
+            pgrust_expr::ExprError::InvalidByteaInput { value } => {
+                Self::InvalidByteaInput { value }
+            }
+            pgrust_expr::ExprError::InvalidUuidInput { value } => Self::InvalidUuidInput { value },
+            pgrust_expr::ExprError::InvalidByteaHexDigit { value, digit } => {
+                Self::InvalidByteaHexDigit { value, digit }
+            }
+            pgrust_expr::ExprError::InvalidByteaHexOddDigits { value } => {
+                Self::InvalidByteaHexOddDigits { value }
+            }
+            pgrust_expr::ExprError::InvalidGeometryInput { ty, value } => {
+                Self::InvalidGeometryInput { ty, value }
+            }
+            pgrust_expr::ExprError::InvalidRangeInput { ty, value } => {
+                Self::InvalidRangeInput { ty, value }
+            }
+            pgrust_expr::ExprError::InvalidBitInput { digit, is_hex } => {
+                Self::InvalidBitInput { digit, is_hex }
+            }
+            pgrust_expr::ExprError::BitStringLengthMismatch { actual, expected } => {
+                Self::BitStringLengthMismatch { actual, expected }
+            }
+            pgrust_expr::ExprError::BitStringTooLong { actual, limit } => {
+                Self::BitStringTooLong { actual, limit }
+            }
+            pgrust_expr::ExprError::BitStringSizeMismatch { op } => {
+                Self::BitStringSizeMismatch { op }
+            }
+            pgrust_expr::ExprError::BitIndexOutOfRange { index, max_index } => {
+                Self::BitIndexOutOfRange { index, max_index }
+            }
+            pgrust_expr::ExprError::NegativeSubstringLength => Self::NegativeSubstringLength,
+            pgrust_expr::ExprError::InvalidBooleanInput { value } => {
+                Self::InvalidBooleanInput { value }
+            }
+            pgrust_expr::ExprError::InvalidFloatInput { ty, value } => {
+                Self::InvalidFloatInput { ty, value }
+            }
+            pgrust_expr::ExprError::FloatOutOfRange { ty, value } => {
+                Self::FloatOutOfRange { ty, value }
+            }
+            pgrust_expr::ExprError::FloatOverflow => Self::FloatOverflow,
+            pgrust_expr::ExprError::FloatUnderflow => Self::FloatUnderflow,
+            pgrust_expr::ExprError::NumericNaNToInt { ty } => Self::NumericNaNToInt { ty },
+            pgrust_expr::ExprError::NumericInfinityToInt { ty } => {
+                Self::NumericInfinityToInt { ty }
+            }
+            pgrust_expr::ExprError::Int2OutOfRange => Self::Int2OutOfRange,
+            pgrust_expr::ExprError::Int4OutOfRange => Self::Int4OutOfRange,
+            pgrust_expr::ExprError::Int8OutOfRange => Self::Int8OutOfRange,
+            pgrust_expr::ExprError::OidOutOfRange => Self::OidOutOfRange,
+            pgrust_expr::ExprError::NumericFieldOverflow => Self::NumericFieldOverflow,
+            pgrust_expr::ExprError::RequestedLengthTooLarge => Self::RequestedLengthTooLarge,
+        }
+    }
+}
+
 impl From<CatalogError> for ExecError {
     fn from(value: CatalogError) -> Self {
         match value {

@@ -26,22 +26,9 @@ use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
 use num_traits::One;
 
-#[derive(Debug, Clone)]
-pub(crate) struct FloatFormatOptions {
-    pub(crate) extra_float_digits: i32,
-    pub(crate) bytea_output: ByteaOutputFormat,
-    pub(crate) datetime_config: DateTimeConfig,
-}
-
-impl Default for FloatFormatOptions {
-    fn default() -> Self {
-        Self {
-            extra_float_digits: 1,
-            bytea_output: ByteaOutputFormat::Hex,
-            datetime_config: DateTimeConfig::default(),
-        }
-    }
-}
+// :HACK: Preserve the old root pqformat type path while scalar formatting
+// options live in pgrust_expr.
+pub(crate) type FloatFormatOptions = pgrust_expr::backend::libpq::pqformat::FloatFormatOptions;
 
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
