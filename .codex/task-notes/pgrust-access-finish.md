@@ -29,6 +29,7 @@ Key decisions:
 - Moved hash scan runtime (`beginscan`/`rescan`/`gettuple`/`getbitmap`/`endscan`) into `pgrust_access::hash`; root hash AM callbacks are now compatibility adapters that pass `RootAccessServices`.
 - Routed hash build, build-empty, insert, bulk-delete, and vacuum cleanup through `pgrust_access::hash` using explicit interrupt, scalar, and WAL service hooks; root still owns heap row projection for expression/partial indexes.
 - Removed dead root hash page/write helper copies after routing the live hash runtime through `pgrust_access`.
+- Moved BRIN page operation helpers into `pgrust_access::brin::pageops`; root `backend/access/brin/pageops.rs` now maps old `CatalogError` signatures to `AccessError` results.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -36,6 +37,7 @@ Files touched:
 - `crates/pgrust_access/src/access/amapi.rs`
 - `crates/pgrust_access/src/nbtree/{mod.rs,nbtcompare.rs,nbtpreprocesskeys.rs,tuple.rs}`
 - `crates/pgrust_access/src/brin/{mod.rs,minmax.rs,tuple.rs}`
+- `crates/pgrust_access/src/brin/pageops.rs`
 - `crates/pgrust_access/src/brin/validate.rs`
 - `crates/pgrust_access/src/gin/{mod.rs,jsonb_ops.rs}`
 - `crates/pgrust_access/src/gist/{mod.rs,support/*,tuple.rs}`
