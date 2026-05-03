@@ -16,3 +16,6 @@ pub use runtime::{
     UNIQUE_BUILD_DETAIL_SEPARATOR, btbeginscan, btbuild_projected, btbuildempty, btendscan,
     btgetbitmap, btgettuple, btinsert, btrescan, decode_key_payload, encode_key_payload,
 };
+
+#[cfg(debug_assertions)]
+pub use runtime::set_btree_split_pause_for_tests;

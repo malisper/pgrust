@@ -1,5 +1,9 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+#[cfg(debug_assertions)]
+use std::time::Duration;
 
 use parking_lot::RwLockWriteGuard;
 
@@ -79,6 +83,25 @@ fn check_insert_split_interrupts(
 pub const UNIQUE_BUILD_DETAIL_SEPARATOR: &str = "\nDETAIL: ";
 const INDEX_TUPLE_HEADER_SIZE: usize = crate::access::itup::SIZE_OF_INDEX_TUPLE_DATA;
 
+#[cfg(debug_assertions)]
+static BTREE_SPLIT_PAUSE_MS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(debug_assertions)]
+pub fn set_btree_split_pause_for_tests(delay_ms: u64) {
+    BTREE_SPLIT_PAUSE_MS.store(delay_ms, AtomicOrdering::SeqCst);
+}
+
+fn pause_after_btree_split_publish_for_tests() {
+    #[cfg(debug_assertions)]
+    {
+        let delay_ms = BTREE_SPLIT_PAUSE_MS.load(AtomicOrdering::SeqCst);
+        if delay_ms == 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+}
+
 pub(crate) struct LoggedBtreeBlock<'a> {
     #[allow(dead_code)]
     pub block_id: u8,
@@ -137,8 +160,15 @@ struct PageSplitResult {
     left_block: u32,
     right_block: u32,
     level: u32,
+    left_lower_bound: Vec<Value>,
     right_lower_bound: Vec<Value>,
     parent_stack: Vec<InsertStackEntry>,
+}
+
+struct LockedPageSplitResult<'a> {
+    split: PageSplitResult,
+    left_pin: PinnedBuffer<'a, SmgrStorageBackend>,
+    left_guard: RwLockWriteGuard<'a, Page>,
 }
 
 #[derive(Debug, Clone)]
@@ -2306,12 +2336,12 @@ fn allocate_btree_block(
     }
 }
 
-fn write_split_pages_locked(
-    ctx: &IndexInsertContext,
+fn write_split_pages_locked<'a>(
+    ctx: &'a IndexInsertContext,
     txns: &dyn AccessTransactionServices,
     block: u32,
-    pin: PinnedBuffer<'_, SmgrStorageBackend>,
-    mut guard: RwLockWriteGuard<'_, Page>,
+    pin: PinnedBuffer<'a, SmgrStorageBackend>,
+    mut guard: RwLockWriteGuard<'a, Page>,
     existing_high_key: Option<IndexTupleData>,
     left_items: &[IndexTupleData],
     right_items: &[IndexTupleData],
@@ -2319,7 +2349,7 @@ fn write_split_pages_locked(
     is_leaf: bool,
     scalar: &dyn AccessScalarServices,
     wal: &dyn AccessWalServices,
-) -> Result<PageSplitResult, CatalogError> {
+) -> Result<LockedPageSplitResult<'a>, CatalogError> {
     let new_block = allocate_btree_block(ctx, txns)?;
     let mut left_page = [0u8; pgrust_storage::smgr::BLCKSZ];
     let mut right_page = [0u8; pgrust_storage::smgr::BLCKSZ];
@@ -2452,35 +2482,42 @@ fn write_split_pages_locked(
     ctx.pool
         .install_page_image_locked(pin.buffer_id(), &left_page, lsn, &mut guard)
         .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))?;
-    drop(guard);
-    drop(pin);
 
-    Ok(PageSplitResult {
-        left_block: block,
-        right_block: new_block,
-        level,
-        right_lower_bound: tuple_key_prefix_values(
-            &ctx.index_desc,
-            right_items
-                .first()
-                .ok_or(CatalogError::Corrupt("right split page empty"))?,
-            btree_key_count(&ctx.index_meta),
-            scalar,
-        )?,
-        parent_stack: Vec::new(),
+    Ok(LockedPageSplitResult {
+        split: PageSplitResult {
+            left_block: block,
+            right_block: new_block,
+            level,
+            left_lower_bound: tuple_key_prefix_values(
+                &ctx.index_desc,
+                left_items
+                    .first()
+                    .ok_or(CatalogError::Corrupt("left split page empty"))?,
+                btree_key_count(&ctx.index_meta),
+                scalar,
+            )?,
+            right_lower_bound: tuple_key_prefix_values(
+                &ctx.index_desc,
+                right_items
+                    .first()
+                    .ok_or(CatalogError::Corrupt("right split page empty"))?,
+                btree_key_count(&ctx.index_meta),
+                scalar,
+            )?,
+            parent_stack: Vec::new(),
+        },
+        left_pin: pin,
+        left_guard: guard,
     })
 }
 
-fn clear_incomplete_split(
+fn clear_incomplete_split_locked(
     ctx: &IndexInsertContext,
     block: u32,
+    pin: PinnedBuffer<'_, SmgrStorageBackend>,
+    mut guard: RwLockWriteGuard<'_, Page>,
     wal: &dyn AccessWalServices,
 ) -> Result<(), CatalogError> {
-    let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
-    let mut guard = ctx
-        .pool
-        .lock_buffer_exclusive(pin.buffer_id())
-        .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
     let mut page = *guard;
     let mut opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
@@ -2514,18 +2551,32 @@ fn clear_incomplete_split(
         .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))
 }
 
-fn insert_tuple_into_locked_page(
+fn clear_locked_split(
     ctx: &IndexInsertContext,
+    locked: LockedPageSplitResult<'_>,
+    wal: &dyn AccessWalServices,
+) -> Result<(), CatalogError> {
+    clear_incomplete_split_locked(
+        ctx,
+        locked.split.left_block,
+        locked.left_pin,
+        locked.left_guard,
+        wal,
+    )
+}
+
+fn insert_tuple_into_locked_page<'a>(
+    ctx: &'a IndexInsertContext,
     runtime: &(impl AccessHeapServices + AccessTransactionServices),
-    pin: PinnedBuffer<'_, SmgrStorageBackend>,
-    mut guard: RwLockWriteGuard<'_, Page>,
+    pin: PinnedBuffer<'a, SmgrStorageBackend>,
+    mut guard: RwLockWriteGuard<'a, Page>,
     block: u32,
     new_tuple: IndexTupleData,
     key_values: &[Value],
     is_leaf: bool,
     scalar: &dyn AccessScalarServices,
     wal: &dyn AccessWalServices,
-) -> Result<Option<PageSplitResult>, CatalogError> {
+) -> Result<Option<LockedPageSplitResult<'a>>, CatalogError> {
     let page = *guard;
     let old_opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
@@ -2702,8 +2753,8 @@ fn prune_aborted_leaf_items(
     before.saturating_sub(items.len())
 }
 
-fn insert_tuple_into_page(
-    ctx: &IndexInsertContext,
+fn insert_tuple_into_page<'a>(
+    ctx: &'a IndexInsertContext,
     runtime: &(impl AccessHeapServices + AccessTransactionServices),
     block: u32,
     new_tuple: IndexTupleData,
@@ -2711,7 +2762,7 @@ fn insert_tuple_into_page(
     is_leaf: bool,
     scalar: &dyn AccessScalarServices,
     wal: &dyn AccessWalServices,
-) -> Result<Option<PageSplitResult>, CatalogError> {
+) -> Result<Option<LockedPageSplitResult<'a>>, CatalogError> {
     let (pin, guard) = lock_btree_block_exclusive(ctx, block)?;
     insert_tuple_into_locked_page(
         ctx, runtime, pin, guard, block, new_tuple, key_values, is_leaf, scalar, wal,
@@ -2724,18 +2775,11 @@ fn create_new_root(
     left_block: u32,
     right_block: u32,
     child_level: u32,
+    left_lower_bound: &[Value],
     right_lower_bound: &[Value],
     scalar: &dyn AccessScalarServices,
     wal: &dyn AccessWalServices,
 ) -> Result<(), CatalogError> {
-    let left_lower_bound = page_lower_bound(
-        &ctx.index_desc,
-        &ctx.pool,
-        ctx.index_relation,
-        left_block,
-        btree_key_count(&ctx.index_meta),
-        scalar,
-    )?;
     let root_block = allocate_btree_block(ctx, txns)?;
     let mut root = [0u8; pgrust_storage::smgr::BLCKSZ];
     bt_page_init(&mut root, BTP_ROOT, child_level + 1)
@@ -2799,52 +2843,53 @@ fn refresh_parent_stack_for_split(
     )
 }
 
-fn propagate_split_upwards(
-    ctx: &IndexInsertContext,
+fn propagate_split_upwards<'a>(
+    ctx: &'a IndexInsertContext,
     runtime: &(impl AccessHeapServices + AccessTransactionServices),
-    mut split: PageSplitResult,
+    mut locked_split: LockedPageSplitResult<'a>,
     scalar: &dyn AccessScalarServices,
     wal: &dyn AccessWalServices,
 ) -> Result<(), CatalogError> {
     loop {
-        if split.parent_stack.is_empty() {
+        if locked_split.split.parent_stack.is_empty() {
             if let Some(parent_stack) =
-                refresh_parent_stack_for_split(ctx, &split, runtime, scalar, wal)?
+                refresh_parent_stack_for_split(ctx, &locked_split.split, runtime, scalar, wal)?
             {
-                split.parent_stack = parent_stack;
+                locked_split.split.parent_stack = parent_stack;
             } else {
                 create_new_root(
                     ctx,
                     runtime,
-                    split.left_block,
-                    split.right_block,
-                    split.level,
-                    &split.right_lower_bound,
+                    locked_split.split.left_block,
+                    locked_split.split.right_block,
+                    locked_split.split.level,
+                    &locked_split.split.left_lower_bound,
+                    &locked_split.split.right_lower_bound,
                     scalar,
                     wal,
                 )?;
-                clear_incomplete_split(ctx, split.left_block, wal)?;
+                clear_locked_split(ctx, locked_split, wal)?;
                 return Ok(());
             }
         }
 
         let right_pivot = pivot_tuple(
             &ctx.index_desc,
-            split.right_block,
-            &split.right_lower_bound,
+            locked_split.split.right_block,
+            &locked_split.split.right_lower_bound,
             ctx.default_toast_compression,
             scalar,
         )?;
         let parent = find_parent_from_stack(
             ctx,
-            &mut split.parent_stack,
-            split.left_block,
+            &mut locked_split.split.parent_stack,
+            locked_split.split.left_block,
             runtime,
             scalar,
             wal,
         )?;
         let fallback_parent = if parent.is_none() {
-            find_parent_block_by_scan(ctx, split.left_block)?
+            find_parent_block_by_scan(ctx, locked_split.split.left_block)?
         } else {
             None
         };
@@ -2861,17 +2906,17 @@ fn propagate_split_upwards(
                 || parent_opaque.is_meta()
                 || parent_opaque.is_leaf()
                 || parent_opaque.btpo_flags & BTP_DELETED != 0
-                || !page_contains_child(&parent_page, split.left_block)?
+                || !page_contains_child(&parent_page, locked_split.split.left_block)?
             {
                 drop(guard);
                 drop(pin);
-                split.parent_stack.clear();
+                locked_split.split.parent_stack.clear();
                 continue;
             }
-            if page_contains_child(&parent_page, split.right_block)? {
+            if page_contains_child(&parent_page, locked_split.split.right_block)? {
                 drop(guard);
                 drop(pin);
-                clear_incomplete_split(ctx, split.left_block, wal)?;
+                clear_locked_split(ctx, locked_split, wal)?;
                 return Ok(());
             }
             let next_split = insert_tuple_into_locked_page(
@@ -2881,20 +2926,20 @@ fn propagate_split_upwards(
                 guard,
                 parent_block,
                 right_pivot,
-                &split.right_lower_bound,
+                &locked_split.split.right_lower_bound,
                 false,
                 scalar,
                 wal,
             )?;
-            clear_incomplete_split(ctx, split.left_block, wal)?;
+            clear_locked_split(ctx, locked_split, wal)?;
             if let Some(mut next_split) = next_split {
-                next_split.parent_stack.clear();
-                split = next_split;
+                next_split.split.parent_stack.clear();
+                locked_split = next_split;
                 continue;
             }
             return Ok(());
         }
-        split.parent_stack.clear();
+        locked_split.split.parent_stack.clear();
     }
 }
 
@@ -2906,7 +2951,12 @@ fn finish_incomplete_split(
     scalar: &dyn AccessScalarServices,
     wal: &dyn AccessWalServices,
 ) -> Result<(), CatalogError> {
-    let page = read_page(&ctx.pool, ctx.index_relation, left_block)?;
+    let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, left_block)?;
+    let guard = ctx
+        .pool
+        .lock_buffer_exclusive(pin.buffer_id())
+        .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
+    let page = *guard;
     let opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
     if opaque.btpo_flags & BTP_INCOMPLETE_SPLIT == 0 || opaque.btpo_next == P_NONE {
@@ -2917,8 +2967,15 @@ fn finish_incomplete_split(
         find_parent_from_stack(ctx, &mut parent_stack, left_block, runtime, scalar, wal)?
         && parent_contains_child(ctx, parent_block, opaque.btpo_next)?
     {
-        return clear_incomplete_split(ctx, left_block, wal);
+        return clear_incomplete_split_locked(ctx, left_block, pin, guard, wal);
     }
+    let left_lower_bound = page_first_key_values(
+        &ctx.index_desc,
+        &page,
+        btree_key_count(&ctx.index_meta),
+        scalar,
+    )?
+    .ok_or(CatalogError::Corrupt("left split page unexpectedly empty"))?;
     let right_lower_bound = page_lower_bound(
         &ctx.index_desc,
         &ctx.pool,
@@ -2930,12 +2987,17 @@ fn finish_incomplete_split(
     propagate_split_upwards(
         ctx,
         runtime,
-        PageSplitResult {
-            left_block,
-            right_block: opaque.btpo_next,
-            level: opaque.btpo_level,
-            right_lower_bound,
-            parent_stack,
+        LockedPageSplitResult {
+            split: PageSplitResult {
+                left_block,
+                right_block: opaque.btpo_next,
+                level: opaque.btpo_level,
+                left_lower_bound,
+                right_lower_bound,
+                parent_stack,
+            },
+            left_pin: pin,
+            left_guard: guard,
         },
         scalar,
         wal,
@@ -3086,7 +3148,8 @@ where
                         scalar,
                         wal,
                     )? {
-                        split.parent_stack = locked.parent_stack;
+                        split.split.parent_stack = locked.parent_stack;
+                        pause_after_btree_split_publish_for_tests();
                         check_insert_split_interrupts(ctx, runtime)?;
                         propagate_split_upwards(ctx, runtime, split, scalar, wal)?;
                     }
@@ -3119,7 +3182,8 @@ where
         scalar,
         wal,
     )? {
-        split.parent_stack = search.parent_stack;
+        split.split.parent_stack = search.parent_stack;
+        pause_after_btree_split_publish_for_tests();
         check_insert_split_interrupts(ctx, runtime)?;
         propagate_split_upwards(ctx, runtime, split, scalar, wal)?;
     }

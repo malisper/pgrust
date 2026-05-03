@@ -46191,6 +46191,66 @@ fn concurrent_indexed_updates_and_deletes_keep_index_results_correct() {
 }
 
 #[test]
+fn concurrent_btree_splits_complete_once() {
+    #[cfg(debug_assertions)]
+    pgrust_access::nbtree::set_btree_split_pause_for_tests(5);
+    struct ResetBtreeSplitPause;
+    impl Drop for ResetBtreeSplitPause {
+        fn drop(&mut self) {
+            #[cfg(debug_assertions)]
+            pgrust_access::nbtree::set_btree_split_pause_for_tests(0);
+        }
+    }
+    let _reset_pause = ResetBtreeSplitPause;
+
+    let base = temp_dir("concurrent_btree_splits_complete_once");
+    let db = Database::open(&base, 128).unwrap();
+    db.execute(
+        1,
+        "create table split_items (id int4 not null, note text not null)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index split_items_idx on split_items (id, note) with (fillfactor = 10)",
+    )
+    .unwrap();
+
+    let workers: Vec<_> = (0..4)
+        .map(|worker| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for i in 0..60 {
+                    let id = worker * 1000 + i;
+                    let note = format!("worker{worker}-{i}-{}", "x".repeat(1400));
+                    db.execute(
+                        (worker + 700) as ClientId,
+                        &format!("insert into split_items values ({id}, '{note}')"),
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+    join_all_with_timeout(workers, HEAVY_CONTENTION_TEST_TIMEOUT);
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from split_items"),
+        vec![vec![Value::Int64(240)]]
+    );
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from split_items where id = 1005",
+        "split_items_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from split_items where id >= 0"),
+        vec![vec![Value::Int64(240)]]
+    );
+}
+
+#[test]
 fn reopening_database_replays_btree_wal() {
     let base = temp_dir("reopening_database_replays_btree_wal");
     {
