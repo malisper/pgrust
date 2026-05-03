@@ -24,6 +24,8 @@ Key decisions:
 - Moved hash tuple payload encode/decode/hash extraction into `pgrust_access::access::hash`; root hash runtime now calls the portable codec through `RootAccessServices`.
 - Moved hash AM pure helpers into `pgrust_access::access::hash`: opclass/fillfactor/bucket-count helpers, page item extraction, page space checks, and split-needed checks.
 - Added root `AccessWalServices` bridge and routed hash page writes through portable `AccessWalRecord`/`AccessWalBlockRef` records instead of direct hash xlog calls.
+- Added root-free AM callback contexts and function pointer shapes to `pgrust_access::access::amapi`; root `include::access::amapi` now has conversion helpers from old root contexts to portable contexts.
+- Routed the moved generic index scan stub through the portable `pgrust_access::access::amapi::IndexBeginScanContext`.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -118,6 +120,11 @@ Tests run:
 - `scripts/cargo_isolated.sh test -p pgrust_storage --quiet`
 - `scripts/cargo_isolated.sh check --features lz4 --message-format short`
 - `scripts/cargo_isolated.sh test --lib --quiet hash`
+- `cargo fmt --all -- --check`
+- `scripts/cargo_isolated.sh check --message-format short`
+- `scripts/cargo_isolated.sh test -p pgrust_access --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_storage --quiet`
+- `scripts/cargo_isolated.sh check --features lz4 --message-format short`
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.
 - Note: `scripts/cargo_isolated.sh test --lib --quiet gin` also matches unrelated names containing "gin" (for example "planning") and currently hits an unrelated root analyze-services failure; use focused GIN test names instead.
 

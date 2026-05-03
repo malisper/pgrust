@@ -23,19 +23,7 @@ fn catalog_result<T>(result: AccessResult<T>) -> Result<T, CatalogError> {
 }
 
 pub fn index_beginscan_stub(ctx: &IndexBeginScanContext) -> Result<IndexScanDesc, CatalogError> {
-    let access_ctx = access_genam::IndexBeginScanContext {
-        pool: ctx.pool.clone(),
-        client_id: ctx.client_id,
-        snapshot: ctx.snapshot.clone(),
-        heap_relation: ctx.heap_relation,
-        index_relation: ctx.index_relation,
-        index_desc: ctx.index_desc.clone(),
-        index_meta: ctx.index_meta.clone(),
-        key_data: ctx.key_data.clone(),
-        order_by_data: ctx.order_by_data.clone(),
-        direction: ctx.direction,
-        want_itup: ctx.want_itup,
-    };
+    let access_ctx = ctx.to_access_context();
     catalog_result(access_genam::index_beginscan_stub(&access_ctx))
 }
 

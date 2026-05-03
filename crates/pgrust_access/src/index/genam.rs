@@ -1,28 +1,7 @@
-use std::sync::Arc;
-
-use pgrust_core::{ClientId, RelFileLocator, Snapshot};
-use pgrust_nodes::primnodes::RelationDesc;
-use pgrust_nodes::relcache::IndexRelCacheEntry;
-use pgrust_storage::{BufferPool, SmgrStorageBackend};
-
 use crate::AccessResult;
+use crate::access::amapi::IndexBeginScanContext;
 use crate::access::relscan::{BtIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection};
 use crate::access::scankey::ScanKeyData;
-
-#[derive(Clone)]
-pub struct IndexBeginScanContext {
-    pub pool: Arc<BufferPool<SmgrStorageBackend>>,
-    pub client_id: ClientId,
-    pub snapshot: Snapshot,
-    pub heap_relation: RelFileLocator,
-    pub index_relation: RelFileLocator,
-    pub index_desc: RelationDesc,
-    pub index_meta: IndexRelCacheEntry,
-    pub key_data: Vec<ScanKeyData>,
-    pub order_by_data: Vec<ScanKeyData>,
-    pub direction: ScanDirection,
-    pub want_itup: bool,
-}
 
 pub fn index_beginscan_stub(ctx: &IndexBeginScanContext) -> AccessResult<IndexScanDesc> {
     Ok(IndexScanDesc {

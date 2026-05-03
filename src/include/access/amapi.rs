@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use pgrust_access::access::amapi as access_amapi;
+
 use crate::backend::access::transam::xact::Snapshot;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::CatalogError;
@@ -61,6 +63,25 @@ pub struct IndexBuildContext {
     pub expr_eval: Option<IndexBuildExprContext>,
 }
 
+impl IndexBuildContext {
+    pub(crate) fn to_access_context(&self) -> access_amapi::IndexBuildContext {
+        access_amapi::IndexBuildContext {
+            pool: self.pool.clone(),
+            client_id: self.client_id,
+            snapshot: self.snapshot.clone(),
+            heap_relation: self.heap_relation,
+            heap_desc: self.heap_desc.clone(),
+            heap_toast: self.heap_toast.clone(),
+            index_relation: self.index_relation,
+            index_name: self.index_name.clone(),
+            index_desc: self.index_desc.clone(),
+            index_meta: self.index_meta.clone(),
+            default_toast_compression: self.default_toast_compression,
+            maintenance_work_mem_kb: self.maintenance_work_mem_kb,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct IndexInsertContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
@@ -82,6 +103,27 @@ pub struct IndexInsertContext {
     pub unique_check: IndexUniqueCheck,
 }
 
+impl IndexInsertContext {
+    pub(crate) fn to_access_context(&self) -> access_amapi::IndexInsertContext {
+        access_amapi::IndexInsertContext {
+            pool: self.pool.clone(),
+            client_id: self.client_id,
+            snapshot: self.snapshot.clone(),
+            heap_relation: self.heap_relation,
+            heap_desc: self.heap_desc.clone(),
+            index_relation: self.index_relation,
+            index_name: self.index_name.clone(),
+            index_desc: self.index_desc.clone(),
+            index_meta: self.index_meta.clone(),
+            default_toast_compression: self.default_toast_compression,
+            heap_tid: self.heap_tid,
+            old_heap_tid: self.old_heap_tid,
+            values: self.values.clone(),
+            unique_check: self.unique_check,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct IndexBuildEmptyContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
@@ -90,6 +132,19 @@ pub struct IndexBuildEmptyContext {
     pub index_relation: RelFileLocator,
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
+}
+
+impl IndexBuildEmptyContext {
+    pub(crate) fn to_access_context(&self) -> access_amapi::IndexBuildEmptyContext {
+        access_amapi::IndexBuildEmptyContext {
+            pool: self.pool.clone(),
+            client_id: self.client_id,
+            xid: self.xid,
+            index_relation: self.index_relation,
+            index_desc: self.index_desc.clone(),
+            index_meta: self.index_meta.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -107,6 +162,24 @@ pub struct IndexBeginScanContext {
     pub want_itup: bool,
 }
 
+impl IndexBeginScanContext {
+    pub(crate) fn to_access_context(&self) -> access_amapi::IndexBeginScanContext {
+        access_amapi::IndexBeginScanContext {
+            pool: self.pool.clone(),
+            client_id: self.client_id,
+            snapshot: self.snapshot.clone(),
+            heap_relation: self.heap_relation,
+            index_relation: self.index_relation,
+            index_desc: self.index_desc.clone(),
+            index_meta: self.index_meta.clone(),
+            key_data: self.key_data.clone(),
+            order_by_data: self.order_by_data.clone(),
+            direction: self.direction,
+            want_itup: self.want_itup,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct IndexVacuumContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
@@ -121,6 +194,22 @@ pub struct IndexVacuumContext {
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
     pub expr_eval: Option<IndexBuildExprContext>,
+}
+
+impl IndexVacuumContext {
+    pub(crate) fn to_access_context(&self) -> access_amapi::IndexVacuumContext {
+        access_amapi::IndexVacuumContext {
+            pool: self.pool.clone(),
+            client_id: self.client_id,
+            heap_relation: self.heap_relation,
+            heap_desc: self.heap_desc.clone(),
+            heap_toast: self.heap_toast.clone(),
+            index_relation: self.index_relation,
+            index_name: self.index_name.clone(),
+            index_desc: self.index_desc.clone(),
+            index_meta: self.index_meta.clone(),
+        }
+    }
 }
 
 pub type AmBuildFn = fn(&IndexBuildContext) -> Result<IndexBuildResult, CatalogError>;
