@@ -54,7 +54,7 @@ fn circle_point_distance(circle: &GeoCircle, point: &GeoPoint) -> f64 {
     (point_distance(&circle.center, point) - circle.radius).max(0.0)
 }
 
-fn circle_bound_box(circle: &GeoCircle) -> GeoBox {
+pub fn circle_bound_box(circle: &GeoCircle) -> GeoBox {
     let radius = circle.radius.abs();
     GeoBox {
         high: GeoPoint {

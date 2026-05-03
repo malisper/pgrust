@@ -79,7 +79,6 @@ use super::trigger::{RuntimeTriggers, TriggerTransitionCapture, relation_has_ins
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
-use crate::backend::executor::expr_geometry::circle_bound_box;
 use crate::backend::executor::value_io::{
     coerce_assignment_value_with_catalog_and_config, encode_tuple_values_with_config,
 };
@@ -98,14 +97,14 @@ use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BIT_TYPE_OID, BOOL_TYPE_OID,
-    BOX_TYPE_OID, BPCHAR_TYPE_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CIDR_TYPE_OID,
-    CONSTRAINT_FOREIGN, DATE_TYPE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, FLOAT4_TYPE_OID,
-    FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID, INET_TYPE_OID,
-    INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERVAL_TYPE_OID,
-    MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, PG_AM_RELATION_OID,
-    PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID, PG_AUTH_MEMBERS_RELATION_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    BPCHAR_TYPE_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CIDR_TYPE_OID, CONSTRAINT_FOREIGN,
+    DATE_TYPE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID,
+    GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, INET_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID,
+    INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERVAL_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID,
+    NUMERIC_TYPE_OID, OID_TYPE_OID, PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID,
+    PG_ATTRIBUTE_RELATION_OID, PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
+    PG_DESCRIPTION_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_FOREIGN_SERVER_RELATION_OID, PG_FOREIGN_TABLE_RELATION_OID, PG_INDEX_RELATION_OID,
     PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_LSN_TYPE_OID, PG_MAINTAIN_OID,
     PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
@@ -6445,27 +6444,8 @@ pub(crate) fn coerce_index_key_to_opckeytype(
     am_oid: u32,
     opckeytype_oid: Option<u32>,
 ) -> Value {
-    if am_oid != GIST_AM_OID {
-        return value;
-    }
-    match opckeytype_oid {
-        Some(BOX_TYPE_OID) => match value {
-            Value::Polygon(poly) => Value::Box(poly.bound_box),
-            Value::Circle(circle) => Value::Box(circle_bound_box(&circle)),
-            other => other,
-        },
-        Some(GTSVECTOR_TYPE_OID) => match value {
-            Value::Null => Value::Null,
-            Value::TsVector(_) => {
-                // :HACK: pgrust's current GiST tsvector support is lossy and
-                // always heap-rechecks. Store a compact gtsvector placeholder
-                // instead of raw tsvector data so leaf tuples fit on pages.
-                Value::TsVector(Default::default())
-            }
-            other => other,
-        },
-        _ => value,
-    }
+    // :HACK: compatibility wrapper while table commands still own index expression evaluation.
+    pgrust_access::index::buildkeys::coerce_index_key_to_opckeytype(value, am_oid, opckeytype_oid)
 }
 
 pub(crate) fn slot_toast_context(

@@ -11,6 +11,8 @@ Key decisions:
 - Root `snapmgr::Snapshot` now re-exports `pgrust_core::Snapshot`; heap visibility helpers are a root extension trait until heap runtime moves.
 - Moved portable BRIN/index AM catalog validation into `pgrust_access`; root only supplies AM-handler existence through a shim callback.
 - Moved lock-manager code into `pgrust_storage`; root `storage::lmgr` is now compatibility shims. `TransactionWaiter` uses a `TransactionStatusLookup` trait so storage does not depend on access/transam.
+- Moved pure index key projection/coercion into `pgrust_access::index::buildkeys`; root still owns expression-index and partial-index evaluation.
+- `TableLockManager::has_locks_for_client` is public because root integration tests call it through the moved storage crate, where `#[cfg(test)]` would only apply to storage's own tests.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -24,10 +26,13 @@ Files touched:
 - `crates/pgrust_access/src/access/relscan.rs`
 - `crates/pgrust_access/src/index/{mod.rs,genam.rs}`
 - `crates/pgrust_access/src/index/amvalidate.rs`
+- `crates/pgrust_access/src/index/buildkeys.rs`
 - `src/backend/access/services.rs`
 - `src/backend/access/index/genam.rs`
 - `src/backend/access/index/amvalidate.rs`
+- `src/backend/access/index/buildkeys.rs`
 - `src/backend/access/brin/validate.rs`
+- `src/backend/commands/tablecmds.rs`
 - `src/backend/utils/time/snapmgr.rs`
 - `src/backend/access/heap/heapam_visibility.rs`
 - `crates/pgrust_storage/src/lmgr/*`

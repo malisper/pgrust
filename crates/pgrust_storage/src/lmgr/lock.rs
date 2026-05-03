@@ -379,7 +379,6 @@ impl TableLockManager {
         blockers
     }
 
-    #[cfg(test)]
     pub fn has_locks_for_client(&self, client_id: ClientId) -> bool {
         self.state
             .lock()
