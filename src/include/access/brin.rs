@@ -1,2 +1,2 @@
-pub const BRIN_DEFAULT_PAGES_PER_RANGE: u32 = 128;
-pub use pgrust_nodes::access::BrinOptions;
+// :HACK: root compatibility shim while access formats live in `pgrust_access`.
+pub use pgrust_access::access::brin::*;

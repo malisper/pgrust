@@ -28,7 +28,7 @@ use crate::backend::access::transam::xlogreader::{
     XLR_BLOCK_ID_DATA_LONG, XLR_BLOCK_ID_DATA_SHORT, XLR_BLOCK_ID_ORIGIN,
     XLR_BLOCK_ID_TOPLEVEL_XID, XLR_MAX_BLOCK_ID,
 };
-use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
+use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE, Page};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator};
 use crate::backend::utils::crc32c;
 use crate::include::access::heapam_xlog::{XLOG_HEAP2_VISIBLE, XlHeapVisible};
@@ -1609,6 +1609,54 @@ impl WalWriter {
                 .set_len(0)?;
         }
         Ok(())
+    }
+}
+
+impl pgrust_storage::wal::WalSink for WalWriter {
+    fn flush(&self) -> Result<Lsn, String> {
+        WalWriter::flush(self).map_err(|err| err.to_string())
+    }
+
+    fn flush_to(&self, lsn: Lsn) -> Result<Lsn, String> {
+        WalWriter::flush_to(self, lsn).map_err(|err| err.to_string())
+    }
+
+    fn write_commit(&self, xid: u32) -> Result<Lsn, String> {
+        WalWriter::write_commit(self, xid).map_err(|err| err.to_string())
+    }
+
+    fn write_prepare(&self, xid: u32, data: &[u8]) -> Result<Lsn, String> {
+        WalWriter::write_prepare(self, xid, data).map_err(|err| err.to_string())
+    }
+
+    fn write_abort(&self, xid: u32) -> Result<Lsn, String> {
+        WalWriter::write_abort(self, xid).map_err(|err| err.to_string())
+    }
+
+    fn write_insert(
+        &self,
+        xid: u32,
+        tag: BufferTag,
+        page: &Page,
+        offset_number: u16,
+        tuple_data: &[u8],
+    ) -> Result<Lsn, String> {
+        WalWriter::write_insert(self, xid, tag, page, offset_number, tuple_data)
+            .map_err(|err| err.to_string())
+    }
+
+    fn write_record(&self, xid: u32, tag: BufferTag, page: &Page) -> Result<Lsn, String> {
+        WalWriter::write_record(self, xid, tag, page).map_err(|err| err.to_string())
+    }
+
+    fn write_record_with_rmgr(
+        &self,
+        xid: u32,
+        tag: BufferTag,
+        page: &Page,
+        rmid: u8,
+    ) -> Result<Lsn, String> {
+        WalWriter::write_record_with_rmgr(self, xid, tag, page, rmid).map_err(|err| err.to_string())
     }
 }
 

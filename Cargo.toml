@@ -12,6 +12,7 @@ autobins = false
 members = [
     ".",
     "crates/pgrust_analyze",
+    "crates/pgrust_access",
     "crates/pgrust_catalog_store",
     "crates/pgrust_catalog_data",
     "crates/pgrust_catalog_ids",
@@ -21,6 +22,7 @@ members = [
     "crates/pgrust_optimizer",
     "crates/pgrust_parser",
     "crates/pgrust_plpgsql_grammar",
+    "crates/pgrust_storage",
     "crates/pgrust_sql_grammar",
 ]
 
@@ -193,6 +195,7 @@ parking_lot = "0.12"
 pest = "2.7"
 pbkdf2 = "0.12"
 pgrust_analyze = { path = "crates/pgrust_analyze" }
+pgrust_access = { path = "crates/pgrust_access" }
 pgrust_catalog_data = { path = "crates/pgrust_catalog_data" }
 pgrust_catalog_store = { path = "crates/pgrust_catalog_store" }
 pgrust_core = { path = "crates/pgrust_core" }
@@ -201,6 +204,7 @@ pgrust_nodes = { path = "crates/pgrust_nodes" }
 pgrust_optimizer = { path = "crates/pgrust_optimizer" }
 pgrust_parser = { path = "crates/pgrust_parser" }
 pgrust_plpgsql_grammar = { path = "crates/pgrust_plpgsql_grammar" }
+pgrust_storage = { path = "crates/pgrust_storage" }
 rand = "0.8"
 regex = "1"
 rustc-hash = "2.1.2"

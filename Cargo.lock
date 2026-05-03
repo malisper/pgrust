@@ -486,6 +486,7 @@ dependencies = [
  "parking_lot",
  "pbkdf2",
  "pest",
+ "pgrust_access",
  "pgrust_analyze",
  "pgrust_catalog_data",
  "pgrust_catalog_store",
@@ -495,6 +496,7 @@ dependencies = [
  "pgrust_optimizer",
  "pgrust_parser",
  "pgrust_plpgsql_grammar",
+ "pgrust_storage",
  "quick-xml",
  "rand",
  "regex",
@@ -509,6 +511,17 @@ dependencies = [
  "unicode-normalization",
  "wasm-bindgen",
  "web-time",
+]
+
+[[package]]
+name = "pgrust_access"
+version = "0.1.0"
+dependencies = [
+ "pgrust_catalog_data",
+ "pgrust_core",
+ "pgrust_nodes",
+ "pgrust_storage",
+ "serde",
 ]
 
 [[package]]
@@ -560,8 +573,10 @@ name = "pgrust_core"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "parking_lot",
  "serde",
  "stacker",
+ "web-time",
 ]
 
 [[package]]
@@ -645,6 +660,19 @@ version = "0.1.0"
 dependencies = [
  "pest",
  "pest_derive",
+]
+
+[[package]]
+name = "pgrust_storage"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "parking_lot",
+ "pgrust_core",
+ "pgrust_nodes",
+ "rustc-hash",
+ "serde",
+ "web-time",
 ]
 
 [[package]]

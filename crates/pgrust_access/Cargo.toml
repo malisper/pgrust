@@ -1,0 +1,15 @@
+[package]
+name = "pgrust_access"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pgrust_catalog_data = { path = "../pgrust_catalog_data" }
+pgrust_core = { path = "../pgrust_core" }
+pgrust_nodes = { path = "../pgrust_nodes" }
+pgrust_storage = { path = "../pgrust_storage" }
+serde = { version = "1", features = ["derive"] }

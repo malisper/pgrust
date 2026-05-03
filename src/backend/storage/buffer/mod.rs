@@ -1,6 +1,10 @@
-pub mod bufmgr;
-pub mod storage_backend;
+// :HACK: root compatibility shim while storage lives in `pgrust_storage`.
+pub mod bufmgr {
+    pub use pgrust_storage::buffer::bufmgr::*;
+}
 
-pub use crate::include::storage::buf_internals::*;
-pub use bufmgr::*;
-pub use storage_backend::*;
+pub mod storage_backend {
+    pub use pgrust_storage::buffer::storage_backend::*;
+}
+
+pub use pgrust_storage::buffer::*;

@@ -9,5 +9,9 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"
+parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 stacker = "0.1.23"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"

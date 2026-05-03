@@ -1,4 +1,5 @@
 pub const DEFAULT_COLLATION_OID: u32 = 100;
+pub const GLOBAL_TABLESPACE_OID: u32 = 1664;
 pub const RECORD_TYPE_OID: u32 = 2249;
 pub const XID8_TYPE_OID: u32 = 5069;
 

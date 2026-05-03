@@ -1,9 +1,2 @@
-use crate::backend::access::transam::xact::TransactionId;
-
-pub const XLOG_HEAP2_VISIBLE: u8 = 0x40;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct XlHeapVisible {
-    pub snapshot_conflict_horizon: TransactionId,
-    pub flags: u8,
-}
+// :HACK: root compatibility shim while access formats live in `pgrust_access`.
+pub use pgrust_access::access::heapam_xlog::*;
