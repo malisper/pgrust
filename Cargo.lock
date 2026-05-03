@@ -494,6 +494,7 @@ dependencies = [
  "pgrust_nodes",
  "pgrust_optimizer",
  "pgrust_parser",
+ "pgrust_plpgsql",
  "pgrust_plpgsql_grammar",
  "pgrust_storage",
  "quick-xml",
@@ -646,6 +647,17 @@ dependencies = [
  "pgrust_core",
  "pgrust_nodes",
  "pgrust_sql_grammar",
+]
+
+[[package]]
+name = "pgrust_plpgsql"
+version = "0.1.0"
+dependencies = [
+ "pest",
+ "pgrust_catalog_data",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "pgrust_plpgsql_grammar",
 ]
 
 [[package]]
