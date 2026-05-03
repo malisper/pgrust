@@ -1,8 +1,15 @@
 pub use pgrust_nodes::access::HashOptions;
+use pgrust_nodes::datum::Value;
+use pgrust_nodes::primnodes::RelationDesc;
 use pgrust_storage::page::bufpage::{
     MAXALIGN, PageError, SIZE_OF_PAGE_HEADER_DATA, page_init, page_special, page_special_mut,
 };
 use pgrust_storage::smgr::BLCKSZ;
+
+use crate::access::htup::AttributeCompression;
+use crate::access::itup::IndexTupleData;
+use crate::nbtree::tuple::{decode_key_payload, encode_key_payload};
+use crate::{AccessError, AccessResult, AccessScalarServices};
 
 pub const HASH_METAPAGE: u32 = 0;
 pub const HASH_MAGIC: u32 = 0x0644_0640;
@@ -181,6 +188,38 @@ pub fn hash_page_set_opaque(
     special[12..14].copy_from_slice(&opaque.hasho_flag.to_le_bytes());
     special[14..16].copy_from_slice(&opaque.hasho_page_id.to_le_bytes());
     Ok(())
+}
+
+pub fn encode_hash_tuple_payload(
+    desc: &RelationDesc,
+    key_values: &[Value],
+    hash: u32,
+    default_toast_compression: AttributeCompression,
+    services: &dyn AccessScalarServices,
+) -> AccessResult<Vec<u8>> {
+    let key_payload = encode_key_payload(desc, key_values, default_toast_compression, services)?;
+    let mut payload = Vec::with_capacity(4 + key_payload.len());
+    payload.extend_from_slice(&hash.to_le_bytes());
+    payload.extend_from_slice(&key_payload);
+    Ok(payload)
+}
+
+pub fn hash_tuple_hash(tuple: &IndexTupleData) -> AccessResult<u32> {
+    if tuple.payload.len() < 4 {
+        return Err(AccessError::Corrupt("hash tuple payload too short"));
+    }
+    Ok(u32::from_le_bytes(tuple.payload[0..4].try_into().unwrap()))
+}
+
+pub fn hash_tuple_key_values(
+    desc: &RelationDesc,
+    tuple: &IndexTupleData,
+    services: &dyn AccessScalarServices,
+) -> AccessResult<Vec<Value>> {
+    if tuple.payload.len() < 4 {
+        return Err(AccessError::Corrupt("hash tuple payload too short"));
+    }
+    decode_key_payload(desc, &tuple.payload[4..], services)
 }
 
 pub fn hash_metapage_init(page: &mut [u8; BLCKSZ], meta: &HashMetaPageData) {

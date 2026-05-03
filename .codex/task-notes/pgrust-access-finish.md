@@ -21,6 +21,7 @@ Key decisions:
 - Routed btree unique probing through `AccessHeapServices` and `AccessTransactionServices`; access errors now preserve interrupt reasons explicitly.
 - Moved unique-candidate classification and NULL-key checks into `pgrust_access::index::unique`; root still owns scan dispatch and conflict error formatting.
 - Added hash value/equality methods to `AccessScalarServices` and routed hash AM build/insert/scan through `RootAccessServices` instead of direct scalar hash helper calls.
+- Moved hash tuple payload encode/decode/hash extraction into `pgrust_access::access::hash`; root hash runtime now calls the portable codec through `RootAccessServices`.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -33,6 +34,7 @@ Files touched:
 - `crates/pgrust_access/src/gist/{mod.rs,support/*,tuple.rs}`
 - `crates/pgrust_access/src/spgist/{mod.rs,support.rs,quad_box.rs,tuple.rs}`
 - `crates/pgrust_access/src/access/relscan.rs`
+- `crates/pgrust_access/src/access/hash.rs`
 - `crates/pgrust_access/src/index/{mod.rs,genam.rs}`
 - `crates/pgrust_access/src/index/unique.rs`
 - `crates/pgrust_access/src/index/amvalidate.rs`
@@ -89,6 +91,12 @@ Tests run:
 - `scripts/cargo_isolated.sh check --features lz4 --message-format short`
 - `scripts/cargo_isolated.sh test --lib --quiet btree`
 - `scripts/cargo_isolated.sh test --lib --quiet index`
+- `cargo fmt --all -- --check`
+- `scripts/cargo_isolated.sh check --message-format short`
+- `scripts/cargo_isolated.sh test -p pgrust_access --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_storage --quiet`
+- `scripts/cargo_isolated.sh check --features lz4 --message-format short`
+- `scripts/cargo_isolated.sh test --lib --quiet hash`
 - `cargo fmt --all -- --check`
 - `scripts/cargo_isolated.sh check --message-format short`
 - `scripts/cargo_isolated.sh test -p pgrust_access --quiet`

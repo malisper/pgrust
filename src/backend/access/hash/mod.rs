@@ -9,7 +9,6 @@ use crate::backend::access::index::buildkeys::{
     IndexBuildKeyProjector, RootIndexBuildServices, map_access_error, map_catalog_error_to_access,
     materialize_heap_row_values,
 };
-use crate::backend::access::nbtree::nbtree::{decode_key_payload, encode_key_payload};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::access::transam::xlog::{
     INVALID_LSN, XLOG_HASH_ADD_OVFL_PAGE, XLOG_HASH_DELETE, XLOG_HASH_INIT_META_PAGE,
@@ -31,7 +30,8 @@ use crate::include::access::amapi::{
 use crate::include::access::hash::{
     HASH_INVALID_BLOCK, HASH_MAX_BUCKETS, HASH_METAPAGE, HashMetaPageData, HashPageError,
     LH_BUCKET_PAGE, LH_OVERFLOW_PAGE, LH_UNUSED_PAGE, hash_metapage_data, hash_metapage_init,
-    hash_metapage_set, hash_page_get_opaque, hash_page_init, hash_page_set_opaque,
+    hash_metapage_set, hash_page_get_opaque, hash_page_init, hash_page_set_opaque, hash_tuple_hash,
+    hash_tuple_key_values,
 };
 use crate::include::access::htup::AttributeCompression;
 use crate::include::access::itemptr::ItemPointerData;
@@ -340,28 +340,25 @@ fn encode_hash_tuple_payload(
     hash: u32,
     default_toast_compression: AttributeCompression,
 ) -> Result<Vec<u8>, CatalogError> {
-    let key_payload = encode_key_payload(desc, key_values, default_toast_compression)?;
-    let mut payload = Vec::with_capacity(4 + key_payload.len());
-    payload.extend_from_slice(&hash.to_le_bytes());
-    payload.extend_from_slice(&key_payload);
-    Ok(payload)
+    crate::include::access::hash::encode_hash_tuple_payload(
+        desc,
+        key_values,
+        hash,
+        default_toast_compression,
+        &RootAccessServices,
+    )
+    .map_err(map_access_error)
 }
 
 fn tuple_hash(tuple: &IndexTupleData) -> Result<u32, CatalogError> {
-    if tuple.payload.len() < 4 {
-        return Err(CatalogError::Corrupt("hash tuple payload too short"));
-    }
-    Ok(u32::from_le_bytes(tuple.payload[0..4].try_into().unwrap()))
+    hash_tuple_hash(tuple).map_err(map_access_error)
 }
 
 fn tuple_key_values(
     desc: &RelationDesc,
     tuple: &IndexTupleData,
 ) -> Result<Vec<Value>, CatalogError> {
-    if tuple.payload.len() < 4 {
-        return Err(CatalogError::Corrupt("hash tuple payload too short"));
-    }
-    decode_key_payload(desc, &tuple.payload[4..])
+    hash_tuple_key_values(desc, tuple, &RootAccessServices).map_err(map_access_error)
 }
 
 fn hash_page_items(
