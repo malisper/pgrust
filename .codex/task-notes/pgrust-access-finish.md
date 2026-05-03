@@ -4,9 +4,9 @@ Finish the `pgrust_access` split by moving access runtime behind explicit servic
 Key decisions:
 - Start with scalar-dependent AM support before heap/transam moves.
 - Added `AccessError`, `AccessResult`, and service traits in `pgrust_access`.
-- Root adapter is `RootAccessServices`; it maps scalar comparisons/network helpers/JSONB comparison, GIN JSONB extraction, and geometry helpers back to existing executor code.
+- Root adapter is `RootAccessServices`; it maps scalar comparisons/range/multirange/network helpers, GIN JSONB extraction, and geometry helpers back to existing executor code.
 - Kept `pgrust_access` independent of root, parser/analyze/optimizer, executor, PL/pgSQL, and `pgrust_expr`.
-- GIN JSONB and GiST box/point support now live in `pgrust_access` behind scalar service hooks.
+- GIN JSONB and GiST support modules now live in `pgrust_access` behind scalar service hooks.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -32,7 +32,7 @@ Tests run:
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.
 
 Remaining:
-- Move remaining GiST/SP-GiST scalar support modules after adding range/multirange service hooks.
+- Move SP-GiST scalar support modules behind the same range/network/geometry service hooks.
 - Move AM tuple codecs and add projection/TOAST service boundaries.
 - Move index runtime only after expression/partial index projection is represented by `AccessIndexServices`.
 - Move lock/transam/WAL/checkpoint and heap/table runtime in separate slices; those need storage/runtime traits and careful recovery byte-preservation checks.
