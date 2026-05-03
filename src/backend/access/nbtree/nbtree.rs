@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLockWriteGuard;
 
+use pgrust_access::index::unique::keys_contain_null;
 use pgrust_access::nbtree::tuple as access_tuple;
 use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices, AccessResult};
 
@@ -787,10 +788,6 @@ fn key_values_from_heap_row(
         keys.push(value);
     }
     Ok(keys)
-}
-
-fn keys_contain_null(values: &[Value]) -> bool {
-    values.iter().any(|value| matches!(value, Value::Null))
 }
 
 fn write_page_header_fast(

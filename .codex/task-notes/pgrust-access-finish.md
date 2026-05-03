@@ -19,6 +19,7 @@ Key decisions:
 - Routed hash index build heap scanning and key projection through `AccessHeapServices` and `AccessIndexServices` as the first runtime path using the new boundary.
 - Routed btree, BRIN, GIN, GiST, and SP-GiST build heap scans/key projection through the same service boundary.
 - Routed btree unique probing through `AccessHeapServices` and `AccessTransactionServices`; access errors now preserve interrupt reasons explicitly.
+- Moved unique-candidate classification and NULL-key checks into `pgrust_access::index::unique`; root still owns scan dispatch and conflict error formatting.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -32,6 +33,7 @@ Files touched:
 - `crates/pgrust_access/src/spgist/{mod.rs,support.rs,quad_box.rs,tuple.rs}`
 - `crates/pgrust_access/src/access/relscan.rs`
 - `crates/pgrust_access/src/index/{mod.rs,genam.rs}`
+- `crates/pgrust_access/src/index/unique.rs`
 - `crates/pgrust_access/src/index/amvalidate.rs`
 - `crates/pgrust_access/src/index/buildkeys.rs`
 - `src/backend/access/services.rs`
@@ -78,6 +80,13 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet jsonb_ops_empty_container_emits_empty_item`
 - `scripts/cargo_isolated.sh test --lib --quiet index`
 - `scripts/cargo_isolated.sh test --lib --quiet hash`
+- `cargo fmt --all -- --check`
+- `scripts/cargo_isolated.sh check --message-format short`
+- `scripts/cargo_isolated.sh test -p pgrust_access --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_storage --quiet`
+- `scripts/cargo_isolated.sh check --features lz4 --message-format short`
+- `scripts/cargo_isolated.sh test --lib --quiet btree`
+- `scripts/cargo_isolated.sh test --lib --quiet index`
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.
 - Note: `scripts/cargo_isolated.sh test --lib --quiet gin` also matches unrelated names containing "gin" (for example "planning") and currently hits an unrelated root analyze-services failure; use focused GIN test names instead.
 
