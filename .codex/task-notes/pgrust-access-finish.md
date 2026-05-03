@@ -20,6 +20,7 @@ Key decisions:
 - Routed btree, BRIN, GIN, GiST, and SP-GiST build heap scans/key projection through the same service boundary.
 - Routed btree unique probing through `AccessHeapServices` and `AccessTransactionServices`; access errors now preserve interrupt reasons explicitly.
 - Moved unique-candidate classification and NULL-key checks into `pgrust_access::index::unique`; root still owns scan dispatch and conflict error formatting.
+- Added hash value/equality methods to `AccessScalarServices` and routed hash AM build/insert/scan through `RootAccessServices` instead of direct scalar hash helper calls.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -41,6 +42,7 @@ Files touched:
 - `src/backend/access/gin/gin.rs`
 - `src/backend/access/gist/build.rs`
 - `src/backend/access/hash/mod.rs`
+- `src/backend/access/services.rs`
 - `src/backend/access/nbtree/nbtree.rs`
 - `src/backend/access/spgist/build.rs`
 - `src/backend/access/index/genam.rs`
@@ -87,6 +89,12 @@ Tests run:
 - `scripts/cargo_isolated.sh check --features lz4 --message-format short`
 - `scripts/cargo_isolated.sh test --lib --quiet btree`
 - `scripts/cargo_isolated.sh test --lib --quiet index`
+- `cargo fmt --all -- --check`
+- `scripts/cargo_isolated.sh check --message-format short`
+- `scripts/cargo_isolated.sh test -p pgrust_access --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_storage --quiet`
+- `scripts/cargo_isolated.sh check --features lz4 --message-format short`
+- `scripts/cargo_isolated.sh test --lib --quiet hash`
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.
 - Note: `scripts/cargo_isolated.sh test --lib --quiet gin` also matches unrelated names containing "gin" (for example "planning") and currently hits an unrelated root analyze-services failure; use focused GIN test names instead.
 

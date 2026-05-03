@@ -374,6 +374,15 @@ impl AccessScalarServices for RootAccessServices {
         ))
     }
 
+    fn hash_index_value(&self, value: &Value, opclass: Option<u32>) -> AccessResult<Option<u32>> {
+        crate::backend::access::hash::support::hash_index_value(value, opclass)
+            .map_err(AccessError::Scalar)
+    }
+
+    fn hash_values_equal(&self, left: &Value, right: &Value, opclass: Option<u32>) -> bool {
+        crate::backend::access::hash::support::hash_values_equal(left, right, opclass)
+    }
+
     fn gin_jsonb_entries(&self, attnum: u16, bytes: &[u8]) -> AccessResult<Vec<GinEntryKey>> {
         let jsonb = crate::backend::executor::jsonb::decode_jsonb(bytes)
             .map_err(|err| AccessError::Scalar(format!("GIN jsonb decode failed: {err:?}")))?;

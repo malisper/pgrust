@@ -177,6 +177,10 @@ pub trait AccessScalarServices {
 
     fn compare_jsonb_bytes(&self, left: &[u8], right: &[u8]) -> Option<Ordering>;
 
+    fn hash_index_value(&self, value: &Value, opclass: Option<u32>) -> AccessResult<Option<u32>>;
+
+    fn hash_values_equal(&self, left: &Value, right: &Value, opclass: Option<u32>) -> bool;
+
     fn gin_jsonb_entries(&self, attnum: u16, bytes: &[u8]) -> AccessResult<Vec<GinEntryKey>>;
 
     fn bound_box(&self, left: &GeoBox, right: &GeoBox) -> GeoBox;

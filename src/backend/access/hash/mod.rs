@@ -4,6 +4,7 @@ pub mod wal;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
+use crate::backend::access::RootAccessServices;
 use crate::backend::access::index::buildkeys::{
     IndexBuildKeyProjector, RootIndexBuildServices, map_access_error, map_catalog_error_to_access,
     materialize_heap_row_values,
@@ -43,7 +44,7 @@ use crate::include::access::tidbitmap::TidBitmap;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 use crate::{BufferPool, ClientId, PinnedBuffer, SmgrStorageBackend};
-use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices};
+use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices, AccessScalarServices};
 use wal::{LoggedHashBlock, log_hash_record};
 
 pub(crate) use support::{
@@ -264,8 +265,9 @@ fn bulk_load_hash_index(
         let Some(first) = key_values.first() else {
             return Err(CatalogError::Corrupt("hash index missing key value"));
         };
-        let Some(hash) = support::hash_index_value(first, opclass_for_first_key(&ctx.index_meta))
-            .map_err(CatalogError::Io)?
+        let Some(hash) = RootAccessServices
+            .hash_index_value(first, opclass_for_first_key(&ctx.index_meta))
+            .map_err(map_access_error)?
         else {
             continue;
         };
@@ -772,8 +774,9 @@ fn insert_hash_key_values(
     let Some(first) = key_values.first() else {
         return Err(CatalogError::Corrupt("hash index missing key value"));
     };
-    let Some(hash) = support::hash_index_value(first, opclass_for_first_key(index_meta))
-        .map_err(CatalogError::Io)?
+    let Some(hash) = RootAccessServices
+        .hash_index_value(first, opclass_for_first_key(index_meta))
+        .map_err(map_access_error)?
     else {
         return Ok(false);
     };
@@ -842,9 +845,9 @@ fn hashrescan(
     crate::backend::access::index::genam::index_rescan_stub(scan, keys, direction)?;
     let mut state = HashIndexScanOpaque::default();
     if let Some(argument) = scan_key_argument(scan)
-        && let Some(hash) =
-            support::hash_index_value(argument, opclass_for_first_key(&scan.index_meta))
-                .map_err(CatalogError::Io)?
+        && let Some(hash) = RootAccessServices
+            .hash_index_value(argument, opclass_for_first_key(&scan.index_meta))
+            .map_err(map_access_error)?
     {
         let meta = read_meta(&scan.pool, scan.client_id, scan.index_relation)?;
         let bucket = meta.bucket_for_hash(hash);
@@ -885,7 +888,7 @@ fn load_hash_page_items(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> 
                     .ok()
                     .is_some_and(|values| {
                         values.first().is_some_and(|value| {
-                            support::hash_values_equal(value, &scan_key, opclass)
+                            RootAccessServices.hash_values_equal(value, &scan_key, opclass)
                         })
                     })
         })
