@@ -1,15 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::BufferPool;
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
-use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
-use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogError};
-use crate::backend::catalog::indexing::{
-    insert_bootstrap_system_indexes, system_catalog_index_entry_for_db,
-};
+use crate::backend::catalog::indexing::system_catalog_index_entry_for_db;
 use crate::backend::catalog::loader::{
     catalog_from_physical_rows_scoped, load_physical_catalog_rows_visible_in_pool,
     load_physical_catalog_rows_visible_scoped, load_visible_catalog_kind_in_pool_scoped,
@@ -17,9 +12,7 @@ use crate::backend::catalog::loader::{
 use crate::backend::catalog::persistence::{
     apply_catalog_row_changes_subset_incremental, sync_catalog_rows_subset,
 };
-use crate::backend::catalog::rowcodec::{
-    pg_aggregate_row_from_values, pg_event_trigger_row_from_values, pg_proc_row_from_values,
-};
+use crate::backend::catalog::rowcodec::pg_event_trigger_row_from_values;
 use crate::backend::catalog::rows::{
     PhysicalCatalogRows, add_builtin_description_rows, physical_catalog_rows_from_catcache,
 };
@@ -29,7 +22,7 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
     BootstrapCatalogKind, CatalogScope, PgEventTriggerRow, PgTypeRow, bootstrap_catalog_kinds,
-    bootstrap_pg_aggregate_rows, system_catalog_indexes, system_catalog_indexes_for_heap,
+    system_catalog_indexes,
 };
 
 use super::relcache_init::{
@@ -96,7 +89,11 @@ impl CatalogStore {
     }
 
     pub fn next_oid(&self) -> u32 {
-        self.catalog.next_oid().max(self.control.next_oid)
+        if self.catalog_materialized {
+            self.catalog.next_oid().max(self.control.next_oid)
+        } else {
+            self.control.next_oid
+        }
     }
 
     pub fn load(base_dir: impl Into<PathBuf>) -> Result<Self, CatalogError> {
@@ -125,38 +122,23 @@ impl CatalogStore {
             fs::create_dir_all(parent).map_err(|e| CatalogError::Io(e.to_string()))?;
         }
         let kinds = scope_kinds(scope);
-        let db_oid = scope_db_oid(scope);
 
-        let (mut catalog, control, needs_bootstrap_sync) = if control_path.exists() {
-            let control = load_control_file(&control_path)?;
-            let mut catalog = load_catalog_from_visible_physical_startup_scoped(&base_dir, scope)?;
-            insert_missing_bootstrap_relations(&mut catalog, &kinds, db_oid);
-            if matches!(scope, CatalogScope::Database(_)) {
-                insert_bootstrap_system_indexes(&mut catalog);
-            }
-            catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
-            (catalog, control, false)
-        } else {
-            let catalog = Catalog::default();
-            let control = CatalogControl {
-                next_oid: catalog.next_oid,
-                next_rel_number: catalog.next_rel_number,
-                bootstrap_complete: true,
+        let (mut catalog, control, needs_bootstrap_sync, catalog_materialized) =
+            if control_path.exists() {
+                let control = load_control_file(&control_path)?;
+                let mut catalog = Catalog::default();
+                catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
+                (catalog, control, false, false)
+            } else {
+                let catalog = Catalog::default();
+                let control = CatalogControl {
+                    next_oid: catalog.next_oid,
+                    next_rel_number: catalog.next_rel_number,
+                    bootstrap_complete: true,
+                };
+                persist_control_file(&control_path, &control)?;
+                (catalog, control, true, true)
             };
-            persist_control_file(&control_path, &control)?;
-            (catalog, control, true)
-        };
-        let migrated_legacy_attrdefs =
-            migrate_legacy_attrdef_defaults_if_needed(&base_dir, scope, &catalog)?;
-        let backfilled_pg_aggregate = backfill_pg_aggregate_rows_if_needed(&base_dir, scope)?;
-        if migrated_legacy_attrdefs || backfilled_pg_aggregate {
-            catalog = load_catalog_from_visible_physical_startup_scoped(&base_dir, scope)?;
-            insert_missing_bootstrap_relations(&mut catalog, &kinds, db_oid);
-            if matches!(scope, CatalogScope::Database(_)) {
-                insert_bootstrap_system_indexes(&mut catalog);
-            }
-            catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
-        }
         if !needs_bootstrap_sync {
             validate_storage_relfiles_exist(&base_dir, scope)?;
         }
@@ -169,7 +151,7 @@ impl CatalogStore {
             next_oid: catalog.next_oid.max(oid_next),
             bootstrap_complete: control.bootstrap_complete,
         };
-        if needs_bootstrap_sync || migrated_legacy_attrdefs || backfilled_pg_aggregate {
+        if needs_bootstrap_sync {
             persist_scope_control_file(
                 &control_path,
                 oid_control_path.as_deref(),
@@ -189,6 +171,7 @@ impl CatalogStore {
             scope,
             oid_control_path,
             catalog,
+            catalog_materialized,
             control: effective_control,
             extra_type_rows: Vec::new(),
             stored_view_queries: Default::default(),
@@ -211,6 +194,7 @@ impl CatalogStore {
             scope,
             oid_control_path: None,
             catalog,
+            catalog_materialized: true,
             control,
             extra_type_rows: Vec::new(),
             stored_view_queries: Default::default(),
@@ -227,6 +211,9 @@ impl CatalogStore {
                 if let Some(relcache) = load_relcache_init_file(base_dir, self.scope) {
                     return Ok(relcache);
                 }
+                // :HACK: full relcache builds exist for broad compatibility.
+                // Backend query paths should use RelationIdGetRelation so one
+                // relation descriptor is built from keyed syscache probes.
                 let relcache =
                     RelCache::from_catcache_in_db(&self.catcache()?, self.scope_db_oid())?;
                 persist_relcache_init_file(base_dir, self.scope, &relcache);
@@ -242,6 +229,9 @@ impl CatalogStore {
     pub fn catcache(&self) -> Result<CatCache, CatalogError> {
         match &self.mode {
             CatalogStoreMode::Durable { base_dir, .. } => {
+                // :HACK: compatibility API for callers that still need the full
+                // catalog at once. Normal backend lookups should go through
+                // syscache and per-relation relcache instead.
                 let rows = load_visible_physical_rows_startup_scoped(base_dir, self.scope)?;
                 Ok(CatCache::from_rows(
                     rows.namespaces,
@@ -561,6 +551,18 @@ impl CatalogStore {
         &self.extra_type_rows
     }
 
+    pub(super) fn ensure_catalog_materialized(&mut self) -> Result<(), CatalogError> {
+        if self.catalog_materialized {
+            return Ok(());
+        }
+        // :HACK: compatibility write paths still expect a full in-memory
+        // Catalog. PostgreSQL routes normal reads through syscache/relcache; we
+        // only materialize here for legacy broad Catalog mutation helpers.
+        self.catalog = self.catalog_snapshot_with_control()?;
+        self.catalog_materialized = true;
+        Ok(())
+    }
+
     pub fn allocate_oid_block(&mut self, count: u32, floor: u32) -> Result<u32, CatalogError> {
         let mut control = self.control_state()?;
         let oid = control.next_oid.max(floor);
@@ -678,24 +680,6 @@ pub(crate) fn sync_catalog_heaps_for_tests(
     crate::backend::catalog::persistence::sync_catalog_rows(base_dir, &rows, 1)
 }
 
-fn insert_missing_bootstrap_relations(
-    catalog: &mut Catalog,
-    kinds: &[BootstrapCatalogKind],
-    db_oid: u32,
-) {
-    for &kind in kinds {
-        if catalog.get_by_oid(kind.relation_oid()).is_none() {
-            let mut entry = bootstrap_catalog_entry(kind);
-            entry.rel.db_oid = if matches!(kind.scope(), CatalogScope::Shared) {
-                0
-            } else {
-                db_oid
-            };
-            catalog.insert(kind.relation_name(), entry);
-        }
-    }
-}
-
 fn validate_storage_relfiles_exist(
     base_dir: &Path,
     scope: CatalogScope,
@@ -706,11 +690,6 @@ fn validate_storage_relfiles_exist(
     for kind in scope_kinds(scope) {
         let rel = crate::backend::catalog::bootstrap::bootstrap_catalog_rel(kind, db_oid);
         if !smgr.exists(rel, ForkNumber::Main) {
-            if matches!(kind, BootstrapCatalogKind::PgAttrdef)
-                && base_dir.join("catalog").join("defaults.json").exists()
-            {
-                continue;
-            }
             return Err(CatalogError::Corrupt("missing physical relation relfile"));
         }
     }
@@ -725,146 +704,6 @@ fn validate_storage_relfiles_exist(
     }
 
     Ok(())
-}
-
-fn migrate_legacy_attrdef_defaults_if_needed(
-    base_dir: &Path,
-    scope: CatalogScope,
-    catalog: &Catalog,
-) -> Result<bool, CatalogError> {
-    let CatalogScope::Database(db_oid) = scope else {
-        return Ok(false);
-    };
-    let defaults_path = base_dir.join("catalog").join("defaults.json");
-    if !defaults_path.exists() {
-        return Ok(false);
-    }
-
-    let rel = bootstrap_catalog_rel(BootstrapCatalogKind::PgAttrdef, db_oid);
-    let mut smgr = MdStorageManager::new(base_dir);
-    if smgr.exists(rel, ForkNumber::Main) {
-        return Ok(false);
-    }
-
-    smgr.open(rel)
-        .map_err(|e| CatalogError::Io(e.to_string()))?;
-    smgr.create(rel, ForkNumber::Main, false)
-        .map_err(|e| CatalogError::Io(e.to_string()))?;
-    for descriptor in system_catalog_indexes_for_heap(BootstrapCatalogKind::PgAttrdef) {
-        let entry = system_catalog_index_entry_for_db(*descriptor, db_oid);
-        smgr.open(entry.rel)
-            .map_err(|e| CatalogError::Io(e.to_string()))?;
-        smgr.unlink(entry.rel, None, false);
-        smgr.create(entry.rel, ForkNumber::Main, false)
-            .map_err(|e| CatalogError::Io(e.to_string()))?;
-    }
-
-    let catcache = CatCache::from_catalog(catalog);
-    let all_rows = physical_catalog_rows_from_catcache(&catcache);
-    apply_catalog_row_changes_subset_incremental(
-        base_dir,
-        &PhysicalCatalogRows::default(),
-        &PhysicalCatalogRows {
-            attrdefs: all_rows.attrdefs,
-            ..PhysicalCatalogRows::default()
-        },
-        db_oid,
-        &[BootstrapCatalogKind::PgAttrdef],
-    )?;
-    invalidate_relcache_init_file(base_dir, scope);
-    fs::remove_file(defaults_path).map_err(|e| CatalogError::Io(e.to_string()))?;
-    Ok(true)
-}
-
-fn backfill_pg_aggregate_rows_if_needed(
-    base_dir: &Path,
-    scope: CatalogScope,
-) -> Result<bool, CatalogError> {
-    let CatalogScope::Database(db_oid) = scope else {
-        return Ok(false);
-    };
-
-    let txns = TransactionManager::new_durable(base_dir.to_path_buf())
-        .map_err(|e| CatalogError::Io(format!("transaction status load failed: {e:?}")))?;
-    let snapshot = txns
-        .snapshot(INVALID_TRANSACTION_ID)
-        .map_err(|e| CatalogError::Io(format!("startup catalog snapshot failed: {e:?}")))?;
-    let pool = BufferPool::new(SmgrStorageBackend::new(MdStorageManager::new(base_dir)), 64);
-    let mut aggregates = load_visible_catalog_kind_in_pool_scoped(
-        &pool,
-        &txns,
-        &snapshot,
-        0,
-        BootstrapCatalogKind::PgAggregate,
-        db_oid,
-    )?
-    .into_iter()
-    .map(pg_aggregate_row_from_values)
-    .collect::<Result<Vec<_>, _>>()?;
-    let aggregate_proc_rows = load_visible_catalog_kind_in_pool_scoped(
-        &pool,
-        &txns,
-        &snapshot,
-        0,
-        BootstrapCatalogKind::PgProc,
-        db_oid,
-    )?
-    .into_iter()
-    .map(pg_proc_row_from_values)
-    .collect::<Result<Vec<_>, _>>()?;
-    let mut present_fnoids = aggregates
-        .iter()
-        .map(|row| row.aggfnoid)
-        .collect::<BTreeSet<_>>();
-    let bootstrap_rows_by_fnoid = bootstrap_pg_aggregate_rows()
-        .into_iter()
-        .map(|row| (row.aggfnoid, row))
-        .collect::<BTreeMap<_, _>>();
-    // PostgreSQL anchors aggregate identity on pg_proc and looks up pg_aggregate
-    // metadata by aggfnoid. Keep the same invariant here: backfill only builtin
-    // rows that correspond to known aggregate pg_proc entries, and fail rather
-    // than inventing metadata for custom aggregate procs.
-    let mut changed = false;
-    for proc_row in aggregate_proc_rows
-        .into_iter()
-        .filter(|row| row.prokind == 'a')
-    {
-        if present_fnoids.contains(&proc_row.oid) {
-            continue;
-        }
-        let Some(row) = bootstrap_rows_by_fnoid.get(&proc_row.oid).cloned() else {
-            return Err(CatalogError::Corrupt(
-                "missing pg_aggregate row for custom aggregate",
-            ));
-        };
-        present_fnoids.insert(proc_row.oid);
-        aggregates.push(row);
-        changed = true;
-    }
-
-    if !changed {
-        return Ok(false);
-    }
-
-    aggregates.sort_by_key(|row| row.aggfnoid);
-    sync_catalog_rows_subset(
-        base_dir,
-        &PhysicalCatalogRows {
-            aggregates,
-            ..PhysicalCatalogRows::default()
-        },
-        db_oid,
-        &[BootstrapCatalogKind::PgAggregate],
-    )?;
-    Ok(true)
-}
-
-fn load_catalog_from_visible_physical_startup_scoped(
-    base_dir: &Path,
-    scope: CatalogScope,
-) -> Result<Catalog, CatalogError> {
-    let rows = load_visible_physical_rows_startup_scoped(base_dir, scope)?;
-    catalog_from_physical_rows_scoped(base_dir, rows, scope_db_oid(scope))
 }
 
 fn load_visible_physical_rows_startup_scoped(

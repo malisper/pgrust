@@ -2470,6 +2470,10 @@ fn load_backend_catcache(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Result<CatCache, CatalogError> {
+    // :HACK: broad CatCache materialization is a compatibility escape hatch for
+    // catalog views/tests and legacy callers. Hot planner/executor paths should
+    // use SearchSysCache* or RelationIdGetRelation instead, matching
+    // PostgreSQL's keyed syscache/relcache model.
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
     let cache_ctx = BackendCacheContext::from(txn_ctx);
@@ -2819,7 +2823,7 @@ pub fn ensure_proc_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::include::catalog::BootstrapCatalogKind;
+    use crate::include::catalog::{BootstrapCatalogKind, PUBLIC_NAMESPACE_OID};
 
     #[test]
     fn postgres_syscache_names_map_to_catalog_indexes() {
@@ -2951,5 +2955,126 @@ mod tests {
     #[test]
     fn syscache_query_key_skips_unsupported_value_shapes() {
         assert!(SysCacheQueryKey::new(SysCacheId::TYPEOID, &[Value::Float64(1.0)]).is_none());
+    }
+
+    #[test]
+    fn relation_lookup_uses_keyed_syscache_and_one_relcache_entry() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "lazy_relation");
+        let db = Database::open(&base, 16).unwrap();
+        db.execute(1, "create table syscache_items (id int4)")
+            .unwrap();
+
+        let client_id = 77;
+        let rel_key = SysCacheQueryKey::new(
+            SysCacheId::RELNAMENSP,
+            &[
+                Value::Text("syscache_items".into()),
+                oid_key(PUBLIC_NAMESPACE_OID),
+            ],
+        )
+        .unwrap();
+        let rows = SearchSysCache2(
+            &db,
+            client_id,
+            None,
+            SysCacheId::RELNAMENSP,
+            Value::Text("syscache_items".into()),
+            oid_key(PUBLIC_NAMESPACE_OID),
+        )
+        .unwrap();
+        let relation_oid = rows
+            .into_iter()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::Class(row) => Some(row.oid),
+                _ => None,
+            })
+            .unwrap();
+        let class_row = class_row_for_cache_test(&db, client_id, relation_oid);
+
+        {
+            let mut states = db.backend_cache_states.write();
+            let state = states.get_mut(&client_id).unwrap();
+            assert_eq!(
+                state.syscache.get(
+                    BackendCacheContext::Autocommit,
+                    SysCacheLookupMode::Exact,
+                    &rel_key
+                ),
+                Some(vec![SysCacheTuple::Class(class_row)])
+            );
+            assert!(state.catcache.is_none());
+            assert!(state.relation_cache.is_empty());
+        }
+
+        let entry = RelationIdGetRelation(&db, client_id, None, relation_oid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.relation_oid, relation_oid);
+
+        let states = db.backend_cache_states.read();
+        let state = states.get(&client_id).unwrap();
+        assert!(state.catcache.is_none());
+        assert_eq!(state.relation_cache.len(), 1);
+        assert!(state.relation_cache.contains_key(&relation_oid));
+    }
+
+    #[test]
+    fn proc_name_lookup_uses_syscache_list_without_catcache() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "proc_name");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 78;
+        let proc_key =
+            SysCacheQueryKey::new(SysCacheId::PROCNAMEARGSNSP, &[Value::Text("abs".into())])
+                .unwrap();
+
+        let rows = SearchSysCacheList1(
+            &db,
+            client_id,
+            None,
+            SysCacheId::PROCNAMEARGSNSP,
+            Value::Text("abs".into()),
+        )
+        .unwrap();
+        assert!(
+            rows.iter().any(|tuple| matches!(
+                tuple,
+                SysCacheTuple::Proc(row) if row.proname.eq_ignore_ascii_case("abs")
+            )),
+            "pg_proc rows should be found through the PROCNAMEARGSNSP prefix list"
+        );
+
+        let mut states = db.backend_cache_states.write();
+        let state = states.get_mut(&client_id).unwrap();
+        assert_eq!(
+            state.syscache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::List,
+                &proc_key
+            ),
+            Some(rows)
+        );
+        assert!(state.catcache.is_none());
+        assert!(state.relation_cache.is_empty());
+    }
+
+    fn class_row_for_cache_test(
+        db: &Database,
+        client_id: ClientId,
+        relation_oid: u32,
+    ) -> PgClassRow {
+        SearchSysCache1(
+            db,
+            client_id,
+            None,
+            SysCacheId::RELOID,
+            oid_key(relation_oid),
+        )
+        .unwrap()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Class(row) => Some(row),
+            _ => None,
+        })
+        .unwrap()
     }
 }

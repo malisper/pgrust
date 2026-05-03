@@ -54,6 +54,7 @@ pub struct CatalogStore {
     scope: CatalogScope,
     oid_control_path: Option<PathBuf>,
     catalog: Catalog,
+    catalog_materialized: bool,
     control: CatalogControl,
     extra_type_rows: Vec<PgTypeRow>,
     stored_view_queries: HashMap<u32, Query>,
@@ -62,6 +63,7 @@ pub struct CatalogStore {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CatalogStoreSnapshot {
     catalog: Catalog,
+    catalog_materialized: bool,
     control: CatalogControl,
     extra_type_rows: Vec<PgTypeRow>,
     stored_view_queries: HashMap<u32, Query>,
@@ -138,6 +140,7 @@ impl CatalogStore {
     pub(crate) fn snapshot(&self) -> CatalogStoreSnapshot {
         CatalogStoreSnapshot {
             catalog: self.catalog.clone(),
+            catalog_materialized: self.catalog_materialized,
             control: self.control.clone(),
             extra_type_rows: self.extra_type_rows.clone(),
             stored_view_queries: self.stored_view_queries.clone(),
@@ -154,6 +157,7 @@ impl CatalogStore {
         };
         Ok(CatalogStoreSnapshot {
             catalog,
+            catalog_materialized: true,
             control: self.control_state()?,
             extra_type_rows: self.extra_type_rows.clone(),
             stored_view_queries: self.stored_view_queries.clone(),
@@ -162,6 +166,7 @@ impl CatalogStore {
 
     pub(crate) fn restore_snapshot(&mut self, snapshot: CatalogStoreSnapshot) {
         self.catalog = snapshot.catalog;
+        self.catalog_materialized = snapshot.catalog_materialized;
         self.control = snapshot.control;
         self.extra_type_rows = snapshot.extra_type_rows;
         self.stored_view_queries = snapshot.stored_view_queries;
@@ -235,6 +240,7 @@ impl CatalogStore {
         }
 
         self.catalog = snapshot.catalog;
+        self.catalog_materialized = snapshot.catalog_materialized;
         self.control = snapshot.control;
         self.extra_type_rows = snapshot.extra_type_rows;
         self.stored_view_queries = snapshot.stored_view_queries;
@@ -764,6 +770,33 @@ mod tests {
         let reopened_entry = reopened_catalog.get("people").unwrap();
         assert_eq!(reopened_entry.rel.rel_number, DEFAULT_FIRST_REL_NUMBER);
         assert_eq!(reopened_entry.desc.columns.len(), 3);
+    }
+
+    #[test]
+    fn durable_reopen_keeps_catalog_lightweight_until_broad_scan() {
+        let base = temp_dir("lazy_reopen");
+        let first = CatalogStore::load(&base).unwrap();
+        assert!(
+            first.catalog_materialized,
+            "initial bootstrap owns a full catalog to seed physical catalogs"
+        );
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        assert!(
+            !reopened.catalog_materialized,
+            "reopen should only read control/cache metadata, not materialize the catalog"
+        );
+        assert!(
+            reopened
+                .catalog_snapshot()
+                .unwrap()
+                .get("pg_class")
+                .is_some()
+        );
+        assert!(
+            !reopened.catalog_materialized,
+            "compatibility snapshots should not make normal open state eager"
+        );
     }
 
     #[test]
@@ -2517,7 +2550,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_store_migrates_legacy_defaults_json_into_pg_attrdef() {
+    fn catalog_store_rejects_legacy_defaults_json_without_pg_attrdef_relfile() {
         let base = temp_dir("legacy_defaults_migration");
         let mut store = CatalogStore::load(&base).unwrap();
         let mut desc = RelationDesc {
@@ -2551,23 +2584,11 @@ mod tests {
         )
         .unwrap();
 
-        let reopened = CatalogStore::load(&base).unwrap();
-        let relcache = reopened.relcache().unwrap();
-        let migrated = relcache.get_by_name("notes").unwrap();
-        assert_eq!(
-            migrated.desc.columns[1].default_expr.as_deref(),
-            Some("'legacy'")
-        );
-        assert!(migrated.desc.columns[1].attrdef_oid.is_some());
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        let attrdef = rows
-            .attrdefs
-            .iter()
-            .find(|row| row.adrelid == entry.relation_oid && row.adnum == 2)
-            .unwrap();
-        assert_eq!(attrdef.adbin, "'legacy'");
-        assert!(attrdef.oid > entry.row_type_oid);
+        let err = CatalogStore::load(&base).unwrap_err();
+        assert!(matches!(
+            err,
+            CatalogError::Corrupt("missing physical relation relfile")
+        ));
     }
 
     fn assert_missing_bootstrap_relfile_fails(label: &str, kind: BootstrapCatalogKind) {

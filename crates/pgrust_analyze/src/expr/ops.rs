@@ -2362,9 +2362,9 @@ fn resolve_prefix_operator(
     let mut ambiguous = false;
 
     for operator in catalog
-        .operator_rows()
+        .operator_rows_by_name(op)
         .into_iter()
-        .filter(|row| row.oprname.eq_ignore_ascii_case(op) && row.oprleft == 0 && row.oprright != 0)
+        .filter(|row| row.oprleft == 0 && row.oprright != 0)
     {
         let declared_type = catalog.type_by_oid(operator.oprright)?.sql_type;
         let result_type = catalog.type_by_oid(operator.oprresult)?.sql_type;

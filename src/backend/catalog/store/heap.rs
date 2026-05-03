@@ -224,6 +224,7 @@ impl CatalogStore {
         mut row: PgDatabaseRow,
     ) -> Result<PgDatabaseRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            self.ensure_catalog_materialized()?;
             let mut control = self.control_state()?;
             if self
                 .catalog
@@ -284,6 +285,7 @@ impl CatalogStore {
             &[BootstrapCatalogKind::PgDatabase],
         )?;
         self.catalog = catalog.clone();
+        self.catalog_materialized = true;
         self.control.next_oid = catalog.next_oid;
         self.control.next_rel_number = catalog.next_rel_number;
         Ok(row)
@@ -292,6 +294,7 @@ impl CatalogStore {
     #[cfg(test)]
     pub fn drop_database_row_direct(&mut self, name: &str) -> Result<PgDatabaseRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            self.ensure_catalog_materialized()?;
             let mut databases = self.catalog.databases.clone();
             let control = self.control_state()?;
             let position = databases
@@ -333,6 +336,7 @@ impl CatalogStore {
             &[BootstrapCatalogKind::PgDatabase],
         )?;
         self.catalog = catalog.clone();
+        self.catalog_materialized = true;
         self.control.next_oid = catalog.next_oid;
         self.control.next_rel_number = catalog.next_rel_number;
         Ok(row)

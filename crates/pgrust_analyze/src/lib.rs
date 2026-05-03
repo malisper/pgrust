@@ -1512,6 +1512,14 @@ pub trait CatalogLookup: Send + Sync {
         bootstrap_pg_operator_rows()
     }
 
+    fn operator_rows_by_name(&self, name: &str) -> Vec<PgOperatorRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        self.operator_rows()
+            .into_iter()
+            .filter(|row| row.oprname.eq_ignore_ascii_case(normalized))
+            .collect()
+    }
+
     fn ts_config_rows(&self) -> Vec<PgTsConfigRow> {
         bootstrap_pg_ts_config_rows().to_vec()
     }

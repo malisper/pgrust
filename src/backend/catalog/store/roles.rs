@@ -49,6 +49,7 @@ impl CatalogStore {
         attrs: &RoleAttributes,
     ) -> Result<PgAuthIdRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            self.ensure_catalog_materialized()?;
             let mut authids = self.catalog.authids.clone();
             let mut control = self.control_state()?;
             let row = create_role_row(&mut authids, &mut control.next_oid, role_name, attrs)?;
@@ -86,6 +87,7 @@ impl CatalogStore {
             &[BootstrapCatalogKind::PgAuthId],
         )?;
         self.catalog = catalog.clone();
+        self.catalog_materialized = true;
         self.control.next_oid = catalog.next_oid;
         self.control.next_rel_number = catalog.next_rel_number;
         Ok(row)
@@ -98,6 +100,7 @@ impl CatalogStore {
         new_name: &str,
     ) -> Result<PgAuthIdRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            self.ensure_catalog_materialized()?;
             let mut authids = self.catalog.authids.clone();
             let control = self.control_state()?;
             let old_row = authids
@@ -147,6 +150,7 @@ impl CatalogStore {
             &[BootstrapCatalogKind::PgAuthId],
         )?;
         self.catalog = catalog.clone();
+        self.catalog_materialized = true;
         Ok(row)
     }
 
@@ -157,6 +161,7 @@ impl CatalogStore {
         attrs: &RoleAttributes,
     ) -> Result<PgAuthIdRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            self.ensure_catalog_materialized()?;
             let mut authids = self.catalog.authids.clone();
             let control = self.control_state()?;
             let old_row = authids
@@ -206,12 +211,14 @@ impl CatalogStore {
             &[BootstrapCatalogKind::PgAuthId],
         )?;
         self.catalog = catalog.clone();
+        self.catalog_materialized = true;
         Ok(row)
     }
 
     #[cfg(test)]
     pub fn drop_role_direct(&mut self, role_name: &str) -> Result<PgAuthIdRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            self.ensure_catalog_materialized()?;
             let mut authids = self.catalog.authids.clone();
             let auth_members = self.catalog.auth_members.clone();
             let control = self.control_state()?;
@@ -290,6 +297,7 @@ impl CatalogStore {
             ],
         )?;
         self.catalog = catalog.clone();
+        self.catalog_materialized = true;
         Ok(removed_row)
     }
 
@@ -299,6 +307,7 @@ impl CatalogStore {
         membership: &NewRoleMembership,
     ) -> Result<PgAuthMembersRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            self.ensure_catalog_materialized()?;
             let mut auth_members = self.catalog.auth_members.clone();
             let mut control = self.control_state()?;
             let row =
@@ -336,6 +345,7 @@ impl CatalogStore {
             &[BootstrapCatalogKind::PgAuthMembers],
         )?;
         self.catalog = catalog.clone();
+        self.catalog_materialized = true;
         self.control.next_oid = catalog.next_oid;
         Ok(row)
     }
@@ -351,6 +361,7 @@ impl CatalogStore {
         set_option: bool,
     ) -> Result<PgAuthMembersRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            self.ensure_catalog_materialized()?;
             let mut auth_members = self.catalog.auth_members.clone();
             let control = self.control_state()?;
             let old_row = auth_members
@@ -416,6 +427,7 @@ impl CatalogStore {
             &[BootstrapCatalogKind::PgAuthMembers],
         )?;
         self.catalog = catalog.clone();
+        self.catalog_materialized = true;
         Ok(row)
     }
 
@@ -427,6 +439,7 @@ impl CatalogStore {
         grantor: u32,
     ) -> Result<PgAuthMembersRow, CatalogError> {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
+            self.ensure_catalog_materialized()?;
             let mut auth_members = self.catalog.auth_members.clone();
             let control = self.control_state()?;
             let row = delete_role_membership_row(&mut auth_members, roleid, member, grantor)?;
@@ -459,6 +472,7 @@ impl CatalogStore {
             &[BootstrapCatalogKind::PgAuthMembers],
         )?;
         self.catalog = catalog.clone();
+        self.catalog_materialized = true;
         Ok(row)
     }
 

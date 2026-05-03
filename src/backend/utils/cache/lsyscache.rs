@@ -1023,15 +1023,54 @@ fn proc_rows_by_name(
         .rsplit_once('.')
         .map(|(_, name)| name)
         .unwrap_or(normalized);
-    let mut rows = with_backend_catcache(db, client_id, txn_ctx, |catcache| {
-        catcache
-            .proc_rows_by_name(base_name)
+    let mut rows = SearchSysCacheList1(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PROCNAMEARGSNSP,
+        catalog_name_key(base_name),
+    )
+    .map(|tuples| {
+        tuples
             .into_iter()
-            .cloned()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Proc(row) => Some(row),
+                _ => None,
+            })
+            .filter(|row| row.proname.eq_ignore_ascii_case(base_name))
             .collect::<Vec<_>>()
     })
     .unwrap_or_default();
     crate::backend::catalog::pg_proc::sort_pg_proc_rows(&mut rows);
+    rows
+}
+
+fn operator_rows_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+) -> Vec<PgOperatorRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    let mut rows = SearchSysCacheList1(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::OPERNAMENSP,
+        catalog_name_key(normalized),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Operator(row) => Some(row),
+                _ => None,
+            })
+            .filter(|row| row.oprname.eq_ignore_ascii_case(normalized))
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    crate::backend::catalog::pg_operator::sort_pg_operator_rows(&mut rows);
     rows
 }
 
@@ -2106,6 +2145,10 @@ impl CatalogLookup for LazyCatalogLookup {
         backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|cache| cache.operator_rows())
             .unwrap_or_default()
+    }
+
+    fn operator_rows_by_name(&self, name: &str) -> Vec<PgOperatorRow> {
+        operator_rows_by_name(&self.db, self.client_id, self.txn_ctx, name)
     }
 
     fn cast_by_source_target(
