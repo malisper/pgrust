@@ -13,6 +13,7 @@ lz4 = ["dep:lz4_flex"]
 
 [dependencies]
 lz4_flex = { version = "0.11", optional = true }
+parking_lot = "0.12"
 pgrust_catalog_data = { path = "../pgrust_catalog_data" }
 pgrust_core = { path = "../pgrust_core" }
 pgrust_nodes = { path = "../pgrust_nodes" }

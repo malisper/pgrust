@@ -18,6 +18,8 @@ fn catalog_error(error: AccessError) -> CatalogError {
     match error {
         AccessError::Corrupt(message) => CatalogError::Corrupt(message),
         AccessError::Interrupted(reason) => CatalogError::Interrupted(reason),
+        AccessError::Io(message) => CatalogError::Io(message),
+        AccessError::UniqueViolation(message) => CatalogError::UniqueViolation(message),
         AccessError::Scalar(message) | AccessError::Unsupported(message) => {
             CatalogError::Io(message)
         }

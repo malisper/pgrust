@@ -138,6 +138,7 @@ fn write_hash_pages(
                 },
                 flags,
                 data: page.page.to_vec(),
+                buffer_data: Vec::new(),
             }
         })
         .collect::<Vec<_>>();

@@ -1,10 +1,13 @@
 use std::cmp::Ordering;
 
 use pgrust_core::{
-    CommandId, InterruptReason, Lsn, RelFileLocator, Snapshot, TransactionId, TransactionStatus,
+    CommandId, INVALID_TRANSACTION_ID, InterruptReason, Lsn, RelFileLocator, Snapshot,
+    TransactionId, TransactionStatus,
 };
+use pgrust_nodes::SqlType;
 use pgrust_nodes::datum::{
-    GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue, Value,
+    ArrayValue, GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue,
+    Value,
 };
 use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc};
 use pgrust_nodes::relcache::IndexRelCacheEntry;
@@ -23,6 +26,10 @@ pub trait AccessInterruptServices {
 
 pub trait AccessTransactionServices {
     fn transaction_status(&self, xid: TransactionId) -> Option<TransactionStatus>;
+
+    fn oldest_active_xid(&self) -> TransactionId {
+        INVALID_TRANSACTION_ID
+    }
 
     fn combo_command_pair(
         &self,
@@ -59,6 +66,7 @@ pub struct AccessWalBlockRef {
     pub tag: BufferTag,
     pub flags: u8,
     pub data: Vec<u8>,
+    pub buffer_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +95,14 @@ pub trait AccessScalarServices {
     fn encode_value(&self, column: &ColumnDesc, value: &Value) -> AccessResult<TupleValue>;
 
     fn decode_value(&self, column: &ColumnDesc, raw: Option<&[u8]>) -> AccessResult<Value>;
+
+    fn format_unique_key_detail(&self, columns: &[ColumnDesc], values: &[Value]) -> String;
+
+    fn format_vector_array_storage_text(
+        &self,
+        sql_type: SqlType,
+        array: &ArrayValue,
+    ) -> AccessResult<String>;
 
     fn compare_range_values(&self, left: &RangeValue, right: &RangeValue) -> Ordering;
 

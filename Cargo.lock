@@ -517,6 +517,7 @@ name = "pgrust_access"
 version = "0.1.0"
 dependencies = [
  "lz4_flex",
+ "parking_lot",
  "pgrust_catalog_data",
  "pgrust_core",
  "pgrust_nodes",

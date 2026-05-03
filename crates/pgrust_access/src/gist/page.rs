@@ -171,6 +171,7 @@ pub(crate) fn write_logged_pages_with_mode(
                     },
                     flags,
                     data: logged.page.to_vec(),
+                    buffer_data: Vec::new(),
                 }
             })
             .collect::<Vec<_>>();

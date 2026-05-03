@@ -13,8 +13,10 @@ use pgrust_access::{
     AccessTransactionServices, AccessWalRecord, AccessWalServices,
 };
 use pgrust_core::{INVALID_LSN, RelFileLocator, Snapshot, TransactionId, TransactionStatus};
+use pgrust_nodes::SqlType;
 use pgrust_nodes::datum::{
-    GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue, Value,
+    ArrayValue, GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue,
+    Value,
 };
 use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc};
 use pgrust_nodes::tsearch::{TsQuery, TsVector};
@@ -105,6 +107,12 @@ impl AccessInterruptServices for RootAccessRuntime<'_> {
 impl AccessTransactionServices for RootAccessRuntime<'_> {
     fn transaction_status(&self, xid: TransactionId) -> Option<TransactionStatus> {
         self.txns.and_then(|txns| txns.read().status(xid))
+    }
+
+    fn oldest_active_xid(&self) -> TransactionId {
+        self.txns
+            .map(|txns| txns.read().oldest_active_xid())
+            .unwrap_or(pgrust_core::INVALID_TRANSACTION_ID)
     }
 
     fn combo_command_pair(
@@ -233,6 +241,12 @@ impl AccessWalServices for RootAccessWal<'_> {
                     &block.data,
                 );
             }
+            if !block.buffer_data.is_empty() {
+                crate::backend::access::transam::xloginsert::xlog_register_buf_data(
+                    block_id,
+                    &block.buffer_data,
+                );
+            }
         }
         if !record.payload.is_empty() {
             crate::backend::access::transam::xloginsert::xlog_register_data(&record.payload);
@@ -273,6 +287,19 @@ impl AccessScalarServices for RootAccessServices {
 
     fn decode_value(&self, column: &ColumnDesc, raw: Option<&[u8]>) -> AccessResult<Value> {
         crate::backend::executor::value_io::decode_value(column, raw)
+            .map_err(|err| AccessError::Scalar(format!("{err:?}")))
+    }
+
+    fn format_unique_key_detail(&self, columns: &[ColumnDesc], values: &[Value]) -> String {
+        crate::backend::executor::value_io::format_unique_key_detail(columns, values)
+    }
+
+    fn format_vector_array_storage_text(
+        &self,
+        sql_type: SqlType,
+        array: &ArrayValue,
+    ) -> AccessResult<String> {
+        crate::backend::executor::value_io::format_vector_array_storage_text(sql_type, array)
             .map_err(|err| AccessError::Scalar(format!("{err:?}")))
     }
 
