@@ -34,6 +34,12 @@ pub trait AccessTransactionServices {
 }
 
 pub trait AccessHeapServices {
+    fn for_each_heap_tuple(
+        &self,
+        rel: RelFileLocator,
+        visit: &mut dyn FnMut(ItemPointerData, HeapTuple) -> AccessResult<()>,
+    ) -> AccessResult<u64>;
+
     fn for_each_visible_heap_tuple(
         &self,
         rel: RelFileLocator,

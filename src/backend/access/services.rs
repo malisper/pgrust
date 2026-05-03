@@ -75,6 +75,21 @@ impl<'a> RootAccessRuntime<'a> {
             client_id,
         }
     }
+
+    pub fn heap_storage(
+        pool: &'a Arc<
+            crate::BufferPool<crate::backend::storage::buffer::storage_backend::SmgrStorageBackend>,
+        >,
+        client_id: pgrust_core::ClientId,
+    ) -> Self {
+        Self {
+            pool: Some(pool),
+            txns: None,
+            txn_waiter: None,
+            interrupts: None,
+            client_id,
+        }
+    }
 }
 
 impl AccessInterruptServices for RootAccessRuntime<'_> {
@@ -124,6 +139,27 @@ impl AccessTransactionServices for RootAccessRuntime<'_> {
 }
 
 impl AccessHeapServices for RootAccessRuntime<'_> {
+    fn for_each_heap_tuple(
+        &self,
+        rel: RelFileLocator,
+        visit: &mut dyn FnMut(ItemPointerData, HeapTuple) -> AccessResult<()>,
+    ) -> AccessResult<u64> {
+        let pool = self.pool.ok_or_else(|| {
+            AccessError::Unsupported("access heap scan missing buffer pool".into())
+        })?;
+        let mut scan = crate::backend::access::heap::heapam::heap_scan_begin(pool, rel)
+            .map_err(|err| AccessError::Scalar(format!("heap scan begin failed: {err:?}")))?;
+        let mut count = 0;
+        while let Some((tid, tuple)) =
+            crate::backend::access::heap::heapam::heap_scan_next(pool, self.client_id, &mut scan)
+                .map_err(|err| AccessError::Scalar(format!("heap scan failed: {err:?}")))?
+        {
+            visit(tid, tuple)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     fn for_each_visible_heap_tuple(
         &self,
         rel: RelFileLocator,
