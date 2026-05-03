@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+pub const BLCKSZ: usize = 8192;
+pub const ITEM_ID_SIZE: usize = 4;
+pub const SIZE_OF_PAGE_HEADER_DATA: usize = 24;
+pub const MAXALIGN: usize = 8;
+
 /// 1-based offset of an item within a page.
 pub type OffsetNumber = u16;
 

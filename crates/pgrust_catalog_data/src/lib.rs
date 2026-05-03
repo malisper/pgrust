@@ -60,6 +60,7 @@ pub mod pg_ts_parser;
 pub mod pg_ts_template;
 pub mod pg_type;
 pub mod pg_user_mapping;
+pub mod statistics_payload;
 pub mod system_fk;
 pub mod toasting;
 

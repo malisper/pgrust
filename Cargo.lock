@@ -490,6 +490,7 @@ dependencies = [
  "pgrust_catalog_data",
  "pgrust_core",
  "pgrust_nodes",
+ "pgrust_optimizer",
  "pgrust_parser",
  "pgrust_plpgsql_grammar",
  "quick-xml",
@@ -528,6 +529,7 @@ dependencies = [
  "pgrust_core",
  "pgrust_nodes",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -553,6 +555,19 @@ dependencies = [
  "pgrust_catalog_ids",
  "pgrust_core",
  "serde",
+]
+
+[[package]]
+name = "pgrust_optimizer"
+version = "0.1.0"
+dependencies = [
+ "pgrust_analyze",
+ "pgrust_catalog_data",
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "serde_json",
 ]
 
 [[package]]

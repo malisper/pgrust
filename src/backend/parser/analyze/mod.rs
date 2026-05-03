@@ -593,7 +593,7 @@ struct RootAnalyzeServices;
 
 static ROOT_ANALYZE_SERVICES: RootAnalyzeServices = RootAnalyzeServices;
 
-fn with_root_analyze_services<T>(f: impl FnOnce() -> T) -> T {
+pub(crate) fn with_root_analyze_services<T>(f: impl FnOnce() -> T) -> T {
     pgrust_analyze::with_analyze_services(&ROOT_ANALYZE_SERVICES, f)
 }
 

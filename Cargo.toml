@@ -16,6 +16,7 @@ members = [
     "crates/pgrust_catalog_ids",
     "crates/pgrust_core",
     "crates/pgrust_nodes",
+    "crates/pgrust_optimizer",
     "crates/pgrust_parser",
     "crates/pgrust_plpgsql_grammar",
     "crates/pgrust_sql_grammar",
@@ -193,6 +194,7 @@ pgrust_analyze = { path = "crates/pgrust_analyze" }
 pgrust_catalog_data = { path = "crates/pgrust_catalog_data" }
 pgrust_core = { path = "crates/pgrust_core" }
 pgrust_nodes = { path = "crates/pgrust_nodes" }
+pgrust_optimizer = { path = "crates/pgrust_optimizer" }
 pgrust_parser = { path = "crates/pgrust_parser" }
 pgrust_plpgsql_grammar = { path = "crates/pgrust_plpgsql_grammar" }
 rand = "0.8"

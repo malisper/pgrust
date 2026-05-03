@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::OffsetNumber;
 
+pub const BRIN_DEFAULT_PAGES_PER_RANGE: u32 = 128;
+pub const SIZEOF_HEAP_TUPLE_HEADER: usize = 23;
+pub const SPGIST_CONFIG_PROC: i16 = 1;
+
+const BRIN_SPECIAL_SIZE: usize = crate::storage::MAXALIGN;
+const BRIN_PAGE_CONTENT_OFFSET: usize = (crate::storage::SIZE_OF_PAGE_HEADER_DATA
+    + (crate::storage::MAXALIGN - 1))
+    & !(crate::storage::MAXALIGN - 1);
+const REVMAP_ENTRY_SIZE: usize = 6;
+const REVMAP_CONTENT_SIZE: usize =
+    crate::storage::BLCKSZ - BRIN_PAGE_CONTENT_OFFSET - BRIN_SPECIAL_SIZE;
+pub const REVMAP_PAGE_MAXITEMS: usize = REVMAP_CONTENT_SIZE / REVMAP_ENTRY_SIZE;
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash, Serialize, Deserialize,
 )]
