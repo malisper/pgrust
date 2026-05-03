@@ -3339,6 +3339,64 @@ fn select_sql_varchar_cast_truncates() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn select_all_preserves_duplicates() {
+    let base = temp_dir("select_all_preserves_duplicates");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select all x from (values (1), (1)) as t(x) order by x",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(1)]],
+    );
+}
+
+#[test]
+fn inherited_table_marker_parses_as_default_relation_scan() {
+    let base = temp_dir("inherited_table_marker_relation_scan");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table t0(c0 bool)").unwrap();
+    db.execute(1, "create table t1(c0 bool)").unwrap();
+    db.execute(1, "insert into t0 values (true)").unwrap();
+    db.execute(1, "insert into t1 values (true), (false)")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select count(*) from t0* full outer join t1* on true")
+            .unwrap(),
+        vec![vec![Value::Int64(2)]],
+    );
+}
+
+#[test]
+fn between_symmetric_matches_postgres_rewrite() {
+    let base = temp_dir("between_symmetric");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 2 between symmetric 3 and 1, 2 not between symmetric 3 and 1, 4 between symmetric 3 and 1, null::int between symmetric 3 and 1",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Null,
+        ]],
+    );
+}
+
 #[test]
 fn setop_join_branch_executes_with_child_local_vars() {
     let base = temp_dir("setop_join_branch_child_roots");
@@ -12373,6 +12431,28 @@ fn integer_to_boolean_casts_match_postgres() {
 }
 
 #[test]
+fn boolean_to_integer_casts_match_postgres() {
+    let base = temp_dir("boolean_to_integer_casts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select false::smallint, true::integer, true::bigint, cast((1 = 1) as int)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Int16(0),
+            Value::Int32(1),
+            Value::Int64(1),
+            Value::Int32(1),
+        ]],
+    );
+}
+
+#[test]
 fn pg_input_error_info_reports_varchar_typmod_truncation() {
     let base = temp_dir("pg_input_error_info_varchar");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -14862,6 +14942,26 @@ fn any_array_empty_and_null_array_cases() {
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1 = any(ARRAY[]::int4[]), 1 = any((null)::int4[]), (null)::int4 = any(ARRAY[1]::int4[])").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Null, Value::Null]]); } other => panic!("expected query result, got {:?}", other), }
 }
+
+#[test]
+fn in_list_with_only_nulls_uses_left_type() {
+    let base = temp_dir("in_list_only_nulls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 1 in (null), 1 not in (null), cast(1 in (null) as varchar)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Null, Value::Null, Value::Null]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn array_overlap_false_and_null_cases() {
     let base = temp_dir("array_overlap_false_null");

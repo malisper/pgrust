@@ -21486,6 +21486,7 @@ fn build_simple_select_statement(
                 distinct = true;
                 distinct_on = build_select_distinct_clause(part)?;
             }
+            Rule::select_all_clause => {}
             Rule::simple_select_core => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
@@ -21493,6 +21494,7 @@ fn build_simple_select_statement(
                             distinct = true;
                             distinct_on = build_select_distinct_clause(inner)?;
                         }
+                        Rule::select_all_clause => {}
                         Rule::select_list => targets = Some(build_select_list(inner)?),
                         Rule::from_item => from = Some(build_from_item(inner)?),
                         Rule::expr => where_clause = Some(build_expr(inner)?),

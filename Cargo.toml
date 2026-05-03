@@ -157,6 +157,10 @@ required-features = ["tools"]
 name = "wal_syscall_check"
 path = "src/bin/wal_syscall_check.rs"
 required-features = ["tools"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }

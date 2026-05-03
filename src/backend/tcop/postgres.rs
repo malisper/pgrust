@@ -36,7 +36,9 @@ use crate::backend::parser::{
     CatalogLookup, PartitionBoundSpec, PartitionRangeDatumValue, SelectStatement,
     SerializedPartitionValue, Statement, deserialize_partition_bound, partition_value_to_value,
 };
-use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
+use crate::backend::parser::{
+    SqlType, SqlTypeKind, bind_delete, bind_insert, bind_update, parse_expr, plan_merge,
+};
 use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::cache::syscache::backend_catcache;
 use crate::backend::utils::cache::system_views::format_pg_get_expr_policy_sql;
@@ -66,7 +68,7 @@ use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
 use crate::include::nodes::parsenodes::{CopyFormat, CopyToStatement};
-use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
+use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc, TargetEntry};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::session::LargeObjectFastpathCall;
@@ -6634,6 +6636,24 @@ pub(crate) fn handle_connection(
 ) -> io::Result<()> {
     let reader = stream.try_clone()?;
     handle_connection_with_io(reader, stream, cluster, client_id)
+}
+
+#[cfg(fuzzing)]
+pub fn fuzz_startup_packet(bytes: &[u8]) {
+    if bytes.len() < 8 {
+        return;
+    }
+
+    let declared_len = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    if declared_len < 8 || declared_len > bytes.len() {
+        return;
+    }
+
+    let payload = &bytes[4..declared_len];
+    let code = i32::from_be_bytes(payload[0..4].try_into().unwrap());
+    if code == PROTOCOL_VERSION_3_0 {
+        let _ = parse_startup_parameters(&payload[4..]);
+    }
 }
 
 fn parse_startup_parameters(payload: &[u8]) -> io::Result<HashMap<String, String>> {
@@ -15289,6 +15309,22 @@ fn describe_sql(
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             Ok(Some(columns))
         }
+        Statement::Insert(stmt) => {
+            let bound = bind_insert(&stmt, &catalog).map_err(ExecError::Parse)?;
+            Ok(returning_columns(bound.returning, &catalog))
+        }
+        Statement::Update(stmt) => {
+            let bound = bind_update(&stmt, &catalog).map_err(ExecError::Parse)?;
+            Ok(returning_columns(bound.returning, &catalog))
+        }
+        Statement::Delete(stmt) => {
+            let bound = bind_delete(&stmt, &catalog).map_err(ExecError::Parse)?;
+            Ok(returning_columns(bound.returning, &catalog))
+        }
+        Statement::Merge(stmt) => {
+            let bound = plan_merge(&stmt, &catalog).map_err(ExecError::Parse)?;
+            Ok(returning_columns(bound.returning, &catalog))
+        }
         Statement::Execute(execute_stmt) => {
             let mut columns = session
                 .prepared_statement_result_columns_for_describe(&execute_stmt)?
@@ -15304,6 +15340,29 @@ fn describe_sql(
         ])),
         _ => Ok(None),
     }
+}
+
+fn returning_columns(
+    targets: Vec<TargetEntry>,
+    catalog: &dyn CatalogLookup,
+) -> Option<Vec<QueryColumn>> {
+    if targets.is_empty() {
+        return None;
+    }
+    let mut columns = targets
+        .into_iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| QueryColumn {
+            name: target.name,
+            sql_type: target.sql_type,
+            wire_type_oid: None,
+        })
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        return None;
+    }
+    annotate_query_columns_with_wire_type_oids(&mut columns, catalog);
+    Some(columns)
 }
 
 fn sql_without_describe_terminator(sql: &str) -> String {
@@ -16349,6 +16408,13 @@ mod tests {
     fn describe_statement_message(statement_name: &str) -> Vec<u8> {
         let mut body = vec![b'S'];
         body.extend_from_slice(statement_name.as_bytes());
+        body.push(0);
+        frontend_message(b'D', &body)
+    }
+
+    fn describe_portal_message(portal_name: &str) -> Vec<u8> {
+        let mut body = vec![b'P'];
+        body.extend_from_slice(portal_name.as_bytes());
         body.push(0);
         frontend_message(b'D', &body)
     }
@@ -17414,6 +17480,47 @@ mod tests {
         assert_eq!(parse_tag, b'1');
         assert_eq!(param_tag, b't');
         assert_eq!(row_tag, b'T');
+    }
+
+    #[test]
+    fn extended_describe_reports_dml_returning_columns() {
+        let db = Database::open(temp_dir("extended_describe_dml_returning"), 16).unwrap();
+        let mut state = ConnectionState::new(Session::new(2));
+        let mut output = Vec::new();
+
+        state
+            .session
+            .execute(&db, "create table items (id int4)")
+            .unwrap();
+        state
+            .session
+            .execute(&db, "insert into items values (1)")
+            .unwrap();
+
+        let parse_packet = parse_message("", "delete from items returning id");
+        let bind_packet = bind_message("", &[]);
+        let describe_packet = describe_portal_message("");
+        let execute_packet = execute_message("");
+        handle_parse(&mut output, &mut state, &parse_packet[5..]).unwrap();
+        handle_bind(&mut output, &db, &mut state, &bind_packet[5..]).unwrap();
+        handle_describe(&mut output, &db, &mut state, &describe_packet[5..]).unwrap();
+        handle_execute(&mut output, &db, &mut state, &execute_packet[5..]).unwrap();
+
+        let mut cursor = Cursor::new(output);
+        let (tag, _) = read_message(&mut cursor, "parse complete");
+        assert_eq!(tag, b'1');
+        let (tag, _) = read_message(&mut cursor, "bind complete");
+        assert_eq!(tag, b'2');
+        let (tag, body) = read_message(&mut cursor, "describe returning portal");
+        assert_eq!(tag, b'T');
+        assert_eq!(i16::from_be_bytes(body[0..2].try_into().unwrap()), 1);
+        assert!(body.windows(b"id\0".len()).any(|window| window == b"id\0"));
+
+        let (tag, _) = read_message(&mut cursor, "execute returning data row");
+        assert_eq!(tag, b'D');
+        let (tag, body) = read_message(&mut cursor, "execute returning command complete");
+        assert_eq!(tag, b'C');
+        assert_eq!(body, b"DELETE 1\0");
     }
 
     #[test]
