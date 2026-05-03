@@ -1,4 +1,7 @@
-use crate::backend::access::heap::heapam::heap_fetch;
+use pgrust_access::{AccessHeapServices, AccessTransactionServices};
+
+use crate::backend::access::RootAccessRuntime;
+use crate::backend::access::index::buildkeys::map_access_error;
 use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::{
     INVALID_TRANSACTION_ID, TransactionId, TransactionStatus,
@@ -30,6 +33,13 @@ pub fn probe_unique_conflict(
     {
         return Ok(None);
     }
+    let access_runtime = RootAccessRuntime {
+        pool: Some(&ctx.pool),
+        txns: Some(&ctx.txns),
+        txn_waiter: ctx.txn_waiter.as_deref(),
+        interrupts: Some(ctx.interrupts.as_ref()),
+        client_id: ctx.client_id,
+    };
     loop {
         let begin = crate::include::access::amapi::IndexBeginScanContext {
             pool: ctx.pool.clone(),
@@ -58,7 +68,7 @@ pub fn probe_unique_conflict(
             let tid = scan
                 .xs_heaptid
                 .ok_or(CatalogError::Corrupt("index scan tuple missing heap tid"))?;
-            match classify_unique_candidate(ctx, tid)? {
+            match classify_unique_candidate(ctx, tid, &access_runtime)? {
                 UniqueCandidateResult::NoConflict => {}
                 UniqueCandidateResult::Conflict(tuple) => {
                     let _ = indexam::index_endscan(scan, ctx.index_meta.am_oid);
@@ -74,20 +84,9 @@ pub fn probe_unique_conflict(
         let Some(xid) = wait_for_xid else {
             return Ok(None);
         };
-        let waiter = ctx.txn_waiter.as_ref().ok_or_else(|| {
-            CatalogError::Io("btree unique check missing transaction waiter".into())
-        })?;
-        match waiter.wait_for(&ctx.txns, xid, ctx.client_id, ctx.interrupts.as_ref()) {
-            crate::backend::storage::lmgr::WaitOutcome::Completed => {}
-            crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {
-                return Err(CatalogError::Io(format!(
-                    "btree unique check timed out waiting for transaction {xid}"
-                )));
-            }
-            crate::backend::storage::lmgr::WaitOutcome::Interrupted(reason) => {
-                return Err(CatalogError::Interrupted(reason));
-            }
-        }
+        access_runtime
+            .wait_for_transaction(xid)
+            .map_err(map_access_error)?;
     }
 }
 
@@ -104,6 +103,7 @@ pub(crate) enum UniqueCandidateResult {
 fn tid_reachable_from_same_transaction_update_chain(
     ctx: &IndexInsertContext,
     target_tid: ItemPointerData,
+    heap: &impl AccessHeapServices,
 ) -> Result<bool, CatalogError> {
     if !item_pointer_is_valid(ctx.heap_tid) || !item_pointer_is_valid(target_tid) {
         return Ok(false);
@@ -118,8 +118,9 @@ fn tid_reachable_from_same_transaction_update_chain(
         if !seen.insert(current_tid) {
             return Ok(false);
         }
-        let tuple = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, current_tid)
-            .map_err(|err| CatalogError::Io(format!("heap unique chain probe failed: {err:?}")))?;
+        let tuple = heap
+            .fetch_heap_tuple(ctx.heap_relation, current_tid)
+            .map_err(map_access_error)?;
         if !ctx.snapshot.transaction_is_own(tuple.header.xmax) || tuple.header.ctid == current_tid {
             return Ok(false);
         }
@@ -138,13 +139,14 @@ fn item_pointer_is_valid(tid: ItemPointerData) -> bool {
 pub(crate) fn classify_unique_candidate(
     ctx: &IndexInsertContext,
     tid: ItemPointerData,
+    services: &(impl AccessHeapServices + AccessTransactionServices),
 ) -> Result<UniqueCandidateResult, CatalogError> {
     if tid == ctx.heap_tid || ctx.old_heap_tid == Some(tid) {
         return Ok(UniqueCandidateResult::NoConflict);
     }
-    let tuple = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, tid)
-        .map_err(|err| CatalogError::Io(format!("heap unique probe failed: {err:?}")))?;
-    let txns = ctx.txns.read();
+    let tuple = services
+        .fetch_heap_tuple(ctx.heap_relation, tid)
+        .map_err(map_access_error)?;
     let xmin = tuple.header.xmin;
     let xmax = tuple.header.xmax;
 
@@ -152,12 +154,12 @@ pub(crate) fn classify_unique_candidate(
         return Ok(UniqueCandidateResult::NoConflict);
     }
     if ctx.snapshot.transaction_is_own(xmin)
-        && tid_reachable_from_same_transaction_update_chain(ctx, tid)?
+        && tid_reachable_from_same_transaction_update_chain(ctx, tid, services)?
     {
         return Ok(UniqueCandidateResult::NoConflict);
     }
     if !ctx.snapshot.transaction_is_own(xmin) {
-        match txns.status(xmin) {
+        match services.transaction_status(xmin) {
             Some(TransactionStatus::Committed) => {}
             Some(TransactionStatus::Aborted) => return Ok(UniqueCandidateResult::NoConflict),
             Some(TransactionStatus::InProgress) | None => {
@@ -172,7 +174,7 @@ pub(crate) fn classify_unique_candidate(
     if ctx.snapshot.transaction_is_own(xmax) {
         return Ok(UniqueCandidateResult::NoConflict);
     }
-    match txns.status(xmax) {
+    match services.transaction_status(xmax) {
         Some(TransactionStatus::Committed) => Ok(UniqueCandidateResult::NoConflict),
         Some(TransactionStatus::Aborted) => Ok(UniqueCandidateResult::Conflict(tuple)),
         Some(TransactionStatus::InProgress) | None => Ok(UniqueCandidateResult::WaitFor(xmax)),

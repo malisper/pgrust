@@ -11,6 +11,7 @@ use super::{GistColumnPickSplit, GistConsistentResult, GistDistanceResult};
 fn catalog_error(error: AccessError) -> CatalogError {
     match error {
         AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        AccessError::Interrupted(reason) => CatalogError::Interrupted(reason),
         AccessError::Scalar(message) | AccessError::Unsupported(message) => {
             CatalogError::Io(message)
         }

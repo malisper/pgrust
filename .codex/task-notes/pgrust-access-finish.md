@@ -18,6 +18,7 @@ Key decisions:
 - Added root runtime bridge implementations for interrupt/transaction/heap services and a root index-build projection service wrapper.
 - Routed hash index build heap scanning and key projection through `AccessHeapServices` and `AccessIndexServices` as the first runtime path using the new boundary.
 - Routed btree, BRIN, GIN, GiST, and SP-GiST build heap scans/key projection through the same service boundary.
+- Routed btree unique probing through `AccessHeapServices` and `AccessTransactionServices`; access errors now preserve interrupt reasons explicitly.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -43,6 +44,7 @@ Files touched:
 - `src/backend/access/index/genam.rs`
 - `src/backend/access/index/amvalidate.rs`
 - `src/backend/access/index/buildkeys.rs`
+- `src/backend/access/index/unique.rs`
 - `src/backend/access/brin/validate.rs`
 - `src/include/access/amapi.rs`
 - `crates/pgrust_core/src/transam.rs`

@@ -94,6 +94,7 @@ pub(crate) fn project_index_key_values(
     )
     .map_err(|err| match err {
         pgrust_access::AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        pgrust_access::AccessError::Interrupted(reason) => CatalogError::Interrupted(reason),
         pgrust_access::AccessError::Scalar(message)
         | pgrust_access::AccessError::Unsupported(message) => CatalogError::Io(message),
     })
@@ -102,6 +103,7 @@ pub(crate) fn project_index_key_values(
 pub(crate) fn map_access_error(err: pgrust_access::AccessError) -> CatalogError {
     match err {
         pgrust_access::AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        pgrust_access::AccessError::Interrupted(reason) => CatalogError::Interrupted(reason),
         pgrust_access::AccessError::Scalar(message)
         | pgrust_access::AccessError::Unsupported(message) => CatalogError::Io(message),
     }
@@ -110,9 +112,7 @@ pub(crate) fn map_access_error(err: pgrust_access::AccessError) -> CatalogError 
 pub(crate) fn map_catalog_error_to_access(err: CatalogError) -> pgrust_access::AccessError {
     match err {
         CatalogError::Corrupt(message) => pgrust_access::AccessError::Corrupt(message),
-        CatalogError::Interrupted(reason) => {
-            pgrust_access::AccessError::Scalar(format!("interrupted: {reason:?}"))
-        }
+        CatalogError::Interrupted(reason) => pgrust_access::AccessError::Interrupted(reason),
         other => pgrust_access::AccessError::Scalar(format!("{other:?}")),
     }
 }

@@ -112,7 +112,7 @@ impl AccessTransactionServices for RootAccessRuntime<'_> {
                 AccessError::Scalar(format!("timed out waiting for transaction {xid}")),
             ),
             crate::backend::storage::lmgr::WaitOutcome::Interrupted(reason) => {
-                Err(AccessError::Scalar(format!("interrupted: {reason:?}")))
+                Err(AccessError::Interrupted(reason))
             }
         }
     }

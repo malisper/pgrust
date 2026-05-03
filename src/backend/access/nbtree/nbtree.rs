@@ -127,6 +127,7 @@ enum LockedUniqueCheckResult {
 fn catalog_error(error: AccessError) -> CatalogError {
     match error {
         AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        AccessError::Interrupted(reason) => CatalogError::Interrupted(reason),
         AccessError::Scalar(message) | AccessError::Unsupported(message) => {
             CatalogError::Io(message)
         }
@@ -2768,6 +2769,13 @@ fn bt_check_unique_locked(
     locked_opaque: crate::include::access::nbtree::BTPageOpaqueData,
     key_values: &[Value],
 ) -> Result<LockedUniqueCheckResult, CatalogError> {
+    let access_runtime = RootAccessRuntime {
+        pool: Some(&ctx.pool),
+        txns: Some(&ctx.txns),
+        txn_waiter: ctx.txn_waiter.as_deref(),
+        interrupts: Some(ctx.interrupts.as_ref()),
+        client_id: ctx.client_id,
+    };
     let mut page = *locked_page;
     let mut opaque = locked_opaque;
 
@@ -2786,15 +2794,17 @@ fn bt_check_unique_locked(
             ) {
                 Ordering::Less => continue,
                 Ordering::Greater => return Ok(LockedUniqueCheckResult::Clear),
-                Ordering::Equal => match classify_unique_candidate(ctx, tuple.t_tid)? {
-                    UniqueCandidateResult::NoConflict => {}
-                    UniqueCandidateResult::Conflict(_) => {
-                        return Err(CatalogError::UniqueViolation(ctx.index_name.clone()));
+                Ordering::Equal => {
+                    match classify_unique_candidate(ctx, tuple.t_tid, &access_runtime)? {
+                        UniqueCandidateResult::NoConflict => {}
+                        UniqueCandidateResult::Conflict(_) => {
+                            return Err(CatalogError::UniqueViolation(ctx.index_name.clone()));
+                        }
+                        UniqueCandidateResult::WaitFor(xid) => {
+                            return Ok(LockedUniqueCheckResult::WaitFor(xid));
+                        }
                     }
-                    UniqueCandidateResult::WaitFor(xid) => {
-                        return Ok(LockedUniqueCheckResult::WaitFor(xid));
-                    }
-                },
+                }
             }
         }
 
