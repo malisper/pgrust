@@ -9,16 +9,6 @@ use crate::include::access::amapi::{
 };
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 use crate::include::access::tidbitmap::TidBitmap;
-use crate::include::catalog::BRIN_AM_OID;
-
-fn brin_routine(
-    am_oid: u32,
-) -> Result<crate::include::access::amapi::IndexAmRoutine, CatalogError> {
-    if am_oid == BRIN_AM_OID {
-        return Ok(crate::backend::access::brin::brin_am_handler());
-    }
-    Err(CatalogError::Corrupt("unknown index access method"))
-}
 
 pub fn index_build_stub(
     ctx: &IndexBuildContext,
@@ -49,12 +39,8 @@ pub fn index_build_stub(
         )
         .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    if let Some(ambuild) = routine.ambuild {
-        ambuild(ctx)
-    } else {
-        Ok(IndexBuildResult::default())
-    }
+    let _ = (ctx, am_oid);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }
 
 pub fn index_insert_stub(ctx: &IndexInsertContext, am_oid: u32) -> Result<bool, CatalogError> {
@@ -79,11 +65,8 @@ pub fn index_insert_stub(ctx: &IndexInsertContext, am_oid: u32) -> Result<bool, 
         )
         .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    let aminsert = routine
-        .aminsert
-        .ok_or(CatalogError::Corrupt("missing index insert callback"))?;
-    aminsert(ctx)
+    let _ = (ctx, am_oid);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }
 
 pub fn index_build_empty_stub(
@@ -101,11 +84,8 @@ pub fn index_build_empty_stub(
         )
         .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    let ambuildempty = routine
-        .ambuildempty
-        .ok_or(CatalogError::Corrupt("missing index buildempty callback"))?;
-    ambuildempty(ctx)
+    let _ = (ctx, am_oid);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }
 
 pub fn index_beginscan(
@@ -121,11 +101,8 @@ pub fn index_beginscan(
         )
         .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    let ambeginscan = routine
-        .ambeginscan
-        .ok_or(CatalogError::Corrupt("missing index beginscan callback"))?;
-    ambeginscan(ctx)
+    let _ = (ctx, am_oid);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }
 
 pub fn index_rescan(
@@ -145,11 +122,8 @@ pub fn index_rescan(
         )
         .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    let amrescan = routine
-        .amrescan
-        .ok_or(CatalogError::Corrupt("missing index rescan callback"))?;
-    amrescan(scan, keys, direction)
+    let _ = (scan, am_oid, keys, direction);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }
 
 pub fn index_getnext(scan: &mut IndexScanDesc, am_oid: u32) -> Result<bool, CatalogError> {
@@ -158,11 +132,8 @@ pub fn index_getnext(scan: &mut IndexScanDesc, am_oid: u32) -> Result<bool, Cata
         return pgrust_access::index::indexam::index_getnext(scan, am_oid, &RootAccessServices)
             .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    let amgettuple = routine
-        .amgettuple
-        .ok_or(CatalogError::Corrupt("missing index gettuple callback"))?;
-    amgettuple(scan)
+    let _ = (scan, am_oid);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }
 
 pub fn index_getbitmap(
@@ -183,11 +154,8 @@ pub fn index_getbitmap(
         )
         .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    let amgetbitmap = routine
-        .amgetbitmap
-        .ok_or(CatalogError::Corrupt("missing index getbitmap callback"))?;
-    amgetbitmap(scan, bitmap)
+    let _ = (scan, am_oid, bitmap);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }
 
 pub fn index_endscan(scan: IndexScanDesc, am_oid: u32) -> Result<(), CatalogError> {
@@ -196,11 +164,8 @@ pub fn index_endscan(scan: IndexScanDesc, am_oid: u32) -> Result<(), CatalogErro
         return pgrust_access::index::indexam::index_endscan(scan, am_oid)
             .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    let amendscan = routine
-        .amendscan
-        .ok_or(CatalogError::Corrupt("missing index endscan callback"))?;
-    amendscan(scan)
+    let _ = (scan, am_oid);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }
 
 pub fn index_bulk_delete(
@@ -230,11 +195,8 @@ pub fn index_bulk_delete(
         )
         .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    let ambulkdelete = routine
-        .ambulkdelete
-        .ok_or(CatalogError::Corrupt("missing index bulkdelete callback"))?;
-    ambulkdelete(ctx, callback, stats)
+    let _ = (ctx, am_oid, callback, stats);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }
 
 pub fn index_vacuum_cleanup(
@@ -256,15 +218,14 @@ pub fn index_vacuum_cleanup(
             am_oid,
             stats,
             &runtime,
+            None,
+            &RootAccessServices,
             &RootAccessWal {
                 pool: ctx.pool.as_ref(),
             },
         )
         .map_err(map_access_error);
     }
-    let routine = brin_routine(am_oid)?;
-    let amvacuumcleanup = routine.amvacuumcleanup.ok_or(CatalogError::Corrupt(
-        "missing index vacuumcleanup callback",
-    ))?;
-    amvacuumcleanup(ctx, stats)
+    let _ = (ctx, am_oid, stats);
+    Err(CatalogError::Corrupt("unknown index access method"))
 }

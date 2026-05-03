@@ -1,4 +1,6 @@
-use pgrust_catalog_data::{BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, SPGIST_AM_OID};
+use pgrust_catalog_data::{
+    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, SPGIST_AM_OID,
+};
 use pgrust_nodes::datum::Value;
 use pgrust_nodes::primnodes::{ColumnDesc, RelationDesc};
 
@@ -19,7 +21,7 @@ use crate::{
 pub fn supports_index_am(am_oid: u32) -> bool {
     matches!(
         am_oid,
-        BTREE_AM_OID | GIN_AM_OID | GIST_AM_OID | HASH_AM_OID | SPGIST_AM_OID
+        BRIN_AM_OID | BTREE_AM_OID | GIN_AM_OID | GIST_AM_OID | HASH_AM_OID | SPGIST_AM_OID
     )
 }
 
@@ -119,6 +121,7 @@ pub fn index_build_stub(
     wal: &dyn AccessWalServices,
 ) -> AccessResult<IndexBuildResult> {
     match am_oid {
+        BRIN_AM_OID => crate::brin::brinbuild(ctx, heap, index, scalar, wal),
         BTREE_AM_OID => {
             let (heap_tuples, projected) = collect_projected_rows(ctx, heap, index, scalar)?;
             crate::nbtree::btbuild_projected(ctx, heap_tuples, projected, scalar, wal)
@@ -159,6 +162,7 @@ where
     R: AccessHeapServices + AccessTransactionServices + AccessInterruptServices,
 {
     match am_oid {
+        BRIN_AM_OID => crate::brin::brininsert(ctx, scalar, wal),
         BTREE_AM_OID => crate::nbtree::btinsert(ctx, runtime, scalar, wal),
         GIN_AM_OID => crate::gin::gininsert(ctx, scalar, wal),
         GIST_AM_OID => crate::gist::gistinsert(ctx, scalar, wal),
@@ -174,6 +178,7 @@ pub fn index_build_empty_stub(
     wal: &dyn AccessWalServices,
 ) -> AccessResult<()> {
     match am_oid {
+        BRIN_AM_OID => crate::brin::brinbuildempty(ctx, wal),
         BTREE_AM_OID => crate::nbtree::btbuildempty(ctx, wal),
         GIN_AM_OID => crate::gin::ginbuildempty(ctx, wal),
         GIST_AM_OID => crate::gist::gistbuildempty(ctx, wal),
@@ -189,6 +194,7 @@ pub fn index_beginscan(
     scalar: &dyn AccessScalarServices,
 ) -> AccessResult<IndexScanDesc> {
     match am_oid {
+        BRIN_AM_OID => crate::brin::brinbeginscan(ctx),
         BTREE_AM_OID => crate::nbtree::btbeginscan(ctx, scalar),
         GIN_AM_OID => crate::gin::ginbeginscan(ctx),
         GIST_AM_OID => crate::gist::gistbeginscan(ctx),
@@ -206,6 +212,7 @@ pub fn index_rescan(
     scalar: &dyn AccessScalarServices,
 ) -> AccessResult<()> {
     match am_oid {
+        BRIN_AM_OID => crate::brin::brinrescan(scan, keys, direction),
         BTREE_AM_OID => crate::nbtree::btrescan(scan, keys, direction, scalar),
         GIN_AM_OID => crate::gin::ginrescan(scan, keys, direction),
         GIST_AM_OID => crate::gist::gistrescan(scan, keys, direction),
@@ -221,6 +228,7 @@ pub fn index_getnext(
     scalar: &dyn AccessScalarServices,
 ) -> AccessResult<bool> {
     match am_oid {
+        BRIN_AM_OID => Err(AccessError::Corrupt("missing index gettuple callback")),
         BTREE_AM_OID => crate::nbtree::btgettuple(scan, scalar),
         GIN_AM_OID => Err(AccessError::Corrupt("missing index gettuple callback")),
         GIST_AM_OID => crate::gist::gistgettuple(scan, scalar),
@@ -238,6 +246,7 @@ pub fn index_getbitmap(
     scalar: &dyn AccessScalarServices,
 ) -> AccessResult<i64> {
     match am_oid {
+        BRIN_AM_OID => crate::brin::bringetbitmap(scan, bitmap, scalar),
         BTREE_AM_OID => crate::nbtree::btgetbitmap(scan, bitmap, scalar),
         GIN_AM_OID => crate::gin::gingetbitmap(scan, bitmap, heap, scalar),
         GIST_AM_OID => crate::gist::gistgetbitmap(scan, bitmap, scalar),
@@ -249,6 +258,7 @@ pub fn index_getbitmap(
 
 pub fn index_endscan(scan: IndexScanDesc, am_oid: u32) -> AccessResult<()> {
     match am_oid {
+        BRIN_AM_OID => crate::brin::brinendscan(scan),
         BTREE_AM_OID => crate::nbtree::btendscan(scan),
         GIN_AM_OID => crate::gin::ginendscan(scan),
         GIST_AM_OID => crate::gist::gistendscan(scan),
@@ -270,6 +280,7 @@ where
     R: AccessTransactionServices + AccessInterruptServices,
 {
     match am_oid {
+        BRIN_AM_OID => crate::brin::brinbulkdelete(ctx, callback, stats),
         BTREE_AM_OID => crate::nbtree::btbulkdelete(ctx, callback, stats, runtime, wal),
         GIN_AM_OID => crate::gin::ginbulkdelete(ctx, callback, stats, wal),
         GIST_AM_OID => crate::gist::gistbulkdelete(ctx, callback, stats, wal),
@@ -284,12 +295,15 @@ pub fn index_vacuum_cleanup<R>(
     am_oid: u32,
     stats: Option<IndexBulkDeleteResult>,
     runtime: &R,
+    index: Option<&mut dyn AccessIndexServices>,
+    scalar: &dyn AccessScalarServices,
     wal: &dyn AccessWalServices,
 ) -> AccessResult<IndexBulkDeleteResult>
 where
-    R: AccessTransactionServices,
+    R: AccessHeapServices + AccessTransactionServices,
 {
     match am_oid {
+        BRIN_AM_OID => crate::brin::brinvacuumcleanup(ctx, stats, runtime, index, scalar, wal),
         BTREE_AM_OID => crate::nbtree::btvacuumcleanup(ctx, stats, runtime, wal),
         GIN_AM_OID => crate::gin::ginvacuumcleanup(ctx, stats, wal),
         GIST_AM_OID => crate::gist::gistvacuumcleanup(ctx, stats),
