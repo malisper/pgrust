@@ -1,49 +1,19 @@
-use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices};
+// :HACK: root compatibility shim while SP-GiST runtime lives in
+// `pgrust_access`; root still owns heap scans and expression/partial index
+// projection.
+use pgrust_access::{
+    AccessError, AccessHeapServices, AccessIndexServices, spgist as access_spgist,
+};
 
-use crate::backend::access::RootAccessRuntime;
 use crate::backend::access::index::buildkeys::{
     IndexBuildKeyProjector, RootIndexBuildServices, map_access_error, map_catalog_error_to_access,
     materialize_heap_row_values,
 };
-use crate::backend::access::transam::xlog::{XLOG_GIST_INSERT, XLOG_GIST_PAGE_INIT};
+use crate::backend::access::{RootAccessRuntime, RootAccessServices, RootAccessWal};
 use crate::backend::catalog::CatalogError;
-use crate::backend::storage::page::bufpage::PageError;
 use crate::include::access::amapi::{IndexBuildContext, IndexBuildEmptyContext, IndexBuildResult};
-use crate::include::access::itemptr::ItemPointerData;
-use crate::include::access::spgist::{F_LEAF, SPGIST_ROOT_BLKNO, spgist_page_append_tuple};
-use crate::include::nodes::datum::Value;
-
-use super::page::{SpgistLoggedPage, allocate_new_block, ensure_empty_spgist, write_logged_pages};
-use super::state::SpgistState;
-use super::tuple::make_leaf_tuple;
 
 pub(crate) fn spgbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
-    if ctx.index_meta.indisunique {
-        return Err(CatalogError::Io(
-            "SP-GiST does not support unique indexes".into(),
-        ));
-    }
-    ensure_empty_spgist(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.snapshot.current_xid,
-        ctx.index_relation,
-    )?;
-    let mut builder = SpgistBulkBuilder::new(ctx)?;
-    let mut result = scan_visible_heap(ctx, |tid, key_values| builder.insert(tid, key_values))?;
-    builder.finish()?;
-    result.index_tuples = builder.index_tuples;
-    Ok(result)
-}
-
-pub(crate) fn spgbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
-    ensure_empty_spgist(&ctx.pool, ctx.client_id, ctx.xid, ctx.index_relation)
-}
-
-fn scan_visible_heap(
-    ctx: &IndexBuildContext,
-    mut visit: impl FnMut(ItemPointerData, Vec<Value>) -> Result<bool, CatalogError>,
-) -> Result<IndexBuildResult, CatalogError> {
     let attr_descs = ctx.heap_desc.attribute_descs();
     let mut key_projector = IndexBuildKeyProjector::new(ctx)?;
     let mut index_services = RootIndexBuildServices::new(ctx, &mut key_projector);
@@ -53,115 +23,48 @@ fn scan_visible_heap(
         Some(ctx.interrupts.as_ref()),
         ctx.client_id,
     );
-    let mut result = IndexBuildResult::default();
+    let mut heap_tuples = 0;
+    let mut pending = Vec::new();
     heap_services
         .for_each_visible_heap_tuple(
             ctx.heap_relation,
             ctx.snapshot.clone(),
             &mut |tid, tuple| {
-                let datums = tuple
-                    .deform(&attr_descs)
-                    .map_err(|err| AccessError::Scalar(format!("heap deform failed: {err:?}")))?;
+                let datums = tuple.deform(&attr_descs).map_err(|err| {
+                    AccessError::Scalar(format!("spgist heap deform failed: {err:?}"))
+                })?;
                 let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)
                     .map_err(map_catalog_error_to_access)?;
-                let key_values =
-                    index_services.project_index_row(&ctx.index_meta, &row_values, tid)?;
-                result.heap_tuples += 1;
-                if let Some(key_values) = key_values
-                    && visit(tid, key_values).map_err(map_catalog_error_to_access)?
+                heap_tuples += 1;
+                if let Some(key_values) =
+                    index_services.project_index_row(&ctx.index_meta, &row_values, tid)?
                 {
-                    result.index_tuples += 1;
+                    pending.push((tid, key_values));
                 }
                 Ok(())
             },
         )
         .map_err(map_access_error)?;
-    Ok(result)
+
+    drop(index_services);
+    access_spgist::spgbuild_projected(
+        &ctx.to_access_context(),
+        heap_tuples,
+        pending,
+        &RootAccessServices,
+        &RootAccessWal {
+            pool: ctx.pool.as_ref(),
+        },
+    )
+    .map_err(map_access_error)
 }
 
-struct SpgistBulkBuilder<'a> {
-    ctx: &'a IndexBuildContext,
-    current_block: u32,
-    current_page: [u8; crate::backend::storage::smgr::BLCKSZ],
-    page_dirty: bool,
-    index_tuples: u64,
-}
-
-impl<'a> SpgistBulkBuilder<'a> {
-    fn new(ctx: &'a IndexBuildContext) -> Result<Self, CatalogError> {
-        let state = SpgistState::new(&ctx.index_desc, &ctx.index_meta)?;
-        let _ = state.config(0)?;
-
-        let mut current_page = [0u8; crate::backend::storage::smgr::BLCKSZ];
-        crate::include::access::spgist::spgist_page_init(&mut current_page, F_LEAF)
-            .map_err(|err| CatalogError::Io(format!("spgist build page init failed: {err:?}")))?;
-        Ok(Self {
-            ctx,
-            current_block: SPGIST_ROOT_BLKNO,
-            current_page,
-            page_dirty: false,
-            index_tuples: 0,
-        })
-    }
-
-    fn insert(
-        &mut self,
-        heap_tid: ItemPointerData,
-        values: Vec<Value>,
-    ) -> Result<bool, CatalogError> {
-        let tuple = make_leaf_tuple(&self.ctx.index_desc, &values, heap_tid)?;
-        match spgist_page_append_tuple(&mut self.current_page, &tuple) {
-            Ok(_) => {
-                self.page_dirty = true;
-            }
-            Err(crate::include::access::spgist::SpgistPageError::Page(PageError::NoSpace)) => {
-                self.flush_current_page()?;
-                self.current_block = allocate_new_block(&self.ctx.pool, self.ctx.index_relation)?;
-                crate::include::access::spgist::spgist_page_init(&mut self.current_page, F_LEAF)
-                    .map_err(|err| {
-                        CatalogError::Io(format!("spgist build page init failed: {err:?}"))
-                    })?;
-                spgist_page_append_tuple(&mut self.current_page, &tuple).map_err(|err| {
-                    CatalogError::Io(format!("spgist build tuple append failed: {err:?}"))
-                })?;
-                self.page_dirty = true;
-            }
-            Err(err) => {
-                return Err(CatalogError::Io(format!(
-                    "spgist build tuple append failed: {err:?}"
-                )));
-            }
-        }
-        self.index_tuples += 1;
-        Ok(true)
-    }
-
-    fn finish(&mut self) -> Result<(), CatalogError> {
-        self.flush_current_page()
-    }
-
-    fn flush_current_page(&mut self) -> Result<(), CatalogError> {
-        if !self.page_dirty {
-            return Ok(());
-        }
-        let wal_info = if self.current_block == SPGIST_ROOT_BLKNO {
-            XLOG_GIST_INSERT
-        } else {
-            XLOG_GIST_PAGE_INIT
-        };
-        write_logged_pages(
-            &self.ctx.pool,
-            self.ctx.client_id,
-            self.ctx.snapshot.current_xid,
-            self.ctx.index_relation,
-            wal_info,
-            &[SpgistLoggedPage {
-                block: self.current_block,
-                page: &self.current_page,
-                will_init: self.current_block != SPGIST_ROOT_BLKNO,
-            }],
-        )?;
-        self.page_dirty = false;
-        Ok(())
-    }
+pub(crate) fn spgbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
+    access_spgist::spgbuildempty(
+        &ctx.to_access_context(),
+        &RootAccessWal {
+            pool: ctx.pool.as_ref(),
+        },
+    )
+    .map_err(map_access_error)
 }

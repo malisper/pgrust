@@ -1,9 +1,7 @@
 mod build;
 mod insert;
-mod page;
 mod quad_box;
 mod scan;
-mod state;
 mod support;
 mod tuple;
 mod vacuum;
