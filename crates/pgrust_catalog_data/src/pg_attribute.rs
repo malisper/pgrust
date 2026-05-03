@@ -403,7 +403,7 @@ fn type_byval(sql_type: SqlType, attlen: i16) -> bool {
     )
 }
 
-fn sql_type_oid(sql_type: SqlType) -> u32 {
+pub fn sql_type_oid(sql_type: SqlType) -> u32 {
     if !sql_type.is_array && sql_type.type_oid != 0 {
         return sql_type.type_oid;
     }

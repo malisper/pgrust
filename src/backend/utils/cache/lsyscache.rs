@@ -15,7 +15,7 @@ use crate::backend::rewrite::{
 };
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
-use crate::backend::utils::cache::relcache::RelCacheEntry;
+use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
     RelationIdGetRelation, SearchSysCache1, SearchSysCache2, SearchSysCacheList1,
     SearchSysCacheList2, SearchSysCacheList3, SysCacheId, SysCacheTuple, backend_catcache,
@@ -34,6 +34,7 @@ use crate::backend::utils::cache::system_views::{
     build_pg_stat_wal_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
     build_pg_tables_rows, build_pg_views_rows_with_definition_formatter,
 };
+use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
@@ -1317,6 +1318,18 @@ pub struct LazyCatalogLookup {
     pub client_id: ClientId,
     pub txn_ctx: Option<(TransactionId, CommandId)>,
     pub search_path: Vec<String>,
+}
+
+impl LazyCatalogLookup {
+    pub fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
+        let catcache = backend_catcache(&self.db, self.client_id, self.txn_ctx).ok()?;
+        let relcache = RelCache::from_catcache(&catcache).ok()?;
+        Some(VisibleCatalog::with_search_path(
+            relcache,
+            Some(catcache),
+            self.search_path.clone(),
+        ))
+    }
 }
 
 fn owned_temp_namespace(db: &Database, client_id: ClientId) -> Option<TempNamespace> {
@@ -2666,6 +2679,142 @@ impl CatalogLookup for LazyCatalogLookup {
         backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.user_mapping_rows())
             .unwrap_or_default()
+    }
+
+    fn information_schema_foreign_data_wrappers_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<crate::include::catalog::PgForeignDataWrapperRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrappers_rows(
+            authids,
+            auth_members,
+            wrappers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_data_wrapper_options_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<crate::include::catalog::PgForeignDataWrapperRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrapper_options_rows(
+            authids,
+            auth_members,
+            wrappers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_servers_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<crate::include::catalog::PgForeignDataWrapperRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_servers_rows(
+            authids,
+            auth_members,
+            wrappers,
+            servers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_server_options_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_server_options_rows(
+            authids,
+            auth_members,
+            servers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_user_mappings_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        mappings: Vec<crate::include::catalog::PgUserMappingRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_user_mappings_rows(
+            authids,
+            auth_members,
+            servers,
+            mappings,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_user_mapping_options_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        mappings: Vec<crate::include::catalog::PgUserMappingRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_user_mapping_options_rows(
+            authids,
+            auth_members,
+            servers,
+            mappings,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_usage_privileges_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<crate::include::catalog::PgForeignDataWrapperRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_usage_privileges_rows(
+            authids,
+            auth_members,
+            wrappers,
+            servers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_tables_rows(
+        &self,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        tables: Vec<crate::include::catalog::PgForeignTableRow>,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_tables_rows(
+            namespaces, classes, servers, tables,
+        )
+    }
+
+    fn information_schema_foreign_table_options_rows(
+        &self,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+        tables: Vec<crate::include::catalog::PgForeignTableRow>,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_table_options_rows(
+            namespaces, classes, tables,
+        )
     }
 
     fn pg_tables_rows(&self) -> Vec<Vec<Value>> {

@@ -928,6 +928,142 @@ impl CatalogLookup for VisibleCatalog {
         VisibleCatalog::user_mapping_rows(self)
     }
 
+    fn information_schema_foreign_data_wrappers_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<PgForeignDataWrapperRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<crate::include::nodes::datum::Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrappers_rows(
+            authids,
+            auth_members,
+            wrappers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_data_wrapper_options_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<PgForeignDataWrapperRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<crate::include::nodes::datum::Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrapper_options_rows(
+            authids,
+            auth_members,
+            wrappers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_servers_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<PgForeignDataWrapperRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<crate::include::nodes::datum::Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_servers_rows(
+            authids,
+            auth_members,
+            wrappers,
+            servers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_server_options_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<crate::include::nodes::datum::Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_server_options_rows(
+            authids,
+            auth_members,
+            servers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_user_mappings_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        mappings: Vec<crate::include::catalog::PgUserMappingRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<crate::include::nodes::datum::Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_user_mappings_rows(
+            authids,
+            auth_members,
+            servers,
+            mappings,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_user_mapping_options_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        mappings: Vec<crate::include::catalog::PgUserMappingRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<crate::include::nodes::datum::Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_user_mapping_options_rows(
+            authids,
+            auth_members,
+            servers,
+            mappings,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_usage_privileges_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<PgForeignDataWrapperRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<crate::include::nodes::datum::Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_usage_privileges_rows(
+            authids,
+            auth_members,
+            wrappers,
+            servers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_tables_rows(
+        &self,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        tables: Vec<crate::include::catalog::PgForeignTableRow>,
+    ) -> Vec<Vec<crate::include::nodes::datum::Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_tables_rows(
+            namespaces, classes, servers, tables,
+        )
+    }
+
+    fn information_schema_foreign_table_options_rows(
+        &self,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+        tables: Vec<crate::include::catalog::PgForeignTableRow>,
+    ) -> Vec<Vec<crate::include::nodes::datum::Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_table_options_rows(
+            namespaces, classes, tables,
+        )
+    }
+
     fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
         VisibleCatalog::statistic_ext_rows(self)
     }
@@ -1133,10 +1269,6 @@ impl CatalogLookup for VisibleCatalog {
 
     fn pg_locks_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
         build_pg_locks_rows(Vec::new())
-    }
-
-    fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
-        Some(self.clone())
     }
 }
 

@@ -47,3 +47,15 @@ pub struct PgInheritsRow {
     pub inhseqno: i32,
     pub inhdetachpending: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgPartitionedTableRow {
+    pub partrelid: u32,
+    pub partstrat: char,
+    pub partnatts: i16,
+    pub partdefid: u32,
+    pub partattrs: Vec<i16>,
+    pub partclass: Vec<u32>,
+    pub partcollation: Vec<u32>,
+    pub partexprs: Option<String>,
+}

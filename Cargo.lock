@@ -486,6 +486,7 @@ dependencies = [
  "parking_lot",
  "pbkdf2",
  "pest",
+ "pgrust_analyze",
  "pgrust_catalog_data",
  "pgrust_core",
  "pgrust_nodes",
@@ -505,6 +506,18 @@ dependencies = [
  "unicode-normalization",
  "wasm-bindgen",
  "web-time",
+]
+
+[[package]]
+name = "pgrust_analyze"
+version = "0.1.0"
+dependencies = [
+ "pgrust_catalog_data",
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "serde_json",
 ]
 
 [[package]]

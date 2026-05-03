@@ -8,6 +8,7 @@ pub mod partition;
 pub mod pathnodes;
 pub mod plannodes;
 pub mod primnodes;
+pub mod record;
 pub mod relcache;
 pub mod tsearch;
 

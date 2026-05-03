@@ -1482,7 +1482,8 @@ fn catalog_with_inherited_indexed_items()
             .expect("seed inherited index stats");
     }
 
-    crate::backend::parser::CatalogLookup::materialize_visible_catalog(&catalog)
+    catalog
+        .materialize_visible_catalog()
         .expect("materialize inherited optimizer test catalog")
 }
 

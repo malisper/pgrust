@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+use pgrust_core::{PgPartitionedTableRow, RelFileLocator};
+
 use crate::access::{BrinOptions, BtreeOptions, GinOptions, GistOptions, HashOptions};
+use crate::partition::LoweredPartitionSpec;
 use crate::primnodes::Expr;
+use crate::primnodes::RelationDesc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexAmOpEntry {
@@ -64,4 +68,29 @@ pub struct IndexRelCacheEntry {
     pub gist_options: Option<GistOptions>,
     pub gin_options: Option<GinOptions>,
     pub hash_options: Option<HashOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelCacheEntry {
+    pub rel: RelFileLocator,
+    pub relation_oid: u32,
+    pub namespace_oid: u32,
+    pub owner_oid: u32,
+    pub of_type_oid: u32,
+    pub row_type_oid: u32,
+    pub array_type_oid: u32,
+    pub reltoastrelid: u32,
+    pub relhasindex: bool,
+    pub relpersistence: char,
+    pub relkind: char,
+    pub relispartition: bool,
+    pub relispopulated: bool,
+    pub relpartbound: Option<String>,
+    pub relhastriggers: bool,
+    pub relrowsecurity: bool,
+    pub relforcerowsecurity: bool,
+    pub desc: RelationDesc,
+    pub partitioned_table: Option<PgPartitionedTableRow>,
+    pub partition_spec: Option<LoweredPartitionSpec>,
+    pub index: Option<IndexRelCacheEntry>,
 }

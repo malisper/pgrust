@@ -35,103 +35,10 @@ const RECURSIVE_DETAIL: &str =
     "Views that directly or indirectly reference themselves are not automatically updatable.";
 const CONDITIONAL_INSTEAD_DETAIL: &str =
     "Views with conditional DO INSTEAD rules are not automatically updatable.";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NonUpdatableViewColumnReason {
-    SystemColumn,
-    NotBaseRelationColumn,
-}
-
-impl NonUpdatableViewColumnReason {
-    pub(crate) fn detail(self) -> &'static str {
-        match self {
-            NonUpdatableViewColumnReason::SystemColumn => {
-                "View columns that refer to system columns are not updatable."
-            }
-            NonUpdatableViewColumnReason::NotBaseRelationColumn => {
-                "View columns that are not columns of their base relation are not updatable."
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NonUpdatableViewColumn {
-    pub(crate) relation_name: String,
-    pub(crate) reason: NonUpdatableViewColumnReason,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ViewDmlEvent {
-    Insert,
-    Update,
-    Delete,
-}
-
-impl ViewDmlEvent {
-    pub(crate) fn rule_event_code(self) -> char {
-        match self {
-            ViewDmlEvent::Update => '2',
-            ViewDmlEvent::Insert => '3',
-            ViewDmlEvent::Delete => '4',
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ViewRuleEventClassification {
-    pub(crate) unconditional_instead: bool,
-    pub(crate) conditional_instead: bool,
-    pub(crate) also: bool,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ResolvedAutoViewTarget {
-    pub(crate) base_relation: BoundRelation,
-    pub(crate) base_inh: bool,
-    pub(crate) visible_output_exprs: Vec<Expr>,
-    pub(crate) combined_predicate: Option<Expr>,
-    pub(crate) has_security_barrier: bool,
-    pub(crate) updatable_column_map: Vec<Option<usize>>,
-    pub(crate) non_updatable_column_reasons: Vec<Option<NonUpdatableViewColumn>>,
-    pub(crate) local_updatable_column_map: Vec<Option<usize>>,
-    pub(crate) local_non_updatable_column_reasons: Vec<Option<NonUpdatableViewColumn>>,
-    pub(crate) privilege_contexts: Vec<ViewPrivilegeContext>,
-    pub(crate) all_view_predicates: Vec<ViewCheck>,
-    pub(crate) view_check_options: Vec<ViewCheck>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ViewPrivilegeContext {
-    pub(crate) relation: BoundRelation,
-    pub(crate) check_as_user_oid: Option<u32>,
-    pub(crate) column_map: Vec<Option<usize>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ViewCheck {
-    pub(crate) view_name: String,
-    pub(crate) expr: Expr,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ViewDmlRewriteError {
-    Parse(ParseError),
-    UnsupportedViewShape(String),
-    UnsupportedViewShapeForView {
-        relation_name: String,
-        detail: String,
-    },
-    NestedUserRuleMix(String),
-    RecursiveView(String),
-    DeferredFeature(String),
-    NonUpdatableColumn {
-        relation_name: String,
-        column_name: String,
-        reason: NonUpdatableViewColumnReason,
-    },
-    MultipleAssignments(String),
-}
+pub(crate) use pgrust_analyze::{
+    NonUpdatableViewColumn, NonUpdatableViewColumnReason, ResolvedAutoViewTarget, ViewCheck,
+    ViewDmlEvent, ViewDmlRewriteError, ViewPrivilegeContext, ViewRuleEventClassification,
+};
 
 fn view_check_as_user_oid(catalog: &dyn CatalogLookup, view_oid: u32) -> Option<u32> {
     let class_row = catalog.class_row_by_oid(view_oid)?;
@@ -172,21 +79,6 @@ fn compose_column_maps(
         .iter()
         .map(|inner| inner.and_then(|index| inner_to_relation.get(index).copied().flatten()))
         .collect()
-}
-
-impl ViewDmlRewriteError {
-    pub(crate) fn detail(&self) -> String {
-        match self {
-            ViewDmlRewriteError::Parse(err) => err.to_string(),
-            ViewDmlRewriteError::UnsupportedViewShapeForView { detail, .. } => detail.clone(),
-            ViewDmlRewriteError::UnsupportedViewShape(detail)
-            | ViewDmlRewriteError::NestedUserRuleMix(detail)
-            | ViewDmlRewriteError::DeferredFeature(detail) => detail.clone(),
-            ViewDmlRewriteError::RecursiveView(_) => RECURSIVE_DETAIL.into(),
-            ViewDmlRewriteError::NonUpdatableColumn { reason, .. } => reason.detail().into(),
-            ViewDmlRewriteError::MultipleAssignments(_) => String::new(),
-        }
-    }
 }
 
 pub(crate) fn resolve_auto_updatable_view_target(

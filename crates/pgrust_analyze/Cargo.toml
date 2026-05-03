@@ -1,0 +1,20 @@
+[package]
+name = "pgrust_analyze"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+lz4 = []
+
+[dependencies]
+pgrust_catalog_data = { path = "../pgrust_catalog_data" }
+pgrust_catalog_ids = { path = "../pgrust_catalog_ids" }
+pgrust_core = { path = "../pgrust_core" }
+pgrust_nodes = { path = "../pgrust_nodes" }
+pgrust_parser = { path = "../pgrust_parser" }
+serde_json = { version = "1", features = ["arbitrary_precision"] }

@@ -1,18 +1,7 @@
 use crate::desc::column_desc;
+pub use pgrust_core::PgPartitionedTableRow;
 use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind};
 use pgrust_nodes::primnodes::RelationDesc;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PgPartitionedTableRow {
-    pub partrelid: u32,
-    pub partstrat: char,
-    pub partnatts: i16,
-    pub partdefid: u32,
-    pub partattrs: Vec<i16>,
-    pub partclass: Vec<u32>,
-    pub partcollation: Vec<u32>,
-    pub partexprs: Option<String>,
-}
 
 pub fn pg_partitioned_table_desc() -> RelationDesc {
     RelationDesc {

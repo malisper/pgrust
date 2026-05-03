@@ -5,6 +5,7 @@ pub mod analyze;
 pub(crate) mod comments;
 pub mod gram;
 
+pub use crate::include::nodes::parsenodes::ParseError;
 pub use crate::include::nodes::parsenodes::*;
 pub use analyze::*;
 pub(crate) use gram::wrap_values_as_select;

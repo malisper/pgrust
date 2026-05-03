@@ -11,32 +11,7 @@ use crate::include::catalog::{PgClassRow, PgPolicyRow, PolicyCommand};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{BoolExprType, Expr, RelationDesc};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RlsWriteCheckSource {
-    Insert,
-    Update,
-    SelectVisibility,
-    ConflictUpdateVisibility,
-    MergeUpdateVisibility,
-    MergeDeleteVisibility,
-    ViewCheckOption(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RlsWriteCheck {
-    pub expr: Expr,
-    pub display_exprs: Vec<Expr>,
-    pub policy_name: Option<String>,
-    pub source: RlsWriteCheckSource,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TargetRlsState {
-    pub visibility_quals: Vec<Expr>,
-    pub write_checks: Vec<RlsWriteCheck>,
-    pub depends_on_row_security: bool,
-}
+pub(crate) use pgrust_analyze::{RlsWriteCheck, RlsWriteCheckSource, TargetRlsState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RlsStatus {

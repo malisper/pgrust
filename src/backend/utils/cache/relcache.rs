@@ -5,7 +5,7 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::{LoweredPartitionSpec, SqlType, SqlTypeKind};
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::catalog::PgTypeRow;
@@ -13,12 +13,13 @@ use crate::include::catalog::toasting::toast_relation_name;
 use crate::include::catalog::{
     ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BIT_TYPE_OID, CIDR_TYPE_OID,
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, INET_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_TOAST_NAMESPACE_OID, PgPartitionedTableRow, TIMESTAMP_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID, VARBIT_TYPE_OID, bootstrap_catalog_kinds,
-    builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
-    builtin_scalar_function_for_proc_oid, system_catalog_index_by_oid,
+    PG_CONSTRAINT_RELATION_OID, PG_TOAST_NAMESPACE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    VARBIT_TYPE_OID, bootstrap_catalog_kinds, builtin_range_spec_by_multirange_oid,
+    builtin_range_spec_by_oid, builtin_scalar_function_for_proc_oid, system_catalog_index_by_oid,
 };
-pub use pgrust_nodes::relcache::{IndexAmOpEntry, IndexAmProcEntry, IndexRelCacheEntry};
+pub use pgrust_nodes::relcache::{
+    IndexAmOpEntry, IndexAmProcEntry, IndexRelCacheEntry, RelCacheEntry,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ResolvedIndexSupportMetadata {
@@ -357,31 +358,6 @@ fn proc_oids_match(left: u32, right: u32) -> bool {
 
 fn normalize_ordering_strategy(strategy: u16) -> u16 {
     if strategy == 15 { 1 } else { strategy }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelCacheEntry {
-    pub rel: RelFileLocator,
-    pub relation_oid: u32,
-    pub namespace_oid: u32,
-    pub owner_oid: u32,
-    pub of_type_oid: u32,
-    pub row_type_oid: u32,
-    pub array_type_oid: u32,
-    pub reltoastrelid: u32,
-    pub relhasindex: bool,
-    pub relpersistence: char,
-    pub relkind: char,
-    pub relispartition: bool,
-    pub relispopulated: bool,
-    pub relpartbound: Option<String>,
-    pub relhastriggers: bool,
-    pub relrowsecurity: bool,
-    pub relforcerowsecurity: bool,
-    pub desc: RelationDesc,
-    pub partitioned_table: Option<PgPartitionedTableRow>,
-    pub partition_spec: Option<LoweredPartitionSpec>,
-    pub index: Option<IndexRelCacheEntry>,
 }
 
 #[derive(Debug, Clone, Default)]
