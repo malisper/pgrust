@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use pgrust_core::{
-    CommandId, INVALID_TRANSACTION_ID, InterruptReason, Lsn, RelFileLocator, Snapshot,
+    CommandId, INVALID_TRANSACTION_ID, InterruptReason, Lsn, MvccError, RelFileLocator, Snapshot,
     TransactionId, TransactionStatus,
 };
 use pgrust_nodes::SqlType;
@@ -16,9 +16,11 @@ use pgrust_storage::BufferTag;
 
 use crate::AccessResult;
 use crate::access::gin::GinEntryKey;
+use crate::access::heaptoast::ToastChunk;
 use crate::access::htup::HeapTuple;
 use crate::access::htup::TupleValue;
 use crate::access::itemptr::ItemPointerData;
+use crate::varatt::VarattExternal;
 
 pub trait AccessInterruptServices {
     fn check_interrupts(&self) -> Result<(), InterruptReason>;
@@ -27,9 +29,19 @@ pub trait AccessInterruptServices {
 pub trait AccessTransactionServices {
     fn transaction_status(&self, xid: TransactionId) -> Option<TransactionStatus>;
 
+    fn snapshot(&self, xid: TransactionId) -> Result<Snapshot, MvccError>;
+
+    fn snapshot_for_command(
+        &self,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<Snapshot, MvccError>;
+
     fn oldest_active_xid(&self) -> TransactionId {
         INVALID_TRANSACTION_ID
     }
+
+    fn combo_command_id(&self, xid: TransactionId, cmin: CommandId, cmax: CommandId) -> CommandId;
 
     fn combo_command_pair(
         &self,
@@ -241,4 +253,13 @@ pub trait AccessIndexServices {
 
 pub trait AccessToastServices {
     fn resolve_external_toast(&self, value: &Value) -> AccessResult<Value>;
+
+    fn fetch_external_toast_chunks(
+        &self,
+        _pointer: VarattExternal,
+    ) -> AccessResult<Vec<ToastChunk>> {
+        Err(crate::AccessError::Unsupported(
+            "external TOAST chunk fetch is not available in this access context".into(),
+        ))
+    }
 }

@@ -1,3 +1,6 @@
+// :HACK: Compatibility adapter while portable TOAST tuple/pointer helpers live
+// in `pgrust_access`. Root still owns executor/index orchestration for TOAST
+// heap storage.
 pub use crate::include::access::heaptoast::*;
 
 use crate::backend::access::heap::heapam::{
@@ -6,67 +9,25 @@ use crate::backend::access::heap::heapam::{
 use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::executor::value_io::tuple_from_values;
-use crate::backend::executor::{ExecError, ExecutorContext, RelationDesc, Value};
+use crate::backend::executor::{ExecError, ExecutorContext, RelationDesc};
 use crate::backend::parser::BoundIndexRelation;
-use crate::include::access::detoast::decode_ondisk_toast_pointer;
 use crate::include::access::htup::{HeapTuple, ItemPointerData};
-use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::nodes::primnodes::ToastRelationRef;
-use crate::include::varatt::{
-    VarattExternal, encode_ondisk_toast_pointer, varatt_external_set_size_and_compression_method,
-};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredToastValue {
-    pub(crate) pointer: VarattExternal,
-    pub(crate) chunk_tids: Vec<ItemPointerData>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExternalToastValueInput {
-    pub(crate) data: Vec<u8>,
-    pub(crate) rawsize: i32,
-    pub(crate) compression_id: ToastCompressionId,
-}
-
-fn toast_relation_desc() -> RelationDesc {
-    crate::backend::executor::RelationDesc {
-        columns: vec![
-            crate::backend::catalog::catalog::column_desc(
-                "chunk_id",
-                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Oid),
-                false,
-            ),
-            crate::backend::catalog::catalog::column_desc(
-                "chunk_seq",
-                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
-                false,
-            ),
-            crate::backend::catalog::catalog::column_desc(
-                "chunk_data",
-                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Bytea),
-                false,
-            ),
-        ],
-    }
-}
+use pgrust_access::access::toast_compression::ToastCompressionId;
+use pgrust_access::varatt::{VarattExternal, varatt_external_set_size_and_compression_method};
 
 fn next_toast_value_id(ctx: &ExecutorContext, toast: ToastRelationRef) -> Result<u32, ExecError> {
     let mut scan = heap_scan_begin(&ctx.pool, toast.rel)?;
-    let desc = toast_relation_desc();
+    let desc = pgrust_access::access::heaptoast::toast_relation_desc();
     let attr_descs = desc.attribute_descs();
     let mut max_value_id = 0u32;
     while let Some((_tid, tuple)) = heap_scan_next(&ctx.pool, ctx.client_id, &mut scan)? {
         let values = tuple.deform(&attr_descs)?;
-        let Some(chunk_id_bytes) = values.first().and_then(|value| *value) else {
+        let Some(chunk_id) = pgrust_access::access::heaptoast::toast_chunk_id_from_values(&values)
+            .map_err(access_error_to_exec)?
+        else {
             continue;
         };
-        let chunk_id = u32::from_le_bytes(chunk_id_bytes.try_into().map_err(|_| {
-            ExecError::InvalidStorageValue {
-                column: "chunk_id".into(),
-                details: "toast chunk_id must be 4 bytes".into(),
-            }
-        })?);
         max_value_id = max_value_id.max(chunk_id);
     }
     Ok(max_value_id.saturating_add(1))
@@ -80,16 +41,16 @@ pub(crate) fn store_external_value(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StoredToastValue, ExecError> {
-    let desc = toast_relation_desc();
+    let desc = pgrust_access::access::heaptoast::toast_relation_desc();
     let value_id = next_toast_value_id(ctx, toast)?;
     let mut chunk_tids = Vec::new();
 
     for (chunk_seq, chunk) in value.data.chunks(TOAST_MAX_CHUNK_SIZE).enumerate() {
-        let row = vec![
-            Value::Int64(i64::from(value_id)),
-            Value::Int32(chunk_seq as i32),
-            Value::Bytea(chunk.to_vec()),
-        ];
+        let row = pgrust_access::access::heaptoast::toast_chunk_row_values(
+            value_id,
+            chunk_seq as i32,
+            chunk,
+        );
         let tuple = tuple_from_values(&desc, &row)?;
         let tid = heap_insert_mvcc_with_cid(&ctx.pool, ctx.client_id, toast.rel, xid, cid, &tuple)?;
         if let Some(index) = toast_index
@@ -178,20 +139,16 @@ pub(crate) fn delete_external_value(
     xid: TransactionId,
 ) -> Result<(), ExecError> {
     let mut scan = heap_scan_begin(&ctx.pool, toast.rel)?;
-    let desc = toast_relation_desc();
+    let desc = pgrust_access::access::heaptoast::toast_relation_desc();
     let attr_descs = desc.attribute_descs();
     let mut tids = Vec::new();
     while let Some((tid, tuple)) = heap_scan_next(&ctx.pool, ctx.client_id, &mut scan)? {
         let values = tuple.deform(&attr_descs)?;
-        let Some(chunk_id_bytes) = values.first().and_then(|value| *value) else {
+        let Some(chunk_id) = pgrust_access::access::heaptoast::toast_chunk_id_from_values(&values)
+            .map_err(access_error_to_exec)?
+        else {
             continue;
         };
-        let chunk_id = u32::from_le_bytes(chunk_id_bytes.try_into().map_err(|_| {
-            ExecError::InvalidStorageValue {
-                column: "chunk_id".into(),
-                details: "toast chunk_id must be 4 bytes".into(),
-            }
-        })?);
         if chunk_id == value_id {
             tids.push(tid);
         }
@@ -206,25 +163,43 @@ pub(crate) fn delete_external_from_tuple(
     tuple: &HeapTuple,
     xid: TransactionId,
 ) -> Result<(), ExecError> {
-    for pointer in extract_external_pointers(desc, tuple)? {
+    for pointer in extract_external_pointers_from_tuple(desc, tuple)? {
         delete_external_value(ctx, toast, pointer.va_valueid, xid)?;
     }
     Ok(())
 }
 
-pub(crate) fn extract_external_pointers(
+fn extract_external_pointers_from_tuple(
     desc: &RelationDesc,
     tuple: &HeapTuple,
-) -> Result<Vec<VarattExternal>, ExecError> {
-    let attr_descs = desc.attribute_descs();
-    let raw = tuple.deform(&attr_descs)?;
-    Ok(raw
-        .into_iter()
-        .flatten()
-        .filter_map(decode_ondisk_toast_pointer)
-        .collect())
+) -> Result<Vec<pgrust_access::varatt::VarattExternal>, ExecError> {
+    pgrust_access::access::heaptoast::extract_external_pointers(desc, tuple)
+        .map_err(access_error_to_exec)
 }
 
-pub(crate) fn encoded_pointer_bytes(pointer: VarattExternal) -> Vec<u8> {
-    encode_ondisk_toast_pointer(pointer).to_vec()
+fn access_error_to_exec(error: pgrust_access::AccessError) -> ExecError {
+    match error {
+        pgrust_access::AccessError::Corrupt(message) => ExecError::InvalidStorageValue {
+            column: "<toast>".into(),
+            details: message.into(),
+        },
+        pgrust_access::AccessError::Scalar(message)
+            if message.starts_with("toast ") || message.contains("deform") =>
+        {
+            ExecError::InvalidStorageValue {
+                column: "<toast>".into(),
+                details: message,
+            }
+        }
+        pgrust_access::AccessError::Interrupted(reason) => ExecError::Interrupted(reason),
+        pgrust_access::AccessError::Io(message)
+        | pgrust_access::AccessError::Scalar(message)
+        | pgrust_access::AccessError::UniqueViolation(message)
+        | pgrust_access::AccessError::Unsupported(message) => ExecError::DetailedError {
+            message,
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        },
+    }
 }

@@ -365,7 +365,7 @@ fn sample_relation(
             } else {
                 let txns = ctx.txns.read();
                 ctx.snapshot
-                    .tuple_bytes_visible_with_hints(&txns, tuple_bytes)
+                    .tuple_bytes_visible_with_hints(&*txns, tuple_bytes)
                     .0
             };
             if !visible {
@@ -595,7 +595,7 @@ fn sample_inheritance_tree(
                 } else {
                     let txns = ctx.txns.read();
                     ctx.snapshot
-                        .tuple_bytes_visible_with_hints(&txns, tuple_bytes)
+                        .tuple_bytes_visible_with_hints(&*txns, tuple_bytes)
                         .0
                 };
                 if !visible {

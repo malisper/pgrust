@@ -281,7 +281,7 @@ fn catalog_tuples_delete_matching(
             if remaining.is_empty() {
                 break;
             }
-            if !snapshot.tuple_visible(&txns, &tuple) {
+            if !snapshot.tuple_visible(&*txns, &tuple) {
                 continue;
             }
             let decoded = decode_catalog_tuple_values(desc, &tuple)?;
@@ -339,7 +339,7 @@ fn find_catalog_tuple_tid(
         if !catalog_row_identity_matches(kind, &decoded, values) {
             continue;
         }
-        if snapshot.tuple_visible(&txns, &tuple) {
+        if snapshot.tuple_visible(&*txns, &tuple) {
             return Ok(Some(tid));
         }
     }

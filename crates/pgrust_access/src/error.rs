@@ -2,6 +2,8 @@ use std::fmt;
 
 use pgrust_core::InterruptReason;
 
+use crate::common::toast_compression::ToastCompressionError;
+
 pub type AccessResult<T> = Result<T, AccessError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,3 +30,17 @@ impl fmt::Display for AccessError {
 }
 
 impl std::error::Error for AccessError {}
+
+impl From<ToastCompressionError> for AccessError {
+    fn from(error: ToastCompressionError) -> Self {
+        match error {
+            ToastCompressionError::Lz4NotSupported => {
+                AccessError::Unsupported("compression method lz4 not supported".into())
+            }
+            ToastCompressionError::InvalidCompressionMethod(value) => {
+                AccessError::Scalar(format!("invalid compression method \"{value}\""))
+            }
+            ToastCompressionError::InvalidStorageValue { details } => AccessError::Corrupt(details),
+        }
+    }
+}

@@ -9,7 +9,7 @@ use crate::backend::access::transam::clog::{
 };
 pub use crate::backend::utils::time::snapmgr::Snapshot;
 use parking_lot::Mutex;
-pub use pgrust_core::TransactionStatus;
+pub use pgrust_core::{MvccError, TransactionStatus};
 
 pub type TransactionId = u32;
 pub type CommandId = u32;
@@ -20,14 +20,6 @@ pub const FIRST_NORMAL_TRANSACTION_ID: TransactionId = 3;
 
 pub const fn transaction_id_is_normal(xid: TransactionId) -> bool {
     xid >= FIRST_NORMAL_TRANSACTION_ID
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MvccError {
-    UnknownTransactionId(TransactionId),
-    TransactionNotInProgress(TransactionId),
-    Io(String),
-    CorruptStatusFile(&'static str),
 }
 
 #[derive(Debug)]
@@ -353,6 +345,46 @@ impl TransactionManager {
         file.seek(SeekFrom::Start(0))
             .map_err(|e| MvccError::Io(e.to_string()))?;
         Ok(())
+    }
+}
+
+impl pgrust_access::AccessTransactionServices for TransactionManager {
+    fn transaction_status(&self, xid: TransactionId) -> Option<TransactionStatus> {
+        self.status(xid)
+    }
+
+    fn snapshot(&self, xid: TransactionId) -> Result<pgrust_core::Snapshot, MvccError> {
+        TransactionManager::snapshot(self, xid)
+    }
+
+    fn snapshot_for_command(
+        &self,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<pgrust_core::Snapshot, MvccError> {
+        TransactionManager::snapshot_for_command(self, xid, cid)
+    }
+
+    fn oldest_active_xid(&self) -> TransactionId {
+        TransactionManager::oldest_active_xid(self)
+    }
+
+    fn combo_command_id(&self, xid: TransactionId, cmin: CommandId, cmax: CommandId) -> CommandId {
+        TransactionManager::combo_command_id(self, xid, cmin, cmax)
+    }
+
+    fn combo_command_pair(
+        &self,
+        xid: TransactionId,
+        combocid: CommandId,
+    ) -> Option<(CommandId, CommandId)> {
+        TransactionManager::combo_command_pair(self, xid, combocid)
+    }
+
+    fn wait_for_transaction(&self, xid: TransactionId) -> pgrust_access::AccessResult<()> {
+        Err(pgrust_access::AccessError::Unsupported(format!(
+            "transaction wait for {xid} requires database waiter"
+        )))
     }
 }
 

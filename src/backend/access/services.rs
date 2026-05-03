@@ -109,10 +109,39 @@ impl AccessTransactionServices for RootAccessRuntime<'_> {
         self.txns.and_then(|txns| txns.read().status(xid))
     }
 
+    fn snapshot(&self, xid: TransactionId) -> Result<Snapshot, pgrust_core::MvccError> {
+        let txns = self.txns.ok_or(pgrust_core::MvccError::Io(
+            "access snapshot missing transaction manager".into(),
+        ))?;
+        txns.read().snapshot(xid)
+    }
+
+    fn snapshot_for_command(
+        &self,
+        xid: TransactionId,
+        cid: pgrust_core::CommandId,
+    ) -> Result<Snapshot, pgrust_core::MvccError> {
+        let txns = self.txns.ok_or(pgrust_core::MvccError::Io(
+            "access snapshot missing transaction manager".into(),
+        ))?;
+        txns.read().snapshot_for_command(xid, cid)
+    }
+
     fn oldest_active_xid(&self) -> TransactionId {
         self.txns
             .map(|txns| txns.read().oldest_active_xid())
             .unwrap_or(pgrust_core::INVALID_TRANSACTION_ID)
+    }
+
+    fn combo_command_id(
+        &self,
+        xid: TransactionId,
+        cmin: pgrust_core::CommandId,
+        cmax: pgrust_core::CommandId,
+    ) -> pgrust_core::CommandId {
+        self.txns
+            .map(|txns| txns.read().combo_command_id(xid, cmin, cmax))
+            .unwrap_or(cmax)
     }
 
     fn combo_command_pair(
@@ -191,7 +220,7 @@ impl AccessHeapServices for RootAccessRuntime<'_> {
         while let Some((tid, tuple)) = crate::backend::access::heap::heapam::heap_scan_next_visible(
             pool,
             self.client_id,
-            &txns.read(),
+            &*txns.read(),
             &mut scan,
         )
         .map_err(|err| AccessError::Scalar(format!("heap scan failed: {err:?}")))?

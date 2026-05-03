@@ -5,10 +5,12 @@ pub mod error;
 pub mod gin;
 pub mod gist;
 pub mod hash;
+pub mod heap;
 pub mod index;
 pub mod nbtree;
 pub mod services;
 pub mod spgist;
+pub mod table;
 pub mod varatt;
 
 pub use access::{ItemPointerData, TupleValue};

@@ -6,18 +6,5 @@ pub mod pruneheap;
 pub mod vacuumlazy;
 pub mod visibilitymap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeapWalPolicy {
-    Wal,
-    NoWal,
-}
-
-impl HeapWalPolicy {
-    pub fn from_relpersistence(relpersistence: char) -> Self {
-        if relpersistence == 'p' {
-            Self::Wal
-        } else {
-            Self::NoWal
-        }
-    }
-}
+// :HACK: Compatibility re-export while heap runtime lives in `pgrust_access`.
+pub use pgrust_access::heap::HeapWalPolicy;

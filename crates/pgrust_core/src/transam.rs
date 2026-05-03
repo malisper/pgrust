@@ -19,6 +19,14 @@ pub enum TransactionStatus {
     Aborted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MvccError {
+    UnknownTransactionId(TransactionId),
+    TransactionNotInProgress(TransactionId),
+    Io(String),
+    CorruptStatusFile(&'static str),
+}
+
 pub type Lsn = u64;
 pub const INVALID_LSN: Lsn = 0;
 pub const WAL_SEG_SIZE_BYTES: u32 = 16 * 1024 * 1024;

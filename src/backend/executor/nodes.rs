@@ -1268,7 +1268,7 @@ fn collect_visible_page_offsets(
             continue;
         }
         let tuple_bytes = page_get_item_unchecked(page, off);
-        if snapshot.tuple_bytes_visible(&txns_guard, tuple_bytes) {
+        if snapshot.tuple_bytes_visible(&*txns_guard, tuple_bytes) {
             offsets.push(off);
         }
     }
