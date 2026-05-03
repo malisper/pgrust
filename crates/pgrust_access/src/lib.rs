@@ -13,4 +13,8 @@ pub mod varatt;
 pub use access::{ItemPointerData, TupleValue};
 pub use error::{AccessError, AccessResult};
 pub use pgrust_storage::BLCKSZ;
-pub use services::{AccessIndexServices, AccessScalarServices, AccessToastServices};
+pub use services::{
+    AccessHeapServices, AccessIndexServices, AccessInterruptServices, AccessScalarServices,
+    AccessToastServices, AccessTransactionServices, AccessWalBlockRef, AccessWalRecord,
+    AccessWalServices,
+};

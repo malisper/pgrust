@@ -1,3 +1,4 @@
+pub mod amapi;
 pub mod brin;
 pub mod brin_internal;
 pub mod brin_page;

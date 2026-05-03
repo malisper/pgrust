@@ -13,10 +13,14 @@ Key decisions:
 - Moved lock-manager code into `pgrust_storage`; root `storage::lmgr` is now compatibility shims. `TransactionWaiter` uses a `TransactionStatusLookup` trait so storage does not depend on access/transam.
 - Moved pure index key projection/coercion into `pgrust_access::index::buildkeys`; root still owns expression-index and partial-index evaluation.
 - `TableLockManager::has_locks_for_client` is public because root integration tests call it through the moved storage crate, where `#[cfg(test)]` would only apply to storage's own tests.
+- Added access runtime service traits for interrupts, transaction lookup/waiting, heap fetch/visible scans, and WAL record logging.
+- Moved portable AM result/unique-check types into `pgrust_access::access::amapi`; root `include::access::amapi` re-exports them while keeping root-owned callback contexts.
+- Added root runtime bridge implementations for interrupt/transaction/heap services and a root index-build projection service wrapper.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
 - `crates/pgrust_access/src/services.rs`
+- `crates/pgrust_access/src/access/amapi.rs`
 - `crates/pgrust_access/src/nbtree/{mod.rs,nbtcompare.rs,nbtpreprocesskeys.rs,tuple.rs}`
 - `crates/pgrust_access/src/brin/{mod.rs,minmax.rs,tuple.rs}`
 - `crates/pgrust_access/src/brin/validate.rs`
@@ -32,6 +36,8 @@ Files touched:
 - `src/backend/access/index/amvalidate.rs`
 - `src/backend/access/index/buildkeys.rs`
 - `src/backend/access/brin/validate.rs`
+- `src/include/access/amapi.rs`
+- `crates/pgrust_core/src/transam.rs`
 - `src/backend/commands/tablecmds.rs`
 - `src/backend/utils/time/snapmgr.rs`
 - `src/backend/access/heap/heapam_visibility.rs`
@@ -54,9 +60,11 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet hash`
 - `scripts/cargo_isolated.sh test --lib --quiet jsonb_ops_extracts_object_keys_and_array_strings_as_keys`
 - `scripts/cargo_isolated.sh test --lib --quiet jsonb_ops_empty_container_emits_empty_item`
+- `scripts/cargo_isolated.sh test --lib --quiet index`
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.
 
 Remaining:
-- Wire `AccessIndexServices`/`AccessToastServices` into runtime index build paths.
+- Use the new runtime service traits from moved index runtime paths instead of passing root contexts directly.
+- Wire `AccessToastServices` into detoast/TOAST runtime paths.
 - Move index runtime only after expression/partial index projection is represented by `AccessIndexServices`.
 - Move lock/transam/WAL/checkpoint and heap/table runtime in separate slices; those need storage/runtime traits and careful recovery byte-preservation checks.

@@ -20,19 +20,9 @@ use crate::include::nodes::primnodes::ToastRelationRef;
 use crate::pgrust::database::{LargeObjectRuntime, SequenceRuntime, TransactionWaiter};
 use crate::{BufferPool, ClientId};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct IndexBuildResult {
-    pub heap_tuples: u64,
-    pub index_tuples: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct IndexBulkDeleteResult {
-    pub num_pages: u64,
-    pub num_index_tuples: u64,
-    pub num_removed_tuples: u64,
-    pub num_deleted_pages: u64,
-}
+// :HACK: root compatibility re-export while AM callbacks still use root-owned
+// runtime context structs below.
+pub use pgrust_access::access::amapi::{IndexBuildResult, IndexBulkDeleteResult, IndexUniqueCheck};
 
 #[derive(Clone)]
 pub struct IndexBuildExprContext {
@@ -131,13 +121,6 @@ pub struct IndexVacuumContext {
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
     pub expr_eval: Option<IndexBuildExprContext>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexUniqueCheck {
-    No,
-    Yes,
-    Partial,
 }
 
 pub type AmBuildFn = fn(&IndexBuildContext) -> Result<IndexBuildResult, CatalogError>;

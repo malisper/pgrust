@@ -9,6 +9,7 @@ use crate::backend::access::transam::clog::{
 };
 pub use crate::backend::utils::time::snapmgr::Snapshot;
 use parking_lot::Mutex;
+pub use pgrust_core::TransactionStatus;
 
 pub type TransactionId = u32;
 pub type CommandId = u32;
@@ -19,13 +20,6 @@ pub const FIRST_NORMAL_TRANSACTION_ID: TransactionId = 3;
 
 pub const fn transaction_id_is_normal(xid: TransactionId) -> bool {
     xid >= FIRST_NORMAL_TRANSACTION_ID
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransactionStatus {
-    InProgress,
-    Committed,
-    Aborted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

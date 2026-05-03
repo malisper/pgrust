@@ -1,5 +1,9 @@
 use std::cmp::Ordering;
 
+use pgrust_core::{
+    BufferTag, CommandId, InterruptReason, Lsn, RelFileLocator, Snapshot, TransactionId,
+    TransactionStatus,
+};
 use pgrust_nodes::datum::{
     GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue, Value,
 };
@@ -9,8 +13,60 @@ use pgrust_nodes::tsearch::{TsQuery, TsVector};
 
 use crate::AccessResult;
 use crate::access::gin::GinEntryKey;
+use crate::access::htup::HeapTuple;
 use crate::access::htup::TupleValue;
 use crate::access::itemptr::ItemPointerData;
+
+pub trait AccessInterruptServices {
+    fn check_interrupts(&self) -> Result<(), InterruptReason>;
+}
+
+pub trait AccessTransactionServices {
+    fn transaction_status(&self, xid: TransactionId) -> Option<TransactionStatus>;
+
+    fn combo_command_pair(
+        &self,
+        xid: TransactionId,
+        combocid: CommandId,
+    ) -> Option<(CommandId, CommandId)>;
+
+    fn wait_for_transaction(&self, xid: TransactionId) -> AccessResult<()>;
+}
+
+pub trait AccessHeapServices {
+    fn for_each_visible_heap_tuple(
+        &self,
+        rel: RelFileLocator,
+        snapshot: Snapshot,
+        visit: &mut dyn FnMut(ItemPointerData, HeapTuple) -> AccessResult<()>,
+    ) -> AccessResult<u64>;
+
+    fn fetch_heap_tuple(
+        &self,
+        rel: RelFileLocator,
+        tid: ItemPointerData,
+    ) -> AccessResult<HeapTuple>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessWalBlockRef {
+    pub tag: BufferTag,
+    pub flags: u8,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessWalRecord {
+    pub xid: TransactionId,
+    pub rmid: u8,
+    pub info: u8,
+    pub payload: Vec<u8>,
+    pub blocks: Vec<AccessWalBlockRef>,
+}
+
+pub trait AccessWalServices {
+    fn log_access_record(&self, record: AccessWalRecord) -> AccessResult<Lsn>;
+}
 
 pub trait AccessScalarServices {
     fn compare_order_values(

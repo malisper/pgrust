@@ -12,6 +12,13 @@ pub const fn transaction_id_is_normal(xid: TransactionId) -> bool {
     xid >= FIRST_NORMAL_TRANSACTION_ID
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionStatus {
+    InProgress,
+    Committed,
+    Aborted,
+}
+
 pub type Lsn = u64;
 pub const INVALID_LSN: Lsn = 0;
 pub const WAL_SEG_SIZE_BYTES: u32 = 16 * 1024 * 1024;

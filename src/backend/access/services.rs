@@ -1,11 +1,18 @@
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use pgrust_access::access::gin::GinEntryKey;
+use pgrust_access::access::htup::HeapTuple;
 use pgrust_access::access::htup::TupleValue;
+use pgrust_access::access::itemptr::ItemPointerData;
 use pgrust_access::gin::jsonb_ops::{
     JGINFLAG_BOOL, JGINFLAG_NULL, JGINFLAG_NUM, JGINFLAG_STR, scalar_key, text_key,
 };
-use pgrust_access::{AccessError, AccessResult, AccessScalarServices};
+use pgrust_access::{
+    AccessError, AccessHeapServices, AccessInterruptServices, AccessResult, AccessScalarServices,
+    AccessTransactionServices,
+};
+use pgrust_core::{RelFileLocator, Snapshot, TransactionId, TransactionStatus};
 use pgrust_nodes::datum::{
     GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue, Value,
 };
@@ -13,6 +20,151 @@ use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc};
 use pgrust_nodes::tsearch::{TsQuery, TsVector};
 
 pub(crate) struct RootAccessServices;
+
+// :HACK: explicit root runtime bridge while heap/index/transam code is moved
+// incrementally into `pgrust_access`.
+#[allow(dead_code)]
+pub(crate) struct RootAccessRuntime<'a> {
+    pub pool: Option<
+        &'a Arc<
+            crate::BufferPool<crate::backend::storage::buffer::storage_backend::SmgrStorageBackend>,
+        >,
+    >,
+    pub txns:
+        Option<&'a parking_lot::RwLock<crate::backend::access::transam::xact::TransactionManager>>,
+    pub txn_waiter: Option<&'a crate::pgrust::database::TransactionWaiter>,
+    pub interrupts: Option<&'a pgrust_core::InterruptState>,
+    pub client_id: pgrust_core::ClientId,
+}
+
+#[allow(dead_code)]
+impl<'a> RootAccessRuntime<'a> {
+    pub fn transaction_only(
+        txns: &'a parking_lot::RwLock<crate::backend::access::transam::xact::TransactionManager>,
+        txn_waiter: Option<&'a crate::pgrust::database::TransactionWaiter>,
+        interrupts: Option<&'a pgrust_core::InterruptState>,
+        client_id: pgrust_core::ClientId,
+    ) -> Self {
+        Self {
+            pool: None,
+            txns: Some(txns),
+            txn_waiter,
+            interrupts,
+            client_id,
+        }
+    }
+
+    pub fn heap(
+        pool: &'a Arc<
+            crate::BufferPool<crate::backend::storage::buffer::storage_backend::SmgrStorageBackend>,
+        >,
+        txns: &'a parking_lot::RwLock<crate::backend::access::transam::xact::TransactionManager>,
+        interrupts: Option<&'a pgrust_core::InterruptState>,
+        client_id: pgrust_core::ClientId,
+    ) -> Self {
+        Self {
+            pool: Some(pool),
+            txns: Some(txns),
+            txn_waiter: None,
+            interrupts,
+            client_id,
+        }
+    }
+}
+
+impl AccessInterruptServices for RootAccessRuntime<'_> {
+    fn check_interrupts(&self) -> Result<(), pgrust_core::InterruptReason> {
+        if let Some(interrupts) = self.interrupts {
+            pgrust_core::check_for_interrupts(interrupts)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl AccessTransactionServices for RootAccessRuntime<'_> {
+    fn transaction_status(&self, xid: TransactionId) -> Option<TransactionStatus> {
+        self.txns.and_then(|txns| txns.read().status(xid))
+    }
+
+    fn combo_command_pair(
+        &self,
+        xid: TransactionId,
+        combocid: pgrust_core::CommandId,
+    ) -> Option<(pgrust_core::CommandId, pgrust_core::CommandId)> {
+        self.txns
+            .and_then(|txns| txns.read().combo_command_pair(xid, combocid))
+    }
+
+    fn wait_for_transaction(&self, xid: TransactionId) -> AccessResult<()> {
+        let txns = self.txns.ok_or_else(|| {
+            AccessError::Unsupported("access transaction wait missing transaction manager".into())
+        })?;
+        let waiter = self.txn_waiter.ok_or_else(|| {
+            AccessError::Unsupported("access transaction wait missing waiter".into())
+        })?;
+        let interrupts = self.interrupts.ok_or_else(|| {
+            AccessError::Unsupported("access transaction wait missing interrupt state".into())
+        })?;
+        match waiter.wait_for(txns, xid, self.client_id, interrupts) {
+            crate::backend::storage::lmgr::WaitOutcome::Completed => Ok(()),
+            crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => Err(
+                AccessError::Scalar(format!("timed out waiting for transaction {xid}")),
+            ),
+            crate::backend::storage::lmgr::WaitOutcome::Interrupted(reason) => {
+                Err(AccessError::Scalar(format!("interrupted: {reason:?}")))
+            }
+        }
+    }
+}
+
+impl AccessHeapServices for RootAccessRuntime<'_> {
+    fn for_each_visible_heap_tuple(
+        &self,
+        rel: RelFileLocator,
+        snapshot: Snapshot,
+        visit: &mut dyn FnMut(ItemPointerData, HeapTuple) -> AccessResult<()>,
+    ) -> AccessResult<u64> {
+        let pool = self.pool.ok_or_else(|| {
+            AccessError::Unsupported("access heap scan missing buffer pool".into())
+        })?;
+        let txns = self.txns.ok_or_else(|| {
+            AccessError::Unsupported("access heap scan missing transaction manager".into())
+        })?;
+        let mut scan = crate::backend::access::heap::heapam::heap_scan_begin_visible(
+            pool,
+            self.client_id,
+            rel,
+            snapshot,
+        )
+        .map_err(|err| AccessError::Scalar(format!("heap scan begin failed: {err:?}")))?;
+        let mut count = 0;
+        while let Some((tid, tuple)) = crate::backend::access::heap::heapam::heap_scan_next_visible(
+            pool,
+            self.client_id,
+            &txns.read(),
+            &mut scan,
+        )
+        .map_err(|err| AccessError::Scalar(format!("heap scan failed: {err:?}")))?
+        {
+            visit(tid, tuple)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    fn fetch_heap_tuple(
+        &self,
+        rel: RelFileLocator,
+        tid: ItemPointerData,
+    ) -> AccessResult<HeapTuple> {
+        let pool = self.pool.ok_or_else(|| {
+            AccessError::Unsupported("access heap fetch missing buffer pool".into())
+        })?;
+        crate::backend::access::heap::heapam::heap_fetch(pool, self.client_id, rel, tid)
+            .map_err(|err| AccessError::Scalar(format!("heap fetch failed: {err:?}")))
+    }
+}
 
 impl AccessScalarServices for RootAccessServices {
     fn compare_order_values(

@@ -19,6 +19,37 @@ pub(crate) struct IndexBuildKeyProjector {
     exec_ctx: Option<ExecutorContext>,
 }
 
+// :HACK: service wrapper used while root still owns expression-index and
+// partial-index expression evaluation.
+#[allow(dead_code)]
+pub(crate) struct RootIndexBuildServices<'a> {
+    ctx: &'a IndexBuildContext,
+    projector: &'a mut IndexBuildKeyProjector,
+}
+
+#[allow(dead_code)]
+impl<'a> RootIndexBuildServices<'a> {
+    pub(crate) fn new(
+        ctx: &'a IndexBuildContext,
+        projector: &'a mut IndexBuildKeyProjector,
+    ) -> Self {
+        Self { ctx, projector }
+    }
+}
+
+impl pgrust_access::AccessIndexServices for RootIndexBuildServices<'_> {
+    fn project_index_row(
+        &mut self,
+        _index_meta: &pgrust_nodes::relcache::IndexRelCacheEntry,
+        row_values: &[Value],
+        heap_tid: ItemPointerData,
+    ) -> pgrust_access::AccessResult<Option<Vec<Value>>> {
+        self.projector
+            .project(self.ctx, row_values, heap_tid)
+            .map_err(map_catalog_error_to_access)
+    }
+}
+
 pub(crate) fn materialize_heap_row_values(
     heap_desc: &RelationDesc,
     datums: &[Option<&[u8]>],
@@ -73,6 +104,16 @@ fn map_access_error(err: pgrust_access::AccessError) -> CatalogError {
         pgrust_access::AccessError::Corrupt(message) => CatalogError::Corrupt(message),
         pgrust_access::AccessError::Scalar(message)
         | pgrust_access::AccessError::Unsupported(message) => CatalogError::Io(message),
+    }
+}
+
+fn map_catalog_error_to_access(err: CatalogError) -> pgrust_access::AccessError {
+    match err {
+        CatalogError::Corrupt(message) => pgrust_access::AccessError::Corrupt(message),
+        CatalogError::Interrupted(reason) => {
+            pgrust_access::AccessError::Scalar(format!("interrupted: {reason:?}"))
+        }
+        other => pgrust_access::AccessError::Scalar(format!("{other:?}")),
     }
 }
 
