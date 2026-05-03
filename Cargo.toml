@@ -34,7 +34,7 @@ crate-type = ["rlib"]
 [features]
 default = []
 deadlock_detection = ["parking_lot/deadlock_detection"]
-lz4 = ["dep:lz4_flex", "pgrust_analyze/lz4"]
+lz4 = ["pgrust_access/lz4", "pgrust_analyze/lz4"]
 tools = []
 
 [[bin]]
@@ -216,7 +216,6 @@ stacker = "0.1.23"
 encoding_rs = "0.8"
 md-5 = "0.10"
 rust-stemmers = "1"
-lz4_flex = { version = "0.11", optional = true }
 quick-xml = "0.38"
 unicode-normalization = "0.1.25"
 unicode-general-category = "1.1.0"

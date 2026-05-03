@@ -477,7 +477,6 @@ dependencies = [
  "hmac",
  "itoa",
  "libc",
- "lz4_flex",
  "md-5",
  "mimalloc",
  "num-bigint",
@@ -517,6 +516,7 @@ dependencies = [
 name = "pgrust_access"
 version = "0.1.0"
 dependencies = [
+ "lz4_flex",
  "pgrust_catalog_data",
  "pgrust_core",
  "pgrust_nodes",

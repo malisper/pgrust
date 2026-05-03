@@ -31,3 +31,6 @@ Remaining:
 - Move `lmgr`/transaction wait state after deciding whether it belongs in storage or access.
 - Move transam/WAL/checkpoint after Snapshot/TransactionManager can cross the crate boundary cleanly.
 - Move heap/index runtime modules and native AM implementations behind root service adapters.
+- `toast_compression.rs` was wrapped after the initial extraction commit:
+  portable compression logic now lives in `pgrust_access::common`, while root
+  maps `ToastCompressionError` back to `ExecError`.

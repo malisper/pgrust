@@ -1,3 +1,3 @@
 pub mod heaptuple;
-#[allow(dead_code)]
 pub mod pglz;
+pub mod toast_compression;
