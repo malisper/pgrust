@@ -42,8 +42,8 @@ use crate::include::nodes::primnodes::RelationDesc;
 use crate::{BufferPool, ClientId, PinnedBuffer};
 
 use super::minmax::{
-    BrinMinmaxStrategy, minmax_add_value, minmax_consistent, minmax_multi_add_value,
-    minmax_multi_consistent, minmax_multi_union, minmax_union,
+    minmax_add_value, minmax_consistent, minmax_multi_add_value, minmax_multi_consistent,
+    minmax_multi_union, minmax_strategy_from_i16, minmax_union,
 };
 use super::pageops::{
     brin_can_do_samepage_update, brin_page_get_freespace, brin_page_init,
@@ -645,7 +645,7 @@ fn range_matches_scan(
             // decide until their native summaries are implemented.
             continue;
         }
-        let strategy = BrinMinmaxStrategy::try_from(key.strategy as i16)?;
+        let strategy = minmax_strategy_from_i16(key.strategy as i16)?;
         if brin_opfamily_is_minmax_multi(opfamily_oid) {
             if !minmax_multi_consistent(column, strategy, &key.argument)? {
                 return Ok(false);

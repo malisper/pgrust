@@ -40,27 +40,9 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct GistConsistentResult {
-    pub(crate) matches: bool,
-    pub(crate) recheck: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct GistDistanceResult {
-    pub(crate) value: Option<f64>,
-    pub(crate) recheck: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct GistColumnPickSplit {
-    pub(crate) left: Vec<usize>,
-    pub(crate) right: Vec<usize>,
-    pub(crate) left_union: Value,
-    pub(crate) right_union: Value,
-}
-
-pub(crate) type GistSortComparator = fn(&Value, &Value) -> Ordering;
+pub(crate) use pgrust_access::gist::support::{
+    GistColumnPickSplit, GistConsistentResult, GistDistanceResult, GistSortComparator,
+};
 
 fn has_multirange_value(values: &[Value]) -> bool {
     values
