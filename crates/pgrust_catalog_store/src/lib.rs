@@ -2,6 +2,7 @@ pub mod bootstrap;
 pub mod catalog;
 pub mod catcache;
 pub mod indexing;
+pub mod materialize;
 pub mod pg_aggregate;
 pub mod pg_am;
 pub mod pg_amop;
@@ -41,9 +42,11 @@ pub mod pg_ts_template;
 pub mod pg_type;
 pub mod pg_user_mapping;
 pub mod relcache;
+pub mod rowcodec;
 pub mod rows;
 pub mod state;
 pub mod store;
+pub mod syscache;
 pub mod toasting;
 
 pub use catalog::{
@@ -52,7 +55,8 @@ pub use catalog::{
 pub use catcache::CatCache;
 pub use relcache::RelCache;
 pub use store::{
-    CatalogMutationEffect, CatalogStoreSnapshot, CreateTableResult, RuleDependencies,
+    CatalogControl, CatalogMutationEffect, CatalogReadRuntime, CatalogStoreCore, CatalogStoreMode,
+    CatalogStoreSnapshot, CatalogWriteRuntime, CreateTableResult, RuleDependencies,
     RuleOwnerDependency,
 };
 
@@ -63,7 +67,8 @@ pub const FROZEN_TRANSACTION_ID: u32 = 2;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pgrust_catalog_data::{INT4_TYPE_OID, PG_CLASS_RELATION_OID};
+    use pgrust_catalog_data::{INT4_TYPE_OID, PG_CLASS_RELATION_OID, PgNamespaceRow};
+    use pgrust_nodes::Value;
 
     #[test]
     fn catcache_from_catalog_keeps_builtin_type_rows() {
@@ -93,6 +98,47 @@ mod tests {
         assert_eq!(
             relcache::default_sequence_oid_from_default_expr("nextval(456)::int8"),
             Some(456)
+        );
+    }
+
+    #[test]
+    fn rowcodec_roundtrips_namespace_rows() {
+        let row = PgNamespaceRow {
+            oid: 11,
+            nspname: "app".into(),
+            nspowner: 10,
+            nspacl: Some(vec!["app=UC/app".into()]),
+        };
+
+        let values = rowcodec::namespace_row_values(row.clone());
+        let decoded = rowcodec::namespace_row_from_values(values).unwrap();
+
+        assert_eq!(decoded, row);
+    }
+
+    #[test]
+    fn syscache_decodes_namespace_tuples_and_bootstrap_types() {
+        assert_eq!(syscache::SysCacheId::NAMESPACEOID.expected_keys(), 1);
+
+        let row = PgNamespaceRow {
+            oid: 11,
+            nspname: "app".into(),
+            nspowner: 10,
+            nspacl: None,
+        };
+        let tuple = syscache::sys_cache_tuple_from_values(
+            syscache::SysCacheId::NAMESPACEOID,
+            rowcodec::namespace_row_values(row.clone()),
+        )
+        .unwrap();
+        assert_eq!(tuple, syscache::SysCacheTuple::Namespace(row));
+
+        let builtin = syscache::bootstrap_sys_cache_tuple(
+            syscache::SysCacheId::TYPEOID,
+            &[Value::Int64(i64::from(INT4_TYPE_OID))],
+        );
+        assert!(
+            matches!(builtin, Some(syscache::SysCacheTuple::Type(row)) if row.oid == INT4_TYPE_OID)
         );
     }
 }

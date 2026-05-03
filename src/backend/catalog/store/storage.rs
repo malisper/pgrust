@@ -30,7 +30,8 @@ use super::relcache_init::{
     relcache_init_needs_invalidation,
 };
 use super::{
-    CONTROL_FILE_MAGIC, CatalogControl, CatalogStore, CatalogStoreMode, CatalogWriteContext,
+    CONTROL_FILE_MAGIC, CatalogControl, CatalogStore, CatalogStoreCore, CatalogStoreMode,
+    CatalogWriteContext,
 };
 
 fn scope_db_oid(scope: CatalogScope) -> u32 {
@@ -164,17 +165,19 @@ impl CatalogStore {
         }
 
         Ok(Self {
-            mode: CatalogStoreMode::Durable {
-                base_dir,
-                control_path,
+            core: CatalogStoreCore {
+                mode: CatalogStoreMode::Durable {
+                    base_dir,
+                    control_path,
+                },
+                scope,
+                oid_control_path,
+                catalog,
+                catalog_materialized,
+                control: effective_control,
+                extra_type_rows: Vec::new(),
+                stored_view_queries: Default::default(),
             },
-            scope,
-            oid_control_path,
-            catalog,
-            catalog_materialized,
-            control: effective_control,
-            extra_type_rows: Vec::new(),
-            stored_view_queries: Default::default(),
         })
     }
 
@@ -190,14 +193,16 @@ impl CatalogStore {
             bootstrap_complete: true,
         };
         Self {
-            mode: CatalogStoreMode::Ephemeral,
-            scope,
-            oid_control_path: None,
-            catalog,
-            catalog_materialized: true,
-            control,
-            extra_type_rows: Vec::new(),
-            stored_view_queries: Default::default(),
+            core: CatalogStoreCore {
+                mode: CatalogStoreMode::Ephemeral,
+                scope,
+                oid_control_path: None,
+                catalog,
+                catalog_materialized: true,
+                control,
+                extra_type_rows: Vec::new(),
+                stored_view_queries: Default::default(),
+            },
         }
     }
 

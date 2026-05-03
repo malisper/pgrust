@@ -1,16 +1,69 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use crate::Catalog;
+use crate::rows::PhysicalCatalogRows;
 use crate::toasting::ToastCatalogChanges;
+use crate::{Catalog, CatalogEntry};
 use pgrust_catalog_data::PgTypeRow;
 use pgrust_catalog_data::{BootstrapCatalogKind, CatalogScope};
 use pgrust_core::RelFileLocator;
 use pgrust_nodes::Query;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogStoreMode {
+    Durable {
+        base_dir: PathBuf,
+        control_path: PathBuf,
+    },
+    Ephemeral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogControl {
+    pub next_oid: u32,
+    pub next_rel_number: u32,
+    pub bootstrap_complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogStoreCore {
+    pub mode: CatalogStoreMode,
+    pub scope: CatalogScope,
+    pub oid_control_path: Option<PathBuf>,
+    pub catalog: Catalog,
+    pub catalog_materialized: bool,
+    pub control: CatalogControl,
+    pub extra_type_rows: Vec<PgTypeRow>,
+    pub stored_view_queries: HashMap<u32, Query>,
+}
+
+pub trait CatalogReadRuntime {
+    type Error;
+
+    fn check_catalog_interrupts(&self) -> Result<(), Self::Error>;
+}
+
+pub trait CatalogWriteRuntime: CatalogReadRuntime {
+    fn insert_catalog_rows(
+        &self,
+        rows: &PhysicalCatalogRows,
+        db_oid: u32,
+        kinds: &[BootstrapCatalogKind],
+    ) -> Result<(), Self::Error>;
+
+    fn delete_catalog_rows(
+        &self,
+        rows: &PhysicalCatalogRows,
+        db_oid: u32,
+        kinds: &[BootstrapCatalogKind],
+    ) -> Result<(), Self::Error>;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogStoreSnapshot {
     pub catalog: Catalog,
     pub catalog_materialized: bool,
+    pub control: CatalogControl,
     pub scope: CatalogScope,
     pub extra_type_rows: Vec<PgTypeRow>,
     pub stored_view_queries: HashMap<u32, Query>,
@@ -29,7 +82,7 @@ pub struct CatalogMutationEffect {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateTableResult {
-    pub entry: crate::CatalogEntry,
+    pub entry: CatalogEntry,
     pub toast: Option<ToastCatalogChanges>,
 }
 
