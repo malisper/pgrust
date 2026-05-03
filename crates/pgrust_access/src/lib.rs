@@ -1,6 +1,7 @@
 pub mod access;
 pub mod brin;
 pub mod common;
+pub mod crc32c;
 pub mod error;
 pub mod gin;
 pub mod gist;
@@ -11,6 +12,7 @@ pub mod nbtree;
 pub mod services;
 pub mod spgist;
 pub mod table;
+pub mod transam;
 pub mod varatt;
 
 pub use access::{ItemPointerData, TupleValue};

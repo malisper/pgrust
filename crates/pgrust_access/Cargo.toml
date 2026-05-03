@@ -18,4 +18,5 @@ pgrust_catalog_data = { path = "../pgrust_catalog_data" }
 pgrust_core = { path = "../pgrust_core" }
 pgrust_nodes = { path = "../pgrust_nodes" }
 pgrust_storage = { path = "../pgrust_storage" }
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
