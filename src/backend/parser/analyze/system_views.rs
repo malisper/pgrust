@@ -570,14 +570,25 @@ fn nullable_oid_array(values: Option<Vec<u32>>) -> Value {
 }
 
 fn information_schema_table_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let view_metadata = information_schema_view_metadata(catalog)
+        .into_iter()
+        .map(|view| (view.relation_oid, view.updatability))
+        .collect::<std::collections::BTreeMap<_, _>>();
     information_schema_relation_rows(catalog, &['r', 'p', 'v', 'm', 'f'])
         .into_iter()
         .map(|(schema_name, table_name, relation)| {
+            let is_insertable = match relation.relkind {
+                'r' | 'p' => true,
+                'v' | 'f' => view_metadata
+                    .get(&relation.relation_oid)
+                    .is_some_and(|updatability| updatability.insertable),
+                _ => false,
+            };
             vec![
                 Value::Text(schema_name.into()),
                 Value::Text(table_name.into()),
                 Value::Text(information_schema_table_type(relation.relkind).into()),
-                yes_or_no(information_schema_relation_insertable(&relation)),
+                yes_or_no(is_insertable),
             ]
         })
         .collect()
@@ -638,10 +649,6 @@ fn information_schema_table_type(relkind: char) -> &'static str {
         'f' => "FOREIGN",
         _ => "BASE TABLE",
     }
-}
-
-fn information_schema_relation_insertable(relation: &BoundRelation) -> bool {
-    matches!(relation.relkind, 'r' | 'p')
 }
 
 fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
