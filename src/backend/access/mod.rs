@@ -11,4 +11,4 @@ pub mod spgist;
 pub mod table;
 pub mod transam;
 
-pub(crate) use services::RootAccessServices;
+pub(crate) use services::{RootAccessRuntime, RootAccessServices};

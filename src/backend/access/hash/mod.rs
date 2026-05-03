@@ -4,9 +4,8 @@ pub mod wal;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
-use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::access::index::buildkeys::{
-    IndexBuildKeyProjector, materialize_heap_row_values,
+    IndexBuildKeyProjector, RootIndexBuildServices, materialize_heap_row_values,
 };
 use crate::backend::access::nbtree::nbtree::{decode_key_payload, encode_key_payload};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
@@ -43,6 +42,7 @@ use crate::include::access::tidbitmap::TidBitmap;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 use crate::{BufferPool, ClientId, PinnedBuffer, SmgrStorageBackend};
+use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices};
 use wal::{LoggedHashBlock, log_hash_record};
 
 pub(crate) use support::{
@@ -66,6 +66,15 @@ fn page_error(err: HashPageError) -> CatalogError {
 
 fn slotted_page_error(err: PageError) -> CatalogError {
     CatalogError::Io(format!("hash slotted page error: {err:?}"))
+}
+
+fn access_error(err: AccessError) -> CatalogError {
+    match err {
+        AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        AccessError::Scalar(message) | AccessError::Unsupported(message) => {
+            CatalogError::Io(message)
+        }
+    }
 }
 
 fn pin_hash_block<'a>(
@@ -684,38 +693,37 @@ fn maybe_split_bucket(
 }
 
 fn hashbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
-    let mut scan = heap_scan_begin_visible(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.heap_relation,
-        ctx.snapshot.clone(),
-    )
-    .map_err(|err| CatalogError::Io(format!("heap scan begin failed: {err:?}")))?;
     let attr_descs = ctx.heap_desc.attribute_descs();
     let mut key_projector = IndexBuildKeyProjector::new(ctx)?;
+    let mut index_services = RootIndexBuildServices::new(ctx, &mut key_projector);
+    let heap_services = crate::backend::access::RootAccessRuntime::heap(
+        &ctx.pool,
+        &ctx.txns,
+        Some(ctx.interrupts.as_ref()),
+        ctx.client_id,
+    );
     let mut heap_tuples = 0;
     let mut pending = Vec::new();
-    loop {
-        check_catalog_interrupts(ctx.interrupts.as_ref())?;
-        let next = {
-            let txns = ctx.txns.read();
-            heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)
-        };
-        let Some((tid, tuple)) =
-            next.map_err(|err| CatalogError::Io(format!("heap scan failed: {err:?}")))?
-        else {
-            break;
-        };
-        let datums = tuple
-            .deform(&attr_descs)
-            .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
-        let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)?;
-        heap_tuples += 1;
-        let Some(key_values) = key_projector.project(ctx, &row_values, tid)? else {
-            continue;
-        };
-        pending.push((tid, key_values));
-    }
+    heap_services
+        .for_each_visible_heap_tuple(
+            ctx.heap_relation,
+            ctx.snapshot.clone(),
+            &mut |tid, tuple| {
+                let datums = tuple
+                    .deform(&attr_descs)
+                    .map_err(|err| AccessError::Scalar(format!("heap deform failed: {err:?}")))?;
+                let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)
+                    .map_err(|err| AccessError::Scalar(format!("{err:?}")))?;
+                heap_tuples += 1;
+                if let Some(key_values) =
+                    index_services.project_index_row(&ctx.index_meta, &row_values, tid)?
+                {
+                    pending.push((tid, key_values));
+                }
+                Ok(())
+            },
+        )
+        .map_err(access_error)?;
 
     let fillfactor = fillfactor_from_meta(&ctx.index_meta);
     if relation_nblocks(&ctx.pool, ctx.index_relation)? == 0 {

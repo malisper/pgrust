@@ -16,6 +16,7 @@ Key decisions:
 - Added access runtime service traits for interrupts, transaction lookup/waiting, heap fetch/visible scans, and WAL record logging.
 - Moved portable AM result/unique-check types into `pgrust_access::access::amapi`; root `include::access::amapi` re-exports them while keeping root-owned callback contexts.
 - Added root runtime bridge implementations for interrupt/transaction/heap services and a root index-build projection service wrapper.
+- Routed hash index build heap scanning and key projection through `AccessHeapServices` and `AccessIndexServices` as the first runtime path using the new boundary.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -32,6 +33,7 @@ Files touched:
 - `crates/pgrust_access/src/index/amvalidate.rs`
 - `crates/pgrust_access/src/index/buildkeys.rs`
 - `src/backend/access/services.rs`
+- `src/backend/access/hash/mod.rs`
 - `src/backend/access/index/genam.rs`
 - `src/backend/access/index/amvalidate.rs`
 - `src/backend/access/index/buildkeys.rs`
@@ -61,6 +63,7 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet jsonb_ops_extracts_object_keys_and_array_strings_as_keys`
 - `scripts/cargo_isolated.sh test --lib --quiet jsonb_ops_empty_container_emits_empty_item`
 - `scripts/cargo_isolated.sh test --lib --quiet index`
+- `scripts/cargo_isolated.sh test --lib --quiet hash`
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.
 
 Remaining:
