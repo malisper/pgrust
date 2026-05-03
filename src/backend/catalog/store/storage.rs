@@ -84,6 +84,9 @@ fn oid_control_path_for_scope(base_dir: &Path, scope: CatalogScope) -> Option<Pa
     }
 }
 
+#[cfg(test)]
+static STORE_CATCACHE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl CatalogStore {
     pub(crate) fn scope_db_oid(&self) -> u32 {
         scope_db_oid(self.scope)
@@ -232,6 +235,9 @@ impl CatalogStore {
     }
 
     pub fn catcache(&self) -> Result<CatCache, CatalogError> {
+        #[cfg(test)]
+        STORE_CATCACHE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         match &self.mode {
             CatalogStoreMode::Durable { base_dir, .. } => {
                 // :HACK: compatibility API for callers that still need the full
@@ -289,6 +295,16 @@ impl CatalogStore {
             }
             CatalogStoreMode::Ephemeral => Ok(CatCache::from_catalog(&self.catalog)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_catcache_call_count_for_tests() {
+        STORE_CATCACHE_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn catcache_call_count_for_tests() -> u64 {
+        STORE_CATCACHE_CALLS.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn catcache_with_snapshot(

@@ -134,6 +134,23 @@ fn scratch_temp_dir(label: &str) -> PathBuf {
     crate::pgrust::test_support::scratch_temp_dir("database", label)
 }
 
+fn reset_broad_catalog_load_counters() {
+    crate::backend::utils::cache::syscache::reset_backend_catcache_load_count_for_tests();
+    crate::backend::catalog::store::CatalogStore::reset_catcache_call_count_for_tests();
+}
+
+fn assert_no_broad_catalog_loads(label: &str) {
+    let backend_loads =
+        crate::backend::utils::cache::syscache::backend_catcache_load_count_for_tests();
+    let store_loads = crate::backend::catalog::store::CatalogStore::catcache_call_count_for_tests();
+    assert_eq!(
+        backend_loads + store_loads,
+        0,
+        "{label} should use keyed syscache/relcache instead of broad CatCache materialization \
+         (backend_catcache={backend_loads}, store_catcache={store_loads})"
+    );
+}
+
 fn role_oid(db: &Database, role_name: &str) -> u32 {
     db.catalog
         .read()
@@ -20155,19 +20172,42 @@ fn lookup_any_relation_uses_targeted_relation_cache_without_catcache() {
     db.execute(1, "create table targeted_lookup (id int4 not null)")
         .unwrap();
     db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters();
 
     let catalog = db.lazy_catalog_lookup(1, None, None);
     let unqualified = catalog.lookup_any_relation("targeted_lookup").unwrap();
     let qualified = catalog
         .lookup_any_relation("public.targeted_lookup")
         .unwrap();
+    let by_oid = catalog.relation_by_oid(unqualified.relation_oid).unwrap();
 
     assert_eq!(unqualified.relation_oid, qualified.relation_oid);
+    assert_eq!(unqualified.relation_oid, by_oid.relation_oid);
+    assert_no_broad_catalog_loads("relation lookup by name/OID");
     let states = db.backend_cache_states.read();
     let state = states.get(&1).unwrap();
     assert!(state.catcache.is_none());
     assert_eq!(state.relation_cache.len(), 1);
     assert!(state.relation_cache.contains_key(&unqualified.relation_oid));
+}
+
+#[test]
+fn simple_select_uses_keyed_catalog_without_broad_catcache() {
+    let base = temp_dir("simple_select_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table keyed_select (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into keyed_select values (1, 'alpha')")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters();
+
+    assert_eq!(
+        query_rows(&db, 1, "select name from keyed_select where id = 1"),
+        vec![vec![Value::Text("alpha".into())]]
+    );
+    assert_no_broad_catalog_loads("simple SELECT parse/plan/execute");
 }
 
 #[test]

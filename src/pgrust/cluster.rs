@@ -512,6 +512,7 @@ impl Cluster {
         Ok(Database {
             cluster: Arc::clone(&self.shared),
             database_oid: row.oid,
+            database_name: row.datname,
             pool: Arc::clone(&self.shared.pool),
             wal: self.shared.wal.clone(),
             autovacuum_config: self.shared.autovacuum_config,

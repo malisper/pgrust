@@ -90,10 +90,10 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::{InterruptReason, InterruptState};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID,
-    PgConstraintRow, PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization, UNKNOWN_TYPE_OID,
-    annotate_catalog_type_io_procs, builtin_type_row_by_oid, builtin_type_rows,
-    synthetic_type_output_proc_oid, system_catalog_indexes,
+    CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgEnumRow,
+    PgRangeRow, PgTypeRow, RangeCanonicalization, UNKNOWN_TYPE_OID, annotate_catalog_type_io_procs,
+    builtin_type_row_by_oid, builtin_type_rows, synthetic_type_output_proc_oid,
+    system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 pub use crate::pgrust::autovacuum::AutovacuumConfig;
@@ -532,6 +532,7 @@ impl PreparedTransactionManager {
 pub struct Database {
     pub(crate) cluster: Arc<ClusterShared>,
     pub database_oid: u32,
+    pub(crate) database_name: String,
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub wal: Option<Arc<WalWriter>>,
     pub autovacuum_config: AutovacuumConfig,
@@ -2342,18 +2343,7 @@ impl Database {
     }
 
     pub(crate) fn current_database_name(&self) -> String {
-        self.shared_catalog
-            .read()
-            .catcache()
-            .ok()
-            .and_then(|cache| {
-                cache
-                    .database_rows()
-                    .into_iter()
-                    .find(|row| row.oid == self.database_oid)
-                    .map(|row| row.datname)
-            })
-            .unwrap_or_else(|| CURRENT_DATABASE_NAME.to_string())
+        self.database_name.clone()
     }
 
     pub(crate) fn checkpoint_config_value(&self, name: &str) -> Option<String> {

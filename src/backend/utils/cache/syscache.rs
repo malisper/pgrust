@@ -6,7 +6,7 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::rowcodec::{
-    pg_auth_members_row_from_values, pg_authid_row_from_values, pg_class_row_from_values,
+    pg_auth_members_row_from_values, pg_authid_row_from_values,
     pg_publication_namespace_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::catalog::store::{CatalogStore, CatalogWriteContext};
@@ -21,10 +21,11 @@ use crate::backend::utils::time::snapmgr::{Snapshot, get_catalog_snapshot};
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     PG_CONSTRAINT_RELATION_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDependRow,
-    PgIndexRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgProcRow, PgPublicationNamespaceRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows,
+    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgDependRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -1788,6 +1789,9 @@ fn load_backend_catcache(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Result<CatCache, CatalogError> {
+    #[cfg(test)]
+    BACKEND_CATCACHE_LOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     // :HACK: broad CatCache materialization is a compatibility escape hatch for
     // catalog views/tests and legacy callers. Hot planner/executor paths should
     // use SearchSysCache* or RelationIdGetRelation instead, matching
@@ -1903,31 +1907,25 @@ pub fn drain_pending_invalidations(db: &Database, client_id: ClientId) -> Vec<Ca
         .collect()
 }
 
-pub fn ensure_namespace_rows(
-    db: &Database,
-    client_id: ClientId,
-    txn_ctx: Option<(TransactionId, CommandId)>,
-) -> Vec<PgNamespaceRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.namespace_rows())
-        .unwrap_or_default()
+#[cfg(test)]
+static BACKEND_CATCACHE_LOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_backend_catcache_load_count_for_tests() {
+    BACKEND_CATCACHE_LOADS.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
-pub fn ensure_class_rows(
-    db: &Database,
-    client_id: ClientId,
-    txn_ctx: Option<(TransactionId, CommandId)>,
-) -> Vec<PgClassRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.class_rows())
-        .unwrap_or_default()
+#[cfg(test)]
+pub(crate) fn backend_catcache_load_count_for_tests() -> u64 {
+    BACKEND_CATCACHE_LOADS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-pub fn scan_class_rows_without_catcache(
+fn scan_syscache_rows_without_catcache(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
-) -> Vec<PgClassRow> {
+    cache_id: SysCacheId,
+) -> Vec<SysCacheTuple> {
     if txn_ctx.is_none() {
         db.accept_invalidation_messages(client_id);
     }
@@ -1939,14 +1937,50 @@ pub fn scan_class_rows_without_catcache(
                 &snapshot,
                 client_id,
                 db.database_oid,
-                PG_CLASS_OID_INDEX_OID,
+                cache_id.index_oid(),
                 Vec::new(),
             )
             .ok()
         })
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|values| pg_class_row_from_values(values).ok())
+        .filter_map(|values| sys_cache_tuple_from_values(cache_id, values).ok())
+        .collect()
+}
+
+pub fn ensure_namespace_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgNamespaceRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::NAMESPACEOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Namespace(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_class_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgClassRow> {
+    scan_class_rows_without_catcache(db, client_id, txn_ctx)
+}
+
+pub fn scan_class_rows_without_catcache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgClassRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::RELOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Class(row) => Some(row),
+            _ => None,
+        })
         .collect()
 }
 
@@ -1955,9 +1989,13 @@ pub fn ensure_constraint_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgConstraintRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.constraint_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::CONSTROID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Constraint(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_depend_rows(
@@ -1965,9 +2003,13 @@ pub fn ensure_depend_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgDependRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.depend_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::DEPENDDEPENDER)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Depend(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_inherit_rows(
@@ -1975,9 +2017,13 @@ pub fn ensure_inherit_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgInheritsRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.inherit_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::INHRELIDSEQNO)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Inherits(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_rewrite_rows(
@@ -1985,9 +2031,13 @@ pub fn ensure_rewrite_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgRewriteRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.rewrite_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::REWRITEOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Rewrite(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_statistic_rows(
@@ -1995,9 +2045,13 @@ pub fn ensure_statistic_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgStatisticRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.statistic_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::STATRELATTINH)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Statistic(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_attribute_rows(
@@ -2005,9 +2059,13 @@ pub fn ensure_attribute_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgAttributeRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.attribute_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::ATTNUM)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Attribute(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_attrdef_rows(
@@ -2015,9 +2073,13 @@ pub fn ensure_attrdef_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgAttrdefRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.attrdef_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::ATTRDEFOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Attrdef(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_type_rows(
@@ -2063,9 +2125,13 @@ pub fn ensure_index_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgIndexRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.index_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::INDEXRELID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Index(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_am_rows(
@@ -2073,9 +2139,13 @@ pub fn ensure_am_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgAmRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.am_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::AMOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Am(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_amop_rows(
@@ -2083,9 +2153,13 @@ pub fn ensure_amop_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgAmopRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.amop_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::AMOPSTRATEGY)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Amop(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_amproc_rows(
@@ -2093,9 +2167,13 @@ pub fn ensure_amproc_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgAmprocRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.amproc_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::AMPROCNUM)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Amproc(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_opclass_rows(
@@ -2103,9 +2181,13 @@ pub fn ensure_opclass_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgOpclassRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.opclass_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::CLAOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Opclass(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_opfamily_rows(
@@ -2113,9 +2195,13 @@ pub fn ensure_opfamily_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgOpfamilyRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.opfamily_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::OPFAMILYOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Opfamily(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_collation_rows(
@@ -2123,9 +2209,13 @@ pub fn ensure_collation_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgCollationRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.collation_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::COLLOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Collation(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn ensure_proc_rows(
@@ -2133,9 +2223,167 @@ pub fn ensure_proc_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgProcRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.proc_rows())
-        .unwrap_or_default()
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::PROCOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Proc(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_language_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgLanguageRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::LANGOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Language(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_operator_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgOperatorRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::OPEROID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Operator(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_cast_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgCastRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::CASTOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Cast(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_trigger_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgTriggerRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::TRIGGEROID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Trigger(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_event_trigger_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgEventTriggerRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::EventTriggerOid)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::EventTrigger(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_policy_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgPolicyRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::POLICYOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Policy(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_publication_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgPublicationRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::PUBLICATIONOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Publication(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_publication_rel_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgPublicationRelRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::PUBLICATIONREL)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::PublicationRel(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_publication_namespace_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgPublicationNamespaceRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::PUBLICATIONNAMESPACE)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::PublicationNamespace(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_statistic_ext_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgStatisticExtRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::STATEXTOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::StatisticExt(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn ensure_statistic_ext_data_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgStatisticExtDataRow> {
+    scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::STATEXTDATASTXOID)
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::StatisticExtData(row) => Some(row),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]

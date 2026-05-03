@@ -11115,10 +11115,9 @@ fn psql_describe_tableinfo_query(
         'I' => None,
         _ => amname,
     };
-    let reltablespace = db
-        .backend_catcache(session.client_id, txn_ctx)
-        .ok()
-        .and_then(|catcache| catcache.class_by_oid(oid).map(|row| row.reltablespace))
+    let reltablespace = catalog
+        .class_row_by_oid(oid)
+        .map(|row| row.reltablespace)
         .unwrap_or(entry.rel.spc_oid);
     let relreplident = catalog
         .class_row_by_oid(oid)
@@ -11243,17 +11242,18 @@ fn psql_describe_columns_query(
             index_meta.indrelid,
         )
     });
-    let fdw_options_by_attnum = backend_catcache(db, session.client_id, session.catalog_txn_ctx())
-        .ok()
-        .and_then(|cache| {
-            cache.attributes_by_relid(entry.relation_oid).map(|attrs| {
-                attrs
-                    .iter()
-                    .map(|attr| (attr.attnum, attr.attfdwoptions.clone()))
-                    .collect::<HashMap<_, _>>()
-            })
+    let fdw_options_by_attnum = entry
+        .desc
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, column)| {
+            column
+                .fdw_options
+                .clone()
+                .map(|options| ((idx + 1) as i16, options))
         })
-        .unwrap_or_default();
+        .collect::<HashMap<_, _>>();
 
     let mut columns = vec![
         QueryColumn::text("attname"),
@@ -11429,7 +11429,7 @@ fn psql_describe_columns_query(
                     psql_format_fdw_options(
                         fdw_options_by_attnum
                             .get(&attnum)
-                            .and_then(|options| options.as_deref())
+                            .map(Vec::as_slice)
                             .or(column.fdw_options.as_deref()),
                     )
                     .into(),
@@ -12627,14 +12627,9 @@ fn psql_describe_indexes_query(
         .into_iter()
         .map(|index| {
             let index_row = catalog.index_row_by_oid(index.relation_oid);
-            let reltablespace = db
-                .backend_catcache(session.client_id, txn_ctx)
-                .ok()
-                .and_then(|catcache| {
-                    catcache
-                        .class_by_oid(index.relation_oid)
-                        .map(|row| row.reltablespace)
-                })
+            let reltablespace = catalog
+                .class_row_by_oid(index.relation_oid)
+                .map(|row| row.reltablespace)
                 .unwrap_or(index.rel.spc_oid);
             let constraint = constraints.iter().find(|row| {
                 row.conindid == index.relation_oid && matches!(row.contype, 'p' | 'u' | 'x')
@@ -17470,7 +17465,16 @@ mod tests {
                 CURRENT_DATE AS now",
         );
         handle_parse(&mut output, &mut state, &parse_packet[5..]).unwrap();
+        db.backend_cache_states.write().remove(&1);
+        crate::backend::utils::cache::syscache::reset_backend_catcache_load_count_for_tests();
+        crate::backend::catalog::store::CatalogStore::reset_catcache_call_count_for_tests();
         handle_describe(&mut output, &db, &mut state, &[b'S', 0]).unwrap();
+        assert_eq!(
+            crate::backend::utils::cache::syscache::backend_catcache_load_count_for_tests()
+                + crate::backend::catalog::store::CatalogStore::catcache_call_count_for_tests(),
+            0,
+            "extended protocol describe should use keyed catalog lookups"
+        );
 
         let mut cursor = Cursor::new(output);
         let (parse_tag, _) = read_message(&mut cursor, "parse complete");
