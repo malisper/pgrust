@@ -2,6 +2,7 @@ pub mod access;
 pub mod brin;
 pub mod common;
 pub mod error;
+pub mod gin;
 pub mod gist;
 pub mod nbtree;
 pub mod services;

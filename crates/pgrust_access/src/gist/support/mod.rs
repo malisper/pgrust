@@ -1,4 +1,6 @@
+pub mod box_ops;
 pub mod network_ops;
+pub mod point_ops;
 pub mod tsquery_ops;
 pub mod tsvector_ops;
 
