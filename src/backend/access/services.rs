@@ -10,9 +10,9 @@ use pgrust_access::gin::jsonb_ops::{
 };
 use pgrust_access::{
     AccessError, AccessHeapServices, AccessInterruptServices, AccessResult, AccessScalarServices,
-    AccessTransactionServices,
+    AccessTransactionServices, AccessWalRecord, AccessWalServices,
 };
-use pgrust_core::{RelFileLocator, Snapshot, TransactionId, TransactionStatus};
+use pgrust_core::{INVALID_LSN, RelFileLocator, Snapshot, TransactionId, TransactionStatus};
 use pgrust_nodes::datum::{
     GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue, Value,
 };
@@ -35,6 +35,11 @@ pub(crate) struct RootAccessRuntime<'a> {
     pub txn_waiter: Option<&'a crate::pgrust::database::TransactionWaiter>,
     pub interrupts: Option<&'a pgrust_core::InterruptState>,
     pub client_id: pgrust_core::ClientId,
+}
+
+pub(crate) struct RootAccessWal<'a> {
+    pub pool:
+        &'a crate::BufferPool<crate::backend::storage::buffer::storage_backend::SmgrStorageBackend>,
 }
 
 #[allow(dead_code)]
@@ -163,6 +168,46 @@ impl AccessHeapServices for RootAccessRuntime<'_> {
         })?;
         crate::backend::access::heap::heapam::heap_fetch(pool, self.client_id, rel, tid)
             .map_err(|err| AccessError::Scalar(format!("heap fetch failed: {err:?}")))
+    }
+}
+
+impl AccessWalServices for RootAccessWal<'_> {
+    fn log_access_record(&self, record: AccessWalRecord) -> AccessResult<pgrust_core::Lsn> {
+        let Some(wal) = self.pool.wal_writer() else {
+            return Ok(INVALID_LSN);
+        };
+        crate::backend::access::transam::xloginsert::xlog_begin_insert();
+        for (block_id, block) in record.blocks.iter().enumerate() {
+            let block_id = u8::try_from(block_id)
+                .map_err(|_| AccessError::Unsupported("too many WAL block refs".into()))?;
+            crate::backend::access::transam::xloginsert::xlog_register_buffer(
+                block_id,
+                block.tag,
+                block.flags,
+            );
+            if block.data.len() == crate::backend::storage::buffer::PAGE_SIZE {
+                let mut page = [0u8; crate::backend::storage::buffer::PAGE_SIZE];
+                page.copy_from_slice(&block.data);
+                crate::backend::access::transam::xloginsert::xlog_register_buffer_image(
+                    block_id, &page,
+                );
+            } else if !block.data.is_empty() {
+                crate::backend::access::transam::xloginsert::xlog_register_buf_data(
+                    block_id,
+                    &block.data,
+                );
+            }
+        }
+        if !record.payload.is_empty() {
+            crate::backend::access::transam::xloginsert::xlog_register_data(&record.payload);
+        }
+        crate::backend::access::transam::xloginsert::xlog_insert(
+            &wal,
+            record.xid,
+            record.rmid,
+            record.info,
+        )
+        .map_err(|err| AccessError::Scalar(format!("WAL insert failed: {err}")))
     }
 }
 

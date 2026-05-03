@@ -23,6 +23,7 @@ Key decisions:
 - Added hash value/equality methods to `AccessScalarServices` and routed hash AM build/insert/scan through `RootAccessServices` instead of direct scalar hash helper calls.
 - Moved hash tuple payload encode/decode/hash extraction into `pgrust_access::access::hash`; root hash runtime now calls the portable codec through `RootAccessServices`.
 - Moved hash AM pure helpers into `pgrust_access::access::hash`: opclass/fillfactor/bucket-count helpers, page item extraction, page space checks, and split-needed checks.
+- Added root `AccessWalServices` bridge and routed hash page writes through portable `AccessWalRecord`/`AccessWalBlockRef` records instead of direct hash xlog calls.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -46,6 +47,7 @@ Files touched:
 - `src/backend/access/gist/build.rs`
 - `src/backend/access/hash/mod.rs`
 - `src/backend/access/services.rs`
+- `src/backend/access/mod.rs`
 - `src/backend/access/nbtree/nbtree.rs`
 - `src/backend/access/spgist/build.rs`
 - `src/backend/access/index/genam.rs`
@@ -92,6 +94,12 @@ Tests run:
 - `scripts/cargo_isolated.sh check --features lz4 --message-format short`
 - `scripts/cargo_isolated.sh test --lib --quiet btree`
 - `scripts/cargo_isolated.sh test --lib --quiet index`
+- `cargo fmt --all -- --check`
+- `scripts/cargo_isolated.sh check --message-format short`
+- `scripts/cargo_isolated.sh test -p pgrust_access --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_storage --quiet`
+- `scripts/cargo_isolated.sh check --features lz4 --message-format short`
+- `scripts/cargo_isolated.sh test --lib --quiet hash`
 - `cargo fmt --all -- --check`
 - `scripts/cargo_isolated.sh check --message-format short`
 - `scripts/cargo_isolated.sh test -p pgrust_access --quiet`

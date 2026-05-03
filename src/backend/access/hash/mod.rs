@@ -4,16 +4,16 @@ pub mod wal;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
-use crate::backend::access::RootAccessServices;
 use crate::backend::access::index::buildkeys::{
     IndexBuildKeyProjector, RootIndexBuildServices, map_access_error, map_catalog_error_to_access,
     materialize_heap_row_values,
 };
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::access::transam::xlog::{
-    INVALID_LSN, XLOG_HASH_ADD_OVFL_PAGE, XLOG_HASH_DELETE, XLOG_HASH_INIT_META_PAGE,
-    XLOG_HASH_INSERT, XLOG_HASH_SPLIT_ALLOCATE_PAGE, XLOG_HASH_SPLIT_PAGE, XLOG_HASH_VACUUM,
+    XLOG_HASH_ADD_OVFL_PAGE, XLOG_HASH_DELETE, XLOG_HASH_INIT_META_PAGE, XLOG_HASH_INSERT,
+    XLOG_HASH_SPLIT_ALLOCATE_PAGE, XLOG_HASH_SPLIT_PAGE, XLOG_HASH_VACUUM,
 };
+use crate::backend::access::{RootAccessServices, RootAccessWal};
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::fsm::{get_free_index_page, record_free_index_page};
 use crate::backend::storage::page::bufpage::{
@@ -46,8 +46,10 @@ use crate::include::access::tidbitmap::TidBitmap;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 use crate::{BufferPool, ClientId, PinnedBuffer, SmgrStorageBackend};
-use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices, AccessScalarServices};
-use wal::{LoggedHashBlock, log_hash_record};
+use pgrust_access::{
+    AccessError, AccessHeapServices, AccessIndexServices, AccessScalarServices, AccessWalBlockRef,
+    AccessWalRecord, AccessWalServices,
+};
 
 pub(crate) use support::{
     HASH_PARTITION_SEED, hash_bytes_extended, hash_combine64, hash_value_extended,
@@ -133,30 +135,37 @@ fn write_hash_pages(
         pool.ensure_block_exists(rel, ForkNumber::Main, page.block)
             .map_err(|err| CatalogError::Io(format!("hash extend failed: {err:?}")))?;
     }
-    let lsn = if let Some(wal) = pool.wal_writer() {
-        let blocks = pages
-            .iter()
-            .enumerate()
-            .map(|(idx, page)| LoggedHashBlock {
-                block_id: idx as u8,
+    let blocks = pages
+        .iter()
+        .map(|page| {
+            let mut flags = pgrust_core::REGBUF_STANDARD | pgrust_core::REGBUF_FORCE_IMAGE;
+            if page.will_init {
+                flags |= pgrust_core::REGBUF_WILL_INIT;
+            }
+            AccessWalBlockRef {
                 tag: crate::backend::storage::buffer::BufferTag {
                     rel,
                     fork: ForkNumber::Main,
                     block: page.block,
                 },
-                page: &page.page,
-                will_init: page.will_init,
-            })
-            .collect::<Vec<_>>();
-        let wal_info = pages
-            .first()
-            .map(|page| page.wal_info)
-            .unwrap_or(XLOG_HASH_INSERT);
-        log_hash_record(&wal, xid, wal_info, &blocks, &[])
-            .map_err(|err| CatalogError::Io(format!("hash WAL log failed: {err}")))?
-    } else {
-        INVALID_LSN
-    };
+                flags,
+                data: page.page.to_vec(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let wal_info = pages
+        .first()
+        .map(|page| page.wal_info)
+        .unwrap_or(XLOG_HASH_INSERT);
+    let lsn = RootAccessWal { pool }
+        .log_access_record(AccessWalRecord {
+            xid,
+            rmid: pgrust_core::RM_HASH_ID,
+            info: wal_info,
+            payload: Vec::new(),
+            blocks,
+        })
+        .map_err(map_access_error)?;
     for page in pages {
         let pin = pin_hash_block(pool, client_id, rel, page.block)?;
         let mut guard = pool

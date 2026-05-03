@@ -1,8 +1,7 @@
 use std::cmp::Ordering;
 
 use pgrust_core::{
-    BufferTag, CommandId, InterruptReason, Lsn, RelFileLocator, Snapshot, TransactionId,
-    TransactionStatus,
+    CommandId, InterruptReason, Lsn, RelFileLocator, Snapshot, TransactionId, TransactionStatus,
 };
 use pgrust_nodes::datum::{
     GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue, Value,
@@ -10,6 +9,7 @@ use pgrust_nodes::datum::{
 use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc};
 use pgrust_nodes::relcache::IndexRelCacheEntry;
 use pgrust_nodes::tsearch::{TsQuery, TsVector};
+use pgrust_storage::BufferTag;
 
 use crate::AccessResult;
 use crate::access::gin::GinEntryKey;
