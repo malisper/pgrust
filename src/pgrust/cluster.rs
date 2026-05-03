@@ -205,26 +205,29 @@ impl Cluster {
         std::fs::create_dir_all(&base_dir)
             .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
         let base_dir_has_cluster_contents = base_dir_has_cluster_contents(&base_dir)?;
+        let bootstrap_control_file =
+            !ControlFileStore::path(&base_dir).exists() && !base_dir_has_cluster_contents;
 
         let checkpoint_config = Arc::new(
             CheckpointConfig::load_from_data_dir(&base_dir)
                 .map_err(|message| DatabaseError::Catalog(CatalogError::Io(message)))?,
         );
         let mut txns = TransactionManager::new_durable(&base_dir)?;
-        let control_file =
-            if ControlFileStore::path(&base_dir).exists() || base_dir_has_cluster_contents {
-                Arc::new(ControlFileStore::load(&base_dir)?)
-            } else {
-                Arc::new(ControlFileStore::bootstrap(
-                    &base_dir,
-                    txns.next_xid(),
-                    checkpoint_config.as_ref(),
-                )?)
-            };
+        let control_file = if bootstrap_control_file {
+            Arc::new(ControlFileStore::bootstrap(
+                &base_dir,
+                txns.next_xid(),
+                checkpoint_config.as_ref(),
+            )?)
+        } else {
+            Arc::new(ControlFileStore::load(&base_dir)?)
+        };
         let control_snapshot = control_file.snapshot();
 
         let shared_catalog = CatalogStore::load_shared(&base_dir)?;
-        ensure_bootstrap_databases(&base_dir, &shared_catalog)?;
+        if bootstrap_control_file {
+            ensure_bootstrap_databases(&base_dir, &shared_catalog)?;
+        }
 
         let wal_dir = base_dir.join("pg_wal");
         let prepared_xacts_for_recovery = PreparedTransactionManager::load(&base_dir)?;
@@ -274,15 +277,7 @@ impl Cluster {
         ));
 
         open_relfiles_for_store(&pool, &shared_catalog)?;
-        let mut open_databases = HashMap::new();
-        for row in shared_catalog.catcache()?.database_rows() {
-            let local_store = CatalogStore::load_database(&base_dir, row.oid)?;
-            open_relfiles_for_store(&pool, &local_store)?;
-            open_databases.insert(
-                row.oid,
-                Arc::new(OpenDatabaseState::new(&base_dir, row.oid, local_store)?),
-            );
-        }
+        let open_databases = HashMap::new();
 
         let wal_bg_writer = WalBgWriter::start(Arc::clone(&wal), Duration::from_millis(200));
         let txns = Arc::new(RwLock::new(txns));
@@ -356,25 +351,24 @@ impl Cluster {
             shared
                 .table_locks
                 .restore_locks_for_client(record.prepared_client_id, &record.held_table_locks);
-            if let Some(state) = shared.open_databases.read().get(&record.db_oid) {
-                state.row_locks.restore_transaction_locks(
+            let state = open_database_state_for_shared(&shared, record.db_oid)?;
+            state.row_locks.restore_transaction_locks(
+                record.prepared_client_id,
+                record.advisory_scope_id,
+                &record.row_locks,
+            );
+            state.advisory_locks.restore_transaction_locks(
+                record.prepared_client_id,
+                record.advisory_scope_id,
+                &record.advisory_locks,
+            );
+            if let Some(predicate_state) = &record.predicate_state {
+                state.predicate_locks.restore_prepared(
                     record.prepared_client_id,
-                    record.advisory_scope_id,
-                    &record.row_locks,
+                    record.xid,
+                    &record.subxids,
+                    predicate_state.clone(),
                 );
-                state.advisory_locks.restore_transaction_locks(
-                    record.prepared_client_id,
-                    record.advisory_scope_id,
-                    &record.advisory_locks,
-                );
-                if let Some(predicate_state) = &record.predicate_state {
-                    state.predicate_locks.restore_prepared(
-                        record.prepared_client_id,
-                        record.xid,
-                        &record.subxids,
-                        predicate_state.clone(),
-                    );
-                }
             }
         }
         autovacuum_runtime.start(Arc::downgrade(&shared), options.autovacuum);
@@ -623,26 +617,15 @@ impl Cluster {
         &self,
         db_oid: u32,
     ) -> Result<Arc<OpenDatabaseState>, ExecError> {
-        if let Some(state) = self.shared.open_databases.read().get(&db_oid) {
-            return Ok(Arc::clone(state));
-        }
-        let local_store = CatalogStore::load_database(&self.shared.base_dir, db_oid)?;
-        open_relfiles_for_store(&self.shared.pool, &local_store)?;
-        let state = Arc::new(
-            OpenDatabaseState::new(&self.shared.base_dir, db_oid, local_store).map_err(|err| {
-                ExecError::DetailedError {
-                    message: format!("failed to open database state: {err:?}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "58000",
-                }
-            })?,
-        );
-        self.shared
-            .open_databases
-            .write()
-            .insert(db_oid, Arc::clone(&state));
-        Ok(state)
+        open_database_state_for_shared(&self.shared, db_oid).map_err(|err| match err {
+            DatabaseError::Catalog(err) => err.into(),
+            other => ExecError::DetailedError {
+                message: format!("failed to open database state: {other:?}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58000",
+            },
+        })
     }
 }
 
@@ -676,6 +659,30 @@ fn ensure_bootstrap_databases(
         let _ = CatalogStore::load_database(base_dir, row.oid)?;
     }
     Ok(())
+}
+
+fn open_database_state_for_shared(
+    shared: &Arc<ClusterShared>,
+    db_oid: u32,
+) -> Result<Arc<OpenDatabaseState>, DatabaseError> {
+    if let Some(state) = shared.open_databases.read().get(&db_oid) {
+        return Ok(Arc::clone(state));
+    }
+
+    let local_store = CatalogStore::load_database(&shared.base_dir, db_oid)?;
+    open_relfiles_for_store(&shared.pool, &local_store)?;
+    let state = Arc::new(OpenDatabaseState::new(
+        &shared.base_dir,
+        db_oid,
+        local_store,
+    )?);
+
+    let mut open_databases = shared.open_databases.write();
+    if let Some(existing) = open_databases.get(&db_oid) {
+        return Ok(Arc::clone(existing));
+    }
+    open_databases.insert(db_oid, Arc::clone(&state));
+    Ok(state)
 }
 
 fn open_relfiles_for_store(
