@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use pgrust_access::access::gin::GinEntryKey;
+use pgrust_access::access::htup::TupleValue;
 use pgrust_access::gin::jsonb_ops::{
     JGINFLAG_BOOL, JGINFLAG_NULL, JGINFLAG_NUM, JGINFLAG_STR, scalar_key, text_key,
 };
@@ -8,7 +9,7 @@ use pgrust_access::{AccessError, AccessResult, AccessScalarServices};
 use pgrust_nodes::datum::{
     GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue, Value,
 };
-use pgrust_nodes::primnodes::BuiltinScalarFunction;
+use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc};
 use pgrust_nodes::tsearch::{TsQuery, TsVector};
 
 pub(crate) struct RootAccessServices;
@@ -30,6 +31,16 @@ impl AccessScalarServices for RootAccessServices {
             descending,
         )
         .map_err(|err| AccessError::Scalar(format!("{err:?}")))
+    }
+
+    fn encode_value(&self, column: &ColumnDesc, value: &Value) -> AccessResult<TupleValue> {
+        crate::backend::executor::value_io::encode_value(column, value)
+            .map_err(|err| AccessError::Scalar(format!("{err:?}")))
+    }
+
+    fn decode_value(&self, column: &ColumnDesc, raw: Option<&[u8]>) -> AccessResult<Value> {
+        crate::backend::executor::value_io::decode_value(column, raw)
+            .map_err(|err| AccessError::Scalar(format!("{err:?}")))
     }
 
     fn compare_range_values(&self, left: &RangeValue, right: &RangeValue) -> Ordering {

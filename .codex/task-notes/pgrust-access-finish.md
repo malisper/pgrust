@@ -12,10 +12,10 @@ Files touched:
 - `crates/pgrust_access/src/error.rs`
 - `crates/pgrust_access/src/services.rs`
 - `crates/pgrust_access/src/nbtree/{mod.rs,nbtcompare.rs,nbtpreprocesskeys.rs}`
-- `crates/pgrust_access/src/brin/{mod.rs,minmax.rs}`
+- `crates/pgrust_access/src/brin/{mod.rs,minmax.rs,tuple.rs}`
 - `crates/pgrust_access/src/gin/{mod.rs,jsonb_ops.rs}`
-- `crates/pgrust_access/src/gist/{mod.rs,support/*}`
-- `crates/pgrust_access/src/spgist/{mod.rs,support.rs,quad_box.rs}`
+- `crates/pgrust_access/src/gist/{mod.rs,support/*,tuple.rs}`
+- `crates/pgrust_access/src/spgist/{mod.rs,support.rs,quad_box.rs,tuple.rs}`
 - `src/backend/access/services.rs`
 - Root compatibility shims under `src/backend/access/{nbtree,brin,gin,gist}/...`
 
@@ -34,6 +34,7 @@ Tests run:
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.
 
 Remaining:
-- Move AM tuple codecs and add projection/TOAST service boundaries.
+- Move remaining btree tuple/key payload helpers.
+- Wire `AccessIndexServices`/`AccessToastServices` into runtime index build paths.
 - Move index runtime only after expression/partial index projection is represented by `AccessIndexServices`.
 - Move lock/transam/WAL/checkpoint and heap/table runtime in separate slices; those need storage/runtime traits and careful recovery byte-preservation checks.

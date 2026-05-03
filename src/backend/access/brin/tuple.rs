@@ -1,368 +1,80 @@
+// :HACK: root compatibility shim while BRIN tuple codecs live in `pgrust_access`.
+use pgrust_access::brin::tuple as access_tuple;
+use pgrust_access::{AccessError, AccessResult};
+
+use crate::backend::access::RootAccessServices;
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::value_io::{decode_value, encode_value};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::brin_internal::{BrinDesc, BrinMemTuple, BrinTupleBytes};
-use crate::include::access::brin_tuple::{
-    BRIN_EMPTY_RANGE_MASK, BRIN_NULLS_MASK, BRIN_OFFSET_MASK, BRIN_PLACEHOLDER_MASK, BrinTuple,
-    brin_header_size_with_bitmap, brin_null_bitmap_len, brin_tuple_data_offset,
-    brin_tuple_has_nulls, brin_tuple_is_empty_range, brin_tuple_is_placeholder,
-};
-use crate::include::access::htup::{HeapTuple, TupleValue};
-use crate::include::catalog::{
-    BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID, BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID,
-    BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID, BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID,
-    BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID, BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
-    BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID, BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID,
-    BRIN_OID_MINMAX_MULTI_FAMILY_OID, BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID,
-    BRIN_TID_MINMAX_MULTI_FAMILY_OID, BRIN_TIME_MINMAX_MULTI_FAMILY_OID,
-    BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID, BRIN_UUID_MINMAX_MULTI_FAMILY_OID,
-};
-use crate::include::nodes::datum::Value;
-use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
-use crate::include::varatt::{is_compressed_inline_datum, is_ondisk_toast_pointer};
+use crate::include::nodes::primnodes::RelationDesc;
 
-fn disk_column(column: &ColumnDesc, suffix: usize) -> ColumnDesc {
-    let mut column = column.clone();
-    column.name = format!("{}_{}", column.name, suffix);
-    column.storage.nullable = true;
-    column
+fn catalog_error(error: AccessError) -> CatalogError {
+    match error {
+        AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        AccessError::Scalar(message) | AccessError::Unsupported(message) => {
+            CatalogError::Io(message)
+        }
+    }
 }
 
-const MINMAX_MULTI_DEFAULT_VALUES_PER_RANGE: usize = 32;
+fn catalog_result<T>(result: AccessResult<T>) -> Result<T, CatalogError> {
+    result.map_err(catalog_error)
+}
 
 pub(crate) fn brin_opfamily_is_minmax_multi(opfamily_oid: Option<u32>) -> bool {
-    matches!(
-        opfamily_oid,
-        Some(
-            BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID
-                | BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID
-                | BRIN_OID_MINMAX_MULTI_FAMILY_OID
-                | BRIN_TID_MINMAX_MULTI_FAMILY_OID
-                | BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID
-                | BRIN_TIME_MINMAX_MULTI_FAMILY_OID
-                | BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID
-                | BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID
-                | BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID
-                | BRIN_UUID_MINMAX_MULTI_FAMILY_OID
-                | BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID
-                | BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID
-                | BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID
-                | BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID
-        )
-    )
-}
-
-fn brin_minmax_multi_values_per_range(options: &[(String, String)]) -> usize {
-    options
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("values_per_range"))
-        .and_then(|(_, value)| value.parse::<usize>().ok())
-        .unwrap_or(MINMAX_MULTI_DEFAULT_VALUES_PER_RANGE)
-        .clamp(8, 256)
+    access_tuple::brin_opfamily_is_minmax_multi(opfamily_oid)
 }
 
 pub(crate) fn brin_build_desc(index_desc: &RelationDesc) -> BrinDesc {
-    brin_build_desc_with_meta(index_desc, None)
+    access_tuple::brin_build_desc(index_desc)
 }
 
 pub(crate) fn brin_build_desc_with_meta(
     index_desc: &RelationDesc,
     index_meta: Option<&IndexRelCacheEntry>,
 ) -> BrinDesc {
-    let info = index_desc
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            let nstored = index_meta
-                .filter(|meta| {
-                    brin_opfamily_is_minmax_multi(meta.opfamily_oids.get(index).copied())
-                })
-                .map(|meta| {
-                    brin_minmax_multi_values_per_range(
-                        meta.indclass_options
-                            .get(index)
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]),
-                    )
-                })
-                .unwrap_or(2);
-            crate::include::access::brin_internal::BrinOpcInfo {
-                nstored,
-                regular_nulls: true,
-            }
-        })
-        .collect::<Vec<_>>();
-    BrinDesc {
-        tupdesc: index_desc.clone(),
-        total_stored: info.iter().map(|info| info.nstored).sum(),
-        info,
-    }
+    access_tuple::brin_build_desc_with_meta(index_desc, index_meta)
 }
 
 pub(crate) fn brin_disk_tupdesc(desc: &BrinDesc) -> RelationDesc {
-    let mut columns = Vec::with_capacity(desc.total_stored);
-    for (column_index, column) in desc.tupdesc.columns.iter().enumerate() {
-        let info = &desc.info[column_index];
-        for stored in 0..info.nstored {
-            columns.push(disk_column(column, stored + 1));
-        }
-    }
-    RelationDesc { columns }
-}
-
-fn encode_disk_tuple_value(column: &ColumnDesc, value: &Value) -> Result<TupleValue, CatalogError> {
-    encode_value(column, value).map_err(|err| CatalogError::Io(format!("{err:?}")))
-}
-
-fn reversed_null_bitmap_bits(tuple: &BrinMemTuple) -> Vec<u8> {
-    let natts = tuple.columns.len();
-    let mut bitmap = vec![0u8; brin_null_bitmap_len(natts)];
-    for (attno, column) in tuple.columns.iter().enumerate() {
-        if column.all_nulls {
-            bitmap[attno / 8] |= 1 << (attno % 8);
-        }
-        if column.has_nulls {
-            let bit = natts + attno;
-            bitmap[bit / 8] |= 1 << (bit % 8);
-        }
-    }
-    bitmap
+    access_tuple::brin_disk_tupdesc(desc)
 }
 
 pub(crate) fn brin_form_tuple(
     desc: &BrinDesc,
     tuple: &BrinMemTuple,
 ) -> Result<BrinTupleBytes, CatalogError> {
-    let disk_desc = brin_disk_tupdesc(desc);
-    let mut values = Vec::with_capacity(desc.total_stored);
-    for (column_index, column) in tuple.columns.iter().enumerate() {
-        let disk_column = &disk_desc.columns[column_index * desc.info[column_index].nstored];
-        let info = &desc.info[column_index];
-        if column.all_nulls {
-            values.extend((0..info.nstored).map(|_| TupleValue::Null));
-            continue;
-        }
-        if column.values.len() != info.nstored {
-            return Err(CatalogError::Corrupt("BRIN value count mismatch"));
-        }
-        for value in &column.values {
-            values.push(encode_disk_tuple_value(disk_column, value)?);
-        }
-    }
-
-    let any_nulls = tuple
-        .columns
-        .iter()
-        .any(|column| column.all_nulls || column.has_nulls);
-    let heap_tuple = HeapTuple::from_values(&disk_desc.attribute_descs(), &values)
-        .map_err(|err| CatalogError::Io(format!("{err:?}")))?;
-    let header_size = brin_header_size_with_bitmap(tuple.columns.len(), any_nulls);
-    if header_size > usize::from(BRIN_OFFSET_MASK) {
-        return Err(CatalogError::Io(format!(
-            "BRIN tuple header offset {} exceeds PostgreSQL bt_info capacity",
-            header_size
-        )));
-    }
-
-    let total_len =
-        crate::backend::storage::page::bufpage::max_align(header_size + heap_tuple.data.len());
-    let mut bytes = vec![0u8; total_len];
-    bytes[0..4].copy_from_slice(&tuple.blkno.to_le_bytes());
-
-    let mut bt_info = header_size as u8;
-    if any_nulls {
-        bt_info |= BRIN_NULLS_MASK;
-        let bitmap = reversed_null_bitmap_bits(tuple);
-        bytes[BrinTuple::SIZE..BrinTuple::SIZE + bitmap.len()].copy_from_slice(&bitmap);
-    }
-    if tuple.placeholder {
-        bt_info |= BRIN_PLACEHOLDER_MASK;
-    }
-    if tuple.empty_range {
-        bt_info |= BRIN_EMPTY_RANGE_MASK;
-    }
-    bytes[4] = bt_info;
-    bytes[header_size..header_size + heap_tuple.data.len()].copy_from_slice(&heap_tuple.data);
-
-    Ok(BrinTupleBytes {
-        header: BrinTuple {
-            bt_blkno: tuple.blkno,
-            bt_info,
-        },
-        bytes,
-    })
+    catalog_result(access_tuple::brin_form_tuple(
+        desc,
+        tuple,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn brin_form_placeholder_tuple(
     desc: &BrinDesc,
     blkno: u32,
 ) -> Result<BrinTupleBytes, CatalogError> {
-    let tuple = BrinMemTuple::placeholder(desc, blkno);
-    brin_form_tuple(desc, &tuple)
-}
-
-fn bitmap_bit(bitmap: &[u8], bit: usize) -> bool {
-    bitmap
-        .get(bit / 8)
-        .is_some_and(|byte| byte & (1 << (bit % 8)) != 0)
-}
-
-fn disk_nulls_for_tuple(desc: &BrinDesc, tuple: &BrinMemTuple) -> Vec<bool> {
-    let mut nulls = Vec::with_capacity(desc.total_stored);
-    for (column_index, column) in tuple.columns.iter().enumerate() {
-        let count = desc.info[column_index].nstored;
-        if column.all_nulls {
-            nulls.extend((0..count).map(|_| true));
-        } else {
-            nulls.extend((0..count).map(|_| false));
-        }
-    }
-    nulls
-}
-
-fn parse_disk_values<'a>(
-    disk_desc: &'a RelationDesc,
-    data: &'a [u8],
-    nulls: &[bool],
-) -> Result<Vec<Option<&'a [u8]>>, CatalogError> {
-    let attr_descs = disk_desc.attribute_descs();
-    let mut values = Vec::with_capacity(attr_descs.len());
-    let mut raw_offset = 0usize;
-    for (index, attr) in attr_descs.iter().enumerate() {
-        if nulls.get(index).copied().unwrap_or(false) {
-            values.push(None);
-            continue;
-        }
-        match attr.attlen {
-            len if len > 0 => {
-                raw_offset = attr.attalign.align_offset(raw_offset);
-                let end = raw_offset + len as usize;
-                let datum = data
-                    .get(raw_offset..end)
-                    .ok_or(CatalogError::Corrupt("truncated BRIN fixed-width datum"))?;
-                values.push(Some(datum));
-                raw_offset = end;
-            }
-            -1 => {
-                let slice = data
-                    .get(raw_offset..)
-                    .ok_or(CatalogError::Corrupt("truncated BRIN varlena datum"))?;
-                if is_ondisk_toast_pointer(slice) {
-                    let end = raw_offset + crate::include::varatt::TOAST_POINTER_SIZE;
-                    let datum = data
-                        .get(raw_offset..end)
-                        .ok_or(CatalogError::Corrupt("truncated BRIN toast pointer"))?;
-                    values.push(Some(datum));
-                    raw_offset = end;
-                } else if slice.first().is_some_and(|byte| byte & 0x01 != 0) {
-                    let total_len = usize::from(slice[0] >> 1);
-                    let end = raw_offset + total_len;
-                    let datum = data
-                        .get(raw_offset + 1..end)
-                        .ok_or(CatalogError::Corrupt("truncated BRIN short varlena datum"))?;
-                    values.push(Some(datum));
-                    raw_offset = end;
-                } else {
-                    raw_offset = attr.attalign.align_offset(raw_offset);
-                    let header = data
-                        .get(raw_offset..raw_offset + 4)
-                        .ok_or(CatalogError::Corrupt("truncated BRIN varlena header"))?;
-                    let total_len = (u32::from_le_bytes(header.try_into().unwrap()) >> 2) as usize;
-                    let end = raw_offset + total_len;
-                    let whole = data
-                        .get(raw_offset..end)
-                        .ok_or(CatalogError::Corrupt("truncated BRIN varlena datum"))?;
-                    if is_compressed_inline_datum(whole) {
-                        values.push(Some(whole));
-                    } else {
-                        values.push(Some(&whole[4..]));
-                    }
-                    raw_offset = end;
-                }
-            }
-            -2 => {
-                let start = raw_offset;
-                while data
-                    .get(raw_offset)
-                    .copied()
-                    .ok_or(CatalogError::Corrupt("unterminated BRIN cstring datum"))?
-                    != 0
-                {
-                    raw_offset += 1;
-                }
-                let datum = &data[start..raw_offset];
-                values.push(Some(datum));
-                raw_offset += 1;
-            }
-            other => {
-                return Err(CatalogError::Io(format!(
-                    "unsupported BRIN attribute length {}",
-                    other
-                )));
-            }
-        }
-    }
-    Ok(values)
+    catalog_result(access_tuple::brin_form_placeholder_tuple(
+        desc,
+        blkno,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn brin_deform_tuple(
     desc: &BrinDesc,
     tuple_bytes: &[u8],
 ) -> Result<BrinMemTuple, CatalogError> {
-    if tuple_bytes.len() < BrinTuple::SIZE {
-        return Err(CatalogError::Corrupt("truncated BRIN tuple"));
-    }
-    let blkno = u32::from_le_bytes(tuple_bytes[0..4].try_into().unwrap());
-    let bt_info = tuple_bytes[4];
-    let natts = desc.tupdesc.columns.len();
-    let has_nulls = brin_tuple_has_nulls(bt_info);
-    let header_size = brin_tuple_data_offset(bt_info);
-    if header_size < BrinTuple::SIZE || header_size > tuple_bytes.len() {
-        return Err(CatalogError::Corrupt("invalid BRIN tuple data offset"));
-    }
-    let null_bitmap = if has_nulls {
-        let len = brin_null_bitmap_len(natts);
-        tuple_bytes
-            .get(BrinTuple::SIZE..BrinTuple::SIZE + len)
-            .ok_or(CatalogError::Corrupt("truncated BRIN null bitmap"))?
-    } else {
-        &[][..]
-    };
-
-    let mut memtuple = BrinMemTuple::new(desc, blkno);
-    memtuple.placeholder = brin_tuple_is_placeholder(bt_info);
-    memtuple.empty_range = brin_tuple_is_empty_range(bt_info);
-
-    for attno in 0..natts {
-        memtuple.columns[attno].all_nulls = has_nulls && bitmap_bit(null_bitmap, attno);
-        memtuple.columns[attno].has_nulls = has_nulls && bitmap_bit(null_bitmap, natts + attno);
-    }
-
-    let disk_desc = brin_disk_tupdesc(desc);
-    let disk_nulls = disk_nulls_for_tuple(desc, &memtuple);
-    let raw_values = parse_disk_values(&disk_desc, &tuple_bytes[header_size..], &disk_nulls)?;
-
-    let mut stored_index = 0usize;
-    for attno in 0..natts {
-        let count = desc.info[attno].nstored;
-        if memtuple.columns[attno].all_nulls {
-            stored_index += count;
-            continue;
-        }
-        for value_index in 0..count {
-            let value = decode_value(&disk_desc.columns[stored_index], raw_values[stored_index])
-                .map_err(|err| CatalogError::Io(format!("{err:?}")))?;
-            memtuple.columns[attno].values[value_index] = value;
-            stored_index += 1;
-        }
-    }
-
-    Ok(memtuple)
+    catalog_result(access_tuple::brin_deform_tuple(
+        desc,
+        tuple_bytes,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn brin_tuple_bytes_equal(left: &[u8], right: &[u8]) -> bool {
-    left == right
+    access_tuple::brin_tuple_bytes_equal(left, right)
 }
 
 #[cfg(test)]
@@ -373,6 +85,7 @@ mod tests {
     use crate::include::access::brin_tuple::{
         BRIN_EMPTY_RANGE_MASK, BRIN_NULLS_MASK, BRIN_PLACEHOLDER_MASK,
     };
+    use crate::include::nodes::datum::Value;
 
     fn one_int4_desc() -> BrinDesc {
         brin_build_desc(&RelationDesc {

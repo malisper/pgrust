@@ -3,11 +3,14 @@ use std::cmp::Ordering;
 use pgrust_nodes::datum::{
     GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue, Value,
 };
-use pgrust_nodes::primnodes::BuiltinScalarFunction;
+use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc};
+use pgrust_nodes::relcache::IndexRelCacheEntry;
 use pgrust_nodes::tsearch::{TsQuery, TsVector};
 
 use crate::AccessResult;
 use crate::access::gin::GinEntryKey;
+use crate::access::htup::TupleValue;
+use crate::access::itemptr::ItemPointerData;
 
 pub trait AccessScalarServices {
     fn compare_order_values(
@@ -18,6 +21,10 @@ pub trait AccessScalarServices {
         nulls_first: Option<bool>,
         descending: bool,
     ) -> AccessResult<Ordering>;
+
+    fn encode_value(&self, column: &ColumnDesc, value: &Value) -> AccessResult<TupleValue>;
+
+    fn decode_value(&self, column: &ColumnDesc, raw: Option<&[u8]>) -> AccessResult<Value>;
 
     fn compare_range_values(&self, left: &RangeValue, right: &RangeValue) -> Ordering;
 
@@ -141,6 +148,15 @@ pub trait AccessScalarServices {
     fn point_polygon_distance(&self, point: &GeoPoint, poly: &GeoPolygon) -> f64;
 }
 
-pub trait AccessIndexServices {}
+pub trait AccessIndexServices {
+    fn project_index_row(
+        &mut self,
+        index_meta: &IndexRelCacheEntry,
+        row_values: &[Value],
+        heap_tid: ItemPointerData,
+    ) -> AccessResult<Option<Vec<Value>>>;
+}
 
-pub trait AccessToastServices {}
+pub trait AccessToastServices {
+    fn resolve_external_toast(&self, value: &Value) -> AccessResult<Value>;
+}
