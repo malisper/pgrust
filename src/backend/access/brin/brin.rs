@@ -2,17 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use pgrust_access::{AccessError, AccessHeapServices};
 
-use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use crate::backend::access::RootAccessRuntime;
 use crate::backend::access::index::buildkeys::{
-    IndexBuildKeyProjector, materialize_heap_row_values_with_toast, project_index_key_values,
+    IndexBuildKeyProjector, map_access_error, map_catalog_error_to_access,
+    materialize_heap_row_values_with_toast, project_index_key_values,
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::page::bufpage::{PageError, max_align, page_get_item, page_header};
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::cache::relcache::index_amproc_oid;
-use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
+use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::backend::utils::time::snapmgr::Snapshot;
 use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
@@ -25,7 +27,6 @@ use crate::include::access::brin_internal::{
 use crate::include::access::brin_internal::{BrinDesc, BrinMemTuple, BrinTupleLocation};
 use crate::include::access::brin_page::{BRIN_PAGETYPE_REGULAR, brin_page_type};
 use crate::include::access::brin_revmap::normalize_range_start;
-use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{
     BrinIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection,
@@ -295,43 +296,41 @@ fn scan_visible_heap_summaries(
     toast: Option<&ToastFetchContext>,
     mut projector: Option<&mut BrinBuildProjector<'_>>,
 ) -> Result<u64, CatalogError> {
-    let mut scan = heap_scan_begin_visible(pool, client_id, heap_relation, snapshot)
-        .map_err(|err| CatalogError::Io(format!("brin heap scan begin failed: {err:?}")))?;
     let attr_descs = heap_desc.attribute_descs();
     let mut visible = 0u64;
-    loop {
-        check_for_interrupts(interrupts.as_ref()).map_err(CatalogError::Interrupted)?;
-        let next = {
-            let txns = txns.read();
-            heap_scan_next_visible(pool, client_id, &txns, &mut scan)
-        };
-        let Some((tid, tuple)): Option<(ItemPointerData, HeapTuple)> =
-            next.map_err(|err| CatalogError::Io(format!("brin heap scan failed: {err:?}")))?
-        else {
-            break;
-        };
-        visible += 1;
-        let range_start = normalize_range_start(pages_per_range, tid.block_number);
-        if target_ranges.is_some_and(|ranges| !ranges.contains(&range_start)) {
-            continue;
-        }
-        let datums = tuple
-            .deform(&attr_descs)
-            .map_err(|err| CatalogError::Io(format!("brin heap deform failed: {err:?}")))?;
-        let row_values = materialize_heap_row_values_with_toast(heap_desc, &datums, toast)?;
-        let key_values = if let Some(projector) = projector.as_deref_mut() {
-            let Some(key_values) = projector.project(&row_values, tid)? else {
-                continue;
+    let heap_services = RootAccessRuntime::heap(pool, txns, Some(interrupts.as_ref()), client_id);
+    heap_services
+        .for_each_visible_heap_tuple(heap_relation, snapshot, &mut |tid, tuple| {
+            visible += 1;
+            let range_start = normalize_range_start(pages_per_range, tid.block_number);
+            if target_ranges.is_some_and(|ranges| !ranges.contains(&range_start)) {
+                return Ok(());
+            }
+            let datums = tuple
+                .deform(&attr_descs)
+                .map_err(|err| AccessError::Scalar(format!("brin heap deform failed: {err:?}")))?;
+            let row_values = materialize_heap_row_values_with_toast(heap_desc, &datums, toast)
+                .map_err(map_catalog_error_to_access)?;
+            let key_values = if let Some(projector) = projector.as_deref_mut() {
+                let Some(key_values) = projector
+                    .project(&row_values, tid)
+                    .map_err(map_catalog_error_to_access)?
+                else {
+                    return Ok(());
+                };
+                key_values
+            } else {
+                project_index_key_values(index_desc, &index_meta.indkey, &row_values, &[])
+                    .map_err(map_catalog_error_to_access)?
             };
-            key_values
-        } else {
-            project_index_key_values(index_desc, &index_meta.indkey, &row_values, &[])?
-        };
-        let summary = summaries
-            .entry(range_start)
-            .or_insert_with(|| BrinMemTuple::new(desc, range_start));
-        add_values_to_summary(index_meta, index_desc, desc, summary, &key_values)?;
-    }
+            let summary = summaries
+                .entry(range_start)
+                .or_insert_with(|| BrinMemTuple::new(desc, range_start));
+            add_values_to_summary(index_meta, index_desc, desc, summary, &key_values)
+                .map_err(map_catalog_error_to_access)?;
+            Ok(())
+        })
+        .map_err(map_access_error)?;
     Ok(visible)
 }
 
@@ -985,6 +984,7 @@ mod tests {
     use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
     use crate::backend::utils::misc::interrupts::InterruptState;
     use crate::include::access::brin::BrinOptions;
+    use crate::include::access::htup::HeapTuple;
     use crate::include::catalog::{
         BRIN_AM_OID, BRIN_MINMAX_ADD_VALUE_PROC_OID, BRIN_MINMAX_CONSISTENT_PROC_OID,
         BRIN_MINMAX_OPCINFO_PROC_OID, BRIN_MINMAX_UNION_PROC_OID, INT4_TYPE_OID,

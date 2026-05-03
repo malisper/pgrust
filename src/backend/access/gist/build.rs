@@ -1,8 +1,11 @@
 use std::cmp::Ordering;
 
-use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices};
+
+use crate::backend::access::RootAccessRuntime;
 use crate::backend::access::index::buildkeys::{
-    IndexBuildKeyProjector, materialize_heap_row_values,
+    IndexBuildKeyProjector, RootIndexBuildServices, map_access_error, map_catalog_error_to_access,
+    materialize_heap_row_values,
 };
 use crate::backend::access::transam::xlog::{XLOG_GIST_PAGE_INIT, XLOG_GIST_PAGE_UPDATE};
 use crate::backend::catalog::CatalogError;
@@ -291,38 +294,37 @@ fn scan_visible_heap(
     ctx: &IndexBuildContext,
     mut visit: impl FnMut(ItemPointerData, Vec<Value>) -> Result<(), CatalogError>,
 ) -> Result<IndexBuildResult, CatalogError> {
-    let mut scan = heap_scan_begin_visible(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.heap_relation,
-        ctx.snapshot.clone(),
-    )
-    .map_err(|err| CatalogError::Io(format!("heap scan begin failed: {err:?}")))?;
     let attr_descs = ctx.heap_desc.attribute_descs();
     let mut key_projector = IndexBuildKeyProjector::new(ctx)?;
+    let mut index_services = RootIndexBuildServices::new(ctx, &mut key_projector);
+    let heap_services = RootAccessRuntime::heap(
+        &ctx.pool,
+        &ctx.txns,
+        Some(ctx.interrupts.as_ref()),
+        ctx.client_id,
+    );
     let mut result = IndexBuildResult::default();
-    loop {
-        crate::backend::utils::misc::interrupts::check_for_interrupts(ctx.interrupts.as_ref())
-            .map_err(CatalogError::Interrupted)?;
-        let next = {
-            let txns = ctx.txns.read();
-            heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)
-        };
-        let Some((tid, tuple)) =
-            next.map_err(|err| CatalogError::Io(format!("heap scan failed: {err:?}")))?
-        else {
-            break;
-        };
-        let datums = tuple
-            .deform(&attr_descs)
-            .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
-        let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)?;
-        if let Some(key_values) = key_projector.project(ctx, &row_values, tid)? {
-            visit(tid, key_values)?;
-            result.index_tuples += 1;
-        }
-        result.heap_tuples += 1;
-    }
+    heap_services
+        .for_each_visible_heap_tuple(
+            ctx.heap_relation,
+            ctx.snapshot.clone(),
+            &mut |tid, tuple| {
+                let datums = tuple
+                    .deform(&attr_descs)
+                    .map_err(|err| AccessError::Scalar(format!("heap deform failed: {err:?}")))?;
+                let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)
+                    .map_err(map_catalog_error_to_access)?;
+                if let Some(key_values) =
+                    index_services.project_index_row(&ctx.index_meta, &row_values, tid)?
+                {
+                    visit(tid, key_values).map_err(map_catalog_error_to_access)?;
+                    result.index_tuples += 1;
+                }
+                result.heap_tuples += 1;
+                Ok(())
+            },
+        )
+        .map_err(map_access_error)?;
     Ok(result)
 }
 

@@ -99,7 +99,7 @@ pub(crate) fn project_index_key_values(
     })
 }
 
-fn map_access_error(err: pgrust_access::AccessError) -> CatalogError {
+pub(crate) fn map_access_error(err: pgrust_access::AccessError) -> CatalogError {
     match err {
         pgrust_access::AccessError::Corrupt(message) => CatalogError::Corrupt(message),
         pgrust_access::AccessError::Scalar(message)
@@ -107,7 +107,7 @@ fn map_access_error(err: pgrust_access::AccessError) -> CatalogError {
     }
 }
 
-fn map_catalog_error_to_access(err: CatalogError) -> pgrust_access::AccessError {
+pub(crate) fn map_catalog_error_to_access(err: CatalogError) -> pgrust_access::AccessError {
     match err {
         CatalogError::Corrupt(message) => pgrust_access::AccessError::Corrupt(message),
         CatalogError::Interrupted(reason) => {

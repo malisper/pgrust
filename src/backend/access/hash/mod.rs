@@ -5,7 +5,8 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use crate::backend::access::index::buildkeys::{
-    IndexBuildKeyProjector, RootIndexBuildServices, materialize_heap_row_values,
+    IndexBuildKeyProjector, RootIndexBuildServices, map_access_error, map_catalog_error_to_access,
+    materialize_heap_row_values,
 };
 use crate::backend::access::nbtree::nbtree::{decode_key_payload, encode_key_payload};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
@@ -66,15 +67,6 @@ fn page_error(err: HashPageError) -> CatalogError {
 
 fn slotted_page_error(err: PageError) -> CatalogError {
     CatalogError::Io(format!("hash slotted page error: {err:?}"))
-}
-
-fn access_error(err: AccessError) -> CatalogError {
-    match err {
-        AccessError::Corrupt(message) => CatalogError::Corrupt(message),
-        AccessError::Scalar(message) | AccessError::Unsupported(message) => {
-            CatalogError::Io(message)
-        }
-    }
 }
 
 fn pin_hash_block<'a>(
@@ -713,7 +705,7 @@ fn hashbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> 
                     .deform(&attr_descs)
                     .map_err(|err| AccessError::Scalar(format!("heap deform failed: {err:?}")))?;
                 let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)
-                    .map_err(|err| AccessError::Scalar(format!("{err:?}")))?;
+                    .map_err(map_catalog_error_to_access)?;
                 heap_tuples += 1;
                 if let Some(key_values) =
                     index_services.project_index_row(&ctx.index_meta, &row_values, tid)?
@@ -723,7 +715,7 @@ fn hashbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> 
                 Ok(())
             },
         )
-        .map_err(access_error)?;
+        .map_err(map_access_error)?;
 
     let fillfactor = fillfactor_from_meta(&ctx.index_meta);
     if relation_nblocks(&ctx.pool, ctx.index_relation)? == 0 {

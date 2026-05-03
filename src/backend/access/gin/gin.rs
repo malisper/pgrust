@@ -3,12 +3,14 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices};
+
+use crate::backend::access::RootAccessRuntime;
 use crate::backend::access::gin::jsonb_ops::{self, GinJsonbQuery};
-use crate::backend::access::heap::heapam::{
-    heap_scan_begin, heap_scan_begin_visible, heap_scan_next, heap_scan_next_visible,
-};
+use crate::backend::access::heap::heapam::{heap_scan_begin, heap_scan_next};
 use crate::backend::access::index::buildkeys::{
-    IndexBuildKeyProjector, materialize_heap_row_values,
+    IndexBuildKeyProjector, RootIndexBuildServices, map_access_error, map_catalog_error_to_access,
+    materialize_heap_row_values,
 };
 use crate::backend::access::transam::xlog::RM_GIN_ID;
 use crate::backend::catalog::CatalogError;
@@ -18,7 +20,7 @@ use crate::backend::storage::fsm::{
 };
 use crate::backend::storage::page::bufpage::{PageError, page_header};
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, RelFileLocator, StorageManager};
-use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
+use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
     IndexBuildResult, IndexBulkDeleteCallback, IndexBulkDeleteResult, IndexInsertContext,
@@ -31,7 +33,6 @@ use crate::include::access::gin::{
     gin_metapage_init, gin_metapage_set_data, gin_page_append_item, gin_page_get_opaque,
     gin_page_init, gin_page_items, gin_page_set_opaque,
 };
-use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{IndexScanDesc, IndexScanOpaque, ScanDirection};
 use crate::include::access::scankey::ScanKeyData;
@@ -245,33 +246,28 @@ fn scan_visible_heap_entries(
     projector: &mut IndexBuildKeyProjector,
     entries: &mut BTreeMap<GinEntryKey, BTreeSet<ItemPointerData>>,
 ) -> Result<u64, CatalogError> {
-    let mut scan = heap_scan_begin_visible(pool, client_id, heap_relation, snapshot)
-        .map_err(|err| CatalogError::Io(format!("gin heap scan begin failed: {err:?}")))?;
     let attr_descs = heap_desc.attribute_descs();
     let mut visible = 0u64;
-    loop {
-        check_for_interrupts(interrupts.as_ref()).map_err(CatalogError::Interrupted)?;
-        let next = {
-            let txns = txns.read();
-            heap_scan_next_visible(pool, client_id, &txns, &mut scan)
-        };
-        let Some((tid, tuple)): Option<(ItemPointerData, HeapTuple)> =
-            next.map_err(|err| CatalogError::Io(format!("gin heap scan failed: {err:?}")))?
-        else {
-            break;
-        };
-        visible += 1;
-        let row_values = materialize_heap_row_values(
-            heap_desc,
-            &tuple
-                .deform(&attr_descs)
-                .map_err(|err| CatalogError::Io(format!("gin heap deform failed: {err:?}")))?,
-        )?;
-        let Some(index_values) = projector.project(ctx, &row_values, tid)? else {
-            continue;
-        };
-        insert_index_values(entries, tid, &index_values)?;
-    }
+    let heap_services = RootAccessRuntime::heap(pool, txns, Some(interrupts.as_ref()), client_id);
+    let mut index_services = RootIndexBuildServices::new(ctx, projector);
+    heap_services
+        .for_each_visible_heap_tuple(heap_relation, snapshot, &mut |tid, tuple| {
+            visible += 1;
+            let row_values = materialize_heap_row_values(
+                heap_desc,
+                &tuple.deform(&attr_descs).map_err(|err| {
+                    AccessError::Scalar(format!("gin heap deform failed: {err:?}"))
+                })?,
+            )
+            .map_err(map_catalog_error_to_access)?;
+            let Some(index_values) =
+                index_services.project_index_row(&ctx.index_meta, &row_values, tid)?
+            else {
+                return Ok(());
+            };
+            insert_index_values(entries, tid, &index_values).map_err(map_catalog_error_to_access)
+        })
+        .map_err(map_access_error)?;
     Ok(visible)
 }
 

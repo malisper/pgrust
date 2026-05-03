@@ -4,14 +4,12 @@ use std::sync::Arc;
 use parking_lot::RwLockWriteGuard;
 
 use pgrust_access::nbtree::tuple as access_tuple;
-use pgrust_access::{AccessError, AccessResult};
+use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices, AccessResult};
 
-use crate::backend::access::RootAccessServices;
-use crate::backend::access::heap::heapam::{
-    heap_fetch, heap_scan_begin_visible, heap_scan_next_visible,
-};
+use crate::backend::access::heap::heapam::heap_fetch;
 use crate::backend::access::index::buildkeys::{
-    IndexBuildKeyProjector, materialize_heap_row_values_with_toast,
+    IndexBuildKeyProjector, RootIndexBuildServices, map_access_error, map_catalog_error_to_access,
+    materialize_heap_row_values_with_toast,
 };
 use crate::backend::access::index::unique::{UniqueCandidateResult, classify_unique_candidate};
 use crate::backend::access::nbtree::nbtcompare::{
@@ -26,6 +24,7 @@ use crate::backend::access::transam::xlog::{
     INVALID_LSN, XLOG_BTREE_INSERT_LEAF, XLOG_BTREE_INSERT_META, XLOG_BTREE_INSERT_UPPER,
     XLOG_BTREE_NEWROOT, XLOG_BTREE_SPLIT_L, XLOG_BTREE_SPLIT_R, XLOG_FPI,
 };
+use crate::backend::access::{RootAccessRuntime, RootAccessServices};
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::value_io::{
     format_unique_key_detail, format_vector_array_storage_text,
@@ -1133,15 +1132,15 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
     // per-tuple timeout polling makes PostgreSQL's btree regression primary-key
     // build miss its statement timeout. Keep interrupt checks on online index
     // operations and move bulk-build polling back here once the builder is faster.
-    let mut scan = heap_scan_begin_visible(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.heap_relation,
-        ctx.snapshot.clone(),
-    )
-    .map_err(|err| CatalogError::Io(format!("heap scan begin failed: {err:?}")))?;
     let attr_descs = ctx.heap_desc.attribute_descs();
     let mut key_projector = IndexBuildKeyProjector::new(ctx)?;
+    let mut index_services = RootIndexBuildServices::new(ctx, &mut key_projector);
+    let heap_services = RootAccessRuntime::heap(
+        &ctx.pool,
+        &ctx.txns,
+        Some(ctx.interrupts.as_ref()),
+        ctx.client_id,
+    );
     let toast =
         ctx.heap_toast.map(
             |relation| crate::include::nodes::execnodes::ToastFetchContext {
@@ -1156,42 +1155,46 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
     let mut result = IndexBuildResult::default();
     let mut approx_bytes = 0usize;
     let key_count = btree_key_count(&ctx.index_meta);
-    loop {
-        let next = {
-            let txns = ctx.txns.read();
-            heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)
-        };
-        let Some((tid, tuple)) =
-            next.map_err(|err| CatalogError::Io(format!("heap scan failed: {err:?}")))?
-        else {
-            break;
-        };
-        let datums = tuple
-            .deform(&attr_descs)
-            .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
-        let row_values =
-            materialize_heap_row_values_with_toast(&ctx.heap_desc, &datums, toast.as_ref())?;
-        let Some(all_values) = key_projector.project(ctx, &row_values, tid)? else {
-            result.heap_tuples += 1;
-            continue;
-        };
-        let payload =
-            encode_key_payload(&ctx.index_desc, &all_values, ctx.default_toast_compression)?;
-        let tuple = IndexTupleData::new_raw(tid, false, false, false, payload);
-        check_leaf_tuple_size(&ctx.index_name, &tuple)?;
-        let key_values = key_prefix(&all_values, key_count).to_vec();
-        approx_bytes = approx_bytes
-            .saturating_add(tuple.size())
-            .saturating_add(all_values.len() * 16);
-        if approx_bytes > ctx.maintenance_work_mem_kb.saturating_mul(1024) {
-            return Err(CatalogError::Io(
-                "CREATE INDEX requires external build spill, which is not supported yet".into(),
-            ));
-        }
-        spool.push(BtSortTuple { tuple, key_values });
-        result.heap_tuples += 1;
-        result.index_tuples += 1;
-    }
+    heap_services
+        .for_each_visible_heap_tuple(
+            ctx.heap_relation,
+            ctx.snapshot.clone(),
+            &mut |tid, tuple| {
+                let datums = tuple
+                    .deform(&attr_descs)
+                    .map_err(|err| AccessError::Scalar(format!("heap deform failed: {err:?}")))?;
+                let row_values =
+                    materialize_heap_row_values_with_toast(&ctx.heap_desc, &datums, toast.as_ref())
+                        .map_err(map_catalog_error_to_access)?;
+                let Some(all_values) =
+                    index_services.project_index_row(&ctx.index_meta, &row_values, tid)?
+                else {
+                    result.heap_tuples += 1;
+                    return Ok(());
+                };
+                let payload =
+                    encode_key_payload(&ctx.index_desc, &all_values, ctx.default_toast_compression)
+                        .map_err(map_catalog_error_to_access)?;
+                let tuple = IndexTupleData::new_raw(tid, false, false, false, payload);
+                check_leaf_tuple_size(&ctx.index_name, &tuple)
+                    .map_err(map_catalog_error_to_access)?;
+                let key_values = key_prefix(&all_values, key_count).to_vec();
+                approx_bytes = approx_bytes
+                    .saturating_add(tuple.size())
+                    .saturating_add(all_values.len() * 16);
+                if approx_bytes > ctx.maintenance_work_mem_kb.saturating_mul(1024) {
+                    return Err(AccessError::Scalar(
+                        "CREATE INDEX requires external build spill, which is not supported yet"
+                            .into(),
+                    ));
+                }
+                spool.push(BtSortTuple { tuple, key_values });
+                result.heap_tuples += 1;
+                result.index_tuples += 1;
+                Ok(())
+            },
+        )
+        .map_err(map_access_error)?;
 
     let tuples = spool.finish(
         &ctx.index_desc.columns,
