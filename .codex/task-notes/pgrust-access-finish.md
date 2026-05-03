@@ -27,6 +27,7 @@ Key decisions:
 - Added root-free AM callback contexts and function pointer shapes to `pgrust_access::access::amapi`; root `include::access::amapi` now has conversion helpers from old root contexts to portable contexts.
 - Routed the moved generic index scan stub through the portable `pgrust_access::access::amapi::IndexBeginScanContext`.
 - Moved hash scan runtime (`beginscan`/`rescan`/`gettuple`/`getbitmap`/`endscan`) into `pgrust_access::hash`; root hash AM callbacks are now compatibility adapters that pass `RootAccessServices`.
+- Routed hash build, build-empty, insert, bulk-delete, and vacuum cleanup through `pgrust_access::hash` using explicit interrupt, scalar, and WAL service hooks; root still owns heap row projection for expression/partial indexes.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`

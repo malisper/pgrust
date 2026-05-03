@@ -8,18 +8,14 @@ use crate::backend::access::index::buildkeys::{
     IndexBuildKeyProjector, RootIndexBuildServices, map_access_error, map_catalog_error_to_access,
     materialize_heap_row_values,
 };
-use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::access::transam::xlog::{
-    XLOG_HASH_ADD_OVFL_PAGE, XLOG_HASH_DELETE, XLOG_HASH_INIT_META_PAGE, XLOG_HASH_INSERT,
-    XLOG_HASH_SPLIT_ALLOCATE_PAGE, XLOG_HASH_SPLIT_PAGE, XLOG_HASH_VACUUM,
+    XLOG_HASH_ADD_OVFL_PAGE, XLOG_HASH_INIT_META_PAGE, XLOG_HASH_INSERT,
+    XLOG_HASH_SPLIT_ALLOCATE_PAGE, XLOG_HASH_SPLIT_PAGE,
 };
-use crate::backend::access::{RootAccessServices, RootAccessWal};
+use crate::backend::access::{RootAccessRuntime, RootAccessServices, RootAccessWal};
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::fsm::{get_free_index_page, record_free_index_page};
-use crate::backend::storage::page::bufpage::{
-    ItemIdFlags, PageError, page_add_item, page_get_item, page_get_item_id,
-    page_get_max_offset_number, page_remove_item,
-};
+use crate::backend::storage::page::bufpage::{PageError, page_add_item};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
 use crate::include::access::amapi::{
@@ -29,11 +25,10 @@ use crate::include::access::amapi::{
 };
 use crate::include::access::hash::{
     HASH_INVALID_BLOCK, HASH_MAX_BUCKETS, HASH_METAPAGE, HashMetaPageData, HashPageError,
-    LH_BUCKET_PAGE, LH_OVERFLOW_PAGE, LH_UNUSED_PAGE, hash_build_bucket_count,
-    hash_fillfactor_from_meta, hash_metapage_data, hash_metapage_init, hash_metapage_set,
-    hash_opclass_for_first_key, hash_page_get_opaque, hash_page_has_items, hash_page_has_space,
-    hash_page_init, hash_page_items, hash_page_set_opaque, hash_split_needed, hash_tuple_hash,
-    hash_tuple_key_values,
+    LH_BUCKET_PAGE, LH_OVERFLOW_PAGE, LH_UNUSED_PAGE, hash_build_bucket_count, hash_metapage_data,
+    hash_metapage_init, hash_metapage_set, hash_opclass_for_first_key, hash_page_get_opaque,
+    hash_page_has_items, hash_page_has_space, hash_page_init, hash_page_items,
+    hash_page_set_opaque, hash_split_needed, hash_tuple_hash, hash_tuple_key_values,
 };
 use crate::include::access::htup::AttributeCompression;
 use crate::include::access::itemptr::ItemPointerData;
@@ -671,45 +666,28 @@ fn hashbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> 
         )
         .map_err(map_access_error)?;
 
-    let fillfactor = hash_fillfactor_from_meta(&ctx.index_meta);
-    if relation_nblocks(&ctx.pool, ctx.index_relation)? == 0 {
-        let mut result = bulk_load_hash_index(ctx, fillfactor, pending)?;
-        result.heap_tuples = heap_tuples;
-        return Ok(result);
-    }
-
-    let mut result = IndexBuildResult {
+    drop(index_services);
+    access_hash::hashbuild_projected(
+        &ctx.to_access_context(),
         heap_tuples,
-        ..IndexBuildResult::default()
-    };
-    for (tid, key_values) in pending {
-        check_catalog_interrupts(ctx.interrupts.as_ref())?;
-        if insert_hash_key_values(
-            &ctx.pool,
-            ctx.client_id,
-            ctx.snapshot.current_xid,
-            ctx.index_relation,
-            &ctx.index_desc,
-            &ctx.index_meta,
-            ctx.default_toast_compression,
-            tid,
-            &key_values,
-        )? {
-            result.index_tuples += 1;
-        }
-    }
-    Ok(result)
+        pending,
+        &heap_services,
+        &RootAccessServices,
+        &RootAccessWal {
+            pool: ctx.pool.as_ref(),
+        },
+    )
+    .map_err(map_access_error)
 }
 
 fn hashbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
-    init_hash_relation(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.xid,
-        ctx.index_relation,
-        2,
-        hash_fillfactor_from_meta(&ctx.index_meta),
+    access_hash::hashbuildempty(
+        &ctx.to_access_context(),
+        &RootAccessWal {
+            pool: ctx.pool.as_ref(),
+        },
     )
+    .map_err(map_access_error)
 }
 
 fn insert_hash_key_values(
@@ -762,17 +740,14 @@ fn insert_hash_key_values(
 }
 
 fn hashinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
-    insert_hash_key_values(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.snapshot.current_xid,
-        ctx.index_relation,
-        &ctx.index_desc,
-        &ctx.index_meta,
-        ctx.default_toast_compression,
-        ctx.heap_tid,
-        &ctx.values,
+    access_hash::hashinsert(
+        &ctx.to_access_context(),
+        &RootAccessServices,
+        &RootAccessWal {
+            pool: ctx.pool.as_ref(),
+        },
     )
+    .map_err(map_access_error)
 }
 
 fn hashbeginscan(ctx: &IndexBeginScanContext) -> Result<IndexScanDesc, CatalogError> {
@@ -807,117 +782,36 @@ fn hashbulkdelete(
     callback: &IndexBulkDeleteCallback<'_>,
     stats: Option<IndexBulkDeleteResult>,
 ) -> Result<IndexBulkDeleteResult, CatalogError> {
-    let mut result = stats.unwrap_or_default();
-    let nblocks = relation_nblocks(&ctx.pool, ctx.index_relation)?;
-    result.num_pages = u64::from(nblocks);
-    for block in 1..nblocks {
-        check_catalog_interrupts(ctx.interrupts.as_ref())?;
-        let mut page = read_page(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
-        let Ok(opaque) = hash_page_get_opaque(&page) else {
-            continue;
-        };
-        if opaque.is_unused() || opaque.is_meta() {
-            continue;
-        }
-        let max_offset = page_get_max_offset_number(&page).map_err(slotted_page_error)?;
-        let mut removed = 0_u64;
-        for offset in (1..=max_offset).rev() {
-            let item_id = page_get_item_id(&page, offset).map_err(slotted_page_error)?;
-            if item_id.lp_flags != ItemIdFlags::Normal {
-                continue;
-            }
-            let bytes = page_get_item(&page, offset).map_err(slotted_page_error)?;
-            let tuple = IndexTupleData::parse(bytes).map_err(|err| {
-                CatalogError::Io(format!("hash index tuple parse failed: {err:?}"))
-            })?;
-            result.num_index_tuples = result.num_index_tuples.saturating_add(1);
-            if callback(tuple.t_tid) {
-                page_remove_item(&mut page, offset).map_err(slotted_page_error)?;
-                removed = removed.saturating_add(1);
-            }
-        }
-        if removed > 0 {
-            result.num_removed_tuples = result.num_removed_tuples.saturating_add(removed);
-            write_hash_pages(
-                &ctx.pool,
-                ctx.client_id,
-                INVALID_TRANSACTION_ID,
-                ctx.index_relation,
-                &[HashPageImage {
-                    block,
-                    page,
-                    wal_info: XLOG_HASH_DELETE,
-                    will_init: false,
-                }],
-            )?;
-        }
-    }
-    Ok(result)
+    let runtime = RootAccessRuntime::heap(
+        &ctx.pool,
+        &ctx.txns,
+        Some(ctx.interrupts.as_ref()),
+        ctx.client_id,
+    );
+    access_hash::hashbulkdelete(
+        &ctx.to_access_context(),
+        callback,
+        stats,
+        &runtime,
+        &RootAccessWal {
+            pool: ctx.pool.as_ref(),
+        },
+    )
+    .map_err(map_access_error)
 }
 
 fn hashvacuumcleanup(
     ctx: &IndexVacuumContext,
     stats: Option<IndexBulkDeleteResult>,
 ) -> Result<IndexBulkDeleteResult, CatalogError> {
-    let mut result = stats.unwrap_or_default();
-    let mut meta = read_meta(&ctx.pool, ctx.client_id, ctx.index_relation)?;
-    meta.hashm_ntuples = meta.hashm_ntuples.saturating_sub(result.num_removed_tuples);
-    for bucket in 0..meta.bucket_count() {
-        let Some(mut prev_block) = meta.bucket_block(bucket) else {
-            continue;
-        };
-        let mut prev_page = read_page(&ctx.pool, ctx.client_id, ctx.index_relation, prev_block)?;
-        let mut prev_opaque = hash_page_get_opaque(&prev_page).map_err(page_error)?;
-        let mut next_block = prev_opaque.hasho_nextblkno;
-        while next_block != HASH_INVALID_BLOCK {
-            let block = next_block;
-            let page = read_page(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
-            let opaque = hash_page_get_opaque(&page).map_err(page_error)?;
-            next_block = opaque.hasho_nextblkno;
-            if !hash_page_items(&page).map_err(map_access_error)?.is_empty() {
-                prev_block = block;
-                prev_page = page;
-                prev_opaque = opaque;
-                continue;
-            }
-            prev_opaque.hasho_nextblkno = opaque.hasho_nextblkno;
-            hash_page_set_opaque(&mut prev_page, prev_opaque).map_err(page_error)?;
-            let mut unused = [0u8; crate::backend::storage::smgr::BLCKSZ];
-            hash_page_init(&mut unused, 0, LH_UNUSED_PAGE);
-            write_hash_pages(
-                &ctx.pool,
-                ctx.client_id,
-                INVALID_TRANSACTION_ID,
-                ctx.index_relation,
-                &[
-                    HashPageImage {
-                        block: prev_block,
-                        page: prev_page,
-                        wal_info: XLOG_HASH_VACUUM,
-                        will_init: false,
-                    },
-                    HashPageImage {
-                        block,
-                        page: unused,
-                        wal_info: XLOG_HASH_VACUUM,
-                        will_init: false,
-                    },
-                ],
-            )?;
-            record_free_index_page(&ctx.pool, ctx.index_relation, block)
-                .map_err(CatalogError::Io)?;
-            result.num_deleted_pages = result.num_deleted_pages.saturating_add(1);
-        }
-    }
-    write_meta(
-        &ctx.pool,
-        ctx.client_id,
-        INVALID_TRANSACTION_ID,
-        ctx.index_relation,
-        &meta,
-        XLOG_HASH_VACUUM,
-    )?;
-    Ok(result)
+    access_hash::hashvacuumcleanup(
+        &ctx.to_access_context(),
+        stats,
+        &RootAccessWal {
+            pool: ctx.pool.as_ref(),
+        },
+    )
+    .map_err(map_access_error)
 }
 
 pub fn hash_am_handler() -> IndexAmRoutine {
