@@ -18,7 +18,7 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::storage::fsm::{get_free_index_page, record_free_index_page};
 use crate::backend::storage::page::bufpage::{
     ItemIdFlags, PageError, page_add_item, page_get_item, page_get_item_id,
-    page_get_max_offset_number, page_header, page_remove_item,
+    page_get_max_offset_number, page_remove_item,
 };
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
@@ -29,8 +29,10 @@ use crate::include::access::amapi::{
 };
 use crate::include::access::hash::{
     HASH_INVALID_BLOCK, HASH_MAX_BUCKETS, HASH_METAPAGE, HashMetaPageData, HashPageError,
-    LH_BUCKET_PAGE, LH_OVERFLOW_PAGE, LH_UNUSED_PAGE, hash_metapage_data, hash_metapage_init,
-    hash_metapage_set, hash_page_get_opaque, hash_page_init, hash_page_set_opaque, hash_tuple_hash,
+    LH_BUCKET_PAGE, LH_OVERFLOW_PAGE, LH_UNUSED_PAGE, hash_build_bucket_count,
+    hash_fillfactor_from_meta, hash_metapage_data, hash_metapage_init, hash_metapage_set,
+    hash_opclass_for_first_key, hash_page_get_opaque, hash_page_has_items, hash_page_has_space,
+    hash_page_init, hash_page_items, hash_page_set_opaque, hash_split_needed, hash_tuple_hash,
     hash_tuple_key_values,
 };
 use crate::include::access::htup::AttributeCompression;
@@ -230,24 +232,6 @@ fn write_meta(
     )
 }
 
-fn opclass_for_first_key(
-    meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
-) -> Option<u32> {
-    meta.indclass.first().copied()
-}
-
-fn fillfactor_from_meta(meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry) -> u16 {
-    meta.hash_options
-        .map(|options| options.fillfactor)
-        .unwrap_or(crate::include::access::hash::HASH_DEFAULT_FILLFACTOR)
-}
-
-fn build_bucket_count(index_tuple_count: usize, fillfactor: u16) -> u32 {
-    let target = HashMetaPageData::new(1, fillfactor).target_tuples_per_bucket() as usize;
-    let desired = index_tuple_count.div_ceil(target).max(2);
-    desired.min(HASH_MAX_BUCKETS) as u32
-}
-
 fn bulk_load_hash_index(
     ctx: &IndexBuildContext,
     fillfactor: u16,
@@ -257,7 +241,10 @@ fn bulk_load_hash_index(
         heap_tuples: pending.len() as u64,
         ..IndexBuildResult::default()
     };
-    let mut meta = HashMetaPageData::new(build_bucket_count(pending.len(), fillfactor), fillfactor);
+    let mut meta = HashMetaPageData::new(
+        hash_build_bucket_count(pending.len(), fillfactor),
+        fillfactor,
+    );
     let mut buckets = vec![Vec::new(); meta.bucket_count() as usize];
 
     for (tid, key_values) in pending {
@@ -266,7 +253,7 @@ fn bulk_load_hash_index(
             return Err(CatalogError::Corrupt("hash index missing key value"));
         };
         let Some(hash) = RootAccessServices
-            .hash_index_value(first, opclass_for_first_key(&ctx.index_meta))
+            .hash_index_value(first, hash_opclass_for_first_key(&ctx.index_meta))
             .map_err(map_access_error)?
         else {
             continue;
@@ -361,42 +348,6 @@ fn tuple_key_values(
     hash_tuple_key_values(desc, tuple, &RootAccessServices).map_err(map_access_error)
 }
 
-fn hash_page_items(
-    page: &[u8; crate::backend::storage::smgr::BLCKSZ],
-) -> Result<Vec<IndexTupleData>, CatalogError> {
-    let mut items = Vec::new();
-    let max_offset = page_get_max_offset_number(page).map_err(slotted_page_error)?;
-    for offset in 1..=max_offset {
-        let item_id = page_get_item_id(page, offset).map_err(slotted_page_error)?;
-        if item_id.lp_flags != ItemIdFlags::Normal {
-            continue;
-        }
-        let bytes = page_get_item(page, offset).map_err(slotted_page_error)?;
-        items.push(
-            IndexTupleData::parse(bytes).map_err(|err| {
-                CatalogError::Io(format!("hash index tuple parse failed: {err:?}"))
-            })?,
-        );
-    }
-    Ok(items)
-}
-
-fn page_has_space(
-    page: &[u8; crate::backend::storage::smgr::BLCKSZ],
-    tuple: &IndexTupleData,
-) -> Result<bool, CatalogError> {
-    let header = page_header(page).map_err(slotted_page_error)?;
-    let needed = crate::backend::storage::page::bufpage::max_align(tuple.size())
-        + crate::backend::storage::page::bufpage::ITEM_ID_SIZE;
-    Ok(header.free_space() >= needed)
-}
-
-fn page_has_items(
-    page: &[u8; crate::backend::storage::smgr::BLCKSZ],
-) -> Result<bool, CatalogError> {
-    Ok(page_get_max_offset_number(page).map_err(slotted_page_error)? > 0)
-}
-
 fn allocate_hash_block(
     pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,
@@ -451,7 +402,9 @@ fn build_bucket_chain_images(
     hash_page_init(&mut current_page, bucket, LH_BUCKET_PAGE);
 
     for tuple in items {
-        if !page_has_space(&current_page, tuple)? && page_has_items(&current_page)? {
+        if !hash_page_has_space(&current_page, tuple).map_err(map_access_error)?
+            && hash_page_has_items(&current_page).map_err(map_access_error)?
+        {
             let (next_block, next_will_init) =
                 if let Some(block) = reusable_overflows.get(reuse_index).copied() {
                     reuse_index += 1;
@@ -508,7 +461,7 @@ fn append_tuple_to_bucket(
     loop {
         let mut page = read_page(pool, client_id, rel, block)?;
         let mut opaque = hash_page_get_opaque(&page).map_err(page_error)?;
-        if page_has_space(&page, tuple)? {
+        if hash_page_has_space(&page, tuple).map_err(map_access_error)? {
             page_add_item(&mut page, &tuple.serialize()).map_err(slotted_page_error)?;
             write_hash_pages(
                 pool,
@@ -582,11 +535,6 @@ fn collect_bucket_chain(
     }
 }
 
-fn split_needed(meta: &HashMetaPageData) -> bool {
-    meta.bucket_count() < HASH_MAX_BUCKETS as u32
-        && meta.hashm_ntuples > u64::from(meta.bucket_count()) * meta.target_tuples_per_bucket()
-}
-
 fn maybe_split_bucket(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
@@ -594,7 +542,7 @@ fn maybe_split_bucket(
     rel: RelFileLocator,
     meta: &mut HashMetaPageData,
 ) -> Result<(), CatalogError> {
-    if !split_needed(meta) {
+    if !hash_split_needed(meta) {
         return Ok(());
     }
     let new_bucket = meta.hashm_maxbucket.saturating_add(1);
@@ -626,7 +574,7 @@ fn maybe_split_bucket(
         if idx > 0 {
             old_overflows.push(*block);
         }
-        for tuple in hash_page_items(page)? {
+        for tuple in hash_page_items(page).map_err(map_access_error)? {
             if meta.bucket_for_hash(tuple_hash(&tuple)?) == new_bucket {
                 new_items.push(tuple);
             } else {
@@ -716,7 +664,7 @@ fn hashbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> 
         )
         .map_err(map_access_error)?;
 
-    let fillfactor = fillfactor_from_meta(&ctx.index_meta);
+    let fillfactor = hash_fillfactor_from_meta(&ctx.index_meta);
     if relation_nblocks(&ctx.pool, ctx.index_relation)? == 0 {
         let mut result = bulk_load_hash_index(ctx, fillfactor, pending)?;
         result.heap_tuples = heap_tuples;
@@ -753,7 +701,7 @@ fn hashbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
         ctx.xid,
         ctx.index_relation,
         2,
-        fillfactor_from_meta(&ctx.index_meta),
+        hash_fillfactor_from_meta(&ctx.index_meta),
     )
 }
 
@@ -772,7 +720,7 @@ fn insert_hash_key_values(
         return Err(CatalogError::Corrupt("hash index missing key value"));
     };
     let Some(hash) = RootAccessServices
-        .hash_index_value(first, opclass_for_first_key(index_meta))
+        .hash_index_value(first, hash_opclass_for_first_key(index_meta))
         .map_err(map_access_error)?
     else {
         return Ok(false);
@@ -843,7 +791,7 @@ fn hashrescan(
     let mut state = HashIndexScanOpaque::default();
     if let Some(argument) = scan_key_argument(scan)
         && let Some(hash) = RootAccessServices
-            .hash_index_value(argument, opclass_for_first_key(&scan.index_meta))
+            .hash_index_value(argument, hash_opclass_for_first_key(&scan.index_meta))
             .map_err(map_access_error)?
     {
         let meta = read_meta(&scan.pool, scan.client_id, scan.index_relation)?;
@@ -876,8 +824,9 @@ fn load_hash_page_items(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> 
         .as_hash_mut()
         .and_then(|state| state.scan_key.clone())
         .ok_or(CatalogError::Corrupt("hash scan missing key value"))?;
-    let opclass = opclass_for_first_key(&scan.index_meta);
-    let filtered = hash_page_items(&page)?
+    let opclass = hash_opclass_for_first_key(&scan.index_meta);
+    let filtered = hash_page_items(&page)
+        .map_err(map_access_error)?
         .into_iter()
         .filter(|tuple| {
             tuple_hash(tuple).ok() == Some(scan_hash)
@@ -1051,7 +1000,7 @@ fn hashvacuumcleanup(
             let page = read_page(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
             let opaque = hash_page_get_opaque(&page).map_err(page_error)?;
             next_block = opaque.hasho_nextblkno;
-            if !hash_page_items(&page)?.is_empty() {
+            if !hash_page_items(&page).map_err(map_access_error)?.is_empty() {
                 prev_block = block;
                 prev_page = page;
                 prev_opaque = opaque;

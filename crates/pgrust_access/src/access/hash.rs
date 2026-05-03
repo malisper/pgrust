@@ -1,8 +1,11 @@
 pub use pgrust_nodes::access::HashOptions;
 use pgrust_nodes::datum::Value;
 use pgrust_nodes::primnodes::RelationDesc;
+use pgrust_nodes::relcache::IndexRelCacheEntry;
 use pgrust_storage::page::bufpage::{
-    MAXALIGN, PageError, SIZE_OF_PAGE_HEADER_DATA, page_init, page_special, page_special_mut,
+    ITEM_ID_SIZE, ItemIdFlags, MAXALIGN, PageError, SIZE_OF_PAGE_HEADER_DATA, max_align,
+    page_get_item, page_get_item_id, page_get_max_offset_number, page_header, page_init,
+    page_special, page_special_mut,
 };
 use pgrust_storage::smgr::BLCKSZ;
 
@@ -190,6 +193,22 @@ pub fn hash_page_set_opaque(
     Ok(())
 }
 
+pub fn hash_opclass_for_first_key(meta: &IndexRelCacheEntry) -> Option<u32> {
+    meta.indclass.first().copied()
+}
+
+pub fn hash_fillfactor_from_meta(meta: &IndexRelCacheEntry) -> u16 {
+    meta.hash_options
+        .map(|options| options.fillfactor)
+        .unwrap_or(HASH_DEFAULT_FILLFACTOR)
+}
+
+pub fn hash_build_bucket_count(index_tuple_count: usize, fillfactor: u16) -> u32 {
+    let target = HashMetaPageData::new(1, fillfactor).target_tuples_per_bucket() as usize;
+    let desired = index_tuple_count.div_ceil(target).max(2);
+    desired.min(HASH_MAX_BUCKETS) as u32
+}
+
 pub fn encode_hash_tuple_payload(
     desc: &RelationDesc,
     key_values: &[Value],
@@ -220,6 +239,41 @@ pub fn hash_tuple_key_values(
         return Err(AccessError::Corrupt("hash tuple payload too short"));
     }
     decode_key_payload(desc, &tuple.payload[4..], services)
+}
+
+pub fn hash_page_items(page: &[u8; BLCKSZ]) -> AccessResult<Vec<IndexTupleData>> {
+    let mut items = Vec::new();
+    let max_offset = page_get_max_offset_number(page).map_err(hash_page_access_error)?;
+    for offset in 1..=max_offset {
+        let item_id = page_get_item_id(page, offset).map_err(hash_page_access_error)?;
+        if item_id.lp_flags != ItemIdFlags::Normal {
+            continue;
+        }
+        let bytes = page_get_item(page, offset).map_err(hash_page_access_error)?;
+        items.push(IndexTupleData::parse(bytes).map_err(|err| {
+            AccessError::Scalar(format!("hash index tuple parse failed: {err:?}"))
+        })?);
+    }
+    Ok(items)
+}
+
+pub fn hash_page_has_space(page: &[u8; BLCKSZ], tuple: &IndexTupleData) -> AccessResult<bool> {
+    let header = page_header(page).map_err(hash_page_access_error)?;
+    let needed = max_align(tuple.size()) + ITEM_ID_SIZE;
+    Ok(header.free_space() >= needed)
+}
+
+pub fn hash_page_has_items(page: &[u8; BLCKSZ]) -> AccessResult<bool> {
+    Ok(page_get_max_offset_number(page).map_err(hash_page_access_error)? > 0)
+}
+
+pub fn hash_split_needed(meta: &HashMetaPageData) -> bool {
+    meta.bucket_count() < HASH_MAX_BUCKETS as u32
+        && meta.hashm_ntuples > u64::from(meta.bucket_count()) * meta.target_tuples_per_bucket()
+}
+
+fn hash_page_access_error(err: PageError) -> AccessError {
+    AccessError::Scalar(format!("hash slotted page error: {err:?}"))
 }
 
 pub fn hash_metapage_init(page: &mut [u8; BLCKSZ], meta: &HashMetaPageData) {
