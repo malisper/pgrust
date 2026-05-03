@@ -576,6 +576,29 @@ pub struct Database {
     pub(crate) stats: Arc<RwLock<DatabaseStatsStore>>,
     pub(crate) large_objects: Arc<LargeObjectRuntime>,
     pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,
+    #[cfg(test)]
+    pub(crate) broad_catalog_load_counters: Arc<BroadCatalogLoadCounters>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct BroadCatalogLoadCounters {
+    backend_catcache_loads: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct BroadCatalogLoadCounts {
+    pub backend_catcache: u64,
+    pub local_store_catcache: u64,
+    pub shared_store_catcache: u64,
+}
+
+#[cfg(test)]
+impl BroadCatalogLoadCounts {
+    pub(crate) fn total(self) -> u64 {
+        self.backend_catcache + self.local_store_catcache + self.shared_store_catcache
+    }
 }
 
 const TEMP_DB_OID_BASE: u32 = 0x7000_0000;
@@ -1197,6 +1220,41 @@ impl Database {
         txn_ctx: CatalogTxnContext,
     ) -> Result<CatCache, CatalogError> {
         syscache_backend_catcache(self, client_id, txn_ctx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_backend_catcache_load_for_tests(&self) {
+        self.broad_catalog_load_counters
+            .backend_catcache_loads
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_broad_catalog_load_counters_for_tests(&self) {
+        self.broad_catalog_load_counters
+            .backend_catcache_loads
+            .store(0, Ordering::Relaxed);
+        self.catalog.read().reset_catcache_call_count_for_tests();
+        self.shared_catalog
+            .read()
+            .reset_catcache_call_count_for_tests();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn broad_catalog_load_counts_for_tests(&self) -> BroadCatalogLoadCounts {
+        BroadCatalogLoadCounts {
+            backend_catcache: self
+                .broad_catalog_load_counters
+                .backend_catcache_loads
+                .load(Ordering::Relaxed),
+            local_store_catcache: self.catalog.read().catcache_call_count_for_tests(),
+            shared_store_catcache: self.shared_catalog.read().catcache_call_count_for_tests(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn broad_catalog_load_count_for_tests(&self) -> u64 {
+        self.broad_catalog_load_counts_for_tests().total()
     }
 
     pub(crate) fn txn_auth_catalog(

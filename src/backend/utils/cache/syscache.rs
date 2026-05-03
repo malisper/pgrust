@@ -1790,7 +1790,7 @@ fn load_backend_catcache(
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Result<CatCache, CatalogError> {
     #[cfg(test)]
-    BACKEND_CATCACHE_LOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    db.record_backend_catcache_load_for_tests();
 
     // :HACK: broad CatCache materialization is a compatibility escape hatch for
     // catalog views/tests and legacy callers. Hot planner/executor paths should
@@ -1905,19 +1905,6 @@ pub fn drain_pending_invalidations(db: &Database, client_id: ClientId) -> Vec<Ca
         .pending_invalidations
         .drain(..)
         .collect()
-}
-
-#[cfg(test)]
-static BACKEND_CATCACHE_LOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-#[cfg(test)]
-pub(crate) fn reset_backend_catcache_load_count_for_tests() {
-    BACKEND_CATCACHE_LOADS.store(0, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(crate) fn backend_catcache_load_count_for_tests() -> u64 {
-    BACKEND_CATCACHE_LOADS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn scan_syscache_rows_without_catcache(

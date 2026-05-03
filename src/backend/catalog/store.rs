@@ -1,5 +1,9 @@
 use std::collections::BTreeSet;
 use std::ops::{Deref, DerefMut};
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -38,9 +42,17 @@ const CONTROL_FILE_MAGIC: u32 = 0x5052_4743;
 pub(crate) const DEFAULT_FIRST_REL_NUMBER: u32 = pgrust_catalog_store::DEFAULT_FIRST_REL_NUMBER;
 pub(crate) const DEFAULT_FIRST_USER_OID: u32 = pgrust_catalog_store::DEFAULT_FIRST_USER_OID;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CatalogStore {
     core: CatalogStoreCore,
+    #[cfg(test)]
+    catcache_call_count: Arc<AtomicU64>,
+}
+
+impl PartialEq for CatalogStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.core == other.core
+    }
 }
 
 impl Deref for CatalogStore {
@@ -107,6 +119,29 @@ impl pgrust_catalog_store::store::CatalogWriteRuntime for CatalogWriteContext {
 }
 
 impl CatalogStore {
+    fn from_core(core: CatalogStoreCore) -> Self {
+        Self {
+            core,
+            #[cfg(test)]
+            catcache_call_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_catcache_call_for_tests(&self) {
+        self.catcache_call_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_catcache_call_count_for_tests(&self) {
+        self.catcache_call_count.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn catcache_call_count_for_tests(&self) -> u64 {
+        self.catcache_call_count.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn snapshot(&self) -> CatalogStoreSnapshot {
         CatalogStoreSnapshot {
             catalog: self.catalog.clone(),

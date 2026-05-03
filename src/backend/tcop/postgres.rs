@@ -17466,12 +17466,10 @@ mod tests {
         );
         handle_parse(&mut output, &mut state, &parse_packet[5..]).unwrap();
         db.backend_cache_states.write().remove(&1);
-        crate::backend::utils::cache::syscache::reset_backend_catcache_load_count_for_tests();
-        crate::backend::catalog::store::CatalogStore::reset_catcache_call_count_for_tests();
+        db.reset_broad_catalog_load_counters_for_tests();
         handle_describe(&mut output, &db, &mut state, &[b'S', 0]).unwrap();
         assert_eq!(
-            crate::backend::utils::cache::syscache::backend_catcache_load_count_for_tests()
-                + crate::backend::catalog::store::CatalogStore::catcache_call_count_for_tests(),
+            db.broad_catalog_load_count_for_tests(),
             0,
             "extended protocol describe should use keyed catalog lookups"
         );

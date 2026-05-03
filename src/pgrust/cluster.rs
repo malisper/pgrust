@@ -554,6 +554,10 @@ impl Cluster {
             stats: Arc::clone(&state.stats),
             large_objects: Arc::clone(&state.large_objects),
             _wal_bg_writer: self.shared.wal_bg_writer.clone(),
+            #[cfg(test)]
+            broad_catalog_load_counters: Arc::new(
+                crate::pgrust::database::BroadCatalogLoadCounters::default(),
+            ),
         })
     }
 

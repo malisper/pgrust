@@ -134,20 +134,20 @@ fn scratch_temp_dir(label: &str) -> PathBuf {
     crate::pgrust::test_support::scratch_temp_dir("database", label)
 }
 
-fn reset_broad_catalog_load_counters() {
-    crate::backend::utils::cache::syscache::reset_backend_catcache_load_count_for_tests();
-    crate::backend::catalog::store::CatalogStore::reset_catcache_call_count_for_tests();
+fn reset_broad_catalog_load_counters(db: &Database) {
+    db.reset_broad_catalog_load_counters_for_tests();
 }
 
-fn assert_no_broad_catalog_loads(label: &str) {
-    let backend_loads =
-        crate::backend::utils::cache::syscache::backend_catcache_load_count_for_tests();
-    let store_loads = crate::backend::catalog::store::CatalogStore::catcache_call_count_for_tests();
+fn assert_no_broad_catalog_loads(db: &Database, label: &str) {
+    let counts = db.broad_catalog_load_counts_for_tests();
     assert_eq!(
-        backend_loads + store_loads,
+        counts.total(),
         0,
         "{label} should use keyed syscache/relcache instead of broad CatCache materialization \
-         (backend_catcache={backend_loads}, store_catcache={store_loads})"
+         (backend_catcache={}, local_store_catcache={}, shared_store_catcache={})",
+        counts.backend_catcache,
+        counts.local_store_catcache,
+        counts.shared_store_catcache
     );
 }
 
@@ -20172,7 +20172,7 @@ fn lookup_any_relation_uses_targeted_relation_cache_without_catcache() {
     db.execute(1, "create table targeted_lookup (id int4 not null)")
         .unwrap();
     db.backend_cache_states.write().remove(&1);
-    reset_broad_catalog_load_counters();
+    reset_broad_catalog_load_counters(&db);
 
     let catalog = db.lazy_catalog_lookup(1, None, None);
     let unqualified = catalog.lookup_any_relation("targeted_lookup").unwrap();
@@ -20183,7 +20183,7 @@ fn lookup_any_relation_uses_targeted_relation_cache_without_catcache() {
 
     assert_eq!(unqualified.relation_oid, qualified.relation_oid);
     assert_eq!(unqualified.relation_oid, by_oid.relation_oid);
-    assert_no_broad_catalog_loads("relation lookup by name/OID");
+    assert_no_broad_catalog_loads(&db, "relation lookup by name/OID");
     let states = db.backend_cache_states.read();
     let state = states.get(&1).unwrap();
     assert!(state.catcache.is_none());
@@ -20201,13 +20201,30 @@ fn simple_select_uses_keyed_catalog_without_broad_catcache() {
     db.execute(1, "insert into keyed_select values (1, 'alpha')")
         .unwrap();
     db.backend_cache_states.write().remove(&1);
-    reset_broad_catalog_load_counters();
+    reset_broad_catalog_load_counters(&db);
 
     assert_eq!(
         query_rows(&db, 1, "select name from keyed_select where id = 1"),
         vec![vec![Value::Text("alpha".into())]]
     );
-    assert_no_broad_catalog_loads("simple SELECT parse/plan/execute");
+    assert_no_broad_catalog_loads(&db, "simple SELECT parse/plan/execute");
+}
+
+#[test]
+fn broad_catalog_load_counters_are_database_scoped() {
+    let left = Database::open(temp_dir("broad_counter_left"), 16).unwrap();
+    let right = Database::open(temp_dir("broad_counter_right"), 16).unwrap();
+
+    reset_broad_catalog_load_counters(&left);
+    reset_broad_catalog_load_counters(&right);
+
+    left.catalog.read().catcache().unwrap();
+
+    let left_counts = left.broad_catalog_load_counts_for_tests();
+    assert_eq!(left_counts.backend_catcache, 0);
+    assert_eq!(left_counts.local_store_catcache, 1);
+    assert_eq!(left_counts.shared_store_catcache, 0);
+    assert_eq!(right.broad_catalog_load_count_for_tests(), 0);
 }
 
 #[test]

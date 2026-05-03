@@ -84,9 +84,6 @@ fn oid_control_path_for_scope(base_dir: &Path, scope: CatalogScope) -> Option<Pa
     }
 }
 
-#[cfg(test)]
-static STORE_CATCACHE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 impl CatalogStore {
     pub(crate) fn scope_db_oid(&self) -> u32 {
         scope_db_oid(self.scope)
@@ -167,21 +164,19 @@ impl CatalogStore {
             sync_physical_catalogs_scoped(&base_dir, &catalog, scope, &kinds)?;
         }
 
-        Ok(Self {
-            core: CatalogStoreCore {
-                mode: CatalogStoreMode::Durable {
-                    base_dir,
-                    control_path,
-                },
-                scope,
-                oid_control_path,
-                catalog,
-                catalog_materialized,
-                control: effective_control,
-                extra_type_rows: Vec::new(),
-                stored_view_queries: Default::default(),
+        Ok(Self::from_core(CatalogStoreCore {
+            mode: CatalogStoreMode::Durable {
+                base_dir,
+                control_path,
             },
-        })
+            scope,
+            oid_control_path,
+            catalog,
+            catalog_materialized,
+            control: effective_control,
+            extra_type_rows: Vec::new(),
+            stored_view_queries: Default::default(),
+        }))
     }
 
     pub fn new_ephemeral() -> Self {
@@ -195,18 +190,16 @@ impl CatalogStore {
             next_rel_number: catalog.next_rel_number,
             bootstrap_complete: true,
         };
-        Self {
-            core: CatalogStoreCore {
-                mode: CatalogStoreMode::Ephemeral,
-                scope,
-                oid_control_path: None,
-                catalog,
-                catalog_materialized: true,
-                control,
-                extra_type_rows: Vec::new(),
-                stored_view_queries: Default::default(),
-            },
-        }
+        Self::from_core(CatalogStoreCore {
+            mode: CatalogStoreMode::Ephemeral,
+            scope,
+            oid_control_path: None,
+            catalog,
+            catalog_materialized: true,
+            control,
+            extra_type_rows: Vec::new(),
+            stored_view_queries: Default::default(),
+        })
     }
 
     pub fn catalog_snapshot(&self) -> Result<Catalog, CatalogError> {
@@ -236,7 +229,7 @@ impl CatalogStore {
 
     pub fn catcache(&self) -> Result<CatCache, CatalogError> {
         #[cfg(test)]
-        STORE_CATCACHE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.record_catcache_call_for_tests();
 
         match &self.mode {
             CatalogStoreMode::Durable { base_dir, .. } => {
@@ -295,16 +288,6 @@ impl CatalogStore {
             }
             CatalogStoreMode::Ephemeral => Ok(CatCache::from_catalog(&self.catalog)),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn reset_catcache_call_count_for_tests() {
-        STORE_CATCACHE_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn catcache_call_count_for_tests() -> u64 {
-        STORE_CATCACHE_CALLS.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn catcache_with_snapshot(
