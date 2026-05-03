@@ -38,9 +38,7 @@ use crate::include::access::hash::{
 use crate::include::access::htup::AttributeCompression;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
-use crate::include::access::relscan::{
-    HashIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection,
-};
+use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::tidbitmap::TidBitmap;
 use crate::include::nodes::datum::Value;
@@ -48,7 +46,7 @@ use crate::include::nodes::primnodes::RelationDesc;
 use crate::{BufferPool, ClientId, PinnedBuffer, SmgrStorageBackend};
 use pgrust_access::{
     AccessError, AccessHeapServices, AccessIndexServices, AccessScalarServices, AccessWalBlockRef,
-    AccessWalRecord, AccessWalServices,
+    AccessWalRecord, AccessWalServices, hash as access_hash,
 };
 
 pub(crate) use support::{
@@ -777,18 +775,11 @@ fn hashinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
     )
 }
 
-fn scan_key_argument(scan: &IndexScanDesc) -> Option<&Value> {
-    scan.key_data
-        .iter()
-        .find(|key| key.attribute_number == 1 && matches!(key.strategy, 1 | 3))
-        .map(|key| &key.argument)
-}
-
 fn hashbeginscan(ctx: &IndexBeginScanContext) -> Result<IndexScanDesc, CatalogError> {
-    let mut scan = crate::backend::access::index::genam::index_beginscan_stub(ctx)?;
-    scan.opaque = IndexScanOpaque::Hash(HashIndexScanOpaque::default());
-    hashrescan(&mut scan, &ctx.key_data, ctx.direction)?;
-    Ok(scan)
+    // :HACK: root compatibility adapter while hash scan runtime moves into
+    // `pgrust_access`; old AM callbacks still use root context types.
+    access_hash::hashbeginscan(&ctx.to_access_context(), &RootAccessServices)
+        .map_err(map_access_error)
 }
 
 fn hashrescan(
@@ -796,145 +787,19 @@ fn hashrescan(
     keys: &[ScanKeyData],
     direction: ScanDirection,
 ) -> Result<(), CatalogError> {
-    crate::backend::access::index::genam::index_rescan_stub(scan, keys, direction)?;
-    let mut state = HashIndexScanOpaque::default();
-    if let Some(argument) = scan_key_argument(scan)
-        && let Some(hash) = RootAccessServices
-            .hash_index_value(argument, hash_opclass_for_first_key(&scan.index_meta))
-            .map_err(map_access_error)?
-    {
-        let meta = read_meta(&scan.pool, scan.client_id, scan.index_relation)?;
-        let bucket = meta.bucket_for_hash(hash);
-        state.scan_hash = Some(hash);
-        state.scan_key = Some(argument.to_owned_value());
-        state.current_block = meta.bucket_block(bucket);
-    }
-    scan.opaque = IndexScanOpaque::Hash(state);
-    Ok(())
-}
-
-fn load_hash_page_items(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
-    let Some(block) = scan
-        .opaque
-        .as_hash_mut()
-        .and_then(|state| state.current_block)
-    else {
-        return Ok(false);
-    };
-    let page = read_page(&scan.pool, scan.client_id, scan.index_relation, block)?;
-    let opaque = hash_page_get_opaque(&page).map_err(page_error)?;
-    let scan_hash = scan
-        .opaque
-        .as_hash_mut()
-        .and_then(|state| state.scan_hash)
-        .ok_or(CatalogError::Corrupt("hash scan missing hash key"))?;
-    let scan_key = scan
-        .opaque
-        .as_hash_mut()
-        .and_then(|state| state.scan_key.clone())
-        .ok_or(CatalogError::Corrupt("hash scan missing key value"))?;
-    let opclass = hash_opclass_for_first_key(&scan.index_meta);
-    let filtered = hash_page_items(&page)
-        .map_err(map_access_error)?
-        .into_iter()
-        .filter(|tuple| {
-            tuple_hash(tuple).ok() == Some(scan_hash)
-                && tuple_key_values(&scan.index_desc, tuple)
-                    .ok()
-                    .is_some_and(|values| {
-                        values.first().is_some_and(|value| {
-                            RootAccessServices.hash_values_equal(value, &scan_key, opclass)
-                        })
-                    })
-        })
-        .collect::<Vec<_>>();
-    let state = scan
-        .opaque
-        .as_hash_mut()
-        .ok_or(CatalogError::Corrupt("hash scan state missing opaque"))?;
-    state.current_block = if opaque.hasho_nextblkno == HASH_INVALID_BLOCK {
-        None
-    } else {
-        Some(opaque.hasho_nextblkno)
-    };
-    state.current_items = filtered;
-    state.next_offset = match scan.direction {
-        ScanDirection::Forward => 0,
-        ScanDirection::Backward => state.current_items.len().saturating_sub(1),
-    };
-    Ok(true)
+    access_hash::hashrescan(scan, keys, direction, &RootAccessServices).map_err(map_access_error)
 }
 
 fn hashgettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
-    loop {
-        let needs_load = scan
-            .opaque
-            .as_hash_mut()
-            .is_none_or(|state| state.current_items.is_empty());
-        if needs_load {
-            if !load_hash_page_items(scan)? {
-                return Ok(false);
-            }
-            continue;
-        }
-        let next = {
-            let state = scan
-                .opaque
-                .as_hash_mut()
-                .ok_or(CatalogError::Corrupt("hash scan state missing opaque"))?;
-            match scan.direction {
-                ScanDirection::Forward => {
-                    if state.next_offset >= state.current_items.len() {
-                        state.current_items.clear();
-                        None
-                    } else {
-                        let idx = state.next_offset;
-                        state.next_offset += 1;
-                        Some(state.current_items[idx].clone())
-                    }
-                }
-                ScanDirection::Backward => {
-                    if state.current_items.is_empty()
-                        || state.next_offset >= state.current_items.len()
-                    {
-                        state.current_items.clear();
-                        None
-                    } else {
-                        let idx = state.next_offset;
-                        let tuple = state.current_items[idx].clone();
-                        if idx == 0 {
-                            state.current_items.clear();
-                        } else {
-                            state.next_offset -= 1;
-                        }
-                        Some(tuple)
-                    }
-                }
-            }
-        };
-        let Some(tuple) = next else {
-            continue;
-        };
-        scan.xs_heaptid = Some(tuple.t_tid);
-        scan.xs_itup = scan.xs_want_itup.then_some(tuple);
-        scan.xs_recheck = true;
-        return Ok(true);
-    }
+    access_hash::hashgettuple(scan, &RootAccessServices).map_err(map_access_error)
 }
 
 fn hashgetbitmap(scan: &mut IndexScanDesc, bitmap: &mut TidBitmap) -> Result<i64, CatalogError> {
-    let mut count = 0_i64;
-    while hashgettuple(scan)? {
-        if let Some(tid) = scan.xs_heaptid {
-            bitmap.add_tid(tid);
-            count += 1;
-        }
-    }
-    Ok(count)
+    access_hash::hashgetbitmap(scan, bitmap, &RootAccessServices).map_err(map_access_error)
 }
 
 fn hashendscan(scan: IndexScanDesc) -> Result<(), CatalogError> {
-    crate::backend::access::index::genam::index_endscan_stub(scan)
+    access_hash::hashendscan(scan).map_err(map_access_error)
 }
 
 fn hashbulkdelete(
@@ -1053,19 +918,6 @@ fn hashvacuumcleanup(
         XLOG_HASH_VACUUM,
     )?;
     Ok(result)
-}
-
-trait HashScanOpaqueExt {
-    fn as_hash_mut(&mut self) -> Option<&mut HashIndexScanOpaque>;
-}
-
-impl HashScanOpaqueExt for IndexScanOpaque {
-    fn as_hash_mut(&mut self) -> Option<&mut HashIndexScanOpaque> {
-        match self {
-            IndexScanOpaque::Hash(state) => Some(state),
-            _ => None,
-        }
-    }
 }
 
 pub fn hash_am_handler() -> IndexAmRoutine {
