@@ -15,6 +15,7 @@ Files touched:
 - `crates/pgrust_access/src/brin/{mod.rs,minmax.rs}`
 - `crates/pgrust_access/src/gin/{mod.rs,jsonb_ops.rs}`
 - `crates/pgrust_access/src/gist/{mod.rs,support/*}`
+- `crates/pgrust_access/src/spgist/{mod.rs,support.rs,quad_box.rs}`
 - `src/backend/access/services.rs`
 - Root compatibility shims under `src/backend/access/{nbtree,brin,gin,gist}/...`
 
@@ -27,12 +28,12 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet btree`
 - `scripts/cargo_isolated.sh test --lib --quiet brin`
 - `scripts/cargo_isolated.sh test --lib --quiet gist`
+- `scripts/cargo_isolated.sh test --lib --quiet spgist`
 - `scripts/cargo_isolated.sh test --lib --quiet jsonb_ops_extracts_object_keys_and_array_strings_as_keys`
 - `scripts/cargo_isolated.sh test --lib --quiet jsonb_ops_empty_container_emits_empty_item`
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.
 
 Remaining:
-- Move SP-GiST scalar support modules behind the same range/network/geometry service hooks.
 - Move AM tuple codecs and add projection/TOAST service boundaries.
 - Move index runtime only after expression/partial index projection is represented by `AccessIndexServices`.
 - Move lock/transam/WAL/checkpoint and heap/table runtime in separate slices; those need storage/runtime traits and careful recovery byte-preservation checks.

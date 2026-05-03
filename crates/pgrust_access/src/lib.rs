@@ -6,6 +6,7 @@ pub mod gin;
 pub mod gist;
 pub mod nbtree;
 pub mod services;
+pub mod spgist;
 pub mod varatt;
 
 pub use access::{ItemPointerData, TupleValue};
