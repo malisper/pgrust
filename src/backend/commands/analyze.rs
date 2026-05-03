@@ -4,6 +4,7 @@ use super::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, row_matches_index_predicate,
 };
 use crate::RelFileLocator;
+use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::value_io::decode_value_with_toast;
 use crate::backend::executor::{ExecError, ExecutorContext, TupleSlot, Value, eval_expr};

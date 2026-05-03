@@ -7,6 +7,8 @@ Key decisions:
 - Root adapter is `RootAccessServices`; it maps scalar comparisons/range/multirange/network helpers, GIN JSONB extraction, and geometry helpers back to existing executor code.
 - Kept `pgrust_access` independent of root, parser/analyze/optimizer, executor, PL/pgSQL, and `pgrust_expr`.
 - GIN JSONB and GiST support modules now live in `pgrust_access` behind scalar service hooks.
+- Moved portable index scan descriptor state and generic scan stub setup/reset into `pgrust_access`; root keeps old paths as shims.
+- Root `snapmgr::Snapshot` now re-exports `pgrust_core::Snapshot`; heap visibility helpers are a root extension trait until heap runtime moves.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -16,7 +18,12 @@ Files touched:
 - `crates/pgrust_access/src/gin/{mod.rs,jsonb_ops.rs}`
 - `crates/pgrust_access/src/gist/{mod.rs,support/*,tuple.rs}`
 - `crates/pgrust_access/src/spgist/{mod.rs,support.rs,quad_box.rs,tuple.rs}`
+- `crates/pgrust_access/src/access/relscan.rs`
+- `crates/pgrust_access/src/index/{mod.rs,genam.rs}`
 - `src/backend/access/services.rs`
+- `src/backend/access/index/genam.rs`
+- `src/backend/utils/time/snapmgr.rs`
+- `src/backend/access/heap/heapam_visibility.rs`
 - Root compatibility shims under `src/backend/access/{nbtree,brin,gin,gist}/...`
 
 Tests run:
@@ -30,6 +37,7 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet brin`
 - `scripts/cargo_isolated.sh test --lib --quiet gist`
 - `scripts/cargo_isolated.sh test --lib --quiet spgist`
+- `scripts/cargo_isolated.sh test --lib --quiet hash`
 - `scripts/cargo_isolated.sh test --lib --quiet jsonb_ops_extracts_object_keys_and_array_strings_as_keys`
 - `scripts/cargo_isolated.sh test --lib --quiet jsonb_ops_empty_container_emits_empty_item`
 - Boundary checks for `crates/pgrust_access/src` root imports and `crates/pgrust_storage/src` access imports.

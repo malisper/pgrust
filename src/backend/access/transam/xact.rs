@@ -377,6 +377,7 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
     use crate::include::access::htup::HeapTuple;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};

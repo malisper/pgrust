@@ -8,6 +8,7 @@ use serde_json::Value as JsonValue;
 
 use crate::BufferPool;
 use crate::backend::access::heap::heapam::{heap_scan_begin, heap_scan_next};
+use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogError};

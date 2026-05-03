@@ -9,6 +9,7 @@ use crate::backend::access::heap::heapam::{
     heap_delete_with_waiter, heap_flush, heap_insert, heap_insert_mvcc_with_cid, heap_scan_begin,
     heap_scan_next, heap_update_with_waiter,
 };
+use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::CatalogError;

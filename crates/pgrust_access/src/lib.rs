@@ -4,6 +4,7 @@ pub mod common;
 pub mod error;
 pub mod gin;
 pub mod gist;
+pub mod index;
 pub mod nbtree;
 pub mod services;
 pub mod spgist;

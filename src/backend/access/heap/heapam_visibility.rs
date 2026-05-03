@@ -8,8 +8,28 @@ use crate::include::access::htup::{
     INFOMASK_OFFSET,
 };
 
-impl Snapshot {
-    pub fn tuple_bytes_try_visible_from_hints(&self, bytes: &[u8]) -> Option<bool> {
+pub trait SnapshotVisibility {
+    fn tuple_bytes_try_visible_from_hints(&self, bytes: &[u8]) -> Option<bool>;
+    fn tuple_bytes_visible(&self, txns: &TransactionManager, bytes: &[u8]) -> bool;
+    fn tuple_bytes_visible_with_hints(
+        &self,
+        txns: &TransactionManager,
+        bytes: &[u8],
+    ) -> (bool, u16);
+    fn tuple_visible(&self, txns: &TransactionManager, tuple: &HeapTuple) -> bool;
+
+    #[cfg(test)]
+    fn check_visibility(
+        &self,
+        txns: &TransactionManager,
+        xmin: TransactionId,
+        xmax: TransactionId,
+        cid: CommandId,
+    ) -> bool;
+}
+
+impl SnapshotVisibility for Snapshot {
+    fn tuple_bytes_try_visible_from_hints(&self, bytes: &[u8]) -> Option<bool> {
         let infomask = u16::from_le_bytes([bytes[INFOMASK_OFFSET], bytes[INFOMASK_OFFSET + 1]]);
         let xmin = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
 
@@ -38,7 +58,7 @@ impl Snapshot {
         None
     }
 
-    pub fn tuple_bytes_visible(&self, txns: &TransactionManager, bytes: &[u8]) -> bool {
+    fn tuple_bytes_visible(&self, txns: &TransactionManager, bytes: &[u8]) -> bool {
         let infomask = u16::from_le_bytes([bytes[INFOMASK_OFFSET], bytes[INFOMASK_OFFSET + 1]]);
         let xmin = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
 
@@ -69,7 +89,7 @@ impl Snapshot {
         check_visibility(self, txns, xmin, xmax, cid)
     }
 
-    pub fn tuple_bytes_visible_with_hints(
+    fn tuple_bytes_visible_with_hints(
         &self,
         txns: &TransactionManager,
         bytes: &[u8],
@@ -139,7 +159,7 @@ impl Snapshot {
         (visible, hints)
     }
 
-    pub fn tuple_visible(&self, txns: &TransactionManager, tuple: &HeapTuple) -> bool {
+    fn tuple_visible(&self, txns: &TransactionManager, tuple: &HeapTuple) -> bool {
         check_visibility(
             self,
             txns,
@@ -150,7 +170,7 @@ impl Snapshot {
     }
 
     #[cfg(test)]
-    pub(crate) fn check_visibility(
+    fn check_visibility(
         &self,
         txns: &TransactionManager,
         xmin: TransactionId,

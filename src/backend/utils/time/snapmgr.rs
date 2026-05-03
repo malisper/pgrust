@@ -1,55 +1,9 @@
-use std::collections::BTreeSet;
-
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::utils::cache::syscache::BackendCacheContext;
 use crate::include::catalog::BootstrapCatalogKind;
 use crate::pgrust::database::Database;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snapshot {
-    pub current_xid: TransactionId,
-    pub current_cid: CommandId,
-    pub(crate) heap_current_cid: Option<CommandId>,
-    pub xmin: TransactionId,
-    pub xmax: TransactionId,
-    pub(crate) in_progress: BTreeSet<TransactionId>,
-    pub(crate) own_xids: BTreeSet<TransactionId>,
-}
-
-impl Snapshot {
-    pub fn bootstrap() -> Self {
-        Self {
-            current_xid: INVALID_TRANSACTION_ID,
-            current_cid: CommandId::MAX,
-            heap_current_cid: None,
-            xmin: 1,
-            xmax: 1,
-            in_progress: BTreeSet::new(),
-            own_xids: BTreeSet::new(),
-        }
-    }
-
-    pub fn transaction_active_in_snapshot(&self, xid: TransactionId) -> bool {
-        xid != INVALID_TRANSACTION_ID
-            && xid != self.current_xid
-            && xid >= self.xmin
-            && xid < self.xmax
-            && self.in_progress.contains(&xid)
-    }
-
-    pub fn transaction_is_own(&self, xid: TransactionId) -> bool {
-        xid != INVALID_TRANSACTION_ID && (xid == self.current_xid || self.own_xids.contains(&xid))
-    }
-
-    pub fn heap_current_cid(&self) -> Option<CommandId> {
-        self.heap_current_cid
-    }
-
-    pub fn set_heap_current_cid(&mut self, cid: CommandId) {
-        self.heap_current_cid = Some(cid);
-    }
-}
+pub use pgrust_core::Snapshot;
 
 pub fn relation_has_syscache(relation_oid: u32) -> bool {
     matches!(

@@ -4,6 +4,7 @@ use super::HeapWalPolicy;
 use super::visibilitymap::{
     VisibilityMapBuffer, VisibilityMapError, visibilitymap_clear_with_wal_policy, visibilitymap_pin,
 };
+use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::access::transam::xact::{
     CommandId, MvccError, Snapshot, TransactionId, TransactionManager, TransactionStatus,
 };

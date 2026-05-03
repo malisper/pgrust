@@ -14,6 +14,7 @@ pub mod htup;
 pub mod itemptr;
 pub mod itup;
 pub mod nbtree;
+pub mod relscan;
 pub mod scankey;
 pub mod spgist;
 pub mod tidbitmap;

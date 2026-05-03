@@ -6,6 +6,7 @@ use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end, heap_scan_next_visible,
     heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_scan_prepare_page_at,
 };
+use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::access::index::indexam;
 use crate::backend::access::nbtree::nbtcompare::compare_bt_values;
 use crate::backend::access::nbtree::nbtree::decode_key_payload;
