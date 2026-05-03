@@ -9,19 +9,24 @@ Key decisions:
 - GIN JSONB and GiST support modules now live in `pgrust_access` behind scalar service hooks.
 - Moved portable index scan descriptor state and generic scan stub setup/reset into `pgrust_access`; root keeps old paths as shims.
 - Root `snapmgr::Snapshot` now re-exports `pgrust_core::Snapshot`; heap visibility helpers are a root extension trait until heap runtime moves.
+- Moved portable BRIN/index AM catalog validation into `pgrust_access`; root only supplies AM-handler existence through a shim callback.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
 - `crates/pgrust_access/src/services.rs`
 - `crates/pgrust_access/src/nbtree/{mod.rs,nbtcompare.rs,nbtpreprocesskeys.rs,tuple.rs}`
 - `crates/pgrust_access/src/brin/{mod.rs,minmax.rs,tuple.rs}`
+- `crates/pgrust_access/src/brin/validate.rs`
 - `crates/pgrust_access/src/gin/{mod.rs,jsonb_ops.rs}`
 - `crates/pgrust_access/src/gist/{mod.rs,support/*,tuple.rs}`
 - `crates/pgrust_access/src/spgist/{mod.rs,support.rs,quad_box.rs,tuple.rs}`
 - `crates/pgrust_access/src/access/relscan.rs`
 - `crates/pgrust_access/src/index/{mod.rs,genam.rs}`
+- `crates/pgrust_access/src/index/amvalidate.rs`
 - `src/backend/access/services.rs`
 - `src/backend/access/index/genam.rs`
+- `src/backend/access/index/amvalidate.rs`
+- `src/backend/access/brin/validate.rs`
 - `src/backend/utils/time/snapmgr.rs`
 - `src/backend/access/heap/heapam_visibility.rs`
 - Root compatibility shims under `src/backend/access/{nbtree,brin,gin,gist}/...`
