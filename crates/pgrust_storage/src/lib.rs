@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod fsm;
 pub mod include;
+pub mod lmgr;
 pub mod page;
 pub mod smgr;
 pub mod sync;
@@ -27,7 +28,9 @@ pub mod backend {
     }
 
     pub mod storage {
-        pub use crate::{buffer, fsm, fsync_dir, fsync_file, page, smgr, sync, sync_file_data};
+        pub use crate::{
+            buffer, fsm, fsync_dir, fsync_file, lmgr, page, smgr, sync, sync_file_data,
+        };
     }
 
     pub mod utils {

@@ -10,6 +10,7 @@ Key decisions:
 - Moved portable index scan descriptor state and generic scan stub setup/reset into `pgrust_access`; root keeps old paths as shims.
 - Root `snapmgr::Snapshot` now re-exports `pgrust_core::Snapshot`; heap visibility helpers are a root extension trait until heap runtime moves.
 - Moved portable BRIN/index AM catalog validation into `pgrust_access`; root only supplies AM-handler existence through a shim callback.
+- Moved lock-manager code into `pgrust_storage`; root `storage::lmgr` is now compatibility shims. `TransactionWaiter` uses a `TransactionStatusLookup` trait so storage does not depend on access/transam.
 
 Files touched:
 - `crates/pgrust_access/src/error.rs`
@@ -29,6 +30,9 @@ Files touched:
 - `src/backend/access/brin/validate.rs`
 - `src/backend/utils/time/snapmgr.rs`
 - `src/backend/access/heap/heapam_visibility.rs`
+- `crates/pgrust_storage/src/lmgr/*`
+- `src/backend/storage/lmgr/*`
+- `src/backend/utils/misc/interrupts.rs`
 - Root compatibility shims under `src/backend/access/{nbtree,brin,gin,gist}/...`
 
 Tests run:

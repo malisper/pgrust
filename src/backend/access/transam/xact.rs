@@ -374,6 +374,12 @@ impl Default for TransactionManager {
     }
 }
 
+impl pgrust_storage::lmgr::TransactionStatusLookup for TransactionManager {
+    fn transaction_in_progress(&self, xid: TransactionId) -> bool {
+        matches!(self.status(xid), Some(TransactionStatus::InProgress))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
