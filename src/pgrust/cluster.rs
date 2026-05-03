@@ -135,9 +135,7 @@ impl OpenDatabaseState {
         database_oid: u32,
         catalog: CatalogStore,
     ) -> Result<Self, DatabaseError> {
-        let sequences = Arc::new(
-            SequenceRuntime::load(Some(base_dir), &catalog).map_err(DatabaseError::Catalog)?,
-        );
+        let sequences = Arc::new(SequenceRuntime::new_durable(base_dir));
         let range_types = load_range_type_entries(base_dir, database_oid)?;
         Ok(Self {
             catalog: Arc::new(RwLock::new(catalog)),
@@ -276,7 +274,6 @@ impl Cluster {
             Arc::clone(&wal),
         ));
 
-        open_relfiles_for_store(&pool, &shared_catalog)?;
         let open_databases = HashMap::new();
 
         let wal_bg_writer = WalBgWriter::start(Arc::clone(&wal), Duration::from_millis(200));
@@ -670,7 +667,6 @@ fn open_database_state_for_shared(
     }
 
     let local_store = CatalogStore::load_database(&shared.base_dir, db_oid)?;
-    open_relfiles_for_store(&shared.pool, &local_store)?;
     let state = Arc::new(OpenDatabaseState::new(
         &shared.base_dir,
         db_oid,
@@ -683,22 +679,6 @@ fn open_database_state_for_shared(
     }
     open_databases.insert(db_oid, Arc::clone(&state));
     Ok(state)
-}
-
-fn open_relfiles_for_store(
-    pool: &Arc<BufferPool<SmgrStorageBackend>>,
-    store: &CatalogStore,
-) -> Result<(), CatalogError> {
-    let relcache = store.relcache()?;
-    for (_, entry) in relcache.entries() {
-        if !entry_has_startup_storage(entry) {
-            continue;
-        }
-        let rel = entry.rel;
-        pool.with_storage_mut(|s| s.smgr.open(rel))
-            .map_err(|e| CatalogError::Io(e.to_string()))?;
-    }
-    Ok(())
 }
 
 fn create_relfiles_for_store_with_smg(

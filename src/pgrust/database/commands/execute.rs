@@ -1748,15 +1748,15 @@ impl Database {
         }
         if stmt.restart_identity {
             for sequence_oid in owned_sequence_oids_for_truncate(&targets, &catalog) {
-                let Some(mut data) = self.sequences.sequence_data(sequence_oid) else {
+                let persistent = catalog
+                    .relation_by_oid(sequence_oid)
+                    .is_some_and(|relation| relation.relpersistence != 't');
+                let Some(mut data) = self.sequences.sequence_data(sequence_oid, persistent)? else {
                     continue;
                 };
                 data.state.last_value = data.options.start;
                 data.state.log_cnt = 0;
                 data.state.is_called = false;
-                let persistent = catalog
-                    .relation_by_oid(sequence_oid)
-                    .is_some_and(|relation| relation.relpersistence != 't');
                 sequence_effects.push(self.sequences.apply_upsert(sequence_oid, data, persistent));
             }
         }

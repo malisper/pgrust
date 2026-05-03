@@ -572,7 +572,7 @@ impl Database {
         }
         let current = self
             .sequences
-            .sequence_data(relation.relation_oid)
+            .sequence_data(relation.relation_oid, relation.relpersistence != 't')?
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(
                     alter_stmt.sequence_name.clone(),

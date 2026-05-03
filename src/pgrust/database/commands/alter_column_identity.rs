@@ -540,9 +540,12 @@ impl Database {
                 hint: None,
                 sqlstate: "XX000",
             })?;
-        let current = self.sequences.sequence_data(sequence_oid).ok_or_else(|| {
-            ExecError::Parse(ParseError::TableDoesNotExist(sequence_oid.to_string()))
-        })?;
+        let current = self
+            .sequences
+            .sequence_data(sequence_oid, relation.relpersistence != 't')?
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(sequence_oid.to_string()))
+            })?;
         let (next_options, restart) =
             apply_sequence_option_patch(&current.options, options).map_err(ExecError::Parse)?;
         let mut next = current;

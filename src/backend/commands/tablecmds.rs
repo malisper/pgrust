@@ -10810,7 +10810,7 @@ pub fn execute_truncate_table(
             .note_relation_truncate(target.relation_oid);
     }
     if stmt.restart_identity {
-        restart_owned_sequences_for_truncate(&targets, catalog, ctx);
+        restart_owned_sequences_for_truncate(&targets, catalog, ctx)?;
     }
     fire_after_truncate_triggers(&triggers, ctx)?;
     Ok(StatementResult::AffectedRows(0))
@@ -10906,22 +10906,23 @@ fn restart_owned_sequences_for_truncate(
     targets: &[BoundRelation],
     catalog: &dyn CatalogLookup,
     ctx: &ExecutorContext,
-) {
+) -> Result<(), ExecError> {
     let Some(sequences) = &ctx.sequences else {
-        return;
+        return Ok(());
     };
     for sequence_oid in owned_sequence_oids_for_truncate(targets, catalog) {
-        let Some(mut data) = sequences.sequence_data(sequence_oid) else {
+        let persistent = catalog
+            .relation_by_oid(sequence_oid)
+            .is_some_and(|relation| relation.relpersistence != 't');
+        let Some(mut data) = sequences.sequence_data(sequence_oid, persistent)? else {
             continue;
         };
         data.state.last_value = data.options.start;
         data.state.log_cnt = 0;
         data.state.is_called = false;
-        let persistent = catalog
-            .relation_by_oid(sequence_oid)
-            .is_some_and(|relation| relation.relpersistence != 't');
         let _ = sequences.apply_upsert(sequence_oid, data, persistent);
     }
+    Ok(())
 }
 
 fn lookup_truncate_relation(

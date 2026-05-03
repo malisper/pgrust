@@ -9377,7 +9377,9 @@ fn check_setval_bounds(
     target: &SequenceCallTarget,
     value: i64,
 ) -> Result<(), ExecError> {
-    let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+    let Some(data) =
+        sequence_runtime(ctx)?.sequence_data(target.relation_oid, target.persistent)?
+    else {
         return Ok(());
     };
     if value < data.options.minvalue || value > data.options.maxvalue {
@@ -9394,7 +9396,7 @@ fn map_nextval_sequence_error(
     if let ExecError::DetailedError { message, .. } = &error
         && message.starts_with("nextval: reached")
         && let Ok(runtime) = sequence_runtime(ctx)
-        && let Some(data) = runtime.sequence_data(target.relation_oid)
+        && let Ok(Some(data)) = runtime.sequence_data(target.relation_oid, target.persistent)
     {
         return nextval_bounds_error(target, &data);
     }
@@ -9728,7 +9730,9 @@ fn eval_sequence_builtin_function(
             let catalog = sequence_catalog(ctx)?;
             let target = resolve_sequence_call_target(ctx, target)?;
             ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
-            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+            let Some(data) =
+                sequence_runtime(ctx)?.sequence_data(target.relation_oid, target.persistent)?
+            else {
                 return Ok(Value::Null);
             };
             Ok(Value::Record(RecordValue::anonymous(vec![
@@ -9755,7 +9759,9 @@ fn eval_sequence_builtin_function(
             ) {
                 return Ok(Value::Null);
             }
-            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+            let Some(data) =
+                sequence_runtime(ctx)?.sequence_data(target.relation_oid, target.persistent)?
+            else {
                 return Ok(Value::Null);
             };
             if data.state.is_called {
@@ -9768,7 +9774,9 @@ fn eval_sequence_builtin_function(
             let catalog = sequence_catalog(ctx)?;
             let target = resolve_sequence_call_target(ctx, target)?;
             ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
-            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+            let Some(data) =
+                sequence_runtime(ctx)?.sequence_data(target.relation_oid, target.persistent)?
+            else {
                 return Ok(Value::Null);
             };
             Ok(Value::Record(RecordValue::anonymous(vec![

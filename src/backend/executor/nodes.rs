@@ -2661,8 +2661,13 @@ impl PlanNode for SeqScanState {
                 return Ok(None);
             }
 
+            let persistent = ctx
+                .catalog
+                .as_deref()
+                .and_then(|catalog| catalog.relation_by_oid(self.relation_oid))
+                .is_none_or(|relation| relation.relpersistence != 't');
             let values = sequence_scan_runtime(ctx)?
-                .current_row(self.relation_oid)
+                .current_row(self.relation_oid, persistent)?
                 .ok_or_else(|| ExecError::DetailedError {
                     message: format!("sequence {} does not exist", self.relation_name),
                     detail: None,

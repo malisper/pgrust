@@ -2189,7 +2189,7 @@ fn sequence_rows(ctx: &ExecutorContext) -> Result<Vec<SequenceViewRow>, ExecErro
         .into_iter()
         .filter(|class| class.relkind == 'S')
     {
-        let Some(data) = sequences.sequence_data(class.oid) else {
+        let Some(data) = sequences.sequence_data(class.oid, class.relpersistence != 't')? else {
             continue;
         };
         let schema = catalog
