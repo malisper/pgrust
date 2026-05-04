@@ -4752,6 +4752,34 @@ pub fn qualified_base_scan_output_exprs(
         .collect()
 }
 
+fn scan_relation_has_explicit_alias(relation_name: &str) -> bool {
+    relation_name
+        .rsplit_once(' ')
+        .is_some_and(|(_, alias)| !alias.trim().is_empty())
+}
+
+fn projection_target_can_drop_simple_qualifier(target: &TargetEntry) -> bool {
+    if target.input_resno.is_none() || target.name.is_empty() {
+        return false;
+    }
+    matches!(
+        &target.expr,
+        Expr::Var(var) if !verbose_output_attr_is_system(var.varattno)
+    )
+}
+
+fn verbose_output_attr_is_system(attno: pgrust_nodes::primnodes::AttrNumber) -> bool {
+    matches!(
+        attno,
+        TABLE_OID_ATTR_NO
+            | SELF_ITEM_POINTER_ATTR_NO
+            | XMIN_ATTR_NO
+            | CMIN_ATTR_NO
+            | XMAX_ATTR_NO
+            | CMAX_ATTR_NO
+    )
+}
+
 pub fn qualified_subquery_scan_output_exprs(
     scan_name: Option<&str>,
     output_columns: &[QueryColumn],
@@ -5393,6 +5421,12 @@ pub fn verbose_plan_output_exprs(
     ctx: &VerboseExplainContext,
     for_parent_ref: bool,
 ) -> Vec<String> {
+    if !for_parent_ref
+        && matches!(plan, Plan::Filter { .. } | Plan::Limit { .. })
+        && let Some(output) = &ctx.scan_output_override
+    {
+        return output.clone();
+    }
     match plan {
         Plan::Result { .. } => Vec::new(),
         Plan::Append { desc, children, .. } | Plan::MergeAppend { desc, children, .. } => {
@@ -5405,6 +5439,35 @@ pub fn verbose_plan_output_exprs(
                 },
             )
         }
+        Plan::SeqScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::TidScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexOnlyScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::BitmapHeapScan {
+            relation_name,
+            desc,
+            ..
+        } if !for_parent_ref && !scan_relation_has_explicit_alias(relation_name) => desc
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect(),
         Plan::SeqScan {
             relation_name,
             desc,
@@ -5462,7 +5525,14 @@ pub fn verbose_plan_output_exprs(
             targets
                 .iter()
                 .filter(|target| !target.resjunk)
-                .map(|target| render_verbose_target_expr(target, &input_names, ctx))
+                .map(|target| {
+                    let rendered = render_verbose_target_expr(target, &input_names, ctx);
+                    if !for_parent_ref && projection_target_can_drop_simple_qualifier(target) {
+                        strip_qualified_identifiers(rendered)
+                    } else {
+                        rendered
+                    }
+                })
                 .collect()
         }
         Plan::Aggregate {

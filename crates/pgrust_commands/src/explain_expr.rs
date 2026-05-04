@@ -258,6 +258,7 @@ pub fn render_explain_expr_inner_with_qualifier(
                 Some(qualifier) => format!("{qualifier}.{name}"),
                 None => name,
             })
+            .or_else(|| attrno_index(var.varattno).map(|index| format!("column{}", index + 1)))
             .unwrap_or_else(|| format!("{expr:?}")),
         Expr::Param(param) if param.paramkind == ParamKind::Exec => {
             format!("${}", param.paramid)
@@ -1801,6 +1802,7 @@ pub(crate) fn render_explain_projection_expr_inner_with_qualifier(
                 Some(qualifier) => format!("{qualifier}.{name}"),
                 None => name,
             })
+            .or_else(|| attrno_index(var.varattno).map(|index| format!("column{}", index + 1)))
             .unwrap_or_else(|| format!("{expr:?}")),
         Expr::Const(value) => render_explain_projection_const(value),
         Expr::Op(op) => match op.op {
@@ -1890,6 +1892,12 @@ pub fn render_explain_infix_operand_with_display_type(
                 render_explain_sql_type_name(sql_type.with_typmod(SqlType::NO_TYPEMOD))
             )
         }
+        (Some(sql_type), expr) if let Some(value) = render_negative_numeric_literal_text(expr) => {
+            format!(
+                "'{value}'::{}",
+                render_explain_sql_type_name(sql_type.with_typmod(SqlType::NO_TYPEMOD))
+            )
+        }
         (Some(sql_type), Expr::Cast(inner, _)) if matches!(inner.as_ref(), Expr::Const(_)) => {
             render_explain_infix_operand_with_display_type(
                 inner,
@@ -1967,6 +1975,8 @@ pub fn comparison_display_type(
         Some(SqlType::new(SqlTypeKind::Text))
     } else if let Some(sql_type) = comparison_cast_literal_display_type(left, right) {
         Some(sql_type)
+    } else if let Some(sql_type) = comparison_numeric_literal_display_type(left, right) {
+        Some(sql_type)
     } else if let Some(sql_type) = comparison_text_literal_display_type(left, right) {
         Some(sql_type)
     } else if timestamp_timestamptz_comparison_display_type(left, right) {
@@ -1985,9 +1995,58 @@ fn comparison_cast_literal_display_type(left: &Expr, right: &Expr) -> Option<Sql
     };
     matches!(
         sql_type.kind,
-        SqlTypeKind::Int2 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
     )
     .then_some(sql_type)
+}
+
+fn comparison_numeric_literal_display_type(left: &Expr, right: &Expr) -> Option<SqlType> {
+    fn numeric_type_if_literal(literal: &Expr, typed: &Expr) -> Option<SqlType> {
+        if !expr_is_negative_numeric_literal(literal) {
+            return None;
+        }
+        let sql_type = match typed {
+            Expr::Var(var) => var.vartype,
+            other => pgrust_nodes::primnodes::expr_sql_type_hint(other)?,
+        };
+        matches!(
+            sql_type.kind,
+            SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+        )
+        .then_some(sql_type)
+    }
+
+    numeric_type_if_literal(left, right).or_else(|| numeric_type_if_literal(right, left))
+}
+
+fn expr_is_negative_numeric_literal(expr: &Expr) -> bool {
+    if render_negative_numeric_literal_text(expr).is_some() {
+        return true;
+    }
+    match expr {
+        Expr::Const(Value::Int16(value)) => *value < 0,
+        Expr::Const(Value::Int32(value)) => *value < 0,
+        Expr::Const(Value::Int64(value)) => *value < 0,
+        Expr::Const(Value::Numeric(value)) => value.render().starts_with('-'),
+        _ => false,
+    }
+}
+
+fn render_negative_numeric_literal_text(expr: &Expr) -> Option<String> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.op != pgrust_nodes::primnodes::OpExprKind::Negate || op.args.len() != 1 {
+        return None;
+    }
+    let Some(Expr::Const(value)) = op.args.first() else {
+        return None;
+    };
+    matches!(
+        value,
+        Value::Int16(_) | Value::Int32(_) | Value::Int64(_) | Value::Numeric(_)
+    )
+    .then(|| format!("-{}", render_explain_literal(value).trim_matches('\'')))
 }
 
 fn comparison_text_literal_display_type(left: &Expr, right: &Expr) -> Option<SqlType> {
@@ -2693,6 +2752,16 @@ fn render_explain_cast(
                 render_explain_sql_type_name(ty)
             );
         }
+        if matches!(
+            ty.kind,
+            SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+        ) {
+            return format!(
+                "{}::{}",
+                render_explain_typed_literal(value, ty),
+                render_explain_sql_type_name(ty)
+            );
+        }
         return format!(
             "{}::{}",
             render_explain_literal(value),
@@ -2810,6 +2879,16 @@ fn render_explain_join_cast(
     if let Expr::Const(value) = expr {
         if matches!(ty.kind, SqlTypeKind::Oid) {
             return format!("'{}'::oid", render_explain_literal(value));
+        }
+        if matches!(
+            ty.kind,
+            SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+        ) {
+            return format!(
+                "{}::{}",
+                render_explain_typed_literal(value, ty),
+                render_explain_sql_type_name(ty)
+            );
         }
         return format!(
             "{}::{}",
