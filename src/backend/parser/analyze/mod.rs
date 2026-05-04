@@ -109,6 +109,37 @@ pub fn rewrite_bound_delete_auto_view_target(
     })
 }
 
+pub fn bind_rule_qual(
+    expr: &crate::include::nodes::parsenodes::SqlExpr,
+    relation_desc: &crate::include::nodes::primnodes::RelationDesc,
+    event: crate::include::nodes::parsenodes::RuleEvent,
+    catalog: &dyn CatalogLookup,
+) -> Result<crate::include::nodes::primnodes::Expr, ParseError> {
+    with_root_analyze_services_and_notices(|| {
+        pgrust_analyze::bind_rule_qual(expr, relation_desc, event, catalog)
+    })
+}
+
+pub fn bind_rule_action_statement(
+    statement: &crate::include::nodes::parsenodes::Statement,
+    relation_desc: &crate::include::nodes::primnodes::RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<pgrust_analyze::BoundRuleAction, ParseError> {
+    with_root_analyze_services_and_notices(|| {
+        pgrust_analyze::bind_rule_action_statement(statement, relation_desc, catalog)
+    })
+}
+
+pub fn validate_rule_definition(
+    stmt: &crate::include::nodes::parsenodes::CreateRuleStatement,
+    relation_desc: &crate::include::nodes::primnodes::RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    with_root_analyze_services_and_notices(|| {
+        pgrust_analyze::validate_rule_definition(stmt, relation_desc, catalog)
+    })
+}
+
 fn catalog_error_to_parse_error(err: CatalogError) -> ParseError {
     match err {
         CatalogError::TableAlreadyExists(name) => ParseError::TableAlreadyExists(name),
