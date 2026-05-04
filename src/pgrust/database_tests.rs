@@ -34828,6 +34828,57 @@ fn join_regress_outer_join_subquery_alias_executes_without_var_rewrite_panic() {
 }
 
 #[test]
+fn subselect_regress_lateral_values_in_executes_without_crash() {
+    let base = temp_dir("subselect_regress_lateral_values_in");
+    let db = Database::open(&base, 16).unwrap();
+
+    for sql in [
+        "create temp table onek (unique1 int4, unique2 int4, two int4, four int4, ten int4, \
+         twenty int4, hundred int4, thousand int4, twothousand int4, fivethous int4, \
+         tenthous int4, odd int4, even int4, stringu1 name, stringu2 name, string4 name)",
+        "insert into onek select g, 1000 - g, g % 2, g % 4, g % 10, g % 20, g % 100, g, \
+         g * 2, g * 5, g * 10, g * 2 + 1, g * 2, ('A' || g::text)::name, \
+         ('B' || g::text)::name, ('C' || (g % 4)::text)::name from generate_series(0, 999) g",
+        "create index onek_unique1 on onek using btree(unique1 int4_ops)",
+        "create index onek_unique2 on onek using btree(unique2 int4_ops)",
+        "analyze onek",
+    ] {
+        db.execute(1, sql).unwrap();
+    }
+
+    let _ = query_rows(
+        &db,
+        1,
+        "explain (costs off) select * from onek t1, \
+         lateral (select * from onek t2 where t2.ten in (values (t1.ten), (1)))",
+    );
+}
+
+#[test]
+fn subselect_regress_partitioned_exists_prune_sublink_executes_without_crash() {
+    let base = temp_dir("subselect_regress_partitioned_exists_prune_sublink");
+    let db = Database::open(&base, 16).unwrap();
+
+    for sql in [
+        "create temp table exists_tbl (c1 int, c2 int, c3 int) partition by list (c1)",
+        "create temp table exists_tbl_null partition of exists_tbl for values in (null)",
+        "create temp table exists_tbl_def partition of exists_tbl default",
+        "insert into exists_tbl select x, x/2, x+1 from generate_series(0,10) x",
+        "analyze exists_tbl",
+    ] {
+        db.execute(1, sql).unwrap();
+    }
+
+    let rows = query_rows(
+        &db,
+        1,
+        "explain (costs off) select * from exists_tbl t1 \
+         where (exists(select 1 from exists_tbl t2 where t1.c1 = t2.c2) or c3 < 0)",
+    );
+    assert!(!rows.is_empty());
+}
+
+#[test]
 fn join_regress_remaining_outer_join_crash_queries_do_not_panic() {
     let base = temp_dir("join_regress_remaining_crash_queries");
     let db = Database::open(&base, 16).unwrap();
