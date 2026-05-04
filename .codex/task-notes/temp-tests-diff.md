@@ -4,7 +4,9 @@ Diagnose and fix the ON COMMIT/FK portion of the temp regression diff from .cont
 Key decisions:
 PostgreSQL really raises "unsupported ON COMMIT and foreign key combination" at COMMIT when an ON COMMIT DELETE ROWS temp table is referenced by a temp table that is not also being truncated. pgrust now checks FK dependencies before applying commit-time temp truncates.
 
-Explicit pg_temp CREATE TYPE now resolves to the session temp namespace, records a temp effect, and marks composite type catalog rows as temp persistence. The remaining pasted diff still has separate causes: temp-schema CREATE VIEW rejection aborts the next 2PC block, and PL/pgSQL dynamic EXECUTE of DECLARE CURSOR routes through the read-only executor instead of the session portal path.
+Explicit pg_temp CREATE TYPE now resolves to the session temp namespace, records a temp effect, and marks composite type catalog rows as temp persistence.
+
+Explicit pg_temp CREATE VIEW now follows PostgreSQL's RangeVar creation-namespace behavior: targeting a temp namespace adjusts relation persistence to temporary, so CREATE VIEW succeeds and PREPARE TRANSACTION fails later with the temp-object 2PC error. The remaining pasted diff is PL/pgSQL dynamic EXECUTE of DECLARE CURSOR routing through the read-only executor instead of the session portal path.
 
 Files touched:
 .codex/task-notes/temp-tests-diff.md
@@ -23,6 +25,7 @@ CARGO_INCREMENTAL=0 scripts/cargo_isolated.sh check
 scripts/run_regression.sh --test temp --jobs 1 --timeout 180 --results-dir /tmp/diffs/temp-oncommit-fix --port 55437
 scripts/run_regression.sh --test temp --jobs 1 --timeout 180 --results-dir /tmp/diffs/temp-oncommit-fix2 --port 55438
 scripts/run_regression.sh --test temp --jobs 1 --timeout 180 --results-dir /tmp/diffs/temp-temp-type-fix --port 55439
+scripts/run_regression.sh --test temp --jobs 1 --timeout 120 --results-dir /tmp/diffs/temp-view-fix
 
 Remaining:
-Implement temp CREATE VIEW support or adjust fixture; teach PL/pgSQL dynamic EXECUTE/session path to handle DECLARE/FETCH portal commands if temp buffer pin tests should pass.
+Teach PL/pgSQL dynamic EXECUTE/session path to handle DECLARE/FETCH portal commands if temp buffer pin tests should pass.

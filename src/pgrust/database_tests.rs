@@ -51027,6 +51027,19 @@ fn pg_temp_function_drop_and_operator_create_reject_prepare() {
         ExecError::DetailedError { message, .. }
             if message == "cannot PREPARE a transaction that has operated on temporary objects"
     ));
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "create view pg_temp.twophase_view as select 1")
+        .unwrap();
+    let err = session
+        .execute(&db, "prepare transaction 'twophase_view'")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "cannot PREPARE a transaction that has operated on temporary objects"
+    ));
 }
 
 #[test]

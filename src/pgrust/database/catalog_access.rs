@@ -275,18 +275,17 @@ impl Database {
         txn_ctx: CatalogTxnContext,
         stmt: &CreateViewStatement,
         configured_search_path: Option<&[String]>,
-    ) -> Result<(String, u32), ParseError> {
+    ) -> Result<(String, u32, TablePersistence), ParseError> {
         let view_name = normalize_create_view_name(stmt)?;
-        let (storage_name, namespace_oid, _) = self.resolve_create_relation_target(
+        self.resolve_create_relation_target(
             client_id,
             txn_ctx,
             stmt.schema_name.as_deref(),
             &view_name,
             stmt.persistence,
             configured_search_path,
-            false,
-        )?;
-        Ok((storage_name, namespace_oid))
+            true,
+        )
     }
 
     pub(super) fn normalize_create_type_name_with_search_path(
