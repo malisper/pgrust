@@ -12,6 +12,9 @@ use crate::backend::parser::{
     CatalogLookup, CreateStatisticsStatement, SelectStatement, pg_plan_query_with_config,
     pg_plan_values_query_with_config, plan_merge,
 };
+use crate::backend::utils::cache::{
+    catcache::CatCache, relcache::RelCache, visible_catalog::VisibleCatalog,
+};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::pl::plpgsql::execute_do_with_context;
 use pgrust_executor::{
@@ -46,6 +49,13 @@ fn restrict_nonsystem_view_enabled(ctx: &ExecutorContext) -> bool {
         ctx.gucs
             .get("restrict_nonsystem_relation_kind")
             .map(String::as_str),
+    )
+}
+
+fn visible_catalog_for_planning(catalog: &Catalog) -> VisibleCatalog {
+    VisibleCatalog::new(
+        RelCache::from_catalog(catalog),
+        Some(CatCache::from_catalog(catalog)),
     )
 }
 
@@ -246,17 +256,18 @@ fn execute_statement_with_source(
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx, PlannerConfig::default()),
         Statement::Select(stmt) => {
             let requires_update = stmt.locking_clause.is_some();
+            let planning_catalog = visible_catalog_for_planning(catalog);
             if restrict_nonsystem_view_enabled(ctx) {
-                reject_restricted_views_in_select(&stmt, catalog)?;
+                reject_restricted_views_in_select(&stmt, &planning_catalog)?;
             }
             let planned = crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
                 restrict_nonsystem_view_enabled(ctx),
-                || pg_plan_query(&stmt, catalog),
+                || pg_plan_query(&stmt, &planning_catalog),
             )?;
             if requires_update {
                 check_planned_stmt_select_for_update_privileges(&planned, ctx)?;
             } else {
-                reject_restricted_views_in_planned_stmt(&planned, catalog, ctx)?;
+                reject_restricted_views_in_planned_stmt(&planned, &planning_catalog, ctx)?;
                 check_planned_stmt_select_privileges(&planned, ctx)?;
             }
             execute_query_desc(

@@ -48,6 +48,7 @@ pub struct TimestampGenerateSeriesState {
     sign: i32,
     output_kind: SqlTypeKind,
     emitted: usize,
+    finished: bool,
 }
 
 impl GenerateSeriesState {
@@ -184,10 +185,14 @@ impl TimestampGenerateSeriesState {
             sign,
             output_kind,
             emitted: 0,
+            finished: false,
         })
     }
 
     pub fn next_value(&mut self) -> Result<Option<Value>, GenerateSeriesError> {
+        if self.finished {
+            return Ok(None);
+        }
         let done = if self.sign > 0 {
             self.current > self.end
         } else {
@@ -204,11 +209,11 @@ impl TimestampGenerateSeriesState {
         if matches!(self.end, TIMESTAMP_NOEND | TIMESTAMP_NOBEGIN)
             && self.emitted >= MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS
         {
-            self.current = if self.sign > 0 { i64::MAX } else { i64::MIN };
+            self.finished = true;
             return Ok(Some(value));
         }
         let Some(next) = timestamp_add_interval(self.current, self.step) else {
-            self.current = if self.sign > 0 { i64::MAX } else { i64::MIN };
+            self.finished = true;
             return Ok(Some(value));
         };
         if next == self.current {
@@ -401,6 +406,31 @@ mod tests {
             Some(Value::Timestamp(TimestampADT(2 * USECS_PER_DAY)))
         );
         assert_eq!(state.next_value().unwrap(), None);
+    }
+
+    #[test]
+    fn timestamp_series_caps_unbounded_infinity() {
+        let mut state = TimestampGenerateSeriesState::new(
+            Value::Timestamp(TimestampADT(0)),
+            Value::Timestamp(TimestampADT(TIMESTAMP_NOEND)),
+            Value::Interval(IntervalValue {
+                months: 1,
+                days: 0,
+                time_micros: 0,
+            }),
+            SqlTypeKind::Timestamp,
+        )
+        .unwrap();
+
+        let mut emitted = 0usize;
+        while state.next_value().unwrap().is_some() {
+            emitted += 1;
+            assert!(
+                emitted <= MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS,
+                "unbounded timestamp series did not stop at cap"
+            );
+        }
+        assert_eq!(emitted, MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS);
     }
 
     #[test]
