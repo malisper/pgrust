@@ -456,11 +456,7 @@ impl CatalogStore {
             return Ok(extra_tuples);
         }
 
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let snapshot = ctx.snapshot_for_command()?;
         let rows = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
@@ -576,11 +572,7 @@ impl CatalogStore {
             return Err(CatalogError::Corrupt("syscache list key count mismatch"));
         }
 
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let snapshot = ctx.snapshot_for_command()?;
         let rows = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,

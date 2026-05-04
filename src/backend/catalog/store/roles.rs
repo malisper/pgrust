@@ -32,11 +32,7 @@ fn visible_role_catcache_for_ctx(
 ) -> Result<CatCache, CatalogError> {
     // Read the visible role rows without carrying the txns read lock into the
     // later MVCC insert/delete helpers, which may need to reacquire it.
-    let snapshot = ctx
-        .txns
-        .read()
-        .snapshot_for_command(ctx.xid, ctx.cid)
-        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    let snapshot = ctx.snapshot_for_command()?;
     let txns = ctx.txns.read();
     store.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)
 }

@@ -3484,6 +3484,9 @@ fn execute_planned_query_result_with_bindings(
     let planned_stmt = query_desc.planned_stmt;
     let saved_subplans = std::mem::replace(&mut ctx.subplans, planned_stmt.subplans);
     let saved_scalar_function_cache = std::mem::take(&mut ctx.scalar_function_cache);
+    let saved_cte_tables = ctx.cte_tables.clone();
+    let saved_cte_producers = ctx.cte_producers.clone();
+    let saved_recursive_worktables = ctx.recursive_worktables.clone();
     let result = (|| {
         let saved_exec_params = if planned_stmt.ext_params.is_empty() {
             Vec::new()
@@ -3539,6 +3542,9 @@ fn execute_planned_query_result_with_bindings(
         }
         result
     })();
+    ctx.recursive_worktables = saved_recursive_worktables;
+    ctx.cte_producers = saved_cte_producers;
+    ctx.cte_tables = saved_cte_tables;
     ctx.scalar_function_cache = saved_scalar_function_cache;
     ctx.subplans = saved_subplans;
     result

@@ -1967,10 +1967,7 @@ impl CatalogStore {
         let description_rows = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
-            &ctx.txns
-                .read()
-                .snapshot_for_command(ctx.xid, ctx.cid)
-                .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?,
+            &ctx.snapshot_for_command()?,
             ctx.client_id,
             self.scope_db_oid(),
             PG_DESCRIPTION_O_C_O_INDEX_OID,
@@ -4577,11 +4574,7 @@ impl CatalogStore {
         _nspacl: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let snapshot = ctx.snapshot_for_command()?;
         let existing_row = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
@@ -9324,11 +9317,7 @@ impl CatalogStore {
         max_target_attnum: i32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let snapshot = ctx.snapshot_for_command()?;
         let source_rows = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
@@ -9391,11 +9380,7 @@ impl CatalogStore {
         target_classoid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let snapshot = ctx.snapshot_for_command()?;
         let source_rows = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
@@ -9645,11 +9630,7 @@ impl CatalogStore {
         new_owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let snapshot = ctx.snapshot_for_command()?;
         let existing = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
@@ -9705,11 +9686,7 @@ impl CatalogStore {
         new_name: &str,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let snapshot = ctx.snapshot_for_command()?;
         let existing_row = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
@@ -9764,11 +9741,7 @@ impl CatalogStore {
         nspacl: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let snapshot = ctx.snapshot_for_command()?;
         let existing_row = probe_system_catalog_rows_visible_in_db(
             &ctx.pool,
             &ctx.txns,
@@ -9983,11 +9956,7 @@ fn visible_catalog_caches_for_ctx(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
 ) -> Result<(CatCache, RelCache), CatalogError> {
-    let snapshot = ctx
-        .txns
-        .read()
-        .snapshot_for_command(ctx.xid, ctx.cid)
-        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    let snapshot = ctx.snapshot_for_command()?;
     let txns = ctx.txns.read();
     let catcache = store.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
     let relcache = RelCache::from_catcache_in_db(&catcache, store.scope_db_oid())?;
@@ -10035,11 +10004,7 @@ fn tablespace_row_by_oid_mvcc(
     ctx: &CatalogWriteContext,
     tablespace_oid: u32,
 ) -> Result<Option<PgTablespaceRow>, CatalogError> {
-    let snapshot = ctx
-        .txns
-        .read()
-        .snapshot_for_command(ctx.xid, ctx.cid)
-        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    let snapshot = ctx.snapshot_for_command()?;
     Ok(probe_system_catalog_rows_visible_in_db(
         &ctx.pool,
         &ctx.txns,
@@ -11563,11 +11528,7 @@ fn cast_row_by_oid_mvcc(
     ctx: &CatalogWriteContext,
     cast_oid: u32,
 ) -> Result<Option<PgCastRow>, CatalogError> {
-    let snapshot = ctx
-        .txns
-        .read()
-        .snapshot_for_command(ctx.xid, ctx.cid)
-        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    let snapshot = ctx.snapshot_for_command()?;
     Ok(probe_system_catalog_rows_visible_in_db(
         &ctx.pool,
         &ctx.txns,
@@ -11592,11 +11553,7 @@ fn cast_row_by_source_target_mvcc(
     source_oid: u32,
     target_oid: u32,
 ) -> Result<Option<PgCastRow>, CatalogError> {
-    let snapshot = ctx
-        .txns
-        .read()
-        .snapshot_for_command(ctx.xid, ctx.cid)
-        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    let snapshot = ctx.snapshot_for_command()?;
     Ok(probe_system_catalog_rows_visible_in_db(
         &ctx.pool,
         &ctx.txns,
@@ -12027,11 +11984,7 @@ fn foreign_table_row_mvcc(
     ctx: &CatalogWriteContext,
     relation_oid: u32,
 ) -> Result<Option<PgForeignTableRow>, CatalogError> {
-    let snapshot = ctx
-        .txns
-        .read()
-        .snapshot_for_command(ctx.xid, ctx.cid)
-        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    let snapshot = ctx.snapshot_for_command()?;
     Ok(probe_system_catalog_rows_visible_in_db(
         &ctx.pool,
         &ctx.txns,

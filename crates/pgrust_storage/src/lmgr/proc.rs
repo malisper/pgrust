@@ -72,6 +72,15 @@ impl TransactionWaiter {
         self.cv.notify_all();
     }
 
+    pub fn holder_xids_for_client(&self, client_id: ClientId) -> Vec<TransactionId> {
+        let state = self.state.lock();
+        state
+            .holders
+            .iter()
+            .filter_map(|(xid, holder)| (*holder == client_id).then_some(*xid))
+            .collect()
+    }
+
     pub fn snapshot(&self) -> Vec<TransactionLockSnapshotRow> {
         let state = self.state.lock();
         let mut rows = Vec::new();

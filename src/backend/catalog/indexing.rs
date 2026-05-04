@@ -456,11 +456,7 @@ pub(crate) fn catalog_index_insert_state_for_db(
     heap_kind: BootstrapCatalogKind,
     db_oid: u32,
 ) -> Result<CatalogIndexInsertState, CatalogError> {
-    let snapshot = ctx
-        .txns
-        .read()
-        .snapshot_for_command(ctx.xid, ctx.cid)
-        .map_err(|err| CatalogError::Io(format!("catalog snapshot failed: {err:?}")))?;
+    let snapshot = ctx.snapshot_for_command()?;
     let heap_relation = bootstrap_catalog_rel(heap_kind, db_oid);
     let heap_desc = crate::include::catalog::bootstrap_relation_desc(heap_kind);
     let contexts = system_catalog_indexes_for_heap(heap_kind)

@@ -55665,6 +55665,40 @@ fn truncate_rollback_restores_relfilenodes_and_rows() {
 }
 
 #[test]
+fn truncate_after_savepoint_uses_current_catalog_version() {
+    let base = temp_dir("txn_truncate_savepoint_catalog_version");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table trunc_sp (note text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into trunc_sp values ('a0'), ('b')")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "truncate trunc_sp").unwrap();
+    session
+        .execute(&db, "insert into trunc_sp values ('a1'), ('b')")
+        .unwrap();
+    session.execute(&db, "savepoint s1").unwrap();
+    session.execute(&db, "truncate trunc_sp").unwrap();
+    session
+        .execute(&db, "insert into trunc_sp values ('d1'), ('e')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select note from trunc_sp order by note"),
+        vec![
+            vec![Value::Text("d1".into())],
+            vec![Value::Text("e".into())],
+        ]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
 fn failed_transaction_rejects_commands() {
     let base = temp_dir("failed_txn");
     let db = Database::open(&base, 64).unwrap();
@@ -60818,6 +60852,57 @@ fn create_recursive_view_executes_and_viewdef_keeps_with() {
         panic!("expected text view definition");
     };
     assert!(definition.contains("WITH RECURSIVE nums(n) AS"));
+}
+
+#[test]
+fn nested_cte_survives_plpgsql_internal_select() {
+    let dir = temp_dir("nested_cte_plpgsql_internal_select");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set statement_timeout = '2s'")
+        .unwrap();
+    session
+        .execute(&db, "create table cte_inputs(i int4 primary key)")
+        .unwrap();
+    session
+        .execute(&db, "insert into cte_inputs values (1), (2)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function plpgsql_select_identity(x int4) returns int4 language plpgsql as $$
+             declare y int4;
+             begin
+               select x into y;
+               return y;
+             end;
+             $$",
+        )
+        .unwrap();
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "with test_bytes as (
+           select i, plpgsql_select_identity(i) as v from cte_inputs
+         ), test_padded as (
+           select i, plpgsql_select_identity(v + 100) as v from test_bytes
+         )
+         select p.i, b.v, p.v
+         from test_padded p
+         join test_bytes b using (i)
+         order by p.i",
+    );
+
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int32(1), Value::Int32(1), Value::Int32(101)],
+            vec![Value::Int32(2), Value::Int32(2), Value::Int32(102)],
+        ]
+    );
 }
 
 #[test]

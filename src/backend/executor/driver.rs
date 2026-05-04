@@ -142,6 +142,9 @@ pub fn execute_query_desc(
     let saved_scalar_function_cache = std::mem::take(&mut ctx.scalar_function_cache);
     let saved_proc_execute_acl_cache = std::mem::take(&mut ctx.proc_execute_acl_cache);
     let saved_initplan_values = std::mem::take(&mut ctx.expr_bindings.initplan_values);
+    let saved_cte_tables = ctx.cte_tables.clone();
+    let saved_cte_producers = ctx.cte_producers.clone();
+    let saved_recursive_worktables = ctx.recursive_worktables.clone();
     let result = (|| {
         let saved_exec_params = if planned_stmt.ext_params.is_empty() {
             Vec::new()
@@ -195,6 +198,9 @@ pub fn execute_query_desc(
         }
         result
     })();
+    ctx.recursive_worktables = saved_recursive_worktables;
+    ctx.cte_producers = saved_cte_producers;
+    ctx.cte_tables = saved_cte_tables;
     ctx.expr_bindings.initplan_values = saved_initplan_values;
     ctx.proc_execute_acl_cache = saved_proc_execute_acl_cache;
     ctx.scalar_function_cache = saved_scalar_function_cache;
