@@ -1115,18 +1115,14 @@ pub fn bind_lowered_comparison_expr(
         }
         (left, right)
     };
-    let collation_oid = derive_consumer_collation(
+    let left_collation_type = expr_sql_type_hint(&left).unwrap_or(left_type);
+    let right_collation_type = expr_sql_type_hint(&right).unwrap_or(right_type);
+    let collation_oid = derive_consumer_collation_from_exprs(
         catalog,
         CollationConsumer::StringComparison,
         &[
-            (
-                expr_sql_type_hint(&left).unwrap_or(left_type),
-                left_explicit_collation,
-            ),
-            (
-                expr_sql_type_hint(&right).unwrap_or(right_type),
-                right_explicit_collation,
-            ),
+            (&left, left_collation_type, left_explicit_collation),
+            (&right, right_collation_type, right_explicit_collation),
         ],
     )?;
     Ok(Expr::op_with_collation(

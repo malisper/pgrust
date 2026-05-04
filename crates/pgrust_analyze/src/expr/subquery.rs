@@ -661,8 +661,29 @@ fn bind_row_valued_in_testexpr(
                 right_type: sql_type_name(common),
             });
         }
-        coerced_fields.push((field_name, coerce_bound_expr(field_expr, left_type, common)));
-        target.expr = coerce_bound_expr(target.expr.clone(), right_type, common);
+        let coerced_left = coerce_bound_expr(field_expr, left_type, common);
+        let coerced_right = coerce_bound_expr(target.expr.clone(), right_type, common);
+        derive_consumer_collation_from_exprs(
+            catalog,
+            CollationConsumer::StringComparison,
+            &[
+                (&coerced_left, common, None),
+                (&coerced_right, common, None),
+            ],
+        )
+        .map_err(|err| match err {
+            ParseError::DetailedError {
+                sqlstate: "42P21", ..
+            } => ParseError::DetailedError {
+                message: "could not determine which collation to use for string hashing".into(),
+                detail: None,
+                hint: Some("Use the COLLATE clause to set the collation explicitly.".into()),
+                sqlstate: "42P22",
+            },
+            other => other,
+        })?;
+        coerced_fields.push((field_name, coerced_left));
+        target.expr = coerced_right;
         target.sql_type = common;
     }
     let descriptor = assign_anonymous_record_descriptor(
@@ -888,12 +909,12 @@ pub(super) fn bind_quantified_array_expr(
     let left = coerce_bound_expr(bound_left, raw_left_type, comparison_left_type);
     let collation_oid = consumer_for_subquery_comparison_op(op)
         .map(|consumer| {
-            derive_consumer_collation(
+            derive_consumer_collation_from_exprs(
                 catalog,
                 consumer,
                 &[
-                    (comparison_left_type, left_explicit_collation),
-                    (target_array_type.element_type(), None),
+                    (&left, comparison_left_type, left_explicit_collation),
+                    (&bound_array, target_array_type.element_type(), None),
                 ],
             )
         })

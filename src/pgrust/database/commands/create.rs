@@ -277,6 +277,46 @@ pub(super) fn describe_select_query_without_planning(
     Ok((query.columns(), query.column_names()))
 }
 
+fn validate_create_table_as_output_collations(query: &Query) -> Result<(), ExecError> {
+    if let Some(set_operation) = &query.set_operation {
+        for column in &set_operation.output_desc.columns {
+            if is_collatable_type(column.sql_type) && column.collation_oid == 0 {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!(
+                        "no collation was derived for column \"{}\" with collatable type {}",
+                        column.name,
+                        format_sql_type_name(column.sql_type)
+                    ),
+                    detail: None,
+                    hint: Some("Use the COLLATE clause to set the collation explicitly.".into()),
+                    sqlstate: "42P22",
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_create_table_as_select_output_collations(
+    stmt: &crate::backend::parser::SelectStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    let (query, _) = crate::backend::parser::analyze_select_query_with_outer(
+        stmt,
+        catalog,
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+    )?;
+    let rewritten = crate::backend::rewrite::pg_rewrite_query(query, catalog)?;
+    for query in &rewritten {
+        validate_create_table_as_output_collations(query)?;
+    }
+    Ok(())
+}
+
 fn split_sql_body_statements(body: &str) -> Result<Vec<String>, ExecError> {
     let body = sql_standard_body_inner(body).unwrap_or(body);
     let mut statements = Vec::new();
@@ -7506,6 +7546,7 @@ impl Database {
                 }));
             }
         };
+        validate_create_table_as_select_output_collations(select_query, &catalog)?;
 
         let mut snapshot = self.txns.read().snapshot_for_command(xid, table_cid)?;
         snapshot.set_heap_current_cid(heap_cid);

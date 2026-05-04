@@ -143,6 +143,28 @@ impl AnalyzedFrom {
                 .map(|column| column_desc(column.name.clone(), column.sql_type, true))
                 .collect(),
         };
+        Self::values_with_desc(rows, output_columns, desc)
+    }
+
+    pub(super) fn values_with_desc(
+        rows: Vec<Vec<Expr>>,
+        output_columns: Vec<QueryColumn>,
+        desc: RelationDesc,
+    ) -> Self {
+        let output_exprs = desc
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(index),
+                    varlevelsup: 0,
+                    vartype: column.sql_type,
+                    collation_oid: (column.collation_oid != 0).then_some(column.collation_oid),
+                })
+            })
+            .collect();
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
@@ -159,7 +181,7 @@ impl AnalyzedFrom {
                 },
             }],
             jointree: Some(JoinTreeNode::RangeTblRef(1)),
-            output_exprs: rte_output_exprs(1, &output_columns),
+            output_exprs,
             output_columns,
         }
     }

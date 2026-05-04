@@ -286,14 +286,29 @@ pub(super) fn bind_values_rows(
             wire_type_oid: None,
         })
         .collect::<Vec<_>>();
-    let desc = RelationDesc {
+    let mut desc = RelationDesc {
         columns: output_columns
             .iter()
             .map(|col| column_desc(col.name.clone(), col.sql_type, true))
             .collect(),
     };
+    for (col_idx, column) in desc.columns.iter_mut().enumerate() {
+        if !super::collation::is_collatable_type(column.sql_type) {
+            continue;
+        }
+        let inputs = bound_rows
+            .iter()
+            .filter_map(|row| row.get(col_idx).map(|expr| (expr, column.sql_type, None)))
+            .collect::<Vec<_>>();
+        column.collation_oid = super::collation::derive_consumer_collation_from_exprs(
+            catalog,
+            super::collation::CollationConsumer::StringComparison,
+            &inputs,
+        )?
+        .unwrap_or(0);
+    }
     Ok((
-        AnalyzedFrom::values(bound_rows, output_columns),
+        AnalyzedFrom::values_with_desc(bound_rows, output_columns, desc.clone()),
         scope_for_relation(None, &desc),
     ))
 }

@@ -10021,7 +10021,10 @@ fn psql_describe_columns_query(
                 row.push(Value::Bool(!column.storage.nullable));
             }
             if include_attcollation {
-                row.push(Value::Null);
+                row.push(psql_column_collation_display_value(
+                    &catalog,
+                    display_column,
+                ));
             }
             if include_attidentity {
                 row.push(Value::InternalChar(
@@ -10105,6 +10108,26 @@ fn psql_format_fdw_options(options: Option<&[String]>) -> String {
 
 fn psql_quote_ident_if_needed(ident: &str) -> String {
     pgrust_protocol::sql::psql_quote_ident_if_needed(ident)
+}
+
+fn psql_column_collation_display_value(
+    catalog: &impl crate::backend::parser::CatalogLookup,
+    column: &crate::include::nodes::primnodes::ColumnDesc,
+) -> Value {
+    let default_collation =
+        crate::backend::catalog::catalog::default_column_collation_oid(column.sql_type);
+    if column.collation_oid == 0
+        || column.collation_oid == default_collation
+        || column.collation_oid == crate::include::catalog::DEFAULT_COLLATION_OID
+    {
+        return Value::Null;
+    }
+    catalog
+        .collation_rows()
+        .into_iter()
+        .find(|row| row.oid == column.collation_oid)
+        .map(|row| Value::Text(row.collname.into()))
+        .unwrap_or(Value::Null)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

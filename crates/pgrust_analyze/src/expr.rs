@@ -4985,9 +4985,26 @@ pub fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?;
-                let (_, expr_explicit_collation) = strip_explicit_collation(bound_expr);
-                let (_, pattern_explicit_collation) = strip_explicit_collation(bound_pattern);
-                derive_consumer_collation(
+                let (bound_expr, expr_explicit_collation) = strip_explicit_collation(bound_expr);
+                let (bound_pattern, pattern_explicit_collation) =
+                    strip_explicit_collation(bound_pattern);
+                let expr_type = infer_sql_expr_type_with_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                let pattern_type = infer_sql_expr_type_with_ctes(
+                    pattern,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                derive_consumer_collation_from_exprs(
                     catalog,
                     if *case_insensitive {
                         CollationConsumer::ILike
@@ -4995,28 +5012,8 @@ pub fn bind_expr_with_outer_and_ctes(
                         CollationConsumer::Like
                     },
                     &[
-                        (
-                            infer_sql_expr_type_with_ctes(
-                                expr,
-                                scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                                ctes,
-                            ),
-                            expr_explicit_collation,
-                        ),
-                        (
-                            infer_sql_expr_type_with_ctes(
-                                pattern,
-                                scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                                ctes,
-                            ),
-                            pattern_explicit_collation,
-                        ),
+                        (&bound_expr, expr_type, expr_explicit_collation),
+                        (&bound_pattern, pattern_type, pattern_explicit_collation),
                     ],
                 )?
             },
@@ -5078,34 +5075,31 @@ pub fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?;
-                let (_, expr_explicit_collation) = strip_explicit_collation(bound_expr);
-                let (_, pattern_explicit_collation) = strip_explicit_collation(bound_pattern);
-                derive_consumer_collation(
+                let (bound_expr, expr_explicit_collation) = strip_explicit_collation(bound_expr);
+                let (bound_pattern, pattern_explicit_collation) =
+                    strip_explicit_collation(bound_pattern);
+                let expr_type = infer_sql_expr_type_with_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                let pattern_type = infer_sql_expr_type_with_ctes(
+                    pattern,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                derive_consumer_collation_from_exprs(
                     catalog,
                     CollationConsumer::Similar,
                     &[
-                        (
-                            infer_sql_expr_type_with_ctes(
-                                expr,
-                                scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                                ctes,
-                            ),
-                            expr_explicit_collation,
-                        ),
-                        (
-                            infer_sql_expr_type_with_ctes(
-                                pattern,
-                                scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                                ctes,
-                            ),
-                            pattern_explicit_collation,
-                        ),
+                        (&bound_expr, expr_type, expr_explicit_collation),
+                        (&bound_pattern, pattern_type, pattern_explicit_collation),
                     ],
                 )?
             },

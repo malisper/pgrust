@@ -79,6 +79,16 @@ impl Database {
         let current_user_oid = self.auth_state(client_id).current_user_oid();
         let row = match &stmt.kind {
             CreateCollationKind::From { source_collation } => {
+                if source_collation.eq_ignore_ascii_case("default")
+                    || source_collation.eq_ignore_ascii_case("pg_catalog.default")
+                {
+                    return Err(ExecError::DetailedError {
+                        message: "collation \"default\" cannot be copied".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
                 let source = resolve_collation_row(
                     self,
                     client_id,
@@ -215,6 +225,23 @@ impl Database {
             });
         }
         ensure_collation_owner(self, client_id, Some((xid, cid)), &row)?;
+        if !stmt.cascade
+            && let Some((relation_name, column_name)) =
+                find_column_depending_on_collation(self, client_id, Some((xid, cid)), row.oid)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop collation {} because other objects depend on it",
+                    row.collname
+                ),
+                detail: Some(format!(
+                    "column {} of table {} depends on collation {}",
+                    column_name, relation_name, row.collname
+                )),
+                hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+                sqlstate: "2BP01",
+            });
+        }
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -235,6 +262,26 @@ impl Database {
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }
+}
+
+fn find_column_depending_on_collation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    collation_oid: u32,
+) -> Option<(String, String)> {
+    let catcache = db.backend_catcache(client_id, txn_ctx).ok()?;
+    let classes = catcache.class_rows();
+    catcache
+        .attribute_rows()
+        .into_iter()
+        .filter(|attr| attr.attnum > 0 && !attr.attisdropped && attr.attcollation == collation_oid)
+        .find_map(|attr| {
+            classes
+                .iter()
+                .find(|class| class.oid == attr.attrelid)
+                .map(|class| (class.relname.clone(), attr.attname))
+        })
 }
 
 fn resolve_collation_create_name(
