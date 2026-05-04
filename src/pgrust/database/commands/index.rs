@@ -1306,6 +1306,122 @@ impl Database {
         Ok(())
     }
 
+    fn is_brin_bloom_opclass(opclass: &PgOpclassRow) -> bool {
+        matches!(
+            opclass.opcfamily,
+            crate::include::catalog::BRIN_BYTEA_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_CHAR_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_NAME_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_INTEGER_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_TEXT_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_OID_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_TID_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_FLOAT_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_MACADDR_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_MACADDR8_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_NETWORK_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_BPCHAR_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_TIME_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_DATETIME_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_INTERVAL_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_TIMETZ_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_NUMERIC_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_UUID_BLOOM_FAMILY_OID
+                | crate::include::catalog::BRIN_PG_LSN_BLOOM_FAMILY_OID
+        )
+    }
+
+    fn validate_brin_bloom_opclass_options(options: &[RelOption]) -> Result<(), ExecError> {
+        let mut seen_n_distinct_per_range = false;
+        let mut seen_false_positive_rate = false;
+        for option in options {
+            if option.name.eq_ignore_ascii_case("n_distinct_per_range") {
+                if seen_n_distinct_per_range {
+                    return Err(ExecError::DetailedError {
+                        message: "parameter \"n_distinct_per_range\" specified more than once"
+                            .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22023",
+                    });
+                }
+                seen_n_distinct_per_range = true;
+                let value = option
+                    .value
+                    .parse::<f64>()
+                    .map_err(|_| ExecError::DetailedError {
+                        message: format!(
+                            "invalid value for option \"n_distinct_per_range\": \"{}\"",
+                            option.value
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22023",
+                    })?;
+                if !(-1.0..=2_147_483_647.0).contains(&value) {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "value {} out of bounds for option \"n_distinct_per_range\"",
+                            option.value
+                        ),
+                        detail: Some(
+                            "Valid values are between \"-1.000000\" and \"2147483647.000000\"."
+                                .into(),
+                        ),
+                        hint: None,
+                        sqlstate: "22023",
+                    });
+                }
+                continue;
+            }
+            if option.name.eq_ignore_ascii_case("false_positive_rate") {
+                if seen_false_positive_rate {
+                    return Err(ExecError::DetailedError {
+                        message: "parameter \"false_positive_rate\" specified more than once"
+                            .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22023",
+                    });
+                }
+                seen_false_positive_rate = true;
+                let value = option
+                    .value
+                    .parse::<f64>()
+                    .map_err(|_| ExecError::DetailedError {
+                        message: format!(
+                            "invalid value for option \"false_positive_rate\": \"{}\"",
+                            option.value
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22023",
+                    })?;
+                if !(0.0001..=0.25).contains(&value) {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "value {} out of bounds for option \"false_positive_rate\"",
+                            option.value
+                        ),
+                        detail: Some(
+                            "Valid values are between \"0.000100\" and \"0.250000\".".into(),
+                        ),
+                        hint: None,
+                        sqlstate: "22023",
+                    });
+                }
+                continue;
+            }
+            return Err(ExecError::DetailedError {
+                message: format!("unrecognized parameter \"{}\"", option.name),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        Ok(())
+    }
+
     fn validate_index_opclass_options(
         access_method_oid: u32,
         opclass: &PgOpclassRow,
@@ -1316,6 +1432,9 @@ impl Database {
         }
         if access_method_oid == BRIN_AM_OID && Self::is_brin_minmax_multi_opclass(opclass) {
             return Self::validate_brin_minmax_multi_opclass_options(&column.opclass_options);
+        }
+        if access_method_oid == BRIN_AM_OID && Self::is_brin_bloom_opclass(opclass) {
+            return Self::validate_brin_bloom_opclass_options(&column.opclass_options);
         }
         if access_method_oid != GIST_AM_OID || opclass.opcfamily != GIST_TSVECTOR_FAMILY_OID {
             return Err(ExecError::DetailedError {
