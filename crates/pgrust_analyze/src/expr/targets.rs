@@ -29,6 +29,31 @@ fn input_resno_for_scope_expr(scope: &BoundScope, expr: &Expr) -> Option<usize> 
         .map(|index| index + 1)
 }
 
+fn direct_column_input_resno(scope: &BoundScope, expr: &SqlExpr) -> Option<usize> {
+    let SqlExpr::Column(name) = expr else {
+        return None;
+    };
+    let (relation, column_name) = name
+        .rsplit_once('.')
+        .map_or((None, name.as_str()), |(relation, column)| {
+            (Some(relation), column)
+        });
+    let mut matches = scope.columns.iter().enumerate().filter(|(_, column)| {
+        !column.hidden
+            && column.output_name.eq_ignore_ascii_case(column_name)
+            && relation.is_none_or(|relation| {
+                column
+                    .relation_names
+                    .iter()
+                    .any(|visible_relation| visible_relation.eq_ignore_ascii_case(relation))
+            })
+    });
+    let Some((index, _)) = matches.next() else {
+        return None;
+    };
+    matches.next().is_none().then_some(index + 1)
+}
+
 pub fn bind_select_targets(
     targets: &[SelectItem],
     scope: &BoundScope,
@@ -84,6 +109,7 @@ fn bind_select_item_once(
         ));
     }
 
+    let direct_input_resno = direct_column_input_resno(scope, &item.expr);
     let typed = bind_typed_expr_with_outer_and_ctes(
         &item.expr,
         scope,
@@ -93,7 +119,7 @@ fn bind_select_item_once(
         ctes,
     )?;
     let output_name = select_item_output_name(item, &typed.expr);
-    let input_resno = input_resno_for_scope_expr(scope, &typed.expr);
+    let input_resno = direct_input_resno.or_else(|| input_resno_for_scope_expr(scope, &typed.expr));
     Ok(vec![BoundScalarSelectTarget {
         output_name,
         expr: typed.expr,

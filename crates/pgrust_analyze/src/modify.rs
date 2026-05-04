@@ -1498,7 +1498,7 @@ fn bind_merge_when_clause(
                             .zip(target_columns.iter())
                             .map(|(cell, target)| match cell {
                                 InsertValuesCell::Raw(expr) => {
-                                    ensure_generated_assignment_allowed(
+                                    ensure_generated_insert_assignment_allowed(
                                         target_desc,
                                         target,
                                         Some(expr),
@@ -1531,7 +1531,7 @@ fn bind_merge_when_clause(
                                     }
                                 }
                                 InsertValuesCell::Bound(expr) => {
-                                    ensure_generated_assignment_allowed(
+                                    ensure_generated_insert_assignment_allowed(
                                         target_desc,
                                         target,
                                         Some(&SqlExpr::Const(Value::Null)),
@@ -5256,6 +5256,7 @@ fn auto_view_base_target(
 
 fn ensure_auto_view_insert_generated_assignment_allowed(
     ctx: Option<&AutoViewInsertContext>,
+    view_desc: &RelationDesc,
     target: &BoundAssignmentTarget,
     expr: Option<&SqlExpr>,
 ) -> Result<(), ParseError> {
@@ -5265,7 +5266,19 @@ fn ensure_auto_view_insert_generated_assignment_allowed(
     let Some(base_target) = auto_view_base_target(ctx, target) else {
         return Ok(());
     };
-    ensure_generated_assignment_allowed(&ctx.base_desc, &base_target, expr)
+    if expr.is_some_and(|expr| matches!(expr, SqlExpr::Default))
+        && view_desc
+            .columns
+            .get(target.column_index)
+            .is_some_and(|column| column.default_expr.is_some())
+    {
+        return ensure_generated_insert_assignment_allowed(
+            &ctx.base_desc,
+            &base_target,
+            Some(&SqlExpr::Const(Value::Null)),
+        );
+    }
+    ensure_generated_insert_assignment_allowed(&ctx.base_desc, &base_target, expr)
 }
 
 fn insert_default_expr_for_target(
@@ -6132,11 +6145,8 @@ pub(super) fn ensure_generated_assignment_allowed(
     }
     if expr.is_some_and(|expr| !matches!(expr, SqlExpr::Default)) {
         return Err(ParseError::DetailedError {
-            message: format!(
-                "column \"{}\" of relation is a generated column",
-                column.name
-            ),
-            detail: Some("Generated columns can only be assigned DEFAULT.".into()),
+            message: format!("column \"{}\" can only be updated to DEFAULT", column.name),
+            detail: Some(format!("Column \"{}\" is a generated column.", column.name)),
             hint: None,
             sqlstate: "428C9",
         });
@@ -6501,10 +6511,11 @@ pub fn bind_insert_with_outer_scopes_and_ctes(
                             InsertValuesCell::Raw(expr) => {
                                 ensure_auto_view_insert_generated_assignment_allowed(
                                     auto_view_insert_context.as_ref(),
+                                    &entry.desc,
                                     target,
                                     Some(expr),
                                 )?;
-                                ensure_generated_assignment_allowed(
+                                ensure_generated_insert_assignment_allowed(
                                     &entry.desc,
                                     target,
                                     Some(expr),
@@ -6542,10 +6553,11 @@ pub fn bind_insert_with_outer_scopes_and_ctes(
                             InsertValuesCell::Bound(expr) => {
                                 ensure_auto_view_insert_generated_assignment_allowed(
                                     auto_view_insert_context.as_ref(),
+                                    &entry.desc,
                                     target,
                                     Some(&SqlExpr::Const(Value::Null)),
                                 )?;
-                                ensure_generated_assignment_allowed(
+                                ensure_generated_insert_assignment_allowed(
                                     &entry.desc,
                                     target,
                                     Some(&SqlExpr::Const(Value::Null)),
@@ -6628,6 +6640,7 @@ pub fn bind_insert_with_outer_scopes_and_ctes(
             for target in &target_columns {
                 ensure_auto_view_insert_generated_assignment_allowed(
                     auto_view_insert_context.as_ref(),
+                    &entry.desc,
                     target,
                     Some(&SqlExpr::Const(Value::Null)),
                 )?;

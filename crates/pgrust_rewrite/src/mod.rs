@@ -300,8 +300,24 @@ fn collect_query_relation_privileges_into(
     if let Some(jointree) = &query.jointree {
         collect_join_tree_relation_privileges(jointree, query, &mut local_privileges, privileges);
     }
+    let single_relation_target_varno = (query.rtable.len() == 1
+        && matches!(query.rtable[0].kind, RangeTblEntryKind::Relation { .. }))
+    .then_some(1);
     for target in &query.target_list {
-        collect_expr_relation_privileges(&target.expr, query, &mut local_privileges, privileges);
+        if let (Some(varno), Some(input_resno)) = (single_relation_target_varno, target.input_resno)
+            && let Some(permission) = local_privileges.get_mut(varno - 1).and_then(Option::as_mut)
+        {
+            permission.selected_columns.push(input_resno - 1);
+            permission.selected_columns.sort_unstable();
+            permission.selected_columns.dedup();
+        } else {
+            collect_expr_relation_privileges(
+                &target.expr,
+                query,
+                &mut local_privileges,
+                privileges,
+            );
+        }
     }
     for clause in &query.distinct_on {
         collect_expr_relation_privileges(&clause.expr, query, &mut local_privileges, privileges);

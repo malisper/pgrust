@@ -439,7 +439,12 @@ pub fn bind_user_defined_scalar_function_call_from_resolved_typed_args(
     reject_unknown_ordinary_polymorphic_args(resolved, args)?;
     let coerced_args =
         coerce_resolved_user_defined_function_args(resolved, bound_args_with_types, catalog)?;
-    if let Some(inlined) = try_inline_scalar_sql_function(resolved, &coerced_args, catalog)? {
+    // :HACK: Keep SQL-function calls visible to the executor so function
+    // EXECUTE privileges are enforced. A later inliner should carry ACL checks.
+    let inline_sql_functions = false;
+    if inline_sql_functions
+        && let Some(inlined) = try_inline_scalar_sql_function(resolved, &coerced_args, catalog)?
+    {
         return Ok(inlined);
     }
     Ok(Expr::user_defined_func(

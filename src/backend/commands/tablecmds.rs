@@ -5486,9 +5486,10 @@ fn move_updated_row_to_partition(
         return Ok(WriteUpdatedRowResult::AlreadyModified);
     };
     capture_copy_to_dml_notices();
-    materialize_generated_columns(
+    materialize_generated_columns_with_tableoid(
         &destination.relation_info.relation.desc,
         &mut destination_values,
+        Some(destination.relation_info.relation.relation_oid),
         ctx,
     )?;
     let projected_values = remap_partition_row_to_parent_layout(
@@ -5727,7 +5728,12 @@ pub(crate) fn write_updated_row(
     )>,
 ) -> Result<WriteUpdatedRowResult, ExecError> {
     let mut current_values = current_values.to_vec();
-    materialize_generated_columns(desc, &mut current_values, ctx)?;
+    materialize_generated_columns_with_tableoid(
+        desc,
+        &mut current_values,
+        Some(relation_oid),
+        ctx,
+    )?;
     if let Some(catalog) = ctx.catalog.as_deref() {
         let namespace_oid = catalog
             .class_row_by_oid(relation_oid)
@@ -7207,6 +7213,15 @@ pub(crate) fn materialize_generated_columns(
     values: &mut [Value],
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    materialize_generated_columns_with_tableoid(desc, values, None, ctx)
+}
+
+pub(crate) fn materialize_generated_columns_with_tableoid(
+    desc: &RelationDesc,
+    values: &mut [Value],
+    table_oid: Option<u32>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
     if !desc.columns.iter().any(|column| column.generated.is_some()) {
         return Ok(());
     }
@@ -7241,9 +7256,10 @@ pub(crate) fn materialize_generated_columns(
             })
             .collect::<Result<Vec<_>, ExecError>>()?
     };
-    let mut slot = TupleSlot::virtual_row(values.to_vec());
+    let mut slot = TupleSlot::virtual_row_with_metadata(values.to_vec(), None, table_oid);
     for (column_index, expr) in generated_exprs {
         values[column_index] = eval_expr(&expr, &mut slot, ctx)?.to_owned_value();
+        slot.tts_values[column_index] = values[column_index].clone();
     }
     for (column_index, column) in desc.columns.iter().enumerate() {
         match column.generated {
@@ -10886,7 +10902,12 @@ fn execute_merge_insert_action(
             return Ok(None);
         };
         capture_copy_to_dml_notices();
-        materialize_generated_columns(&stmt.desc, &mut row_values, ctx)?;
+        materialize_generated_columns_with_tableoid(
+            &stmt.desc,
+            &mut row_values,
+            Some(stmt.relation_oid),
+            ctx,
+        )?;
         coerce_user_defined_base_assignments(&stmt.desc, &mut row_values, ctx)?;
         enforce_insert_domain_constraints(&stmt.desc, &row_values, ctx)?;
         enforce_exclusion_constraints_against_values(
@@ -11058,7 +11079,12 @@ fn execute_merge_update_row(
         return Ok(None);
     };
     capture_copy_to_dml_notices();
-    materialize_generated_columns(&stmt.desc, &mut updated_values, ctx)?;
+    materialize_generated_columns_with_tableoid(
+        &stmt.desc,
+        &mut updated_values,
+        Some(stmt.relation_oid),
+        ctx,
+    )?;
     let target_is_child_layout = target_relation
         .as_ref()
         .is_some_and(|relation| relation.relation_oid != stmt.relation_oid);
@@ -12772,7 +12798,12 @@ pub(crate) fn execute_insert_rows(
                 return Ok(());
             };
             capture_copy_to_dml_notices();
-            materialize_generated_columns(desc, &mut values, ctx)?;
+            materialize_generated_columns_with_tableoid(
+                desc,
+                &mut values,
+                Some(relation_oid),
+                ctx,
+            )?;
             coerce_user_defined_base_assignments(desc, &mut values, ctx)?;
             enforce_insert_domain_constraints(desc, &values, ctx)?;
             enforce_partition_constraint_after_before_insert(
@@ -13070,7 +13101,12 @@ pub fn execute_prepared_insert_row(
         }
         return Ok(());
     };
-    materialize_generated_columns(&prepared.desc, &mut values, ctx)?;
+    materialize_generated_columns_with_tableoid(
+        &prepared.desc,
+        &mut values,
+        Some(prepared.relation_oid),
+        ctx,
+    )?;
     let heap_tid = write_insert_heap_row(
         &prepared.relation_name,
         &prepared.relation_name,
@@ -13312,7 +13348,12 @@ pub fn execute_update_with_waiter(
                         break;
                     };
                     capture_copy_to_dml_notices();
-                    materialize_generated_columns(&target.desc, &mut triggered_values, ctx)?;
+                    materialize_generated_columns_with_tableoid(
+                        &target.desc,
+                        &mut triggered_values,
+                        Some(target.relation_oid),
+                        ctx,
+                    )?;
                     match write_updated_row(
                         &target.relation_name,
                         target.rel,
@@ -13787,7 +13828,12 @@ fn execute_update_from_joined_input(
                     break;
                 };
                 capture_copy_to_dml_notices();
-                materialize_generated_columns(&target.desc, &mut triggered_values, ctx)?;
+                materialize_generated_columns_with_tableoid(
+                    &target.desc,
+                    &mut triggered_values,
+                    Some(target.relation_oid),
+                    ctx,
+                )?;
                 match write_updated_row(
                     &target.relation_name,
                     target.rel,
@@ -14755,7 +14801,12 @@ pub(crate) fn apply_base_update_row(
     let mut current_values = new_values;
     loop {
         ctx.check_for_interrupts()?;
-        materialize_generated_columns(&target.desc, &mut current_values, ctx)?;
+        materialize_generated_columns_with_tableoid(
+            &target.desc,
+            &mut current_values,
+            Some(target.relation_oid),
+            ctx,
+        )?;
         if let Some(catalog) = ctx.catalog.as_deref() {
             let namespace_oid = catalog
                 .class_row_by_oid(target.relation_oid)

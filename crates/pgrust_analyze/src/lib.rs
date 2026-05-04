@@ -69,8 +69,8 @@ use pgrust_nodes::plannodes::{Plan, PlannedStmt};
 use pgrust_nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, HypotheticalAggFunc, JsonTableFunction,
     OrderByEntry, OrderedSetAggFunc, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause,
-    TargetEntry, ToastRelationRef, Var, expr_contains_set_returning, expr_sql_type_hint,
-    user_attrno,
+    TargetEntry, ToastRelationRef, Var, attrno_index, expr_contains_set_returning,
+    expr_sql_type_hint, user_attrno,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -113,7 +113,7 @@ pub use functions::{ResolvedFunctionCall, resolve_function_call};
 pub use generated::{
     bind_generated_expr, expr_references_column, generated_relation_output_exprs,
     scope_for_base_relation_with_generated, scope_for_relation_with_generated,
-    validate_generated_columns,
+    validate_generated_columns, validate_generated_columns_for_relation,
 };
 use geometry::*;
 pub use index_predicates::*;
@@ -8486,7 +8486,7 @@ fn bind_select_query_with_outer(
                         constraint_deps.dedup();
                         let window_clauses = take_window_clauses(&window_state);
 
-                        let query = Query {
+                        let mut query = Query {
                             command_type: pgrust_nodes::CommandType::Select,
                             depends_on_row_security: false,
                             rtable: base.rtable,
@@ -8513,6 +8513,7 @@ fn bind_select_query_with_outer(
                             recursive_union: None,
                             set_operation: None,
                         };
+                        annotate_select_column_privileges(&mut query);
                         let query = apply_select_distinct(
                             query,
                             stmt.distinct && !lower_distinct_to_grouping,
@@ -8596,7 +8597,7 @@ fn bind_select_query_with_outer(
                                 .into(),
                         ));
                     }
-                    let query = Query {
+                    let mut query = Query {
                         command_type: pgrust_nodes::CommandType::Select,
                         depends_on_row_security: false,
                         rtable: base.rtable,
@@ -8623,12 +8624,222 @@ fn bind_select_query_with_outer(
                         recursive_union: None,
                         set_operation: None,
                     };
+                    annotate_select_column_privileges(&mut query);
                     let query = apply_select_distinct(query, stmt.distinct, distinct_on);
                     Ok((query, scope))
                 })
             }
         })
     })
+}
+
+fn annotate_select_column_privileges(query: &mut Query) {
+    let mut selected_by_varno = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+    let single_relation_varno = (query.rtable.len() == 1
+        && matches!(query.rtable[0].kind, RangeTblEntryKind::Relation { .. }))
+    .then_some(1);
+
+    for target in &query.target_list {
+        if let (Some(varno), Some(input_resno)) = (single_relation_varno, target.input_resno) {
+            selected_by_varno
+                .entry(varno)
+                .or_default()
+                .push(input_resno - 1);
+        } else {
+            collect_select_privilege_columns(&target.expr, &mut selected_by_varno);
+        }
+    }
+    if let Some(where_qual) = &query.where_qual {
+        collect_select_privilege_columns(where_qual, &mut selected_by_varno);
+    }
+    if let Some(having_qual) = &query.having_qual {
+        collect_select_privilege_columns(having_qual, &mut selected_by_varno);
+    }
+    for group_by in &query.group_by {
+        collect_select_privilege_columns(group_by, &mut selected_by_varno);
+    }
+    for sort in &query.sort_clause {
+        collect_select_privilege_columns(&sort.expr, &mut selected_by_varno);
+    }
+
+    for (varno, columns) in selected_by_varno {
+        let Some(rte) = query.rtable.get_mut(varno.saturating_sub(1)) else {
+            continue;
+        };
+        let Some(permission) = rte.permission.as_mut() else {
+            continue;
+        };
+        permission.selected_columns.extend(columns);
+        permission.selected_columns.sort_unstable();
+        permission.selected_columns.dedup();
+    }
+}
+
+fn collect_select_privilege_columns(
+    expr: &Expr,
+    selected_by_varno: &mut std::collections::BTreeMap<usize, Vec<usize>>,
+) {
+    match expr {
+        Expr::Var(var) => {
+            if var.varlevelsup == 0
+                && let Some(index) = attrno_index(var.varattno)
+            {
+                selected_by_varno.entry(var.varno).or_default().push(index);
+            }
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. }
+        | Expr::CaseTest(_) => {}
+        Expr::GroupingKey(grouping_key) => {
+            collect_select_privilege_columns(&grouping_key.expr, selected_by_varno)
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+        }
+        Expr::Aggref(aggref) => {
+            for arg in &aggref.direct_args {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+            for arg in &aggref.args {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+            for item in &aggref.aggorder {
+                collect_select_privilege_columns(&item.expr, selected_by_varno);
+            }
+            if let Some(filter) = &aggref.aggfilter {
+                collect_select_privilege_columns(filter, selected_by_varno);
+            }
+        }
+        Expr::WindowFunc(func) => {
+            for arg in &func.args {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+            for arm in &case_expr.args {
+                collect_select_privilege_columns(&arm.expr, selected_by_varno);
+                collect_select_privilege_columns(&arm.result, selected_by_varno);
+            }
+            collect_select_privilege_columns(&case_expr.defresult, selected_by_varno);
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+        }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_select_privilege_columns(child, selected_by_varno);
+            }
+        }
+        Expr::SetReturning(srf) => {
+            for arg in pgrust_nodes::primnodes::set_returning_call_exprs(&srf.call) {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+        }
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_select_privilege_columns(testexpr, selected_by_varno);
+            }
+        }
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_select_privilege_columns(testexpr, selected_by_varno);
+            }
+            for arg in &subplan.args {
+                collect_select_privilege_columns(arg, selected_by_varno);
+            }
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_select_privilege_columns(&saop.left, selected_by_varno);
+            collect_select_privilege_columns(&saop.right, selected_by_varno);
+        }
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_select_privilege_columns(child, selected_by_varno);
+            }
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            collect_select_privilege_columns(inner, selected_by_varno);
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_select_privilege_columns(expr, selected_by_varno);
+            collect_select_privilege_columns(pattern, selected_by_varno);
+            if let Some(escape) = escape {
+                collect_select_privilege_columns(escape, selected_by_varno);
+            }
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            collect_select_privilege_columns(inner, selected_by_varno);
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_select_privilege_columns(left, selected_by_varno);
+            collect_select_privilege_columns(right, selected_by_varno);
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                collect_select_privilege_columns(element, selected_by_varno);
+            }
+        }
+        Expr::Row { fields, .. } => {
+            for (_, expr) in fields {
+                collect_select_privilege_columns(expr, selected_by_varno);
+            }
+        }
+        Expr::FieldSelect { expr, .. } => collect_select_privilege_columns(expr, selected_by_varno),
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_select_privilege_columns(array, selected_by_varno);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_select_privilege_columns(lower, selected_by_varno);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_select_privilege_columns(upper, selected_by_varno);
+                }
+            }
+        }
+    }
 }
 
 fn apply_select_distinct(query: Query, distinct: bool, distinct_on: Vec<SortGroupClause>) -> Query {
