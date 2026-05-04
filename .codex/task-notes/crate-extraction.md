@@ -772,6 +772,11 @@ Tests run:
 - `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after UUID/enum/catalog-visibility extraction (107 tests)
 - `scripts/cargo_isolated.sh check --lib --quiet` after UUID/enum/catalog-visibility extraction
 - `bash scripts/check_crate_boundaries.sh` after UUID/enum/catalog-visibility extraction
+- `cargo fmt` after PL/pgSQL SQL normalizer extraction
+- `scripts/cargo_isolated.sh check -p pgrust_plpgsql --quiet` after PL/pgSQL SQL normalizer extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after PL/pgSQL SQL normalizer extraction
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet` after PL/pgSQL SQL normalizer extraction (61 tests)
+- `bash scripts/check_crate_boundaries.sh` after PL/pgSQL SQL normalizer extraction
 
 Remaining:
 - Continue executor service boundaries for PL/pgSQL callbacks, command callbacks, catalog role helpers, tsearch, and notices. Transaction state, row locks, serializable predicate locks, mutation sinks, aggregate helper clusters, stats value shaping, misc builtin/control value shaping, current-schema/search-path policy, num-null/extreme-value helpers, simple value-call helpers, encoding helpers, float8 aggregate transition helpers, UUID builtins, enum support, and catalog visibility helpers have initial traits/crate-local homes.

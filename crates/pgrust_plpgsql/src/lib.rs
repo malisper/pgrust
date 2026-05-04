@@ -3,6 +3,7 @@ pub mod cache;
 pub mod compiled;
 mod gram;
 pub mod gucs;
+pub mod normalize;
 pub mod polymorphic;
 pub mod runtime;
 
@@ -21,6 +22,7 @@ pub use cache::{
 pub use compiled::*;
 pub use gram::parse_block;
 pub use gucs::*;
+pub use normalize::*;
 pub use polymorphic::*;
 pub use runtime::*;
 
