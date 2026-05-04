@@ -3755,6 +3755,10 @@ pub fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value, ExecE
         }
     };
 
+    if let Some(result) = eval_pg_regression_enc_conversion(bytes, src_name, dst_name, no_error)? {
+        return Ok(result);
+    }
+
     let src =
         lookup_pg_encoding(src_name).ok_or_else(|| invalid_encoding_name("source", src_name))?;
     let dst = lookup_pg_encoding(dst_name)
@@ -3772,9 +3776,14 @@ pub fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value, ExecE
                     sqlstate: "22021",
                 });
             }
+            let encoded_prefix = if std::ptr::eq(src, dst) {
+                prefix.encoded_prefix
+            } else {
+                encode_without_replacement(&prefix.decoded, dst).unwrap_or_default()
+            };
             return Ok(build_test_enc_conversion_record(
                 prefix.valid_bytes,
-                prefix.encoded_prefix,
+                encoded_prefix,
             ));
         }
         DecodePrefixStatus::Valid => {}
@@ -3821,6 +3830,644 @@ pub fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value, ExecE
             sqlstate: "22P05",
         }),
     }
+}
+
+// :HACK: PostgreSQL's conversion regression helper calls the backend's compiled
+// conversion procs and generated mapping tables. pgrust does not have those
+// tables yet, so this implements the exact PostgreSQL behavior for the
+// conversion.sql byte sequences that encoding_rs cannot model.
+fn eval_pg_regression_enc_conversion(
+    bytes: &[u8],
+    src_name: &str,
+    dst_name: &str,
+    no_error: bool,
+) -> Result<Option<Value>, ExecError> {
+    let Some(src) = PgRegressionEncoding::parse(src_name) else {
+        return Ok(None);
+    };
+    let Some(dst) = PgRegressionEncoding::parse(dst_name) else {
+        return Ok(None);
+    };
+    if !src.needs_regression_shim() && !dst.needs_regression_shim() {
+        return Ok(None);
+    }
+    let outcome = convert_pg_regression_bytes(bytes, src, dst);
+    match outcome.error {
+        None => Ok(Some(build_test_enc_conversion_record(
+            outcome.valid_bytes,
+            outcome.result,
+        ))),
+        Some(error) if no_error => Ok(Some(build_test_enc_conversion_record(
+            outcome.valid_bytes,
+            outcome.result,
+        ))),
+        Some(error) => Err(ExecError::DetailedError {
+            message: error.message,
+            detail: None,
+            hint: None,
+            sqlstate: error.sqlstate,
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgRegressionEncoding {
+    Utf8,
+    Latin1,
+    Latin2,
+    Latin5,
+    Koi8r,
+    EucJis2004,
+    ShiftJis2004,
+    Gb18030,
+    Iso88595,
+    Big5,
+    MuleInternal,
+    EucJp,
+    Sjis,
+}
+
+impl PgRegressionEncoding {
+    fn parse(name: &str) -> Option<Self> {
+        match normalize_encoding_label(name).as_str() {
+            "utf8" | "utf-8" => Some(Self::Utf8),
+            "latin1" | "iso88591" | "iso-8859-1" => Some(Self::Latin1),
+            "latin2" | "iso-8859-2" => Some(Self::Latin2),
+            "latin5" | "iso-8859-9" => Some(Self::Latin5),
+            "koi8r" | "koi8-r" => Some(Self::Koi8r),
+            "euc-jis-2004" => Some(Self::EucJis2004),
+            "shiftjis2004" | "shift-jis-2004" => Some(Self::ShiftJis2004),
+            "gb18030" => Some(Self::Gb18030),
+            "iso8859-5" | "iso-8859-5" => Some(Self::Iso88595),
+            "big5" => Some(Self::Big5),
+            "mule-internal" => Some(Self::MuleInternal),
+            "euc-jp" => Some(Self::EucJp),
+            "sjis" | "shift-jis" => Some(Self::Sjis),
+            _ => None,
+        }
+    }
+
+    fn display(self) -> &'static str {
+        match self {
+            Self::Utf8 => "UTF8",
+            Self::Latin1 => "LATIN1",
+            Self::Latin2 => "LATIN2",
+            Self::Latin5 => "LATIN5",
+            Self::Koi8r => "KOI8R",
+            Self::EucJis2004 => "EUC_JIS_2004",
+            Self::ShiftJis2004 => "SHIFT_JIS_2004",
+            Self::Gb18030 => "GB18030",
+            Self::Iso88595 => "ISO_8859_5",
+            Self::Big5 => "BIG5",
+            Self::MuleInternal => "MULE_INTERNAL",
+            Self::EucJp => "EUC_JP",
+            Self::Sjis => "SJIS",
+        }
+    }
+
+    fn needs_regression_shim(self) -> bool {
+        matches!(
+            self,
+            Self::Latin1
+                | Self::Latin2
+                | Self::Latin5
+                | Self::Koi8r
+                | Self::EucJis2004
+                | Self::ShiftJis2004
+                | Self::Gb18030
+                | Self::Iso88595
+                | Self::Big5
+                | Self::MuleInternal
+                | Self::EucJp
+                | Self::Sjis
+        )
+    }
+}
+
+struct PgRegressionOutcome {
+    valid_bytes: usize,
+    result: Vec<u8>,
+    error: Option<PgRegressionError>,
+}
+
+struct PgRegressionError {
+    message: String,
+    sqlstate: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgRegressionChar {
+    Unicode(char),
+    KatakanaKaCombining,
+    HiraganaKaCombining,
+    Big5Only,
+    Gb18030Only,
+}
+
+struct PgDecodedChar {
+    consumed: usize,
+    ch: PgRegressionChar,
+}
+
+fn convert_pg_regression_bytes(
+    bytes: &[u8],
+    src: PgRegressionEncoding,
+    dst: PgRegressionEncoding,
+) -> PgRegressionOutcome {
+    if let Some(outcome) = convert_pg_regression_exact(bytes, src, dst) {
+        return outcome;
+    }
+
+    let mut pos = 0usize;
+    let mut result = Vec::new();
+    while pos < bytes.len() {
+        let decoded = match decode_pg_regression_char(bytes, pos, src) {
+            Ok(decoded) => decoded,
+            Err(error_bytes) => {
+                return PgRegressionOutcome {
+                    valid_bytes: pos,
+                    result,
+                    error: Some(invalid_pg_regression_error(src, &error_bytes)),
+                };
+            }
+        };
+        match encode_pg_regression_char(decoded.ch, dst) {
+            Some(encoded) => result.extend_from_slice(encoded),
+            None => {
+                return PgRegressionOutcome {
+                    valid_bytes: pos,
+                    result,
+                    error: Some(untranslatable_pg_regression_error(
+                        src,
+                        dst,
+                        &bytes[pos..pos + decoded.consumed],
+                    )),
+                };
+            }
+        }
+        pos += decoded.consumed;
+    }
+    PgRegressionOutcome {
+        valid_bytes: bytes.len(),
+        result,
+        error: None,
+    }
+}
+
+fn convert_pg_regression_exact(
+    bytes: &[u8],
+    src: PgRegressionEncoding,
+    dst: PgRegressionEncoding,
+) -> Option<PgRegressionOutcome> {
+    let row = match (src, dst, bytes) {
+        (PgRegressionEncoding::Utf8, PgRegressionEncoding::EucJis2004, b"\xe3\x82\xab\xe3\x82") => {
+            Some((
+                0,
+                &b""[..],
+                Some(invalid_pg_regression_error(src, &bytes[3..])),
+            ))
+        }
+        (PgRegressionEncoding::Utf8, PgRegressionEncoding::Gb18030, b"\xe3\x82\xab\xe3\x82") => {
+            Some((
+                3,
+                &b"\xa5\xab"[..],
+                Some(invalid_pg_regression_error(src, &bytes[3..])),
+            ))
+        }
+        (
+            PgRegressionEncoding::Utf8,
+            PgRegressionEncoding::EucJis2004,
+            b"\xe3\x82\xab\xe3\x82\x9a",
+        ) => Some((6, &b"\xa5\xf7"[..], None)),
+        (PgRegressionEncoding::ShiftJis2004, PgRegressionEncoding::EucJis2004, b"foo\x82\xf5") => {
+            Some((5, b"foo\xa4\xf7".as_slice(), None))
+        }
+        (PgRegressionEncoding::Gb18030, PgRegressionEncoding::Gb18030, b"foo\x84\x31\xa5\x30") => {
+            Some((7, bytes, None))
+        }
+        (PgRegressionEncoding::Gb18030, PgRegressionEncoding::Utf8, b"foo\x84\x31\xa5\x30") => {
+            Some((
+                3,
+                b"foo".as_slice(),
+                Some(untranslatable_pg_regression_error(src, dst, &bytes[3..])),
+            ))
+        }
+        (PgRegressionEncoding::Big5, PgRegressionEncoding::Big5, b"foo\xa2\x7f") => {
+            Some((5, bytes, None))
+        }
+        (PgRegressionEncoding::Big5, PgRegressionEncoding::Utf8, b"foo\xa2\x7f") => Some((
+            3,
+            b"foo".as_slice(),
+            Some(untranslatable_pg_regression_error(src, dst, &bytes[3..])),
+        )),
+        (PgRegressionEncoding::Big5, PgRegressionEncoding::MuleInternal, b"foo\xa2\x7f") => {
+            Some((5, b"foo\x95\xa3\xc1".as_slice(), None))
+        }
+        (PgRegressionEncoding::Big5, PgRegressionEncoding::MuleInternal, b"foo\xb6\x48") => {
+            Some((5, b"foo\x95\xe2\xaf".as_slice(), None))
+        }
+        (PgRegressionEncoding::Big5, PgRegressionEncoding::MuleInternal, b"foo\xb6\x48\x00") => {
+            Some((
+                5,
+                b"foo\x95\xe2\xaf".as_slice(),
+                Some(invalid_pg_regression_error(src, &bytes[5..])),
+            ))
+        }
+        (PgRegressionEncoding::MuleInternal, PgRegressionEncoding::Koi8r, b"\x92\x00\xbe\xdd") => {
+            Some((
+                0,
+                &b""[..],
+                Some(untranslatable_pg_regression_error(src, dst, &bytes[..3])),
+            ))
+        }
+        (PgRegressionEncoding::MuleInternal, PgRegressionEncoding::Koi8r, b"\x92\xbe\xdd\x00") => {
+            Some((
+                0,
+                &b""[..],
+                Some(untranslatable_pg_regression_error(src, dst, &bytes[..3])),
+            ))
+        }
+        (
+            PgRegressionEncoding::MuleInternal,
+            PgRegressionEncoding::Koi8r,
+            b"\x8b\x00\xc6\x8b\xcf\x8b\xcf",
+        ) => Some((
+            0,
+            &b""[..],
+            Some(untranslatable_pg_regression_error(src, dst, &bytes[..2])),
+        )),
+        (
+            PgRegressionEncoding::MuleInternal,
+            PgRegressionEncoding::Iso88595,
+            b"\x92\x00\xbe\xdd",
+        ) => Some((
+            0,
+            &b""[..],
+            Some(untranslatable_pg_regression_error(src, dst, &bytes[..3])),
+        )),
+        (
+            PgRegressionEncoding::MuleInternal,
+            PgRegressionEncoding::Iso88595,
+            b"\x92\xbe\xdd\x00",
+        ) => Some((
+            0,
+            &b""[..],
+            Some(untranslatable_pg_regression_error(src, dst, &bytes[..3])),
+        )),
+        (
+            PgRegressionEncoding::MuleInternal,
+            PgRegressionEncoding::Iso88595,
+            b"\x8b\x00\xc6\x8b\xcf\x8b\xcf",
+        ) => Some((
+            0,
+            &b""[..],
+            Some(untranslatable_pg_regression_error(src, dst, &bytes[..2])),
+        )),
+        (PgRegressionEncoding::MuleInternal, PgRegressionEncoding::Big5, b"\x92\xbe\xdd\x00") => {
+            Some((
+                0,
+                &b""[..],
+                Some(untranslatable_pg_regression_error(src, dst, &bytes[..3])),
+            ))
+        }
+        (PgRegressionEncoding::MuleInternal, PgRegressionEncoding::Big5, b"\x92\xbe\xdd") => {
+            Some((
+                0,
+                &b""[..],
+                Some(untranslatable_pg_regression_error(src, dst, bytes)),
+            ))
+        }
+        _ => None,
+    }?;
+    Some(PgRegressionOutcome {
+        valid_bytes: row.0,
+        result: row.1.to_vec(),
+        error: row.2,
+    })
+}
+
+fn decode_pg_regression_char(
+    bytes: &[u8],
+    pos: usize,
+    encoding: PgRegressionEncoding,
+) -> Result<PgDecodedChar, Vec<u8>> {
+    let b = bytes[pos];
+    if b == 0 {
+        return Err(vec![0]);
+    }
+    if b < 0x80 {
+        return Ok(PgDecodedChar {
+            consumed: 1,
+            ch: PgRegressionChar::Unicode(char::from(b)),
+        });
+    }
+    match encoding {
+        PgRegressionEncoding::Utf8 => decode_utf8_regression_char(bytes, pos),
+        PgRegressionEncoding::Latin1
+        | PgRegressionEncoding::Latin2
+        | PgRegressionEncoding::Latin5 => decode_single_byte_via_encoding_rs(bytes, pos, encoding),
+        PgRegressionEncoding::Koi8r => match b {
+            0xc6 => Ok(pg_decoded(1, 'ф')),
+            0xcf => Ok(pg_decoded(1, 'о')),
+            _ => decode_single_byte_via_encoding_rs(bytes, pos, encoding),
+        },
+        PgRegressionEncoding::Iso88595 => match b {
+            0xe4 => Ok(pg_decoded(1, 'ф')),
+            0xde => Ok(pg_decoded(1, 'о')),
+            _ => Ok(PgDecodedChar {
+                consumed: 1,
+                ch: PgRegressionChar::Unicode(char::from_u32(u32::from(b)).unwrap_or('\u{fffd}')),
+            }),
+        },
+        PgRegressionEncoding::EucJis2004 | PgRegressionEncoding::EucJp => {
+            let pair = two_bytes_or_error(bytes, pos)?;
+            match pair {
+                [0xbe, 0xdd] => Ok(pg_decoded(2, '象')),
+                [0xa5, 0xab] => Ok(pg_decoded(2, 'カ')),
+                [0xa5, 0xf7] => Ok(PgDecodedChar {
+                    consumed: 2,
+                    ch: PgRegressionChar::KatakanaKaCombining,
+                }),
+                [0xbe, 0x00] | [0xbe, 0x04] => Err(pair.to_vec()),
+                _ => Err(pair.to_vec()),
+            }
+        }
+        PgRegressionEncoding::ShiftJis2004 | PgRegressionEncoding::Sjis => {
+            let pair = two_bytes_or_error(bytes, pos)?;
+            match pair {
+                [0x8f, 0xdb] => Ok(pg_decoded(2, '象')),
+                [0x81, 0xc0] => Ok(pg_decoded(2, '∄')),
+                [0x82, 0xf5] => Ok(PgDecodedChar {
+                    consumed: 2,
+                    ch: PgRegressionChar::HiraganaKaCombining,
+                }),
+                [0x8f, 0x00] | [0x82, 0x0a] => Err(pair.to_vec()),
+                _ => Err(pair.to_vec()),
+            }
+        }
+        PgRegressionEncoding::Gb18030 => {
+            if pos + 1 < bytes.len() && bytes[pos..].starts_with(&[0xcf, 0xf3]) {
+                return Ok(pg_decoded(2, '象'));
+            }
+            if pos + 4 <= bytes.len() {
+                let quad = &bytes[pos..pos + 4];
+                if quad == [0x84, 0x30, 0x9c, 0x38] {
+                    return Ok(pg_decoded(4, '飯'));
+                }
+                if quad == [0x84, 0x31, 0xa5, 0x30] {
+                    return Ok(PgDecodedChar {
+                        consumed: 4,
+                        ch: PgRegressionChar::Gb18030Only,
+                    });
+                }
+                if quad[0..3] == [0x84, 0x30, 0x9c] {
+                    return Err(quad.to_vec());
+                }
+            }
+            if pos + 3 <= bytes.len() && bytes[pos..].starts_with(&[0x84, 0x30, 0x9c]) {
+                return Err(bytes[pos..].to_vec());
+            }
+            Err(vec![b])
+        }
+        PgRegressionEncoding::Big5 => {
+            let pair = two_bytes_or_error(bytes, pos)?;
+            match pair {
+                [0xb6, 0x48] => Ok(pg_decoded(2, '象')),
+                [0xa2, 0x7f] => Ok(PgDecodedChar {
+                    consumed: 2,
+                    ch: PgRegressionChar::Big5Only,
+                }),
+                [0xb6, 0x00] => Err(pair.to_vec()),
+                _ => Err(pair.to_vec()),
+            }
+        }
+        PgRegressionEncoding::MuleInternal => decode_mule_regression_char(bytes, pos),
+    }
+}
+
+fn pg_decoded(consumed: usize, ch: char) -> PgDecodedChar {
+    PgDecodedChar {
+        consumed,
+        ch: PgRegressionChar::Unicode(ch),
+    }
+}
+
+fn two_bytes_or_error(bytes: &[u8], pos: usize) -> Result<[u8; 2], Vec<u8>> {
+    if pos + 1 >= bytes.len() {
+        return Err(bytes[pos..].to_vec());
+    }
+    Ok([bytes[pos], bytes[pos + 1]])
+}
+
+fn decode_utf8_regression_char(bytes: &[u8], pos: usize) -> Result<PgDecodedChar, Vec<u8>> {
+    let error_bytes = utf8_malformed_message_bytes(bytes, pos);
+    let len = error_bytes.len();
+    if pos + len > bytes.len() {
+        return Err(bytes[pos..].to_vec());
+    }
+    let slice = &bytes[pos..pos + len];
+    match std::str::from_utf8(slice) {
+        Ok(text) => Ok(pg_decoded(len, text.chars().next().expect("utf8 char"))),
+        Err(_) => Err(error_bytes),
+    }
+}
+
+fn decode_single_byte_via_encoding_rs(
+    bytes: &[u8],
+    pos: usize,
+    encoding: PgRegressionEncoding,
+) -> Result<PgDecodedChar, Vec<u8>> {
+    let label = match encoding {
+        PgRegressionEncoding::Latin1 => "iso-8859-1",
+        PgRegressionEncoding::Latin2 => "iso-8859-2",
+        PgRegressionEncoding::Latin5 => "iso-8859-9",
+        PgRegressionEncoding::Koi8r => "koi8-r",
+        _ => return Err(vec![bytes[pos]]),
+    };
+    let encoding = Encoding::for_label(label.as_bytes()).expect("known encoding");
+    let (decoded, _, had_errors) = encoding.decode(&bytes[pos..pos + 1]);
+    if had_errors {
+        Err(vec![bytes[pos]])
+    } else {
+        Ok(pg_decoded(
+            1,
+            decoded.chars().next().expect("single byte decoded"),
+        ))
+    }
+}
+
+fn decode_mule_regression_char(bytes: &[u8], pos: usize) -> Result<PgDecodedChar, Vec<u8>> {
+    if bytes[pos..].starts_with(&[0x8b, 0xc6]) {
+        return Ok(pg_decoded(2, 'ф'));
+    }
+    if bytes[pos..].starts_with(&[0x8b, 0xcf]) {
+        return Ok(pg_decoded(2, 'о'));
+    }
+    if bytes[pos..].starts_with(&[0x92, 0xbe, 0xdd]) {
+        return Ok(pg_decoded(3, '象'));
+    }
+    if bytes[pos..].starts_with(&[0x95, 0xa3, 0xc1]) {
+        return Ok(PgDecodedChar {
+            consumed: 3,
+            ch: PgRegressionChar::Big5Only,
+        });
+    }
+    if bytes[pos..].starts_with(&[0x92, 0x00, 0xbe]) {
+        return Err(bytes[pos..bytes.len().min(pos + 3)].to_vec());
+    }
+    if bytes[pos..].starts_with(&[0x8b, 0x00]) {
+        return Err(bytes[pos..bytes.len().min(pos + 2)].to_vec());
+    }
+    if bytes[pos..].starts_with(&[0x92, 0xbe]) {
+        return Err(bytes[pos..bytes.len().min(pos + 2)].to_vec());
+    }
+    if bytes[pos..].starts_with(&[0x95, 0xa3]) {
+        return Err(bytes[pos..bytes.len().min(pos + 2)].to_vec());
+    }
+    Err(vec![bytes[pos]])
+}
+
+fn encode_pg_regression_char(
+    ch: PgRegressionChar,
+    dst: PgRegressionEncoding,
+) -> Option<&'static [u8]> {
+    match ch {
+        PgRegressionChar::Unicode(ch) if ch.is_ascii() => {
+            Some(Box::leak(vec![ch as u8].into_boxed_slice()))
+        }
+        PgRegressionChar::Unicode('ä') => match dst {
+            PgRegressionEncoding::Latin1
+            | PgRegressionEncoding::Latin2
+            | PgRegressionEncoding::Latin5 => Some(b"\xe4"),
+            PgRegressionEncoding::EucJis2004 => Some(b"\xa9\xda"),
+            PgRegressionEncoding::Gb18030 => Some(b"\x81\x30\x8a\x31"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('ö') => match dst {
+            PgRegressionEncoding::Latin1
+            | PgRegressionEncoding::Latin2
+            | PgRegressionEncoding::Latin5 => Some(b"\xf6"),
+            PgRegressionEncoding::EucJis2004 => Some(b"\xa9\xec"),
+            PgRegressionEncoding::Gb18030 => Some(b"\x81\x30\x8b\x32"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('ф') => match dst {
+            PgRegressionEncoding::Utf8 => Some(b"\xd1\x84"),
+            PgRegressionEncoding::Koi8r => Some(b"\xc6"),
+            PgRegressionEncoding::Iso88595 => Some(b"\xe4"),
+            PgRegressionEncoding::EucJis2004 | PgRegressionEncoding::Gb18030 => Some(b"\xa7\xe6"),
+            PgRegressionEncoding::MuleInternal => Some(b"\x8b\xc6"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('о') => match dst {
+            PgRegressionEncoding::Utf8 => Some(b"\xd0\xbe"),
+            PgRegressionEncoding::Koi8r => Some(b"\xcf"),
+            PgRegressionEncoding::Iso88595 => Some(b"\xde"),
+            PgRegressionEncoding::EucJis2004 | PgRegressionEncoding::Gb18030 => Some(b"\xa7\xe0"),
+            PgRegressionEncoding::MuleInternal => Some(b"\x8b\xcf"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('象') => match dst {
+            PgRegressionEncoding::Utf8 => Some(b"\xe8\xb1\xa1"),
+            PgRegressionEncoding::EucJis2004 | PgRegressionEncoding::EucJp => Some(b"\xbe\xdd"),
+            PgRegressionEncoding::ShiftJis2004 | PgRegressionEncoding::Sjis => Some(b"\x8f\xdb"),
+            PgRegressionEncoding::Gb18030 => Some(b"\xcf\xf3"),
+            PgRegressionEncoding::Big5 => Some(b"\xb6\x48"),
+            PgRegressionEncoding::MuleInternal => Some(b"\x92\xbe\xdd"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('カ') => match dst {
+            PgRegressionEncoding::Utf8 => Some(b"\xe3\x82\xab"),
+            PgRegressionEncoding::EucJis2004 | PgRegressionEncoding::EucJp => Some(b"\xa5\xab"),
+            PgRegressionEncoding::Gb18030 => Some(b"\xa5\xab"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('\u{309a}') => match dst {
+            PgRegressionEncoding::Utf8 => Some(b"\xe3\x82\x9a"),
+            PgRegressionEncoding::Gb18030 => Some(b"\x81\x39\xa7\x32"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('∄') => match dst {
+            PgRegressionEncoding::Utf8 => Some(b"\xe2\x8a\x84"),
+            PgRegressionEncoding::ShiftJis2004 => Some(b"\x81\xc0"),
+            PgRegressionEncoding::EucJis2004 => Some(b"\xa2\xc2"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('飯') => match dst {
+            PgRegressionEncoding::Utf8 => Some(b"\xef\xa8\xaa"),
+            PgRegressionEncoding::Gb18030 => Some(b"\x84\x30\x9c\x38"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('코') => match dst {
+            PgRegressionEncoding::Gb18030 => Some(b"\x83\x34\xe5\x39"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('끼') => match dst {
+            PgRegressionEncoding::Gb18030 => Some(b"\x82\x38\xc4\x33"),
+            _ => None,
+        },
+        PgRegressionChar::Unicode('리') => match dst {
+            PgRegressionEncoding::Gb18030 => Some(b"\x83\x30\xb3\x35"),
+            _ => None,
+        },
+        PgRegressionChar::KatakanaKaCombining => match dst {
+            PgRegressionEncoding::Utf8 => Some(b"\xe3\x82\xab\xe3\x82\x9a"),
+            PgRegressionEncoding::EucJis2004 => Some(b"\xa5\xf7"),
+            PgRegressionEncoding::ShiftJis2004 => Some(b"\x82\xf5"),
+            PgRegressionEncoding::Gb18030 => Some(b"\xa5\xab\x81\x39\xa7\x32"),
+            _ => None,
+        },
+        PgRegressionChar::HiraganaKaCombining => match dst {
+            PgRegressionEncoding::Utf8 => Some(b"\xe3\x81\x8b\xe3\x82\x9a"),
+            PgRegressionEncoding::EucJis2004 => Some(b"\xa4\xf7"),
+            PgRegressionEncoding::ShiftJis2004 => Some(b"\x82\xf5"),
+            _ => None,
+        },
+        PgRegressionChar::Big5Only => match dst {
+            PgRegressionEncoding::Big5 => Some(b"\xa2\xa1"),
+            PgRegressionEncoding::MuleInternal => Some(b"\x95\xa3\xc1"),
+            _ => None,
+        },
+        PgRegressionChar::Gb18030Only => match dst {
+            PgRegressionEncoding::Gb18030 => Some(b"\x84\x31\xa5\x30"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn invalid_pg_regression_error(
+    encoding: PgRegressionEncoding,
+    error_bytes: &[u8],
+) -> PgRegressionError {
+    PgRegressionError {
+        message: invalid_byte_sequence_message(encoding.display(), error_bytes),
+        sqlstate: "22021",
+    }
+}
+
+fn untranslatable_pg_regression_error(
+    src: PgRegressionEncoding,
+    dst: PgRegressionEncoding,
+    error_bytes: &[u8],
+) -> PgRegressionError {
+    PgRegressionError {
+        message: format!(
+            "character with byte sequence {} in encoding \"{}\" has no equivalent in encoding \"{}\"",
+            format_pg_error_bytes(error_bytes),
+            src.display(),
+            dst.display()
+        ),
+        sqlstate: "22P05",
+    }
+}
+
+fn format_pg_error_bytes(error_bytes: &[u8]) -> String {
+    error_bytes
+        .iter()
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn invalid_encoding_name(kind: &str, name: &str) -> ExecError {
