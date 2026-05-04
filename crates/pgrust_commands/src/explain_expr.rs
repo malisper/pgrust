@@ -3109,12 +3109,21 @@ fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> S
                 .replace('"', "\\\"");
             format!("\"{rendered}\"")
         }
-        Value::Text(_) | Value::TextRef(_, _) => value
-            .as_text()
-            .unwrap_or_default()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace(',', "\\,"),
+        Value::Text(_) | Value::TextRef(_, _) => {
+            let rendered = value
+                .as_text()
+                .unwrap_or_default()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            if rendered
+                .chars()
+                .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '{' | '}'))
+            {
+                format!("\"{rendered}\"")
+            } else {
+                rendered.replace(',', "\\,")
+            }
+        }
         Value::Bool(value) => {
             if *value {
                 "t".into()

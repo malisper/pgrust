@@ -3853,6 +3853,27 @@ fn render_index_scan_key(
     runtime_renderer: Option<&dyn Fn(&Expr) -> String>,
 ) -> Option<String> {
     let default_column_names;
+    if purpose == 's'
+        && key.attribute_number == 0
+        && let Some(display_expr) = &key.display_expr
+    {
+        let column_names = match key_column_names {
+            Some(names) => names,
+            None => {
+                default_column_names = desc
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>();
+                &default_column_names
+            }
+        };
+        return Some(render_index_display_expr(
+            display_expr,
+            column_names,
+            SqlType::new(SqlTypeKind::Record),
+        ));
+    }
     let index_attno = usize::try_from(key.attribute_number.checked_sub(1)?).ok()?;
     let index_key_attno = *index_meta.indkey.get(index_attno)?;
     let (column_name, column_type) = if index_key_attno == 0 {
