@@ -1,5 +1,4 @@
 use super::super::*;
-use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
@@ -7,22 +6,18 @@ use crate::pgrust::database::ddl::{
 };
 
 fn lookup_relation_for_alter_column_compression(
-    catalog: &dyn CatalogLookup,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
     name: &str,
     if_exists: bool,
-) -> Result<Option<BoundRelation>, ExecError> {
-    match catalog.lookup_any_relation(name) {
-        Some(entry) if matches!(entry.relkind, 'r' | 'f' | 'm') => Ok(Some(entry)),
-        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
-            name: name.to_string(),
-            expected: "table or materialized view",
-        })),
-        None if if_exists => {
-            push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
-            Ok(None)
-        }
-        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
+) -> Result<Option<crate::backend::parser::BoundRelation>, ExecError> {
+    let relation = pgrust_commands::tablecmds::lookup_relation_for_alter_column_compression(
+        catalog, name, if_exists,
+    )
+    .map_err(ExecError::Parse)?;
+    if relation.is_none() && if_exists {
+        push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
     }
+    Ok(relation)
 }
 
 impl Database {

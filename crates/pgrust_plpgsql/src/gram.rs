@@ -950,18 +950,6 @@ fn raise_string_literal_text(sql: &str) -> Result<String, ParseError> {
     }
 }
 
-fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "assert_failure" => Some("P0004"),
-        "data_corrupted" => Some("XX001"),
-        "division_by_zero" => Some("22012"),
-        "feature_not_supported" => Some("0A000"),
-        "raise_exception" => Some("P0001"),
-        "reading_sql_data_not_permitted" => Some("2F003"),
-        _ => None,
-    }
-}
-
 fn build_assert_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     let mut condition = None;
     let mut message = None;

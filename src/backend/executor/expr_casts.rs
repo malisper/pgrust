@@ -4120,22 +4120,22 @@ pub(crate) fn soft_input_error_info_with_catalog_and_config(
             {
                 Err(err)
             }
-            Err(err) => Ok(Some(input_error_info(err, text))),
+            Err(err) => Ok(Some(input_error_info(err.into(), text))),
         };
     }
     if !ty.is_array && matches!(ty.kind, SqlTypeKind::Json | SqlTypeKind::Jsonb) {
         if matches!(ty.kind, SqlTypeKind::Json) {
             return match validate_json_text_input_with_limit(text, config.max_stack_depth_kb) {
                 Ok(()) => Ok(None),
-                Err(err) => Ok(Some(input_error_info(err, text))),
+                Err(err) => Ok(Some(input_error_info(err.into(), text))),
             };
         }
         match parse_json_text_input(text) {
             Ok(_) => match parse_jsonb_text_with_limit(text, config.max_stack_depth_kb) {
                 Ok(_) => return Ok(None),
-                Err(err) => return Ok(Some(input_error_info(err, text))),
+                Err(err) => return Ok(Some(input_error_info(err.into(), text))),
             },
-            Err(err) => return Ok(Some(input_error_info(err, text))),
+            Err(err) => return Ok(Some(input_error_info(err.into(), text))),
         }
     }
     let parsed = match ty.kind {

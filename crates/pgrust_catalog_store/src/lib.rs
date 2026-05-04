@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod catalog;
 pub mod catcache;
+pub mod dependency_drop;
 pub mod indexing;
 pub mod materialize;
 pub mod pg_aggregate;
@@ -41,7 +42,11 @@ pub mod pg_ts_parser;
 pub mod pg_ts_template;
 pub mod pg_type;
 pub mod pg_user_mapping;
+pub mod privileges;
 pub mod relcache;
+pub mod role_memberships;
+pub mod role_settings;
+pub mod roles;
 pub mod rowcodec;
 pub mod rows;
 pub mod state;
@@ -53,7 +58,12 @@ pub use catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions, CatalogIndexMeta,
 };
 pub use catcache::CatCache;
+pub use dependency_drop::{CatalogDependencyGraph, DropBehavior, ObjectAddress};
+pub use privileges::*;
 pub use relcache::RelCache;
+pub use role_memberships::*;
+pub use role_settings::*;
+pub use roles::*;
 pub use store::{
     CatalogControl, CatalogMutationEffect, CatalogReadRuntime, CatalogStoreCore, CatalogStoreMode,
     CatalogStoreSnapshot, CatalogWriteRuntime, CreateTableResult, RuleDependencies,

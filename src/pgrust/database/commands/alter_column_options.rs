@@ -7,105 +7,23 @@ use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table,
     validate_alter_table_alter_column_options,
 };
+use pgrust_commands::reloptions::{reset_view_reloptions, set_view_reloptions};
 
-fn normalize_view_reloption(
-    option: &crate::backend::parser::RelOption,
-) -> Result<String, ExecError> {
-    let name = option.name.to_ascii_lowercase();
-    if !matches!(
-        name.as_str(),
-        "security_barrier" | "security_invoker" | "check_option"
-    ) {
-        return Err(ExecError::DetailedError {
-            message: format!("unrecognized parameter \"{}\"", option.name),
-            detail: None,
-            hint: None,
-            sqlstate: "22023",
-        });
+fn reloption_error_to_exec(err: pgrust_commands::reloptions::RelOptionError) -> ExecError {
+    match err {
+        pgrust_commands::reloptions::RelOptionError::Parse(err) => ExecError::Parse(err),
+        pgrust_commands::reloptions::RelOptionError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
     }
-    let value = if name == "check_option" {
-        match option.value.to_ascii_lowercase().as_str() {
-            "local" => "local",
-            "cascaded" => "cascaded",
-            _ => {
-                return Err(ExecError::DetailedError {
-                    message: format!(
-                        "invalid value for enum option \"check_option\": {}",
-                        option.value
-                    ),
-                    detail: Some("Valid values are \"local\" and \"cascaded\".".into()),
-                    hint: None,
-                    sqlstate: "22023",
-                });
-            }
-        }
-    } else {
-        match option.value.to_ascii_lowercase().as_str() {
-            "true" | "on" => "true",
-            "false" | "off" => "false",
-            _ => {
-                return Err(ExecError::DetailedError {
-                    message: format!(
-                        "invalid value for boolean option \"{name}\": {}",
-                        option.value
-                    ),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "22023",
-                });
-            }
-        }
-    };
-    Ok(format!("{name}={value}"))
-}
-
-fn normalize_view_reset_reloption(option: &str) -> Result<String, ExecError> {
-    // PostgreSQL accepts RESET of reloptions that are not valid SET options for
-    // views, such as autovacuum_enabled, because only the resulting reloptions
-    // array is validated after matching entries are removed.
-    Ok(option.to_ascii_lowercase())
-}
-
-fn set_view_reloptions(
-    current: Option<Vec<String>>,
-    options: &[crate::backend::parser::RelOption],
-) -> Result<Option<Vec<String>>, ExecError> {
-    let mut reloptions = current.unwrap_or_default();
-    for option in options {
-        let normalized = normalize_view_reloption(option)?;
-        let name = normalized
-            .split_once('=')
-            .map(|(name, _)| name)
-            .unwrap_or(normalized.as_str())
-            .to_string();
-        reloptions.retain(|existing| {
-            let existing_name = existing
-                .split_once('=')
-                .map(|(name, _)| name)
-                .unwrap_or(existing.as_str());
-            !existing_name.eq_ignore_ascii_case(&name)
-        });
-        reloptions.push(normalized);
-    }
-    Ok((!reloptions.is_empty()).then_some(reloptions))
-}
-
-fn reset_view_reloptions(
-    current: Option<Vec<String>>,
-    options: &[String],
-) -> Result<Option<Vec<String>>, ExecError> {
-    let resets = options
-        .iter()
-        .map(|option| normalize_view_reset_reloption(option))
-        .collect::<Result<Vec<_>, ExecError>>()?;
-    let reloptions = reset_reloptions(current, &resets).unwrap_or_default();
-    if resets
-        .iter()
-        .any(|option| option.eq_ignore_ascii_case("check_option"))
-    {
-        return Ok(Some(reloptions));
-    }
-    Ok((!reloptions.is_empty()).then_some(reloptions))
 }
 
 impl Database {
@@ -190,7 +108,8 @@ impl Database {
         let current = catalog
             .class_row_by_oid(relation.relation_oid)
             .and_then(|row| row.reloptions);
-        let reloptions = set_view_reloptions(current, &alter_stmt.options)?;
+        let reloptions =
+            set_view_reloptions(current, &alter_stmt.options).map_err(reloption_error_to_exec)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -292,7 +211,8 @@ impl Database {
         let current = catalog
             .class_row_by_oid(relation.relation_oid)
             .and_then(|row| row.reloptions);
-        let reloptions = reset_view_reloptions(current, &alter_stmt.options)?;
+        let reloptions =
+            reset_view_reloptions(current, &alter_stmt.options).map_err(reloption_error_to_exec)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -406,7 +326,8 @@ impl Database {
             let current = catalog
                 .class_row_by_oid(relation.relation_oid)
                 .and_then(|row| row.reloptions);
-            let reloptions = reset_view_reloptions(current, &alter_stmt.options)?;
+            let reloptions = reset_view_reloptions(current, &alter_stmt.options)
+                .map_err(reloption_error_to_exec)?;
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),

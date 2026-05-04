@@ -31,9 +31,8 @@ use super::expr_bit::{
 use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_boolor_statefunc};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
-    cast_value_with_source_type_catalog_and_config, parse_interval_text_value,
-    parse_text_array_literal_with_catalog_and_op, parse_text_array_literal_with_op,
-    soft_input_error_info_with_catalog_and_config,
+    cast_value_with_source_type_catalog_and_config, parse_text_array_literal_with_catalog_and_op,
+    parse_text_array_literal_with_op, soft_input_error_info_with_catalog_and_config,
 };
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
@@ -283,15 +282,69 @@ fn sql_type_from_builtin_oid(oid: u32) -> Option<SqlType> {
 }
 
 fn stats_oid_arg(values: &[Value], op: &'static str) -> Result<u32, ExecError> {
-    match values.first() {
-        Some(Value::Int32(v)) if *v >= 0 => Ok(*v as u32),
-        Some(Value::Int64(v)) if *v >= 0 && *v <= i64::from(u32::MAX) => Ok(*v as u32),
-        Some(other) => Err(ExecError::TypeMismatch {
-            op,
-            left: other.clone(),
-            right: Value::Int64(i64::from(crate::include::catalog::OID_TYPE_OID)),
-        }),
-        None => Err(malformed_expr_error(op)),
+    pgrust_executor::stats_oid_arg(values, op).map_err(|error| match error {
+        pgrust_executor::StatsArgError::MalformedCall { op } => malformed_expr_error(op),
+        pgrust_executor::StatsArgError::TypeMismatch { op, left, right } => {
+            ExecError::TypeMismatch { op, left, right }
+        }
+    })
+}
+
+fn relation_stats_snapshot(
+    entry: crate::backend::utils::activity::RelationStatsEntry,
+) -> pgrust_executor::RelationStatsSnapshot {
+    pgrust_executor::RelationStatsSnapshot {
+        numscans: entry.numscans,
+        tuples_returned: entry.tuples_returned,
+        tuples_fetched: entry.tuples_fetched,
+        tuples_inserted: entry.tuples_inserted,
+        tuples_updated: entry.tuples_updated,
+        tuples_hot_updated: entry.tuples_hot_updated,
+        tuples_deleted: entry.tuples_deleted,
+        live_tuples: entry.live_tuples,
+        dead_tuples: entry.dead_tuples,
+        blocks_fetched: entry.blocks_fetched,
+        blocks_hit: entry.blocks_hit,
+        lastscan: entry.lastscan,
+    }
+}
+
+fn relation_xact_stats_snapshot(
+    entry: crate::backend::utils::activity::RelationStatsDelta,
+) -> pgrust_executor::RelationStatsSnapshot {
+    pgrust_executor::RelationStatsSnapshot {
+        numscans: entry.numscans,
+        tuples_returned: entry.tuples_returned,
+        tuples_fetched: entry.tuples_fetched,
+        tuples_inserted: entry.tuples_inserted,
+        tuples_updated: entry.tuples_updated,
+        tuples_hot_updated: entry.tuples_hot_updated,
+        tuples_deleted: entry.tuples_deleted,
+        live_tuples: entry.live_tuples,
+        dead_tuples: entry.dead_tuples,
+        blocks_fetched: entry.blocks_fetched,
+        blocks_hit: entry.blocks_hit,
+        lastscan: entry.lastscan,
+    }
+}
+
+fn function_stats_snapshot(
+    entry: crate::backend::utils::activity::FunctionStatsEntry,
+) -> pgrust_executor::FunctionStatsSnapshot {
+    pgrust_executor::FunctionStatsSnapshot {
+        calls: entry.calls,
+        total_time_micros: entry.total_time_micros,
+        self_time_micros: entry.self_time_micros,
+    }
+}
+
+fn function_xact_stats_snapshot(
+    entry: crate::backend::utils::activity::FunctionStatsDelta,
+) -> pgrust_executor::FunctionStatsSnapshot {
+    pgrust_executor::FunctionStatsSnapshot {
+        calls: entry.calls,
+        total_time_micros: entry.total_time_micros,
+        self_time_micros: entry.self_time_micros,
     }
 }
 
@@ -305,24 +358,10 @@ fn relation_stats_value(
         .write()
         .visible_relation_entry(&ctx.stats, oid)
         .unwrap_or_default();
-    Ok(match func {
-        BuiltinScalarFunction::PgStatGetNumscans => Value::Int64(entry.numscans),
-        BuiltinScalarFunction::PgStatGetLastscan => entry
-            .lastscan
-            .map(Value::TimestampTz)
-            .unwrap_or(Value::Null),
-        BuiltinScalarFunction::PgStatGetTuplesReturned => Value::Int64(entry.tuples_returned),
-        BuiltinScalarFunction::PgStatGetTuplesFetched => Value::Int64(entry.tuples_fetched),
-        BuiltinScalarFunction::PgStatGetTuplesInserted => Value::Int64(entry.tuples_inserted),
-        BuiltinScalarFunction::PgStatGetTuplesUpdated => Value::Int64(entry.tuples_updated),
-        BuiltinScalarFunction::PgStatGetTuplesHotUpdated => Value::Int64(entry.tuples_hot_updated),
-        BuiltinScalarFunction::PgStatGetTuplesDeleted => Value::Int64(entry.tuples_deleted),
-        BuiltinScalarFunction::PgStatGetLiveTuples => Value::Int64(entry.live_tuples),
-        BuiltinScalarFunction::PgStatGetDeadTuples => Value::Int64(entry.dead_tuples),
-        BuiltinScalarFunction::PgStatGetBlocksFetched => Value::Int64(entry.blocks_fetched),
-        BuiltinScalarFunction::PgStatGetBlocksHit => Value::Int64(entry.blocks_hit),
-        _ => unreachable!("non-relation stats builtin in relation_stats_value"),
-    })
+    Ok(pgrust_executor::relation_stats_value(
+        func,
+        &relation_stats_snapshot(entry),
+    ))
 }
 
 fn relation_xact_stats_value(
@@ -340,15 +379,10 @@ fn relation_xact_stats_value(
         .map(|entry| &entry.current)
         .cloned()
         .unwrap_or_default();
-    Ok(match func {
-        BuiltinScalarFunction::PgStatGetXactNumscans => Value::Int64(current.numscans),
-        BuiltinScalarFunction::PgStatGetXactTuplesReturned => Value::Int64(current.tuples_returned),
-        BuiltinScalarFunction::PgStatGetXactTuplesFetched => Value::Int64(current.tuples_fetched),
-        BuiltinScalarFunction::PgStatGetXactTuplesInserted => Value::Int64(current.tuples_inserted),
-        BuiltinScalarFunction::PgStatGetXactTuplesUpdated => Value::Int64(current.tuples_updated),
-        BuiltinScalarFunction::PgStatGetXactTuplesDeleted => Value::Int64(current.tuples_deleted),
-        _ => unreachable!("non-xact relation stats builtin in relation_xact_stats_value"),
-    })
+    Ok(pgrust_executor::relation_xact_stats_value(
+        func,
+        &relation_xact_stats_snapshot(current),
+    ))
 }
 
 fn function_stats_value(
@@ -364,16 +398,10 @@ fn function_stats_value(
     } else {
         return Ok(Value::Null);
     };
-    Ok(match func {
-        BuiltinScalarFunction::PgStatGetFunctionCalls => Value::Int64(entry.calls),
-        BuiltinScalarFunction::PgStatGetFunctionTotalTime => {
-            Value::Float64(entry.total_time_micros as f64 / 1000.0)
-        }
-        BuiltinScalarFunction::PgStatGetFunctionSelfTime => {
-            Value::Float64(entry.self_time_micros as f64 / 1000.0)
-        }
-        _ => unreachable!("non-function stats builtin in function_stats_value"),
-    })
+    Ok(pgrust_executor::function_stats_value(
+        func,
+        &function_stats_snapshot(entry),
+    ))
 }
 
 fn function_xact_stats_value(
@@ -388,16 +416,10 @@ fn function_xact_stats_value(
     let Some(entry) = session.function_xact.get(&oid) else {
         return Ok(Value::Null);
     };
-    Ok(match func {
-        BuiltinScalarFunction::PgStatGetXactFunctionCalls => Value::Int64(entry.calls),
-        BuiltinScalarFunction::PgStatGetXactFunctionTotalTime => {
-            Value::Float64(entry.total_time_micros as f64 / 1000.0)
-        }
-        BuiltinScalarFunction::PgStatGetXactFunctionSelfTime => {
-            Value::Float64(entry.self_time_micros as f64 / 1000.0)
-        }
-        _ => unreachable!("non-xact function stats builtin in function_xact_stats_value"),
-    })
+    Ok(pgrust_executor::function_xact_stats_value(
+        func,
+        &function_xact_stats_snapshot(entry.clone()),
+    ))
 }
 
 fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
@@ -2619,142 +2641,23 @@ fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, Exe
 }
 
 fn eval_pg_encoding_to_char(values: &[Value]) -> Result<Value, ExecError> {
-    let encoding = match values {
-        [Value::Int16(value)] => i32::from(*value),
-        [Value::Int32(value)] => *value,
-        [Value::Int64(value)] => i32::try_from(*value).unwrap_or(-1),
-        [Value::Null] => return Ok(Value::Null),
-        _ => {
-            return Err(ExecError::TypeMismatch {
-                op: "pg_encoding_to_char",
-                left: values.first().cloned().unwrap_or(Value::Null),
-                right: Value::Int32(0),
-            });
-        }
-    };
-    let name = match encoding {
-        0 => "SQL_ASCII",
-        6 => "UTF8",
-        _ => "",
-    };
-    Ok(Value::Text(name.into()))
+    pgrust_executor::eval_pg_encoding_to_char(values).map_err(misc_builtin_error)
 }
 
 fn eval_pg_char_to_encoding(values: &[Value]) -> Result<Value, ExecError> {
-    let name = match values {
-        [value] if value.as_text().is_some() => value.as_text().expect("guarded above"),
-        [Value::Null] => return Ok(Value::Null),
-        _ => {
-            return Err(ExecError::TypeMismatch {
-                op: "pg_char_to_encoding",
-                left: values.first().cloned().unwrap_or(Value::Null),
-                right: Value::Text(String::new().into()),
-            });
-        }
-    };
-    let cleaned: String = name
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .map(|ch| ch.to_ascii_lowercase())
-        .collect();
-    let encoding = match cleaned.as_str() {
-        "" => -1,
-        "sqlascii" => 0,
-        "eucjp" => 1,
-        "euccn" => 2,
-        "euckr" => 3,
-        "euctw" => 4,
-        "eucjis2004" => 5,
-        "utf8" | "unicode" => 6,
-        "muleinternal" => 7,
-        "latin1" | "iso88591" => 8,
-        "latin2" | "iso88592" => 9,
-        "latin3" | "iso88593" => 10,
-        "latin4" | "iso88594" => 11,
-        "latin5" | "iso88599" => 12,
-        "latin6" | "iso885910" => 13,
-        "latin7" | "iso885913" => 14,
-        "latin8" | "iso885914" => 15,
-        "latin9" | "iso885915" => 16,
-        "latin10" | "iso885916" => 17,
-        "win1256" | "windows1256" => 18,
-        "win1258" | "windows1258" | "abc" | "tcvn" | "tcvn5712" | "vscii" => 19,
-        "win866" | "windows866" | "alt" => 20,
-        "win874" | "windows874" => 21,
-        "koi8r" | "koi8" => 22,
-        "win1251" | "windows1251" | "win" => 23,
-        "win1252" | "windows1252" => 24,
-        "iso88595" => 25,
-        "iso88596" => 26,
-        "iso88597" => 27,
-        "iso88598" => 28,
-        "win1250" | "windows1250" => 29,
-        "win1253" | "windows1253" => 30,
-        "win1254" | "windows1254" => 31,
-        "win1255" | "windows1255" => 32,
-        "win1257" | "windows1257" => 33,
-        "koi8u" => 34,
-        "sjis" | "shiftjis" | "mskanji" | "win932" | "windows932" => 35,
-        "big5" | "win950" | "windows950" => 36,
-        "gbk" | "win936" | "windows936" => 37,
-        "uhc" | "win949" | "windows949" => 38,
-        "gb18030" => 39,
-        "johab" => 40,
-        "shiftjis2004" => 41,
-        _ => -1,
-    };
-    Ok(Value::Int32(encoding))
+    pgrust_executor::eval_pg_char_to_encoding(values).map_err(misc_builtin_error)
 }
 
 fn eval_convert(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
-        [Value::Bytea(bytes), _, _] => Ok(Value::Bytea(bytes.clone())),
-        _ => Err(ExecError::TypeMismatch {
-            op: "convert",
-            left: values.first().cloned().unwrap_or(Value::Null),
-            right: values.get(1).cloned().unwrap_or(Value::Null),
-        }),
-    }
+    pgrust_executor::eval_convert(values).map_err(misc_builtin_error)
 }
 
 fn eval_greatest(values: &[Value]) -> Result<Value, ExecError> {
-    let mut best: Option<Value> = None;
-    for value in values {
-        if matches!(value, Value::Null) {
-            continue;
-        }
-        let replace = match best.as_ref() {
-            None => true,
-            Some(current) => {
-                compare_order_values(current, value, None, None, false)? == std::cmp::Ordering::Less
-            }
-        };
-        if replace {
-            best = Some(value.clone());
-        }
-    }
-    Ok(best.unwrap_or(Value::Null))
+    pgrust_executor::eval_greatest(values).map_err(misc_builtin_error)
 }
 
 fn eval_least(values: &[Value]) -> Result<Value, ExecError> {
-    let mut best: Option<Value> = None;
-    for value in values {
-        if matches!(value, Value::Null) {
-            continue;
-        }
-        let replace = match best.as_ref() {
-            None => true,
-            Some(current) => {
-                compare_order_values(current, value, None, None, false)?
-                    == std::cmp::Ordering::Greater
-            }
-        };
-        if replace {
-            best = Some(value.clone());
-        }
-    }
-    Ok(best.unwrap_or(Value::Null))
+    pgrust_executor::eval_least(values).map_err(misc_builtin_error)
 }
 
 fn lookup_system_binding(
@@ -6545,44 +6448,11 @@ fn eval_pg_column_toast_chunk_id_raw(raw: &[u8]) -> Result<Value, ExecError> {
 }
 
 fn eval_pg_column_toast_chunk_id_values(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null] => Ok(Value::Null),
-        [_] => Ok(Value::Null),
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "pg_column_toast_chunk_id(any)",
-            actual: format!("PgColumnToastChunkId({} args)", values.len()),
-        })),
-    }
+    pgrust_executor::eval_pg_column_toast_chunk_id_values(values).map_err(misc_builtin_error)
 }
 
 fn eval_num_nulls(values: &[Value], func_variadic: bool, count_nulls: bool) -> Value {
-    if func_variadic {
-        let Some(value) = values.first() else {
-            return Value::Int32(0);
-        };
-        if matches!(value, Value::Null) {
-            return Value::Null;
-        }
-        let Some(array) = crate::include::nodes::datum::array_value_from_value(value) else {
-            return Value::Int32(if matches!(value, Value::Null) == count_nulls {
-                1
-            } else {
-                0
-            });
-        };
-        let count = array
-            .elements
-            .iter()
-            .filter(|value| matches!(value, Value::Null) == count_nulls)
-            .count();
-        return Value::Int32(count as i32);
-    }
-    Value::Int32(
-        values
-            .iter()
-            .filter(|value| matches!(value, Value::Null) == count_nulls)
-            .count() as i32,
-    )
+    pgrust_executor::eval_num_nulls(values, func_variadic, count_nulls)
 }
 
 fn data_dir_path(ctx: &ExecutorContext) -> Result<std::path::PathBuf, ExecError> {
@@ -6955,73 +6825,20 @@ fn eval_pg_control_record(func: BuiltinScalarFunction, ctx: &ExecutorContext) ->
     Value::Record(crate::include::nodes::datum::RecordValue::anonymous(fields))
 }
 
-fn canonicalize_path_text(path: &str) -> String {
-    let absolute = path.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            if parts.last().is_some_and(|last| *last != "..") {
-                parts.pop();
-            } else if !absolute {
-                parts.push(part);
-            }
-        } else {
-            parts.push(part);
-        }
-    }
-    if absolute {
-        if parts.is_empty() {
-            "/".into()
-        } else {
-            format!("/{}", parts.join("/"))
-        }
-    } else if parts.is_empty() {
-        ".".into()
-    } else {
-        parts.join("/")
-    }
-}
-
 fn eval_test_canonicalize_path(values: &[Value]) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(malformed_expr_error("test_canonicalize_path"));
-    };
-    Ok(value
-        .as_text()
-        .map(canonicalize_path_text)
-        .map(Into::into)
-        .map(Value::Text)
-        .unwrap_or(Value::Null))
+    pgrust_executor::eval_test_canonicalize_path(values).map_err(misc_builtin_error)
 }
 
 fn eval_gist_translate_cmptype_common(values: &[Value]) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(malformed_expr_error("gist_translate_cmptype_common"));
-    };
-    let strategy = int32_arg(value, "gist_translate_cmptype_common")?;
-    Ok(Value::Int16(match strategy {
-        3 => 18,
-        7 => 3,
-        other => other as i16,
-    }))
+    pgrust_executor::eval_gist_translate_cmptype_common(values).map_err(misc_builtin_error)
 }
 
 fn eval_pg_log_backend_memory_contexts(values: &[Value]) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(malformed_expr_error("pg_log_backend_memory_contexts"));
-    };
-    let _pid = int32_arg(value, "pg_log_backend_memory_contexts")?;
-    Ok(Value::Bool(true))
+    pgrust_executor::eval_pg_log_backend_memory_contexts(values).map_err(misc_builtin_error)
 }
 
 fn eval_pg_current_logfile(values: &[Value]) -> Result<Value, ExecError> {
-    if values.len() > 1 {
-        return Err(malformed_expr_error("pg_current_logfile"));
-    }
-    Ok(Value::Null)
+    pgrust_executor::eval_pg_current_logfile(values).map_err(misc_builtin_error)
 }
 
 fn acl_item_parts(item: &str) -> Option<(&str, &str, &str)> {
@@ -10551,23 +10368,9 @@ fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
 }
 
 fn configured_current_schema_search_path(ctx: &ExecutorContext) -> Vec<String> {
-    ctx.gucs
-        .get("search_path")
-        .filter(|value| !value.trim().eq_ignore_ascii_case("default"))
-        .map(|value| {
-            value
-                .split(',')
-                .map(|schema| {
-                    schema
-                        .trim()
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .to_ascii_lowercase()
-                })
-                .filter(|schema| !schema.is_empty())
-                .collect()
-        })
-        .unwrap_or_else(|| vec!["public".into()])
+    pgrust_executor::configured_current_schema_search_path(
+        ctx.gucs.get("search_path").map(String::as_str),
+    )
 }
 
 fn current_schema_value(ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
@@ -10586,29 +10389,14 @@ fn current_schema_value(ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
     };
     let namespaces = catalog.namespace_rows();
     let catalog_search_path = catalog.search_path();
-    let mut search_path = if catalog_search_path.is_empty() {
-        configured_current_schema_search_path(ctx)
-    } else {
-        catalog_search_path
-    };
-    if search_path.len() > 1
-        && search_path
-            .first()
-            .is_some_and(|schema| schema == "pg_catalog")
-    {
-        search_path.remove(0);
-    }
-    search_path
-        .into_iter()
-        .filter(|schema| schema != "$user" && !current_schema_is_temp(schema))
-        .find(|schema| {
-            namespaces
-                .iter()
-                .any(|namespace| namespace.nspname.eq_ignore_ascii_case(schema))
-        })
-        .map(|schema| Value::Text(schema.into()))
-        .map(Ok)
-        .unwrap_or(Ok(Value::Null))
+    Ok(pgrust_executor::current_schema_from_search_path(
+        catalog_search_path,
+        configured_current_schema_search_path(ctx),
+        namespaces
+            .into_iter()
+            .map(|namespace| namespace.nspname.to_string())
+            .collect(),
+    ))
 }
 
 fn ensure_current_schema_temp_namespace(
@@ -10631,82 +10419,29 @@ fn ensure_current_schema_temp_namespace(
 }
 
 fn current_schema_is_temp(schema: &str) -> bool {
-    schema.eq_ignore_ascii_case("pg_temp") || schema.to_ascii_lowercase().starts_with("pg_temp_")
+    pgrust_executor::current_schema_is_temp(schema)
 }
 
 fn current_schemas_value(include_implicit: bool, ctx: &ExecutorContext) -> Value {
-    let mut schemas = Vec::<String>::new();
-    let mut push_schema = |schema: String| {
-        if !schemas
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(&schema))
-        {
-            schemas.push(schema);
-        }
-    };
-
-    if include_implicit {
-        if let Some(temp_schema) = current_temp_namespace_name(ctx) {
-            push_schema(temp_schema.to_string());
-        }
-        push_schema("pg_catalog".into());
-    }
-
-    let configured_path = ctx
-        .catalog
-        .as_deref()
-        .map(|catalog| catalog.search_path())
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| configured_current_schema_search_path(ctx));
-    for schema in configured_path {
-        if schema == "$user" {
-            continue;
-        }
-        if schema.eq_ignore_ascii_case("pg_temp") {
-            if include_implicit {
-                if let Some(temp_schema) = current_temp_namespace_name(ctx) {
-                    push_schema(temp_schema.to_string());
-                }
-            }
-            continue;
-        }
-        if schema.eq_ignore_ascii_case("pg_catalog") && include_implicit {
-            continue;
-        }
-        push_schema(schema);
-    }
-
-    Value::PgArray(
-        ArrayValue::from_1d(
-            schemas
-                .into_iter()
-                .map(|schema| Value::Text(schema.into()))
-                .collect(),
-        )
-        .with_element_type_oid(NAME_TYPE_OID),
+    pgrust_executor::current_schemas_value(
+        include_implicit,
+        current_temp_namespace_name(ctx).map(|name| name.to_string()),
+        ctx.catalog
+            .as_deref()
+            .map(|catalog| catalog.search_path())
+            .unwrap_or_default(),
+        configured_current_schema_search_path(ctx),
     )
 }
 
 fn pg_stat_get_backend_wal_value(values: &[Value], ctx: &ExecutorContext) -> Value {
-    let pid = values.first().and_then(|value| match value {
-        Value::Int32(value) => Some(*value),
-        Value::Int64(value) => i32::try_from(*value).ok(),
-        _ => None,
-    });
-    if pid != Some(ctx.client_id as i32) {
-        return Value::Null;
-    }
     let wal_bytes = ctx.session_stats.read().backend_wal_write_bytes();
-    Value::Record(crate::include::nodes::datum::RecordValue::anonymous(vec![
-        ("wal_records".into(), Value::Int64(0)),
-        ("wal_fpi".into(), Value::Int64(0)),
-        ("wal_bytes".into(), Value::Int64(wal_bytes)),
-        ("wal_buffers_full".into(), Value::Int64(0)),
-        (
-            "stats_reset".into(),
-            Value::TimestampTz(crate::backend::utils::activity::now_timestamptz()),
-        ),
-    ]))
+    pgrust_executor::pg_stat_get_backend_wal_value(
+        values,
+        ctx.client_id,
+        wal_bytes,
+        crate::backend::utils::activity::now_timestamptz(),
+    )
 }
 
 fn current_temp_namespace_oid(ctx: &ExecutorContext) -> Option<u32> {
@@ -10720,12 +10455,13 @@ fn current_temp_namespace_oid(ctx: &ExecutorContext) -> Option<u32> {
 }
 
 fn warn_time_precision_overflow(precision: Option<i32>, type_name: &str, suffix: &str) {
-    if let Some(precision) = precision
-        && precision > MAX_TIME_PRECISION
-    {
-        crate::backend::utils::misc::notices::push_warning(format!(
-            "{type_name}({precision}){suffix} precision reduced to maximum allowed, {MAX_TIME_PRECISION}"
-        ));
+    if let Some(warning) = pgrust_executor::time_precision_overflow_warning(
+        precision,
+        MAX_TIME_PRECISION,
+        type_name,
+        suffix,
+    ) {
+        crate::backend::utils::misc::notices::push_warning(warning);
     }
 }
 
@@ -13019,39 +12755,7 @@ fn eval_plpgsql_builtin_function(
 }
 
 fn eval_pg_sleep_function(values: &[Value]) -> Result<Value, ExecError> {
-    let seconds = match values {
-        [Value::Null] => return Ok(Value::Null),
-        [Value::Float64(value)] => *value,
-        [Value::Int32(value)] => *value as f64,
-        [Value::Int64(value)] => *value as f64,
-        [Value::Interval(value)] if value.is_finite() => value.cmp_key() as f64 / 1_000_000.0,
-        [value] if value.as_text().is_some() => {
-            let interval = parse_interval_text_value(value.as_text().unwrap())?;
-            interval.cmp_key() as f64 / 1_000_000.0
-        }
-        [other] => {
-            return Err(ExecError::TypeMismatch {
-                op: "pg_sleep",
-                left: other.clone(),
-                right: Value::Null,
-            });
-        }
-        _ => {
-            return Err(ExecError::TypeMismatch {
-                op: "pg_sleep",
-                left: values.first().cloned().unwrap_or(Value::Null),
-                right: values.get(1).cloned().unwrap_or(Value::Null),
-            });
-        }
-    };
-    if !seconds.is_finite() || seconds < 0.0 {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "non-negative finite sleep duration",
-            actual: seconds.to_string(),
-        }));
-    }
-    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
-    Ok(Value::Null)
+    pgrust_executor::eval_pg_sleep_function(values).map_err(misc_builtin_error)
 }
 
 fn eval_timezone_function(
@@ -14317,56 +14021,46 @@ fn pg_typeof_type_name(ty: SqlType, ctx: &ExecutorContext) -> String {
     sql_type_name(ty)
 }
 
-fn int4_array_from_client_ids(pids: Vec<crate::ClientId>) -> Value {
-    Value::PgArray(
-        ArrayValue::from_1d(
-            pids.into_iter()
-                .map(|pid| Value::Int32(pid as i32))
-                .collect(),
-        )
-        .with_element_type_oid(INT4_TYPE_OID),
-    )
-}
-
-fn client_id_arg(value: &Value, op: &'static str) -> Result<Option<crate::ClientId>, ExecError> {
-    match value {
-        Value::Null => Ok(None),
-        Value::Int32(pid) if *pid > 0 => Ok(Some(*pid as crate::ClientId)),
-        Value::Int32(_) => Ok(None),
-        other => Err(ExecError::TypeMismatch {
-            op,
-            left: other.clone(),
-            right: Value::Int32(0),
-        }),
+fn misc_builtin_error(error: pgrust_executor::MiscBuiltinError) -> ExecError {
+    match error {
+        pgrust_executor::MiscBuiltinError::MalformedCall { op } => malformed_expr_error(op),
+        pgrust_executor::MiscBuiltinError::TypeMismatch { op, left, right } => {
+            ExecError::TypeMismatch { op, left, right }
+        }
+        pgrust_executor::MiscBuiltinError::InvalidSleepDuration { actual } => {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "non-negative finite sleep duration",
+                actual,
+            })
+        }
+        pgrust_executor::MiscBuiltinError::UnexpectedToken { expected, actual } => {
+            ExecError::Parse(ParseError::UnexpectedToken { expected, actual })
+        }
+        pgrust_executor::MiscBuiltinError::NegativeTerminateTimeout => ExecError::DetailedError {
+            message: "\"timeout\" must not be negative".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22003",
+        },
+        pgrust_executor::MiscBuiltinError::Expr(error) => error.into(),
     }
 }
 
+fn int4_array_from_client_ids(pids: Vec<crate::ClientId>) -> Value {
+    pgrust_executor::int4_array_from_client_ids(pids)
+}
+
+fn client_id_arg(value: &Value, op: &'static str) -> Result<Option<crate::ClientId>, ExecError> {
+    pgrust_executor::client_id_arg(value, op)
+        .map(|pid| pid.map(|pid| pid as crate::ClientId))
+        .map_err(misc_builtin_error)
+}
+
 fn pg_signal_permission_error(func: BuiltinScalarFunction, superuser_target: bool) -> ExecError {
-    let (message, detail) = match (func, superuser_target) {
-        (BuiltinScalarFunction::PgCancelBackend, true) => (
-            "permission denied to cancel query",
-            "Only roles with the SUPERUSER attribute may cancel queries of roles with the SUPERUSER attribute.",
-        ),
-        (BuiltinScalarFunction::PgCancelBackend, false) => (
-            "permission denied to cancel query",
-            "Only roles with privileges of the role whose query is being canceled or with privileges of the \"pg_signal_backend\" role may cancel this query.",
-        ),
-        (BuiltinScalarFunction::PgTerminateBackend, true) => (
-            "permission denied to terminate process",
-            "Only roles with the SUPERUSER attribute may terminate processes of roles with the SUPERUSER attribute.",
-        ),
-        (BuiltinScalarFunction::PgTerminateBackend, false) => (
-            "permission denied to terminate process",
-            "Only roles with privileges of the role whose process is being terminated or with privileges of the \"pg_signal_backend\" role may terminate this process.",
-        ),
-        _ => (
-            "permission denied to signal backend",
-            "Insufficient privileges.",
-        ),
-    };
+    let permission = pgrust_executor::backend_signal_permission(func, superuser_target);
     ExecError::DetailedError {
-        message: message.into(),
-        detail: Some(detail.into()),
+        message: permission.message.into(),
+        detail: Some(permission.detail.into()),
         hint: None,
         sqlstate: "42501",
     }
@@ -14377,33 +14071,15 @@ fn eval_pg_signal_backend_function(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let Some(pid_value) = values.first() else {
-        return Err(malformed_expr_error("pg_signal_backend"));
-    };
-    if matches!(pid_value, Value::Null) {
+    if values
+        .first()
+        .is_some_and(|value| matches!(value, Value::Null))
+    {
         return Ok(Value::Null);
     }
-    let op = match func {
-        BuiltinScalarFunction::PgCancelBackend => "pg_cancel_backend",
-        BuiltinScalarFunction::PgTerminateBackend => "pg_terminate_backend",
-        _ => "pg_signal_backend",
-    };
-    if matches!(func, BuiltinScalarFunction::PgTerminateBackend) {
-        let timeout = values
-            .get(1)
-            .map(|value| int64_arg(value, "pg_terminate_backend"))
-            .transpose()?
-            .unwrap_or(0);
-        if timeout < 0 {
-            return Err(ExecError::DetailedError {
-                message: "\"timeout\" must not be negative".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "22003",
-            });
-        }
-    }
-    let Some(target_pid) = client_id_arg(pid_value, op)? else {
+    let Some(target_pid) =
+        pgrust_executor::validate_backend_signal_args(func, values).map_err(misc_builtin_error)?
+    else {
         return Ok(Value::Bool(false));
     };
     let Some(db) = ctx.database.as_ref() else {
@@ -14547,10 +14223,9 @@ fn eval_pg_isolation_test_session_is_blocked(
         .unwrap_or_default();
     // :HACK: pgrust does not yet model PostgreSQL isolationtester injection
     // points or safe-snapshot waits, so this checks modeled lock blockers only.
-    Ok(Value::Bool(
-        blockers
-            .iter()
-            .any(|blocker| interesting_pids.contains(blocker)),
+    Ok(pgrust_executor::isolation_session_is_blocked(
+        &blockers,
+        &interesting_pids,
     ))
 }
 
@@ -15017,7 +14692,9 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::HashValueExtended(kind) => {
             eval_hash_builtin_function(kind, true, &values)
         }
-        BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
+        BuiltinScalarFunction::GetDatabaseEncoding => {
+            Ok(pgrust_executor::eval_get_database_encoding())
+        }
         BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
         BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
         BuiltinScalarFunction::Normalize => eval_unicode_normalize_function(&values),
@@ -15092,20 +14769,15 @@ pub(crate) fn eval_builtin_function(
             Ok(Value::Null)
         }
         BuiltinScalarFunction::PgStatGetBackendPid => {
-            let beid = values.first().and_then(|value| match value {
-                Value::Int32(value) => Some(*value),
-                Value::Int64(value) => i32::try_from(*value).ok(),
-                _ => None,
-            });
             let current_beid = ctx
                 .database
                 .as_ref()
                 .map(|db| db.temp_backend_id(ctx.client_id) as i32)
                 .unwrap_or(ctx.client_id as i32);
-            Ok(Value::Int32(
-                (beid == Some(current_beid))
-                    .then_some(ctx.client_id as i32)
-                    .unwrap_or(0),
+            Ok(pgrust_executor::pg_stat_get_backend_pid_value(
+                &values,
+                current_beid,
+                ctx.client_id,
             ))
         }
         BuiltinScalarFunction::PgStatGetBackendWal => {

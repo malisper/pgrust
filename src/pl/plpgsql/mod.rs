@@ -1,5 +1,5 @@
 mod ast;
-mod cache;
+pub mod cache;
 mod compile;
 mod exec;
 mod gram;
@@ -10,11 +10,8 @@ use crate::backend::executor::{ExecError, ExecutorContext, StatementResult};
 use crate::backend::parser::{Catalog, CatalogLookup, DoStatement, ParseError};
 
 pub use cache::PlpgsqlFunctionCache;
-pub use compile::{CompiledFunction, TriggerTransitionTable};
 pub use exec::{
-    EventTriggerCallContext, EventTriggerDdlCommandRow, EventTriggerDroppedObjectRow,
-    PlpgsqlNotice, TriggerCallContext, TriggerFunctionResult, TriggerOperation, clear_notices,
-    current_event_trigger_ddl_commands, current_event_trigger_dropped_objects,
+    clear_notices, current_event_trigger_ddl_commands, current_event_trigger_dropped_objects,
     current_event_trigger_table_rewrite, take_notices,
 };
 pub(crate) use exec::{
@@ -23,6 +20,13 @@ pub(crate) use exec::{
     execute_user_defined_scalar_function_values_with_arg_types,
     execute_user_defined_set_returning_function, execute_user_defined_trigger_function,
 };
+pub use pgrust_nodes::{
+    EventTriggerCallContext, EventTriggerDdlCommandRow, EventTriggerDroppedObjectRow,
+    TriggerCallContext, TriggerFunctionResult, TriggerOperation, TriggerTransitionCapture,
+    TriggerTransitionTable,
+};
+pub use pgrust_plpgsql::CompiledFunction;
+pub use pgrust_plpgsql::PlpgsqlNotice;
 pub use pgrust_plpgsql::*;
 
 pub fn execute_do(stmt: &DoStatement) -> Result<StatementResult, ExecError> {

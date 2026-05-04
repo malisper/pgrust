@@ -4,23 +4,104 @@ use crate::backend::catalog::persistence::{
 };
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
-use crate::backend::commands::rolecmds::{
-    GrantMembershipAuthorizationError, PasswordSettings, build_alter_role_spec,
-    build_create_role_spec, can_rename_role, grant_membership_authorized_with_detail,
-    membership_row, normalize_drop_role_names, parse_createrole_self_grant, role_management_error,
-    store_role_setting,
-};
 use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,
-    DropOwnedStatement, DropRoleStatement, ReassignOwnedStatement, RoleOption,
+    DropOwnedStatement, DropRoleStatement, ParseError, ReassignOwnedStatement, RoleOption,
 };
 use crate::include::catalog::{
     BootstrapCatalogKind, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_POLICY_RELATION_OID,
+    PgAuthIdRow,
 };
+use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
     catalog_effect_for_acl, default_acl_acl_shdepend_rows, default_acl_hardwired,
 };
+use pgrust_commands::rolecmds::{
+    BuiltRoleSpec, GrantMembershipAuthorizationError, PasswordSettings, RoleAuthorizationContext,
+    RoleCommandNotices, build_alter_role_spec_with_notices, build_create_role_spec_with_notices,
+    membership_row, normalize_drop_role_names, parse_createrole_self_grant, role_management_error,
+};
 use std::collections::{BTreeMap, BTreeSet};
+
+struct RootRoleCommandNotices;
+
+impl RoleCommandNotices for RootRoleCommandNotices {
+    fn empty_password(&self) {
+        crate::backend::utils::misc::notices::push_notice(
+            "empty string is not a valid password, clearing password",
+        );
+    }
+
+    fn md5_password(&self) {
+        crate::backend::utils::misc::notices::push_backend_notice_with_hint(
+            "WARNING",
+            "01000",
+            "setting an MD5-encrypted password",
+            Some(
+                "MD5 password support is deprecated and will be removed in a future release of PostgreSQL."
+                    .into(),
+            ),
+            Some(
+                "Refer to the PostgreSQL documentation for details about migrating to another password type."
+                    .into(),
+            ),
+            None,
+        );
+    }
+}
+
+struct RootRoleAuthorization<'a> {
+    auth: &'a AuthState,
+    catalog: &'a AuthCatalog,
+}
+
+impl RoleAuthorizationContext for RootRoleAuthorization<'_> {
+    fn current_user_oid(&self) -> u32 {
+        self.auth.current_user_oid()
+    }
+
+    fn roles(&self) -> &[PgAuthIdRow] {
+        self.catalog.roles()
+    }
+
+    fn has_admin_option(&self, role_oid: u32) -> bool {
+        self.auth.has_admin_option(role_oid, self.catalog)
+    }
+
+    fn role_by_oid(&self, oid: u32) -> Option<&PgAuthIdRow> {
+        self.catalog.role_by_oid(oid)
+    }
+}
+
+fn build_create_role_spec(
+    stmt: &CreateRoleStatement,
+    password_settings: PasswordSettings,
+) -> Result<BuiltRoleSpec, ParseError> {
+    build_create_role_spec_with_notices(stmt, password_settings, &RootRoleCommandNotices)
+}
+
+fn build_alter_role_spec(
+    stmt: &AlterRoleStatement,
+    existing: &PgAuthIdRow,
+    password_settings: PasswordSettings,
+) -> Result<Option<BuiltRoleSpec>, ParseError> {
+    build_alter_role_spec_with_notices(stmt, existing, password_settings, &RootRoleCommandNotices)
+}
+
+fn can_rename_role(auth: &AuthState, target_oid: u32, catalog: &AuthCatalog) -> bool {
+    pgrust_commands::rolecmds::can_rename_role(&RootRoleAuthorization { auth, catalog }, target_oid)
+}
+
+fn grant_membership_authorized_with_detail(
+    auth: &AuthState,
+    catalog: &AuthCatalog,
+    role_name: &str,
+) -> Result<PgAuthIdRow, GrantMembershipAuthorizationError> {
+    pgrust_commands::rolecmds::grant_membership_authorized_with_detail(
+        &RootRoleAuthorization { auth, catalog },
+        role_name,
+    )
+}
 
 impl Database {
     pub(crate) fn execute_create_role_stmt(
@@ -349,7 +430,12 @@ impl Database {
                 // :HACK: Full pg_db_role_setting support is deferred. Keep the
                 // role-level setting in a small in-memory map so regression
                 // setup syntax succeeds and session SET ROLE can see it.
-                store_role_setting(self.database_oid, existing.oid, normalized, value.clone());
+                pgrust_catalog_store::role_settings::store_role_setting(
+                    self.database_oid,
+                    existing.oid,
+                    normalized,
+                    value.clone(),
+                );
                 return Ok(StatementResult::AffectedRows(0));
             }
             AlterRoleAction::Options(_) => {

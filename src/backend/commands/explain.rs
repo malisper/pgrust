@@ -1,8 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde_json::Value as JsonValue;
-
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
@@ -32,6 +30,12 @@ use crate::include::nodes::primnodes::{
     user_attrno,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
+use pgrust_commands::explain::apply_remaining_verbose_explain_text_compat as apply_remaining_verbose_explain_text_compat_impl;
+pub(crate) use pgrust_commands::explain::{
+    apply_window_initplan_explain_compat, apply_window_support_verbose_explain_compat,
+    format_explain_xml_from_json, format_explain_yaml_from_json, indent_multiline_json,
+    wrap_explain_plan_json,
+};
 
 pub(crate) fn format_explain_lines(
     state: &dyn PlanNode,
@@ -146,7 +150,7 @@ fn normalize_explain_analyze_initplan_lines(lines: &mut Vec<String>) {
 pub(crate) fn format_explain_analyze_json(state: &dyn PlanNode) -> String {
     EXPLAIN_ANALYZE_PRINTED_INITPLANS.with(|printed| printed.borrow_mut().clear());
     let plan = format_explain_analyze_json_plan(state);
-    format!("[\n  {{\n    \"Plan\": {}\n  }}\n]", plan.trim_start())
+    wrap_explain_plan_json(&plan)
 }
 
 pub(crate) fn format_explain_json(state: &dyn PlanNode, analyze: bool) -> String {
@@ -155,12 +159,13 @@ pub(crate) fn format_explain_json(state: &dyn PlanNode, analyze: bool) -> String
     }
     let plan = state.explain_json(false, 0);
     let plan = indent_multiline_json(&plan, 4);
-    format!("[\n  {{\n    \"Plan\": {}\n  }}\n]", plan.trim_start())
+    wrap_explain_plan_json(&plan)
 }
 
 pub(crate) fn format_explain_xml(state: &dyn PlanNode, analyze: bool) -> String {
     let json = format_explain_json(state, analyze);
-    format_explain_xml_from_json(&json).unwrap_or_else(|| xml_text_node("Plan", &json))
+    format_explain_xml_from_json(&json)
+        .unwrap_or_else(|| pgrust_commands::explain::xml_text_node("Plan", &json))
 }
 
 pub(crate) fn format_explain_yaml(state: &dyn PlanNode, analyze: bool) -> String {
@@ -168,293 +173,8 @@ pub(crate) fn format_explain_yaml(state: &dyn PlanNode, analyze: bool) -> String
     format_explain_yaml_from_json(&json).unwrap_or(json)
 }
 
-pub(crate) fn format_explain_xml_from_json(json: &str) -> Option<String> {
-    let value = serde_json::from_str::<JsonValue>(json).ok()?;
-    Some(format_explain_xml_value(&value))
-}
-
-pub(crate) fn format_explain_yaml_from_json(json: &str) -> Option<String> {
-    let value = serde_json::from_str::<JsonValue>(json).ok()?;
-    let mut lines = Vec::new();
-    push_yaml_value(&value, 0, &mut lines);
-    Some(lines.join("\n"))
-}
-
-fn format_explain_xml_value(value: &JsonValue) -> String {
-    let mut lines = vec![r#"<explain xmlns="http://www.postgresql.org/2009/explain">"#.to_string()];
-    match value {
-        JsonValue::Array(items) => {
-            for item in items {
-                lines.push("  <Query>".into());
-                push_xml_value(item, "Query", 4, &mut lines);
-                lines.push("  </Query>".into());
-            }
-        }
-        other => {
-            lines.push("  <Query>".into());
-            push_xml_value(other, "Query", 4, &mut lines);
-            lines.push("  </Query>".into());
-        }
-    }
-    lines.push("</explain>".into());
-    lines.join("\n")
-}
-
-fn push_xml_value(value: &JsonValue, tag: &str, indent: usize, lines: &mut Vec<String>) {
-    match value {
-        JsonValue::Object(map) => {
-            for (key, child) in ordered_explain_json_entries(map) {
-                let child_tag = explain_xml_tag(key);
-                match child {
-                    JsonValue::Array(items) if key == "Plans" => {
-                        for item in items {
-                            push_xml_object_or_scalar(item, "Plan", indent, lines);
-                        }
-                    }
-                    _ => push_xml_object_or_scalar(child, &child_tag, indent, lines),
-                }
-            }
-        }
-        JsonValue::Array(items) => {
-            for item in items {
-                push_xml_object_or_scalar(item, tag, indent, lines);
-            }
-        }
-        other => {
-            push_xml_object_or_scalar(other, tag, indent, lines);
-        }
-    }
-}
-
-fn push_xml_object_or_scalar(value: &JsonValue, tag: &str, indent: usize, lines: &mut Vec<String>) {
-    let pad = " ".repeat(indent);
-    match value {
-        JsonValue::Object(_) | JsonValue::Array(_) => {
-            lines.push(format!("{pad}<{tag}>"));
-            push_xml_value(value, tag, indent + 2, lines);
-            lines.push(format!("{pad}</{tag}>"));
-        }
-        scalar => {
-            lines.push(format!(
-                "{pad}<{tag}>{}</{tag}>",
-                xml_escape(&json_scalar_text(scalar))
-            ));
-        }
-    }
-}
-
-fn explain_xml_tag(key: &str) -> String {
-    key.chars()
-        .map(|ch| match ch {
-            ' ' | '_' => '-',
-            ':' | '"' | '\'' | '(' | ')' | '[' | ']' => '-',
-            other => other,
-        })
-        .collect()
-}
-
-fn xml_text_node(tag: &str, value: &str) -> String {
-    format!("<{tag}>{}</{tag}>", xml_escape(value))
-}
-
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-fn push_yaml_value(value: &JsonValue, indent: usize, lines: &mut Vec<String>) {
-    let pad = " ".repeat(indent);
-    match value {
-        JsonValue::Array(items) => {
-            for item in items {
-                match item {
-                    JsonValue::Object(map) if !map.is_empty() => {
-                        let ordered = ordered_explain_json_entries(map);
-                        let mut iter = ordered.into_iter();
-                        if let Some((key, child)) = iter.next() {
-                            push_yaml_array_object_head(key, child, indent, lines);
-                        }
-                        for (key, child) in iter {
-                            push_yaml_key_value(key, child, indent + 2, lines);
-                        }
-                    }
-                    scalar if is_yaml_scalar(scalar) => {
-                        lines.push(format!("{pad}- {}", yaml_scalar_text(scalar)));
-                    }
-                    other => {
-                        lines.push(format!("{pad}-"));
-                        push_yaml_value(other, indent + 2, lines);
-                    }
-                }
-            }
-        }
-        JsonValue::Object(map) => {
-            for (key, child) in ordered_explain_json_entries(map) {
-                push_yaml_key_value(key, child, indent, lines);
-            }
-        }
-        scalar => lines.push(format!("{pad}{}", yaml_scalar_text(scalar))),
-    }
-}
-
-fn push_yaml_array_object_head(
-    key: &str,
-    value: &JsonValue,
-    indent: usize,
-    lines: &mut Vec<String>,
-) {
-    let pad = " ".repeat(indent);
-    if is_yaml_scalar(value) {
-        lines.push(format!("{pad}- {key}: {}", yaml_scalar_text(value)));
-    } else {
-        lines.push(format!("{pad}- {key}:"));
-        push_yaml_value(value, indent + 4, lines);
-    }
-}
-
-fn push_yaml_key_value(key: &str, value: &JsonValue, indent: usize, lines: &mut Vec<String>) {
-    let pad = " ".repeat(indent);
-    if is_yaml_scalar(value) {
-        lines.push(format!("{pad}{key}: {}", yaml_scalar_text(value)));
-    } else {
-        lines.push(format!("{pad}{key}:"));
-        push_yaml_value(value, indent + 2, lines);
-    }
-}
-
-fn is_yaml_scalar(value: &JsonValue) -> bool {
-    !matches!(value, JsonValue::Array(_) | JsonValue::Object(_))
-}
-
-fn yaml_scalar_text(value: &JsonValue) -> String {
-    match value {
-        JsonValue::String(text) => serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into()),
-        other => json_scalar_text(other),
-    }
-}
-
-fn ordered_explain_json_entries<'a>(
-    map: &'a serde_json::Map<String, JsonValue>,
-) -> Vec<(&'a String, &'a JsonValue)> {
-    let mut entries = map.iter().collect::<Vec<_>>();
-    entries.sort_by(|(left, _), (right, _)| {
-        explain_json_key_order(left)
-            .cmp(&explain_json_key_order(right))
-            .then_with(|| left.cmp(right))
-    });
-    entries
-}
-
-fn explain_json_key_order(key: &str) -> usize {
-    [
-        "Plan",
-        "Node Type",
-        "Parallel Aware",
-        "Async Capable",
-        "Relation Name",
-        "Alias",
-        "Schema",
-        "Startup Cost",
-        "Total Cost",
-        "Plan Rows",
-        "Plan Width",
-        "Actual Startup Time",
-        "Actual Total Time",
-        "Actual Rows",
-        "Actual Loops",
-        "Disabled",
-        "Output",
-        "Sort Key",
-        "Filter",
-        "Recheck Cond",
-        "Index Cond",
-        "Hash Cond",
-        "Join Filter",
-        "Rows Removed by Filter",
-        "Rows Removed by Index Recheck",
-        "Time",
-        "Output Volume",
-        "Format",
-        "Shared Hit Blocks",
-        "Shared Read Blocks",
-        "Shared Dirtied Blocks",
-        "Shared Written Blocks",
-        "Local Hit Blocks",
-        "Local Read Blocks",
-        "Local Dirtied Blocks",
-        "Local Written Blocks",
-        "Temp Read Blocks",
-        "Temp Written Blocks",
-        "Shared I/O Read Time",
-        "Shared I/O Write Time",
-        "Local I/O Read Time",
-        "Local I/O Write Time",
-        "Temp I/O Read Time",
-        "Temp I/O Write Time",
-        "Plans",
-        "Planning",
-        "Memory Used",
-        "Memory Allocated",
-        "Planning Time",
-        "Triggers",
-        "Serialization",
-        "Execution Time",
-    ]
-    .iter()
-    .position(|candidate| *candidate == key)
-    .unwrap_or(usize::MAX)
-}
-
-fn json_scalar_text(value: &JsonValue) -> String {
-    match value {
-        JsonValue::String(text) => text.clone(),
-        JsonValue::Number(number) => number.to_string(),
-        JsonValue::Bool(value) => value.to_string(),
-        JsonValue::Null => "null".into(),
-        other => other.to_string(),
-    }
-}
-
 fn format_explain_analyze_json_plan(state: &dyn PlanNode) -> String {
     let plan = state.explain_json(true, 0);
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&plan) else {
-        return state.explain_json(true, 4);
-    };
-    append_captured_initplans_to_json_plan(&mut value);
-    ensure_bitmap_recheck_count_in_json_plan(&mut value);
-    let rendered = serde_json::to_string_pretty(&value).unwrap_or(plan);
-    indent_multiline_json(&rendered, 4)
-}
-
-fn ensure_bitmap_recheck_count_in_json_plan(value: &mut JsonValue) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    if object
-        .get("Node Type")
-        .and_then(JsonValue::as_str)
-        .is_some_and(|node_type| node_type.starts_with("Bitmap Heap Scan"))
-    {
-        // :HACK: JSON EXPLAIN rows for bitmap heap scans should expose the
-        // PostgreSQL field even when no rows failed index recheck. The executor
-        // keeps the zero in node stats, but command-level JSON normalization can
-        // otherwise leave the field absent for passthrough scan shapes.
-        object
-            .entry("Rows Removed by Index Recheck")
-            .or_insert_with(|| serde_json::json!(0));
-    }
-    if let Some(children) = object.get_mut("Plans").and_then(JsonValue::as_array_mut) {
-        for child in children {
-            ensure_bitmap_recheck_count_in_json_plan(child);
-        }
-    }
-}
-
-fn append_captured_initplans_to_json_plan(plan: &mut serde_json::Value) {
     let mut initplans = EXPLAIN_ANALYZE_INITPLAN_JSON.with(|stored| {
         stored
             .borrow()
@@ -462,52 +182,18 @@ fn append_captured_initplans_to_json_plan(plan: &mut serde_json::Value) {
             .map(|(plan_id, json)| (*plan_id, json.clone()))
             .collect::<Vec<_>>()
     });
-    if initplans.is_empty() {
-        return;
-    }
     initplans.sort_by_key(|(plan_id, _)| *plan_id);
-    let Some(plan_object) = plan.as_object_mut() else {
-        return;
-    };
-    let plans = plan_object
-        .entry("Plans")
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    let Some(plans) = plans.as_array_mut() else {
-        return;
-    };
-
+    let mut printed_initplans = Vec::new();
     for (plan_id, json) in initplans {
         let already_printed =
             EXPLAIN_ANALYZE_PRINTED_INITPLANS.with(|printed| !printed.borrow_mut().insert(plan_id));
         if already_printed {
             continue;
         }
-        let Ok(mut child) = serde_json::from_str::<serde_json::Value>(&json) else {
-            continue;
-        };
-        if let Some(child_object) = child.as_object_mut() {
-            // :HACK: pgrust records executed InitPlans separately from the
-            // runtime PlanNode tree. Attach them at the JSON root so recursive
-            // EXPLAIN JSON consumers can still inspect the executed subplan.
-            child_object.insert(
-                "Parent Relationship".into(),
-                serde_json::Value::String("InitPlan".into()),
-            );
-            child_object.insert(
-                "Subplan Name".into(),
-                serde_json::Value::String(format!("InitPlan {}", plan_id + 1)),
-            );
-        }
-        plans.push(child);
+        printed_initplans.push((plan_id, json));
     }
-}
-
-fn indent_multiline_json(json: &str, indent: usize) -> String {
-    let pad = " ".repeat(indent);
-    json.lines()
-        .map(|line| format!("{pad}{line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    pgrust_commands::explain::format_analyze_plan_json(&plan, &printed_initplans)
+        .unwrap_or_else(|| state.explain_json(true, 4))
 }
 
 fn format_explain_lines_with_options_inner(
@@ -1013,208 +699,7 @@ pub(crate) fn apply_remaining_verbose_explain_text_compat(
     lines: &mut Vec<String>,
     compute_query_id: bool,
 ) {
-    // :HACK: Keep these PostgreSQL-regression display fixes local to EXPLAIN
-    // text rendering. They normalize surface strings for plan trees pgrust
-    // already reaches without pretending planner shape or executor metrics
-    // match PostgreSQL more broadly.
-    apply_verbose_simple_scan_text_compat(lines);
-    apply_temp_object_verbose_explain_compat(lines);
-    apply_remaining_tenk1_window_verbose_compat(lines);
-    if compute_query_id
-        && !lines
-            .iter()
-            .any(|line| line.trim_start().starts_with("Query Identifier:"))
-    {
-        lines.push("Query Identifier: 0".into());
-    }
-}
-
-fn apply_verbose_simple_scan_text_compat(lines: &mut Vec<String>) {
-    let mut index = 0;
-    while index < lines.len() {
-        let trimmed = lines[index].trim_start();
-        let prefix_len = lines[index].len() - trimmed.len();
-        let prefix = lines[index][..prefix_len].to_string();
-        if let Some(rest) = trimmed.strip_prefix("Seq Scan on int8_tbl i8 ") {
-            lines[index] = format!("{prefix}Seq Scan on public.int8_tbl i8 {rest}");
-            if lines
-                .get(index + 1)
-                .is_none_or(|line| !line.trim_start().starts_with("Output:"))
-            {
-                lines.insert(index + 1, format!("{prefix}  Output: q1, q2"));
-                index += 1;
-            }
-        }
-        match lines[index].trim_start() {
-            "Output: i8.q1, i8.q2" | "Output: int8_tbl.q1, int8_tbl.q2" => {
-                lines[index] = format!("{prefix}Output: q1, q2");
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-}
-
-fn apply_temp_object_verbose_explain_compat(lines: &mut [String]) {
-    let has_temp_function_filter = lines
-        .iter()
-        .any(|line| line.contains("Filter: (mysin(t1.f1) < "));
-    if !has_temp_function_filter {
-        return;
-    }
-    for line in lines {
-        let trimmed = line.trim_start();
-        let prefix_len = line.len() - trimmed.len();
-        let prefix = line[..prefix_len].to_string();
-        if let Some(rest) = trimmed.strip_prefix("Seq Scan on t1 ") {
-            *line = format!("{prefix}Seq Scan on pg_temp.t1 {rest}");
-        } else if trimmed == "Output: t1.f1" {
-            *line = format!("{prefix}Output: f1");
-        } else if trimmed.starts_with("Filter: (mysin(t1.f1) < ") {
-            *line = format!("{prefix}Filter: (pg_temp.mysin(t1.f1) < '0.5'::double precision)");
-        }
-    }
-}
-
-fn apply_remaining_tenk1_window_verbose_compat(lines: &mut [String]) {
-    let case_one = lines.iter().any(|line| {
-        line.trim_start() == "Output: tenk1.unique1, tenk1.unique2, tenk1.tenthous, tenk1.ten, tenk1.hundred, (sum(tenk1.unique2) OVER w1), (sum(tenk1.tenthous) OVER w1), (sum(tenk1.unique1) OVER w2)"
-    });
-    let case_two = lines.iter().any(|line| {
-        line.trim_start() == "Output: tenk1.unique1, tenk1.unique2, tenk1.tenthous, tenk1.ten, tenk1.hundred, (sum(tenk1.unique2) OVER w1), (sum(tenk1.tenthous) OVER w2), (sum(tenk1.unique1) OVER w3)"
-    });
-    if !(case_one || case_two) {
-        return;
-    }
-    let mut ordered_windows = 0usize;
-    for line in lines {
-        let trimmed = line.trim_start();
-        let prefix_len = line.len() - trimmed.len();
-        let prefix = line[..prefix_len].to_string();
-        let replacement = match trimmed {
-            "Output: tenk1.unique1, tenk1.unique2, tenk1.tenthous, tenk1.ten, tenk1.hundred, (sum(tenk1.unique2) OVER w1), (sum(tenk1.tenthous) OVER w1), (sum(tenk1.unique1) OVER w2)"
-                if case_one =>
-            {
-                Some(
-                    "Output: sum(unique1) OVER w, (sum(unique2) OVER w1), (sum(tenthous) OVER w1), ten, hundred",
-                )
-            }
-            "Output: tenk1.unique1, tenk1.unique2, tenk1.tenthous, tenk1.ten, tenk1.hundred, (sum(tenk1.unique2) OVER w1), (sum(tenk1.tenthous) OVER w1)"
-                if case_one =>
-            {
-                Some(
-                    "Output: ten, hundred, unique1, unique2, tenthous, sum(unique2) OVER w1, sum(tenthous) OVER w1",
-                )
-            }
-            "Output: tenk1.unique1, tenk1.unique2, tenk1.tenthous, tenk1.ten, tenk1.hundred, (sum(tenk1.unique2) OVER w1), (sum(tenk1.tenthous) OVER w2), (sum(tenk1.unique1) OVER w3)"
-                if case_two =>
-            {
-                Some(
-                    "Output: sum(unique1) OVER w1, (sum(unique2) OVER w2), (sum(tenthous) OVER w3), ten, hundred",
-                )
-            }
-            "Output: tenk1.unique1, tenk1.unique2, tenk1.tenthous, tenk1.ten, tenk1.hundred, (sum(tenk1.unique2) OVER w1), (sum(tenk1.tenthous) OVER w2)"
-                if case_two =>
-            {
-                Some(
-                    "Output: ten, hundred, unique1, unique2, tenthous, (sum(unique2) OVER w2), sum(tenthous) OVER w3",
-                )
-            }
-            "Output: tenk1.unique1, tenk1.unique2, tenk1.tenthous, tenk1.ten, tenk1.hundred, (sum(tenk1.unique2) OVER w1)"
-                if case_two =>
-            {
-                Some("Output: ten, hundred, unique1, unique2, tenthous, sum(unique2) OVER w2")
-            }
-            "Output: tenk1.unique1, tenk1.unique2, tenk1.tenthous, tenk1.ten, tenk1.hundred" => {
-                Some("Output: ten, hundred, unique1, unique2, tenthous")
-            }
-            _ => None,
-        };
-        if let Some(replacement) = replacement {
-            *line = format!("{prefix}{replacement}");
-            continue;
-        }
-        if trimmed == "Window: w2 AS (PARTITION BY tenk1.ten)" && case_one {
-            *line = format!("{prefix}Window: w AS (PARTITION BY tenk1.ten)");
-        } else if trimmed == "Window: w3 AS (PARTITION BY tenk1.ten)" && case_two {
-            *line = format!("{prefix}Window: w1 AS (PARTITION BY tenk1.ten)");
-        } else if trimmed.starts_with("Window: ") && trimmed.contains("ORDER BY tenk1.hundred") {
-            if case_two {
-                ordered_windows += 1;
-                if ordered_windows == 1 && trimmed.starts_with("Window: w2 AS ") {
-                    *line = format!(
-                        "{prefix}{}",
-                        trimmed.replacen("Window: w2 AS ", "Window: w3 AS ", 1)
-                    );
-                } else if ordered_windows == 2 && trimmed.starts_with("Window: w1 AS ") {
-                    *line = format!(
-                        "{prefix}{}",
-                        trimmed.replacen("Window: w1 AS ", "Window: w2 AS ", 1)
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn apply_window_initplan_explain_compat(lines: &mut [String]) {
-    let mut index = 0;
-    while index + 3 < lines.len() {
-        let Some(initplan_label) = lines[index]
-            .split("Run Condition:")
-            .nth(1)
-            .and_then(|text| text.split("(InitPlan ").nth(1))
-            .and_then(|text| text.split(')').next())
-            .map(|number| format!("InitPlan {number}"))
-        else {
-            index += 1;
-            continue;
-        };
-        if !lines[index + 1].trim_start().starts_with("->  Result")
-            || lines[index + 2].trim() != initplan_label
-            || !lines[index + 3].trim_start().starts_with("->  Result")
-        {
-            index += 1;
-            continue;
-        }
-        let detail_prefix = lines[index]
-            .split("Run Condition:")
-            .next()
-            .unwrap_or("")
-            .to_string();
-        let result_line = format!("{detail_prefix}->  Result");
-        let initplan_line = format!("{detail_prefix}{initplan_label}");
-        let initplan_child = format!("{detail_prefix}  ->  Result");
-        lines[index + 1] = initplan_line;
-        lines[index + 2] = initplan_child;
-        lines[index + 3] = result_line;
-        index += 4;
-    }
-}
-
-fn apply_window_support_verbose_explain_compat(lines: &mut [String]) {
-    for line in lines {
-        let trimmed = line.trim_start();
-        let prefix_len = line.len() - trimmed.len();
-        let prefix = &line[..prefix_len];
-        let replacement = match trimmed {
-            "Output: empsalary.empno, empsalary.depname, empsalary.enroll_date, (row_number() OVER w1), (rank() OVER w1), (count(*) OVER w2)" => {
-                Some(
-                    "Output: empno, depname, (row_number() OVER w1), (rank() OVER w1), count(*) OVER w2, enroll_date",
-                )
-            }
-            "Output: empsalary.empno, empsalary.depname, empsalary.enroll_date, (row_number() OVER w1), (rank() OVER w1)" => {
-                Some("Output: depname, enroll_date, empno, row_number() OVER w1, rank() OVER w1")
-            }
-            "Output: empsalary.empno, empsalary.depname, empsalary.enroll_date" => {
-                Some("Output: depname, enroll_date, empno")
-            }
-            _ => None,
-        };
-        if let Some(replacement) = replacement {
-            *line = format!("{prefix}{replacement}");
-        }
-    }
+    apply_remaining_verbose_explain_text_compat_impl(lines, compute_query_id);
 }
 
 fn apply_tenk1_window_explain_compat(lines: &mut Vec<String>, start: usize) {
@@ -1529,124 +1014,7 @@ fn renumber_relation_alias(relation_name: &str, ordinal: usize) -> String {
 }
 
 fn expr_contains_external_param(expr: &Expr) -> bool {
-    match expr {
-        Expr::Param(param) => param.paramkind == ParamKind::External,
-        Expr::Var(_)
-        | Expr::Const(_)
-        | Expr::CaseTest(_)
-        | Expr::Random
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::User
-        | Expr::SystemUser
-        | Expr::CurrentRole
-        | Expr::CurrentCatalog
-        | Expr::CurrentSchema
-        | Expr::CurrentDate
-        | Expr::CurrentTime { .. }
-        | Expr::CurrentTimestamp { .. }
-        | Expr::LocalTime { .. }
-        | Expr::LocalTimestamp { .. } => false,
-        Expr::Aggref(aggref) => {
-            aggref.direct_args.iter().any(expr_contains_external_param)
-                || aggref.args.iter().any(expr_contains_external_param)
-                || aggref
-                    .aggorder
-                    .iter()
-                    .any(|item| expr_contains_external_param(&item.expr))
-                || aggref
-                    .aggfilter
-                    .as_ref()
-                    .is_some_and(expr_contains_external_param)
-        }
-        Expr::GroupingKey(grouping_key) => expr_contains_external_param(&grouping_key.expr),
-        Expr::GroupingFunc(grouping_func) => {
-            grouping_func.args.iter().any(expr_contains_external_param)
-        }
-        Expr::WindowFunc(window_func) => window_func.args.iter().any(expr_contains_external_param),
-        Expr::Op(op) => op.args.iter().any(expr_contains_external_param),
-        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_external_param),
-        Expr::Case(case_expr) => {
-            case_expr
-                .arg
-                .as_ref()
-                .is_some_and(|arg| expr_contains_external_param(arg))
-                || case_expr.args.iter().any(|arm| {
-                    expr_contains_external_param(&arm.expr)
-                        || expr_contains_external_param(&arm.result)
-                })
-                || expr_contains_external_param(&case_expr.defresult)
-        }
-        Expr::Func(func) => func.args.iter().any(expr_contains_external_param),
-        Expr::SqlJsonQueryFunction(func) => func
-            .child_exprs()
-            .into_iter()
-            .any(expr_contains_external_param),
-        Expr::SetReturning(set_returning) => set_returning_call_exprs(&set_returning.call)
-            .into_iter()
-            .any(expr_contains_external_param),
-        Expr::SubLink(sublink) => sublink
-            .testexpr
-            .as_ref()
-            .is_some_and(|expr| expr_contains_external_param(expr)),
-        Expr::SubPlan(subplan) => {
-            subplan
-                .testexpr
-                .as_ref()
-                .is_some_and(|expr| expr_contains_external_param(expr))
-                || subplan.args.iter().any(expr_contains_external_param)
-        }
-        Expr::ScalarArrayOp(scalar) => {
-            expr_contains_external_param(&scalar.left)
-                || expr_contains_external_param(&scalar.right)
-        }
-        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_external_param),
-        Expr::Cast(inner, _)
-        | Expr::Collate { expr: inner, .. }
-        | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner)
-        | Expr::FieldSelect { expr: inner, .. } => expr_contains_external_param(inner),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            expr_contains_external_param(expr)
-                || expr_contains_external_param(pattern)
-                || escape
-                    .as_ref()
-                    .is_some_and(|escape| expr_contains_external_param(escape))
-        }
-        Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right)
-        | Expr::Coalesce(left, right) => {
-            expr_contains_external_param(left) || expr_contains_external_param(right)
-        }
-        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_external_param),
-        Expr::Row { fields, .. } => fields
-            .iter()
-            .any(|(_, field)| expr_contains_external_param(field)),
-        Expr::ArraySubscript { array, subscripts } => {
-            expr_contains_external_param(array)
-                || subscripts.iter().any(|subscript| {
-                    subscript
-                        .lower
-                        .as_ref()
-                        .is_some_and(expr_contains_external_param)
-                        || subscript
-                            .upper
-                            .as_ref()
-                            .is_some_and(expr_contains_external_param)
-                })
-        }
-    }
+    pgrust_commands::explain::expr_contains_external_param(expr)
 }
 pub(crate) fn format_verbose_explain_plan_with_subplans(
     plan: &Plan,
@@ -2888,215 +2256,31 @@ fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
 }
 
 fn projected_subquery_scan_field_projection(input: &Plan, targets: &[TargetEntry]) -> bool {
-    let Plan::SubqueryScan { output_columns, .. } = input else {
-        return false;
-    };
-    let ([target], [column]) = (targets, output_columns.as_slice()) else {
-        return false;
-    };
-    !target.resjunk
-        && matches!(
-            &target.expr,
-            Expr::Var(var)
-                if crate::include::nodes::primnodes::attrno_index(var.varattno) == Some(0)
-        )
-        && target.name != column.name
-        && matches!(
-            column.sql_type.kind,
-            crate::backend::parser::SqlTypeKind::Record
-                | crate::backend::parser::SqlTypeKind::Composite
-        )
+    pgrust_commands::explain::projected_subquery_scan_field_projection(input, targets)
 }
 
 fn projection_targets_are_verbose_passthrough(input: &Plan, targets: &[TargetEntry]) -> bool {
-    if targets.iter().any(target_is_cte_field_select_projection) && plan_contains_cte_scan(input) {
-        return false;
-    }
-    let input_names = input.column_names();
-    if matches!(input, Plan::Append { .. } | Plan::MergeAppend { .. }) {
-        let input_columns = input.columns();
-        return targets.len() == input_names.len()
-            && targets.len() == input_columns.len()
-            && targets.iter().enumerate().all(|(index, target)| {
-                let Some(column) = input_columns.get(index) else {
-                    return false;
-                };
-                // :HACK: PostgreSQL hides the alias-only projection for
-                // partition parents in verbose EXPLAIN while still rendering
-                // child outputs with the parent alias, e.g. part p(x).
-                !target.resjunk
-                    && target.sql_type == column.sql_type
-                    && (target.name == column.name || target.input_resno == Some(index + 1))
-            });
-    }
-    if matches!(input, Plan::WindowAgg { .. })
-        && targets.iter().all(|target| !target.resjunk)
-        && !targets_have_direct_subplans(targets)
-    {
-        return true;
-    }
-    targets.len() == input_names.len() && targets.iter().all(|target| !target.resjunk)
+    pgrust_commands::explain::projection_targets_are_verbose_passthrough(input, targets)
 }
 
 fn target_is_cte_field_select_projection(target: &TargetEntry) -> bool {
-    !target.resjunk && matches!(target.expr, Expr::FieldSelect { .. })
+    pgrust_commands::explain::target_is_cte_field_select_projection(target)
 }
 
 fn plan_contains_cte_scan(plan: &Plan) -> bool {
-    match plan {
-        Plan::CteScan { .. } => true,
-        Plan::Hash { input, .. }
-        | Plan::Materialize { input, .. }
-        | Plan::Memoize { input, .. }
-        | Plan::Gather { input, .. }
-        | Plan::GatherMerge { input, .. }
-        | Plan::Unique { input, .. }
-        | Plan::Filter { input, .. }
-        | Plan::OrderBy { input, .. }
-        | Plan::IncrementalSort { input, .. }
-        | Plan::Limit { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::Projection { input, .. }
-        | Plan::Aggregate { input, .. }
-        | Plan::WindowAgg { input, .. }
-        | Plan::SubqueryScan { input, .. }
-        | Plan::ProjectSet { input, .. } => plan_contains_cte_scan(input),
-        Plan::Append { children, .. }
-        | Plan::MergeAppend { children, .. }
-        | Plan::SetOp { children, .. }
-        | Plan::BitmapOr { children, .. }
-        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_cte_scan),
-        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_cte_scan(bitmapqual),
-        Plan::NestedLoopJoin { left, right, .. }
-        | Plan::HashJoin { left, right, .. }
-        | Plan::MergeJoin { left, right, .. }
-        | Plan::RecursiveUnion {
-            anchor: left,
-            recursive: right,
-            ..
-        } => plan_contains_cte_scan(left) || plan_contains_cte_scan(right),
-        Plan::Result { .. }
-        | Plan::SeqScan { .. }
-        | Plan::TidScan { .. }
-        | Plan::IndexOnlyScan { .. }
-        | Plan::IndexScan { .. }
-        | Plan::BitmapIndexScan { .. }
-        | Plan::FunctionScan { .. }
-        | Plan::WorkTableScan { .. }
-        | Plan::Values { .. } => false,
-    }
+    pgrust_commands::explain::plan_contains_cte_scan(plan)
 }
 
 fn plan_contains_window_agg(plan: &Plan) -> bool {
-    match plan {
-        Plan::WindowAgg { .. } => true,
-        Plan::Hash { input, .. }
-        | Plan::Materialize { input, .. }
-        | Plan::Memoize { input, .. }
-        | Plan::Gather { input, .. }
-        | Plan::GatherMerge { input, .. }
-        | Plan::Unique { input, .. }
-        | Plan::Filter { input, .. }
-        | Plan::OrderBy { input, .. }
-        | Plan::IncrementalSort { input, .. }
-        | Plan::Limit { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::Projection { input, .. }
-        | Plan::Aggregate { input, .. }
-        | Plan::SubqueryScan { input, .. }
-        | Plan::ProjectSet { input, .. } => plan_contains_window_agg(input),
-        Plan::Append { children, .. }
-        | Plan::MergeAppend { children, .. }
-        | Plan::SetOp { children, .. }
-        | Plan::BitmapOr { children, .. }
-        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_window_agg),
-        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_window_agg(bitmapqual),
-        Plan::NestedLoopJoin { left, right, .. }
-        | Plan::HashJoin { left, right, .. }
-        | Plan::MergeJoin { left, right, .. }
-        | Plan::RecursiveUnion {
-            anchor: left,
-            recursive: right,
-            ..
-        } => plan_contains_window_agg(left) || plan_contains_window_agg(right),
-        Plan::Result { .. }
-        | Plan::SeqScan { .. }
-        | Plan::IndexOnlyScan { .. }
-        | Plan::IndexScan { .. }
-        | Plan::TidScan { .. }
-        | Plan::BitmapIndexScan { .. }
-        | Plan::FunctionScan { .. }
-        | Plan::WorkTableScan { .. }
-        | Plan::Values { .. }
-        | Plan::CteScan { .. } => false,
-    }
+    pgrust_commands::explain::plan_contains_window_agg(plan)
 }
 
 fn plan_contains_function_scan(plan: &Plan) -> bool {
-    match plan {
-        Plan::FunctionScan { .. } => true,
-        Plan::Hash { input, .. }
-        | Plan::Materialize { input, .. }
-        | Plan::Memoize { input, .. }
-        | Plan::Gather { input, .. }
-        | Plan::GatherMerge { input, .. }
-        | Plan::Unique { input, .. }
-        | Plan::Filter { input, .. }
-        | Plan::OrderBy { input, .. }
-        | Plan::IncrementalSort { input, .. }
-        | Plan::Limit { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::Projection { input, .. }
-        | Plan::Aggregate { input, .. }
-        | Plan::WindowAgg { input, .. }
-        | Plan::SubqueryScan { input, .. }
-        | Plan::ProjectSet { input, .. } => plan_contains_function_scan(input),
-        Plan::Append { children, .. }
-        | Plan::MergeAppend { children, .. }
-        | Plan::SetOp { children, .. }
-        | Plan::BitmapOr { children, .. }
-        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_function_scan),
-        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_function_scan(bitmapqual),
-        Plan::NestedLoopJoin { left, right, .. }
-        | Plan::HashJoin { left, right, .. }
-        | Plan::MergeJoin { left, right, .. }
-        | Plan::RecursiveUnion {
-            anchor: left,
-            recursive: right,
-            ..
-        } => plan_contains_function_scan(left) || plan_contains_function_scan(right),
-        Plan::Result { .. }
-        | Plan::SeqScan { .. }
-        | Plan::IndexOnlyScan { .. }
-        | Plan::IndexScan { .. }
-        | Plan::TidScan { .. }
-        | Plan::BitmapIndexScan { .. }
-        | Plan::WorkTableScan { .. }
-        | Plan::Values { .. }
-        | Plan::CteScan { .. } => false,
-    }
+    pgrust_commands::explain::plan_contains_function_scan(plan)
 }
 
 fn projection_targets_are_explain_passthrough(input: &Plan, targets: &[TargetEntry]) -> bool {
-    let input_names = input.column_names();
-    let identity_projection = targets.len() == input_names.len()
-        && targets.iter().enumerate().all(|(index, target)| {
-            !target.resjunk
-                && target.input_resno == Some(index + 1)
-                && target.name == input_names[index]
-        });
-    if identity_projection {
-        return true;
-    }
-    if matches!(input, Plan::WindowAgg { .. }) && targets.iter().all(|target| !target.resjunk) {
-        return true;
-    }
-    if targets.iter().all(|target| !target.resjunk) && !targets_have_direct_subplans(targets) {
-        return true;
-    }
-    targets
-        .iter()
-        .all(|target| !target.resjunk && matches!(target.expr, Expr::Var(_)))
+    pgrust_commands::explain::projection_targets_are_explain_passthrough(input, targets)
 }
 
 pub(crate) fn format_buffer_usage(stats: BufferUsageStats) -> String {
@@ -3782,48 +2966,15 @@ fn push_nonverbose_grouping_set_keys(
     group_hashable: &[bool],
     lines: &mut Vec<String>,
 ) {
-    if key_label == "Group Key" {
-        push_nonverbose_sorted_grouping_set_keys(
-            prefix,
-            grouping_sets,
-            group_by_refs,
-            group_items,
-            lines,
-        );
-        return;
-    }
-
-    let mut empty_sets = 0usize;
-    for set in grouping_sets {
-        if set.is_empty() {
-            empty_sets += 1;
-            continue;
-        }
-        let key_label = if key_label == "Hash Key"
-            && !grouping_set_hashable(set, group_by_refs, group_hashable)
-        {
-            "Group Key"
-        } else {
-            key_label
-        };
-        let rendered = set
-            .iter()
-            .filter_map(|ref_id| {
-                group_by_refs
-                    .iter()
-                    .position(|candidate| candidate == ref_id)
-                    .and_then(|index| group_items.get(index))
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !rendered.is_empty() {
-            lines.push(format!("{prefix}{key_label}: {rendered}"));
-        }
-    }
-    for _ in 0..empty_sets {
-        lines.push(format!("{prefix}Group Key: ()"));
-    }
+    pgrust_commands::explain::push_nonverbose_grouping_set_keys(
+        prefix,
+        key_label,
+        grouping_sets,
+        group_by_refs,
+        group_items,
+        group_hashable,
+        lines,
+    )
 }
 
 fn finalize_partial_display_group_by<'a>(
@@ -3858,56 +3009,21 @@ fn push_nonverbose_sorted_grouping_set_keys(
     group_items: &[String],
     lines: &mut Vec<String>,
 ) {
-    for (chain_index, chain) in grouping_set_display_chains(grouping_sets)
-        .iter()
-        .enumerate()
-    {
-        if chain_index > 0
-            && let Some(sort_set) = chain.first()
-        {
-            let sort_key = render_grouping_set_refs(sort_set, group_by_refs, group_items);
-            if !sort_key.is_empty() {
-                lines.push(format!("{prefix}Sort Key: {sort_key}"));
-            }
-        }
-        let key_prefix = if chain_index == 0 {
-            prefix.to_string()
-        } else {
-            format!("{prefix}  ")
-        };
-        for set in chain {
-            let rendered = if set.is_empty() {
-                "()".to_string()
-            } else {
-                render_grouping_set_refs(set, group_by_refs, group_items)
-            };
-            if !rendered.is_empty() {
-                lines.push(format!("{key_prefix}Group Key: {rendered}"));
-            }
-        }
-    }
+    pgrust_commands::explain::push_nonverbose_sorted_grouping_set_keys(
+        prefix,
+        grouping_sets,
+        group_by_refs,
+        group_items,
+        lines,
+    )
 }
 
 fn grouping_set_display_chains(grouping_sets: &[Vec<usize>]) -> Vec<Vec<Vec<usize>>> {
-    let mut chains = Vec::new();
-    let mut current = Vec::<Vec<usize>>::new();
-    for set in grouping_sets {
-        if current
-            .last()
-            .is_some_and(|previous| !grouping_set_refs_subset(set, previous))
-        {
-            chains.push(std::mem::take(&mut current));
-        }
-        current.push(set.clone());
-    }
-    if !current.is_empty() {
-        chains.push(current);
-    }
-    chains
+    pgrust_commands::explain::grouping_set_display_chains(grouping_sets)
 }
 
 fn grouping_set_refs_subset(smaller: &[usize], larger: &[usize]) -> bool {
-    smaller.iter().all(|ref_id| larger.contains(ref_id))
+    pgrust_commands::explain::grouping_set_refs_subset(smaller, larger)
 }
 
 fn render_grouping_set_refs(
@@ -3915,94 +3031,35 @@ fn render_grouping_set_refs(
     group_by_refs: &[usize],
     group_items: &[String],
 ) -> String {
-    set.iter()
-        .filter_map(|ref_id| {
-            group_by_refs
-                .iter()
-                .position(|candidate| candidate == ref_id)
-                .and_then(|index| group_items.get(index))
-        })
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ")
+    pgrust_commands::explain::render_grouping_set_refs(set, group_by_refs, group_items)
 }
 
 fn grouping_key_inner_expr(expr: &Expr) -> &Expr {
-    match expr {
-        Expr::GroupingKey(grouping_key) => &grouping_key.expr,
-        _ => expr,
-    }
+    pgrust_commands::explain::grouping_key_inner_expr(expr)
 }
 
 fn grouping_expr_hashable(expr: &Expr) -> bool {
-    expr_sql_type_hint(grouping_key_inner_expr(expr))
-        .map(grouping_type_hashable)
-        .unwrap_or(true)
+    pgrust_commands::explain::grouping_expr_hashable(expr)
 }
 
 fn grouping_type_hashable(sql_type: SqlType) -> bool {
-    if sql_type.is_array {
-        return grouping_type_hashable(sql_type.element_type());
-    }
-    !matches!(
-        sql_type.kind,
-        SqlTypeKind::VarBit
-            | SqlTypeKind::Bit
-            | SqlTypeKind::Record
-            | SqlTypeKind::Composite
-            | SqlTypeKind::Json
-            | SqlTypeKind::JsonPath
-            | SqlTypeKind::Xml
-    )
+    pgrust_commands::explain::grouping_type_hashable(sql_type)
 }
 
 fn grouping_set_hashable(set: &[usize], group_by_refs: &[usize], group_hashable: &[bool]) -> bool {
-    set.iter().all(|ref_id| {
-        group_by_refs
-            .iter()
-            .position(|candidate| candidate == ref_id)
-            .and_then(|index| group_hashable.get(index))
-            .copied()
-            .unwrap_or(true)
-    })
+    pgrust_commands::explain::grouping_set_hashable(set, group_by_refs, group_hashable)
 }
 
 fn group_items_postgres_display_order(group_items: Vec<String>) -> Vec<String> {
-    if group_items.len() < 3
-        || group_items
-            .first()
-            .is_none_or(|item| !group_item_is_complex_expr(item))
-    {
-        return group_items;
-    }
-    let simple_count = group_items
-        .iter()
-        .filter(|item| !group_item_is_complex_expr(item))
-        .count();
-    if simple_count < 2 {
-        return group_items;
-    }
-
-    let mut simple = group_items
-        .iter()
-        .filter(|item| !group_item_is_complex_expr(item))
-        .cloned()
-        .collect::<Vec<_>>();
-    simple.sort_by(|left, right| group_item_column_name(left).cmp(group_item_column_name(right)));
-    let complex = group_items
-        .into_iter()
-        .filter(|item| group_item_is_complex_expr(item));
-    simple.into_iter().chain(complex).collect()
+    pgrust_commands::explain::group_items_postgres_display_order(group_items)
 }
 
 fn group_item_is_complex_expr(item: &str) -> bool {
-    item.contains('(')
+    pgrust_commands::explain::group_item_is_complex_expr(item)
 }
 
 fn group_item_column_name(item: &str) -> &str {
-    item.rsplit_once('.')
-        .map(|(_, column)| column)
-        .unwrap_or(item)
+    pgrust_commands::explain::group_item_column_name(item)
 }
 
 fn push_nonverbose_scan_details(
@@ -4101,11 +3158,7 @@ fn push_nonverbose_index_scan_details(
 }
 
 fn targets_have_direct_subplans(targets: &[TargetEntry]) -> bool {
-    targets.iter().any(|target| {
-        let mut subplans = Vec::new();
-        collect_direct_expr_subplans(&target.expr, &mut subplans);
-        !subplans.is_empty()
-    })
+    pgrust_commands::explain::targets_have_direct_subplans(targets)
 }
 
 fn nonverbose_sort_items(
@@ -11475,158 +10528,7 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
 }
 
 fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) {
-    match expr {
-        Expr::SubPlan(subplan) => out.push(subplan),
-        Expr::GroupingKey(grouping_key) => collect_direct_expr_subplans(&grouping_key.expr, out),
-        Expr::GroupingFunc(grouping_func) => {
-            for arg in &grouping_func.args {
-                collect_direct_expr_subplans(arg, out);
-            }
-        }
-        Expr::Aggref(aggref) => {
-            for arg in &aggref.args {
-                collect_direct_expr_subplans(arg, out);
-            }
-            for item in &aggref.aggorder {
-                collect_direct_expr_subplans(&item.expr, out);
-            }
-            if let Some(filter) = &aggref.aggfilter {
-                collect_direct_expr_subplans(filter, out);
-            }
-        }
-        Expr::WindowFunc(window_func) => {
-            for arg in &window_func.args {
-                collect_direct_expr_subplans(arg, out);
-            }
-            if let WindowFuncKind::Aggregate(aggref) = &window_func.kind {
-                for arg in &aggref.args {
-                    collect_direct_expr_subplans(arg, out);
-                }
-                for item in &aggref.aggorder {
-                    collect_direct_expr_subplans(&item.expr, out);
-                }
-                if let Some(filter) = &aggref.aggfilter {
-                    collect_direct_expr_subplans(filter, out);
-                }
-            }
-        }
-        Expr::Op(op) => {
-            for arg in &op.args {
-                collect_direct_expr_subplans(arg, out);
-            }
-        }
-        Expr::Bool(bool_expr) => {
-            for arg in &bool_expr.args {
-                collect_direct_expr_subplans(arg, out);
-            }
-        }
-        Expr::Case(case_expr) => {
-            if let Some(arg) = &case_expr.arg {
-                collect_direct_expr_subplans(arg, out);
-            }
-            for arm in &case_expr.args {
-                collect_direct_expr_subplans(&arm.expr, out);
-                collect_direct_expr_subplans(&arm.result, out);
-            }
-            collect_direct_expr_subplans(&case_expr.defresult, out);
-        }
-        Expr::Func(func) => {
-            for arg in &func.args {
-                collect_direct_expr_subplans(arg, out);
-            }
-        }
-        Expr::SqlJsonQueryFunction(func) => {
-            for child in func.child_exprs() {
-                collect_direct_expr_subplans(child, out);
-            }
-        }
-        Expr::SetReturning(srf) => {
-            for arg in set_returning_call_exprs(&srf.call) {
-                collect_direct_expr_subplans(arg, out);
-            }
-        }
-        Expr::SubLink(sublink) => {
-            if let Some(testexpr) = &sublink.testexpr {
-                collect_direct_expr_subplans(testexpr, out);
-            }
-        }
-        Expr::ScalarArrayOp(saop) => {
-            collect_direct_expr_subplans(&saop.left, out);
-            collect_direct_expr_subplans(&saop.right, out);
-        }
-        Expr::Cast(inner, _)
-        | Expr::Collate { expr: inner, .. }
-        | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => collect_direct_expr_subplans(inner, out),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            collect_direct_expr_subplans(expr, out);
-            collect_direct_expr_subplans(pattern, out);
-            if let Some(escape) = escape {
-                collect_direct_expr_subplans(escape, out);
-            }
-        }
-        Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right)
-        | Expr::Coalesce(left, right) => {
-            collect_direct_expr_subplans(left, out);
-            collect_direct_expr_subplans(right, out);
-        }
-        Expr::ArrayLiteral { elements, .. } => {
-            for element in elements {
-                collect_direct_expr_subplans(element, out);
-            }
-        }
-        Expr::Row { fields, .. } => {
-            for (_, expr) in fields {
-                collect_direct_expr_subplans(expr, out);
-            }
-        }
-        Expr::FieldSelect { expr, .. } => collect_direct_expr_subplans(expr, out),
-        Expr::ArraySubscript { array, subscripts } => {
-            collect_direct_expr_subplans(array, out);
-            for subscript in subscripts {
-                if let Some(lower) = &subscript.lower {
-                    collect_direct_expr_subplans(lower, out);
-                }
-                if let Some(upper) = &subscript.upper {
-                    collect_direct_expr_subplans(upper, out);
-                }
-            }
-        }
-        Expr::Xml(xml) => {
-            for child in xml.child_exprs() {
-                collect_direct_expr_subplans(child, out);
-            }
-        }
-        Expr::Var(_)
-        | Expr::Param(_)
-        | Expr::Const(_)
-        | Expr::CaseTest(_)
-        | Expr::Random
-        | Expr::CurrentDate
-        | Expr::CurrentCatalog
-        | Expr::CurrentSchema
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::User
-        | Expr::SystemUser
-        | Expr::CurrentRole
-        | Expr::CurrentTime { .. }
-        | Expr::CurrentTimestamp { .. }
-        | Expr::LocalTime { .. }
-        | Expr::LocalTimestamp { .. } => {}
-    }
+    pgrust_commands::explain::collect_direct_expr_subplans(expr, out)
 }
 
 fn render_nonverbose_expr_with_exec_params(
@@ -11852,141 +10754,32 @@ fn expr_contains_exec_param(expr: &Expr) -> bool {
 }
 
 fn collect_direct_agg_accum_subplans<'a>(accum: &'a AggAccum, out: &mut Vec<&'a SubPlan>) {
-    for arg in &accum.args {
-        collect_direct_expr_subplans(arg, out);
-    }
-    for item in &accum.order_by {
-        collect_direct_expr_subplans(&item.expr, out);
-    }
-    if let Some(filter) = &accum.filter {
-        collect_direct_expr_subplans(filter, out);
-    }
+    pgrust_commands::explain::collect_direct_agg_accum_subplans(accum, out)
 }
 
 fn collect_direct_window_clause_subplans<'a>(clause: &'a WindowClause, out: &mut Vec<&'a SubPlan>) {
-    for expr in &clause.spec.partition_by {
-        collect_direct_expr_subplans(expr, out);
-    }
-    for item in &clause.spec.order_by {
-        collect_direct_expr_subplans(&item.expr, out);
-    }
-    collect_direct_window_bound_subplans(&clause.spec.frame.start_bound, out);
-    collect_direct_window_bound_subplans(&clause.spec.frame.end_bound, out);
-    for func in &clause.functions {
-        for arg in &func.args {
-            collect_direct_expr_subplans(arg, out);
-        }
-        if let WindowFuncKind::Aggregate(aggref) = &func.kind {
-            for arg in &aggref.args {
-                collect_direct_expr_subplans(arg, out);
-            }
-            for item in &aggref.aggorder {
-                collect_direct_expr_subplans(&item.expr, out);
-            }
-            if let Some(filter) = &aggref.aggfilter {
-                collect_direct_expr_subplans(filter, out);
-            }
-        }
-    }
+    pgrust_commands::explain::collect_direct_window_clause_subplans(clause, out)
 }
 
 fn collect_direct_window_bound_subplans<'a>(
     bound: &'a WindowFrameBound,
     out: &mut Vec<&'a SubPlan>,
 ) {
-    match bound {
-        WindowFrameBound::OffsetPreceding(offset) | WindowFrameBound::OffsetFollowing(offset) => {
-            collect_direct_expr_subplans(&offset.expr, out)
-        }
-        WindowFrameBound::UnboundedPreceding
-        | WindowFrameBound::CurrentRow
-        | WindowFrameBound::UnboundedFollowing => {}
-    }
+    pgrust_commands::explain::collect_direct_window_bound_subplans(bound, out)
 }
 
 fn collect_direct_set_returning_call_subplans<'a>(
     call: &'a SetReturningCall,
     out: &mut Vec<&'a SubPlan>,
 ) {
-    match call {
-        SetReturningCall::RowsFrom { items, .. } => {
-            for item in items {
-                match &item.source {
-                    RowsFromSource::Function(call) => {
-                        collect_direct_set_returning_call_subplans(call, out);
-                    }
-                    RowsFromSource::Project { output_exprs, .. } => {
-                        for expr in output_exprs {
-                            collect_direct_expr_subplans(expr, out);
-                        }
-                    }
-                }
-            }
-        }
-        SetReturningCall::GenerateSeries {
-            start,
-            stop,
-            step,
-            timezone,
-            ..
-        } => {
-            collect_direct_expr_subplans(start, out);
-            collect_direct_expr_subplans(stop, out);
-            collect_direct_expr_subplans(step, out);
-            if let Some(timezone) = timezone {
-                collect_direct_expr_subplans(timezone, out);
-            }
-        }
-        SetReturningCall::GenerateSubscripts {
-            array,
-            dimension,
-            reverse,
-            ..
-        } => {
-            collect_direct_expr_subplans(array, out);
-            collect_direct_expr_subplans(dimension, out);
-            if let Some(reverse) = reverse {
-                collect_direct_expr_subplans(reverse, out);
-            }
-        }
-        SetReturningCall::PartitionTree { relid, .. }
-        | SetReturningCall::PartitionAncestors { relid, .. } => {
-            collect_direct_expr_subplans(relid, out);
-        }
-        SetReturningCall::PgLockStatus { .. }
-        | SetReturningCall::PgStatProgressCopy { .. }
-        | SetReturningCall::PgSequences { .. }
-        | SetReturningCall::InformationSchemaSequences { .. } => {}
-        SetReturningCall::TxidSnapshotXip { arg, .. } => {
-            collect_direct_expr_subplans(arg, out);
-        }
-        SetReturningCall::Unnest { args, .. }
-        | SetReturningCall::JsonTableFunction { args, .. }
-        | SetReturningCall::JsonRecordFunction { args, .. }
-        | SetReturningCall::RegexTableFunction { args, .. }
-        | SetReturningCall::StringTableFunction { args, .. }
-        | SetReturningCall::TextSearchTableFunction { args, .. }
-        | SetReturningCall::UserDefined { args, .. } => {
-            for arg in args {
-                collect_direct_expr_subplans(arg, out);
-            }
-        }
-        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
-            for arg in set_returning_call_exprs(call) {
-                collect_direct_expr_subplans(arg, out);
-            }
-        }
-    }
+    pgrust_commands::explain::collect_direct_set_returning_call_subplans(call, out)
 }
 
 fn collect_direct_project_set_target_subplans<'a>(
     target: &'a ProjectSetTarget,
     out: &mut Vec<&'a SubPlan>,
 ) {
-    match target {
-        ProjectSetTarget::Scalar(entry) => collect_direct_expr_subplans(&entry.expr, out),
-        ProjectSetTarget::Set { call, .. } => collect_direct_set_returning_call_subplans(call, out),
-    }
+    pgrust_commands::explain::collect_direct_project_set_target_subplans(target, out)
 }
 
 #[cfg(test)]

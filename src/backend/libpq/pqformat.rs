@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::str::FromStr;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
@@ -17,14 +16,11 @@ use crate::backend::statistics::{
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::{
-    EVENT_TRIGGER_TYPE_OID, PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
-    TRIGGER_TYPE_OID, builtin_type_rows, range_type_ref_for_sql_type,
+    PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
 };
 use crate::include::nodes::datum::InetValue;
 use crate::include::nodes::parsenodes::CopyFormat;
 use crate::pgrust::session::ByteaOutputFormat;
-use num_bigint::BigInt;
-use num_traits::One;
 
 // :HACK: Preserve the old root pqformat type path while scalar formatting
 // options live in pgrust_expr.
@@ -395,54 +391,11 @@ fn push_array_text_element(out: &mut String, text: &str) {
 }
 
 pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
-    let mut words = sql
-        .split_ascii_whitespace()
-        .map(|word| word.to_ascii_uppercase());
-    let first_word = words.next().unwrap_or_default();
-    let second_word = words.next().unwrap_or_default();
-    match (first_word.as_str(), second_word.as_str()) {
-        ("INSERT", _) => format!("INSERT 0 {affected}"),
-        ("UPDATE", _) => format!("UPDATE {affected}"),
-        ("DELETE", _) => format!("DELETE {affected}"),
-        ("CREATE", "TRIGGER") => "CREATE TRIGGER".to_string(),
-        ("CREATE", "TYPE") => "CREATE TYPE".to_string(),
-        ("CREATE", "CAST") => "CREATE CAST".to_string(),
-        ("CREATE", _) => "CREATE TABLE".to_string(),
-        ("DROP", "TRIGGER") => "DROP TRIGGER".to_string(),
-        ("DROP", "TYPE") => "DROP TYPE".to_string(),
-        ("DROP", "CAST") => "DROP CAST".to_string(),
-        ("DROP", _) => "DROP TABLE".to_string(),
-        ("ANALYZE", _) => "ANALYZE".to_string(),
-        ("COMMENT", _) => "COMMENT".to_string(),
-        ("CHECKPOINT", _) => "CHECKPOINT".to_string(),
-        ("COPY", _) => format!("COPY {affected}"),
-        ("DO", _) => "DO".to_string(),
-        ("LISTEN", _) => "LISTEN".to_string(),
-        ("NOTIFY", _) => "NOTIFY".to_string(),
-        ("UNLISTEN", _) => "UNLISTEN".to_string(),
-        ("LOAD", _) => "LOAD".to_string(),
-        ("DISCARD", _) => "DISCARD".to_string(),
-        ("LOCK", _) => "LOCK TABLE".to_string(),
-        ("VACUUM", _) => "VACUUM".to_string(),
-        ("PREPARE", _) => "PREPARE".to_string(),
-        ("SET", _) => "SET".to_string(),
-        ("RESET", _) => "RESET".to_string(),
-        ("BEGIN", _) | ("START", _) => "BEGIN".to_string(),
-        ("COMMIT", _) | ("END", _) => "COMMIT".to_string(),
-        ("RELEASE", _) => "RELEASE".to_string(),
-        ("ROLLBACK", _) => "ROLLBACK".to_string(),
-        _ => format!("SELECT {affected}"),
-    }
+    pgrust_protocol::pqformat::infer_command_tag(sql, affected)
 }
 
 pub(crate) fn infer_dml_returning_command_tag(sql: &str, affected: usize) -> Option<String> {
-    let first_word = sql
-        .split_ascii_whitespace()
-        .next()
-        .map(|word| word.to_ascii_uppercase())
-        .unwrap_or_default();
-    matches!(first_word.as_str(), "INSERT" | "UPDATE" | "DELETE")
-        .then(|| infer_command_tag(sql, affected))
+    pgrust_protocol::pqformat::infer_dml_returning_command_tag(sql, affected)
 }
 
 pub(crate) fn send_query_result(
@@ -458,62 +411,48 @@ pub(crate) fn send_query_result(
     enum_labels: Option<&HashMap<(u32, u32), String>>,
     proc_signatures: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
-    send_row_description(stream, columns)?;
-    let mut row_buf = Vec::new();
-    for row in rows {
-        send_typed_data_row(
-            stream,
-            row,
-            columns,
-            &[],
-            &mut row_buf,
-            float_format.clone(),
-            role_names,
-            relation_names,
-            proc_names,
-            namespace_names,
-            enum_labels,
-            proc_signatures,
-        )?;
-    }
-    send_command_complete(stream, tag)
+    pgrust_protocol::pqformat::send_query_result_with_rows(
+        stream,
+        columns,
+        rows,
+        tag,
+        |stream, row, row_buf| {
+            send_typed_data_row(
+                stream,
+                row,
+                columns,
+                &[],
+                row_buf,
+                float_format.clone(),
+                role_names,
+                relation_names,
+                proc_names,
+                namespace_names,
+                enum_labels,
+                proc_signatures,
+            )
+        },
+    )
 }
 
 pub(crate) fn send_auth_ok(w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[b'R'])?;
-    w.write_all(&8_i32.to_be_bytes())?;
-    w.write_all(&0_i32.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_auth_ok(w)
 }
 
 pub(crate) fn send_parameter_status(w: &mut impl Write, name: &str, value: &str) -> io::Result<()> {
-    let len = 4 + name.len() + 1 + value.len() + 1;
-    w.write_all(&[b'S'])?;
-    w.write_all(&(len as i32).to_be_bytes())?;
-    w.write_all(name.as_bytes())?;
-    w.write_all(&[0])?;
-    w.write_all(value.as_bytes())?;
-    w.write_all(&[0])?;
-    Ok(())
+    pgrust_protocol::pqformat::send_parameter_status(w, name, value)
 }
 
 pub(crate) fn send_backend_key_data(w: &mut impl Write, pid: i32, key: i32) -> io::Result<()> {
-    w.write_all(&[b'K'])?;
-    w.write_all(&12_i32.to_be_bytes())?;
-    w.write_all(&pid.to_be_bytes())?;
-    w.write_all(&key.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_backend_key_data(w, pid, key)
 }
 
 pub(crate) fn send_ready_for_query(w: &mut impl Write, status: u8) -> io::Result<()> {
-    w.write_all(&[b'Z'])?;
-    w.write_all(&5_i32.to_be_bytes())?;
-    w.write_all(&[status])?;
-    Ok(())
+    pgrust_protocol::pqformat::send_ready_for_query(w, status)
 }
 
 pub(crate) fn send_row_description(w: &mut impl Write, columns: &[QueryColumn]) -> io::Result<()> {
-    send_row_description_with_formats(w, columns, &[])
+    pgrust_protocol::pqformat::send_row_description(w, columns)
 }
 
 pub(crate) fn send_row_description_with_formats(
@@ -521,32 +460,7 @@ pub(crate) fn send_row_description_with_formats(
     columns: &[QueryColumn],
     result_formats: &[i16],
 ) -> io::Result<()> {
-    let mut body = Vec::new();
-    body.extend_from_slice(&(columns.len() as i16).to_be_bytes());
-    for (index, col) in columns.iter().enumerate() {
-        body.extend_from_slice(col.name.as_bytes());
-        body.push(0);
-        body.extend_from_slice(&0_i32.to_be_bytes());
-        body.extend_from_slice(&0_i16.to_be_bytes());
-        let (oid, typlen, typmod) = wire_type_info(col);
-        body.extend_from_slice(&oid.to_be_bytes());
-        body.extend_from_slice(&typlen.to_be_bytes());
-        body.extend_from_slice(&typmod.to_be_bytes());
-        body.extend_from_slice(&result_format_code(result_formats, index).to_be_bytes());
-    }
-
-    w.write_all(&[b'T'])?;
-    w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
-    w.write_all(&body)?;
-    Ok(())
-}
-
-fn result_format_code(result_formats: &[i16], index: usize) -> i16 {
-    match result_formats {
-        [] => 0,
-        [single] => *single,
-        many => many.get(index).copied().unwrap_or(0),
-    }
+    pgrust_protocol::pqformat::send_row_description_with_formats(w, columns, result_formats)
 }
 
 pub(crate) fn validate_binary_result_formats(
@@ -554,77 +468,26 @@ pub(crate) fn validate_binary_result_formats(
     columns: &[QueryColumn],
     result_formats: &[i16],
 ) -> Result<(), ExecError> {
-    for (index, column) in columns.iter().enumerate() {
-        match result_format_code(result_formats, index) {
-            0 => {}
-            1 => {
-                validate_binary_output_type(column.sql_type)?;
-                for row in rows {
-                    let Some(value) = row.get(index) else {
-                        continue;
-                    };
-                    if matches!(value, Value::Null) {
-                        continue;
-                    }
-                    let _ = encode_binary_data_row_value(value, column.sql_type)?;
-                }
-            }
-            code => {
-                return Err(ExecError::Parse(
-                    crate::backend::parser::ParseError::FeatureNotSupported(format!(
-                        "result format code {code}"
-                    )),
-                ));
-            }
-        }
-    }
-    Ok(())
+    pgrust_protocol::pqformat::validate_binary_result_formats(
+        rows,
+        columns,
+        result_formats,
+        |column| validate_binary_output_type(column.sql_type),
+        |value, column| encode_binary_data_row_value(value, column.sql_type),
+    )
+    .map_err(|err| match err {
+        pgrust_protocol::pqformat::ResultFormatValidationError::UnsupportedResultFormatCode(
+            code,
+        ) => ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(
+            format!("result format code {code}"),
+        )),
+        pgrust_protocol::pqformat::ResultFormatValidationError::BinaryType(err)
+        | pgrust_protocol::pqformat::ResultFormatValidationError::BinaryEncode(err) => err,
+    })
 }
 
 fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
-    let supported = if sql_type.is_array {
-        matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
-    } else {
-        matches!(
-            sql_type.kind,
-            SqlTypeKind::Int2
-                | SqlTypeKind::Int4
-                | SqlTypeKind::Int8
-                | SqlTypeKind::Tid
-                | SqlTypeKind::Oid
-                | SqlTypeKind::Xid
-                | SqlTypeKind::Money
-                | SqlTypeKind::RegConfig
-                | SqlTypeKind::RegDictionary
-                | SqlTypeKind::Bool
-                | SqlTypeKind::Bytea
-                | SqlTypeKind::Inet
-                | SqlTypeKind::Cidr
-                | SqlTypeKind::MacAddr
-                | SqlTypeKind::MacAddr8
-                | SqlTypeKind::Cstring
-                | SqlTypeKind::Text
-                | SqlTypeKind::Varchar
-                | SqlTypeKind::Char
-                | SqlTypeKind::Name
-                | SqlTypeKind::PgNodeTree
-                | SqlTypeKind::Json
-                | SqlTypeKind::JsonPath
-                | SqlTypeKind::Xml
-                | SqlTypeKind::InternalChar
-                | SqlTypeKind::Float4
-                | SqlTypeKind::Float8
-                | SqlTypeKind::Date
-                | SqlTypeKind::Time
-                | SqlTypeKind::TimeTz
-                | SqlTypeKind::Timestamp
-                | SqlTypeKind::TimestampTz
-                | SqlTypeKind::Record
-                | SqlTypeKind::Composite
-                | SqlTypeKind::Multirange
-        )
-    };
-    if supported {
+    if pgrust_protocol::pqformat::binary_output_type_supported(sql_type) {
         Ok(())
     } else {
         Err(ExecError::Parse(
@@ -633,257 +496,6 @@ fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
                 sql_type
             )),
         ))
-    }
-}
-
-fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
-    if col.sql_type.is_array
-        && let Some(oid) = col.wire_type_oid
-    {
-        return (oid as i32, -1, -1);
-    }
-    if col.sql_type.is_array {
-        if col.sql_type.type_oid != 0 && matches!(col.sql_type.kind, SqlTypeKind::Range) {
-            return (col.sql_type.type_oid as i32, -1, -1);
-        }
-        if let Some(range_type) = range_type_ref_for_sql_type(col.sql_type)
-            && let Some(array_row) = builtin_type_rows()
-                .into_iter()
-                .find(|row| row.typelem == range_type.type_oid())
-        {
-            return (array_row.oid as i32, -1, -1);
-        }
-        if col.sql_type.type_oid != 0 && matches!(col.sql_type.kind, SqlTypeKind::Multirange) {
-            return (col.sql_type.type_oid as i32, -1, -1);
-        }
-        if let Some(multirange_type) =
-            crate::include::catalog::multirange_type_ref_for_sql_type(col.sql_type)
-            && let Some(array_row) = builtin_type_rows()
-                .into_iter()
-                .find(|row| row.typelem == multirange_type.type_oid())
-        {
-            return (array_row.oid as i32, -1, -1);
-        }
-    }
-    if matches!(
-        col.sql_type.kind,
-        SqlTypeKind::Record | SqlTypeKind::Composite
-    ) && let Some(oid) = col.wire_type_oid
-    {
-        return (oid as i32, -1, col.sql_type.typmod);
-    }
-    if let Some(range_type) = range_type_ref_for_sql_type(col.sql_type) {
-        return (range_type.type_oid() as i32, -1, col.sql_type.typmod);
-    }
-    if let Some(multirange_type) =
-        crate::include::catalog::multirange_type_ref_for_sql_type(col.sql_type)
-    {
-        return (multirange_type.type_oid() as i32, -1, col.sql_type.typmod);
-    }
-    if let Some(oid) = col.wire_type_oid {
-        return (oid as i32, -1, col.sql_type.typmod);
-    }
-    if !col.sql_type.is_array && col.sql_type.type_oid != 0 {
-        return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
-    }
-    if col.sql_type.is_array {
-        let oid = match col.sql_type.kind {
-            SqlTypeKind::Int2 => 1005,
-            SqlTypeKind::Int4 => 1007,
-            SqlTypeKind::Int8 => 1016,
-            SqlTypeKind::PgLsn => crate::include::catalog::PG_LSN_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::Range => col.sql_type.type_oid as i32,
-            SqlTypeKind::Multirange => col.sql_type.type_oid as i32,
-            SqlTypeKind::Enum => col.sql_type.type_oid as i32,
-            SqlTypeKind::Internal => unreachable!("internal arrays are unsupported"),
-            SqlTypeKind::Shell => unreachable!("shell type arrays are unsupported"),
-            SqlTypeKind::Cstring => crate::include::catalog::CSTRING_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
-            SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
-            SqlTypeKind::Oid => 1028,
-            SqlTypeKind::RegProc => crate::include::catalog::REGPROC_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::RegClass => crate::include::catalog::REGCLASS_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::RegType => crate::include::catalog::REGTYPE_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::RegRole => crate::include::catalog::REGROLE_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::RegNamespace => {
-                crate::include::catalog::REGNAMESPACE_ARRAY_TYPE_OID as i32
-            }
-            SqlTypeKind::RegOper => crate::include::catalog::REGOPER_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::RegOperator => crate::include::catalog::REGOPERATOR_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::RegProcedure => {
-                crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
-            }
-            SqlTypeKind::RegCollation => {
-                crate::include::catalog::REGCOLLATION_ARRAY_TYPE_OID as i32
-            }
-            SqlTypeKind::Tid => 1010,
-            SqlTypeKind::Xid => 1011,
-            SqlTypeKind::Bit => 1561,
-            SqlTypeKind::VarBit => 1563,
-            SqlTypeKind::Bytea => 1001,
-            SqlTypeKind::Uuid => crate::include::catalog::UUID_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::Inet => crate::include::catalog::INET_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::Cidr => crate::include::catalog::CIDR_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::MacAddr => crate::include::catalog::MACADDR_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::MacAddr8 => crate::include::catalog::MACADDR8_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::Float4 => 1021,
-            SqlTypeKind::Float8 => 1022,
-            SqlTypeKind::Money => 791,
-            SqlTypeKind::Numeric => 1231,
-            SqlTypeKind::Json => 199,
-            SqlTypeKind::Jsonb => 3807,
-            SqlTypeKind::JsonPath => 4073,
-            SqlTypeKind::Xml => 143,
-            SqlTypeKind::Date => 1182,
-            SqlTypeKind::Time => 1183,
-            SqlTypeKind::TimeTz => 1270,
-            SqlTypeKind::Interval => 1187,
-            SqlTypeKind::Point
-            | SqlTypeKind::Lseg
-            | SqlTypeKind::Path
-            | SqlTypeKind::Box
-            | SqlTypeKind::Polygon
-            | SqlTypeKind::Line
-            | SqlTypeKind::Circle => unreachable!("geometry arrays are unsupported"),
-            SqlTypeKind::TsVector => 3643,
-            SqlTypeKind::TsQuery => 3645,
-            SqlTypeKind::RegConfig => 3735,
-            SqlTypeKind::RegDictionary => 3770,
-            SqlTypeKind::InternalChar => 1002,
-            SqlTypeKind::Name => 1003,
-            SqlTypeKind::Text
-            | SqlTypeKind::Int2Vector
-            | SqlTypeKind::OidVector
-            | SqlTypeKind::Timestamp
-            | SqlTypeKind::TimestampTz
-            | SqlTypeKind::Char
-            | SqlTypeKind::PgNodeTree => 1009,
-            SqlTypeKind::Bool => 1000,
-            SqlTypeKind::Varchar => 1015,
-            SqlTypeKind::AnyElement
-            | SqlTypeKind::AnyRange
-            | SqlTypeKind::AnyMultirange
-            | SqlTypeKind::AnyCompatible
-            | SqlTypeKind::AnyCompatibleArray
-            | SqlTypeKind::AnyCompatibleRange
-            | SqlTypeKind::AnyCompatibleMultirange
-            | SqlTypeKind::AnyEnum => {
-                unreachable!("polymorphic pseudo-types are not concrete SQL array types")
-            }
-            SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
-            SqlTypeKind::Trigger => unreachable!("trigger arrays are unsupported"),
-            SqlTypeKind::EventTrigger => unreachable!("event_trigger arrays are unsupported"),
-            SqlTypeKind::Record | SqlTypeKind::Composite => {
-                crate::include::catalog::RECORD_ARRAY_TYPE_OID as i32
-            }
-            SqlTypeKind::Int4Range
-            | SqlTypeKind::Int8Range
-            | SqlTypeKind::NumericRange
-            | SqlTypeKind::DateRange
-            | SqlTypeKind::TimestampRange
-            | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
-        };
-        return (oid, -1, -1);
-    }
-    match col.sql_type.kind {
-        SqlTypeKind::AnyElement => (crate::include::catalog::ANYELEMENTOID as i32, 4, -1),
-        SqlTypeKind::AnyEnum => (crate::include::catalog::ANYENUMOID as i32, 4, -1),
-        SqlTypeKind::AnyArray => (2277, -1, -1),
-        SqlTypeKind::AnyRange => (crate::include::catalog::ANYRANGEOID as i32, -1, -1),
-        SqlTypeKind::AnyMultirange => (crate::include::catalog::ANYMULTIRANGEOID as i32, -1, -1),
-        SqlTypeKind::AnyCompatible => (crate::include::catalog::ANYCOMPATIBLEOID as i32, 4, -1),
-        SqlTypeKind::AnyCompatibleArray => (
-            crate::include::catalog::ANYCOMPATIBLEARRAYOID as i32,
-            -1,
-            -1,
-        ),
-        SqlTypeKind::AnyCompatibleRange => (
-            crate::include::catalog::ANYCOMPATIBLERANGEOID as i32,
-            -1,
-            -1,
-        ),
-        SqlTypeKind::AnyCompatibleMultirange => (
-            crate::include::catalog::ANYCOMPATIBLEMULTIRANGEOID as i32,
-            -1,
-            -1,
-        ),
-        SqlTypeKind::Trigger => (TRIGGER_TYPE_OID as i32, -1, -1),
-        SqlTypeKind::EventTrigger => (EVENT_TRIGGER_TYPE_OID as i32, -1, -1),
-        SqlTypeKind::Internal => (crate::include::catalog::INTERNAL_TYPE_OID as i32, -1, -1),
-        SqlTypeKind::Shell => (col.sql_type.type_oid as i32, -1, -1),
-        SqlTypeKind::Cstring => (crate::include::catalog::CSTRING_TYPE_OID as i32, -2, -1),
-        SqlTypeKind::FdwHandler => (crate::include::catalog::FDW_HANDLER_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::Record | SqlTypeKind::Composite => {
-            (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)
-        }
-        SqlTypeKind::Enum => (col.sql_type.type_oid as i32, 4, col.sql_type.typmod),
-        SqlTypeKind::Int2 => (21, 2, -1),
-        SqlTypeKind::Int4 => (23, 4, -1),
-        SqlTypeKind::Int8 => (20, 8, -1),
-        SqlTypeKind::PgLsn => (crate::include::catalog::PG_LSN_TYPE_OID as i32, 8, -1),
-        SqlTypeKind::Void => (crate::include::catalog::VOID_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::Oid => (26, 4, -1),
-        SqlTypeKind::RegProc => (crate::include::catalog::REGPROC_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::RegClass => (crate::include::catalog::REGCLASS_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::RegType => (crate::include::catalog::REGTYPE_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::RegRole => (crate::include::catalog::REGROLE_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::RegNamespace => (crate::include::catalog::REGNAMESPACE_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::RegOper => (crate::include::catalog::REGOPER_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::RegOperator => (crate::include::catalog::REGOPERATOR_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::RegCollation => (crate::include::catalog::REGCOLLATION_TYPE_OID as i32, 4, -1),
-        SqlTypeKind::Tid => (27, 6, -1),
-        SqlTypeKind::Xid => (28, 4, -1),
-        SqlTypeKind::Bit => (1560, -1, col.sql_type.typmod),
-        SqlTypeKind::VarBit => (1562, -1, col.sql_type.typmod),
-        SqlTypeKind::Bytea => (17, -1, -1),
-        SqlTypeKind::Uuid => (crate::include::catalog::UUID_TYPE_OID as i32, 16, -1),
-        SqlTypeKind::Inet => (crate::include::catalog::INET_TYPE_OID as i32, -1, -1),
-        SqlTypeKind::Cidr => (crate::include::catalog::CIDR_TYPE_OID as i32, -1, -1),
-        SqlTypeKind::MacAddr => (crate::include::catalog::MACADDR_TYPE_OID as i32, 6, -1),
-        SqlTypeKind::MacAddr8 => (crate::include::catalog::MACADDR8_TYPE_OID as i32, 8, -1),
-        SqlTypeKind::Float4 => (700, 4, -1),
-        SqlTypeKind::Float8 => (701, 8, -1),
-        SqlTypeKind::Money => (790, 8, -1),
-        SqlTypeKind::Numeric => (1700, -1, col.sql_type.typmod),
-        SqlTypeKind::Json => (114, -1, -1),
-        SqlTypeKind::Jsonb => (3802, -1, -1),
-        SqlTypeKind::JsonPath => (4072, -1, -1),
-        SqlTypeKind::Xml => (142, -1, -1),
-        SqlTypeKind::Date => (1082, 4, -1),
-        SqlTypeKind::Time => (1083, 8, col.sql_type.typmod),
-        SqlTypeKind::TimeTz => (1266, 12, col.sql_type.typmod),
-        SqlTypeKind::Interval => (1186, 16, col.sql_type.typmod),
-        SqlTypeKind::Point => (600, 16, -1),
-        SqlTypeKind::Lseg => (601, 32, -1),
-        SqlTypeKind::Path => (602, -1, -1),
-        SqlTypeKind::Box => (603, 32, -1),
-        SqlTypeKind::Polygon => (604, -1, -1),
-        SqlTypeKind::Line => (628, 24, -1),
-        SqlTypeKind::Circle => (718, 24, -1),
-        SqlTypeKind::TsVector => (3614, -1, -1),
-        SqlTypeKind::TsQuery => (3615, -1, -1),
-        SqlTypeKind::RegConfig => (3734, 4, -1),
-        SqlTypeKind::RegDictionary => (3769, 4, -1),
-        SqlTypeKind::InternalChar => (18, 1, -1),
-        SqlTypeKind::Name => (19, 64, -1),
-        SqlTypeKind::Bool => (16, 1, -1),
-        SqlTypeKind::Varchar => (1043, -1, col.sql_type.typmod),
-        SqlTypeKind::Text
-        | SqlTypeKind::Int2Vector
-        | SqlTypeKind::OidVector
-        | SqlTypeKind::Char
-        | SqlTypeKind::PgNodeTree => (25, -1, col.sql_type.typmod),
-        SqlTypeKind::Timestamp => (1114, 8, col.sql_type.typmod),
-        SqlTypeKind::TimestampTz => (1184, 8, col.sql_type.typmod),
-        SqlTypeKind::Range
-        | SqlTypeKind::Int4Range
-        | SqlTypeKind::Int8Range
-        | SqlTypeKind::NumericRange
-        | SqlTypeKind::DateRange
-        | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
-        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
 }
 
@@ -982,8 +594,7 @@ pub(crate) fn send_typed_data_row(
     enum_labels: Option<&HashMap<(u32, u32), String>>,
     proc_signatures: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
-    buf.clear();
-    buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
+    pgrust_protocol::pqformat::begin_data_row_body(buf, values.len());
     for (idx, val) in values.iter().enumerate() {
         let decoded_indirect;
         let val = if let Value::IndirectVarlena(indirect) = val {
@@ -996,17 +607,16 @@ pub(crate) fn send_typed_data_row(
             val
         };
         let sql_type = columns.get(idx).map(|col| col.sql_type);
-        let format_code = result_format_code(result_formats, idx);
+        let format_code = pgrust_protocol::pqformat::result_format_code(result_formats, idx);
         if format_code == 1 {
             if matches!(val, Value::Null) {
-                buf.extend_from_slice(&(-1_i32).to_be_bytes());
+                pgrust_protocol::pqformat::append_data_row_null_field(buf);
                 continue;
             }
             let sql_type = sql_type.ok_or_else(|| io::Error::other("missing column type"))?;
             let payload = encode_binary_data_row_value(val, sql_type)
                 .map_err(|e| io::Error::other(format!("{e:?}")))?;
-            buf.extend_from_slice(&(payload.len() as i32).to_be_bytes());
-            buf.extend_from_slice(&payload);
+            pgrust_protocol::pqformat::append_data_row_field(buf, &payload);
             continue;
         }
         if format_code != 0 {
@@ -1016,7 +626,7 @@ pub(crate) fn send_typed_data_row(
             )));
         }
         match val {
-            Value::Null => buf.extend_from_slice(&(-1_i32).to_be_bytes()),
+            Value::Null => pgrust_protocol::pqformat::append_data_row_null_field(buf),
             Value::Int16(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
@@ -1180,13 +790,11 @@ pub(crate) fn send_typed_data_row(
             }
             Value::Xid8(v) => {
                 let rendered = v.to_string();
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Money(v) => {
                 let rendered = crate::backend::executor::money_format_text(*v);
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Bytea(v) => {
                 let rendered = match sql_type.and_then(|ty| (!ty.is_array).then_some(ty.type_oid)) {
@@ -1197,33 +805,27 @@ pub(crate) fn send_typed_data_row(
                     Some(PG_MCV_LIST_TYPE_OID) => render_pg_mcv_list_text(v),
                     _ => format_bytea_text(v, float_format.bytea_output),
                 };
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Uuid(v) => {
                 let rendered = crate::backend::executor::value_io::render_uuid_text(v);
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Inet(v) => {
                 let rendered = v.render_inet();
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Cidr(v) => {
                 let rendered = v.render_cidr();
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::MacAddr(v) => {
                 let rendered = render_macaddr_text(v);
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::MacAddr8(v) => {
                 let rendered = render_macaddr8_text(v);
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Date(_)
             | Value::Time(_)
@@ -1233,26 +835,22 @@ pub(crate) fn send_typed_data_row(
                 let rendered =
                     render_datetime_value_text_with_config(val, &float_format.datetime_config)
                         .expect("datetime values render");
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Range(_) => {
                 let rendered = render_range_text_with_config(val, &float_format.datetime_config)
                     .unwrap_or_default();
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Multirange(_) => {
                 let rendered =
                     render_multirange_text_with_config(val, &float_format.datetime_config)
                         .unwrap_or_default();
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Bit(v) => {
                 let rendered = crate::backend::executor::render_bit_text(v);
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Float64(v) => {
                 let start = buf.len();
@@ -1267,65 +865,52 @@ pub(crate) fn send_typed_data_row(
             }
             Value::Numeric(v) => {
                 let text = v.render();
-                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
-                buf.extend_from_slice(text.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &text);
             }
             Value::PgLsn(v) => {
                 let text = render_pg_lsn_text(*v);
-                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
-                buf.extend_from_slice(text.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &text);
             }
             Value::Tid(v) => {
                 let text = crate::backend::executor::value_io::render_tid_text(v);
-                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
-                buf.extend_from_slice(text.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &text);
             }
             Value::Interval(v) => {
                 let text = render_interval_text_with_config(*v, &float_format.datetime_config);
-                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
-                buf.extend_from_slice(text.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &text);
             }
             Value::Json(v) => {
-                buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
-                buf.extend_from_slice(v.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, v);
             }
             Value::Xml(v) => {
                 let text = crate::backend::executor::render_xml_output_text(v);
-                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
-                buf.extend_from_slice(text.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, text);
             }
             Value::Jsonb(v) => {
                 let text = crate::backend::executor::jsonb::render_jsonb_bytes(v).unwrap();
-                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
-                buf.extend_from_slice(text.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &text);
             }
             Value::JsonPath(v) => {
-                buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
-                buf.extend_from_slice(v.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, v);
             }
             Value::TsVector(v) => {
                 let rendered = crate::backend::executor::render_tsvector_text(v);
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::TsQuery(v) => {
                 let rendered = crate::backend::executor::render_tsquery_text(v);
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Text(v) => {
-                buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
-                buf.extend_from_slice(v.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, v);
             }
             Value::TextRef(_, _) => {
                 let s = val.as_text().unwrap();
-                buf.extend_from_slice(&(s.len() as i32).to_be_bytes());
-                buf.extend_from_slice(s.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, s);
             }
             Value::InternalChar(byte) => {
                 let rendered = render_internal_char_text(*byte);
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::EnumOid(v) => {
                 let rendered = sql_type
@@ -1333,16 +918,13 @@ pub(crate) fn send_typed_data_row(
                     .and_then(|type_oid| enum_labels.and_then(|labels| labels.get(&(type_oid, *v))))
                     .cloned()
                     .unwrap_or_else(|| v.to_string());
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Bool(true) => {
-                buf.extend_from_slice(&1_i32.to_be_bytes());
-                buf.push(b't');
+                pgrust_protocol::pqformat::append_data_row_field(buf, b"t");
             }
             Value::Bool(false) => {
-                buf.extend_from_slice(&1_i32.to_be_bytes());
-                buf.push(b'f');
+                pgrust_protocol::pqformat::append_data_row_field(buf, b"f");
             }
             Value::Point(_)
             | Value::Lseg(_)
@@ -1352,8 +934,7 @@ pub(crate) fn send_typed_data_row(
             | Value::Polygon(_)
             | Value::Circle(_) => {
                 let rendered = render_geometry_text(val, float_format.clone()).unwrap_or_default();
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Array(items) => {
                 let rendered = if let Some(sql_type) = sql_type.filter(|ty| ty.is_array) {
@@ -1397,8 +978,7 @@ pub(crate) fn send_typed_data_row(
                         &float_format.datetime_config,
                     )
                 };
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::PgArray(array) => {
                 let rendered = enum_array_type_oid(sql_type, array, enum_labels)
@@ -1416,28 +996,23 @@ pub(crate) fn send_typed_data_row(
                             &float_format.datetime_config,
                         )
                     });
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Record(record) => {
                 let rendered = crate::backend::executor::value_io::format_record_text_with_options(
                     record,
                     &float_format,
                 );
-                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
-                buf.extend_from_slice(rendered.as_bytes());
+                pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => {
-                buf.extend_from_slice(&(-1_i32).to_be_bytes());
+                pgrust_protocol::pqformat::append_data_row_null_field(buf);
             }
             Value::IndirectVarlena(_) => unreachable!("indirect datums are decoded before output"),
         }
     }
 
-    w.write_all(&[b'D'])?;
-    w.write_all(&((buf.len() + 4) as i32).to_be_bytes())?;
-    w.write_all(buf)?;
-    Ok(())
+    pgrust_protocol::pqformat::send_data_row_body(w, buf)
 }
 
 pub(crate) fn format_text_data_value(
@@ -1683,26 +1258,24 @@ fn encode_binary_record(
     record: &crate::include::nodes::datum::RecordValue,
 ) -> Result<Vec<u8>, ExecError> {
     let mut out = Vec::new();
-    out.extend_from_slice(&(record.fields.len() as i32).to_be_bytes());
+    pgrust_protocol::pqformat::begin_binary_record_body(&mut out, record.fields.len());
     for (field, value) in record.iter() {
         let field_oid = if !field.sql_type.is_array && field.sql_type.type_oid != 0 {
             field.sql_type.type_oid
         } else {
-            wire_type_info(&QueryColumn {
+            pgrust_protocol::pqformat::wire_type_info(&QueryColumn {
                 name: field.name.clone(),
                 sql_type: field.sql_type,
                 wire_type_oid: None,
             })
             .0 as u32
         };
-        out.extend_from_slice(&field_oid.to_be_bytes());
         if matches!(value, Value::Null) {
-            out.extend_from_slice(&(-1_i32).to_be_bytes());
+            pgrust_protocol::pqformat::append_binary_record_field(&mut out, field_oid, None);
             continue;
         }
         let payload = encode_binary_data_row_value(value, field.sql_type)?;
-        out.extend_from_slice(&(payload.len() as i32).to_be_bytes());
-        out.extend_from_slice(&payload);
+        pgrust_protocol::pqformat::append_binary_record_field(&mut out, field_oid, Some(&payload));
     }
     Ok(out)
 }
@@ -1724,22 +1297,25 @@ fn encode_binary_record_array(
             .unwrap_or(crate::include::catalog::RECORD_TYPE_OID)
     };
     let mut out = Vec::new();
-    out.extend_from_slice(&(array.dimensions.len() as i32).to_be_bytes());
-    out.extend_from_slice(
-        &(array.elements.iter().any(|v| matches!(v, Value::Null)) as i32).to_be_bytes(),
+    pgrust_protocol::pqformat::begin_binary_array_body(
+        &mut out,
+        array.dimensions.len(),
+        array.elements.iter().any(|v| matches!(v, Value::Null)),
+        element_oid,
     );
-    out.extend_from_slice(&element_oid.to_be_bytes());
     for dim in &array.dimensions {
-        out.extend_from_slice(&(dim.length as i32).to_be_bytes());
-        out.extend_from_slice(&dim.lower_bound.to_be_bytes());
+        pgrust_protocol::pqformat::append_binary_array_dimension(
+            &mut out,
+            dim.length,
+            dim.lower_bound,
+        );
     }
     for value in &array.elements {
         match value {
-            Value::Null => out.extend_from_slice(&(-1_i32).to_be_bytes()),
+            Value::Null => pgrust_protocol::pqformat::append_binary_array_element(&mut out, None),
             Value::Record(record) => {
                 let payload = encode_binary_record(record)?;
-                out.extend_from_slice(&(payload.len() as i32).to_be_bytes());
-                out.extend_from_slice(&payload);
+                pgrust_protocol::pqformat::append_binary_array_element(&mut out, Some(&payload));
             }
             other => {
                 return Err(ExecError::Parse(
@@ -1755,90 +1331,39 @@ fn encode_binary_record_array(
 }
 
 pub fn format_bytea_text(bytes: &[u8], output: ByteaOutputFormat) -> String {
-    match output {
-        ByteaOutputFormat::Hex => {
-            let mut out = String::with_capacity(2 + bytes.len() * 2);
-            out.push('\\');
-            out.push('x');
-            for byte in bytes {
-                use std::fmt::Write as _;
-                let _ = write!(&mut out, "{:02x}", byte);
-            }
-            out
-        }
-        ByteaOutputFormat::Escape => {
-            let mut out = String::new();
-            for &byte in bytes {
-                match byte {
-                    b'\\' => out.push_str("\\\\"),
-                    0x20..=0x7e => out.push(byte as char),
-                    _ => {
-                        use std::fmt::Write as _;
-                        let _ = write!(&mut out, "\\{:03o}", byte);
-                    }
-                }
-            }
-            out
-        }
-    }
+    pgrust_expr::backend::libpq::pqformat::format_bytea_text(bytes, output)
 }
 
 pub(crate) fn send_command_complete(w: &mut impl Write, tag: &str) -> io::Result<()> {
-    let len = 4 + tag.len() + 1;
-    w.write_all(&[b'C'])?;
-    w.write_all(&(len as i32).to_be_bytes())?;
-    w.write_all(tag.as_bytes())?;
-    w.write_all(&[0])?;
-    Ok(())
+    pgrust_protocol::pqformat::send_command_complete(w, tag)
 }
 
 pub(crate) fn send_parse_complete(w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[b'1'])?;
-    w.write_all(&4_i32.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_parse_complete(w)
 }
 
 pub(crate) fn send_bind_complete(w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[b'2'])?;
-    w.write_all(&4_i32.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_bind_complete(w)
 }
 
 pub(crate) fn send_portal_suspended(w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[b's'])?;
-    w.write_all(&4_i32.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_portal_suspended(w)
 }
 
 pub(crate) fn send_close_complete(w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[b'3'])?;
-    w.write_all(&4_i32.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_close_complete(w)
 }
 
 pub(crate) fn send_no_data(w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[b'n'])?;
-    w.write_all(&4_i32.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_no_data(w)
 }
 
 pub(crate) fn send_parameter_description(w: &mut impl Write, type_oids: &[i32]) -> io::Result<()> {
-    let len = 4 + 2 + type_oids.len() * 4;
-    w.write_all(&[b't'])?;
-    w.write_all(&(len as i32).to_be_bytes())?;
-    w.write_all(&(type_oids.len() as i16).to_be_bytes())?;
-    for oid in type_oids {
-        w.write_all(&oid.to_be_bytes())?;
-    }
-    Ok(())
+    pgrust_protocol::pqformat::send_parameter_description(w, type_oids)
 }
 
 pub(crate) fn send_copy_in_response(w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[b'G'])?;
-    w.write_all(&7_i32.to_be_bytes())?;
-    w.write_all(&[0])?;
-    w.write_all(&0_i16.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_copy_in_response(w)
 }
 
 pub(crate) fn send_copy_out_response(
@@ -1846,33 +1371,15 @@ pub(crate) fn send_copy_out_response(
     format: CopyFormat,
     column_count: usize,
 ) -> io::Result<()> {
-    let format_code = if matches!(format, CopyFormat::Binary) {
-        1_i16
-    } else {
-        0_i16
-    };
-    let len = 4 + 1 + 2 + column_count * 2;
-    w.write_all(&[b'H'])?;
-    w.write_all(&(len as i32).to_be_bytes())?;
-    w.write_all(&[format_code as u8])?;
-    w.write_all(&(column_count as i16).to_be_bytes())?;
-    for _ in 0..column_count {
-        w.write_all(&format_code.to_be_bytes())?;
-    }
-    Ok(())
+    pgrust_protocol::pqformat::send_copy_out_response(w, format, column_count)
 }
 
 pub(crate) fn send_copy_data(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
-    w.write_all(&[b'd'])?;
-    w.write_all(&((4 + data.len()) as i32).to_be_bytes())?;
-    w.write_all(data)?;
-    Ok(())
+    pgrust_protocol::pqformat::send_copy_data(w, data)
 }
 
 pub(crate) fn send_copy_done(w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[b'c'])?;
-    w.write_all(&4_i32.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_copy_done(w)
 }
 
 pub(crate) fn send_notification_response(
@@ -1881,21 +1388,11 @@ pub(crate) fn send_notification_response(
     channel: &str,
     payload: &str,
 ) -> io::Result<()> {
-    let len = 4 + 4 + channel.len() + 1 + payload.len() + 1;
-    w.write_all(&[b'A'])?;
-    w.write_all(&(len as i32).to_be_bytes())?;
-    w.write_all(&sender_pid.to_be_bytes())?;
-    w.write_all(channel.as_bytes())?;
-    w.write_all(&[0])?;
-    w.write_all(payload.as_bytes())?;
-    w.write_all(&[0])?;
-    Ok(())
+    pgrust_protocol::pqformat::send_notification_response(w, sender_pid, channel, payload)
 }
 
 pub(crate) fn send_empty_query(w: &mut impl Write) -> io::Result<()> {
-    w.write_all(&[b'I'])?;
-    w.write_all(&4_i32.to_be_bytes())?;
-    Ok(())
+    pgrust_protocol::pqformat::send_empty_query(w)
 }
 
 pub(crate) fn send_error(
@@ -1906,7 +1403,7 @@ pub(crate) fn send_error(
     hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_error_with_fields(w, sqlstate, message, detail, hint, None, position)
+    pgrust_protocol::pqformat::send_error(w, sqlstate, message, detail, hint, position)
 }
 
 pub(crate) fn send_error_with_hint(
@@ -1916,7 +1413,7 @@ pub(crate) fn send_error_with_hint(
     hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_error_with_fields(w, sqlstate, message, None, hint, None, position)
+    pgrust_protocol::pqformat::send_error_with_hint(w, sqlstate, message, hint, position)
 }
 
 pub(crate) fn send_error_with_fields(
@@ -1928,8 +1425,8 @@ pub(crate) fn send_error_with_fields(
     context: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_error_with_internal_fields(
-        w, sqlstate, message, detail, hint, context, position, None, None,
+    pgrust_protocol::pqformat::send_error_with_fields(
+        w, sqlstate, message, detail, hint, context, position,
     )
 }
 
@@ -1944,53 +1441,17 @@ pub(crate) fn send_error_with_internal_fields(
     internal_query: Option<&str>,
     internal_position: Option<usize>,
 ) -> io::Result<()> {
-    let mut body = Vec::new();
-    body.push(b'S');
-    body.extend_from_slice(b"ERROR\0");
-    body.push(b'V');
-    body.extend_from_slice(b"ERROR\0");
-    body.push(b'C');
-    body.extend_from_slice(sqlstate.as_bytes());
-    body.push(0);
-    body.push(b'M');
-    body.extend_from_slice(message.as_bytes());
-    body.push(0);
-    if let Some(detail) = detail {
-        body.push(b'D');
-        body.extend_from_slice(detail.as_bytes());
-        body.push(0);
-    }
-    if let Some(hint) = hint {
-        body.push(b'H');
-        body.extend_from_slice(hint.as_bytes());
-        body.push(0);
-    }
-    if let Some(context) = context {
-        body.push(b'W');
-        body.extend_from_slice(context.as_bytes());
-        body.push(0);
-    }
-    if let Some(position) = position {
-        body.push(b'P');
-        body.extend_from_slice(position.to_string().as_bytes());
-        body.push(0);
-    }
-    if let Some(internal_position) = internal_position {
-        body.push(b'p');
-        body.extend_from_slice(internal_position.to_string().as_bytes());
-        body.push(0);
-    }
-    if let Some(internal_query) = internal_query {
-        body.push(b'q');
-        body.extend_from_slice(internal_query.as_bytes());
-        body.push(0);
-    }
-    body.push(0);
-
-    w.write_all(&[b'E'])?;
-    w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
-    w.write_all(&body)?;
-    Ok(())
+    pgrust_protocol::pqformat::send_error_with_internal_fields(
+        w,
+        sqlstate,
+        message,
+        detail,
+        hint,
+        context,
+        position,
+        internal_query,
+        internal_position,
+    )
 }
 
 pub(crate) fn send_notice(
@@ -1999,7 +1460,7 @@ pub(crate) fn send_notice(
     detail: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_notice_with_fields(w, "NOTICE", "00000", message, detail, None, position)
+    pgrust_protocol::pqformat::send_notice(w, message, detail, position)
 }
 
 pub(crate) fn send_notice_with_severity(
@@ -2010,7 +1471,9 @@ pub(crate) fn send_notice_with_severity(
     detail: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_notice_with_fields(w, severity, sqlstate, message, detail, None, position)
+    pgrust_protocol::pqformat::send_notice_with_severity(
+        w, severity, sqlstate, message, detail, position,
+    )
 }
 
 pub(crate) fn send_notice_with_fields(
@@ -2022,40 +1485,9 @@ pub(crate) fn send_notice_with_fields(
     hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    let mut body = Vec::new();
-    body.push(b'S');
-    body.extend_from_slice(severity.as_bytes());
-    body.push(0);
-    body.push(b'V');
-    body.extend_from_slice(severity.as_bytes());
-    body.push(0);
-    body.push(b'C');
-    body.extend_from_slice(sqlstate.as_bytes());
-    body.push(0);
-    body.push(b'M');
-    body.extend_from_slice(message.as_bytes());
-    body.push(0);
-    if let Some(detail) = detail {
-        body.push(b'D');
-        body.extend_from_slice(detail.as_bytes());
-        body.push(0);
-    }
-    if let Some(hint) = hint {
-        body.push(b'H');
-        body.extend_from_slice(hint.as_bytes());
-        body.push(0);
-    }
-    if let Some(position) = position {
-        body.push(b'P');
-        body.extend_from_slice(position.to_string().as_bytes());
-        body.push(0);
-    }
-    body.push(0);
-
-    w.write_all(&[b'N'])?;
-    w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
-    w.write_all(&body)?;
-    Ok(())
+    pgrust_protocol::pqformat::send_notice_with_fields(
+        w, severity, sqlstate, message, detail, hint, position,
+    )
 }
 
 pub(crate) fn send_notice_with_hint(
@@ -2066,448 +1498,15 @@ pub(crate) fn send_notice_with_hint(
     hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    let mut body = Vec::new();
-    body.push(b'S');
-    body.extend_from_slice(severity.as_bytes());
-    body.push(0);
-    body.push(b'V');
-    body.extend_from_slice(severity.as_bytes());
-    body.push(0);
-    body.push(b'C');
-    body.extend_from_slice(sqlstate.as_bytes());
-    body.push(0);
-    body.push(b'M');
-    body.extend_from_slice(message.as_bytes());
-    body.push(0);
-    if let Some(hint) = hint {
-        body.push(b'H');
-        body.extend_from_slice(hint.as_bytes());
-        body.push(0);
-    }
-    if let Some(position) = position {
-        body.push(b'P');
-        body.extend_from_slice(position.to_string().as_bytes());
-        body.push(0);
-    }
-    body.push(0);
-
-    w.write_all(&[b'N'])?;
-    w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
-    w.write_all(&body)?;
-    Ok(())
+    pgrust_protocol::pqformat::send_notice_with_hint(w, severity, sqlstate, message, hint, position)
 }
 
 pub(crate) fn format_float8_text(value: f64, options: FloatFormatOptions) -> String {
-    if value.is_nan() {
-        return "NaN".to_string();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_negative() {
-            "-Infinity".to_string()
-        } else {
-            "Infinity".to_string()
-        };
-    }
-
-    if options.extra_float_digits <= 0 {
-        return format_float_with_precision(value, 15 + options.extra_float_digits);
-    }
-    format_float_shortest(value, false)
+    pgrust_expr::backend::libpq::pqformat::format_float8_text(value, options)
 }
 
 pub(crate) fn format_float4_text(value: f64, options: FloatFormatOptions) -> String {
-    let value = value as f32;
-    if value.is_nan() {
-        return "NaN".to_string();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_negative() {
-            "-Infinity".to_string()
-        } else {
-            "Infinity".to_string()
-        };
-    }
-
-    if options.extra_float_digits <= 0 {
-        return format_float_with_precision(value as f64, 6 + options.extra_float_digits);
-    }
-    format_float_shortest(value as f64, true)
-}
-
-fn format_float_shortest(value: f64, is_float4: bool) -> String {
-    let normalized = if is_float4 {
-        let mut buffer = ryu::Buffer::new();
-        normalize_float_rendering(buffer.format_finite(value as f32), true)
-    } else {
-        let mut buffer = ryu::Buffer::new();
-        normalize_float_rendering(buffer.format_finite(value), false)
-    };
-    if let Some(repaired) = repair_midpoint_render(value, is_float4, &normalized) {
-        repaired
-    } else {
-        normalized
-    }
-}
-
-#[derive(Clone)]
-struct ExactRational {
-    num: BigInt,
-    den: BigInt,
-}
-
-fn repair_midpoint_render(value: f64, is_float4: bool, shortest: &str) -> Option<String> {
-    if !is_exact_midpoint_render(value, is_float4, shortest) {
-        return None;
-    }
-
-    let start_digits = significand_digit_count(shortest);
-    let max_digits = if is_float4 { 9 } else { 17 };
-    for digits in (start_digits + 1)..=max_digits {
-        let candidate = rounded_decimal_candidate(value, is_float4, digits);
-        if !parses_same_float(&candidate, value, is_float4) {
-            continue;
-        }
-        if !is_exact_midpoint_render(value, is_float4, &candidate) {
-            return Some(candidate);
-        }
-    }
-
-    None
-}
-
-fn rounded_decimal_candidate(value: f64, is_float4: bool, digits: usize) -> String {
-    let precision = digits.saturating_sub(1);
-    let raw = if is_float4 {
-        format!("{:.*e}", precision, value as f32)
-    } else {
-        format!("{:.*e}", precision, value)
-    };
-    normalize_float_rendering(&raw, is_float4)
-}
-
-fn parses_same_float(candidate: &str, value: f64, is_float4: bool) -> bool {
-    if is_float4 {
-        candidate
-            .parse::<f32>()
-            .map(|parsed| parsed.to_bits() == (value as f32).to_bits())
-            .unwrap_or(false)
-    } else {
-        candidate
-            .parse::<f64>()
-            .map(|parsed| parsed.to_bits() == value.to_bits())
-            .unwrap_or(false)
-    }
-}
-
-fn is_exact_midpoint_render(value: f64, is_float4: bool, rendered: &str) -> bool {
-    let Some(candidate) = decimal_rational(rendered) else {
-        return false;
-    };
-
-    if is_float4 {
-        let target = value as f32;
-        if !target.is_finite() {
-            return false;
-        }
-        let exact = rational_from_f32(target);
-        let lower = rational_from_f32(next_down_f32(target));
-        let upper = rational_from_f32(next_up_f32(target));
-        rational_is_midpoint(&candidate, &lower, &exact)
-            || rational_is_midpoint(&candidate, &exact, &upper)
-    } else {
-        if !value.is_finite() {
-            return false;
-        }
-        let exact = rational_from_f64(value);
-        let lower = rational_from_f64(next_down_f64(value));
-        let upper = rational_from_f64(next_up_f64(value));
-        rational_is_midpoint(&candidate, &lower, &exact)
-            || rational_is_midpoint(&candidate, &exact, &upper)
-    }
-}
-
-fn significand_digit_count(text: &str) -> usize {
-    let unsigned = text.trim_start_matches('-');
-    let significand = unsigned
-        .split_once(['e', 'E'])
-        .map(|(mantissa, _)| mantissa)
-        .unwrap_or(unsigned);
-    let digits = significand.replace('.', "");
-    let trimmed = digits.trim_start_matches('0');
-    trimmed.len().max(1)
-}
-
-fn decimal_rational(text: &str) -> Option<ExactRational> {
-    let (negative, unsigned) = match text.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, text),
-    };
-    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
-        Some((mantissa, exp)) => (mantissa, exp.parse::<i32>().ok()?),
-        None => (unsigned, 0),
-    };
-    let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let mut digits = String::with_capacity(whole.len() + frac.len());
-    digits.push_str(whole);
-    digits.push_str(frac);
-    let digits = digits.trim_start_matches('0');
-    if digits.is_empty() {
-        return Some(ExactRational {
-            num: BigInt::from(0u8),
-            den: BigInt::one(),
-        });
-    }
-
-    let mut num = BigInt::from_str(digits).ok()?;
-    let scale = frac.len() as i32 - exponent;
-    let den = if scale >= 0 {
-        pow10(scale as u32)
-    } else {
-        num *= pow10((-scale) as u32);
-        BigInt::one()
-    };
-    if negative {
-        num = -num;
-    }
-    Some(ExactRational { num, den })
-}
-
-fn rational_from_f64(value: f64) -> ExactRational {
-    let bits = value.to_bits();
-    let negative = (bits >> 63) != 0;
-    let ieee_mantissa = bits & ((1u64 << 52) - 1);
-    let ieee_exponent = ((bits >> 52) & 0x7ff) as i32;
-    let (mantissa, exp2) = if ieee_exponent == 0 {
-        (ieee_mantissa, 1 - 1023 - 52)
-    } else {
-        ((1u64 << 52) | ieee_mantissa, ieee_exponent - 1023 - 52)
-    };
-    rational_from_binary_parts(negative, BigInt::from(mantissa), exp2)
-}
-
-fn rational_from_f32(value: f32) -> ExactRational {
-    let bits = value.to_bits();
-    let negative = (bits >> 31) != 0;
-    let ieee_mantissa = bits & ((1u32 << 23) - 1);
-    let ieee_exponent = ((bits >> 23) & 0xff) as i32;
-    let (mantissa, exp2) = if ieee_exponent == 0 {
-        (ieee_mantissa, 1 - 127 - 23)
-    } else {
-        ((1u32 << 23) | ieee_mantissa, ieee_exponent - 127 - 23)
-    };
-    rational_from_binary_parts(negative, BigInt::from(mantissa), exp2)
-}
-
-fn rational_from_binary_parts(negative: bool, mut num: BigInt, exp2: i32) -> ExactRational {
-    if negative {
-        num = -num;
-    }
-    if exp2 >= 0 {
-        num <<= exp2 as usize;
-        ExactRational {
-            num,
-            den: BigInt::one(),
-        }
-    } else {
-        ExactRational {
-            num,
-            den: BigInt::one() << (-exp2 as usize),
-        }
-    }
-}
-
-fn rational_is_midpoint(
-    candidate: &ExactRational,
-    left: &ExactRational,
-    right: &ExactRational,
-) -> bool {
-    let lhs = &candidate.num * BigInt::from(2u8) * &left.den * &right.den;
-    let rhs = &candidate.den * (&left.num * &right.den + &right.num * &left.den);
-    lhs == rhs
-}
-
-fn pow10(exp: u32) -> BigInt {
-    BigInt::from(10u8).pow(exp)
-}
-
-fn next_up_f64(value: f64) -> f64 {
-    if value.is_nan() || value == f64::INFINITY {
-        return value;
-    }
-    if value == 0.0 {
-        return f64::from_bits(1);
-    }
-    let bits = value.to_bits();
-    if value.is_sign_negative() {
-        f64::from_bits(bits - 1)
-    } else {
-        f64::from_bits(bits + 1)
-    }
-}
-
-fn next_down_f64(value: f64) -> f64 {
-    if value.is_nan() || value == f64::NEG_INFINITY {
-        return value;
-    }
-    if value == 0.0 {
-        return f64::from_bits((1u64 << 63) | 1);
-    }
-    let bits = value.to_bits();
-    if value.is_sign_negative() {
-        f64::from_bits(bits + 1)
-    } else {
-        f64::from_bits(bits - 1)
-    }
-}
-
-fn next_up_f32(value: f32) -> f32 {
-    if value.is_nan() || value == f32::INFINITY {
-        return value;
-    }
-    if value == 0.0 {
-        return f32::from_bits(1);
-    }
-    let bits = value.to_bits();
-    if value.is_sign_negative() {
-        f32::from_bits(bits - 1)
-    } else {
-        f32::from_bits(bits + 1)
-    }
-}
-
-fn next_down_f32(value: f32) -> f32 {
-    if value.is_nan() || value == f32::NEG_INFINITY {
-        return value;
-    }
-    if value == 0.0 {
-        return f32::from_bits((1u32 << 31) | 1);
-    }
-    let bits = value.to_bits();
-    if value.is_sign_negative() {
-        f32::from_bits(bits + 1)
-    } else {
-        f32::from_bits(bits - 1)
-    }
-}
-
-fn format_float_with_precision(value: f64, precision: i32) -> String {
-    let precision = precision.clamp(1, 32) as usize;
-    let sign = if value.is_sign_negative() { "-" } else { "" };
-    let abs = value.abs();
-    if abs == 0.0 {
-        return format!("{sign}0");
-    }
-
-    let rendered = format!("{:.*e}", precision - 1, abs);
-    let (mantissa, exponent) = rendered.split_once('e').unwrap_or((&rendered, "0"));
-    let exponent = exponent.parse::<i32>().unwrap_or(0);
-    let digits = mantissa.replace('.', "");
-    let body = if exponent < -4 || exponent >= precision as i32 {
-        let mantissa = trim_fractional_zeros(mantissa);
-        format_scientific_mantissa(mantissa, exponent, true)
-    } else {
-        let decimal_pos = exponent + 1;
-        let rendered = if decimal_pos <= 0 {
-            format!("0.{}{}", "0".repeat((-decimal_pos) as usize), digits)
-        } else if decimal_pos as usize >= digits.len() {
-            format!(
-                "{digits}{}",
-                "0".repeat(decimal_pos as usize - digits.len())
-            )
-        } else {
-            format!(
-                "{}.{}",
-                &digits[..decimal_pos as usize],
-                &digits[decimal_pos as usize..]
-            )
-        };
-        trim_fractional_zeros(&rendered).to_string()
-    };
-    format!("{sign}{body}")
-}
-
-fn normalize_float_rendering(raw: &str, is_float4: bool) -> String {
-    let (sign, unsigned) = match raw.strip_prefix('-') {
-        Some(rest) => ("-", rest),
-        None => ("", raw),
-    };
-    let scientific_threshold = if is_float4 { 6 } else { 15 };
-
-    let (mut digits, exponent) = if let Some((mantissa, exponent)) = unsigned.split_once(['e', 'E'])
-    {
-        let exponent = exponent.parse::<i32>().unwrap_or(0);
-        let fractional_digits = mantissa
-            .split_once('.')
-            .map(|(_, frac)| frac.len())
-            .unwrap_or(0);
-        (
-            mantissa.replace('.', ""),
-            exponent - fractional_digits as i32,
-        )
-    } else if let Some((whole, frac)) = unsigned.split_once('.') {
-        (format!("{whole}{frac}"), -(frac.len() as i32))
-    } else {
-        (unsigned.to_string(), 0)
-    };
-
-    digits = digits.trim_start_matches('0').to_string();
-    if digits.is_empty() {
-        return format!("{sign}0");
-    }
-
-    let display_exponent = exponent + digits.len() as i32 - 1;
-    if display_exponent < -4 || display_exponent >= scientific_threshold {
-        let significant_digits = digits.trim_end_matches('0');
-        let mantissa = if significant_digits.len() == 1 {
-            significant_digits.to_string()
-        } else {
-            format!("{}.{}", &significant_digits[..1], &significant_digits[1..])
-        };
-        return format!(
-            "{sign}{}",
-            format_scientific_mantissa(&mantissa, display_exponent, true)
-        );
-    }
-
-    if exponent >= 0 {
-        digits.push_str(&"0".repeat(exponent as usize));
-        return format!("{sign}{digits}");
-    }
-
-    let decimal_pos = digits.len() as i32 + exponent;
-    let rendered = if decimal_pos > 0 {
-        format!(
-            "{}.{}",
-            &digits[..decimal_pos as usize],
-            &digits[decimal_pos as usize..]
-        )
-    } else {
-        format!("0.{}{}", "0".repeat((-decimal_pos) as usize), digits)
-    };
-    format!("{sign}{}", trim_fractional_zeros(&rendered))
-}
-
-fn format_scientific_mantissa(mantissa: &str, exponent: i32, pad_exponent: bool) -> String {
-    let mantissa = trim_fractional_zeros(mantissa);
-    if pad_exponent {
-        let sign = if exponent < 0 { '-' } else { '+' };
-        let digits = exponent.abs();
-        if digits < 10 {
-            return format!("{mantissa}e{sign}0{digits}");
-        }
-        return format!("{mantissa}e{sign}{digits}");
-    } else {
-        format!("{mantissa}e{exponent:+}")
-    }
-}
-
-fn trim_fractional_zeros(text: &str) -> &str {
-    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
-    if trimmed.is_empty() || trimmed == "-" {
-        if text.starts_with('-') { "-0" } else { "0" }
-    } else {
-        trimmed
-    }
+    pgrust_expr::backend::libpq::pqformat::format_float4_text(value, options)
 }
 
 #[cfg(test)]
@@ -2964,7 +1963,7 @@ mod tests {
     #[test]
     fn macaddr_protocol_metadata_and_binary_output_use_postgres_oids() {
         assert_eq!(
-            super::wire_type_info(&QueryColumn {
+            pgrust_protocol::pqformat::wire_type_info(&QueryColumn {
                 name: "m".into(),
                 sql_type: SqlType::new(SqlTypeKind::MacAddr),
                 wire_type_oid: None,
@@ -2972,7 +1971,7 @@ mod tests {
             (crate::include::catalog::MACADDR_TYPE_OID as i32, 6, -1)
         );
         assert_eq!(
-            super::wire_type_info(&QueryColumn {
+            pgrust_protocol::pqformat::wire_type_info(&QueryColumn {
                 name: "m8".into(),
                 sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::MacAddr8)),
                 wire_type_oid: None,

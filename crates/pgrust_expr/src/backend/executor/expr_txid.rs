@@ -125,6 +125,69 @@ pub fn cast_text_to_txid_snapshot(text: &str) -> Result<Value, ExecError> {
     Ok(Value::Text(CompactString::from_owned(snapshot.render())))
 }
 
+pub fn eval_txid_snapshot_xmin_value(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [value] => Ok(txid_snapshot_arg(value, "txid_snapshot_xmin")?
+            .map(|snapshot| Value::Xid8(snapshot.xmin))
+            .unwrap_or(Value::Null)),
+        _ => Err(ExecError::DetailedError {
+            message: "malformed txid builtin call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+    }
+}
+
+pub fn eval_txid_snapshot_xmax_value(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [value] => Ok(txid_snapshot_arg(value, "txid_snapshot_xmax")?
+            .map(|snapshot| Value::Xid8(snapshot.xmax))
+            .unwrap_or(Value::Null)),
+        _ => Err(ExecError::DetailedError {
+            message: "malformed txid builtin call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+    }
+}
+
+pub fn eval_txid_visible_in_snapshot_value(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [Value::Int64(xid), snapshot] if *xid >= 0 => {
+            let Some(snapshot) = txid_snapshot_arg(snapshot, "txid_visible_in_snapshot")? else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Bool(snapshot.xid_visible(*xid as u64)))
+        }
+        [Value::Xid8(xid), snapshot] => {
+            let Some(snapshot) = txid_snapshot_arg(snapshot, "txid_visible_in_snapshot")? else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Bool(snapshot.xid_visible(*xid)))
+        }
+        [Value::Int32(xid), snapshot] if *xid >= 0 => {
+            let Some(snapshot) = txid_snapshot_arg(snapshot, "txid_visible_in_snapshot")? else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Bool(snapshot.xid_visible(*xid as u64)))
+        }
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "txid_visible_in_snapshot",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => Err(ExecError::DetailedError {
+            message: "malformed txid builtin call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+    }
+}
+
 pub fn eval_txid_snapshot_xip_values(values: &[Value]) -> Result<Vec<Value>, ExecError> {
     match values {
         [value] => Ok(txid_snapshot_arg(value, "txid_snapshot_xip")?

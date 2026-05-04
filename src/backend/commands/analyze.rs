@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use super::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, row_matches_index_predicate,
@@ -19,15 +19,13 @@ use crate::backend::storage::page::bufpage::{
 use crate::backend::storage::smgr::{ForkNumber, SmgrError, StorageManager};
 use crate::include::access::htup::HeapTuple;
 use crate::include::catalog::{PgStatisticExtDataRow, PgStatisticRow, relkind_has_storage};
-use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-
-const DEFAULT_STATISTICS_TARGET: i16 = 100;
-const STATISTIC_KIND_MCV: i16 = 1;
-const STATISTIC_KIND_HISTOGRAM: i16 = 2;
-const STATISTIC_KIND_CORRELATION: i16 = 3;
+use pgrust_commands::analyze::{
+    AnalyzeRng, BlockSampler, DEFAULT_STATISTICS_TARGET, ReservoirSampler, SampledRow,
+    target_sample_blocks, target_sample_rows,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AnalyzeRelationStats {
@@ -44,116 +42,6 @@ struct InheritanceAnalyzeStats {
     reltuples: f64,
     statistics: Vec<PgStatisticRow>,
     statistics_ext_data: Vec<PgStatisticExtDataRow>,
-}
-
-#[derive(Debug, Clone)]
-struct AnalyzeRng {
-    state: u64,
-}
-
-impl AnalyzeRng {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: seed ^ 0x9E37_79B9_7F4A_7C15,
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        self.state
-    }
-
-    fn gen_range_u64(&mut self, upper_exclusive: u64) -> u64 {
-        if upper_exclusive <= 1 {
-            return 0;
-        }
-        self.next_u64() % upper_exclusive
-    }
-}
-
-#[derive(Debug, Clone)]
-struct BlockSampler {
-    chosen_blocks: Vec<u32>,
-    next_index: usize,
-}
-
-impl BlockSampler {
-    fn new(nblocks: u32, target_blocks: u32, rng: &mut AnalyzeRng) -> Self {
-        let target_blocks = target_blocks.min(nblocks);
-        if target_blocks == 0 {
-            return Self {
-                chosen_blocks: Vec::new(),
-                next_index: 0,
-            };
-        }
-
-        let mut chosen = HashSet::new();
-        while chosen.len() < target_blocks as usize {
-            chosen.insert(rng.gen_range_u64(nblocks as u64) as u32);
-        }
-        let mut chosen_blocks = chosen.into_iter().collect::<Vec<_>>();
-        chosen_blocks.sort_unstable();
-        Self {
-            chosen_blocks,
-            next_index: 0,
-        }
-    }
-}
-
-impl Iterator for BlockSampler {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let block = self.chosen_blocks.get(self.next_index).copied()?;
-        self.next_index += 1;
-        Some(block)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ReservoirSampler<T> {
-    target_size: usize,
-    seen: usize,
-    sample: Vec<T>,
-}
-
-impl<T> ReservoirSampler<T> {
-    fn new(target_size: usize) -> Self {
-        Self {
-            target_size,
-            seen: 0,
-            sample: Vec::with_capacity(target_size),
-        }
-    }
-
-    fn push(&mut self, value: T, rng: &mut AnalyzeRng) {
-        self.seen += 1;
-        if self.target_size == 0 {
-            return;
-        }
-        if self.sample.len() < self.target_size {
-            self.sample.push(value);
-            return;
-        }
-        let replacement = rng.gen_range_u64(self.seen as u64) as usize;
-        if replacement < self.target_size {
-            self.sample[replacement] = value;
-        }
-    }
-
-    fn into_inner(self) -> Vec<T> {
-        self.sample
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SampledRow {
-    physical_ordinal: usize,
-    values: Vec<Value>,
-    widths: Vec<usize>,
 }
 
 pub(crate) fn collect_analyze_stats(
@@ -266,22 +154,7 @@ fn selected_columns(
     relation: &BoundRelation,
     target: &MaintenanceTarget,
 ) -> Result<Vec<usize>, ExecError> {
-    if target.columns.is_empty() {
-        return Ok((0..relation.desc.columns.len()).collect());
-    }
-    let mut out = Vec::with_capacity(target.columns.len());
-    for column in &target.columns {
-        let index = relation
-            .desc
-            .columns
-            .iter()
-            .position(|desc| desc.name.eq_ignore_ascii_case(column))
-            .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column.clone())))?;
-        out.push(index);
-    }
-    out.sort_unstable();
-    out.dedup();
-    Ok(out)
+    pgrust_commands::analyze::selected_columns(relation, target).map_err(analyze_error_to_exec)
 }
 
 fn relation_nblocks_or_zero(
@@ -889,12 +762,7 @@ fn statistics_has_zero_column_target(
     stat: &crate::include::catalog::PgStatisticExtRow,
     relation: &BoundRelation,
 ) -> bool {
-    stat.stxkeys.iter().any(|attnum| {
-        attnum
-            .checked_sub(1)
-            .and_then(|idx| relation.desc.columns.get(idx as usize))
-            .is_some_and(|column| column.attstattarget == 0)
-    })
+    pgrust_commands::analyze::statistics_has_zero_column_target(stat, relation)
 }
 
 fn push_extended_statistics_warning(
@@ -913,23 +781,11 @@ fn qualified_statistics_name(
     stat: &crate::include::catalog::PgStatisticExtRow,
     catalog: &dyn CatalogLookup,
 ) -> String {
-    let namespace = catalog
-        .namespace_row_by_oid(stat.stxnamespace)
-        .map(|row| row.nspname)
-        .unwrap_or_else(|| stat.stxnamespace.to_string());
-    format!("{namespace}.{}", stat.stxname)
+    pgrust_commands::analyze::qualified_statistics_name(stat, catalog)
 }
 
 fn qualified_relation_name(relation: &BoundRelation, catalog: &dyn CatalogLookup) -> String {
-    let namespace = catalog
-        .namespace_row_by_oid(relation.namespace_oid)
-        .map(|row| row.nspname)
-        .unwrap_or_else(|| relation.namespace_oid.to_string());
-    let relname = catalog
-        .class_row_by_oid(relation.relation_oid)
-        .map(|row| row.relname)
-        .unwrap_or_else(|| relation.relation_oid.to_string());
-    format!("{namespace}.{relname}")
+    pgrust_commands::analyze::qualified_relation_name(relation, catalog)
 }
 
 fn build_expression_statistics_rows(
@@ -972,39 +828,14 @@ fn build_expression_statistics_rows(
 }
 
 fn statistics_expression_texts(raw: &Option<String>) -> Result<Vec<String>, ExecError> {
-    let Some(raw) = raw else {
-        return Ok(Vec::new());
-    };
-    serde_json::from_str::<Vec<String>>(raw).map_err(|err| ExecError::DetailedError {
-        message: "could not parse stored statistics expressions".into(),
-        detail: Some(err.to_string()),
-        hint: None,
-        sqlstate: "XX000",
-    })
+    pgrust_commands::analyze::statistics_expression_texts(raw).map_err(analyze_error_to_exec)
 }
 
 fn extended_statistics_target(
     stat: &crate::include::catalog::PgStatisticExtRow,
     relation: &BoundRelation,
 ) -> i16 {
-    stat.stxstattarget
-        .unwrap_or_else(|| {
-            stat.stxkeys
-                .iter()
-                .filter_map(|attnum| {
-                    attnum.checked_sub(1).and_then(|idx| {
-                        relation
-                            .desc
-                            .columns
-                            .get(idx as usize)
-                            .map(|column| column.attstattarget)
-                    })
-                })
-                .filter(|target| *target > 0)
-                .max()
-                .unwrap_or(DEFAULT_STATISTICS_TARGET)
-        })
-        .max(1)
+    pgrust_commands::analyze::extended_statistics_target(stat, relation)
 }
 
 fn build_statistics_rows(
@@ -1016,249 +847,35 @@ fn build_statistics_rows(
     catalog: &dyn CatalogLookup,
     stainherit: bool,
 ) -> Result<Vec<PgStatisticRow>, ExecError> {
-    let mut out = Vec::with_capacity(selected_columns.len());
-    let sample_total = sample_rows.len().max(1) as f64;
-    for (sample_index, column_index) in selected_columns.iter().enumerate() {
-        let column = &relation_desc.columns[*column_index];
-        let nonnull_rows = sample_rows
-            .iter()
-            .filter(|row| !matches!(row.values[sample_index], Value::Null))
-            .collect::<Vec<_>>();
-        let null_count = sample_rows.len().saturating_sub(nonnull_rows.len());
-        let stanullfrac = null_count as f64 / sample_total;
-        let stawidth = if nonnull_rows.is_empty() {
-            i32::from(column.storage.attlen.max(0))
-        } else {
-            (nonnull_rows
-                .iter()
-                .map(|row| row.widths[sample_index])
-                .sum::<usize>() as f64
-                / nonnull_rows.len() as f64)
-                .round() as i32
-        };
-
-        let mut freq = HashMap::<String, (usize, Value)>::new();
-        let mut rendered_values = Vec::with_capacity(nonnull_rows.len());
-        for row in &nonnull_rows {
-            let value = row.values[sample_index].to_owned_value();
-            let rendered = value_stats_text(&value);
-            freq.entry(rendered.clone())
-                .and_modify(|(count, _)| *count += 1)
-                .or_insert((1, value));
-            rendered_values.push((row.physical_ordinal, rendered));
-        }
-        let distinct_seen = freq.len();
-        let stadistinct =
-            estimate_distinct(distinct_seen, nonnull_rows.len(), reltuples, stanullfrac);
-
-        let type_oid = catalog
-            .type_oid_for_sql_type(column.sql_type)
-            .unwrap_or(crate::include::catalog::TEXT_TYPE_OID);
-        let eq_op = catalog
-            .operator_by_name_left_right("=", type_oid, type_oid)
-            .map(|row| row.oid)
-            .unwrap_or(0);
-        let lt_op = catalog
-            .operator_by_name_left_right("<", type_oid, type_oid)
-            .map(|row| row.oid)
-            .unwrap_or(0);
-
-        let target = if column.attstattarget > 0 {
-            column.attstattarget as usize
-        } else {
-            DEFAULT_STATISTICS_TARGET as usize
-        };
-        let value_slot_target = target.min((4_000 / (stawidth.max(1) as usize + 32)).max(1));
-        let mut stakind = [0; 5];
-        let mut staop = [0; 5];
-        let mut stacoll = [0; 5];
-        let mut stanumbers: [Option<ArrayValue>; 5] = Default::default();
-        let mut stavalues: [Option<ArrayValue>; 5] = Default::default();
-        let mut slot_idx = 0usize;
-        let supports_value_slots = !column.sql_type.is_array;
-
-        let mut ranked = freq.into_iter().collect::<Vec<_>>();
-        ranked.sort_by(|left, right| right.1.0.cmp(&left.1.0).then_with(|| left.0.cmp(&right.0)));
-
-        let mcv = ranked
-            .iter()
-            .filter(|(_, (count, _))| *count > 1)
-            .take(value_slot_target)
-            .cloned()
-            .collect::<Vec<_>>();
-        if supports_value_slots && !mcv.is_empty() {
-            stakind[slot_idx] = STATISTIC_KIND_MCV;
-            staop[slot_idx] = eq_op;
-            stacoll[slot_idx] = column.collation_oid;
-            stanumbers[slot_idx] = Some(ArrayValue::from_1d(
-                mcv.iter()
-                    .map(|(_, (count, _))| Value::Float64(*count as f64 / sample_total))
-                    .collect(),
-            ));
-            stavalues[slot_idx] = Some(
-                ArrayValue::from_1d(
-                    mcv.iter()
-                        .map(|(_, (_, value))| value.to_owned_value())
-                        .collect(),
-                )
-                .with_element_type_oid(type_oid),
-            );
-            slot_idx += 1;
-        }
-
-        if supports_value_slots && lt_op != 0 {
-            let mcv_values = mcv
-                .iter()
-                .map(|(value, _)| value.clone())
-                .collect::<HashSet<_>>();
-            let mut histogram_values = ranked
-                .iter()
-                .map(|(value, (_, representative))| {
-                    (value.clone(), representative.to_owned_value())
-                })
-                .filter(|(value, _)| !mcv_values.contains(value))
-                .collect::<Vec<_>>();
-            histogram_values.sort_by(|left, right| left.0.cmp(&right.0));
-            histogram_values.dedup_by(|left, right| left.0 == right.0);
-            if histogram_values.len() >= 2 {
-                stakind[slot_idx] = STATISTIC_KIND_HISTOGRAM;
-                staop[slot_idx] = lt_op;
-                stacoll[slot_idx] = column.collation_oid;
-                stavalues[slot_idx] = Some(
-                    ArrayValue::from_1d(
-                        histogram_values
-                            .into_iter()
-                            .step_by((distinct_seen.max(2) / value_slot_target.max(2)).max(1))
-                            .map(|(_, value)| value)
-                            .collect(),
-                    )
-                    .with_element_type_oid(type_oid),
-                );
-                slot_idx += 1;
-            }
-
-            let correlation = sample_correlation(&rendered_values);
-            stakind[slot_idx] = STATISTIC_KIND_CORRELATION;
-            staop[slot_idx] = lt_op;
-            stacoll[slot_idx] = column.collation_oid;
-            stanumbers[slot_idx] = Some(ArrayValue::from_1d(vec![Value::Float64(correlation)]));
-        }
-
-        out.push(PgStatisticRow {
-            starelid: relation_oid,
-            staattnum: (*column_index + 1) as i16,
-            stainherit,
-            stanullfrac,
-            stawidth,
-            stadistinct,
-            stakind,
-            staop,
-            stacoll,
-            stanumbers,
-            stavalues,
-        });
-    }
-    Ok(out)
-}
-
-fn estimate_distinct(
-    distinct_seen: usize,
-    nonnull_rows: usize,
-    reltuples: f64,
-    stanullfrac: f64,
-) -> f64 {
-    if nonnull_rows == 0 {
-        return 0.0;
-    }
-    if distinct_seen == nonnull_rows {
-        return -1.0;
-    }
-    let estimated = (distinct_seen as f64 / nonnull_rows as f64)
-        * (reltuples * (1.0 - stanullfrac)).max(nonnull_rows as f64);
-    if reltuples > 0.0 && estimated > reltuples * 0.1 {
-        -(estimated / reltuples.max(1.0))
-    } else {
-        estimated.max(1.0)
-    }
-}
-
-fn sample_correlation(values: &[(usize, String)]) -> f64 {
-    if values.len() < 2 {
-        return 0.0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
-    let ranks = sorted
-        .into_iter()
-        .enumerate()
-        .map(|(rank, (physical, _))| (physical, rank as f64))
-        .collect::<HashMap<_, _>>();
-
-    let n = values.len() as f64;
-    let mean = (n - 1.0) / 2.0;
-    let mut num = 0.0;
-    let mut left_den = 0.0;
-    let mut right_den = 0.0;
-    for (physical, _) in values {
-        let left = *physical as f64 - mean;
-        let right = ranks.get(physical).copied().unwrap_or(0.0) - mean;
-        num += left * right;
-        left_den += left * left;
-        right_den += right * right;
-    }
-    if left_den == 0.0 || right_den == 0.0 {
-        0.0
-    } else {
-        num / (left_den.sqrt() * right_den.sqrt())
-    }
+    Ok(pgrust_commands::analyze::build_statistics_rows(
+        relation_oid,
+        relation_desc,
+        selected_columns,
+        sample_rows,
+        reltuples,
+        catalog,
+        stainherit,
+        statistics_value_key,
+    ))
 }
 
 fn value_stats_text(value: &Value) -> String {
     statistics_value_key(value).unwrap_or_else(|| "NULL".into())
 }
 
-fn target_sample_rows(statistics_target: i16) -> usize {
-    let target = if statistics_target <= 0 {
-        DEFAULT_STATISTICS_TARGET as usize
-    } else {
-        statistics_target as usize
-    };
-    target.saturating_mul(300)
-}
-
-fn target_sample_blocks(nblocks: u32, sample_rows: usize, estimated_rows_per_block: usize) -> u32 {
-    if nblocks == 0 || sample_rows == 0 {
-        return 0;
-    }
-    let rows_per_block = estimated_rows_per_block.max(1);
-    (sample_rows.div_ceil(rows_per_block) as u32).clamp(1, nblocks)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn block_sampler_returns_unique_sorted_blocks() {
-        let mut rng = AnalyzeRng::new(123);
-        let blocks = BlockSampler::new(20, 5, &mut rng).collect::<Vec<_>>();
-        assert_eq!(blocks.len(), 5);
-        assert!(blocks.windows(2).all(|pair| pair[0] < pair[1]));
-    }
-
-    #[test]
-    fn reservoir_sampler_keeps_requested_size() {
-        let mut rng = AnalyzeRng::new(42);
-        let mut sampler = ReservoirSampler::new(10);
-        for i in 0..1000 {
-            sampler.push(i, &mut rng);
-        }
-        assert_eq!(sampler.into_inner().len(), 10);
-    }
-
-    #[test]
-    fn target_sample_rows_matches_postgres_shape() {
-        assert_eq!(target_sample_rows(1), 300);
-        assert_eq!(target_sample_rows(100), 30_000);
+fn analyze_error_to_exec(err: pgrust_commands::analyze::AnalyzeError) -> ExecError {
+    match err {
+        pgrust_commands::analyze::AnalyzeError::Parse(err) => ExecError::Parse(err),
+        pgrust_commands::analyze::AnalyzeError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
     }
 }

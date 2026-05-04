@@ -489,13 +489,17 @@ dependencies = [
  "pgrust_analyze",
  "pgrust_catalog_data",
  "pgrust_catalog_store",
+ "pgrust_commands",
  "pgrust_core",
+ "pgrust_executor",
  "pgrust_expr",
  "pgrust_nodes",
  "pgrust_optimizer",
  "pgrust_parser",
  "pgrust_plpgsql",
  "pgrust_plpgsql_grammar",
+ "pgrust_protocol",
+ "pgrust_rewrite",
  "pgrust_storage",
  "quick-xml",
  "rand",
@@ -572,6 +576,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgrust_commands"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hmac",
+ "pbkdf2",
+ "pgrust_access",
+ "pgrust_analyze",
+ "pgrust_catalog_data",
+ "pgrust_catalog_store",
+ "pgrust_core",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "pgrust_protocol",
+ "rand",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "pgrust_core"
 version = "0.1.0"
 dependencies = [
@@ -580,6 +605,22 @@ dependencies = [
  "serde",
  "stacker",
  "web-time",
+]
+
+[[package]]
+name = "pgrust_executor"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "parking_lot",
+ "pgrust_access",
+ "pgrust_catalog_data",
+ "pgrust_catalog_store",
+ "pgrust_core",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_storage",
 ]
 
 [[package]]
@@ -596,12 +637,14 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "parking_lot",
  "pgrust_catalog_data",
  "pgrust_catalog_ids",
  "pgrust_core",
  "pgrust_nodes",
  "pgrust_parser",
  "quick-xml",
+ "rand",
  "regex",
  "rust-stemmers",
  "ryu",
@@ -654,6 +697,7 @@ name = "pgrust_plpgsql"
 version = "0.1.0"
 dependencies = [
  "pest",
+ "pgrust_analyze",
  "pgrust_catalog_data",
  "pgrust_nodes",
  "pgrust_parser",
@@ -666,6 +710,29 @@ version = "0.1.0"
 dependencies = [
  "pest",
  "pest_derive",
+]
+
+[[package]]
+name = "pgrust_protocol"
+version = "0.1.0"
+dependencies = [
+ "pgrust_catalog_data",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "regex",
+]
+
+[[package]]
+name = "pgrust_rewrite"
+version = "0.1.0"
+dependencies = [
+ "pgrust_analyze",
+ "pgrust_catalog_data",
+ "pgrust_catalog_store",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "stacker",
 ]
 
 [[package]]

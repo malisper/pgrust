@@ -21,12 +21,14 @@ md-5 = "0.10"
 num-bigint = "0.4.6"
 num-integer = "0.1.46"
 num-traits = "0.2.19"
+parking_lot = "0.12"
 pgrust_catalog_data = { path = "../pgrust_catalog_data" }
 pgrust_catalog_ids = { path = "../pgrust_catalog_ids" }
 pgrust_core = { path = "../pgrust_core" }
 pgrust_nodes = { path = "../pgrust_nodes" }
 pgrust_parser = { path = "../pgrust_parser" }
 quick-xml = "0.38"
+rand = "0.8"
 regex = "1"
 rust-stemmers = "1"
 ryu = "1"

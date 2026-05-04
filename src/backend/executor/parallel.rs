@@ -1,52 +1,16 @@
 use super::{ExecError, ExecutorContext, ExprEvalBindings, PgPrngState, executor_start};
-use crate::include::access::itemptr::ItemPointerData;
-use crate::include::nodes::datum::Value;
-use crate::include::nodes::execnodes::SystemVarBinding;
 use crate::include::nodes::plannodes::Plan;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU32, Ordering},
-};
 use std::thread;
+
+pub(crate) use pgrust_executor::{ParallelRuntime, WorkerTuple};
 
 thread_local! {
     static PARALLEL_WORKER: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
     static PARALLEL_RUNTIME: RefCell<Option<Arc<ParallelRuntime>>> = const { RefCell::new(None) };
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct ParallelRuntime {
-    seq_scans: parking_lot::Mutex<HashMap<usize, Arc<ParallelSeqScanState>>>,
-}
-
-#[derive(Debug, Default)]
-struct ParallelSeqScanState {
-    next_block: AtomicU32,
-}
-
-impl ParallelRuntime {
-    pub(crate) fn next_seq_scan_block(&self, source_id: usize) -> u32 {
-        let state = {
-            let mut seq_scans = self.seq_scans.lock();
-            seq_scans
-                .entry(source_id)
-                .or_insert_with(|| Arc::new(ParallelSeqScanState::default()))
-                .clone()
-        };
-        state.next_block.fetch_add(1, Ordering::Relaxed)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct WorkerTuple {
-    pub(crate) values: Vec<Value>,
-    pub(crate) system_bindings: Vec<SystemVarBinding>,
-    pub(crate) grouping_refs: Vec<usize>,
-    pub(crate) tid: Option<ItemPointerData>,
-    pub(crate) table_oid: Option<u32>,
 }
 
 #[derive(Debug)]

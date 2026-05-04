@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -14,30 +13,52 @@ use crate::backend::parser::{
     BoundForeignKeyConstraint, BoundIndexRelation, BoundReferencedByForeignKey, BoundRelation,
     CatalogLookup, ForeignKeyAction, ForeignKeyMatchType,
 };
-use crate::include::access::scankey::ScanKeyData;
-use crate::include::catalog::{
-    RI_FKEY_CASCADE_DEL_PROC_OID, RI_FKEY_CASCADE_UPD_PROC_OID, RI_FKEY_CHECK_INS_PROC_OID,
-    RI_FKEY_CHECK_UPD_PROC_OID, RI_FKEY_NOACTION_DEL_PROC_OID, RI_FKEY_NOACTION_UPD_PROC_OID,
-    RI_FKEY_RESTRICT_DEL_PROC_OID, RI_FKEY_RESTRICT_UPD_PROC_OID, RI_FKEY_SETDEFAULT_DEL_PROC_OID,
-    RI_FKEY_SETDEFAULT_UPD_PROC_OID, RI_FKEY_SETNULL_DEL_PROC_OID, RI_FKEY_SETNULL_UPD_PROC_OID,
-};
-use crate::include::nodes::datum::Value;
+use crate::include::catalog::{RI_FKEY_CHECK_INS_PROC_OID, RI_FKEY_CHECK_UPD_PROC_OID};
+use crate::include::nodes::datum::{IndirectVarlenaValue, Value};
 use crate::include::nodes::execnodes::{SlotKind, ToastRelationRef, TupleSlot};
 
-use super::expr_multirange::{
-    multirange_contains_multirange, multirange_contains_range, multirange_from_range,
-    multirange_overlaps_multirange, multirange_overlaps_range, normalize_multirange,
-    render_multirange_with_config,
-};
-use super::expr_range::{range_contains_range, range_overlap, render_range_value_with_config};
 use super::permissions::relation_has_table_privilege;
 use super::relation_values_visible_for_error_detail;
-use super::{ConstraintTiming, ExecError, ExecutorContext, compare_order_values};
+use super::{ConstraintTiming, ExecError, ExecutorContext};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InsertForeignKeyCheckPhase {
-    BeforeHeapInsert,
-    AfterIndexInsert,
+use pgrust_executor::{
+    ForeignKeyHelperError, InboundForeignKeyViolationInfo, InsertForeignKeyCheckPhase,
+    build_equality_scan_keys, extract_key_values, foreign_key_delete_proc_oid,
+    foreign_key_update_proc_oid, inbound_foreign_key_violation_message,
+    inbound_restrict_foreign_key_violation_message, key_columns_changed,
+    map_column_indexes_by_name, periods_overlap, row_matches_key, temporal_periods_cover,
+    values_match_cross_indexes,
+};
+
+struct RootForeignKeyValueRenderContext<'a>(&'a ExecutorContext);
+
+impl pgrust_executor::ForeignKeyValueRenderContext for RootForeignKeyValueRenderContext<'_> {
+    fn enum_label_by_oid(&self, oid: u32) -> Option<String> {
+        self.0
+            .catalog
+            .as_deref()
+            .and_then(|catalog| catalog.enum_label_by_oid(oid))
+    }
+
+    fn decode_indirect_varlena(&self, indirect: &IndirectVarlenaValue) -> Option<Value> {
+        crate::backend::executor::value_io::indirect_varlena_to_value(indirect).ok()
+    }
+
+    fn datetime_config(&self) -> &pgrust_expr::DateTimeConfig {
+        &self.0.datetime_config
+    }
+}
+
+impl From<ForeignKeyHelperError> for ExecError {
+    fn from(err: ForeignKeyHelperError) -> Self {
+        match err {
+            ForeignKeyHelperError::Internal(message) => foreign_key_internal_error(message),
+            ForeignKeyHelperError::Expr(err) => err.into(),
+            ForeignKeyHelperError::TypeMismatch { op, left, right } => {
+                ExecError::TypeMismatch { op, left, right }
+            }
+        }
+    }
 }
 
 fn maybe_defer_constraint(
@@ -160,46 +181,6 @@ fn foreign_key_trigger_enabled(
     trigger
         .as_ref()
         .is_none_or(|row| trigger_is_enabled_for_session(row, ctx.session_replication_role))
-}
-
-fn foreign_key_delete_proc_oid(action: crate::include::nodes::parsenodes::ForeignKeyAction) -> u32 {
-    match action {
-        crate::include::nodes::parsenodes::ForeignKeyAction::Cascade => {
-            RI_FKEY_CASCADE_DEL_PROC_OID
-        }
-        crate::include::nodes::parsenodes::ForeignKeyAction::Restrict => {
-            RI_FKEY_RESTRICT_DEL_PROC_OID
-        }
-        crate::include::nodes::parsenodes::ForeignKeyAction::SetNull => {
-            RI_FKEY_SETNULL_DEL_PROC_OID
-        }
-        crate::include::nodes::parsenodes::ForeignKeyAction::SetDefault => {
-            RI_FKEY_SETDEFAULT_DEL_PROC_OID
-        }
-        crate::include::nodes::parsenodes::ForeignKeyAction::NoAction => {
-            RI_FKEY_NOACTION_DEL_PROC_OID
-        }
-    }
-}
-
-fn foreign_key_update_proc_oid(action: crate::include::nodes::parsenodes::ForeignKeyAction) -> u32 {
-    match action {
-        crate::include::nodes::parsenodes::ForeignKeyAction::Cascade => {
-            RI_FKEY_CASCADE_UPD_PROC_OID
-        }
-        crate::include::nodes::parsenodes::ForeignKeyAction::Restrict => {
-            RI_FKEY_RESTRICT_UPD_PROC_OID
-        }
-        crate::include::nodes::parsenodes::ForeignKeyAction::SetNull => {
-            RI_FKEY_SETNULL_UPD_PROC_OID
-        }
-        crate::include::nodes::parsenodes::ForeignKeyAction::SetDefault => {
-            RI_FKEY_SETDEFAULT_UPD_PROC_OID
-        }
-        crate::include::nodes::parsenodes::ForeignKeyAction::NoAction => {
-            RI_FKEY_NOACTION_UPD_PROC_OID
-        }
-    }
 }
 
 pub(crate) fn enforce_outbound_foreign_keys_for_insert(
@@ -600,27 +581,17 @@ fn inbound_foreign_key_violation(
     key_values: &[Value],
     ctx: &ExecutorContext,
 ) -> ExecError {
-    let detail =
-        if relation_values_visible_for_error_detail(constraint.referenced_relation_oid, ctx) {
-            format!(
-                "Key ({})=({}) is still referenced from table \"{}\".",
-                constraint.referenced_column_names.join(", "),
-                render_key_values(key_values, ctx),
-                constraint.display_child_relation_name
-            )
-        } else {
-            format!(
-                "Key is still referenced from table \"{}\".",
-                constraint.display_child_relation_name
-            )
-        };
+    let rendered_key_values =
+        relation_values_visible_for_error_detail(constraint.referenced_relation_oid, ctx)
+            .then(|| render_key_values(key_values, ctx));
+    let violation = inbound_foreign_key_violation_message(
+        inbound_foreign_key_violation_info(relation_name, constraint),
+        rendered_key_values.as_deref(),
+    );
     ExecError::ForeignKeyViolation {
-        constraint: constraint.display_constraint_name.clone(),
-        message: format!(
-            "update or delete on table \"{relation_name}\" violates foreign key constraint \"{}\" on table \"{}\"",
-            constraint.display_constraint_name, constraint.display_child_relation_name
-        ),
-        detail: Some(detail),
+        constraint: violation.constraint,
+        message: violation.message,
+        detail: violation.detail,
     }
 }
 
@@ -630,27 +601,29 @@ fn inbound_restrict_foreign_key_violation(
     key_values: &[Value],
     ctx: &ExecutorContext,
 ) -> ExecError {
-    let detail =
-        if relation_values_visible_for_error_detail(constraint.referenced_relation_oid, ctx) {
-            format!(
-                "Key ({})=({}) is referenced from table \"{}\".",
-                constraint.referenced_column_names.join(", "),
-                render_key_values(key_values, ctx),
-                constraint.display_child_relation_name
-            )
-        } else {
-            format!(
-                "Key is referenced from table \"{}\".",
-                constraint.display_child_relation_name
-            )
-        };
+    let rendered_key_values =
+        relation_values_visible_for_error_detail(constraint.referenced_relation_oid, ctx)
+            .then(|| render_key_values(key_values, ctx));
+    let violation = inbound_restrict_foreign_key_violation_message(
+        inbound_foreign_key_violation_info(relation_name, constraint),
+        rendered_key_values.as_deref(),
+    );
     ExecError::ForeignKeyViolation {
-        constraint: constraint.display_constraint_name.clone(),
-        message: format!(
-            "update or delete on table \"{relation_name}\" violates RESTRICT setting of foreign key constraint \"{}\" on table \"{}\"",
-            constraint.display_constraint_name, constraint.display_child_relation_name
-        ),
-        detail: Some(detail),
+        constraint: violation.constraint,
+        message: violation.message,
+        detail: violation.detail,
+    }
+}
+
+fn inbound_foreign_key_violation_info<'a>(
+    relation_name: &'a str,
+    constraint: &'a BoundReferencedByForeignKey,
+) -> InboundForeignKeyViolationInfo<'a> {
+    InboundForeignKeyViolationInfo {
+        relation_name,
+        constraint_name: &constraint.display_constraint_name,
+        child_relation_name: &constraint.display_child_relation_name,
+        referenced_column_names: &constraint.referenced_column_names,
     }
 }
 
@@ -878,7 +851,7 @@ fn temporal_referenced_key_exists(
                 ctx,
             )?);
         }
-        return temporal_periods_cover(&parent_periods, child_period);
+        return Ok(temporal_periods_cover(&parent_periods, child_period)?);
     }
     let parent_periods = collect_temporal_parent_periods(
         constraint.referenced_rel,
@@ -894,7 +867,7 @@ fn temporal_referenced_key_exists(
         &snapshot,
         ctx,
     )?;
-    temporal_periods_cover(&parent_periods, child_period)
+    Ok(temporal_periods_cover(&parent_periods, child_period)?)
 }
 
 fn temporal_child_reference_would_be_invalid(
@@ -1049,7 +1022,7 @@ fn temporal_child_period_still_covered(
     {
         parent_periods.push(period.to_owned_value());
     }
-    temporal_periods_cover(&parent_periods, child_period)
+    Ok(temporal_periods_cover(&parent_periods, child_period)?)
 }
 
 fn child_row_exists(
@@ -1119,31 +1092,6 @@ fn partition_leaf_relations(
         }
     }
     Ok(leaves)
-}
-
-fn map_column_indexes_by_name(
-    parent_desc: &crate::backend::executor::RelationDesc,
-    child_desc: &crate::backend::executor::RelationDesc,
-    parent_indexes: &[usize],
-) -> Result<Vec<usize>, ExecError> {
-    parent_indexes
-        .iter()
-        .map(|parent_index| {
-            let parent_column = parent_desc
-                .columns
-                .get(*parent_index)
-                .ok_or_else(|| foreign_key_internal_error("invalid parent column index"))?;
-            child_desc
-                .columns
-                .iter()
-                .enumerate()
-                .find(|(_, column)| {
-                    !column.dropped && column.name.eq_ignore_ascii_case(&parent_column.name)
-                })
-                .map(|(index, _)| index)
-                .ok_or_else(|| foreign_key_internal_error("missing partition foreign key column"))
-        })
-        .collect()
 }
 
 fn index_has_visible_row(
@@ -1370,228 +1318,12 @@ fn collect_temporal_parent_periods(
     Ok(periods)
 }
 
-fn row_matches_key(values: &[Value], key_indexes: &[usize], key_values: &[Value]) -> bool {
-    key_indexes.iter().zip(key_values).all(|(index, expected)| {
-        values.get(*index).is_some_and(|actual| {
-            compare_order_values(actual, expected, None, None, false)
-                .expect("foreign-key key comparisons use implicit default collation")
-                == Ordering::Equal
-        })
-    })
-}
-
-fn values_match_cross_indexes(
-    left_values: &[Value],
-    left_indexes: &[usize],
-    left_period_index: Option<usize>,
-    right_values: &[Value],
-    right_indexes: &[usize],
-    right_period_index: Option<usize>,
-) -> bool {
-    left_indexes
-        .iter()
-        .zip(right_indexes)
-        .filter(|(left, right)| {
-            Some(**left) != left_period_index && Some(**right) != right_period_index
-        })
-        .all(|(left, right)| {
-            left_values
-                .get(*left)
-                .zip(right_values.get(*right))
-                .is_some_and(|(left, right)| {
-                    compare_order_values(left, right, None, None, false)
-                        .expect("foreign-key key comparisons use implicit default collation")
-                        == Ordering::Equal
-                })
-        })
-}
-
-fn periods_overlap(left: &Value, right: &Value) -> Result<bool, ExecError> {
-    match (left, right) {
-        (Value::Range(left), Value::Range(right)) => Ok(range_overlap(left, right)),
-        (Value::Multirange(left), Value::Range(right)) => {
-            Ok(multirange_overlaps_range(left, right))
-        }
-        (Value::Range(left), Value::Multirange(right)) => {
-            Ok(multirange_overlaps_range(right, left))
-        }
-        (Value::Multirange(left), Value::Multirange(right)) => {
-            Ok(multirange_overlaps_multirange(left, right))
-        }
-        (Value::Null, _) | (_, Value::Null) => Ok(false),
-        _ => Err(ExecError::TypeMismatch {
-            op: "PERIOD foreign key",
-            left: left.to_owned_value(),
-            right: right.to_owned_value(),
-        }),
-    }
-}
-
-fn temporal_periods_cover(
-    parent_periods: &[Value],
-    child_period: &Value,
-) -> Result<bool, ExecError> {
-    match child_period {
-        Value::Range(child) => {
-            let mut ranges = Vec::new();
-            for period in parent_periods {
-                match period {
-                    Value::Range(range) => ranges.push(range.clone()),
-                    Value::Multirange(multirange) => ranges.extend(multirange.ranges.clone()),
-                    Value::Null => {}
-                    other => {
-                        return Err(ExecError::TypeMismatch {
-                            op: "PERIOD foreign key",
-                            left: other.to_owned_value(),
-                            right: child_period.to_owned_value(),
-                        });
-                    }
-                }
-            }
-            if ranges.is_empty() {
-                return Ok(false);
-            }
-            match multirange_from_range(child) {
-                Ok(multirange) => {
-                    let parent = normalize_multirange(multirange.multirange_type, ranges)?;
-                    Ok(multirange_contains_range(&parent, child))
-                }
-                Err(_) => Ok(ranges
-                    .iter()
-                    .any(|parent| range_contains_range(parent, child))),
-            }
-        }
-        Value::Multirange(child) => {
-            let mut ranges = Vec::new();
-            for period in parent_periods {
-                match period {
-                    Value::Range(range) => ranges.push(range.clone()),
-                    Value::Multirange(multirange) => ranges.extend(multirange.ranges.clone()),
-                    Value::Null => {}
-                    other => {
-                        return Err(ExecError::TypeMismatch {
-                            op: "PERIOD foreign key",
-                            left: other.to_owned_value(),
-                            right: child_period.to_owned_value(),
-                        });
-                    }
-                }
-            }
-            if ranges.is_empty() {
-                return Ok(false);
-            }
-            let parent = normalize_multirange(child.multirange_type, ranges)?;
-            Ok(multirange_contains_multirange(&parent, child))
-        }
-        Value::Null => Ok(true),
-        other => Err(ExecError::TypeMismatch {
-            op: "PERIOD foreign key",
-            left: other.to_owned_value(),
-            right: Value::Null,
-        }),
-    }
-}
-
-fn key_columns_changed(previous_values: &[Value], values: &[Value], indexes: &[usize]) -> bool {
-    indexes.iter().any(|index| {
-        let previous = previous_values.get(*index).unwrap_or(&Value::Null);
-        let current = values.get(*index).unwrap_or(&Value::Null);
-        previous != current
-    })
-}
-
-fn extract_key_values(values: &[Value], indexes: &[usize]) -> Vec<Value> {
-    indexes
-        .iter()
-        .map(|index| {
-            values
-                .get(*index)
-                .cloned()
-                .unwrap_or(Value::Null)
-                .to_owned_value()
-        })
-        .collect()
-}
-
-fn build_equality_scan_keys(key_values: &[Value]) -> Vec<ScanKeyData> {
-    key_values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| ScanKeyData {
-            attribute_number: index.saturating_add(1) as i16,
-            strategy: 3,
-            argument: value.to_owned_value(),
-        })
-        .collect()
-}
-
 fn render_key_values(values: &[Value], ctx: &ExecutorContext) -> String {
-    values
-        .iter()
-        .map(|value| render_key_value(value, ctx))
-        .collect::<Vec<_>>()
-        .join(", ")
+    pgrust_executor::render_key_values(values, &RootForeignKeyValueRenderContext(ctx))
 }
 
 fn render_key_value(value: &Value, ctx: &ExecutorContext) -> String {
-    match value {
-        Value::Null => "null".into(),
-        Value::Int16(v) => v.to_string(),
-        Value::Int32(v) => v.to_string(),
-        Value::Int64(v) => v.to_string(),
-        Value::Xid8(v) => v.to_string(),
-        Value::PgLsn(v) => crate::backend::executor::render_pg_lsn_text(*v),
-        Value::Tid(v) => crate::backend::executor::value_io::render_tid_text(v),
-        Value::Money(v) => v.to_string(),
-        Value::Float64(v) => v.to_string(),
-        Value::Numeric(v) => format!("{v:?}"),
-        Value::Interval(v) => format!("{v:?}"),
-        Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
-        Value::Bool(v) => v.to_string(),
-        Value::InternalChar(v) => v.to_string(),
-        Value::EnumOid(v) => ctx
-            .catalog
-            .as_deref()
-            .and_then(|catalog| catalog.enum_label_by_oid(*v))
-            .unwrap_or_else(|| v.to_string()),
-        Value::TextRef(_, _) | Value::Text(_) | Value::JsonPath(_) => {
-            value.as_text().unwrap_or_default().to_string()
-        }
-        Value::Xml(v) => v.to_string(),
-        Value::Json(v) => v.to_string(),
-        Value::Bytea(v) => format!("{v:?}"),
-        Value::Inet(v) => v.render_inet(),
-        Value::Cidr(v) => v.render_cidr(),
-        Value::MacAddr(v) => crate::backend::executor::render_macaddr_text(v),
-        Value::MacAddr8(v) => crate::backend::executor::render_macaddr8_text(v),
-        Value::Date(v) => format!("{v:?}"),
-        Value::Time(v) => format!("{v:?}"),
-        Value::TimeTz(v) => format!("{v:?}"),
-        Value::Timestamp(v) => format!("{v:?}"),
-        Value::TimestampTz(v) => format!("{v:?}"),
-        Value::Bit(v) => format!("{v:?}"),
-        Value::Point(v) => format!("{v:?}"),
-        Value::Lseg(v) => format!("{v:?}"),
-        Value::Path(v) => format!("{v:?}"),
-        Value::Line(v) => format!("{v:?}"),
-        Value::Box(v) => format!("{v:?}"),
-        Value::Polygon(v) => format!("{v:?}"),
-        Value::Circle(v) => format!("{v:?}"),
-        Value::Jsonb(v) => format!("{v:?}"),
-        Value::TsVector(v) => format!("{v:?}"),
-        Value::TsQuery(v) => format!("{v:?}"),
-        Value::Array(v) => format!("{v:?}"),
-        Value::PgArray(v) => format!("{v:?}"),
-        Value::Record(v) => format!("{v:?}"),
-        Value::Range(v) => render_range_value_with_config(v, &ctx.datetime_config),
-        Value::Multirange(v) => render_multirange_with_config(v, &ctx.datetime_config),
-        Value::IndirectVarlena(indirect) => {
-            crate::backend::executor::value_io::indirect_varlena_to_value(indirect)
-                .map(|decoded| render_key_value(&decoded, ctx))
-                .unwrap_or_else(|_| "null".into())
-        }
-        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".into(),
-    }
+    pgrust_executor::render_key_value(value, &RootForeignKeyValueRenderContext(ctx))
 }
 
 fn slot_toast_context(

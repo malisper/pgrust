@@ -23,6 +23,7 @@ pub mod jsonb;
 pub mod jsonpath;
 pub mod node_types;
 pub mod pg_regex;
+pub mod random;
 pub mod tsearch;
 pub mod value_io;
 
@@ -71,6 +72,7 @@ pub use expr_xml::{render_xml_output_text, strip_xml_declaration, validate_xml_i
 pub use jsonb::*;
 pub use pg_regex::*;
 pub use pgrust_nodes::datum::Value;
+pub use random::PgPrngState;
 pub use tsearch::*;
 pub use value_io::{
     format_array_value_text, format_record_text, format_record_text_with_config,

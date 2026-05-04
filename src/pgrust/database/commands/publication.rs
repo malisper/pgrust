@@ -6,10 +6,8 @@ use crate::backend::parser::analyze::infer_relation_expr_sql_type;
 use crate::backend::parser::{
     AlterPublicationAction, AlterPublicationStatement, BoundRelation, CatalogLookup,
     CommentOnPublicationStatement, CreatePublicationStatement, DropPublicationStatement,
-    PublicationObjectSpec, PublicationOption, PublicationOptions, PublicationSchemaName,
-    PublicationTableSpec, PublicationTargetSpec, PublishGeneratedColumns, RawTypeName, SqlExpr,
-    SqlType, SqlTypeKind, function_arg_values, is_system_column_name, parse_expr,
-    resolve_raw_type_name,
+    PublicationObjectSpec, PublicationOptions, PublicationSchemaName, PublicationTableSpec,
+    PublicationTargetSpec, SqlType, SqlTypeKind, parse_expr,
 };
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::syscache::{
@@ -17,23 +15,16 @@ use crate::backend::utils::cache::syscache::{
     search_sys_cache_list1_db, search_sys_cache1_db,
 };
 use crate::include::catalog::{
-    INFORMATION_SCHEMA_NAMESPACE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
-    PUBLISH_GENCOLS_NONE, PUBLISH_GENCOLS_STORED, PgAuthIdRow, PgAuthMembersRow, PgNamespaceRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
+    PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, PgAuthIdRow, PgAuthMembersRow,
+    PgNamespaceRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
 };
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{ColumnGeneratedKind, RawXmlExprOp};
 use crate::pgrust::database::ddl::{ensure_relation_owner, format_sql_type_name};
+use pgrust_commands::publication::PublicationMembershipKind;
 
 struct ResolvedPublicationTargets {
     relation_rows: Vec<PgPublicationRelRow>,
     namespace_rows: Vec<PgPublicationNamespaceRow>,
-}
-
-#[derive(Clone, Copy)]
-enum PublicationMembershipKind {
-    Table,
-    Schema,
 }
 
 #[derive(Clone, Copy)]
@@ -1234,23 +1225,78 @@ fn resolve_publication_except_tables(
 }
 
 fn reject_publication_drop_filters(target: &PublicationTargetSpec) -> Result<(), ExecError> {
-    if target.objects.iter().any(|object| {
-        matches!(
-            object,
-            PublicationObjectSpec::Table(PublicationTableSpec {
-                where_clause: Some(_),
-                ..
-            })
-        )
-    }) {
-        return Err(ExecError::DetailedError {
-            message: "cannot use a WHERE clause when removing a table from a publication".into(),
+    pgrust_commands::publication::reject_publication_drop_filters(target)
+        .map_err(publication_target_error_to_exec)
+}
+
+fn publication_target_error_to_exec(
+    err: pgrust_commands::publication::PublicationTargetError,
+) -> ExecError {
+    match err {
+        pgrust_commands::publication::PublicationTargetError::DropWhere => {
+            ExecError::DetailedError {
+                message: "cannot use a WHERE clause when removing a table from a publication"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            }
+        }
+        pgrust_commands::publication::PublicationTargetError::ColumnListWithSchema {
+            relation_name,
+            publication_name,
+        } => publication_column_list_with_schema_error(&relation_name, &publication_name),
+        pgrust_commands::publication::PublicationTargetError::SchemaWithExistingColumnList {
+            publication_name,
+        } => publication_schema_with_existing_column_list_error(&publication_name),
+        pgrust_commands::publication::PublicationTargetError::SystemColumn { column_name } => {
+            ExecError::DetailedError {
+                message: format!(
+                    "cannot use system column \"{column_name}\" in publication column list"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P10",
+            }
+        }
+        pgrust_commands::publication::PublicationTargetError::UnknownColumn {
+            column_name,
+            relation_name,
+        } => ExecError::DetailedError {
+            message: format!(
+                "column \"{column_name}\" of relation \"{relation_name}\" does not exist"
+            ),
             detail: None,
             hint: None,
-            sqlstate: "42601",
-        });
+            sqlstate: "42703",
+        },
+        pgrust_commands::publication::PublicationTargetError::VirtualGeneratedColumn {
+            column_name,
+        } => ExecError::DetailedError {
+            message: format!(
+                "cannot use virtual generated column \"{column_name}\" in publication column list"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42P10",
+        },
+        pgrust_commands::publication::PublicationTargetError::TooManyColumns { relation_name } => {
+            ExecError::DetailedError {
+                message: format!("too many columns in relation \"{relation_name}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "54011",
+            }
+        }
+        pgrust_commands::publication::PublicationTargetError::DuplicateColumn { column_name } => {
+            ExecError::DetailedError {
+                message: format!("duplicate column \"{column_name}\" in publication column list"),
+                detail: None,
+                hint: None,
+                sqlstate: "42701",
+            }
+        }
     }
-    Ok(())
 }
 
 fn reject_partitioned_publication_qualifiers_when_not_via_root(
@@ -1360,31 +1406,13 @@ fn reject_publication_column_list_schema_conflicts(
     existing_rel_rows: &[PgPublicationRelRow],
     existing_namespace_rows: &[PgPublicationNamespaceRow],
 ) -> Result<(), ExecError> {
-    let target_has_schema = target
-        .objects
-        .iter()
-        .any(|object| matches!(object, PublicationObjectSpec::Schema(_)));
-    if target_has_schema || !existing_namespace_rows.is_empty() {
-        if let Some(table) = target.objects.iter().find_map(|object| match object {
-            PublicationObjectSpec::Table(table) if !table.column_names.is_empty() => Some(table),
-            _ => None,
-        }) {
-            return Err(publication_column_list_with_schema_error(
-                &table.relation_name,
-                publication_name,
-            ));
-        }
-    }
-    if target_has_schema
-        && existing_rel_rows
-            .iter()
-            .any(|row| row.prattrs.as_ref().is_some_and(|attrs| !attrs.is_empty()))
-    {
-        return Err(publication_schema_with_existing_column_list_error(
-            publication_name,
-        ));
-    }
-    Ok(())
+    pgrust_commands::publication::reject_publication_column_list_schema_conflicts(
+        target,
+        publication_name,
+        existing_rel_rows,
+        existing_namespace_rows,
+    )
+    .map_err(publication_target_error_to_exec)
 }
 
 fn publication_column_numbers(
@@ -1392,65 +1420,8 @@ fn publication_column_numbers(
     relation_name: &str,
     column_names: &[String],
 ) -> Result<Option<Vec<i16>>, ExecError> {
-    if column_names.is_empty() {
-        return Ok(None);
-    }
-
-    let mut attrs = Vec::with_capacity(column_names.len());
-    for column_name in column_names {
-        if is_system_column_name(column_name) {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "cannot use system column \"{column_name}\" in publication column list"
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42P10",
-            });
-        }
-        let Some((idx, column)) = relation
-            .desc
-            .columns
-            .iter()
-            .enumerate()
-            .find(|(_, column)| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
-        else {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "column \"{column_name}\" of relation \"{relation_name}\" does not exist"
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42703",
-            });
-        };
-        if column.generated == Some(ColumnGeneratedKind::Virtual) {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "cannot use virtual generated column \"{column_name}\" in publication column list"
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42P10",
-            });
-        }
-        let attr_no = i16::try_from(idx + 1).map_err(|_| ExecError::DetailedError {
-            message: format!("too many columns in relation \"{relation_name}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "54011",
-        })?;
-        if attrs.contains(&attr_no) {
-            return Err(ExecError::DetailedError {
-                message: format!("duplicate column \"{column_name}\" in publication column list"),
-                detail: None,
-                hint: None,
-                sqlstate: "42701",
-            });
-        }
-        attrs.push(attr_no);
-    }
-    Ok(Some(attrs))
+    pgrust_commands::publication::publication_column_numbers(relation, relation_name, column_names)
+        .map_err(publication_target_error_to_exec)
 }
 
 fn validate_publication_row_filter(
@@ -1467,9 +1438,11 @@ fn validate_publication_row_filter(
         ));
     }
     let expr = parse_expr(filter).map_err(ExecError::Parse)?;
-    validate_publication_filter_expr(&expr)?;
-    validate_publication_filter_types(&expr, relation, catalog)?;
-    if !publication_filter_returns_bool_by_syntax(&expr)
+    pgrust_commands::publication::validate_publication_filter_expr(&expr)
+        .map_err(publication_filter_error_to_exec)?;
+    pgrust_commands::publication::validate_publication_filter_types(&expr, relation, catalog)
+        .map_err(publication_filter_error_to_exec)?;
+    if !pgrust_commands::publication::publication_filter_returns_bool_by_syntax(&expr)
         && !filter
             .trim_start()
             .to_ascii_lowercase()
@@ -1497,614 +1470,28 @@ fn validate_publication_row_filter(
         return Ok(Some(filter.trim().to_string()));
     }
     Ok(Some(
-        render_publication_filter_expr(&expr).unwrap_or_else(|| filter.trim().to_string()),
+        pgrust_commands::publication::render_publication_filter_expr(&expr, format_sql_type_name)
+            .unwrap_or_else(|| filter.trim().to_string()),
     ))
 }
 
-fn publication_filter_returns_bool_by_syntax(expr: &SqlExpr) -> bool {
-    matches!(
-        expr,
-        SqlExpr::Xml(xml) if xml.op == RawXmlExprOp::IsDocument
-    )
-}
-
-fn validate_publication_filter_types(
-    expr: &SqlExpr,
-    relation: &BoundRelation,
-    catalog: &dyn CatalogLookup,
-) -> Result<(), ExecError> {
-    use SqlExpr::*;
-
-    match expr {
-        Column(name) => {
-            let column_name = name.rsplit('.').next().unwrap_or(name);
-            if let Some(column) = relation
-                .desc
-                .columns
-                .iter()
-                .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
-                && publication_filter_type_is_user_defined(column.sql_type, catalog)
-            {
-                return Err(invalid_publication_where_error(
-                    "User-defined types are not allowed.",
-                ));
+fn publication_filter_error_to_exec(
+    err: pgrust_commands::publication::PublicationFilterError,
+) -> ExecError {
+    match err {
+        pgrust_commands::publication::PublicationFilterError::Parse(err) => ExecError::Parse(err),
+        pgrust_commands::publication::PublicationFilterError::AggregateFunction => {
+            ExecError::DetailedError {
+                message: "aggregate functions are not allowed in WHERE".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42803",
             }
         }
-        Parameter(_) => {}
-        Cast(inner, ty) => {
-            validate_publication_filter_types(inner, relation, catalog)?;
-            let sql_type = resolve_raw_type_name(ty, catalog).map_err(ExecError::Parse)?;
-            if publication_filter_type_is_user_defined(sql_type, catalog) {
-                return Err(invalid_publication_where_error(
-                    "User-defined types are not allowed.",
-                ));
-            }
+        pgrust_commands::publication::PublicationFilterError::InvalidWhere { detail } => {
+            invalid_publication_where_error(detail)
         }
-        Collate {
-            expr: inner,
-            collation,
-        } => {
-            validate_publication_filter_types(inner, relation, catalog)?;
-            if publication_filter_collation_is_user_defined(collation, catalog) {
-                return Err(invalid_publication_where_error(
-                    "User-defined collations are not allowed.",
-                ));
-            }
-        }
-        FuncCall { args, .. } => {
-            for arg in function_arg_values(args) {
-                validate_publication_filter_types(arg, relation, catalog)?;
-            }
-        }
-        BinaryOperator { left, right, .. }
-        | Add(left, right)
-        | Sub(left, right)
-        | BitAnd(left, right)
-        | BitOr(left, right)
-        | BitXor(left, right)
-        | Shl(left, right)
-        | Shr(left, right)
-        | Mul(left, right)
-        | Div(left, right)
-        | Mod(left, right)
-        | Concat(left, right)
-        | Eq(left, right)
-        | NotEq(left, right)
-        | Lt(left, right)
-        | LtEq(left, right)
-        | Gt(left, right)
-        | GtEq(left, right)
-        | RegexMatch(left, right)
-        | And(left, right)
-        | Or(left, right)
-        | IsDistinctFrom(left, right)
-        | IsNotDistinctFrom(left, right)
-        | Overlaps(left, right)
-        | ArrayOverlap(left, right)
-        | ArrayContains(left, right)
-        | ArrayContained(left, right)
-        | JsonbContains(left, right)
-        | JsonbContained(left, right)
-        | JsonbExists(left, right)
-        | JsonbExistsAny(left, right)
-        | JsonbExistsAll(left, right)
-        | JsonbPathExists(left, right)
-        | JsonbPathMatch(left, right)
-        | JsonGet(left, right)
-        | JsonGetText(left, right)
-        | JsonPath(left, right)
-        | JsonPathText(left, right)
-        | AtTimeZone {
-            expr: left,
-            zone: right,
-        } => {
-            validate_publication_filter_types(left, relation, catalog)?;
-            validate_publication_filter_types(right, relation, catalog)?;
-        }
-        UnaryPlus(inner)
-        | Negate(inner)
-        | BitNot(inner)
-        | IsNull(inner)
-        | IsNotNull(inner)
-        | Not(inner)
-        | FieldSelect { expr: inner, .. }
-        | Subscript { expr: inner, .. } => {
-            validate_publication_filter_types(inner, relation, catalog)?;
-        }
-        Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            validate_publication_filter_types(expr, relation, catalog)?;
-            validate_publication_filter_types(pattern, relation, catalog)?;
-            if let Some(escape) = escape {
-                validate_publication_filter_types(escape, relation, catalog)?;
-            }
-        }
-        Case {
-            arg,
-            args,
-            defresult,
-        } => {
-            if let Some(arg) = arg {
-                validate_publication_filter_types(arg, relation, catalog)?;
-            }
-            for when in args {
-                validate_publication_filter_types(&when.expr, relation, catalog)?;
-                validate_publication_filter_types(&when.result, relation, catalog)?;
-            }
-            if let Some(defresult) = defresult {
-                validate_publication_filter_types(defresult, relation, catalog)?;
-            }
-        }
-        ArrayLiteral(values) | Row(values) => {
-            for value in values {
-                validate_publication_filter_types(value, relation, catalog)?;
-            }
-        }
-        QuantifiedArray { left, array, .. } => {
-            validate_publication_filter_types(left, relation, catalog)?;
-            validate_publication_filter_types(array, relation, catalog)?;
-        }
-        ArraySubscript { array, subscripts } => {
-            validate_publication_filter_types(array, relation, catalog)?;
-            for subscript in subscripts {
-                if let Some(lower) = &subscript.lower {
-                    validate_publication_filter_types(lower, relation, catalog)?;
-                }
-                if let Some(upper) = &subscript.upper {
-                    validate_publication_filter_types(upper, relation, catalog)?;
-                }
-            }
-        }
-        GeometryUnaryOp { expr, .. } | PrefixOperator { expr, .. } => {
-            validate_publication_filter_types(expr, relation, catalog)?;
-        }
-        GeometryBinaryOp { left, right, .. } => {
-            validate_publication_filter_types(left, relation, catalog)?;
-            validate_publication_filter_types(right, relation, catalog)?;
-        }
-        InSubquery { expr, .. } => {
-            validate_publication_filter_types(expr, relation, catalog)?;
-        }
-        QuantifiedSubquery { left, .. } => {
-            validate_publication_filter_types(left, relation, catalog)?;
-        }
-        Xml(xml) => {
-            for child in xml.child_exprs() {
-                validate_publication_filter_types(child, relation, catalog)?;
-            }
-        }
-        JsonQueryFunction(func) => {
-            for child in func.child_exprs() {
-                validate_publication_filter_types(child, relation, catalog)?;
-            }
-        }
-        Const(Value::EnumOid(_)) => {
-            return Err(invalid_publication_where_error(
-                "User-defined types are not allowed.",
-            ));
-        }
-        ScalarSubquery(_)
-        | ArraySubquery(_)
-        | Exists(_)
-        | ParamRef(_)
-        | Default
-        | Const(_)
-        | IntegerLiteral(_)
-        | NumericLiteral(_)
-        | Random
-        | CurrentDate
-        | CurrentCatalog
-        | CurrentSchema
-        | CurrentUser
-        | User
-        | SessionUser
-        | SystemUser
-        | CurrentRole
-        | CurrentTime { .. }
-        | CurrentTimestamp { .. }
-        | LocalTime { .. }
-        | LocalTimestamp { .. } => {}
     }
-    Ok(())
-}
-
-fn publication_filter_type_is_user_defined(sql_type: SqlType, catalog: &dyn CatalogLookup) -> bool {
-    if matches!(
-        sql_type.kind,
-        SqlTypeKind::Composite | SqlTypeKind::Enum | SqlTypeKind::Shell
-    ) {
-        return true;
-    }
-    let Some(type_oid) = (sql_type.type_oid != 0).then_some(sql_type.type_oid) else {
-        return false;
-    };
-    let Some(row) = catalog.type_by_oid(type_oid) else {
-        return false;
-    };
-    if row.typnamespace != PG_CATALOG_NAMESPACE_OID
-        && row.typnamespace != INFORMATION_SCHEMA_NAMESPACE_OID
-    {
-        return true;
-    }
-    row.typelem != 0
-        && catalog.type_by_oid(row.typelem).is_some_and(|elem| {
-            elem.typnamespace != PG_CATALOG_NAMESPACE_OID
-                && elem.typnamespace != INFORMATION_SCHEMA_NAMESPACE_OID
-        })
-}
-
-fn publication_filter_collation_is_user_defined(
-    collation: &str,
-    catalog: &dyn CatalogLookup,
-) -> bool {
-    let (schema_name, collation_name) = collation
-        .rsplit_once('.')
-        .map(|(schema, name)| (Some(schema), name))
-        .unwrap_or((None, collation));
-    let collation_name = normalize_catalog_name(collation_name).to_ascii_lowercase();
-    let schema_oid = schema_name.and_then(|schema| {
-        let schema = normalize_catalog_name(schema).to_ascii_lowercase();
-        catalog
-            .namespace_rows()
-            .into_iter()
-            .find(|row| row.nspname.eq_ignore_ascii_case(&schema))
-            .map(|row| row.oid)
-    });
-    catalog
-        .collation_rows()
-        .into_iter()
-        .filter(|row| row.collname.eq_ignore_ascii_case(&collation_name))
-        .filter(|row| {
-            schema_oid
-                .map(|oid| row.collnamespace == oid)
-                .unwrap_or(true)
-        })
-        .any(|row| {
-            row.collnamespace != PG_CATALOG_NAMESPACE_OID
-                && row.collnamespace != INFORMATION_SCHEMA_NAMESPACE_OID
-        })
-}
-
-fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
-    use SqlExpr::*;
-
-    // :HACK: PostgreSQL validates publication filters from the fully bound
-    // expression tree, including function/operator provenance and volatility.
-    // pgrust does not retain enough of that metadata here yet, so keep this
-    // narrow syntactic guard until publication filters use a dedicated binder.
-    match expr {
-        FuncCall { name, args, .. } => {
-            let normalized = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
-            if matches!(normalized.as_str(), "avg" | "count" | "max" | "min" | "sum") {
-                return Err(ExecError::DetailedError {
-                    message: "aggregate functions are not allowed in WHERE".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42803",
-                });
-            }
-            if normalized == "random" || normalized.starts_with("testpub_") {
-                return Err(invalid_publication_where_error(
-                    "User-defined or built-in mutable functions are not allowed.",
-                ));
-            }
-            for arg in function_arg_values(args) {
-                validate_publication_filter_expr(arg)?;
-            }
-        }
-        BinaryOperator { left, right, .. } => {
-            validate_publication_filter_expr(left)?;
-            validate_publication_filter_expr(right)?;
-            return Err(invalid_publication_where_error(
-                "User-defined operators are not allowed.",
-            ));
-        }
-        InSubquery { expr, .. } => {
-            validate_publication_filter_expr(expr)?;
-            return Err(invalid_publication_where_error(
-                "Only columns, constants, built-in operators, built-in data types, built-in collations, and immutable built-in functions are allowed.",
-            ));
-        }
-        ScalarSubquery(_) | ArraySubquery(_) | Exists(_) | QuantifiedSubquery { .. } => {
-            return Err(invalid_publication_where_error(
-                "Only columns, constants, built-in operators, built-in data types, built-in collations, and immutable built-in functions are allowed.",
-            ));
-        }
-        Column(name) if name.eq_ignore_ascii_case("ctid") => {
-            return Err(invalid_publication_where_error(
-                "System columns are not allowed.",
-            ));
-        }
-        Parameter(_) => {}
-        Add(left, right)
-        | Sub(left, right)
-        | BitAnd(left, right)
-        | BitOr(left, right)
-        | BitXor(left, right)
-        | Shl(left, right)
-        | Shr(left, right)
-        | Mul(left, right)
-        | Div(left, right)
-        | Mod(left, right)
-        | Concat(left, right)
-        | Eq(left, right)
-        | NotEq(left, right)
-        | Lt(left, right)
-        | LtEq(left, right)
-        | Gt(left, right)
-        | GtEq(left, right)
-        | RegexMatch(left, right)
-        | And(left, right)
-        | Or(left, right)
-        | IsDistinctFrom(left, right)
-        | IsNotDistinctFrom(left, right)
-        | Overlaps(left, right)
-        | ArrayOverlap(left, right)
-        | ArrayContains(left, right)
-        | ArrayContained(left, right)
-        | JsonbContains(left, right)
-        | JsonbContained(left, right)
-        | JsonbExists(left, right)
-        | JsonbExistsAny(left, right)
-        | JsonbExistsAll(left, right)
-        | JsonbPathExists(left, right)
-        | JsonbPathMatch(left, right)
-        | JsonGet(left, right)
-        | JsonGetText(left, right)
-        | JsonPath(left, right)
-        | JsonPathText(left, right)
-        | AtTimeZone {
-            expr: left,
-            zone: right,
-        } => {
-            validate_publication_filter_expr(left)?;
-            validate_publication_filter_expr(right)?;
-        }
-        UnaryPlus(inner)
-        | Negate(inner)
-        | BitNot(inner)
-        | Cast(inner, _)
-        | Collate { expr: inner, .. }
-        | IsNull(inner)
-        | IsNotNull(inner)
-        | Not(inner)
-        | FieldSelect { expr: inner, .. }
-        | Subscript { expr: inner, .. } => validate_publication_filter_expr(inner)?,
-        Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            validate_publication_filter_expr(expr)?;
-            validate_publication_filter_expr(pattern)?;
-            if let Some(escape) = escape {
-                validate_publication_filter_expr(escape)?;
-            }
-        }
-        Case {
-            arg,
-            args,
-            defresult,
-        } => {
-            if let Some(arg) = arg {
-                validate_publication_filter_expr(arg)?;
-            }
-            for when in args {
-                validate_publication_filter_expr(&when.expr)?;
-                validate_publication_filter_expr(&when.result)?;
-            }
-            if let Some(defresult) = defresult {
-                validate_publication_filter_expr(defresult)?;
-            }
-        }
-        ArrayLiteral(values) | Row(values) => {
-            for value in values {
-                validate_publication_filter_expr(value)?;
-            }
-        }
-        QuantifiedArray { left, array, .. } => {
-            validate_publication_filter_expr(left)?;
-            validate_publication_filter_expr(array)?;
-        }
-        ArraySubscript { array, subscripts } => {
-            validate_publication_filter_expr(array)?;
-            for subscript in subscripts {
-                if let Some(lower) = &subscript.lower {
-                    validate_publication_filter_expr(lower)?;
-                }
-                if let Some(upper) = &subscript.upper {
-                    validate_publication_filter_expr(upper)?;
-                }
-            }
-        }
-        GeometryUnaryOp { expr, .. } | PrefixOperator { expr, .. } => {
-            validate_publication_filter_expr(expr)?;
-        }
-        GeometryBinaryOp { left, right, .. } => {
-            validate_publication_filter_expr(left)?;
-            validate_publication_filter_expr(right)?;
-        }
-        Random => {
-            return Err(invalid_publication_where_error(
-                "User-defined or built-in mutable functions are not allowed.",
-            ));
-        }
-        Xml(xml) => {
-            for child in xml.child_exprs() {
-                validate_publication_filter_expr(child)?;
-            }
-        }
-        JsonQueryFunction(func) => {
-            for child in func.child_exprs() {
-                validate_publication_filter_expr(child)?;
-            }
-        }
-        Column(_)
-        | ParamRef(_)
-        | Default
-        | Const(_)
-        | IntegerLiteral(_)
-        | NumericLiteral(_)
-        | CurrentDate
-        | CurrentCatalog
-        | CurrentSchema
-        | CurrentUser
-        | User
-        | SessionUser
-        | SystemUser
-        | CurrentRole
-        | CurrentTime { .. }
-        | CurrentTimestamp { .. }
-        | LocalTime { .. }
-        | LocalTimestamp { .. } => {}
-    }
-    Ok(())
-}
-
-fn render_publication_filter_expr(expr: &SqlExpr) -> Option<String> {
-    use SqlExpr::*;
-
-    Some(match expr {
-        And(left, right) => format!(
-            "({} AND {})",
-            render_publication_filter_expr(left)?,
-            render_publication_filter_expr(right)?
-        ),
-        Or(left, right) => format!(
-            "({} OR {})",
-            render_publication_filter_expr(left)?,
-            render_publication_filter_expr(right)?
-        ),
-        Eq(left, right) => render_publication_binary_expr(left, "=", right)?,
-        NotEq(left, right) => render_publication_binary_expr(left, "<>", right)?,
-        Lt(left, right) => render_publication_binary_expr(left, "<", right)?,
-        LtEq(left, right) => render_publication_binary_expr(left, "<=", right)?,
-        Gt(left, right) => render_publication_binary_expr(left, ">", right)?,
-        GtEq(left, right) => render_publication_binary_expr(left, ">=", right)?,
-        IsNull(inner) => format!("({} IS NULL)", render_publication_filter_term(inner)?),
-        IsNotNull(inner) => format!("({} IS NOT NULL)", render_publication_filter_term(inner)?),
-        IsDistinctFrom(left, right) => format!(
-            "({} IS DISTINCT FROM {})",
-            render_publication_filter_term(left)?,
-            render_publication_filter_term(right)?
-        ),
-        IsNotDistinctFrom(left, right) => format!(
-            "({} IS NOT DISTINCT FROM {})",
-            render_publication_filter_term(left)?,
-            render_publication_filter_term(right)?
-        ),
-        Not(inner) => format!("(NOT {})", render_publication_filter_term(inner)?),
-        _ => render_publication_filter_term(expr)?,
-    })
-}
-
-fn render_publication_binary_expr(left: &SqlExpr, op: &str, right: &SqlExpr) -> Option<String> {
-    Some(format!(
-        "({} {} {})",
-        render_publication_filter_term(left)?,
-        op,
-        render_publication_filter_term(right)?
-    ))
-}
-
-fn render_publication_filter_term(expr: &SqlExpr) -> Option<String> {
-    use SqlExpr::*;
-
-    Some(match expr {
-        Column(name) => name.clone(),
-        IntegerLiteral(value) | NumericLiteral(value) => value.clone(),
-        Const(value) => render_publication_const(value)?,
-        Cast(inner, ty) => format!(
-            "{}::{}",
-            render_publication_filter_term(inner)?,
-            render_publication_type_name(ty)
-        ),
-        Collate { expr, collation } => {
-            format!(
-                "{} COLLATE {}",
-                render_publication_filter_term(expr)?,
-                collation
-            )
-        }
-        Add(left, right) => render_publication_arithmetic_expr(left, "+", right)?,
-        Sub(left, right) => render_publication_arithmetic_expr(left, "-", right)?,
-        Mul(left, right) => render_publication_arithmetic_expr(left, "*", right)?,
-        Div(left, right) => render_publication_arithmetic_expr(left, "/", right)?,
-        Mod(left, right) => render_publication_arithmetic_expr(left, "%", right)?,
-        UnaryPlus(inner) => format!("+{}", render_publication_filter_term(inner)?),
-        Negate(inner) => format!("-{}", render_publication_filter_term(inner)?),
-        FuncCall { name, args, .. } => {
-            let rendered_args = function_arg_values(args)
-                .map(|arg| render_publication_filter_term(arg))
-                .collect::<Option<Vec<_>>>()?
-                .join(", ");
-            format!("{name}({rendered_args})")
-        }
-        _ => return None,
-    })
-}
-
-fn render_publication_arithmetic_expr(left: &SqlExpr, op: &str, right: &SqlExpr) -> Option<String> {
-    Some(format!(
-        "({} {} {})",
-        render_publication_filter_term(left)?,
-        op,
-        render_publication_filter_term(right)?
-    ))
-}
-
-fn render_publication_const(value: &Value) -> Option<String> {
-    Some(match value {
-        Value::Null => "NULL".into(),
-        Value::Bool(true) => "true".into(),
-        Value::Bool(false) => "false".into(),
-        Value::Int16(value) => value.to_string(),
-        Value::Int32(value) => value.to_string(),
-        Value::Int64(value) => value.to_string(),
-        Value::Float64(value) => value.to_string(),
-        Value::Numeric(value) => value.render(),
-        Value::Text(text) => format!("'{}'::text", escape_publication_string_literal(text)),
-        Value::TextRef(_, _) => format!(
-            "'{}'::text",
-            escape_publication_string_literal(value.as_text().unwrap_or_default())
-        ),
-        Value::Xml(text) => format!("'{}'::xml", escape_publication_string_literal(text)),
-        _ => return None,
-    })
-}
-
-fn render_publication_type_name(ty: &RawTypeName) -> String {
-    match ty {
-        RawTypeName::Builtin(sql_type) => format_sql_type_name(*sql_type).into(),
-        RawTypeName::Serial(kind) => match kind {
-            crate::backend::parser::SerialKind::Small => "smallserial".into(),
-            crate::backend::parser::SerialKind::Regular => "serial".into(),
-            crate::backend::parser::SerialKind::Big => "bigserial".into(),
-        },
-        RawTypeName::Named { name, .. } => name.clone(),
-        RawTypeName::Record => "record".into(),
-    }
-}
-
-fn escape_publication_string_literal(value: &str) -> String {
-    value.replace('\'', "''")
 }
 
 fn lookup_publication_relation(
@@ -2234,19 +1621,11 @@ fn validate_publishable_schema(
 }
 
 fn publication_membership_kind(target: &PublicationTargetSpec) -> PublicationMembershipKind {
-    if target
-        .objects
-        .iter()
-        .all(|object| matches!(object, PublicationObjectSpec::Schema(_)))
-    {
-        PublicationMembershipKind::Schema
-    } else {
-        PublicationMembershipKind::Table
-    }
+    pgrust_commands::publication::publication_membership_kind(target)
 }
 
 fn publication_target_is_all_kind(target: &PublicationTargetSpec) -> bool {
-    target.for_all_tables || target.for_all_sequences
+    pgrust_commands::publication::publication_target_is_all_kind(target)
 }
 
 fn publication_supports_all_target_operations(
@@ -2286,68 +1665,15 @@ fn merge_catalog_effects(
 }
 
 fn publication_row_defaults(publication_name: &str, owner_oid: u32) -> PgPublicationRow {
-    PgPublicationRow {
-        oid: 0,
-        pubname: publication_name.to_ascii_lowercase(),
-        pubowner: owner_oid,
-        puballtables: false,
-        puballsequences: false,
-        pubinsert: true,
-        pubupdate: true,
-        pubdelete: true,
-        pubtruncate: true,
-        pubviaroot: false,
-        pubgencols: PUBLISH_GENCOLS_NONE,
-    }
+    pgrust_commands::publication::publication_row_defaults(publication_name, owner_oid)
 }
 
 fn apply_publication_options(
     publication: &mut PgPublicationRow,
     options: &PublicationOptions,
 ) -> Result<(), ExecError> {
-    let mut seen = BTreeSet::new();
-    for option in &options.options {
-        let option_name = publication_option_name(option);
-        if !seen.insert(option_name.clone()) {
-            return Err(ExecError::Parse(
-                ParseError::ConflictingOrRedundantOptions {
-                    option: option_name,
-                },
-            ));
-        }
-        match option {
-            PublicationOption::Publish(actions) => {
-                publication.pubinsert = actions.insert;
-                publication.pubupdate = actions.update;
-                publication.pubdelete = actions.delete;
-                publication.pubtruncate = actions.truncate;
-            }
-            PublicationOption::PublishViaPartitionRoot(value) => {
-                publication.pubviaroot = *value;
-            }
-            PublicationOption::PublishGeneratedColumns(value) => {
-                publication.pubgencols = match value {
-                    PublishGeneratedColumns::None => PUBLISH_GENCOLS_NONE,
-                    PublishGeneratedColumns::Stored => PUBLISH_GENCOLS_STORED,
-                };
-            }
-            PublicationOption::Raw { name, .. } => {
-                return Err(ExecError::Parse(
-                    ParseError::UnrecognizedPublicationParameter(name.clone()),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn publication_option_name(option: &PublicationOption) -> String {
-    match option {
-        PublicationOption::Publish(_) => "publish".into(),
-        PublicationOption::PublishViaPartitionRoot(_) => "publish_via_partition_root".into(),
-        PublicationOption::PublishGeneratedColumns(_) => "publish_generated_columns".into(),
-        PublicationOption::Raw { name, .. } => name.clone(),
-    }
+    pgrust_commands::publication::apply_publication_options(publication, options)
+        .map_err(ExecError::Parse)
 }
 
 fn current_role_missing_error() -> ExecError {

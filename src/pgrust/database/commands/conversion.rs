@@ -4,8 +4,8 @@ use crate::backend::parser::{
     AlterConversionAction, AlterConversionStatement, CommentOnConversionStatement,
     CreateConversionStatement, DropConversionStatement,
 };
-use crate::include::catalog::PgConversionRow;
 use crate::pgrust::database::ddl::ensure_can_set_role;
+use pgrust_commands::conversion::{conversion_object_name, conversion_row_from_entry};
 
 impl Database {
     pub(crate) fn execute_create_conversion_stmt_with_search_path(
@@ -451,27 +451,6 @@ fn resolve_conversion_create_name(
     ))
 }
 
-fn conversion_row_from_entry(entry: &ConversionEntry) -> PgConversionRow {
-    PgConversionRow {
-        oid: entry.oid,
-        conname: entry.name.clone(),
-        connamespace: entry.namespace_oid,
-        conowner: entry.owner_oid,
-        conforencoding: conversion_encoding_code(&entry.for_encoding),
-        contoencoding: conversion_encoding_code(&entry.to_encoding),
-        conproc: 0,
-        condefault: entry.is_default,
-    }
-}
-
-fn conversion_encoding_code(name: &str) -> i32 {
-    match name.to_ascii_uppercase().as_str() {
-        "UTF8" | "UTF-8" => 6,
-        "LATIN1" | "ISO88591" | "ISO-8859-1" => 8,
-        _ => -1,
-    }
-}
-
 fn ensure_conversion_owner(
     db: &Database,
     client_id: ClientId,
@@ -505,11 +484,4 @@ fn namespace_name(
         .namespace_by_oid(namespace_oid)
         .map(|row| row.nspname.clone())
         .unwrap_or_else(|| namespace_oid.to_string()))
-}
-
-fn conversion_object_name(raw_name: &str) -> String {
-    raw_name
-        .rsplit_once('.')
-        .map(|(_, name)| name.to_ascii_lowercase())
-        .unwrap_or_else(|| raw_name.to_ascii_lowercase())
 }

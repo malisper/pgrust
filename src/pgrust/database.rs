@@ -39,8 +39,7 @@ use crate::backend::catalog::{
 };
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{
-    ExecError, ExecutorContext, LockStatusProvider, SessionReplicationRole, StatementResult, Value,
-    execute_readonly_statement,
+    ExecError, ExecutorContext, LockStatusProvider, Value, execute_readonly_statement,
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
@@ -109,6 +108,7 @@ pub(crate) use large_objects::{
     INV_WRITE, LargeObjectRuntime, ensure_large_object_write_allowed,
     parse_large_object_default_privileges_sql,
 };
+use pgrust_nodes::{SessionReplicationRole, StatementResult};
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 pub(crate) use sequences::{
     SequenceData, SequenceMutationEffect, SequenceOwnedByRef, SequenceRuntime,
@@ -901,18 +901,7 @@ pub(crate) struct StatisticsObjectEntry {
     pub targets: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConversionEntry {
-    pub oid: u32,
-    pub name: String,
-    pub namespace_oid: u32,
-    pub for_encoding: String,
-    pub to_encoding: String,
-    pub function_name: String,
-    pub is_default: bool,
-    pub owner_oid: u32,
-    pub comment: Option<String>,
-}
+pub(crate) use pgrust_commands::conversion::ConversionEntry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DatabaseCreateGrant {

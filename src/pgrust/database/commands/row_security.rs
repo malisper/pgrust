@@ -1,8 +1,9 @@
 use super::super::*;
-use crate::backend::parser::{AlterTableRowSecurityAction, AlterTableSetRowSecurityStatement};
+use crate::backend::parser::AlterTableSetRowSecurityStatement;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_table_or_partitioned_table_for_alter_table,
 };
+use pgrust_commands::row_security::row_security_update_for_action;
 
 impl Database {
     pub(crate) fn execute_alter_table_set_row_security_stmt_with_search_path(
@@ -66,12 +67,7 @@ impl Database {
         };
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
 
-        let (relrowsecurity, relforcerowsecurity) = match alter_stmt.action {
-            AlterTableRowSecurityAction::Enable => (Some(true), None),
-            AlterTableRowSecurityAction::Disable => (Some(false), None),
-            AlterTableRowSecurityAction::Force => (None, Some(true)),
-            AlterTableRowSecurityAction::NoForce => (None, Some(false)),
-        };
+        let row_security_update = row_security_update_for_action(alter_stmt.action);
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -86,8 +82,8 @@ impl Database {
             .write()
             .alter_relation_row_security_mvcc(
                 relation.relation_oid,
-                relrowsecurity,
-                relforcerowsecurity,
+                row_security_update.relrowsecurity,
+                row_security_update.relforcerowsecurity,
                 &ctx,
             )
             .map_err(map_catalog_error)?;

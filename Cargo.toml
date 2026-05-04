@@ -14,15 +14,19 @@ members = [
     "crates/pgrust_analyze",
     "crates/pgrust_access",
     "crates/pgrust_catalog_store",
+    "crates/pgrust_commands",
     "crates/pgrust_catalog_data",
     "crates/pgrust_catalog_ids",
     "crates/pgrust_core",
+    "crates/pgrust_executor",
     "crates/pgrust_expr",
     "crates/pgrust_nodes",
     "crates/pgrust_optimizer",
     "crates/pgrust_parser",
     "crates/pgrust_plpgsql",
     "crates/pgrust_plpgsql_grammar",
+    "crates/pgrust_protocol",
+    "crates/pgrust_rewrite",
     "crates/pgrust_storage",
     "crates/pgrust_sql_grammar",
 ]
@@ -199,13 +203,17 @@ pgrust_analyze = { path = "crates/pgrust_analyze" }
 pgrust_access = { path = "crates/pgrust_access" }
 pgrust_catalog_data = { path = "crates/pgrust_catalog_data" }
 pgrust_catalog_store = { path = "crates/pgrust_catalog_store" }
+pgrust_commands = { path = "crates/pgrust_commands" }
 pgrust_core = { path = "crates/pgrust_core" }
+pgrust_executor = { path = "crates/pgrust_executor" }
 pgrust_expr = { path = "crates/pgrust_expr" }
 pgrust_nodes = { path = "crates/pgrust_nodes" }
 pgrust_optimizer = { path = "crates/pgrust_optimizer" }
 pgrust_parser = { path = "crates/pgrust_parser" }
 pgrust_plpgsql = { path = "crates/pgrust_plpgsql" }
 pgrust_plpgsql_grammar = { path = "crates/pgrust_plpgsql_grammar" }
+pgrust_protocol = { path = "crates/pgrust_protocol" }
+pgrust_rewrite = { path = "crates/pgrust_rewrite" }
 pgrust_storage = { path = "crates/pgrust_storage" }
 rand = "0.8"
 regex = "1"

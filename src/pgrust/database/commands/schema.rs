@@ -1,6 +1,8 @@
 use super::super::*;
-use crate::backend::commands::schemacmds::{
-    CreateSchemaResolution, resolve_create_schema_stmt, transform_create_schema_stmt_elements,
+use crate::include::catalog::{PgAuthIdRow, PgNamespaceRow};
+use crate::pgrust::auth::{AuthCatalog, AuthState};
+use pgrust_commands::schemacmds::{
+    CreateSchemaAuthContext, CreateSchemaResolution, transform_create_schema_stmt_elements,
 };
 
 const DEFAULT_CREATE_SCHEMA_MAINTENANCE_WORK_MEM_KB: usize = 65_536;
@@ -22,6 +24,58 @@ fn current_database_owner_oid(
             hint: None,
             sqlstate: "3D000",
         })
+}
+
+struct RootCreateSchemaAuth<'a> {
+    auth: &'a AuthState,
+    auth_catalog: &'a AuthCatalog,
+}
+
+impl CreateSchemaAuthContext for RootCreateSchemaAuth<'_> {
+    fn current_user_oid(&self) -> u32 {
+        self.auth.current_user_oid()
+    }
+
+    fn session_user_oid(&self) -> u32 {
+        self.auth.session_user_oid()
+    }
+
+    fn role_by_oid(&self, oid: u32) -> Option<&PgAuthIdRow> {
+        self.auth_catalog.role_by_oid(oid)
+    }
+
+    fn role_by_name(&self, name: &str) -> Option<&PgAuthIdRow> {
+        self.auth_catalog.role_by_name(name)
+    }
+
+    fn can_set_role(&self, role_oid: u32) -> bool {
+        self.auth.can_set_role(role_oid, self.auth_catalog)
+    }
+}
+
+fn resolve_create_schema_stmt(
+    stmt: &CreateSchemaStatement,
+    auth: &AuthState,
+    auth_catalog: &AuthCatalog,
+    database_owner_oid: u32,
+    has_database_create_privilege: bool,
+    namespace_rows: &[PgNamespaceRow],
+) -> Result<CreateSchemaResolution, ExecError> {
+    pgrust_commands::schemacmds::resolve_create_schema_stmt(
+        stmt,
+        &RootCreateSchemaAuth { auth, auth_catalog },
+        database_owner_oid,
+        has_database_create_privilege,
+        namespace_rows,
+    )
+    .map_err(Into::into)
+}
+
+fn transform_create_schema_elements(
+    stmt: &CreateSchemaStatement,
+    schema_name: &str,
+) -> Result<Vec<Statement>, ExecError> {
+    transform_create_schema_stmt_elements(&stmt.elements, schema_name).map_err(Into::into)
 }
 
 impl Database {
@@ -139,8 +193,7 @@ impl Database {
                 return Ok(StatementResult::AffectedRows(0));
             }
         };
-        let elements =
-            transform_create_schema_stmt_elements(&stmt.elements, &resolved.schema_name)?;
+        let elements = transform_create_schema_elements(stmt, &resolved.schema_name)?;
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),

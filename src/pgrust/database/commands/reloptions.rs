@@ -308,28 +308,18 @@ pub(super) fn set_reloptions(
     current: Option<Vec<String>>,
     updates: &[String],
 ) -> Option<Vec<String>> {
-    let mut reloptions = current.unwrap_or_default();
-    for update in updates {
-        let name = reloption_name(update);
-        reloptions.retain(|existing| reloption_name(existing) != name);
-        reloptions.push(update.clone());
-    }
-    (!reloptions.is_empty()).then_some(reloptions)
+    // :HACK: Preserve the old database-command helper path while reloption
+    // list mechanics live in `pgrust_commands`.
+    pgrust_commands::reloptions::set_reloptions(current, updates)
 }
 
 pub(super) fn reset_reloptions(
     current: Option<Vec<String>>,
     reset_options: &[String],
 ) -> Option<Vec<String>> {
-    let reset = reset_options
-        .iter()
-        .map(|option| option.to_ascii_lowercase())
-        .collect::<std::collections::BTreeSet<_>>();
-    let reloptions = current?
-        .into_iter()
-        .filter(|option| !reset.contains(&reloption_name(option)))
-        .collect::<Vec<_>>();
-    (!reloptions.is_empty()).then_some(reloptions)
+    // :HACK: Preserve the old database-command helper path while reloption
+    // list mechanics live in `pgrust_commands`.
+    pgrust_commands::reloptions::reset_reloptions(current, reset_options)
 }
 
 pub(super) fn split_table_reloption_resets(

@@ -9,503 +9,62 @@ use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
     AliasColumnSpec, ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection,
-    BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundScope, BoundUpdateStatement,
-    CatalogLookup, CommentOnFunctionStatement, CreateTableAsStatement, CreateTableStatement,
-    CteBody, DeleteStatement, FromItem, GroupByItem, InsertSource, InsertStatement, MergeAction,
-    MergeInsertSource, MergeStatement, OnConflictAction, OnConflictClause, OnConflictTarget,
-    OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RawXmlExpr,
-    SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType,
-    SqlTypeKind, Statement, TablePersistence, UpdateStatement, ValuesStatement, XmlTableColumn,
-    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
-    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
-    parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
-    pg_plan_query_with_outer_scopes_and_ctes_config,
+    BoundCte, BoundScope, CatalogLookup, CteBody, DeleteStatement, FromItem, GroupByItem,
+    InsertSource, InsertStatement, MergeAction, MergeInsertSource, MergeStatement,
+    OnConflictAction, OnConflictClause, OnConflictTarget, OrderByItem, ParseError, RawWindowFrame,
+    RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn,
+    SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement, TablePersistence,
+    UpdateStatement, ValuesStatement, XmlTableColumn, bind_delete_with_outer_scopes,
+    bind_insert_with_outer_scopes, bind_scalar_expr_in_named_slot_scope,
+    bind_update_with_outer_scopes, parse_expr, parse_statement, parse_type_name,
+    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_query_with_outer_scopes_and_ctes_config,
     pg_plan_values_query_with_outer_scopes_and_ctes,
     pg_plan_values_query_with_outer_scopes_and_ctes_config, resolve_raw_type_name,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::pathnodes::PlannerConfig;
-use crate::include::nodes::plannodes::{Plan, PlannedStmt};
-use crate::include::nodes::primnodes::{
-    Param, ParamKind, QueryColumn, TargetEntry, Var, user_attrno,
+use crate::include::nodes::plannodes::PlannedStmt;
+use crate::include::nodes::primnodes::{Param, ParamKind, QueryColumn, Var, user_attrno};
+use pgrust_nodes::TriggerTransitionTable;
+use pgrust_plpgsql::{
+    CompiledAssignIndirection, CompiledBlock, CompiledCursorOpenSource,
+    CompiledEventTriggerBindings, CompiledExceptionHandler, CompiledExpr, CompiledForQuerySource,
+    CompiledForQueryTarget, CompiledFunction, CompiledFunctionSlot, CompiledIndirectAssignTarget,
+    CompiledOutputSlot, CompiledSelectIntoTarget, CompiledStmt, CompiledStrictParam,
+    CompiledTriggerBindings, CompiledTriggerRelation, CompiledTriggerTransitionCte, CompiledVar,
+    DeclaredCursorParam, FunctionReturnContract, PlpgsqlVariableConflict, RuntimeSqlScope,
+    TriggerReturnedRow, count_raise_placeholders, declared_cursor_args_context,
+    dollar_quote_tag_at, dynamic_shape_sql, dynamic_sql_literal, exception_condition_name_sqlstate,
+    find_keyword_at_top_level, find_next_top_level_keyword, identifier_position,
+    is_identifier_char, is_identifier_start, is_internal_plpgsql_name, is_plpgsql_label_alias,
+    is_unsupported_plpgsql_transaction_command, looks_like_aggregate_expr,
+    nonstandard_string_literals_from_gucs, parse_plpgsql_query_condition, parse_proc_argtype_oids,
+    parse_select_into_assign_target, parse_select_into_assign_targets,
+    persistent_object_transition_table_reference_name, plpgsql_label_alias, plpgsql_var_alias,
+    positional_parameter_var_name, print_strict_params_directive,
+    rewrite_plpgsql_assignment_query_expr, runtime_sql_param_id,
+    should_defer_plpgsql_sql_to_runtime, should_fallback_to_runtime_sql,
+    split_cte_prefixed_select_into_target, split_dml_returning_into_targets,
+    split_select_into_target, split_select_with_into_targets, static_query_source_known_columns,
+    target_entry_query_column, transaction_command_name, variable_conflict_from_gucs,
+    variable_conflict_mode,
 };
+
+#[cfg(test)]
+use pgrust_plpgsql::rewrite_plpgsql_query_condition;
 
 use super::ast::{
-    AliasTarget, AssignTarget, Block, CursorArg, CursorDecl, CursorDirection, Decl,
-    ExceptionCondition, ForQuerySource, ForTarget, OpenCursorSource, RaiseCondition, RaiseLevel,
-    RaiseUsingOption, Stmt, VarDecl,
+    AliasTarget, AssignTarget, Block, CursorArg, CursorDecl, Decl, ForQuerySource, ForTarget,
+    OpenCursorSource, RaiseCondition, RaiseLevel, RaiseUsingOption, Stmt, VarDecl,
 };
 use super::gram::parse_block;
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledBlock {
-    pub(crate) local_slots: Vec<CompiledVar>,
-    pub(crate) statements: Vec<CompiledStmt>,
-    pub(crate) exception_handlers: Vec<CompiledExceptionHandler>,
-    pub(crate) exception_sqlstate_slot: Option<usize>,
-    pub(crate) exception_sqlerrm_slot: Option<usize>,
-    pub(crate) total_slots: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct CompiledFunction {
-    pub(crate) name: String,
-    pub(crate) proc_oid: u32,
-    pub(crate) proowner: u32,
-    pub(crate) prosecdef: bool,
-    pub(crate) provolatile: char,
-    pub(crate) proconfig: Option<Vec<String>>,
-    pub(crate) print_strict_params: Option<bool>,
-    pub(crate) parameter_slots: Vec<CompiledFunctionSlot>,
-    pub(crate) context_arg_type_names: Vec<String>,
-    pub(crate) output_slots: Vec<CompiledOutputSlot>,
-    pub(crate) body: CompiledBlock,
-    pub(crate) return_contract: FunctionReturnContract,
-    pub(crate) found_slot: usize,
-    pub(crate) sqlstate_slot: usize,
-    pub(crate) sqlerrm_slot: usize,
-    pub(crate) local_ctes: Vec<BoundCte>,
-    pub(crate) trigger_transition_ctes: Vec<CompiledTriggerTransitionCte>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledFunctionSlot {
-    pub(crate) name: String,
-    pub(crate) slot: usize,
-    pub(crate) ty: SqlType,
-}
-
-#[derive(Debug, Clone)]
-pub struct TriggerTransitionTable {
-    pub name: String,
-    pub desc: RelationDesc,
-    pub rows: Vec<Vec<crate::backend::executor::Value>>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledTriggerTransitionCte {
-    pub(crate) name: String,
-    pub(crate) cte_id: usize,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledOutputSlot {
-    pub(crate) name: String,
-    pub(crate) slot: usize,
-    pub(crate) column: QueryColumn,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledVar {
-    pub(crate) name: String,
-    pub(crate) slot: usize,
-    pub(crate) ty: SqlType,
-    pub(crate) default_expr: Option<CompiledExpr>,
-    pub(crate) not_null: bool,
-    pub(crate) line: usize,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum PlpgsqlVariableConflict {
-    #[default]
-    Error,
-    UseVariable,
-    UseColumn,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum CompiledExpr {
-    Scalar {
-        expr: Expr,
-        subplans: Vec<Plan>,
-        source: String,
-    },
-    QueryCompare {
-        plan: PlannedStmt,
-        op: QueryCompareOp,
-        rhs: Expr,
-        source: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum QueryCompareOp {
-    Eq,
-    NotEq,
-    Lt,
-    LtEq,
-    Gt,
-    GtEq,
-    IsDistinctFrom,
-    IsNotDistinctFrom,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledSelectIntoTarget {
-    pub(crate) slot: usize,
-    pub(crate) ty: SqlType,
-    pub(crate) name: Option<String>,
-    pub(crate) not_null: bool,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledIndirectAssignTarget {
-    pub(crate) slot: usize,
-    pub(crate) ty: SqlType,
-    pub(crate) indirection: Vec<CompiledAssignIndirection>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum CompiledAssignIndirection {
-    Field(String),
-    Subscript(CompiledExpr),
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledStrictParam {
-    pub(crate) name: String,
-    pub(crate) slot: usize,
-}
 
 #[derive(Debug, Clone)]
 struct DeclaredCursor {
     query: String,
     scrollable: bool,
     params: Vec<DeclaredCursorParam>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct DeclaredCursorParam {
-    pub(crate) name: String,
-    pub(crate) type_name: String,
-    pub(crate) ty: SqlType,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledForQueryTarget {
-    pub(crate) targets: Vec<CompiledSelectIntoTarget>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RuntimeSqlScope {
-    pub(crate) columns: Vec<SlotScopeColumn>,
-    pub(crate) relation_scopes: Vec<(String, Vec<SlotScopeColumn>)>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum CompiledForQuerySource {
-    Static {
-        plan: PlannedStmt,
-    },
-    Runtime {
-        sql: String,
-        scope: RuntimeSqlScope,
-    },
-    NoTuples {
-        sql: String,
-    },
-    Dynamic {
-        sql_expr: CompiledExpr,
-        using_exprs: Vec<CompiledExpr>,
-    },
-    Cursor {
-        slot: usize,
-        name: String,
-        source: CompiledCursorOpenSource,
-        scrollable: bool,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum CompiledCursorOpenSource {
-    Static {
-        plan: PlannedStmt,
-    },
-    Dynamic {
-        sql_expr: CompiledExpr,
-        using_exprs: Vec<CompiledExpr>,
-    },
-    Declared {
-        query: String,
-        params: Vec<DeclaredCursorParam>,
-        args: Vec<CompiledExpr>,
-        arg_context: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledExceptionHandler {
-    pub(crate) conditions: Vec<ExceptionCondition>,
-    pub(crate) statements: Vec<CompiledStmt>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum FunctionReturnContract {
-    Scalar {
-        ty: SqlType,
-        setof: bool,
-        output_slot: Option<usize>,
-    },
-    FixedRow {
-        columns: Vec<QueryColumn>,
-        setof: bool,
-        uses_output_vars: bool,
-        composite_typrelid: Option<u32>,
-    },
-    AnonymousRecord {
-        setof: bool,
-    },
-    Trigger {
-        bindings: CompiledTriggerBindings,
-    },
-    EventTrigger {
-        bindings: CompiledEventTriggerBindings,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledTriggerBindings {
-    pub(crate) new_row: CompiledTriggerRelation,
-    pub(crate) old_row: CompiledTriggerRelation,
-    pub(crate) tg_name_slot: usize,
-    pub(crate) tg_op_slot: usize,
-    pub(crate) tg_when_slot: usize,
-    pub(crate) tg_level_slot: usize,
-    pub(crate) tg_relid_slot: usize,
-    pub(crate) tg_nargs_slot: usize,
-    pub(crate) tg_argv_slot: usize,
-    pub(crate) tg_table_name_slot: usize,
-    pub(crate) tg_table_schema_slot: usize,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledTriggerRelation {
-    pub(crate) slots: Vec<usize>,
-    pub(crate) field_names: Vec<String>,
-    pub(crate) field_types: Vec<SqlType>,
-    pub(crate) not_null: Vec<bool>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledEventTriggerBindings {
-    pub(crate) tg_event_slot: usize,
-    pub(crate) tg_tag_slot: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TriggerReturnedRow {
-    New,
-    Old,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum CompiledStmt {
-    WithLine {
-        line: usize,
-        stmt: Box<CompiledStmt>,
-    },
-    Block(CompiledBlock),
-    Assign {
-        slot: usize,
-        ty: SqlType,
-        name: Option<String>,
-        not_null: bool,
-        expr: CompiledExpr,
-        line: usize,
-    },
-    AssignSubscript {
-        slot: usize,
-        root_ty: SqlType,
-        target_ty: SqlType,
-        subscripts: Vec<CompiledExpr>,
-        expr: CompiledExpr,
-        line: usize,
-    },
-    AssignIndirect {
-        target: CompiledIndirectAssignTarget,
-        expr: CompiledExpr,
-        line: usize,
-    },
-    AssignTriggerRow {
-        row: TriggerReturnedRow,
-        expr: CompiledExpr,
-        line: usize,
-    },
-    Null,
-    If {
-        branches: Vec<(CompiledExpr, Vec<CompiledStmt>)>,
-        else_branch: Vec<CompiledStmt>,
-    },
-    While {
-        condition: CompiledExpr,
-        body: Vec<CompiledStmt>,
-    },
-    Loop {
-        body: Vec<CompiledStmt>,
-    },
-    Exit {
-        condition: Option<CompiledExpr>,
-    },
-    ForInt {
-        slot: usize,
-        start_expr: CompiledExpr,
-        end_expr: CompiledExpr,
-        body: Vec<CompiledStmt>,
-    },
-    ForQuery {
-        target: CompiledForQueryTarget,
-        source: CompiledForQuerySource,
-        body: Vec<CompiledStmt>,
-    },
-    ForEach {
-        target: CompiledForQueryTarget,
-        slice: usize,
-        array_expr: CompiledExpr,
-        body: Vec<CompiledStmt>,
-    },
-    Raise {
-        level: RaiseLevel,
-        sqlstate: Option<String>,
-        message: Option<String>,
-        message_expr: Option<CompiledExpr>,
-        detail_expr: Option<CompiledExpr>,
-        hint_expr: Option<CompiledExpr>,
-        errcode_expr: Option<CompiledExpr>,
-        column_expr: Option<CompiledExpr>,
-        constraint_expr: Option<CompiledExpr>,
-        datatype_expr: Option<CompiledExpr>,
-        table_expr: Option<CompiledExpr>,
-        schema_expr: Option<CompiledExpr>,
-        params: Vec<CompiledExpr>,
-        line: usize,
-    },
-    Reraise,
-    Assert {
-        condition: CompiledExpr,
-        message: Option<CompiledExpr>,
-    },
-    Continue {
-        condition: Option<CompiledExpr>,
-    },
-    Return {
-        expr: Option<CompiledExpr>,
-        line: usize,
-    },
-    ReturnRuntimeQuery {
-        sql: String,
-        scope: RuntimeSqlScope,
-        line: usize,
-    },
-    ReturnSelect {
-        plan: PlannedStmt,
-        sql: String,
-        line: usize,
-    },
-    ReturnNext {
-        expr: Option<CompiledExpr>,
-    },
-    ReturnTriggerRow {
-        row: TriggerReturnedRow,
-    },
-    ReturnTriggerNull,
-    ReturnTriggerNoValue,
-    ReturnQuery {
-        source: CompiledForQuerySource,
-    },
-    Perform {
-        plan: PlannedStmt,
-        line: usize,
-        sql: Option<String>,
-    },
-    DynamicExecute {
-        sql_expr: CompiledExpr,
-        strict: bool,
-        into_targets: Vec<CompiledSelectIntoTarget>,
-        using_exprs: Vec<CompiledExpr>,
-        line: usize,
-    },
-    SetGuc {
-        name: String,
-        value: Option<String>,
-        is_local: bool,
-    },
-    CommentOnFunction {
-        stmt: CommentOnFunctionStatement,
-    },
-    GetDiagnostics {
-        stacked: bool,
-        items: Vec<(CompiledSelectIntoTarget, String)>,
-    },
-    OpenCursor {
-        slot: usize,
-        name: String,
-        source: CompiledCursorOpenSource,
-        scrollable: bool,
-        constant: bool,
-    },
-    FetchCursor {
-        slot: usize,
-        direction: CursorDirection,
-        targets: Vec<CompiledSelectIntoTarget>,
-    },
-    MoveCursor {
-        slot: usize,
-        direction: CursorDirection,
-    },
-    CloseCursor {
-        slot: usize,
-    },
-    UnsupportedTransactionCommand {
-        command: String,
-    },
-    SelectInto {
-        plan: PlannedStmt,
-        targets: Vec<CompiledSelectIntoTarget>,
-        strict: bool,
-        strict_params: Vec<CompiledStrictParam>,
-    },
-    ExecInsertInto {
-        stmt: BoundInsertStatement,
-        targets: Vec<CompiledSelectIntoTarget>,
-    },
-    ExecInsert {
-        stmt: BoundInsertStatement,
-    },
-    ExecUpdateInto {
-        stmt: BoundUpdateStatement,
-        targets: Vec<CompiledSelectIntoTarget>,
-    },
-    ExecUpdate {
-        stmt: BoundUpdateStatement,
-    },
-    ExecDeleteInto {
-        stmt: BoundDeleteStatement,
-        targets: Vec<CompiledSelectIntoTarget>,
-    },
-    ExecDelete {
-        stmt: BoundDeleteStatement,
-    },
-    RuntimeSql {
-        sql: String,
-        scope: RuntimeSqlScope,
-    },
-    RuntimeSelectInto {
-        sql: String,
-        scope: RuntimeSqlScope,
-        targets: Vec<CompiledSelectIntoTarget>,
-        strict: bool,
-        strict_params: Vec<CompiledStrictParam>,
-    },
-    CreateTableAs {
-        stmt: CreateTableAsStatement,
-    },
-    CreateTable {
-        stmt: CreateTableStatement,
-    },
-    ExecSql {
-        sql: String,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -1136,57 +695,6 @@ pub(crate) fn compile_function_from_proc(
         local_ctes: Vec::new(),
         trigger_transition_ctes: Vec::new(),
     })
-}
-
-fn print_strict_params_directive(source: &str) -> Option<bool> {
-    source.lines().find_map(|line| {
-        let line = line.trim();
-        let rest = line.strip_prefix("#print_strict_params")?.trim();
-        if rest.eq_ignore_ascii_case("on") {
-            Some(true)
-        } else if rest.eq_ignore_ascii_case("off") {
-            Some(false)
-        } else {
-            None
-        }
-    })
-}
-
-fn variable_conflict_mode(
-    source: &str,
-    gucs: Option<&HashMap<String, String>>,
-) -> PlpgsqlVariableConflict {
-    variable_conflict_directive(source).unwrap_or_else(|| variable_conflict_from_gucs(gucs))
-}
-
-fn variable_conflict_from_gucs(gucs: Option<&HashMap<String, String>>) -> PlpgsqlVariableConflict {
-    gucs.and_then(|gucs| gucs.get("plpgsql.variable_conflict"))
-        .and_then(|value| parse_variable_conflict_mode(value))
-        .unwrap_or_default()
-}
-
-fn nonstandard_string_literals_from_gucs(gucs: Option<&HashMap<String, String>>) -> bool {
-    gucs.and_then(|gucs| gucs.get("standard_conforming_strings"))
-        .is_some_and(|value| value.eq_ignore_ascii_case("off"))
-}
-
-fn variable_conflict_directive(source: &str) -> Option<PlpgsqlVariableConflict> {
-    source.lines().find_map(|line| {
-        let line = line.trim();
-        let rest = line.strip_prefix("#variable_conflict")?.trim();
-        rest.split_whitespace()
-            .next()
-            .and_then(parse_variable_conflict_mode)
-    })
-}
-
-fn parse_variable_conflict_mode(value: &str) -> Option<PlpgsqlVariableConflict> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "error" => Some(PlpgsqlVariableConflict::Error),
-        "use_variable" => Some(PlpgsqlVariableConflict::UseVariable),
-        "use_column" => Some(PlpgsqlVariableConflict::UseColumn),
-        _ => None,
-    }
 }
 
 pub(crate) fn compile_trigger_function_from_proc(
@@ -1999,43 +1507,6 @@ fn duplicate_raise_option<T>(name: &str) -> Result<T, ParseError> {
     })
 }
 
-fn count_raise_placeholders(message: &str) -> usize {
-    let mut count = 0usize;
-    let mut chars = message.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            if chars.peek() == Some(&'%') {
-                chars.next();
-            } else {
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
-fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "assert_failure" => Some("P0004"),
-        "data_corrupted" => Some("XX001"),
-        "division_by_zero" => Some("22012"),
-        "feature_not_supported" => Some("0A000"),
-        "raise_exception" => Some("P0001"),
-        "reading_sql_data_not_permitted" => Some("2F003"),
-        "syntax_error" => Some("42601"),
-        "no_data_found" => Some("P0002"),
-        "too_many_rows" => Some("P0003"),
-        "unique_violation" => Some("23505"),
-        "not_null_violation" => Some("23502"),
-        "check_violation" => Some("23514"),
-        "foreign_key_violation" => Some("23503"),
-        "undefined_file" => Some("58P01"),
-        "invalid_parameter_value" => Some("22023"),
-        "null_value_not_allowed" => Some("22004"),
-        _ => None,
-    }
-}
-
 fn compile_return_stmt(
     expr: Option<&str>,
     line: usize,
@@ -2581,51 +2052,6 @@ fn compile_static_query_source(
     }
 }
 
-fn static_query_source_known_columns(sql: &str) -> Option<Vec<QueryColumn>> {
-    let normalized = sql
-        .trim()
-        .trim_end_matches(';')
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    if !matches!(
-        normalized.as_str(),
-        "select * from pg_get_catalog_foreign_keys()"
-            | "select * from pg_catalog.pg_get_catalog_foreign_keys()"
-    ) {
-        return None;
-    }
-
-    Some(vec![
-        plpgsql_query_column("fktable", SqlType::new(SqlTypeKind::Text)),
-        plpgsql_query_column("fkcols", SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
-        plpgsql_query_column("pktable", SqlType::new(SqlTypeKind::Text)),
-        plpgsql_query_column("pkcols", SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
-        plpgsql_query_column("is_array", SqlType::new(SqlTypeKind::Bool)),
-        plpgsql_query_column("is_opt", SqlType::new(SqlTypeKind::Bool)),
-    ])
-}
-
-fn plpgsql_query_column(name: &str, sql_type: SqlType) -> QueryColumn {
-    QueryColumn {
-        name: name.into(),
-        sql_type,
-        wire_type_oid: None,
-    }
-}
-
-fn should_fallback_to_runtime_sql(err: &ParseError) -> bool {
-    !matches!(
-        err.unpositioned(),
-        ParseError::AmbiguousColumn(_)
-            | ParseError::DetailedError {
-                sqlstate: "42702",
-                ..
-            }
-    )
-}
-
 fn compile_return_query_stmt(
     source: &ForQuerySource,
     catalog: &dyn CatalogLookup,
@@ -2705,86 +2131,15 @@ fn compile_return_query_static_source(
 }
 
 fn normalize_sql_context_text(sql: &str) -> String {
-    sql.trim().trim_end_matches(';').trim_end().to_string()
+    pgrust_plpgsql::normalize_sql_context_text(sql)
 }
 
 fn normalize_nonstandard_string_literals(sql: &str) -> String {
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            let previous = sql[..i].chars().rev().find(|ch| !ch.is_ascii_whitespace());
-            if !matches!(previous, Some('E' | 'e' | '&')) {
-                out.push('E');
-            }
-            out.push('\'');
-            i += 1;
-            while i < bytes.len() {
-                out.push(bytes[i] as char);
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 1;
-                    out.push(bytes[i] as char);
-                } else if bytes[i] == b'\'' {
-                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                        i += 1;
-                        out.push('\'');
-                    } else {
-                        i += 1;
-                        break;
-                    }
-                }
-                i += 1;
-            }
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-
-    out
+    pgrust_protocol::sql::normalize_nonstandard_string_literals(sql)
 }
 
 fn decode_nonstandard_backslash_escapes(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        let Some(escaped) = chars.next() else {
-            out.push('\\');
-            break;
-        };
-        match escaped {
-            '\\' => out.push('\\'),
-            '\'' => out.push('\''),
-            '0'..='7' => {
-                let mut digits = String::from(escaped);
-                while digits.len() < 3 {
-                    match chars.peek().copied() {
-                        Some(next @ '0'..='7') => {
-                            digits.push(next);
-                            chars.next();
-                        }
-                        _ => break,
-                    }
-                }
-                if let Ok(code) = u32::from_str_radix(&digits, 8)
-                    && let Some(decoded) = char::from_u32(code)
-                {
-                    out.push(decoded);
-                }
-            }
-            other => {
-                out.push('\\');
-                out.push(other);
-            }
-        }
-    }
-    out
+    pgrust_plpgsql::decode_nonstandard_backslash_escapes(value)
 }
 
 fn compile_perform_stmt(
@@ -2957,35 +2312,16 @@ fn compile_declared_cursor_args(
             ),
         });
     }
-    let arg_context = declared_cursor_args_context(&assigned, params);
+    let param_names = params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<Vec<_>>();
+    let arg_context = declared_cursor_args_context(&assigned, &param_names);
     let args = assigned
         .into_iter()
         .map(|expr| compile_expr_text(&expr.expect("checked above"), catalog, env))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((args, arg_context))
-}
-
-fn declared_cursor_args_context(
-    assigned: &[Option<String>],
-    params: &[DeclaredCursorParam],
-) -> Option<String> {
-    if assigned.is_empty() {
-        return None;
-    }
-    Some(
-        assigned
-            .iter()
-            .zip(params)
-            .map(|(expr, param)| {
-                format!(
-                    "{} AS {}",
-                    expr.as_deref().expect("cursor args checked").trim(),
-                    param.name
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
-    )
 }
 
 fn duplicate_cursor_param_error(cursor_name: &str, param_name: &str) -> ParseError {
@@ -3171,55 +2507,14 @@ fn compile_exec_sql_stmt(
     }
 }
 
-fn should_defer_plpgsql_sql_to_runtime(err: &ParseError) -> bool {
-    should_fallback_to_runtime_sql(err)
-        && matches!(
-            err.unpositioned(),
-            ParseError::UnknownTable(_)
-                | ParseError::TableDoesNotExist(_)
-                | ParseError::MissingFromClauseEntry(_)
-        )
-}
-
 fn persistent_object_transition_table_reference(
     sql: &str,
     local_ctes: &[BoundCte],
 ) -> Option<String> {
-    if local_ctes.is_empty() {
-        return None;
-    }
-    let lower = sql.trim_start().to_ascii_lowercase();
-    let is_persistent_create = lower.starts_with("create view ")
-        || lower.starts_with("create materialized view ")
-        || (lower.starts_with("create table ")
-            && !lower.starts_with("create table pg_temp.")
-            && !lower.starts_with("create table temp ")
-            && !lower.starts_with("create table temporary "))
-        || (lower.starts_with("create unlogged table ")
-            && !lower.starts_with("create unlogged table pg_temp."));
-    if !is_persistent_create {
-        return None;
-    }
-    local_ctes
-        .iter()
-        .find(|cte| sql_references_relation_name(&lower, &cte.name))
-        .map(|cte| cte.name.clone())
-}
-
-fn sql_references_relation_name(lower_sql: &str, name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    [
-        format!(" from {name}"),
-        format!(" join {name}"),
-        format!(" update {name}"),
-        format!(" into {name}"),
-        format!(" from \"{name}\""),
-        format!(" join \"{name}\""),
-        format!(" update \"{name}\""),
-        format!(" into \"{name}\""),
-    ]
-    .iter()
-    .any(|needle| lower_sql.contains(needle))
+    persistent_object_transition_table_reference_name(
+        sql,
+        local_ctes.iter().map(|cte| cte.name.as_str()),
+    )
 }
 
 fn runtime_sql_scope(env: &CompileEnv) -> RuntimeSqlScope {
@@ -3247,12 +2542,6 @@ pub(crate) fn runtime_sql_bound_scope(scope: &RuntimeSqlScope) -> BoundScope {
             })
         },
     )
-}
-
-pub(crate) const PLPGSQL_RUNTIME_PARAM_BASE: usize = 1_000_000_000;
-
-pub(crate) fn runtime_sql_param_id(slot: usize) -> usize {
-    PLPGSQL_RUNTIME_PARAM_BASE + slot
 }
 
 pub(crate) fn runtime_sql_param_bound_scope(scope: &RuntimeSqlScope) -> BoundScope {
@@ -3325,187 +2614,6 @@ fn bound_scope_from_slot_columns(
         columns: scope_columns,
         relations,
     }
-}
-
-fn split_select_into_target(sql: &str) -> Option<(String, String)> {
-    let trimmed = sql.trim_start();
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.starts_with("select into ") {
-        return None;
-    }
-    let rest = trimmed[12..].trim_start();
-    let (target, rest) = split_leading_select_into_target(rest)?;
-    let select_sql = format!("select {}", rest.trim_start());
-    Some((target, select_sql))
-}
-
-fn split_cte_prefixed_select_into_target(sql: &str) -> Option<(String, String)> {
-    let trimmed = sql.trim_start();
-    if !keyword_at(trimmed, 0, "with") {
-        return None;
-    }
-    let select_idx = find_next_top_level_keyword(trimmed, &["select"])?;
-    let after_select = trimmed[select_idx + "select".len()..].trim_start();
-    if !keyword_at(after_select, 0, "into") {
-        return None;
-    }
-    let rest = after_select["into".len()..].trim_start();
-    let (target, rest) = split_leading_select_into_target(rest)?;
-    let select_sql = format!(
-        "{} select {}",
-        trimmed[..select_idx].trim_end(),
-        rest.trim_start()
-    );
-    Some((target, select_sql))
-}
-
-fn split_leading_select_into_target(rest: &str) -> Option<(String, &str)> {
-    let mut chars = rest.char_indices();
-    let end = if rest.starts_with('"') {
-        let mut escaped = false;
-        let mut end = None;
-        for (index, ch) in rest.char_indices().skip(1) {
-            if ch == '"' {
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if rest[index + 1..].starts_with('"') {
-                    escaped = true;
-                    continue;
-                }
-                end = Some(index + 1);
-                break;
-            }
-        }
-        end?
-    } else {
-        chars
-            .find(|(_, ch)| ch.is_whitespace())
-            .map(|(index, _)| index)
-            .unwrap_or(rest.len())
-    };
-    let target = rest[..end].trim().trim_matches('"').to_ascii_lowercase();
-    Some((target, &rest[end..]))
-}
-
-fn split_select_with_into_targets(sql: &str) -> Option<(Vec<String>, String, bool)> {
-    let trimmed = sql.trim_start();
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.starts_with("select ") || lower.starts_with("select into ") {
-        return None;
-    }
-
-    let into_idx = find_next_top_level_keyword(trimmed, &["into"])?;
-    let select_sql = trimmed[..into_idx].trim_end();
-    if select_sql.eq_ignore_ascii_case("select") {
-        return None;
-    }
-
-    let mut after_into = trimmed[into_idx + "into".len()..].trim_start();
-    let strict = if keyword_at(after_into, 0, "strict") {
-        after_into = after_into["strict".len()..].trim_start();
-        true
-    } else {
-        false
-    };
-    let clause_idx = find_next_top_level_keyword(
-        after_into,
-        &[
-            "from",
-            "where",
-            "group",
-            "having",
-            "window",
-            "union",
-            "intersect",
-            "except",
-            "order",
-            "limit",
-            "offset",
-            "fetch",
-            "for",
-        ],
-    );
-    let (targets_sql, suffix) = match clause_idx {
-        Some(idx) => (&after_into[..idx], after_into[idx..].trim_start()),
-        None => (after_into, ""),
-    };
-    let targets = split_top_level_csv(targets_sql)?;
-    let rewritten = if suffix.is_empty() {
-        select_sql.to_string()
-    } else {
-        format!("{select_sql} {suffix}")
-    };
-    Some((targets, rewritten, strict))
-}
-
-fn split_dml_returning_into_targets(sql: &str) -> Option<(String, Vec<String>)> {
-    let trimmed = sql.trim_start();
-    let lower = trimmed.to_ascii_lowercase();
-    if !(lower.starts_with("insert ")
-        || lower.starts_with("update ")
-        || lower.starts_with("delete ")
-        || lower.starts_with("merge "))
-    {
-        return None;
-    }
-
-    let returning_idx = find_next_top_level_keyword(trimmed, &["returning"])?;
-    let after_returning = trimmed[returning_idx + "returning".len()..].trim_start();
-    let into_idx = find_next_top_level_keyword(after_returning, &["into"])?;
-    let returning_sql = after_returning[..into_idx].trim_end();
-    if returning_sql.is_empty() {
-        return None;
-    }
-    let targets_sql = after_returning[into_idx + "into".len()..].trim();
-    let targets = split_top_level_csv(targets_sql)?;
-    let rewritten = format!(
-        "{} {}",
-        trimmed[..returning_idx + "returning".len()].trim_end(),
-        returning_sql,
-    );
-    Some((rewritten, targets))
-}
-
-fn is_unsupported_plpgsql_transaction_command(sql: &str) -> bool {
-    let trimmed = sql.trim_start();
-    keyword_at(trimmed, 0, "savepoint")
-        || keyword_at(trimmed, 0, "release")
-        || (keyword_at(trimmed, 0, "rollback")
-            && find_next_top_level_keyword(trimmed, &["to"]).is_some())
-}
-
-fn transaction_command_name(sql: &str) -> &str {
-    let trimmed = sql.trim_start();
-    trimmed
-        .split_whitespace()
-        .next()
-        .unwrap_or("transaction command")
-}
-
-fn positional_parameter_var_name(index: usize) -> String {
-    format!("__pgrust_plpgsql_param_{index}")
-}
-
-fn plpgsql_label_alias(scope_index: usize, slot: usize, name: &str) -> String {
-    let mut alias = format!("__pgrust_plpgsql_label_{scope_index}_{slot}_");
-    for ch in name.chars() {
-        alias.push(if is_identifier_char(ch) { ch } else { '_' });
-    }
-    alias
-}
-
-fn is_plpgsql_label_alias(name: &str) -> bool {
-    name.starts_with("__pgrust_plpgsql_label_")
-}
-
-fn plpgsql_var_alias(slot: usize) -> String {
-    format!("__pgrust_plpgsql_var_{slot}")
-}
-
-fn is_internal_plpgsql_name(name: &str) -> bool {
-    name.starts_with("__pgrust_plpgsql_")
 }
 
 fn rewrite_plpgsql_sql_text(sql: &str, env: &CompileEnv) -> Result<String, ParseError> {
@@ -3703,237 +2811,6 @@ where
     Ok(out)
 }
 
-fn find_next_top_level_keyword(sql: &str, keywords: &[&str]) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let mut depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        let ch = bytes[idx] as char;
-        if in_single {
-            if ch == '\'' {
-                if bytes.get(idx + 1) == Some(&b'\'') {
-                    idx += 2;
-                    continue;
-                }
-                in_single = false;
-            }
-            idx += 1;
-            continue;
-        }
-        if in_double {
-            if ch == '"' {
-                if bytes.get(idx + 1) == Some(&b'"') {
-                    idx += 2;
-                    continue;
-                }
-                in_double = false;
-            }
-            idx += 1;
-            continue;
-        }
-        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
-            if let Some(close) = sql[idx + tag.len()..].find(tag) {
-                idx += tag.len() + close + tag.len();
-                continue;
-            }
-            idx += tag.len();
-            continue;
-        }
-
-        match ch {
-            '\'' => {
-                in_single = true;
-                idx += 1;
-                continue;
-            }
-            '"' => {
-                in_double = true;
-                idx += 1;
-                continue;
-            }
-            '[' => {
-                bracket_depth += 1;
-                idx += 1;
-                continue;
-            }
-            ']' => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                idx += 1;
-                continue;
-            }
-            '(' => {
-                depth += 1;
-                idx += 1;
-                continue;
-            }
-            ')' => {
-                depth = depth.saturating_sub(1);
-                idx += 1;
-                continue;
-            }
-            _ => {}
-        }
-
-        if depth == 0
-            && bracket_depth == 0
-            && keywords.iter().any(|keyword| keyword_at(sql, idx, keyword))
-        {
-            return Some(idx);
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn keyword_at(sql: &str, idx: usize, keyword: &str) -> bool {
-    let bytes = sql.as_bytes();
-    let end = idx.saturating_add(keyword.len());
-    if end > bytes.len() || !sql[idx..end].eq_ignore_ascii_case(keyword) {
-        return false;
-    }
-    let before_ok = idx == 0 || !is_identifier_char(bytes[idx - 1] as char);
-    let after_ok = end == bytes.len() || !is_identifier_char(bytes[end] as char);
-    before_ok && after_ok
-}
-
-fn is_identifier_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
-}
-
-fn is_identifier_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_'
-}
-
-fn split_top_level_csv(input: &str) -> Option<Vec<String>> {
-    let bytes = input.as_bytes();
-    let mut depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut start = 0usize;
-    let mut parts = Vec::new();
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        let ch = bytes[idx] as char;
-        if in_single {
-            if ch == '\'' {
-                if bytes.get(idx + 1) == Some(&b'\'') {
-                    idx += 2;
-                    continue;
-                }
-                in_single = false;
-            }
-            idx += 1;
-            continue;
-        }
-        if in_double {
-            if ch == '"' {
-                if bytes.get(idx + 1) == Some(&b'"') {
-                    idx += 2;
-                    continue;
-                }
-                in_double = false;
-            }
-            idx += 1;
-            continue;
-        }
-        if let Some(tag) = dollar_quote_tag_at(input, idx) {
-            if let Some(close) = input[idx + tag.len()..].find(tag) {
-                idx += tag.len() + close + tag.len();
-                continue;
-            }
-            idx += tag.len();
-            continue;
-        }
-
-        match ch {
-            '\'' => in_single = true,
-            '"' => in_double = true,
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            '[' => bracket_depth += 1,
-            ']' => bracket_depth = bracket_depth.saturating_sub(1),
-            ',' if depth == 0 && bracket_depth == 0 => {
-                let part = input[start..idx].trim();
-                if part.is_empty() {
-                    return None;
-                }
-                parts.push(part.to_string());
-                start = idx + 1;
-            }
-            _ => {}
-        }
-        idx += 1;
-    }
-
-    let tail = input[start..].trim();
-    if tail.is_empty() {
-        return None;
-    }
-    parts.push(tail.to_string());
-    Some(parts)
-}
-
-fn dollar_quote_tag_at(sql: &str, idx: usize) -> Option<&str> {
-    let bytes = sql.as_bytes();
-    if bytes.get(idx) != Some(&b'$') {
-        return None;
-    }
-    let mut end = idx + 1;
-    while let Some(byte) = bytes.get(end) {
-        let ch = *byte as char;
-        if ch == '$' {
-            return Some(&sql[idx..=end]);
-        }
-        if !is_identifier_char(ch) {
-            return None;
-        }
-        end += 1;
-    }
-    None
-}
-
-fn parse_select_into_assign_target(target: &str) -> Result<AssignTarget, ParseError> {
-    let trimmed = target.trim();
-    match parse_expr(trimmed)? {
-        SqlExpr::Column(name) => {
-            if let Some((relation, field)) = name.rsplit_once('.') {
-                Ok(AssignTarget::Field {
-                    relation: relation.to_string(),
-                    field: field.to_string(),
-                })
-            } else {
-                Ok(AssignTarget::Name(name))
-            }
-        }
-        SqlExpr::FieldSelect { expr, field } => match *expr {
-            SqlExpr::Column(relation) => Ok(AssignTarget::Field { relation, field }),
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "PL/pgSQL SELECT INTO target",
-                actual: trimmed.into(),
-            }),
-        },
-        _ => Err(ParseError::UnexpectedToken {
-            expected: "PL/pgSQL SELECT INTO target",
-            actual: trimmed.into(),
-        }),
-    }
-}
-
-fn parse_select_into_assign_targets(targets_sql: &str) -> Result<Vec<AssignTarget>, ParseError> {
-    split_top_level_csv(targets_sql)
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "PL/pgSQL SELECT INTO target [, ...]",
-            actual: targets_sql.into(),
-        })?
-        .iter()
-        .map(|target| parse_select_into_assign_target(target))
-        .collect()
-}
-
 fn compile_select_into_stmt(
     select_sql: &str,
     target_refs: &[AssignTarget],
@@ -4013,32 +2890,6 @@ fn strict_params_for_sql(sql: &str, env: &CompileEnv) -> Vec<CompiledStrictParam
         .collect::<Vec<_>>();
     params.sort_by_key(|(position, _)| *position);
     params.into_iter().map(|(_, param)| param).collect()
-}
-
-fn identifier_position(sql: &str, ident: &str) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let ident_len = ident.len();
-    let mut offset = 0usize;
-    while offset + ident_len <= bytes.len() {
-        let rest = &sql[offset..];
-        let Some(found) = rest.to_ascii_lowercase().find(&ident.to_ascii_lowercase()) else {
-            break;
-        };
-        let start = offset + found;
-        let end = start + ident_len;
-        let before_ok =
-            start == 0 || !is_sql_ident_char(sql.as_bytes()[start.saturating_sub(1)] as char);
-        let after_ok = end == sql.len() || !is_sql_ident_char(sql.as_bytes()[end] as char);
-        if before_ok && after_ok {
-            return Some(start);
-        }
-        offset = end;
-    }
-    None
-}
-
-fn is_sql_ident_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn compile_for_query_stmt(
@@ -4371,94 +3222,6 @@ fn dynamic_sql_literal_result_columns(
     }
 }
 
-fn dynamic_sql_literal(sql_expr: &str) -> Option<String> {
-    let expr = parse_expr(sql_expr).ok()?;
-    match expr {
-        SqlExpr::Const(value) => value.as_text().map(str::to_string),
-        _ => None,
-    }
-}
-
-fn dynamic_shape_sql(sql: &str, using_exprs: &[String]) -> String {
-    if using_exprs.is_empty() {
-        return sql.trim().trim_end_matches(';').trim_end().to_string();
-    }
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut idx = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    while idx < bytes.len() {
-        let ch = bytes[idx] as char;
-        if in_single {
-            out.push(ch);
-            if ch == '\'' {
-                if bytes.get(idx + 1) == Some(&b'\'') {
-                    out.push('\'');
-                    idx += 2;
-                    continue;
-                }
-                in_single = false;
-            }
-            idx += 1;
-            continue;
-        }
-        if in_double {
-            out.push(ch);
-            if ch == '"' {
-                if bytes.get(idx + 1) == Some(&b'"') {
-                    out.push('"');
-                    idx += 2;
-                    continue;
-                }
-                in_double = false;
-            }
-            idx += 1;
-            continue;
-        }
-        if ch == '\'' {
-            in_single = true;
-            out.push(ch);
-            idx += 1;
-            continue;
-        }
-        if ch == '"' {
-            in_double = true;
-            out.push(ch);
-            idx += 1;
-            continue;
-        }
-        if ch == '$' {
-            let start = idx + 1;
-            let mut end = start;
-            while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
-                end += 1;
-            }
-            if end > start
-                && let Ok(param_index) = sql[start..end].parse::<usize>()
-                && let Some(expr) = using_exprs.get(param_index - 1)
-            {
-                out.push('(');
-                out.push_str(expr);
-                out.push(')');
-                idx = end;
-                continue;
-            }
-        }
-        out.push(ch);
-        idx += 1;
-    }
-    out.trim().trim_end_matches(';').trim_end().to_string()
-}
-
-fn target_entry_query_column(target: &TargetEntry) -> QueryColumn {
-    QueryColumn {
-        name: target.name.clone(),
-        sql_type: target.sql_type,
-        wire_type_oid: None,
-    }
-}
-
 fn compile_stmt_list(
     statements: &[Stmt],
     catalog: &dyn CatalogLookup,
@@ -4630,230 +3393,6 @@ fn compile_return_select_expr(
     let select = normalize_plpgsql_select(crate::backend::parser::parse_select(&query_sql)?, env);
     let plan = plan_select_for_env(&select, catalog, env)?;
     Ok(Some((query_sql, plan)))
-}
-
-struct ParsedQueryCondition<'a> {
-    left_expr: &'a str,
-    op: QueryCompareOp,
-    right_expr: &'a str,
-    from_clause: &'a str,
-}
-
-fn parse_plpgsql_query_condition(sql: &str) -> Option<ParsedQueryCondition<'_>> {
-    let from_idx = find_keyword_at_top_level(sql, "from")?;
-    let before_from = sql[..from_idx].trim();
-    let after_from = sql[from_idx + "from".len()..].trim();
-    if before_from.is_empty() || after_from.is_empty() {
-        return None;
-    }
-
-    let (left, op, right) = split_top_level_comparison(before_from)?;
-    if !looks_like_aggregate_expr(left) {
-        return None;
-    }
-
-    Some(ParsedQueryCondition {
-        left_expr: left,
-        op: query_compare_op(op)?,
-        right_expr: right,
-        from_clause: after_from,
-    })
-}
-
-fn rewrite_plpgsql_query_condition(sql: &str) -> Option<String> {
-    let parsed = parse_plpgsql_query_condition(sql)?;
-    Some(format!(
-        "(select {} from {}) {} {}",
-        parsed.left_expr,
-        parsed.from_clause,
-        render_query_compare_op(parsed.op),
-        parsed.right_expr
-    ))
-}
-
-fn rewrite_plpgsql_assignment_query_expr(sql: &str) -> Option<String> {
-    let from_idx = find_keyword_at_top_level(sql, "from")?;
-    let expr = sql[..from_idx].trim();
-    let from_clause = sql[from_idx + "from".len()..].trim();
-    if expr.is_empty() || from_clause.is_empty() {
-        return None;
-    }
-    Some(format!("(select {expr} from {from_clause})"))
-}
-
-fn query_compare_op(op: &str) -> Option<QueryCompareOp> {
-    Some(match op {
-        "=" => QueryCompareOp::Eq,
-        "<>" | "!=" => QueryCompareOp::NotEq,
-        "<" => QueryCompareOp::Lt,
-        "<=" => QueryCompareOp::LtEq,
-        ">" => QueryCompareOp::Gt,
-        ">=" => QueryCompareOp::GtEq,
-        "is distinct from" => QueryCompareOp::IsDistinctFrom,
-        "is not distinct from" => QueryCompareOp::IsNotDistinctFrom,
-        _ => return None,
-    })
-}
-
-fn render_query_compare_op(op: QueryCompareOp) -> &'static str {
-    match op {
-        QueryCompareOp::Eq => "=",
-        QueryCompareOp::NotEq => "!=",
-        QueryCompareOp::Lt => "<",
-        QueryCompareOp::LtEq => "<=",
-        QueryCompareOp::Gt => ">",
-        QueryCompareOp::GtEq => ">=",
-        QueryCompareOp::IsDistinctFrom => "is distinct from",
-        QueryCompareOp::IsNotDistinctFrom => "is not distinct from",
-    }
-}
-
-fn split_top_level_comparison(input: &str) -> Option<(&str, &'static str, &str)> {
-    const OPERATORS: [&str; 8] = [
-        " is not distinct from ",
-        " is distinct from ",
-        ">=",
-        "<=",
-        "<>",
-        "!=",
-        "=",
-        ">",
-    ];
-
-    for op in OPERATORS {
-        if let Some(idx) = find_top_level_token(input, op) {
-            let left = input[..idx].trim();
-            let right = input[idx + op.len()..].trim();
-            if !left.is_empty() && !right.is_empty() {
-                return Some((left, op.trim(), right));
-            }
-        }
-    }
-
-    if let Some(idx) = find_top_level_token(input, "<") {
-        let left = input[..idx].trim();
-        let right = input[idx + 1..].trim();
-        if !left.is_empty() && !right.is_empty() {
-            return Some((left, "<", right));
-        }
-    }
-
-    None
-}
-
-fn looks_like_aggregate_expr(expr: &str) -> bool {
-    let trimmed = expr.trim_start();
-    let lower = trimmed.to_ascii_lowercase();
-    [
-        "count(",
-        "sum(",
-        "avg(",
-        "min(",
-        "max(",
-        "bool_and(",
-        "bool_or(",
-        "every(",
-        "array_agg(",
-        "string_agg(",
-        "json_agg(",
-        "jsonb_agg(",
-        "json_object_agg(",
-        "jsonb_object_agg(",
-        "xmlagg(",
-    ]
-    .iter()
-    .any(|prefix| lower.starts_with(prefix))
-}
-
-fn find_keyword_at_top_level(input: &str, keyword: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let keyword_len = keyword.len();
-
-    for (idx, ch) in input.char_indices() {
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-            continue;
-        }
-        if in_double {
-            if ch == '"' {
-                in_double = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' => in_single = true,
-            '"' => in_double = true,
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-
-        if depth != 0 {
-            continue;
-        }
-
-        let tail = &input[idx..];
-        if tail.len() < keyword_len {
-            continue;
-        }
-        if !tail[..keyword_len].eq_ignore_ascii_case(keyword) {
-            continue;
-        }
-        let prev_ok = idx == 0
-            || !input[..idx]
-                .chars()
-                .next_back()
-                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-        let next_ok = tail[keyword_len..]
-            .chars()
-            .next()
-            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
-        if prev_ok && next_ok {
-            return Some(idx);
-        }
-    }
-
-    None
-}
-
-fn find_top_level_token(input: &str, token: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-
-    for (idx, ch) in input.char_indices() {
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-            continue;
-        }
-        if in_double {
-            if ch == '"' {
-                in_double = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' => in_single = true,
-            '"' => in_double = true,
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-
-        if depth == 0 && input[idx..].starts_with(token) {
-            return Some(idx);
-        }
-    }
-
-    None
 }
 
 fn normalize_plpgsql_sql_statement(stmt: Statement, env: &CompileEnv) -> Statement {
@@ -6155,16 +4694,6 @@ fn compile_select_into_target(
         name,
         not_null,
     })
-}
-
-fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
-    if argtypes.trim().is_empty() {
-        return Some(Vec::new());
-    }
-    argtypes
-        .split_whitespace()
-        .map(|part| part.parse::<u32>().ok())
-        .collect()
 }
 
 #[allow(dead_code)]

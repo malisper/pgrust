@@ -5,7 +5,7 @@ use pgrust_access::access::amapi as access_amapi;
 use crate::backend::access::transam::xact::Snapshot;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::{ExecutorCatalog, RelationDesc, SessionReplicationRole};
+use crate::backend::executor::ExecutorCatalog;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::AdvisoryLockManager;
 use crate::backend::storage::smgr::RelFileLocator;
@@ -18,9 +18,10 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::tidbitmap::TidBitmap;
-use crate::include::nodes::primnodes::ToastRelationRef;
+use crate::include::nodes::primnodes::{RelationDesc, ToastRelationRef};
 use crate::pgrust::database::{LargeObjectRuntime, SequenceRuntime, TransactionWaiter};
 use crate::{BufferPool, ClientId};
+use pgrust_nodes::SessionReplicationRole;
 
 // :HACK: root compatibility re-export while AM callbacks still use root-owned
 // runtime context structs below.

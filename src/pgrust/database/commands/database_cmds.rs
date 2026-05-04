@@ -8,8 +8,27 @@ use crate::include::catalog::{
     DEFAULT_TABLESPACE_OID, PG_SHDESCRIPTION_RELATION_OID, TEMPLATE0_DATABASE_NAME,
     TEMPLATE1_DATABASE_NAME,
 };
+use pgrust_commands::database::{database_encoding_code, option_non_default};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+fn database_command_error_to_exec(
+    error: pgrust_commands::database::DatabaseCommandError,
+) -> ExecError {
+    match error {
+        pgrust_commands::database::DatabaseCommandError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+    }
+}
 
 impl Database {
     pub(crate) fn execute_create_database_stmt(
@@ -122,7 +141,8 @@ impl Database {
             row.datconnlimit = stmt.options.connection_limit.unwrap_or(-1);
             row.dattablespace = tablespace_oid;
             if let Some(encoding) = option_non_default(&stmt.options.encoding) {
-                row.encoding = database_encoding_code(encoding)?;
+                row.encoding =
+                    database_encoding_code(encoding).map_err(database_command_error_to_exec)?;
             }
             if let Some(lc_collate) = option_non_default(&stmt.options.lc_collate) {
                 row.datcollate = lc_collate.into();
@@ -566,25 +586,6 @@ impl Database {
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
-    }
-}
-
-fn option_non_default(value: &Option<String>) -> Option<&str> {
-    value
-        .as_deref()
-        .filter(|value| !value.eq_ignore_ascii_case("default"))
-}
-
-fn database_encoding_code(encoding: &str) -> Result<i32, ExecError> {
-    match encoding.to_ascii_lowercase().replace('-', "_").as_str() {
-        "utf8" | "unicode" => Ok(6),
-        "sql_ascii" => Ok(0),
-        _ => Err(ExecError::DetailedError {
-            message: format!("{} is not a valid encoding name", encoding),
-            detail: None,
-            hint: None,
-            sqlstate: "22023",
-        }),
     }
 }
 

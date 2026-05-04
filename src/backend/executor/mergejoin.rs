@@ -1,12 +1,6 @@
-use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::MaterializedRow;
 
-pub(crate) type MergeKey = Vec<Value>;
-
-#[derive(Debug)]
-pub(crate) struct MergeJoinBufferedRow {
-    pub(crate) row: MaterializedRow,
-    pub(crate) key: MergeKey,
-    pub(crate) matchable: bool,
-    pub(crate) matched: bool,
-}
+// :HACK: Preserve the historical root executor path while merge-join runtime
+// state shapes live in `pgrust_executor`.
+pub(crate) type MergeKey = pgrust_executor::MergeKey;
+pub(crate) type MergeJoinBufferedRow = pgrust_executor::MergeJoinBufferedRow<MaterializedRow>;

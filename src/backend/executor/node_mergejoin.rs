@@ -12,6 +12,12 @@ use crate::include::nodes::execnodes::{
 };
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{Expr, JoinType};
+use pgrust_executor::{
+    combined_join_values, compare_merge_keys as compare_merge_keys_with_collations,
+    group_end_by_merge_key, merge_system_bindings, null_extended_left_values,
+    null_extended_right_values, set_inner_expr_bindings as set_inner_eval_bindings,
+    set_outer_expr_bindings as set_outer_eval_bindings,
+};
 
 fn eval_bool_expr(
     expr: &Expr,
@@ -56,8 +62,7 @@ fn set_outer_expr_bindings(
     values: Vec<Value>,
     bindings: &[SystemVarBinding],
 ) {
-    ctx.expr_bindings.outer_tuple = Some(values);
-    ctx.expr_bindings.outer_system_bindings = bindings.to_vec();
+    set_outer_eval_bindings(&mut ctx.expr_bindings, values, bindings);
 }
 
 fn set_inner_expr_bindings(
@@ -65,24 +70,7 @@ fn set_inner_expr_bindings(
     values: Vec<Value>,
     bindings: &[SystemVarBinding],
 ) {
-    ctx.expr_bindings.inner_tuple = Some(values);
-    ctx.expr_bindings.inner_system_bindings = bindings.to_vec();
-}
-
-fn merge_system_bindings(
-    left: &[SystemVarBinding],
-    right: &[SystemVarBinding],
-) -> Vec<SystemVarBinding> {
-    let mut merged = left.to_vec();
-    for binding in right {
-        if !merged
-            .iter()
-            .any(|existing| existing.varno == binding.varno)
-        {
-            merged.push(*binding);
-        }
-    }
-    merged
+    set_inner_eval_bindings(&mut ctx.expr_bindings, values, bindings);
 }
 
 fn eval_merge_key_exprs(
@@ -109,34 +97,24 @@ fn merge_clause_collation(clause: &Expr) -> Option<u32> {
     }
 }
 
+fn merge_clause_collations(clauses: &[Expr]) -> Vec<Option<u32>> {
+    clauses.iter().map(merge_clause_collation).collect()
+}
+
 fn compare_merge_keys(
     clauses: &[Expr],
     descending: &[bool],
     left: &[Value],
     right: &[Value],
 ) -> Result<Ordering, ExecError> {
-    for (index, ((left_value, right_value), clause)) in left
-        .iter()
-        .zip(right.iter())
-        .zip(clauses.iter())
-        .enumerate()
-    {
-        let descending = descending.get(index).copied().unwrap_or(false);
-        let mut ordering = compare_order_values(
-            left_value,
-            right_value,
-            merge_clause_collation(clause),
-            Some(false),
-            false,
-        )?;
-        if descending {
-            ordering = ordering.reverse();
-        }
-        if ordering != Ordering::Equal {
-            return Ok(ordering);
-        }
-    }
-    Ok(Ordering::Equal)
+    let collations = merge_clause_collations(clauses);
+    compare_merge_keys_with_collations(
+        &collations,
+        descending,
+        left,
+        right,
+        |left, right, collation| compare_order_values(left, right, collation, Some(false), false),
+    )
 }
 
 fn materialize_keyed_rows(
@@ -161,31 +139,19 @@ fn materialize_keyed_rows(
     Ok(rows)
 }
 
-fn same_merge_key(clauses: &[Expr], left: &MergeKey, right: &MergeKey) -> Result<bool, ExecError> {
-    Ok(compare_merge_keys(clauses, &[], left, right)? == Ordering::Equal)
-}
-
 fn group_end(
     rows: &[MergeJoinBufferedRow],
     start: usize,
     clauses: &[Expr],
 ) -> Result<usize, ExecError> {
-    let first_key = &rows[start].key;
-    let mut end = start + 1;
-    while end < rows.len() {
-        let next_key = &rows[end].key;
-        if !same_merge_key(clauses, first_key, next_key)? {
-            break;
-        }
-        end += 1;
-    }
-    Ok(end)
+    let collations = merge_clause_collations(clauses);
+    group_end_by_merge_key(rows, start, &collations, |left, right, collation| {
+        compare_order_values(left, right, collation, Some(false), false)
+    })
 }
 
 fn combined_values(left: &MaterializedRow, right: &MaterializedRow) -> Vec<Value> {
-    let mut values = left.slot.tts_values.clone();
-    values.extend(right.slot.tts_values.iter().cloned());
-    values
+    combined_join_values(&left.slot.tts_values, &right.slot.tts_values)
 }
 
 fn output_left_only(left: &MaterializedRow) -> MaterializedRow {
@@ -196,14 +162,12 @@ fn output_left_only(left: &MaterializedRow) -> MaterializedRow {
 }
 
 fn output_null_extended_left(left: &MaterializedRow, right_width: usize) -> MaterializedRow {
-    let mut values = left.slot.tts_values.clone();
-    values.extend(std::iter::repeat_n(Value::Null, right_width));
+    let values = null_extended_left_values(&left.slot.tts_values, right_width);
     MaterializedRow::new(TupleSlot::virtual_row(values), left.system_bindings.clone())
 }
 
 fn output_null_extended_right(right: &MaterializedRow, left_width: usize) -> MaterializedRow {
-    let mut values = vec![Value::Null; left_width];
-    values.extend(right.slot.tts_values.iter().cloned());
+    let values = null_extended_right_values(&right.slot.tts_values, left_width);
     MaterializedRow::new(
         TupleSlot::virtual_row(values),
         right.system_bindings.clone(),

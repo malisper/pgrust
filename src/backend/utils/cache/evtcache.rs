@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::SessionReplicationRole;
 use crate::backend::utils::cache::syscache::BackendCacheContext;
 use crate::backend::utils::time::snapmgr::get_catalog_snapshot;
 use crate::include::catalog::{PgEventTriggerRow, sort_pg_event_trigger_rows};
 use crate::pgrust::database::Database;
+use pgrust_nodes::SessionReplicationRole;
 
 const EVENT_TRIGGER_DISABLED: char = 'D';
 const EVENT_TRIGGER_ENABLED_ORIGIN: char = 'O';

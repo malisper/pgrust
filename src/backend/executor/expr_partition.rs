@@ -10,6 +10,25 @@ use crate::include::catalog::{ANYOID, OID_TYPE_OID, builtin_scalar_function_for_
 use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::parsenodes::SqlType;
 use crate::include::nodes::primnodes::{BuiltinScalarFunction, Expr, expr_sql_type_hint};
+use pgrust_executor::{
+    HashPartitionArgError, hash_partition_int32_arg, hash_partition_key_count_error,
+    hash_partition_key_type_error, hash_partition_oid_arg_to_u32,
+    hash_partition_relation_open_error, hash_partition_support_proc_return_error,
+    not_hash_partitioned_error as not_hash_partitioned_message,
+    unsupported_hash_partition_key_error, validate_hash_partition_modulus_remainder,
+};
+
+impl From<HashPartitionArgError> for ExecError {
+    fn from(error: HashPartitionArgError) -> Self {
+        match error {
+            HashPartitionArgError::OidOutOfRange => ExecError::OidOutOfRange,
+            HashPartitionArgError::TypeMismatch { op, left, right } => {
+                ExecError::TypeMismatch { op, left, right }
+            }
+            HashPartitionArgError::InvalidModulus { message } => detailed_error(message, "22023"),
+        }
+    }
+}
 
 pub(crate) fn eval_satisfies_hash_partition(
     args: &[Expr],
@@ -34,9 +53,9 @@ pub(crate) fn eval_satisfies_hash_partition(
         return Ok(Value::Bool(false));
     }
 
-    let parent_oid = oid_arg_to_u32(&parent, "satisfies_hash_partition")?;
-    let modulus = int32_arg(&modulus, "satisfies_hash_partition")?;
-    let remainder = int32_arg(&remainder, "satisfies_hash_partition")?;
+    let parent_oid = hash_partition_oid_arg_to_u32(&parent, "satisfies_hash_partition")?;
+    let modulus = hash_partition_int32_arg(&modulus, "satisfies_hash_partition")?;
+    let remainder = hash_partition_int32_arg(&remainder, "satisfies_hash_partition")?;
     validate_hash_partition_modulus_remainder(modulus, remainder)?;
 
     let catalog = executor_catalog(ctx)?;
@@ -198,38 +217,10 @@ fn execute_partition_hash_support_proc(
         Value::Int64(value) => Ok(Some(value as u64)),
         Value::Int32(value) => Ok(Some(value as u64)),
         Value::Int16(value) => Ok(Some(value as u64)),
-        other => Err(ExecError::DetailedError {
-            message: "hash partition support function returned non-integer value".into(),
-            detail: Some(format!("returned {other:?}")),
-            hint: None,
-            sqlstate: "XX000",
-        }),
+        other => Err(partition_error(hash_partition_support_proc_return_error(
+            format!("returned {other:?}"),
+        ))),
     }
-}
-
-fn validate_hash_partition_modulus_remainder(
-    modulus: i32,
-    remainder: i32,
-) -> Result<(), ExecError> {
-    if modulus <= 0 {
-        return Err(detailed_error(
-            "modulus for hash partition must be an integer value greater than zero",
-            "22023",
-        ));
-    }
-    if remainder < 0 {
-        return Err(detailed_error(
-            "remainder for hash partition must be an integer value greater than or equal to zero",
-            "22023",
-        ));
-    }
-    if remainder >= modulus {
-        return Err(detailed_error(
-            "remainder for hash partition must be less than modulus",
-            "22023",
-        ));
-    }
-    Ok(())
 }
 
 fn argument_type_matches(actual: SqlType, expected: SqlType) -> bool {
@@ -258,52 +249,10 @@ fn executor_catalog(ctx: &ExecutorContext) -> Result<ExecutorCatalog, ExecError>
         .ok_or_else(|| detailed_error("satisfies_hash_partition requires catalog context", "0A000"))
 }
 
-fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
-    match value {
-        Value::Int32(oid) => u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange),
-        Value::Int64(oid) => u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange),
-        _ if value.as_text().is_some() => value
-            .as_text()
-            .expect("guarded above")
-            .trim()
-            .parse::<u32>()
-            .map_err(|_| ExecError::TypeMismatch {
-                op,
-                left: value.clone(),
-                right: Value::Int64(i64::from(OID_TYPE_OID)),
-            }),
-        _ => Err(ExecError::TypeMismatch {
-            op,
-            left: value.clone(),
-            right: Value::Int64(i64::from(OID_TYPE_OID)),
-        }),
-    }
-}
-
-fn int32_arg(value: &Value, op: &'static str) -> Result<i32, ExecError> {
-    match value {
-        Value::Int16(value) => Ok(i32::from(*value)),
-        Value::Int32(value) => Ok(*value),
-        Value::Int64(value) => i32::try_from(*value).map_err(|_| ExecError::TypeMismatch {
-            op,
-            left: Value::Int64(*value),
-            right: Value::Int32(0),
-        }),
-        _ => Err(ExecError::TypeMismatch {
-            op,
-            left: value.clone(),
-            right: Value::Int32(0),
-        }),
-    }
-}
-
 fn key_count_error(expected: usize, actual: usize) -> Result<Value, ExecError> {
-    Err(detailed_error(
-        format!(
-            "number of partitioning columns ({expected}) does not match number of partition keys provided ({actual})"
-        ),
-        "22023",
-    ))
+    Err(partition_error(hash_partition_key_count_error(
+        expected, actual,
+    )))
 }
 
 fn key_type_error(
@@ -315,42 +264,24 @@ fn key_type_error(
 ) -> Result<Value, ExecError> {
     let expected = format_partition_type(expected, catalog);
     let actual = format_partition_type(actual, catalog);
-    let (expected, actual) = if quoted {
-        (format!("\"{expected}\""), format!("\"{actual}\""))
-    } else {
-        (expected, actual)
-    };
-    Err(detailed_error(
-        format!(
-            "column {} of the partition key has type {expected}, but supplied value is of type {actual}",
-            key_index + 1
-        ),
-        "22023",
-    ))
+    Err(partition_error(hash_partition_key_type_error(
+        key_index, expected, actual, quoted,
+    )))
 }
 
 fn relation_open_error(relation_oid: u32) -> ExecError {
-    detailed_error(
-        format!("could not open relation with OID {relation_oid}"),
-        "42P01",
-    )
+    partition_error(hash_partition_relation_open_error(relation_oid))
 }
 
 fn not_hash_partitioned_error(catalog: &dyn CatalogLookup, relation_oid: u32) -> ExecError {
-    detailed_error(
-        format!(
-            "\"{}\" is not a hash partitioned table",
-            relation_name_for_oid(catalog, relation_oid)
-        ),
-        "22023",
-    )
+    partition_error(not_hash_partitioned_message(relation_name_for_oid(
+        catalog,
+        relation_oid,
+    )))
 }
 
 fn unsupported_hash_key_error(message: String) -> ExecError {
-    detailed_error(
-        format!("unsupported hash partition key value {message}"),
-        "0A000",
-    )
+    partition_error(unsupported_hash_partition_key_error(message))
 }
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
@@ -372,6 +303,16 @@ fn detailed_error(message: impl Into<String>, sqlstate: &'static str) -> ExecErr
     ExecError::DetailedError {
         message: message.into(),
         detail: None,
+        hint: None,
+        sqlstate,
+    }
+}
+
+fn partition_error(error: pgrust_executor::PartitionErrorMessage) -> ExecError {
+    let (message, detail, sqlstate) = error.split_detail();
+    ExecError::DetailedError {
+        message,
+        detail,
         hint: None,
         sqlstate,
     }

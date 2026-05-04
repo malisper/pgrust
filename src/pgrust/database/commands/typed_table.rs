@@ -1,13 +1,29 @@
 use super::super::*;
-use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
+use crate::backend::executor::StatementResult;
 use crate::backend::parser::{
-    AlterTableNotOfStatement, AlterTableOfStatement, BoundRelation, CatalogLookup, ParseError,
-    SqlTypeKind,
+    AlterTableNotOfStatement, AlterTableOfStatement, BoundRelation, CatalogLookup,
 };
-use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, PgTypeRow};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table, map_catalog_error,
 };
+use pgrust_commands::typed_table::TypedTableError;
+
+fn typed_table_error_to_exec(error: TypedTableError) -> ExecError {
+    match error {
+        TypedTableError::Parse(error) => ExecError::Parse(error),
+        TypedTableError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+    }
+}
 
 impl Database {
     pub(crate) fn execute_alter_table_of_stmt_with_search_path(
@@ -178,67 +194,17 @@ impl Database {
 pub(crate) fn resolve_standalone_composite_type(
     catalog: &dyn CatalogLookup,
     type_name: &str,
-) -> Result<(PgTypeRow, BoundRelation), ExecError> {
-    let type_row = catalog
-        .type_by_name(type_name)
-        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(type_name.to_string())))?;
-    if matches!(type_row.sql_type.kind, SqlTypeKind::Shell) {
-        return Err(ExecError::DetailedError {
-            message: format!("type \"{}\" is only a shell", type_row.typname),
-            detail: None,
-            hint: None,
-            sqlstate: "42809",
-        });
-    }
-    if !matches!(type_row.sql_type.kind, SqlTypeKind::Composite) || type_row.typrelid == 0 {
-        return Err(ExecError::DetailedError {
-            message: format!("type {} is not a composite type", type_row.typname),
-            detail: None,
-            hint: None,
-            sqlstate: "42809",
-        });
-    }
-    let class_row = catalog.class_row_by_oid(type_row.typrelid).ok_or_else(|| {
-        ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "composite type relation",
-            actual: format!("missing relation oid {}", type_row.typrelid),
-        })
-    })?;
-    if class_row.relkind != 'c' {
-        return Err(ExecError::DetailedError {
-            message: format!("type {} is the row type of another table", type_row.typname),
-            detail: Some(
-                "A typed table must use a stand-alone composite type created with CREATE TYPE."
-                    .into(),
-            ),
-            hint: None,
-            sqlstate: "42809",
-        });
-    }
-    let relation = catalog
-        .lookup_relation_by_oid(type_row.typrelid)
-        .ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "composite type relation",
-                actual: format!("missing relation oid {}", type_row.typrelid),
-            })
-        })?;
-    Ok((type_row, relation))
+) -> Result<(crate::include::catalog::PgTypeRow, BoundRelation), ExecError> {
+    pgrust_commands::typed_table::resolve_standalone_composite_type(catalog, type_name)
+        .map_err(typed_table_error_to_exec)
 }
 
 pub(crate) fn reject_typed_table_ddl(
     relation: &BoundRelation,
     operation: &str,
 ) -> Result<(), ExecError> {
-    if relation.of_type_oid != 0 {
-        return Err(ExecError::DetailedError {
-            message: format!("cannot {operation} typed table"),
-            detail: None,
-            hint: None,
-            sqlstate: "42809",
-        });
-    }
-    Ok(())
+    pgrust_commands::typed_table::reject_typed_table_ddl(relation, operation)
+        .map_err(typed_table_error_to_exec)
 }
 
 fn reject_alter_table_of_target(
@@ -246,81 +212,14 @@ fn reject_alter_table_of_target(
     relation: &BoundRelation,
     operation: &str,
 ) -> Result<(), ExecError> {
-    if relation.namespace_oid == PG_CATALOG_NAMESPACE_OID {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "user table for typed table operation",
-            actual: "system catalog".into(),
-        }));
-    }
-    if relation.relpersistence == 't' {
-        return Err(ExecError::DetailedError {
-            message: format!("{operation} is not supported for temporary tables"),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    if !catalog
-        .inheritance_parents(relation.relation_oid)
-        .is_empty()
-        || catalog.has_subclass(relation.relation_oid)
-    {
-        return Err(ExecError::DetailedError {
-            message: "cannot change typed-table status of inherited table".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42809",
-        });
-    }
-    Ok(())
+    pgrust_commands::typed_table::reject_alter_table_of_target(catalog, relation, operation)
+        .map_err(typed_table_error_to_exec)
 }
 
 fn validate_typed_table_compatibility(
     relation: &BoundRelation,
     type_relation: &BoundRelation,
 ) -> Result<(), ExecError> {
-    let table_columns = visible_columns(&relation.desc);
-    let type_columns = visible_columns(&type_relation.desc);
-    if table_columns.len() != type_columns.len() {
-        return Err(typed_table_mismatch_error(
-            "table has a different number of columns",
-        ));
-    }
-    for (table_column, type_column) in table_columns.into_iter().zip(type_columns) {
-        if !table_column.name.eq_ignore_ascii_case(&type_column.name) {
-            return Err(typed_table_mismatch_error(&format!(
-                "column \"{}\" has a different name",
-                table_column.name
-            )));
-        }
-        if table_column.sql_type != type_column.sql_type {
-            return Err(typed_table_mismatch_error(&format!(
-                "column \"{}\" has a different type",
-                table_column.name
-            )));
-        }
-        if table_column.collation_oid != type_column.collation_oid {
-            return Err(typed_table_mismatch_error(&format!(
-                "column \"{}\" has a different collation",
-                table_column.name
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn visible_columns(desc: &RelationDesc) -> Vec<&ColumnDesc> {
-    desc.columns
-        .iter()
-        .filter(|column| !column.dropped)
-        .collect()
-}
-
-fn typed_table_mismatch_error(detail: &str) -> ExecError {
-    ExecError::DetailedError {
-        message: "table is not compatible with composite type".into(),
-        detail: Some(detail.to_string()),
-        hint: None,
-        sqlstate: "42809",
-    }
+    pgrust_commands::typed_table::validate_typed_table_compatibility(relation, type_relation)
+        .map_err(typed_table_error_to_exec)
 }

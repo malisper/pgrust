@@ -1,6 +1,6 @@
 use super::render_bit_text;
 use super::{
-    cast_value_with_source_type_catalog_and_config, compare_order_values, parse_numeric_text,
+    cast_value_with_source_type_catalog_and_config, compare_order_values,
     render_datetime_value_text, render_interval_text, render_macaddr_text, render_macaddr8_text,
 };
 use crate::backend::executor::ExecError;
@@ -25,8 +25,6 @@ use crate::include::nodes::primnodes::{
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 
-use num_bigint::BigInt;
-use num_traits::{Signed, Zero};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -34,34 +32,14 @@ use super::expr_multirange::{multirange_intersection_agg_transition, range_agg_t
 use super::expr_range::{range_intersection_agg_transition, render_range_text};
 use super::expr_xml::concat_xml_texts;
 use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
+pub(crate) use pgrust_executor::{
+    CustomAggregateRuntime, NumericAccum, accumulate_sum_value, accumulate_value,
+    aggregate_float_value, aggregate_numeric_value, format_numeric_result, numeric_accum_to_value,
+    numeric_div_display_scale, numeric_quotient_decimal_weight, numeric_sqrt,
+    numeric_visible_scale,
+};
 
 pub(crate) type AggTransitionFn = fn(&mut AccumState, &[Value]) -> Result<(), ExecError>;
-
-#[derive(Debug, Clone)]
-pub(crate) struct CustomAggregateRuntime {
-    pub(crate) transfn_oid: u32,
-    pub(crate) transfn_strict: bool,
-    pub(crate) combinefn_oid: Option<u32>,
-    pub(crate) combinefn_strict: bool,
-    pub(crate) finalfn_oid: Option<u32>,
-    pub(crate) finalfn_strict: bool,
-    pub(crate) mtransfn_oid: Option<u32>,
-    pub(crate) mtransfn_strict: bool,
-    pub(crate) minvtransfn_oid: Option<u32>,
-    pub(crate) minvtransfn_strict: bool,
-    pub(crate) mfinalfn_oid: Option<u32>,
-    pub(crate) mfinalfn_strict: bool,
-    pub(crate) transtype: SqlType,
-    pub(crate) mtranstype: SqlType,
-    pub(crate) transfn_arg_types: Vec<SqlType>,
-    pub(crate) combinefn_arg_types: Vec<SqlType>,
-    pub(crate) finalfn_arg_types: Vec<SqlType>,
-    pub(crate) mtransfn_arg_types: Vec<SqlType>,
-    pub(crate) minvtransfn_arg_types: Vec<SqlType>,
-    pub(crate) mfinalfn_arg_types: Vec<SqlType>,
-    pub(crate) init_value: Option<Value>,
-    pub(crate) minit_value: Option<Value>,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) enum AggregateRuntime {
@@ -76,82 +54,6 @@ pub(crate) enum AggregateRuntime {
         func: OrderedSetAggFunc,
     },
     Custom(CustomAggregateRuntime),
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum NumericAccum {
-    Int(i64),
-    Float(f64),
-    Numeric(NumericValue),
-    NumericSum(NumericSumAccum),
-    Interval(IntervalValue),
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum NumericSumAccum {
-    Finite {
-        coeff: BigInt,
-        scale: u32,
-        dscale: u32,
-    },
-    Special(NumericValue),
-}
-
-impl NumericSumAccum {
-    fn new(value: &NumericValue) -> Self {
-        match value {
-            NumericValue::Finite {
-                coeff,
-                scale,
-                dscale,
-            } => NumericSumAccum::Finite {
-                coeff: coeff.clone(),
-                scale: *scale,
-                dscale: *dscale,
-            },
-            other => NumericSumAccum::Special(other.clone()),
-        }
-    }
-
-    fn add_numeric(&mut self, value: &NumericValue) {
-        match (self, value) {
-            (
-                NumericSumAccum::Finite {
-                    coeff,
-                    scale,
-                    dscale,
-                },
-                NumericValue::Finite {
-                    coeff: rhs,
-                    scale: rhs_scale,
-                    dscale: rhs_dscale,
-                },
-            ) if scale == rhs_scale => {
-                *coeff += rhs;
-                *dscale = (*dscale).max(*rhs_dscale);
-            }
-            (accum, value) => {
-                let sum = accum.to_numeric().add(value);
-                *accum = NumericSumAccum::new(&sum);
-            }
-        }
-    }
-
-    fn to_numeric(&self) -> NumericValue {
-        match self {
-            NumericSumAccum::Finite {
-                coeff,
-                scale,
-                dscale,
-            } => NumericValue::Finite {
-                coeff: coeff.clone(),
-                scale: *scale,
-                dscale: *dscale,
-            }
-            .normalize(),
-            NumericSumAccum::Special(value) => value.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1991,129 +1893,29 @@ fn finalize_regr_stats(
     all_x_equal: bool,
     all_y_equal: bool,
 ) -> Value {
-    let sum_sq_x = stable_regr_semidefinite_sum(sum_sq_x, sum_x, count);
-    let sum_sq_y = stable_regr_semidefinite_sum(sum_sq_y, sum_y, count);
-    match func {
-        AggFunc::RegrCount => Value::Int64(count as i64),
-        AggFunc::RegrSxx => regr_value_or_null(count, sum_sq_x),
-        AggFunc::RegrSyy => regr_value_or_null(count, sum_sq_y),
-        AggFunc::RegrSxy => regr_value_or_null(count, sum_xy),
-        AggFunc::RegrAvgX => regr_value_or_null(count, sum_x / count),
-        AggFunc::RegrAvgY => regr_value_or_null(count, sum_y / count),
-        AggFunc::CovarPop => regr_value_or_null(count, sum_xy / count),
-        AggFunc::CovarSamp => {
-            if count < 2.0 {
-                Value::Null
-            } else {
-                Value::Float64(sum_xy / (count - 1.0))
-            }
-        }
-        AggFunc::Corr => {
-            if count < 1.0 || all_x_equal || all_y_equal {
-                Value::Null
-            } else {
-                Value::Float64(clamp_corr(sum_xy / (sum_sq_x.sqrt() * sum_sq_y.sqrt())))
-            }
-        }
-        AggFunc::RegrR2 => {
-            if count < 1.0 || all_x_equal {
-                Value::Null
-            } else if all_y_equal {
-                Value::Float64(1.0)
-            } else {
-                let corr = clamp_corr(sum_xy / (sum_sq_x.sqrt() * sum_sq_y.sqrt()));
-                Value::Float64(clamp_regr_r2(corr * corr))
-            }
-        }
-        AggFunc::RegrSlope => {
-            if count < 1.0 || all_x_equal {
-                Value::Null
-            } else {
-                Value::Float64(sum_xy / sum_sq_x)
-            }
-        }
-        AggFunc::RegrIntercept => {
-            if count < 1.0 || all_x_equal {
-                Value::Null
-            } else {
-                Value::Float64((sum_y - sum_x * sum_xy / sum_sq_x) / count)
-            }
-        }
-        AggFunc::BoolAnd
-        | AggFunc::BoolOr
-        | AggFunc::Count
-        | AggFunc::AnyValue
-        | AggFunc::Sum
-        | AggFunc::Avg
-        | AggFunc::VarPop
-        | AggFunc::VarSamp
-        | AggFunc::StddevPop
-        | AggFunc::StddevSamp
-        | AggFunc::BitAnd
-        | AggFunc::BitOr
-        | AggFunc::BitXor
-        | AggFunc::Min
-        | AggFunc::Max
-        | AggFunc::StringAgg
-        | AggFunc::ArrayAgg
-        | AggFunc::JsonAgg
-        | AggFunc::JsonbAgg
-        | AggFunc::JsonObjectAgg
-        | AggFunc::JsonObjectAggUnique
-        | AggFunc::JsonObjectAggUniqueStrict
-        | AggFunc::JsonbObjectAgg
-        | AggFunc::JsonbObjectAggUnique
-        | AggFunc::JsonbObjectAggUniqueStrict
-        | AggFunc::RangeAgg
-        | AggFunc::XmlAgg
-        | AggFunc::RangeIntersectAgg => unreachable!("non-regression aggregate"),
-    }
+    pgrust_executor::finalize_regr_stats(
+        func,
+        count,
+        sum_x,
+        sum_sq_x,
+        sum_y,
+        sum_sq_y,
+        sum_xy,
+        all_x_equal,
+        all_y_equal,
+    )
 }
 
 fn stable_regr_semidefinite_sum(sum_sq: f64, sum: f64, count: f64) -> f64 {
-    if !sum_sq.is_finite() || !sum.is_finite() || count < 1.0 {
-        return sum_sq;
-    }
-
-    let mean = sum / count;
-    let tolerance = 8.0 * f64::EPSILON * count * mean * mean;
-    if sum_sq.abs() <= tolerance {
-        0.0
-    } else {
-        sum_sq
-    }
+    pgrust_executor::stable_regr_semidefinite_sum(sum_sq, sum, count)
 }
 
 fn clamp_corr(value: f64) -> f64 {
-    if !value.is_finite() {
-        value
-    } else {
-        let tolerance = 8.0 * f64::EPSILON;
-        if (value - 1.0).abs() <= tolerance {
-            1.0
-        } else if (value + 1.0).abs() <= tolerance {
-            -1.0
-        } else if value.abs() <= tolerance {
-            0.0
-        } else {
-            value.clamp(-1.0, 1.0)
-        }
-    }
+    pgrust_executor::clamp_corr(value)
 }
 
 fn clamp_regr_r2(value: f64) -> f64 {
-    if !value.is_finite() {
-        value
-    } else {
-        let tolerance = 8.0 * f64::EPSILON;
-        if value.abs() <= tolerance {
-            0.0
-        } else if (value - 1.0).abs() <= tolerance {
-            1.0
-        } else {
-            value.clamp(0.0, 1.0)
-        }
-    }
+    pgrust_executor::clamp_regr_r2(value)
 }
 
 fn float8_regr_constant_value_eq(value: f64, first: f64) -> bool {
@@ -2121,108 +1923,27 @@ fn float8_regr_constant_value_eq(value: f64, first: f64) -> bool {
 }
 
 fn regr_value_or_null(count: f64, value: f64) -> Value {
-    if count < 1.0 {
-        Value::Null
-    } else {
-        Value::Float64(value)
-    }
+    pgrust_executor::regr_value_or_null(count, value)
 }
 
 fn string_agg_input_bytes(value: &Value, bytea: bool) -> Vec<u8> {
-    match value {
-        Value::Null => Vec::new(),
-        Value::Bytea(bytes) if bytea => bytes.clone(),
-        _ if !bytea => value
-            .as_text()
-            .expect("text string_agg input must be text")
-            .as_bytes()
-            .to_vec(),
-        _ => panic!("bytea string_agg input must be bytea"),
-    }
+    pgrust_executor::string_agg_input_bytes(value, bytea)
 }
 
 fn validate_array_agg_array_input(
     value: &Value,
     inner_dims: &mut Option<Vec<ArrayDimension>>,
 ) -> Result<(), ExecError> {
-    let Some(array) = normalize_array_value(value) else {
-        return Err(ExecError::DetailedError {
-            message: "cannot accumulate null arrays".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "22004",
-        });
-    };
-    if array.dimensions.is_empty() {
-        return Err(ExecError::DetailedError {
-            message: "cannot accumulate empty arrays".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "2202E",
-        });
-    }
-    match inner_dims {
-        None => *inner_dims = Some(array.dimensions),
-        Some(existing) if existing.as_slice() != array.dimensions.as_slice() => {
-            return Err(ExecError::DetailedError {
-                message: "cannot accumulate arrays of different dimensionality".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "2202E",
-            });
-        }
-        Some(_) => {}
-    }
-    Ok(())
+    pgrust_executor::validate_array_agg_array_input(value, inner_dims)
+        .map_err(super::expr_agg_support::aggregate_support_error)
 }
 
 fn finalize_array_agg(values: &[Value]) -> Value {
-    if values.is_empty() {
-        return Value::Null;
-    }
-    let first_non_null = values.iter().find(|value| !matches!(value, Value::Null));
-    let Some(first_non_null) = first_non_null else {
-        return Value::PgArray(ArrayValue::from_1d(values.to_vec()));
-    };
-    if let Some(first_array) = normalize_array_value(first_non_null) {
-        let mut elements = Vec::new();
-        let mut inner_dims: Option<Vec<ArrayDimension>> = None;
-        for value in values {
-            let Some(array) = normalize_array_value(value) else {
-                return Value::Null;
-            };
-            if array.dimensions.is_empty() {
-                return Value::Null;
-            }
-            match &inner_dims {
-                None => inner_dims = Some(array.dimensions.clone()),
-                Some(existing) if *existing != array.dimensions => return Value::Null,
-                Some(_) => {}
-            }
-            elements.extend(array.elements.clone());
-        }
-        let mut dimensions = vec![ArrayDimension {
-            lower_bound: 1,
-            length: values.len(),
-        }];
-        dimensions.extend(first_array.dimensions);
-        return Value::PgArray(ArrayValue::from_dimensions(dimensions, elements));
-    }
-    Value::PgArray(ArrayValue::from_dimensions(
-        vec![ArrayDimension {
-            lower_bound: 1,
-            length: values.len(),
-        }],
-        values.to_vec(),
-    ))
+    pgrust_executor::finalize_array_agg(values)
 }
 
 fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
-    match value {
-        Value::PgArray(array) => Some(array.clone()),
-        Value::Array(items) => Some(ArrayValue::from_1d(items.clone())),
-        _ => None,
-    }
+    pgrust_executor::normalize_aggregate_array_value(value)
 }
 
 fn render_json_array(values: &[Value]) -> String {
@@ -2445,166 +2166,12 @@ fn value_to_json_text(value: &Value) -> String {
     }
 }
 
-fn accumulate_value(
-    sum: Option<NumericAccum>,
-    result_type: SqlType,
-    value: &Value,
-) -> Option<NumericAccum> {
-    match value {
-        Value::Null => sum,
-        Value::Int16(v) => Some(accumulate_integral(sum, result_type, *v as i64)),
-        Value::Int32(v) => Some(accumulate_integral(sum, result_type, *v as i64)),
-        Value::Int64(v) => Some(accumulate_integral(sum, result_type, *v)),
-        Value::Money(v) => Some(accumulate_integral(sum, result_type, *v)),
-        Value::Float64(v) => Some(match sum {
-            Some(NumericAccum::NumericSum(mut cur)) => {
-                let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
-                cur.add_numeric(&rhs);
-                NumericAccum::NumericSum(cur)
-            }
-            Some(NumericAccum::Numeric(cur)) => {
-                let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
-                NumericAccum::Numeric(cur.add(&rhs))
-            }
-            Some(NumericAccum::Int(cur)) => NumericAccum::Float(cur as f64 + *v),
-            Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v),
-            Some(NumericAccum::Interval(_)) | None => {
-                if matches!(result_type.kind, SqlTypeKind::Numeric) {
-                    NumericAccum::Numeric(
-                        parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero),
-                    )
-                } else {
-                    NumericAccum::Float(*v)
-                }
-            }
-        }),
-        Value::Numeric(v) => {
-            let parsed = v.clone();
-            Some(match sum {
-                Some(NumericAccum::NumericSum(mut cur)) => {
-                    cur.add_numeric(&parsed);
-                    NumericAccum::NumericSum(cur)
-                }
-                Some(NumericAccum::Numeric(cur)) => NumericAccum::Numeric(cur.add(&parsed)),
-                Some(NumericAccum::Int(cur)) => {
-                    NumericAccum::Numeric(NumericValue::from_i64(cur).add(&parsed))
-                }
-                Some(NumericAccum::Float(cur)) => {
-                    let left =
-                        parse_numeric_text(&cur.to_string()).unwrap_or_else(NumericValue::zero);
-                    NumericAccum::Numeric(left.add(&parsed))
-                }
-                Some(NumericAccum::Interval(_)) | None => NumericAccum::Numeric(parsed),
-            })
-        }
-        _ => sum,
-    }
-}
-
-fn numeric_accum_to_value(sum: Option<&NumericAccum>, result_type: SqlType) -> Value {
-    match sum {
-        Some(NumericAccum::Int(value)) if matches!(result_type.kind, SqlTypeKind::Numeric) => {
-            Value::Numeric(NumericValue::from_i64(*value))
-        }
-        Some(NumericAccum::Int(value)) => Value::Int64(*value),
-        Some(NumericAccum::Float(value)) => Value::Float64(*value),
-        Some(NumericAccum::Numeric(value)) => Value::Numeric(value.clone()),
-        Some(NumericAccum::NumericSum(value)) => Value::Numeric(value.to_numeric()),
-        Some(NumericAccum::Interval(value)) => Value::Interval(*value),
-        None => Value::Null,
-    }
-}
-
-fn accumulate_sum_value(
-    sum: Option<NumericAccum>,
-    result_type: SqlType,
-    value: &Value,
-) -> Option<NumericAccum> {
-    match value {
-        Value::Null => sum,
-        Value::Int16(v) => Some(accumulate_integral(sum, result_type, *v as i64)),
-        Value::Int32(v) => Some(accumulate_integral(sum, result_type, *v as i64)),
-        Value::Int64(v) => Some(accumulate_integral(sum, result_type, *v)),
-        Value::Money(v) => Some(accumulate_integral(sum, result_type, *v)),
-        Value::Float64(v) => Some(match sum {
-            Some(NumericAccum::NumericSum(mut cur)) => {
-                let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
-                cur.add_numeric(&rhs);
-                NumericAccum::NumericSum(cur)
-            }
-            Some(NumericAccum::Numeric(cur)) => {
-                let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
-                NumericAccum::Numeric(cur.add(&rhs))
-            }
-            Some(NumericAccum::Int(cur)) => NumericAccum::Float(cur as f64 + *v),
-            Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v),
-            Some(NumericAccum::Interval(_)) | None => {
-                if matches!(result_type.kind, SqlTypeKind::Numeric) {
-                    let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
-                    NumericAccum::NumericSum(NumericSumAccum::new(&rhs))
-                } else {
-                    NumericAccum::Float(*v)
-                }
-            }
-        }),
-        Value::Numeric(v) => Some(match sum {
-            Some(NumericAccum::NumericSum(mut cur)) => {
-                cur.add_numeric(v);
-                NumericAccum::NumericSum(cur)
-            }
-            Some(NumericAccum::Numeric(cur)) => {
-                let mut accum = NumericSumAccum::new(&cur);
-                accum.add_numeric(v);
-                NumericAccum::NumericSum(accum)
-            }
-            Some(NumericAccum::Int(cur)) => {
-                let mut accum = NumericSumAccum::new(&NumericValue::from_i64(cur));
-                accum.add_numeric(v);
-                NumericAccum::NumericSum(accum)
-            }
-            Some(NumericAccum::Float(cur)) => {
-                let left = parse_numeric_text(&cur.to_string()).unwrap_or_else(NumericValue::zero);
-                let mut accum = NumericSumAccum::new(&left);
-                accum.add_numeric(v);
-                NumericAccum::NumericSum(accum)
-            }
-            Some(NumericAccum::Interval(_)) | None => {
-                NumericAccum::NumericSum(NumericSumAccum::new(v))
-            }
-        }),
-        _ => sum,
-    }
-}
-
 fn interval_avg_out_of_range() -> ExecError {
     ExecError::DetailedError {
         message: "interval out of range".into(),
         detail: None,
         hint: None,
         sqlstate: "22008",
-    }
-}
-
-fn aggregate_numeric_value(value: &Value) -> Option<NumericValue> {
-    match value {
-        Value::Null => None,
-        Value::Int16(v) => Some(NumericValue::from_i64(i64::from(*v))),
-        Value::Int32(v) => Some(NumericValue::from_i64(i64::from(*v))),
-        Value::Int64(v) => Some(NumericValue::from_i64(*v)),
-        Value::Float64(v) => parse_numeric_text(&v.to_string()),
-        Value::Numeric(v) => Some(v.clone()),
-        _ => None,
-    }
-}
-
-fn aggregate_float_value(value: &Value) -> Option<f64> {
-    match value {
-        Value::Null => None,
-        Value::Int16(v) => Some(f64::from(*v)),
-        Value::Int32(v) => Some(f64::from(*v)),
-        Value::Int64(v) => Some(*v as f64),
-        Value::Float64(v) => Some(*v),
-        _ => None,
     }
 }
 
@@ -2615,148 +2182,6 @@ fn float8_overflow_error() -> ExecError {
         hint: None,
         sqlstate: "22003",
     }
-}
-
-fn numeric_sqrt(value: &NumericValue, scale: u32) -> NumericValue {
-    match value {
-        NumericValue::Finite { coeff, .. } if coeff.is_zero() => NumericValue::zero(),
-        NumericValue::Finite { .. } => {
-            let seed = value
-                .render()
-                .parse::<f64>()
-                .ok()
-                .map(|v| v.sqrt())
-                .and_then(|v| parse_numeric_text(&format!("{v:.24}")))
-                .unwrap_or_else(|| NumericValue::from_i64(1));
-            let two = NumericValue::from_i64(2);
-            let mut current = seed;
-            for _ in 0..24 {
-                let next = current
-                    .add(
-                        &value
-                            .div(&current, scale + 12)
-                            .unwrap_or_else(NumericValue::zero),
-                    )
-                    .div(&two, scale + 12)
-                    .unwrap_or_else(|| current.clone());
-                if next.cmp(&current) == Ordering::Equal {
-                    current = next;
-                    break;
-                }
-                current = next;
-            }
-            current.round_to_scale(scale).unwrap_or(current)
-        }
-        NumericValue::PosInf => NumericValue::PosInf,
-        NumericValue::NegInf | NumericValue::NaN => NumericValue::NaN,
-    }
-}
-
-fn numeric_visible_scale(value: &NumericValue) -> u32 {
-    value
-        .render()
-        .split_once('.')
-        .map(|(_, frac)| frac.len() as u32)
-        .unwrap_or(0)
-}
-
-fn numeric_quotient_decimal_weight(lhs: &NumericValue, rhs: &NumericValue) -> i32 {
-    fn decimal_weight(value: &NumericValue) -> i32 {
-        match value {
-            NumericValue::Finite { coeff, scale, .. } if !coeff.is_zero() => {
-                coeff.abs().to_str_radix(10).len() as i32 - *scale as i32 - 1
-            }
-            _ => 0,
-        }
-    }
-
-    decimal_weight(lhs) - decimal_weight(rhs)
-}
-
-fn accumulate_integral(
-    sum: Option<NumericAccum>,
-    result_type: SqlType,
-    value: i64,
-) -> NumericAccum {
-    match sum {
-        Some(NumericAccum::NumericSum(mut cur)) => {
-            cur.add_numeric(&NumericValue::from_i64(value));
-            NumericAccum::NumericSum(cur)
-        }
-        Some(NumericAccum::Numeric(cur)) => {
-            NumericAccum::Numeric(cur.add(&NumericValue::from_i64(value)))
-        }
-        Some(NumericAccum::Int(cur)) => NumericAccum::Int(cur + value),
-        Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + value as f64),
-        Some(NumericAccum::Interval(_)) | None => {
-            if matches!(result_type.kind, SqlTypeKind::Numeric) {
-                NumericAccum::Numeric(NumericValue::from_i64(value))
-            } else {
-                NumericAccum::Int(value)
-            }
-        }
-    }
-}
-
-fn format_numeric_result(value: NumericValue, sql_type: SqlType) -> NumericValue {
-    if let Some((_, scale)) = sql_type.numeric_precision_scale() {
-        value.round_to_scale(scale as u32).unwrap_or(value)
-    } else {
-        value
-    }
-}
-
-fn floor_div_i32(value: i32, divisor: i32) -> i32 {
-    if value >= 0 {
-        value / divisor
-    } else {
-        -(((-value) + divisor - 1) / divisor)
-    }
-}
-
-fn numeric_div_display_scale(lhs: &NumericValue, rhs: &NumericValue) -> u32 {
-    const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
-    const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
-    const NUMERIC_MAX_DISPLAY_SCALE: i32 = 1000;
-    const DEC_DIGITS: i32 = 4;
-
-    fn normalized_weight_and_first_group(value: &NumericValue) -> (i32, i32, i32) {
-        match value {
-            NumericValue::Finite {
-                coeff,
-                scale,
-                dscale,
-            } if !coeff.is_zero() => {
-                let digits = coeff.abs().to_str_radix(10);
-                let dec_weight = digits.len() as i32 - (*scale as i32) - 1;
-                let group_weight = floor_div_i32(dec_weight, DEC_DIGITS);
-                let lead_len = (dec_weight - group_weight * DEC_DIGITS + 1).clamp(1, DEC_DIGITS);
-                let first_group = digits
-                    .chars()
-                    .take(lead_len as usize)
-                    .collect::<String>()
-                    .parse::<i32>()
-                    .unwrap_or(0);
-                (group_weight, first_group, *dscale as i32)
-            }
-            NumericValue::Finite { dscale, .. } => (0, 0, *dscale as i32),
-            _ => (0, 0, 0),
-        }
-    }
-
-    let (weight1, first1, dscale1) = normalized_weight_and_first_group(lhs);
-    let (weight2, first2, dscale2) = normalized_weight_and_first_group(rhs);
-    let mut qweight = weight1 - weight2;
-    if first1 <= first2 {
-        qweight -= 1;
-    }
-
-    let mut rscale = NUMERIC_MIN_SIG_DIGITS - qweight * DEC_DIGITS;
-    rscale = rscale.max(dscale1);
-    rscale = rscale.max(dscale2);
-    rscale = rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
-    rscale = rscale.min(NUMERIC_MAX_DISPLAY_SCALE);
-    rscale as u32
 }
 
 #[derive(Debug, Clone)]

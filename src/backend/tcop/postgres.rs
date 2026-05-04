@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::OnceLock;
@@ -15,9 +13,7 @@ use crate::backend::executor::exec_expr::{
 use crate::backend::executor::{
     ExecError, QueryColumn, StatementResult, ensure_no_deferred_column_errors,
 };
-use crate::backend::libpq::pqcomm::{
-    cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
-};
+use crate::backend::libpq::pqcomm::{cstr_from_bytes, read_byte, read_i32};
 use crate::backend::libpq::pqformat::{
     FloatFormatOptions, format_bytea_text, format_exec_error, format_exec_error_hint,
     infer_command_tag, infer_dml_returning_command_tag, send_auth_ok, send_backend_key_data,
@@ -34,7 +30,7 @@ use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{
     CatalogLookup, PartitionBoundSpec, PartitionRangeDatumValue, SelectStatement,
-    SerializedPartitionValue, Statement, deserialize_partition_bound, partition_value_to_value,
+    SerializedPartitionValue, Statement, deserialize_partition_bound,
 };
 use crate::backend::parser::{
     SqlType, SqlTypeKind, bind_delete, bind_insert, bind_update, parse_expr, plan_merge,
@@ -60,8 +56,7 @@ use crate::include::catalog::bootstrap::{
     PG_OPFAMILY_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
 };
 use crate::include::catalog::{
-    ANYELEMENTOID, PG_CLASS_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NDISTINCT_TYPE_OID, PgNamespaceRow, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
+    ANYELEMENTOID, PG_CLASS_RELATION_OID, PgNamespaceRow, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{
@@ -71,7 +66,6 @@ use crate::include::nodes::parsenodes::{CopyFormat, CopyToStatement};
 use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc, TargetEntry};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::ddl::format_sql_type_name;
-use crate::pgrust::session::LargeObjectFastpathCall;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
@@ -4234,10 +4228,7 @@ impl Drop for SessionActivityGuard<'_> {
 }
 
 fn query_id_for_sql(sql: &str) -> i64 {
-    let mut hasher = DefaultHasher::new();
-    sql.hash(&mut hasher);
-    let hash = hasher.finish() & 0x7fff_ffff_ffff_ffff;
-    i64::try_from(hash).unwrap_or(i64::MAX)
+    pgrust_protocol::sql::query_id_for_sql(sql)
 }
 
 fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
@@ -5991,17 +5982,7 @@ fn find_e_unicode_escape_token(sql: &str) -> Option<String> {
 }
 
 fn parse_e_unicode_escape(bytes: &[u8], start: usize) -> Option<(usize, u32)> {
-    if start + 2 > bytes.len() || bytes[start] != b'\\' {
-        return None;
-    }
-    let (len, digits_start, digits_end) = match bytes[start + 1] {
-        b'u' => (6, start + 2, start + 6),
-        b'U' => (10, start + 2, start + 10),
-        _ => return None,
-    };
-    let digits = std::str::from_utf8(&bytes[digits_start..digits_end]).ok()?;
-    let code = u32::from_str_radix(digits, 16).ok()?;
-    Some((len, code))
+    pgrust_protocol::sql::parse_e_unicode_escape(bytes, start)
 }
 
 fn send_exec_error(stream: &mut impl Write, sql: &str, e: &ExecError) -> io::Result<()> {
@@ -6269,56 +6250,20 @@ use crate::pgrust::portal::{CursorOptions, PortalFetchDirection, PortalFetchLimi
 use crate::pgrust::session::{
     CopyCommand, CopyDirection, CopyEndpoint, CopyExecutionResult, Session, parse_copy_command,
 };
+use pgrust_commands::wire::{WireCatalogMaps, enum_label_map};
+use pgrust_protocol::connection::ConnectionState as ProtocolConnectionState;
+use pgrust_protocol::copy::CopyInState;
+use pgrust_protocol::extended::{
+    BoundParam, PreparedStatement, RegclassParamResolver, required_bind_param_count,
+    substitute_params as protocol_substitute_params,
+};
+use pgrust_protocol::sql::SimpleQueryTxnControl;
 
-const SSL_REQUEST_CODE: i32 = 80877103;
-pub(crate) const PROTOCOL_VERSION_3_0: i32 = 196608;
+pub(crate) const PROTOCOL_VERSION_3_0: i32 = pgrust_protocol::pqcomm::PROTOCOL_VERSION_3_0;
 
 static NEXT_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
 
-#[derive(Default)]
-struct PreparedStatement {
-    sql: String,
-    param_type_oids: Vec<u32>,
-    prepare_time: i64,
-}
-
-#[derive(Debug, Clone)]
-enum BoundParam {
-    Null,
-    Text(String),
-    SqlExpression(String),
-}
-
-struct ConnectionState {
-    session: Session,
-    prepared: HashMap<String, PreparedStatement>,
-    portals: HashMap<String, ()>,
-    copy_in: Option<CopyInState>,
-    ignore_till_sync: bool,
-    extended_segment_command_count: usize,
-    pipeline_implicit_txn: bool,
-}
-
-impl ConnectionState {
-    fn new(session: Session) -> Self {
-        Self {
-            session,
-            prepared: HashMap::new(),
-            portals: HashMap::new(),
-            copy_in: None,
-            ignore_till_sync: false,
-            extended_segment_command_count: 0,
-            pipeline_implicit_txn: false,
-        }
-    }
-}
-
-struct CopyInState {
-    copy: CopyCommand,
-    sql: String,
-    pending: Vec<u8>,
-    continuation: Vec<String>,
-}
+type ConnectionState = ProtocolConnectionState<Session, CopyCommand>;
 
 struct ConnectionCleanupGuard<'a> {
     db: &'a Database,
@@ -6395,28 +6340,10 @@ where
 {
     let mut writer = BufWriter::new(writer);
 
-    let startup_params = loop {
-        let len = read_i32(&mut reader)? as usize;
-        if len < 4 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "startup packet too short",
-            ));
-        }
-        let mut payload = vec![0u8; len - 4];
-        reader.read_exact(&mut payload)?;
-
-        let code = i32::from_be_bytes(payload[0..4].try_into().unwrap());
-        match code {
-            SSL_REQUEST_CODE => {
-                writer.write_all(b"N")?;
-                writer.flush()?;
-                continue;
-            }
-            PROTOCOL_VERSION_3_0 => {
-                break parse_startup_parameters(&payload[4..])?;
-            }
-            _ => {
+    let startup_params =
+        match pgrust_protocol::pqcomm::read_startup_parameters(&mut reader, &mut writer)? {
+            Ok(params) => params,
+            Err(code) => {
                 send_error(
                     &mut writer,
                     "08P01",
@@ -6428,8 +6355,7 @@ where
                 writer.flush()?;
                 return Ok(());
             }
-        }
-    };
+        };
 
     let requested_database = startup_params
         .get("database")
@@ -6731,56 +6657,6 @@ fn handle_query(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum FastpathArgType {
-    Int4,
-    Int8,
-    Oid,
-    Bytea,
-    Text,
-}
-
-#[derive(Clone, Copy)]
-enum FastpathResultType {
-    Int4,
-    Int8,
-    Oid,
-    Bytea,
-    Void,
-}
-
-#[derive(Clone, Copy)]
-enum FastpathFunction {
-    LoCreate,
-    LoImport,
-    LoExport,
-    LoOpen,
-    LoClose,
-    LoRead,
-    LoWrite,
-    LoLseek,
-    LoCreat,
-    LoTell,
-    LoUnlink,
-    LoTruncate,
-    LoLseek64,
-    LoTell64,
-    LoTruncate64,
-    LoFromBytea,
-    LoGet,
-    LoPut,
-}
-
-#[derive(Clone)]
-enum FastpathArgValue {
-    Int4(i32),
-    Int8(i64),
-    Oid(u32),
-    Bytea(Vec<u8>),
-    Text(String),
-    Null,
-}
-
 fn handle_function_call(
     stream: &mut impl Write,
     db: &Database,
@@ -6808,397 +6684,61 @@ fn execute_fastpath_function_call(
     state: &mut ConnectionState,
     body: &[u8],
 ) -> Result<Option<Vec<u8>>, ExecError> {
-    let mut offset = 0usize;
-    let function_oid = read_i32_bytes(body, &mut offset).map_err(fastpath_protocol_error)? as u32;
-    let (function, result_type, arg_types) = fastpath_large_object_signature(function_oid)
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("cannot call function with OID {function_oid} via fastpath interface"),
-            detail: None,
-            hint: None,
-            sqlstate: "42883",
-        })?;
+    let parsed = pgrust_protocol::fastpath::parse_large_object_fastpath_call(body, |text| {
+        crate::backend::executor::parse_bytea_text(text)
+    })
+    .map_err(fastpath_parse_error)?;
 
-    let arg_format_count = read_i16_bytes(body, &mut offset).map_err(fastpath_protocol_error)?;
-    if arg_format_count < 0 {
-        return Err(fastpath_invalid_message("negative argument format count"));
-    }
-    let mut arg_formats = Vec::with_capacity(arg_format_count as usize);
-    for _ in 0..arg_format_count {
-        arg_formats.push(read_i16_bytes(body, &mut offset).map_err(fastpath_protocol_error)?);
-    }
-
-    let arg_count = read_i16_bytes(body, &mut offset).map_err(fastpath_protocol_error)?;
-    if arg_count < 0 {
-        return Err(fastpath_invalid_message("negative argument count"));
-    }
-    let arg_count = arg_count as usize;
-    if arg_count != arg_types.len() {
-        return Err(fastpath_invalid_message(
-            "large-object fastpath arity mismatch",
-        ));
-    }
-
-    let mut rendered_args = Vec::with_capacity(arg_count);
-    for (idx, arg_type) in arg_types.iter().copied().enumerate() {
-        let len = read_i32_bytes(body, &mut offset).map_err(fastpath_protocol_error)?;
-        let bytes = if len < 0 {
-            None
-        } else {
-            let len = len as usize;
-            let end = offset.saturating_add(len);
-            let slice = body
-                .get(offset..end)
-                .ok_or_else(|| fastpath_invalid_message("short fastpath argument"))?;
-            offset = end;
-            Some(slice)
-        };
-        let format = match arg_formats.as_slice() {
-            [] => 0,
-            [format] => *format,
-            formats => *formats
-                .get(idx)
-                .ok_or_else(|| fastpath_invalid_message("missing argument format code"))?,
-        };
-        rendered_args.push(decode_fastpath_arg(bytes, format, arg_type)?);
-    }
-
-    let result_format = read_i16_bytes(body, &mut offset).map_err(fastpath_protocol_error)?;
-    if offset != body.len() {
-        return Err(fastpath_invalid_message("trailing data in fastpath call"));
-    }
-
-    let value = match fastpath_large_object_call(function, &rendered_args)? {
+    let value = match parsed.call {
         Some(call) => state.session.execute_large_object_fastpath(db, call)?,
         None => Value::Null,
     };
-    fastpath_result_bytes(
+    pgrust_protocol::fastpath::fastpath_result_bytes(
         &value,
-        result_type,
-        result_format,
-        state.session.bytea_output(),
+        parsed.result_type,
+        parsed.result_format,
+        |bytes| format_bytea_text(bytes, state.session.bytea_output()),
     )
-}
-
-fn fastpath_large_object_signature(
-    function_oid: u32,
-) -> Option<(FastpathFunction, FastpathResultType, Vec<FastpathArgType>)> {
-    use FastpathArgType as A;
-    use FastpathFunction as F;
-    use FastpathResultType as R;
-    match function_oid {
-        715 => Some((F::LoCreate, R::Oid, vec![A::Oid])),
-        764 => Some((F::LoImport, R::Oid, vec![A::Text])),
-        765 => Some((F::LoExport, R::Int4, vec![A::Oid, A::Text])),
-        767 => Some((F::LoImport, R::Oid, vec![A::Text, A::Oid])),
-        952 => Some((F::LoOpen, R::Int4, vec![A::Oid, A::Int4])),
-        953 => Some((F::LoClose, R::Int4, vec![A::Int4])),
-        954 => Some((F::LoRead, R::Bytea, vec![A::Int4, A::Int4])),
-        955 => Some((F::LoWrite, R::Int4, vec![A::Int4, A::Bytea])),
-        956 => Some((F::LoLseek, R::Int4, vec![A::Int4, A::Int4, A::Int4])),
-        957 => Some((F::LoCreat, R::Oid, vec![A::Int4])),
-        958 => Some((F::LoTell, R::Int4, vec![A::Int4])),
-        964 => Some((F::LoUnlink, R::Int4, vec![A::Oid])),
-        1004 => Some((F::LoTruncate, R::Int4, vec![A::Int4, A::Int4])),
-        3170 => Some((F::LoLseek64, R::Int8, vec![A::Int4, A::Int8, A::Int4])),
-        3171 => Some((F::LoTell64, R::Int8, vec![A::Int4])),
-        3172 => Some((F::LoTruncate64, R::Int4, vec![A::Int4, A::Int8])),
-        3457 => Some((F::LoFromBytea, R::Oid, vec![A::Oid, A::Bytea])),
-        3458 => Some((F::LoGet, R::Bytea, vec![A::Oid])),
-        3459 => Some((F::LoGet, R::Bytea, vec![A::Oid, A::Int8, A::Int4])),
-        3460 => Some((F::LoPut, R::Void, vec![A::Oid, A::Int8, A::Bytea])),
-        _ => None,
-    }
-}
-
-fn decode_fastpath_arg(
-    bytes: Option<&[u8]>,
-    format: i16,
-    arg_type: FastpathArgType,
-) -> Result<FastpathArgValue, ExecError> {
-    let Some(bytes) = bytes else {
-        return Ok(FastpathArgValue::Null);
-    };
-    match format {
-        0 => decode_fastpath_text_arg(bytes, arg_type),
-        1 => decode_fastpath_binary_arg(bytes, arg_type),
-        _ => Err(fastpath_invalid_message(
-            "unsupported fastpath argument format",
-        )),
-    }
-}
-
-fn decode_fastpath_text_arg(
-    bytes: &[u8],
-    arg_type: FastpathArgType,
-) -> Result<FastpathArgValue, ExecError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| fastpath_invalid_message("invalid fastpath text argument"))?;
-    let trimmed = text.trim();
-    match arg_type {
-        FastpathArgType::Int4 => trimmed
-            .parse::<i32>()
-            .map(FastpathArgValue::Int4)
-            .map_err(|_| fastpath_invalid_message("invalid int4 fastpath argument")),
-        FastpathArgType::Int8 => trimmed
-            .parse::<i64>()
-            .map(FastpathArgValue::Int8)
-            .map_err(|_| fastpath_invalid_message("invalid int8 fastpath argument")),
-        FastpathArgType::Oid => trimmed
-            .parse::<u32>()
-            .map(FastpathArgValue::Oid)
-            .map_err(|_| fastpath_invalid_message("invalid oid fastpath argument")),
-        FastpathArgType::Bytea => {
-            crate::backend::executor::parse_bytea_text(text).map(FastpathArgValue::Bytea)
-        }
-        FastpathArgType::Text => Ok(FastpathArgValue::Text(text.to_string())),
-    }
-}
-
-fn decode_fastpath_binary_arg(
-    bytes: &[u8],
-    arg_type: FastpathArgType,
-) -> Result<FastpathArgValue, ExecError> {
-    Ok(match arg_type {
-        FastpathArgType::Int4 => FastpathArgValue::Int4(fastpath_i32(bytes)?),
-        FastpathArgType::Int8 => FastpathArgValue::Int8(fastpath_i64(bytes)?),
-        FastpathArgType::Oid => FastpathArgValue::Oid(fastpath_u32(bytes)?),
-        FastpathArgType::Bytea => FastpathArgValue::Bytea(bytes.to_vec()),
-        FastpathArgType::Text => {
-            let text = std::str::from_utf8(bytes)
-                .map_err(|_| fastpath_invalid_message("invalid fastpath text argument"))?;
-            FastpathArgValue::Text(text.to_string())
-        }
-    })
-}
-
-fn fastpath_large_object_call(
-    function: FastpathFunction,
-    args: &[FastpathArgValue],
-) -> Result<Option<LargeObjectFastpathCall>, ExecError> {
-    if args.iter().any(|arg| matches!(arg, FastpathArgValue::Null)) {
-        return Ok(None);
-    }
-    use FastpathArgValue as V;
-    use FastpathFunction as F;
-    let call = match (function, args) {
-        (F::LoCreate, [V::Oid(oid)]) => LargeObjectFastpathCall::Create { oid: *oid },
-        (F::LoImport, [V::Text(path)]) => LargeObjectFastpathCall::Import {
-            path: path.clone(),
-            oid: None,
-        },
-        (F::LoImport, [V::Text(path), V::Oid(oid)]) => LargeObjectFastpathCall::Import {
-            path: path.clone(),
-            oid: Some(*oid),
-        },
-        (F::LoExport, [V::Oid(oid), V::Text(path)]) => LargeObjectFastpathCall::Export {
-            oid: *oid,
-            path: path.clone(),
-        },
-        (F::LoOpen, [V::Oid(oid), V::Int4(mode)]) => LargeObjectFastpathCall::Open {
-            oid: *oid,
-            mode: *mode,
-        },
-        (F::LoClose, [V::Int4(fd)]) => LargeObjectFastpathCall::Close { fd: *fd },
-        (F::LoRead, [V::Int4(fd), V::Int4(len)]) => {
-            LargeObjectFastpathCall::Read { fd: *fd, len: *len }
-        }
-        (F::LoWrite, [V::Int4(fd), V::Bytea(data)]) => LargeObjectFastpathCall::Write {
-            fd: *fd,
-            data: data.clone(),
-        },
-        (F::LoLseek, [V::Int4(fd), V::Int4(offset), V::Int4(whence)]) => {
-            LargeObjectFastpathCall::Lseek {
-                fd: *fd,
-                offset: i64::from(*offset),
-                whence: *whence,
-                result_i64: false,
-            }
-        }
-        (F::LoCreat, [V::Int4(mode)]) => LargeObjectFastpathCall::Creat { mode: *mode },
-        (F::LoTell, [V::Int4(fd)]) => LargeObjectFastpathCall::Tell {
-            fd: *fd,
-            result_i64: false,
-        },
-        (F::LoUnlink, [V::Oid(oid)]) => LargeObjectFastpathCall::Unlink { oid: *oid },
-        (F::LoTruncate, [V::Int4(fd), V::Int4(len)]) => LargeObjectFastpathCall::Truncate {
-            fd: *fd,
-            len: i64::from(*len),
-        },
-        (F::LoLseek64, [V::Int4(fd), V::Int8(offset), V::Int4(whence)]) => {
-            LargeObjectFastpathCall::Lseek {
-                fd: *fd,
-                offset: *offset,
-                whence: *whence,
-                result_i64: true,
-            }
-        }
-        (F::LoTell64, [V::Int4(fd)]) => LargeObjectFastpathCall::Tell {
-            fd: *fd,
-            result_i64: true,
-        },
-        (F::LoTruncate64, [V::Int4(fd), V::Int8(len)]) => {
-            LargeObjectFastpathCall::Truncate { fd: *fd, len: *len }
-        }
-        (F::LoFromBytea, [V::Oid(oid), V::Bytea(data)]) => LargeObjectFastpathCall::FromBytea {
-            oid: *oid,
-            data: data.clone(),
-        },
-        (F::LoGet, [V::Oid(oid)]) => LargeObjectFastpathCall::Get {
-            oid: *oid,
-            offset: None,
-            len: None,
-        },
-        (F::LoGet, [V::Oid(oid), V::Int8(offset), V::Int4(len)]) => LargeObjectFastpathCall::Get {
-            oid: *oid,
-            offset: Some(*offset),
-            len: Some(*len),
-        },
-        (F::LoPut, [V::Oid(oid), V::Int8(offset), V::Bytea(data)]) => {
-            LargeObjectFastpathCall::Put {
-                oid: *oid,
-                offset: *offset,
-                data: data.clone(),
-            }
-        }
-        _ => {
-            return Err(fastpath_invalid_message(
-                "large-object fastpath type mismatch",
-            ));
-        }
-    };
-    Ok(Some(call))
-}
-
-fn fastpath_result_bytes(
-    value: &Value,
-    result_type: FastpathResultType,
-    format: i16,
-    bytea_output: crate::pgrust::session::ByteaOutputFormat,
-) -> Result<Option<Vec<u8>>, ExecError> {
-    if matches!(value, Value::Null) || matches!(result_type, FastpathResultType::Void) {
-        return Ok(None);
-    }
-    match format {
-        0 => Ok(Some(
-            fastpath_result_text(value, result_type, bytea_output)?.into_bytes(),
-        )),
-        1 => fastpath_result_binary(value, result_type).map(Some),
-        _ => Err(fastpath_invalid_message(
-            "unsupported fastpath result format",
-        )),
-    }
-}
-
-fn fastpath_result_text(
-    value: &Value,
-    result_type: FastpathResultType,
-    bytea_output: crate::pgrust::session::ByteaOutputFormat,
-) -> Result<String, ExecError> {
-    Ok(match result_type {
-        FastpathResultType::Int4 => fastpath_value_i32(value)?.to_string(),
-        FastpathResultType::Int8 => fastpath_value_i64(value)?.to_string(),
-        FastpathResultType::Oid => fastpath_value_u32(value)?.to_string(),
-        FastpathResultType::Bytea => match value {
-            Value::Bytea(bytes) => format_bytea_text(bytes, bytea_output),
-            _ => return Err(fastpath_invalid_message("fastpath result type mismatch")),
-        },
-        FastpathResultType::Void => String::new(),
-    })
-}
-
-fn fastpath_result_binary(
-    value: &Value,
-    result_type: FastpathResultType,
-) -> Result<Vec<u8>, ExecError> {
-    Ok(match result_type {
-        FastpathResultType::Int4 => fastpath_value_i32(value)?.to_be_bytes().to_vec(),
-        FastpathResultType::Int8 => fastpath_value_i64(value)?.to_be_bytes().to_vec(),
-        FastpathResultType::Oid => fastpath_value_u32(value)?.to_be_bytes().to_vec(),
-        FastpathResultType::Bytea => match value {
-            Value::Bytea(bytes) => bytes.clone(),
-            _ => return Err(fastpath_invalid_message("fastpath result type mismatch")),
-        },
-        FastpathResultType::Void => Vec::new(),
-    })
+    .map_err(fastpath_invalid_message)
 }
 
 fn send_function_call_response(stream: &mut impl Write, bytes: Option<&[u8]>) -> io::Result<()> {
-    let payload_len = bytes.map_or(0, <[u8]>::len);
-    let len = 4 + 4 + payload_len;
-    stream.write_all(&[b'V'])?;
-    stream.write_all(&(len as i32).to_be_bytes())?;
-    match bytes {
-        Some(bytes) => {
-            stream.write_all(&(bytes.len() as i32).to_be_bytes())?;
-            stream.write_all(bytes)?;
-        }
-        None => stream.write_all(&(-1_i32).to_be_bytes())?,
-    }
-    Ok(())
-}
-
-fn fastpath_i32(bytes: &[u8]) -> Result<i32, ExecError> {
-    let array: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| fastpath_invalid_message("invalid int4 fastpath argument"))?;
-    Ok(i32::from_be_bytes(array))
-}
-
-fn fastpath_u32(bytes: &[u8]) -> Result<u32, ExecError> {
-    let array: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| fastpath_invalid_message("invalid oid fastpath argument"))?;
-    Ok(u32::from_be_bytes(array))
-}
-
-fn fastpath_i64(bytes: &[u8]) -> Result<i64, ExecError> {
-    let array: [u8; 8] = bytes
-        .try_into()
-        .map_err(|_| fastpath_invalid_message("invalid int8 fastpath argument"))?;
-    Ok(i64::from_be_bytes(array))
-}
-
-fn fastpath_value_i32(value: &Value) -> Result<i32, ExecError> {
-    match value {
-        Value::Int32(value) => Ok(*value),
-        Value::Int64(value) => {
-            i32::try_from(*value).map_err(|_| fastpath_invalid_message("int4 result out of range"))
-        }
-        _ => Err(fastpath_invalid_message("fastpath result type mismatch")),
-    }
-}
-
-fn fastpath_value_i64(value: &Value) -> Result<i64, ExecError> {
-    match value {
-        Value::Int64(value) => Ok(*value),
-        Value::Int32(value) => Ok(i64::from(*value)),
-        _ => Err(fastpath_invalid_message("fastpath result type mismatch")),
-    }
-}
-
-fn fastpath_value_u32(value: &Value) -> Result<u32, ExecError> {
-    match value {
-        Value::Int64(value) => {
-            u32::try_from(*value).map_err(|_| fastpath_invalid_message("oid result out of range"))
-        }
-        Value::Int32(value) => {
-            u32::try_from(*value).map_err(|_| fastpath_invalid_message("oid result out of range"))
-        }
-        _ => Err(fastpath_invalid_message("fastpath result type mismatch")),
-    }
+    // :HACK: keep old tcop helper path while fastpath wire framing lives in pgrust_protocol.
+    pgrust_protocol::fastpath::send_function_call_response(stream, bytes)
 }
 
 fn fastpath_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
+    // :HACK: keep old tcop helper path while fastpath text helpers live in pgrust_protocol.
+    pgrust_protocol::fastpath::fastpath_hex(bytes)
 }
 
 fn quote_fastpath_sql_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    // :HACK: keep old tcop helper path while fastpath text helpers live in pgrust_protocol.
+    pgrust_protocol::fastpath::quote_fastpath_sql_literal(value)
+}
+
+fn fastpath_parse_error(
+    err: pgrust_protocol::fastpath::FastpathParseError<ExecError>,
+) -> ExecError {
+    match err {
+        pgrust_protocol::fastpath::FastpathParseError::Protocol(err) => {
+            fastpath_protocol_error(err)
+        }
+        pgrust_protocol::fastpath::FastpathParseError::Message(message) => {
+            fastpath_invalid_message(message)
+        }
+        pgrust_protocol::fastpath::FastpathParseError::UnsupportedFunction(function_oid) => {
+            ExecError::DetailedError {
+                message: format!(
+                    "cannot call function with OID {function_oid} via fastpath interface"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            }
+        }
+        pgrust_protocol::fastpath::FastpathParseError::Bytea(err) => err,
+    }
 }
 
 fn fastpath_protocol_error(err: io::Error) -> ExecError {
@@ -7317,17 +6857,6 @@ enum QueryStatementFlow {
     CopyInStarted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SimpleQueryTxnControl {
-    Begin,
-    Commit { chain: bool },
-    Rollback { chain: bool },
-    Savepoint,
-    Release,
-    RollbackTo,
-    Other,
-}
-
 fn execute_simple_query_statements(
     stream: &mut impl Write,
     db: &Database,
@@ -7440,40 +6969,13 @@ fn execute_simple_query_statements(
 }
 
 fn simple_query_txn_control(sql: &str) -> SimpleQueryTxnControl {
-    let normalized = sql
-        .trim_start()
-        .trim_end_matches(';')
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    if normalized.starts_with("begin") || normalized.starts_with("start transaction") {
-        return SimpleQueryTxnControl::Begin;
-    }
-    if normalized.starts_with("commit") || normalized.starts_with("end") {
-        return SimpleQueryTxnControl::Commit {
-            chain: normalized.contains(" and chain"),
-        };
-    }
-    if normalized.starts_with("rollback to") || normalized.starts_with("abort to") {
-        return SimpleQueryTxnControl::RollbackTo;
-    }
-    if normalized.starts_with("rollback") || normalized.starts_with("abort") {
-        return SimpleQueryTxnControl::Rollback {
-            chain: normalized.contains(" and chain"),
-        };
-    }
-    if normalized.starts_with("savepoint") {
-        return SimpleQueryTxnControl::Savepoint;
-    }
-    if normalized.starts_with("release") {
-        return SimpleQueryTxnControl::Release;
-    }
-    SimpleQueryTxnControl::Other
+    // :HACK: keep old tcop helper path while simple-query classification lives in pgrust_protocol.
+    pgrust_protocol::sql::simple_query_txn_control(sql)
 }
 
 fn simple_query_starts_implicit_transaction(control: SimpleQueryTxnControl) -> bool {
-    matches!(control, SimpleQueryTxnControl::Other)
+    // :HACK: keep old tcop helper path while simple-query classification lives in pgrust_protocol.
+    pgrust_protocol::sql::simple_query_starts_implicit_transaction(control)
 }
 
 fn simple_query_chain_requires_transaction_error(command: &'static str) -> ExecError {
@@ -7833,12 +7335,11 @@ fn execute_query_statement(
                             send_exec_error(stream, error_sql.as_ref(), &e)?;
                             return Ok(QueryStatementFlow::Continue);
                         }
-                        state.copy_in = Some(CopyInState {
+                        state.copy_in = Some(CopyInState::new(
                             copy,
-                            sql: error_sql.as_ref().to_string(),
-                            pending: Vec::new(),
-                            continuation: Vec::new(),
-                        });
+                            error_sql.as_ref().to_string(),
+                            Vec::new(),
+                        ));
                         send_copy_in_response(stream)?;
                         return Ok(QueryStatementFlow::CopyInStarted);
                     }
@@ -7999,7 +7500,11 @@ fn execute_query_statement(
         }) => {
             let catalog = state.session.catalog_lookup(db);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
-            let catalog_maps = WireCatalogMaps::for_columns(&catalog, &columns);
+            let catalog_maps = WireCatalogMaps::for_columns_with_proc_signature_map(
+                &catalog,
+                &columns,
+                proc_signature_map,
+            );
             flush_pending_backend_messages_with_sql(stream, db, &state.session, &sql)?;
             let command_tag = infer_dml_returning_command_tag(&sql, rows.len())
                 .unwrap_or_else(|| format!("SELECT {}", rows.len()));
@@ -8159,41 +7664,7 @@ fn send_nonstandard_backslash_warnings(stream: &mut impl Write, sql: &str) -> io
 }
 
 fn normalize_nonstandard_string_literals(sql: &str) -> String {
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            let previous = sql[..i].chars().rev().find(|ch| !ch.is_ascii_whitespace());
-            if !matches!(previous, Some('E' | 'e' | '&')) {
-                out.push('E');
-            }
-            out.push('\'');
-            i += 1;
-            while i < bytes.len() {
-                out.push(bytes[i] as char);
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 1;
-                    out.push(bytes[i] as char);
-                } else if bytes[i] == b'\'' {
-                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                        i += 1;
-                        out.push('\'');
-                    } else {
-                        i += 1;
-                        break;
-                    }
-                }
-                i += 1;
-            }
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-
-    out
+    pgrust_protocol::sql::normalize_nonstandard_string_literals(sql)
 }
 
 fn execute_copy_to_statement(
@@ -8246,7 +7717,11 @@ fn execute_streaming_select_statement(
             let mut columns = guard.columns.clone();
             let catalog = state.session.catalog_lookup(db);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
-            let catalog_maps = WireCatalogMaps::for_columns(&catalog, &columns);
+            let catalog_maps = WireCatalogMaps::for_columns_with_proc_signature_map(
+                &catalog,
+                &columns,
+                proc_signature_map,
+            );
             let mut row_buf = Vec::new();
             let mut row_count = 0usize;
             let mut header_sent = false;
@@ -8343,316 +7818,13 @@ fn execute_streaming_select_statement(
 }
 
 fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -> Vec<&str> {
-    let mut statements = Vec::new();
-    let mut start = 0usize;
-    let bytes = sql.as_bytes();
-    let mut i = 0usize;
-    let mut block_comment_depth = 0usize;
-    let mut paren_depth = 0usize;
-    let mut single_quote = false;
-    let mut double_quote = false;
-    let mut line_comment = false;
-    let mut dollar_quote: Option<String> = None;
-    let mut sql_function_atomic_body = false;
-
-    while i < bytes.len() {
-        if line_comment {
-            if bytes[i] == b'\n' {
-                line_comment = false;
-            }
-            i += 1;
-            continue;
-        }
-        if block_comment_depth > 0 {
-            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                block_comment_depth += 1;
-                i += 2;
-                continue;
-            }
-            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                block_comment_depth -= 1;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(tag) = &dollar_quote {
-            if sql[i..].starts_with(tag) {
-                i += tag.len();
-                dollar_quote = None;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-        if single_quote {
-            if !standard_conforming_strings && bytes[i] == b'\\' && i + 1 < bytes.len() {
-                i += 2;
-            } else if bytes[i] == b'\'' {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    i += 2;
-                } else {
-                    single_quote = false;
-                    i += 1;
-                }
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-        if double_quote {
-            if bytes[i] == b'"' {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
-                    i += 2;
-                } else {
-                    double_quote = false;
-                    i += 1;
-                }
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
-            line_comment = true;
-            i += 2;
-            continue;
-        }
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            block_comment_depth = 1;
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'\'' {
-            single_quote = true;
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'"' {
-            double_quote = true;
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'$' {
-            if let Some(tag_end) = sql[i + 1..].find('$') {
-                let delimiter = &sql[i..=i + 1 + tag_end];
-                if delimiter[1..delimiter.len() - 1]
-                    .chars()
-                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-                {
-                    dollar_quote = Some(delimiter.to_string());
-                    i += delimiter.len();
-                    continue;
-                }
-            }
-        }
-        if bytes[i] == b'(' {
-            paren_depth += 1;
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b')' {
-            paren_depth = paren_depth.saturating_sub(1);
-            i += 1;
-            continue;
-        }
-        if paren_depth == 0
-            && !sql_function_atomic_body
-            && simple_query_keyword_at(sql, i, "begin").is_some()
-            && simple_query_current_statement_is_create_routine(sql, start, i)
-        {
-            let begin_end = simple_query_keyword_at(sql, i, "begin").unwrap_or(i);
-            let atomic_start = simple_query_skip_whitespace(sql, begin_end);
-            if simple_query_keyword_at(sql, atomic_start, "atomic").is_some() {
-                sql_function_atomic_body = true;
-            }
-        }
-        if bytes[i] == b';' && paren_depth == 0 {
-            if sql_function_atomic_body
-                && (!simple_query_prefix_ends_with_keyword(&sql[start..i], "end")
-                    || simple_query_next_token_is_keyword(sql, i + 1, "end"))
-            {
-                i += 1;
-                continue;
-            }
-            statements.push(&sql[start..=i]);
-            sql_function_atomic_body = false;
-            start = i + 1;
-        }
-        i += 1;
-    }
-
-    if start < sql.len() {
-        statements.push(&sql[start..]);
-    }
-    statements
-}
-
-fn simple_query_current_statement_is_create_routine(
-    sql: &str,
-    start: usize,
-    keyword_pos: usize,
-) -> bool {
-    let prefix = sql[start..keyword_pos].trim_start().to_ascii_lowercase();
-    prefix.starts_with("create function ")
-        || prefix.starts_with("create or replace function ")
-        || prefix.starts_with("create procedure ")
-        || prefix.starts_with("create or replace procedure ")
-}
-
-fn simple_query_keyword_at(sql: &str, pos: usize, keyword: &str) -> Option<usize> {
-    let end = pos.checked_add(keyword.len())?;
-    let candidate = sql.get(pos..end)?;
-    if !candidate.eq_ignore_ascii_case(keyword) {
-        return None;
-    }
-    let bytes = sql.as_bytes();
-    if pos > 0 && simple_query_ident_byte(bytes[pos - 1]) {
-        return None;
-    }
-    if end < bytes.len() && simple_query_ident_byte(bytes[end]) {
-        return None;
-    }
-    Some(end)
-}
-
-fn simple_query_skip_whitespace(sql: &str, mut pos: usize) -> usize {
-    let bytes = sql.as_bytes();
-    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-        pos += 1;
-    }
-    pos
-}
-
-fn simple_query_prefix_ends_with_keyword(prefix: &str, keyword: &str) -> bool {
-    let trimmed = prefix.trim_end();
-    let Some(start) = trimmed.len().checked_sub(keyword.len()) else {
-        return false;
-    };
-    if !trimmed[start..].eq_ignore_ascii_case(keyword) {
-        return false;
-    }
-    start == 0 || !simple_query_ident_byte(trimmed.as_bytes()[start - 1])
-}
-
-fn simple_query_next_token_is_keyword(sql: &str, pos: usize, keyword: &str) -> bool {
-    let pos = simple_query_skip_whitespace(sql, pos);
-    simple_query_keyword_at(sql, pos, keyword).is_some()
-}
-
-fn simple_query_ident_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
-}
-
-#[derive(Default)]
-struct WireCatalogMaps {
-    role_names: Option<HashMap<u32, String>>,
-    relation_names: Option<HashMap<u32, String>>,
-    proc_names: Option<HashMap<u32, String>>,
-    proc_signatures: Option<HashMap<u32, String>>,
-    namespace_names: Option<HashMap<u32, String>>,
-    enum_labels: Option<HashMap<(u32, u32), String>>,
-}
-
-#[derive(Default)]
-struct WireCatalogMapNeeds {
-    role_names: bool,
-    relation_names: bool,
-    proc_names: bool,
-    proc_signatures: bool,
-    namespace_names: bool,
-    enum_labels: bool,
-}
-
-impl WireCatalogMaps {
-    fn for_columns(catalog: &dyn CatalogLookup, columns: &[QueryColumn]) -> Self {
-        let needs = WireCatalogMapNeeds::for_columns(columns);
-        Self {
-            role_names: needs.role_names.then(|| role_name_map(catalog)),
-            relation_names: needs.relation_names.then(|| relation_name_map(catalog)),
-            proc_names: needs.proc_names.then(|| proc_name_map(catalog)),
-            proc_signatures: needs.proc_signatures.then(|| proc_signature_map(catalog)),
-            namespace_names: needs.namespace_names.then(|| namespace_name_map(catalog)),
-            enum_labels: needs.enum_labels.then(|| enum_label_map(catalog)),
-        }
-    }
-
-    fn role_names(&self) -> Option<&HashMap<u32, String>> {
-        self.role_names.as_ref()
-    }
-
-    fn relation_names(&self) -> Option<&HashMap<u32, String>> {
-        self.relation_names.as_ref()
-    }
-
-    fn proc_names(&self) -> Option<&HashMap<u32, String>> {
-        self.proc_names.as_ref()
-    }
-
-    fn proc_signatures(&self) -> Option<&HashMap<u32, String>> {
-        self.proc_signatures.as_ref()
-    }
-
-    fn namespace_names(&self) -> Option<&HashMap<u32, String>> {
-        self.namespace_names.as_ref()
-    }
-
-    fn enum_labels(&self) -> Option<&HashMap<(u32, u32), String>> {
-        self.enum_labels.as_ref()
-    }
-}
-
-impl WireCatalogMapNeeds {
-    fn for_columns(columns: &[QueryColumn]) -> Self {
-        let mut needs = Self::default();
-        for column in columns {
-            needs.add_type(column.sql_type);
-        }
-        needs
-    }
-
-    fn add_type(&mut self, sql_type: SqlType) {
-        if sql_type.is_array {
-            if matches!(sql_type.element_type().kind, SqlTypeKind::Enum) {
-                self.enum_labels = true;
-            }
-            return;
-        }
-
-        match sql_type.kind {
-            SqlTypeKind::RegRole => self.role_names = true,
-            SqlTypeKind::RegClass => self.relation_names = true,
-            SqlTypeKind::RegProc => self.proc_names = true,
-            SqlTypeKind::RegProcedure => {
-                self.proc_names = true;
-                self.proc_signatures = true;
-            }
-            SqlTypeKind::RegNamespace => self.namespace_names = true,
-            SqlTypeKind::Enum => self.enum_labels = true,
-            _ => {}
-        }
-    }
-}
-
-fn role_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
-    catalog
-        .authid_rows()
-        .into_iter()
-        .map(|row| (row.oid, row.rolname))
-        .collect()
-}
-
-fn proc_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
-    catalog
-        .proc_rows()
-        .into_iter()
-        .map(|row| (row.oid, row.proname))
-        .collect()
+    pgrust_protocol::sql::split_simple_query_statements(sql, standard_conforming_strings)
 }
 
 fn proc_signature_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    // :HACK: proc signature rendering still depends on root executor's exact
+    // regprocedure formatting; the surrounding wire map storage lives in
+    // pgrust_commands.
     catalog
         .proc_rows()
         .into_iter()
@@ -8662,30 +7834,6 @@ fn proc_signature_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
                 crate::backend::executor::expr_reg::function_signature_text(&row, catalog),
             )
         })
-        .collect()
-}
-
-fn relation_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
-    catalog
-        .class_rows()
-        .into_iter()
-        .map(|row| (row.oid, row.relname))
-        .collect()
-}
-
-fn namespace_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
-    catalog
-        .namespace_rows()
-        .into_iter()
-        .map(|row| (row.oid, row.nspname))
-        .collect()
-}
-
-fn enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
-    catalog
-        .enum_rows()
-        .into_iter()
-        .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
         .collect()
 }
 
@@ -8699,7 +7847,11 @@ fn try_handle_psql_describe_query(
         return Ok(false);
     };
     let catalog = state.session.catalog_lookup(db);
-    let catalog_maps = WireCatalogMaps::for_columns(&catalog, &columns);
+    let catalog_maps = WireCatalogMaps::for_columns_with_proc_signature_map(
+        &catalog,
+        &columns,
+        proc_signature_map,
+    );
     send_query_result(
         stream,
         &columns,
@@ -8901,13 +8053,8 @@ fn execute_psql_describe_query(
 }
 
 fn is_psql_permissions_query(lower: &str) -> bool {
-    lower.starts_with("select n.nspname")
-        && lower.contains("c.relname")
-        && lower.contains("case c.relkind")
-        && lower.contains("c.relacl")
-        && lower.contains("from pg_catalog.pg_class c")
-        && lower.contains("from pg_catalog.pg_policy pol")
-        && lower.contains(" as \"policies\"")
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::is_permissions_query(lower)
 }
 
 fn psql_describe_permissions_query(
@@ -9009,18 +8156,7 @@ fn psql_describe_policy_query(
     session: &Session,
     sql: &str,
 ) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
-    let columns = vec![
-        QueryColumn::text("polname"),
-        QueryColumn {
-            name: "polpermissive".into(),
-            sql_type: SqlType::new(SqlTypeKind::Bool),
-            wire_type_oid: None,
-        },
-        QueryColumn::text("array_to_string"),
-        QueryColumn::text("pg_get_expr"),
-        QueryColumn::text("pg_get_expr"),
-        QueryColumn::text("cmd"),
-    ];
+    let columns = pgrust_commands::psql::describe_policy_query_columns();
     let Some(relation_oid) = extract_single_quoted_literal_after(sql, "where pol.polrelid =")
         .and_then(|value| value.parse::<u32>().ok())
     else {
@@ -9034,41 +8170,11 @@ fn psql_describe_policy_query(
         .into_iter()
         .map(|row| (row.oid, row.rolname))
         .collect::<HashMap<_, _>>();
-    let mut policies = catcache.policy_rows_for_relation(relation_oid);
-    policies.sort_by(|left, right| {
-        left.polname
-            .cmp(&right.polname)
-            .then(left.oid.cmp(&right.oid))
-    });
-    let rows = policies
-        .into_iter()
-        .map(|policy| {
-            let roles = if policy.polroles.as_slice() == [0] {
-                Value::Null
-            } else {
-                let mut names = policy
-                    .polroles
-                    .iter()
-                    .map(|oid| {
-                        role_names
-                            .get(oid)
-                            .cloned()
-                            .unwrap_or_else(|| oid.to_string())
-                    })
-                    .collect::<Vec<_>>();
-                names.sort();
-                Value::Text(names.join(",").into())
-            };
-            vec![
-                Value::Text(policy.polname.into()),
-                Value::Bool(policy.polpermissive),
-                roles,
-                optional_policy_expr_query_value(policy.polqual),
-                optional_policy_expr_query_value(policy.polwithcheck),
-                psql_describe_policy_command_value(policy.polcmd),
-            ]
-        })
-        .collect();
+    let rows = pgrust_commands::psql::describe_policy_query_rows(
+        catcache.policy_rows_for_relation(relation_oid),
+        &role_names,
+        |expr| optional_policy_expr_query_value(Some(expr)),
+    );
     (columns, rows)
 }
 
@@ -9078,31 +8184,14 @@ fn optional_policy_expr_query_value(value: Option<String>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn psql_describe_policy_command_value(command: crate::include::catalog::PolicyCommand) -> Value {
-    match command {
-        crate::include::catalog::PolicyCommand::All => Value::Null,
-        crate::include::catalog::PolicyCommand::Select => Value::Text("SELECT".into()),
-        crate::include::catalog::PolicyCommand::Insert => Value::Text("INSERT".into()),
-        crate::include::catalog::PolicyCommand::Update => Value::Text("UPDATE".into()),
-        crate::include::catalog::PolicyCommand::Delete => Value::Text("DELETE".into()),
-    }
-}
-
 fn psql_permissions_relkind_name(relkind: char) -> &'static str {
-    match relkind {
-        'r' => "table",
-        'v' => "view",
-        'm' => "materialized view",
-        'S' => "sequence",
-        'f' => "foreign table",
-        'p' => "partitioned table",
-        _ => "",
-    }
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::permissions_relkind_name(relkind)
 }
 
 fn is_psql_roles_query(lower: &str) -> bool {
-    lower.starts_with("select r.rolname, r.rolsuper")
-        && lower.contains("from pg_catalog.pg_roles r")
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::is_roles_query(lower)
 }
 
 fn psql_roles_query(
@@ -9175,8 +8264,8 @@ fn psql_roles_query(
 }
 
 fn is_psql_role_settings_query(lower: &str) -> bool {
-    lower.starts_with("select rolname as \"role\", datname as \"database\"")
-        && lower.contains("from pg_catalog.pg_db_role_setting s")
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::is_role_settings_query(lower)
 }
 
 fn psql_role_settings_query() -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
@@ -9192,10 +8281,8 @@ fn psql_role_settings_query() -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
 }
 
 fn is_psql_object_description_query(lower: &str) -> bool {
-    lower.starts_with("select distinct tt.nspname")
-        && lower.contains("join pg_catalog.pg_description d")
-        && lower.contains("tt.object")
-        && lower.contains("d.description")
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::is_object_description_query(lower)
 }
 
 fn psql_object_description_query(
@@ -9414,16 +8501,8 @@ fn push_psql_description_row(
 }
 
 fn is_psql_partitioned_relations_query(lower: &str) -> bool {
-    let Some(owner_pos) = lower.find("pg_catalog.pg_get_userbyid(c.relowner) as \"owner\"") else {
-        return false;
-    };
-    let type_pos = lower.find("case c.relkind");
-    lower.starts_with("select n.nspname as \"schema\"")
-        && lower.contains("c.relname as \"name\"")
-        && lower.contains("from pg_catalog.pg_class c")
-        && lower.contains("where c.relkind in")
-        && lower.contains("c.relkind in ('")
-        && type_pos.is_none_or(|pos| owner_pos < pos)
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::is_partitioned_relations_query(lower)
 }
 
 fn psql_partitioned_relations_query(
@@ -9674,73 +8753,18 @@ fn psql_timestamptz_column(name: impl Into<String>) -> QueryColumn {
 }
 
 fn extract_psql_identifier_pattern<'a>(sql: &'a str, identifier: &str) -> Option<&'a str> {
-    let lower = sql.to_ascii_lowercase();
-    let identifier = identifier.to_ascii_lowercase();
-    let mut search_start = 0usize;
-    while let Some(relative) = lower[search_start..].find(&identifier) {
-        let start = search_start + relative;
-        let end = start + identifier.len();
-        let before = start
-            .checked_sub(1)
-            .and_then(|idx| lower.as_bytes().get(idx));
-        let after = lower.as_bytes().get(end);
-        if !before.is_some_and(|byte| is_sql_identifier_byte(*byte))
-            && !after.is_some_and(|byte| is_sql_identifier_byte(*byte))
-            && let Some(pattern) = extract_psql_operator_pattern_at(sql, &lower, end)
-        {
-            return Some(pattern);
-        }
-        search_start = end;
-    }
-    None
-}
-
-fn extract_psql_operator_pattern_at<'a>(
-    sql: &'a str,
-    lower_sql: &str,
-    start: usize,
-) -> Option<&'a str> {
-    let marker = "operator(pg_catalog.~)";
-    let mut index = skip_ascii_whitespace(sql, start, sql.len());
-    if !lower_sql[index..].starts_with(marker) {
-        return None;
-    }
-    index += marker.len();
-    index = skip_ascii_whitespace(sql, index, sql.len());
-    if matches!(sql.as_bytes().get(index), Some(b'e' | b'E'))
-        && sql.as_bytes().get(index + 1) == Some(&b'\'')
-    {
-        index += 1;
-    }
-    if sql.as_bytes().get(index) != Some(&b'\'') {
-        return None;
-    }
-    let rest = &sql[index + 1..];
-    let end = rest.find('\'')?;
-    rest[..end].strip_prefix("^(")?.strip_suffix(")$")
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_identifier_pattern(sql, identifier)
 }
 
 fn extract_psql_any_identifier_pattern<'a>(sql: &'a str, identifiers: &[&str]) -> Option<&'a str> {
-    identifiers
-        .iter()
-        .find_map(|identifier| extract_psql_identifier_pattern(sql, identifier))
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_any_identifier_pattern(sql, identifiers)
 }
 
 fn psql_pattern_regex(pattern: Option<&str>) -> Option<regex::Regex> {
-    pattern
-        .filter(|pattern| !psql_describe_pattern_is_plain(pattern))
-        .and_then(|pattern| {
-            let pattern = psql_pattern_literal_regex_text(pattern);
-            regex::Regex::new(&format!("^(?:{pattern})$")).ok()
-        })
-}
-
-fn psql_pattern_literal_regex_text(pattern: &str) -> std::borrow::Cow<'_, str> {
-    if pattern.contains("\\\\") {
-        std::borrow::Cow::Owned(pattern.replace("\\\\", "\\"))
-    } else {
-        std::borrow::Cow::Borrowed(pattern)
-    }
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::pattern_regex(pattern)
 }
 
 fn psql_pattern_matches(
@@ -9748,23 +8772,13 @@ fn psql_pattern_matches(
     pattern: Option<&str>,
     pattern_regex: Option<&regex::Regex>,
 ) -> bool {
-    let Some(pattern) = pattern else {
-        return true;
-    };
-    if psql_describe_pattern_is_plain(pattern) {
-        value.eq_ignore_ascii_case(pattern)
-    } else {
-        pattern_regex.is_some_and(|regex| regex.is_match(value))
-    }
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::pattern_matches(value, pattern, pattern_regex)
 }
 
 fn is_psql_list_tables_query(lower: &str) -> bool {
-    lower.starts_with("select n.nspname")
-        && lower.contains("c.relname")
-        && lower.contains("case c.relkind")
-        && lower.contains("pg_catalog.pg_get_userbyid(c.relowner)")
-        && lower.contains("from pg_catalog.pg_class c")
-        && lower.contains("where c.relkind in")
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::is_list_tables_query(lower)
 }
 
 fn psql_list_tables_query(
@@ -9859,60 +8873,26 @@ fn psql_list_tables_query(
 }
 
 fn psql_list_tables_query_includes_relkind(lower_sql: &str, relkind: char) -> bool {
-    match relkind {
-        'r' => lower_sql.contains("'r'"),
-        'p' => lower_sql.contains("'p'"),
-        'v' => lower_sql.contains("'v'"),
-        'm' => lower_sql.contains("'m'"),
-        'i' => lower_sql.contains("'i'"),
-        'I' => lower_sql.contains("'i'"),
-        'S' => lower_sql.contains("'s'"),
-        't' => lower_sql.contains("'t'"),
-        'f' => lower_sql.contains("'f'"),
-        _ => false,
-    }
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::list_tables_query_includes_relkind(lower_sql, relkind)
 }
 
 fn psql_list_tables_relkind_name(relkind: char) -> &'static str {
-    match relkind {
-        'r' => "table",
-        'v' => "view",
-        'm' => "materialized view",
-        'i' => "index",
-        'S' => "sequence",
-        't' => "TOAST table",
-        'f' => "foreign table",
-        'p' => "partitioned table",
-        'I' => "partitioned index",
-        _ => "",
-    }
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::list_tables_relkind_name(relkind)
 }
 
 fn format_acl_column_value(acl: Option<Vec<String>>) -> Value {
-    match acl {
-        Some(items) if items.is_empty() => Value::Text("(none)".into()),
-        Some(items) => Value::Text(items.join("\n").into()),
-        None => Value::Null,
-    }
+    // :HACK: keep old tcop helper path while psql ACL formatting lives in pgrust_commands.
+    pgrust_commands::psql::format_acl_column_value(acl)
 }
 
 fn format_column_privileges_value(
     attributes: &[crate::include::catalog::PgAttributeRow],
     relation_oid: u32,
 ) -> Value {
-    let parts = attributes
-        .iter()
-        .filter(|attribute| attribute.attrelid == relation_oid && !attribute.attisdropped)
-        .filter_map(|attribute| {
-            let acl = attribute.attacl.as_ref()?;
-            Some(format!("{}:\n  {}", attribute.attname, acl.join("\n  ")))
-        })
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        Value::Null
-    } else {
-        Value::Text(parts.join("\n").into())
-    }
+    // :HACK: keep old tcop helper path while psql ACL formatting lives in pgrust_commands.
+    pgrust_commands::psql::format_column_privileges_value(attributes, relation_oid)
 }
 
 fn format_policy_column_value(
@@ -9920,63 +8900,18 @@ fn format_policy_column_value(
     role_names: &HashMap<u32, String>,
     relation_oid: u32,
 ) -> Value {
-    let mut relation_policies = policies
-        .iter()
-        .filter(|policy| policy.polrelid == relation_oid)
-        .collect::<Vec<_>>();
-    relation_policies.sort_by_key(|policy| policy.oid);
-
-    let parts = relation_policies
-        .into_iter()
-        .map(|policy| {
-            let mut text = policy.polname.clone();
-            if !policy.polpermissive {
-                text.push_str(" (RESTRICTIVE)");
-            }
-            if policy.polcmd != crate::include::catalog::PolicyCommand::All {
-                text.push_str(&format!(" ({})", policy.polcmd.as_char()));
-            }
-            text.push(':');
-            if let Some(qual) = &policy.polqual {
-                text.push_str("\n  (u): ");
-                text.push_str(&format_pg_get_expr_policy_sql(qual));
-            }
-            if let Some(with_check) = &policy.polwithcheck {
-                text.push_str("\n  (c): ");
-                text.push_str(&format_pg_get_expr_policy_sql(with_check));
-            }
-            if policy.polroles.as_slice() != [0] {
-                let mut names = policy
-                    .polroles
-                    .iter()
-                    .map(|oid| {
-                        if *oid == 0 {
-                            "public".to_string()
-                        } else {
-                            role_names
-                                .get(oid)
-                                .cloned()
-                                .unwrap_or_else(|| oid.to_string())
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                names.sort();
-                text.push_str("\n  to: ");
-                text.push_str(&names.join(", "));
-            }
-            text
-        })
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        Value::Null
-    } else {
-        Value::Text(parts.join("\n").into())
-    }
+    // :HACK: keep old tcop helper path while psql ACL formatting lives in pgrust_commands.
+    pgrust_commands::psql::format_policy_column_value(
+        policies,
+        role_names,
+        relation_oid,
+        format_pg_get_expr_policy_sql,
+    )
 }
 
 fn psql_describe_inherits_query_includes_relkind(lower_sql: &str) -> bool {
-    lower_sql.contains("select c.oid::pg_catalog.regclass, c.relkind")
-        || lower_sql.contains("select c.oid::regclass, c.relkind")
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::describe_inherits_query_includes_relkind(lower_sql)
 }
 
 fn psql_describe_types_query(
@@ -10192,130 +9127,33 @@ fn psql_describe_partition_of_query_rows(
 }
 
 fn psql_partition_bound_text(bound: &PartitionBoundSpec) -> String {
-    match bound {
-        PartitionBoundSpec::List {
-            is_default: true, ..
-        }
-        | PartitionBoundSpec::Range {
-            is_default: true, ..
-        } => "DEFAULT".into(),
-        PartitionBoundSpec::List { values, .. } => format!(
-            "FOR VALUES IN ({})",
-            values
-                .iter()
-                .map(psql_partition_value_text)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        PartitionBoundSpec::Range { from, to, .. } => format!(
-            "FOR VALUES FROM ({}) TO ({})",
-            from.iter()
-                .map(psql_partition_range_datum_text)
-                .collect::<Vec<_>>()
-                .join(", "),
-            to.iter()
-                .map(psql_partition_range_datum_text)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        PartitionBoundSpec::Hash { modulus, remainder } => {
-            format!("FOR VALUES WITH (MODULUS {modulus}, REMAINDER {remainder})")
-        }
-    }
+    // :HACK: keep old tcop helper path while psql partition display lives in pgrust_commands.
+    pgrust_commands::partition::describe_partition_bound_text(bound)
 }
 
 fn psql_partition_bound_is_default(bound: &PartitionBoundSpec) -> bool {
-    matches!(
-        bound,
-        PartitionBoundSpec::List {
-            is_default: true,
-            ..
-        } | PartitionBoundSpec::Range {
-            is_default: true,
-            ..
-        }
-    )
+    // :HACK: keep old tcop helper path while psql partition display lives in pgrust_commands.
+    pgrust_commands::partition::describe_partition_bound_is_default(bound)
 }
 
 fn psql_partition_range_datum_text(value: &PartitionRangeDatumValue) -> String {
-    match value {
-        PartitionRangeDatumValue::MinValue => "MINVALUE".into(),
-        PartitionRangeDatumValue::MaxValue => "MAXVALUE".into(),
-        PartitionRangeDatumValue::Value(value) => psql_partition_value_text(value),
-    }
+    // :HACK: keep old tcop helper path while psql partition display lives in pgrust_commands.
+    pgrust_commands::partition::describe_partition_range_datum_text(value)
 }
 
 fn psql_partition_value_text(value: &SerializedPartitionValue) -> String {
-    match value {
-        SerializedPartitionValue::Null => "NULL".into(),
-        SerializedPartitionValue::Text(text)
-        | SerializedPartitionValue::Json(text)
-        | SerializedPartitionValue::JsonPath(text)
-        | SerializedPartitionValue::Xml(text)
-        | SerializedPartitionValue::Numeric(text)
-        | SerializedPartitionValue::Float64(text) => quote_sql_literal_for_describe(text),
-        SerializedPartitionValue::Int16(value) if *value < 0 => {
-            quote_sql_literal_for_describe(&value.to_string())
-        }
-        SerializedPartitionValue::Int32(value) if *value < 0 => {
-            quote_sql_literal_for_describe(&value.to_string())
-        }
-        SerializedPartitionValue::Int64(value) if *value < 0 => {
-            quote_sql_literal_for_describe(&value.to_string())
-        }
-        SerializedPartitionValue::Int16(value) => value.to_string(),
-        SerializedPartitionValue::Int32(value) => value.to_string(),
-        SerializedPartitionValue::Int64(value) => value.to_string(),
-        SerializedPartitionValue::Money(value) => value.to_string(),
-        SerializedPartitionValue::Bool(value) => value.to_string(),
-        SerializedPartitionValue::EnumOid(value) => {
-            quote_sql_literal_for_describe(&value.to_string())
-        }
-        SerializedPartitionValue::Date(_)
-        | SerializedPartitionValue::Time(_)
-        | SerializedPartitionValue::TimeTz { .. }
-        | SerializedPartitionValue::Timestamp(_)
-        | SerializedPartitionValue::TimestampTz(_)
-        | SerializedPartitionValue::EnumOid(_)
-        | SerializedPartitionValue::Array(_)
-        | SerializedPartitionValue::Record(_)
-        | SerializedPartitionValue::Range(_)
-        | SerializedPartitionValue::Multirange(_) => {
-            let value = partition_value_to_value(value);
-            let rendered = render_value_for_describe_bound(&value);
-            quote_sql_literal_for_describe(&rendered)
-        }
-        SerializedPartitionValue::Bytea(bytes) | SerializedPartitionValue::Jsonb(bytes) => {
-            let mut out = String::from("'\\\\x");
-            for byte in bytes {
-                out.push_str(&format!("{byte:02x}"));
-            }
-            out.push('\'');
-            out
-        }
-        SerializedPartitionValue::InternalChar(byte) => {
-            quote_sql_literal_for_describe(&(*byte as char).to_string())
-        }
-    }
+    // :HACK: keep old tcop helper path while psql partition display lives in pgrust_commands.
+    pgrust_commands::partition::describe_partition_value_text(value)
 }
 
 fn render_value_for_describe_bound(value: &Value) -> String {
-    match value {
-        Value::Date(_)
-        | Value::Time(_)
-        | Value::TimeTz(_)
-        | Value::Timestamp(_)
-        | Value::TimestampTz(_) => {
-            crate::backend::executor::render_datetime_value_text(value).unwrap_or_default()
-        }
-        Value::Array(values) => crate::backend::executor::value_io::format_array_text(values),
-        Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
-        _ => value.as_text().unwrap_or_default().to_string(),
-    }
+    // :HACK: keep old tcop helper path while psql partition display lives in pgrust_commands.
+    pgrust_commands::partition::render_value_for_describe_bound(value)
 }
 
 fn quote_sql_literal_for_describe(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    // :HACK: keep old tcop helper path while psql partition display lives in pgrust_commands.
+    pgrust_commands::partition::quote_sql_literal_for_describe(value)
 }
 
 fn psql_statistics_regex_filter(sql: &str, marker: &str) -> Option<regex::Regex> {
@@ -10425,14 +9263,7 @@ fn psql_acl_item_grants(
     effective_names: &std::collections::BTreeSet<String>,
     privilege: char,
 ) -> bool {
-    let Some((grantee, rest)) = item.split_once('=') else {
-        return false;
-    };
-    if !effective_names.contains(grantee) {
-        return false;
-    }
-    let privileges = rest.split_once('/').map(|(privs, _)| privs).unwrap_or(rest);
-    privileges.chars().any(|ch| ch == privilege)
+    pgrust_protocol::sql::psql_acl_item_grants(item, effective_names, privilege)
 }
 
 fn psql_list_statistics_query(
@@ -10596,7 +9427,11 @@ fn try_handle_statistics_catalog_query(
         return Ok(false);
     };
     let catalog = state.session.catalog_lookup(db);
-    let catalog_maps = WireCatalogMaps::for_columns(&catalog, &columns);
+    let catalog_maps = WireCatalogMaps::for_columns_with_proc_signature_map(
+        &catalog,
+        &columns,
+        proc_signature_map,
+    );
     send_query_result(
         stream,
         &columns,
@@ -10622,147 +9457,12 @@ fn execute_statistics_catalog_query(
     session: &Session,
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
-    let lower = sql.to_ascii_lowercase();
-    if lower.contains("from pg_statistic_ext s left join pg_statistic_ext_data d")
-        && lower.contains("where s.stxname =")
-    {
-        return statistics_object_data_query(session, db, sql);
-    }
-    if lower.contains("from pg_statistic_ext s, pg_namespace n, pg_authid a")
-        && lower.contains("s.stxnamespace = n.oid")
-        && lower.contains("s.stxowner = a.oid")
-    {
-        return Some(statistics_namespace_owner_query(session, db));
-    }
-    None
-}
-
-fn statistics_namespace_owner_query(
-    session: &Session,
-    db: &Database,
-) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
-    // :HACK: This preserves the existing tcop-side statistics catalog handling
-    // while returning real pg_statistic_ext rows for ALTER GENERIC's ownership
-    // visibility query. The long-term direction is to remove the broad
-    // pg_statistic_ext shortcut above and let normal catalog scans handle this.
     let catalog = session.catalog_lookup(db);
-    let role_names = role_name_map(&catalog);
-    let mut rows = catalog
-        .statistic_ext_rows()
-        .into_iter()
-        .filter_map(|row| {
-            let namespace = catalog.namespace_row_by_oid(row.stxnamespace)?;
-            matches!(namespace.nspname.as_str(), "alt_nsp1" | "alt_nsp2").then(|| {
-                vec![
-                    Value::Text(namespace.nspname.into()),
-                    Value::Text(row.stxname.into()),
-                    Value::Text(
-                        role_names
-                            .get(&row.stxowner)
-                            .cloned()
-                            .unwrap_or_else(|| row.stxowner.to_string())
-                            .into(),
-                    ),
-                ]
-            })
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        let left_key = (
-            value_text_for_sort(&left[0]).to_string(),
-            value_text_for_sort(&left[1]).to_string(),
-        );
-        let right_key = (
-            value_text_for_sort(&right[0]).to_string(),
-            value_text_for_sort(&right[1]).to_string(),
-        );
-        left_key.cmp(&right_key)
-    });
-    (
-        vec![
-            QueryColumn::text("nspname"),
-            QueryColumn::text("stxname"),
-            QueryColumn::text("rolname"),
-        ],
-        rows,
-    )
-}
-
-fn value_text_for_sort(value: &Value) -> &str {
-    match value {
-        Value::Text(text) => text.as_str(),
-        _ => "",
-    }
-}
-
-fn statistics_object_data_query(
-    session: &Session,
-    db: &Database,
-    sql: &str,
-) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
-    let name = extract_single_quoted_literal_after(sql, "where s.stxname =")?;
-    let catalog = session.catalog_lookup(db);
-    let data_rows = catalog.statistic_ext_data_rows();
-    let rows = catalog
-        .statistic_ext_rows()
-        .into_iter()
-        .filter(|row| row.stxname.eq_ignore_ascii_case(&name))
-        .flat_map(|row| {
-            let matching_data = data_rows
-                .iter()
-                .filter(|data| data.stxoid == row.oid)
-                .cloned()
-                .collect::<Vec<_>>();
-            if matching_data.is_empty() {
-                return vec![vec![
-                    Value::Text(row.stxname.into()),
-                    Value::Null,
-                    Value::Null,
-                    Value::Null,
-                    Value::Null,
-                ]];
-            }
-            matching_data
-                .into_iter()
-                .map(|data| {
-                    vec![
-                        Value::Text(row.stxname.clone().into()),
-                        data.stxdndistinct.map_or(Value::Null, Value::Bytea),
-                        data.stxddependencies.map_or(Value::Null, Value::Bytea),
-                        data.stxdmcv.map_or(Value::Null, Value::Bytea),
-                        Value::Bool(data.stxdinherit),
-                    ]
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    Some((
-        vec![
-            QueryColumn::text("stxname"),
-            QueryColumn {
-                name: "stxdndistinct".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bytea).with_identity(PG_NDISTINCT_TYPE_OID, 0),
-                wire_type_oid: None,
-            },
-            QueryColumn {
-                name: "stxddependencies".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bytea)
-                    .with_identity(PG_DEPENDENCIES_TYPE_OID, 0),
-                wire_type_oid: None,
-            },
-            QueryColumn {
-                name: "stxdmcv".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bytea).with_identity(PG_MCV_LIST_TYPE_OID, 0),
-                wire_type_oid: None,
-            },
-            QueryColumn {
-                name: "stxdinherit".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-                wire_type_oid: None,
-            },
-        ],
-        rows,
-    ))
+    // :HACK: This preserves the existing tcop-side statistics catalog shortcut
+    // while moving row/column shaping into pgrust_commands. The long-term
+    // direction is to remove this broad shortcut and let normal catalog scans
+    // handle these queries.
+    pgrust_commands::psql::execute_statistics_catalog_query(&catalog, sql)
 }
 
 fn split_qualified_statistics_name(name: &str) -> (&str, &str) {
@@ -10803,6 +9503,13 @@ fn statistics_row_columns_text(
     Some(items.join(", "))
 }
 
+fn value_text_for_sort(value: &Value) -> &str {
+    match value {
+        Value::Text(text) => text.as_str(),
+        _ => "",
+    }
+}
+
 fn statistics_expr_looks_like_function_call(expr: &str) -> bool {
     let trimmed = expr.trim();
     let Some(open_paren) = trimmed.find('(') else {
@@ -10819,71 +9526,13 @@ fn statistics_expr_looks_like_function_call(expr: &str) -> bool {
 }
 
 fn format_statistics_expr_text(expr: &str, desc: &RelationDesc) -> String {
-    let mut out = String::with_capacity(expr.len() + 8);
-    let mut chars = expr.chars().peekable();
-    let mut prev_non_space: Option<char> = None;
-    while let Some(ch) = chars.next() {
-        if matches!(ch, '+' | '*' | '/')
-            || (ch == '-' && statistics_minus_is_binary(prev_non_space))
-        {
-            if !out.ends_with(' ') {
-                out.push(' ');
-            }
-            out.push(ch);
-            if chars.peek().is_some_and(|next| !next.is_whitespace()) {
-                out.push(' ');
-            }
-        } else {
-            out.push(ch);
-        }
-        if !ch.is_whitespace() {
-            prev_non_space = Some(ch);
-        }
-    }
-    format_numeric_statistics_expr_literals(&out, desc)
-}
-
-fn format_numeric_statistics_expr_literals(expr: &str, desc: &RelationDesc) -> String {
-    let parts = expr.split_whitespace().collect::<Vec<_>>();
-    let [left, op, right] = parts.as_slice() else {
-        return expr.to_string();
-    };
-    if !matches!(*op, "+" | "-" | "*" | "/") {
-        return expr.to_string();
-    }
-    if statistics_expr_is_numeric_column(left, desc) && statistics_expr_is_integer_literal(right) {
-        return format!("{left} {op} {right}::numeric");
-    }
-    if statistics_expr_is_integer_literal(left) && statistics_expr_is_numeric_column(right, desc) {
-        return format!("{left}::numeric {op} {right}");
-    }
-    expr.to_string()
-}
-
-fn statistics_expr_is_numeric_column(token: &str, desc: &RelationDesc) -> bool {
-    let token = token.trim_matches('"');
-    desc.columns.iter().any(|column| {
-        !column.dropped
-            && column.name.eq_ignore_ascii_case(token)
-            && matches!(column.sql_type.kind, SqlTypeKind::Numeric)
-    })
-}
-
-fn statistics_expr_is_integer_literal(token: &str) -> bool {
-    !token.contains("::") && token.parse::<i64>().is_ok()
-}
-
-fn statistics_minus_is_binary(prev_non_space: Option<char>) -> bool {
-    prev_non_space.is_some_and(|ch| !matches!(ch, '(' | '+' | '-' | '*' | '/'))
+    // :HACK: keep old tcop helper path while psql statistics display lives in pgrust_commands.
+    pgrust_commands::psql::format_statistics_expr_text(expr, desc)
 }
 
 fn extract_single_quoted_literal_after<'a>(sql: &'a str, needle: &str) -> Option<String> {
-    let lower = sql.to_ascii_lowercase();
-    let start = lower.find(needle)? + needle.len();
-    let tail = sql.get(start..)?.trim_start();
-    let tail = tail.strip_prefix('\'')?;
-    let end = tail.find('\'')?;
-    Some(tail[..end].to_string())
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_single_quoted_literal_after(sql, needle)
 }
 
 fn pg_policy_polqual_inputcollid_query(
@@ -10995,12 +9644,8 @@ fn psql_describe_lookup_query(
 }
 
 fn psql_describe_pattern_is_plain(pattern: &str) -> bool {
-    !pattern.chars().any(|ch| {
-        matches!(
-            ch,
-            '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
-        )
-    })
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::describe_pattern_is_plain(pattern)
 }
 
 fn psql_describe_lookup_regex_rows(
@@ -11470,44 +10115,11 @@ fn psql_describe_columns_query(
 }
 
 fn psql_format_fdw_options(options: Option<&[String]>) -> String {
-    let Some(options) = options else {
-        return String::new();
-    };
-    if options.is_empty() {
-        return String::new();
-    }
-    let parts = options
-        .iter()
-        .filter_map(|option| option.split_once('='))
-        .map(|(name, value)| {
-            format!(
-                "{} '{}'",
-                psql_quote_ident_if_needed(name),
-                value.replace('\'', "''")
-            )
-        })
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("({})", parts.join(", "))
-    }
+    pgrust_protocol::sql::psql_format_fdw_options(options)
 }
 
 fn psql_quote_ident_if_needed(ident: &str) -> String {
-    let mut chars = ident.chars();
-    let Some(first) = chars.next() else {
-        return "\"\"".into();
-    };
-    let is_simple_start = first == '_' || first.is_ascii_lowercase();
-    let is_simple_rest =
-        chars.all(|ch| ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit());
-    let is_keyword = matches!(ident, "user");
-    if is_simple_start && is_simple_rest && !is_keyword {
-        ident.to_string()
-    } else {
-        quote_identifier(ident)
-    }
+    pgrust_protocol::sql::psql_quote_ident_if_needed(ident)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12273,75 +10885,19 @@ fn format_date_for_constraint_display(date: DateADT) -> String {
 }
 
 fn normalize_check_expr_operator_spacing(expr_sql: &str) -> String {
-    let chars = expr_sql.chars().collect::<Vec<_>>();
-    let mut out = String::with_capacity(expr_sql.len());
-    let mut index = 0;
-    while index < chars.len() {
-        let op = if matches!(chars.get(index), Some('>' | '<' | '!' | '='))
-            && matches!(chars.get(index + 1), Some('='))
-        {
-            Some(2)
-        } else if matches!(chars.get(index), Some('<')) && matches!(chars.get(index + 1), Some('>'))
-        {
-            Some(2)
-        } else if matches!(chars.get(index), Some('>' | '<' | '='))
-            && !matches!(chars.get(index + 1), Some('>'))
-        {
-            Some(1)
-        } else {
-            None
-        };
-        let Some(op_len) = op else {
-            out.push(chars[index]);
-            index += 1;
-            continue;
-        };
-        if !out.ends_with(' ') {
-            out.push(' ');
-        }
-        for offset in 0..op_len {
-            out.push(chars[index + offset]);
-        }
-        if !matches!(chars.get(index + op_len), Some(' ')) {
-            out.push(' ');
-        }
-        index += op_len;
-    }
-    out
+    pgrust_protocol::sql::normalize_check_expr_operator_spacing(expr_sql)
 }
 
 fn is_simple_sql_string_literal(value: &str) -> bool {
-    value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2
+    pgrust_protocol::sql::is_simple_sql_string_literal(value)
 }
 
 fn check_expr_column_matches(expr: &str, column_name: &str) -> bool {
-    expr.eq_ignore_ascii_case(column_name)
-        || expr == quote_identifier(column_name)
-        || expr
-            .strip_suffix("::double precision")
-            .is_some_and(|base| check_expr_column_matches(base.trim(), column_name))
+    pgrust_protocol::sql::check_expr_column_matches(expr, column_name)
 }
 
 fn is_plain_numeric_literal(value: &str) -> bool {
-    if value.is_empty() {
-        return false;
-    }
-    let mut chars = value.chars().peekable();
-    if matches!(chars.peek(), Some('+') | Some('-')) {
-        chars.next();
-    }
-    let mut saw_digit = false;
-    let mut saw_dot = false;
-    for ch in chars {
-        if ch.is_ascii_digit() {
-            saw_digit = true;
-        } else if ch == '.' && !saw_dot {
-            saw_dot = true;
-        } else {
-            return false;
-        }
-    }
-    saw_digit
+    pgrust_protocol::sql::is_plain_numeric_literal(value)
 }
 
 fn index_backed_constraint_def(
@@ -13100,85 +11656,38 @@ pub(crate) fn format_psql_indexdef(
 }
 
 fn extract_psql_pattern_name(sql: &str) -> Option<&str> {
-    let lower = sql.to_ascii_lowercase();
-    let start = lower.find("operator(pg_catalog.~)")?;
-    extract_psql_operator_pattern_at(sql, &lower, start)
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_pattern_name(sql)
 }
 
 fn extract_quoted_oid(sql: &str) -> Option<u32> {
-    let lower = sql.to_ascii_lowercase();
-    let marker = "where c.oid = '";
-    let alt_marker = "where a.attrelid = '";
-    let start = lower
-        .find(marker)
-        .map(|idx| idx + marker.len())
-        .or_else(|| lower.find(alt_marker).map(|idx| idx + alt_marker.len()))?;
-    let rest = &sql[start..];
-    let end = rest.find('\'')?;
-    rest[..end].parse::<u32>().ok()
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_quoted_oid(sql)
 }
 
 fn extract_constraint_relid(sql: &str) -> Option<u32> {
-    extract_quoted_oid_with_markers(
-        sql,
-        &[
-            "where c.conrelid = '",
-            "where r.conrelid = '",
-            "and c.conrelid = '",
-            "and r.conrelid = '",
-            "where conrelid = '",
-            "and conrelid = '",
-            "where c.confrelid = '",
-            "where r.confrelid = '",
-            "and c.confrelid = '",
-            "and r.confrelid = '",
-            "where confrelid = '",
-            "and confrelid = '",
-        ],
-    )
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_constraint_relid(sql)
 }
 
 fn extract_quoted_literal_with_markers<'a>(sql: &'a str, markers: &[&str]) -> Option<&'a str> {
-    let lower = sql.to_ascii_lowercase();
-    let start = markers
-        .iter()
-        .find_map(|marker| lower.find(marker).map(|idx| idx + marker.len()))?;
-    let rest = &sql[start..];
-    let end = rest.find('\'')?;
-    Some(&rest[..end])
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_quoted_literal_with_markers(sql, markers)
 }
 
 fn extract_quoted_oid_with_markers(sql: &str, markers: &[&str]) -> Option<u32> {
-    extract_quoted_literal_with_markers(sql, markers)?
-        .parse::<u32>()
-        .ok()
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_quoted_oid_with_markers(sql, markers)
 }
 
 fn extract_unquoted_u32_after(sql: &str, marker: &str) -> Option<u32> {
-    let lower = sql.to_ascii_lowercase();
-    let start = lower.find(marker)? + marker.len();
-    let rest = sql[start..].trim_start();
-    let len = rest
-        .as_bytes()
-        .iter()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    (len > 0).then(|| rest[..len].parse::<u32>().ok())?
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_unquoted_u32_after(sql, marker)
 }
 
 fn extract_col_description_attnum(sql: &str) -> Option<i32> {
-    let lower = sql.to_ascii_lowercase();
-    let marker = lower
-        .find("::pg_catalog.regclass,")
-        .map(|idx| idx + "::pg_catalog.regclass,".len())
-        .or_else(|| {
-            lower
-                .find("::regclass,")
-                .map(|idx| idx + "::regclass,".len())
-        })?;
-    let rest = sql[marker..].trim_start();
-    let end = rest.find(')')?;
-    rest[..end].trim().parse::<i32>().ok()
+    // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
+    pgrust_protocol::psql::extract_col_description_attnum(sql)
 }
 
 fn resolve_regclass_literal(db: &Database, session: &Session, literal: &str) -> Option<u32> {
@@ -13361,21 +11870,12 @@ fn format_regclass_nextval_default(
     )?;
     Some(format!(
         "nextval({}::regclass)",
-        quote_sql_string(&relation_name)
+        pgrust_protocol::sql::quote_sql_string(&relation_name)
     ))
 }
 
 fn parse_nextval_relation_oid(expr_sql: &str) -> Option<u32> {
-    let expr_sql = expr_sql.trim();
-    let rest = expr_sql.strip_prefix("nextval(")?;
-    let close = rest.find(')')?;
-    let oid = rest[..close].trim().parse().ok()?;
-    let trailing = rest[close + 1..].trim();
-    if trailing.is_empty() || trailing.starts_with("::") {
-        Some(oid)
-    } else {
-        None
-    }
+    pgrust_protocol::sql::parse_nextval_relation_oid(expr_sql)
 }
 
 fn handle_copy_data(state: &mut ConnectionState, body: &[u8]) -> io::Result<()> {
@@ -13385,7 +11885,7 @@ fn handle_copy_data(state: &mut ConnectionState, body: &[u8]) -> io::Result<()> 
             "received CopyData outside copy-in mode",
         ));
     };
-    copy.pending.extend_from_slice(body);
+    copy.append_data(body);
     Ok(())
 }
 
@@ -13400,7 +11900,7 @@ fn handle_copy_done(
             "received CopyDone outside copy-in mode",
         ));
     };
-    let text = String::from_utf8_lossy(&copy.pending);
+    let text = copy.pending_text_lossy();
     if let Err(e) = state.session.copy_from_text(db, &copy.copy, &text) {
         send_exec_error(stream, &copy.sql, &e)?;
         send_ready_with_pending_messages(stream, db, &state.session)?;
@@ -13438,76 +11938,7 @@ fn handle_copy_fail(
 }
 
 fn parse_copy_from_stdin(sql: &str) -> Option<(String, Option<Vec<String>>, String)> {
-    let lower = sql.to_ascii_lowercase();
-    let prefix = "copy ";
-    let source = " from stdin";
-    if !lower.starts_with(prefix) || !lower.contains(source) {
-        return None;
-    }
-    let end = lower.find(source)?;
-    let target = sql[prefix.len()..end].trim();
-    if target.is_empty() {
-        return None;
-    }
-    let options = sql[end + source.len()..].trim();
-    let null_marker = parse_copy_null_marker(options)?;
-    let (table, columns) = if let Some(open_paren) = target.find('(') {
-        let close_paren = target.rfind(')')?;
-        if close_paren < open_paren {
-            return None;
-        }
-        let table = target[..open_paren].trim();
-        let columns = target[open_paren + 1..close_paren]
-            .split(',')
-            .map(|part| part.trim())
-            .filter(|part| !part.is_empty())
-            .map(|part| part.to_string())
-            .collect::<Vec<_>>();
-        if table.is_empty() || columns.is_empty() {
-            return None;
-        }
-        (table.to_string(), Some(columns))
-    } else {
-        (target.to_string(), None)
-    };
-    Some((table, columns, null_marker))
-}
-
-fn parse_copy_null_marker(options: &str) -> Option<String> {
-    let options = options.trim();
-    if options.is_empty() {
-        return Some("\\N".into());
-    }
-    let lower = options.to_ascii_lowercase();
-    let rest = lower
-        .strip_prefix("null")
-        .and_then(|_| options.get(4..))?
-        .trim_start();
-    parse_single_quoted_copy_option(rest)
-}
-
-fn parse_single_quoted_copy_option(input: &str) -> Option<String> {
-    let mut chars = input.char_indices();
-    if chars.next()?.1 != '\'' {
-        return None;
-    }
-    let mut out = String::new();
-    let mut end = None;
-    let mut iter = input[1..].char_indices().peekable();
-    while let Some((idx, ch)) = iter.next() {
-        if ch == '\'' {
-            if matches!(iter.peek(), Some((_, '\''))) {
-                iter.next();
-                out.push('\'');
-                continue;
-            }
-            end = Some(idx + 2);
-            break;
-        }
-        out.push(ch);
-    }
-    let end = end?;
-    input[end..].trim().is_empty().then_some(out)
+    pgrust_protocol::sql::parse_copy_from_stdin(sql)
 }
 
 fn handle_parse(
@@ -13515,34 +11946,30 @@ fn handle_parse(
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
-    let mut offset = 0;
-    let statement_name = read_cstr(body, &mut offset)?;
-    let raw_sql = read_cstr(body, &mut offset)?;
-    let nparams = read_i16_bytes(body, &mut offset)? as usize;
-    let mut param_type_oids = Vec::with_capacity(nparams);
-    for _ in 0..nparams {
-        param_type_oids.push(read_i32_bytes(body, &mut offset)? as u32);
-    }
-    let sql =
-        match normalize_extended_query_sql(&raw_sql, state.session.standard_conforming_strings()) {
-            Ok(sql) => sql,
-            Err(e) => {
-                send_error(
-                    stream,
-                    exec_error_sqlstate(&e),
-                    &format_exec_error(&e),
-                    exec_error_detail(&e),
-                    exec_error_hint(&e),
-                    None,
-                )?;
-                state.session.mark_transaction_failed();
-                state.ignore_till_sync = true;
-                return Ok(());
-            }
-        };
-    if let Some(param) =
-        first_missing_sql_parameter_ref(&sql, state.session.standard_conforming_strings())
-    {
+    let message = pgrust_protocol::extended::parse_parse_message(body)?;
+    let sql = match normalize_extended_query_sql(
+        &message.raw_sql,
+        state.session.standard_conforming_strings(),
+    ) {
+        Ok(sql) => sql,
+        Err(e) => {
+            send_error(
+                stream,
+                exec_error_sqlstate(&e),
+                &format_exec_error(&e),
+                exec_error_detail(&e),
+                exec_error_hint(&e),
+                None,
+            )?;
+            state.session.mark_transaction_failed();
+            state.ignore_till_sync = true;
+            return Ok(());
+        }
+    };
+    if let Some(param) = pgrust_protocol::sql::first_missing_sql_parameter_ref(
+        &sql,
+        state.session.standard_conforming_strings(),
+    ) {
         send_error(
             stream,
             "42P18",
@@ -13556,10 +11983,10 @@ fn handle_parse(
         return Ok(());
     }
     state.prepared.insert(
-        statement_name,
+        message.statement_name,
         PreparedStatement {
             sql,
-            param_type_oids,
+            param_type_oids: message.param_type_oids,
             prepare_time: crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         },
     );
@@ -13572,79 +11999,61 @@ fn handle_bind(
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
-    let mut offset = 0;
-    let portal_name = read_cstr(body, &mut offset)?;
-    let statement_name = read_cstr(body, &mut offset)?;
-    let n_format_codes = read_i16_bytes(body, &mut offset)? as usize;
-    let mut param_formats = Vec::with_capacity(n_format_codes);
-    for _ in 0..n_format_codes {
-        param_formats.push(read_i16_bytes(body, &mut offset)?);
-    }
-    if param_formats.iter().any(|code| !matches!(*code, 0 | 1)) {
-        send_error(
-            stream,
-            "0A000",
-            "unsupported parameter format code",
-            None,
-            None,
-            None,
-        )?;
-        state.session.mark_transaction_failed();
-        state.ignore_till_sync = true;
-        return Ok(());
-    }
-    let nparams = read_i16_bytes(body, &mut offset)? as usize;
-    if !(param_formats.is_empty() || param_formats.len() == 1 || param_formats.len() == nparams) {
-        send_error(
-            stream,
-            "08P01",
-            "bind message has invalid parameter format code count",
-            None,
-            None,
-            None,
-        )?;
-        state.session.mark_transaction_failed();
-        state.ignore_till_sync = true;
-        return Ok(());
-    }
-    let mut raw_params = Vec::with_capacity(nparams);
-    for _ in 0..nparams {
-        let len = read_i32_bytes(body, &mut offset)?;
-        if len < 0 {
-            raw_params.push(None);
-        } else {
-            let len = len as usize;
-            let bytes = &body[offset..offset + len];
-            offset += len;
-            raw_params.push(Some(bytes.to_vec()));
+    let message = match pgrust_protocol::extended::parse_bind_message(body) {
+        Ok(message) => message,
+        Err(pgrust_protocol::extended::BindMessageError::Io(err)) => return Err(err),
+        Err(pgrust_protocol::extended::BindMessageError::UnsupportedParameterFormatCode) => {
+            send_error(
+                stream,
+                "0A000",
+                "unsupported parameter format code",
+                None,
+                None,
+                None,
+            )?;
+            state.session.mark_transaction_failed();
+            state.ignore_till_sync = true;
+            return Ok(());
         }
-    }
-    let n_result_codes = read_i16_bytes(body, &mut offset)? as usize;
-    let mut result_formats = Vec::with_capacity(n_result_codes);
-    for _ in 0..n_result_codes {
-        result_formats.push(read_i16_bytes(body, &mut offset)?);
-    }
-    if result_formats.iter().any(|code| !matches!(*code, 0 | 1)) {
-        send_error(
-            stream,
-            "0A000",
-            "unsupported result format code",
-            None,
-            None,
-            None,
-        )?;
-        state.session.mark_transaction_failed();
-        state.ignore_till_sync = true;
-        return Ok(());
-    }
+        Err(pgrust_protocol::extended::BindMessageError::InvalidParameterFormatCodeCount) => {
+            send_error(
+                stream,
+                "08P01",
+                "bind message has invalid parameter format code count",
+                None,
+                None,
+                None,
+            )?;
+            state.session.mark_transaction_failed();
+            state.ignore_till_sync = true;
+            return Ok(());
+        }
+        Err(pgrust_protocol::extended::BindMessageError::UnsupportedResultFormatCode) => {
+            send_error(
+                stream,
+                "0A000",
+                "unsupported result format code",
+                None,
+                None,
+                None,
+            )?;
+            state.session.mark_transaction_failed();
+            state.ignore_till_sync = true;
+            return Ok(());
+        }
+    };
+    let nparams = message.raw_params.len();
 
-    let Some(stmt) = state.prepared.get(&statement_name) else {
-        let message = if statement_name.is_empty() {
+    let Some(stmt) = state.prepared.get(&message.statement_name) else {
+        let error_message = if message.statement_name.is_empty() {
             "unnamed prepared statement does not exist".to_string()
         } else {
-            format!("prepared statement \"{statement_name}\" does not exist")
+            format!(
+                "prepared statement \"{}\" does not exist",
+                message.statement_name
+            )
         };
-        send_error(stream, "26000", &message, None, None, None)?;
+        send_error(stream, "26000", &error_message, None, None, None)?;
         state.session.mark_transaction_failed();
         state.ignore_till_sync = true;
         return Ok(());
@@ -13655,7 +12064,8 @@ fn handle_bind(
             stream,
             "08P01",
             &format!(
-                "bind message supplies {nparams} parameters, but prepared statement \"{statement_name}\" requires {required_params}"
+                "bind message supplies {nparams} parameters, but prepared statement \"{}\" requires {required_params}",
+                message.statement_name
             ),
             None,
             None,
@@ -13667,8 +12077,9 @@ fn handle_bind(
     }
     let catalog = state.session.catalog_lookup(db);
     let mut params = Vec::with_capacity(nparams);
-    for (index, raw) in raw_params.iter().enumerate() {
-        let format_code = parameter_format_code(&param_formats, index);
+    for (index, raw) in message.raw_params.iter().enumerate() {
+        let format_code =
+            pgrust_protocol::sql::parameter_format_code(&message.param_formats, index);
         match decode_bound_param(
             raw.as_deref(),
             format_code,
@@ -13686,32 +12097,32 @@ fn handle_bind(
         }
     }
     let sql = substitute_params(&stmt.sql, &params, &catalog);
-    let prep_stmt_name = (!statement_name.is_empty()).then_some(statement_name);
+    let prep_stmt_name = (!message.statement_name.is_empty()).then_some(message.statement_name);
     match state.session.bind_protocol_portal(
         db,
-        &portal_name,
-        prep_stmt_name,
+        &message.portal_name,
+        prep_stmt_name.clone(),
         &sql,
-        result_formats.clone(),
+        message.result_formats.clone(),
     ) {
         Ok(()) => {
-            if let Some(cols) = state.session.portal_columns(&portal_name)
-                && result_formats.len() > 1
-                && result_formats.len() != cols.len()
+            if let Some(cols) = state.session.portal_columns(&message.portal_name)
+                && message.result_formats.len() > 1
+                && message.result_formats.len() != cols.len()
             {
                 send_error(
                     stream,
                     "08P01",
                     &format!(
                         "bind message has {} result formats but query has {} columns",
-                        result_formats.len(),
+                        message.result_formats.len(),
                         cols.len()
                     ),
                     None,
                     None,
                     None,
                 )?;
-                state.session.close_portal(&portal_name).ok();
+                state.session.close_portal(&message.portal_name).ok();
                 state.session.mark_transaction_failed();
                 state.ignore_till_sync = true;
                 return Ok(());
@@ -13732,67 +12143,67 @@ fn handle_describe(
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
-    let mut offset = 0;
-    let target_type = body
-        .get(offset)
-        .copied()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "describe target missing"))?;
-    offset += 1;
-    let name = read_cstr(body, &mut offset)?;
-    match target_type {
-        b'S' => match state.prepared.get(&name) {
-            Some(stmt) => {
-                let param_type_oids = stmt
-                    .param_type_oids
-                    .iter()
-                    .map(|oid| *oid as i32)
-                    .collect::<Vec<_>>();
-                send_parameter_description(stream, &param_type_oids)?;
-                match describe_sql(db, &state.session, &stmt.sql, &stmt.param_type_oids) {
-                    Ok(Some(cols)) => send_row_description(stream, &cols),
-                    Ok(None) => send_no_data(stream),
-                    Err(e) => {
-                        let describe_sql = sql_without_describe_terminator(&stmt.sql);
-                        send_exec_error(stream, &describe_sql, &e)
+    let message = pgrust_protocol::extended::parse_describe_message(body)?;
+    match message.target {
+        pgrust_protocol::extended::DescribeTargetKind::Statement => {
+            match state.prepared.get(&message.name) {
+                Some(stmt) => {
+                    let param_type_oids = stmt
+                        .param_type_oids
+                        .iter()
+                        .map(|oid| *oid as i32)
+                        .collect::<Vec<_>>();
+                    send_parameter_description(stream, &param_type_oids)?;
+                    match describe_sql(db, &state.session, &stmt.sql, &stmt.param_type_oids) {
+                        Ok(Some(cols)) => send_row_description(stream, &cols),
+                        Ok(None) => send_no_data(stream),
+                        Err(e) => {
+                            let describe_sql = sql_without_describe_terminator(&stmt.sql);
+                            send_exec_error(stream, &describe_sql, &e)
+                        }
                     }
                 }
+                None => {
+                    let error_message = if message.name.is_empty() {
+                        "unnamed prepared statement does not exist".to_string()
+                    } else {
+                        format!("prepared statement \"{}\" does not exist", message.name)
+                    };
+                    state.session.mark_transaction_failed();
+                    state.ignore_till_sync = true;
+                    send_error(stream, "26000", &error_message, None, None, None)
+                }
             }
-            None => {
-                let message = if name.is_empty() {
-                    "unnamed prepared statement does not exist".to_string()
-                } else {
-                    format!("prepared statement \"{name}\" does not exist")
-                };
-                state.session.mark_transaction_failed();
-                state.ignore_till_sync = true;
-                send_error(stream, "26000", &message, None, None, None)
+        }
+        pgrust_protocol::extended::DescribeTargetKind::Portal => {
+            match state.session.portal_columns(&message.name) {
+                Some(mut cols) => {
+                    let catalog = state.session.catalog_lookup(db);
+                    annotate_query_columns_with_wire_type_oids(&mut cols, &catalog);
+                    let formats = state
+                        .session
+                        .portal_result_formats(&message.name)
+                        .unwrap_or_default();
+                    send_row_description_with_formats(stream, &cols, &formats)
+                }
+                None if state.session.portal_source_text(&message.name).is_some() => {
+                    send_no_data(stream)
+                }
+                None => {
+                    state.session.mark_transaction_failed();
+                    state.ignore_till_sync = true;
+                    send_error(
+                        stream,
+                        "34000",
+                        &format!("portal \"{}\" does not exist", message.name),
+                        None,
+                        None,
+                        None,
+                    )
+                }
             }
-        },
-        b'P' => match state.session.portal_columns(&name) {
-            Some(mut cols) => {
-                let catalog = state.session.catalog_lookup(db);
-                annotate_query_columns_with_wire_type_oids(&mut cols, &catalog);
-                let formats = state
-                    .session
-                    .portal_result_formats(&name)
-                    .unwrap_or_default();
-                send_row_description_with_formats(stream, &cols, &formats)
-            }
-            None if state.session.portal_source_text(&name).is_some() => send_no_data(stream),
-            None => {
-                state.session.mark_transaction_failed();
-                state.ignore_till_sync = true;
-                send_error(
-                    stream,
-                    "34000",
-                    &format!("portal \"{name}\" does not exist"),
-                    None,
-                    None,
-                    None,
-                )
-            }
-        },
-        _ => {
+        }
+        pgrust_protocol::extended::DescribeTargetKind::Invalid(target_type) => {
             state.session.mark_transaction_failed();
             state.ignore_till_sync = true;
             send_error(
@@ -13813,31 +12224,36 @@ fn handle_execute(
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
-    let mut offset = 0;
-    let portal_name = read_cstr(body, &mut offset)?;
-    let max_rows = read_i32_bytes(body, &mut offset)?;
-    let limit = if max_rows <= 0 {
+    let message = pgrust_protocol::extended::parse_execute_message(body)?;
+    let limit = if message.max_rows <= 0 {
         PortalFetchLimit::All
     } else {
-        PortalFetchLimit::Count(max_rows as usize)
+        PortalFetchLimit::Count(message.max_rows as usize)
     };
-    let Some(source_text) = state.session.portal_source_text(&portal_name) else {
+    let Some(source_text) = state.session.portal_source_text(&message.portal_name) else {
         state.session.mark_transaction_failed();
         state.ignore_till_sync = true;
         return send_error(
             stream,
             "34000",
-            &format!("portal \"{portal_name}\" does not exist"),
+            &format!("portal \"{}\" does not exist", message.portal_name),
             None,
             None,
             None,
         );
     };
-    if handle_extended_pipeline_pre_execute(stream, db, state, &portal_name, &source_text)? {
+    if handle_extended_pipeline_pre_execute(stream, db, state, &message.portal_name, &source_text)?
+    {
         return Ok(());
     }
     state.extended_segment_command_count = state.extended_segment_command_count.saturating_add(1);
-    if try_handle_pipeline_statement_timeout_show(stream, db, state, &portal_name, &source_text)? {
+    if try_handle_pipeline_statement_timeout_show(
+        stream,
+        db,
+        state,
+        &message.portal_name,
+        &source_text,
+    )? {
         return Ok(());
     }
     {
@@ -13850,7 +12266,7 @@ fn handle_execute(
                         let tag = format!("COPY {row_count}");
                         if let Err(e) = state
                             .session
-                            .mark_portal_command_done(&portal_name, tag.clone())
+                            .mark_portal_command_done(&message.portal_name, tag.clone())
                         {
                             let message = format_exec_error(&e);
                             let hint = format_exec_error_hint(&e);
@@ -13903,7 +12319,7 @@ fn handle_execute(
     }
     match state
         .session
-        .execute_portal_forward(db, &portal_name, limit)
+        .execute_portal_forward(db, &message.portal_name, limit)
     {
         Ok(mut result) => {
             let catalog = state.session.catalog_lookup(db);
@@ -13911,7 +12327,7 @@ fn handle_execute(
             if !result.columns.is_empty() || !result.rows.is_empty() {
                 let formats = state
                     .session
-                    .portal_result_formats(&portal_name)
+                    .portal_result_formats(&message.portal_name)
                     .unwrap_or_default();
                 if let Err(e) =
                     validate_binary_result_formats(&result.rows, &result.columns, &formats)
@@ -13929,7 +12345,11 @@ fn handle_execute(
                     )?;
                     return Ok(());
                 }
-                let catalog_maps = WireCatalogMaps::for_columns(&catalog, &result.columns);
+                let catalog_maps = WireCatalogMaps::for_columns_with_proc_signature_map(
+                    &catalog,
+                    &result.columns,
+                    proc_signature_map,
+                );
                 let mut row_buf = Vec::new();
                 for row in &result.rows {
                     if let Err(e) = ensure_no_deferred_column_errors(row) {
@@ -14142,13 +12562,7 @@ fn extended_query_is_set_local(sql: &str) -> bool {
 }
 
 fn normalized_command_prefix(sql: &str) -> String {
-    sql.trim_start()
-        .trim_end_matches(';')
-        .split_whitespace()
-        .take(4)
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
+    pgrust_protocol::sql::normalized_command_prefix(sql)
 }
 
 fn parse_portal_copy_to_statement(
@@ -14184,21 +12598,15 @@ fn handle_close(
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
-    let mut offset = 0;
-    let target_type = body
-        .get(offset)
-        .copied()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "close target missing"))?;
-    offset += 1;
-    let name = read_cstr(body, &mut offset)?;
-    match target_type {
-        b'S' => {
-            state.prepared.remove(&name);
+    let message = pgrust_protocol::extended::parse_close_message(body)?;
+    match message.target {
+        pgrust_protocol::extended::CloseTargetKind::Statement => {
+            state.prepared.remove(&message.name);
         }
-        b'P' => {
-            let _ = state.session.close_portal(&name);
+        pgrust_protocol::extended::CloseTargetKind::Portal => {
+            let _ = state.session.close_portal(&message.name);
         }
-        _ => {
+        pgrust_protocol::extended::CloseTargetKind::Invalid(target_type) => {
             state.session.mark_transaction_failed();
             state.ignore_till_sync = true;
             return send_error(
@@ -14293,43 +12701,22 @@ fn backend_notice_visible_for_client_min_messages(
     severity: &str,
     client_min_messages: Option<&str>,
 ) -> bool {
-    let Some(min_messages) = client_min_messages else {
-        return true;
-    };
-    backend_notice_severity_rank(severity) >= client_min_messages_rank(min_messages)
+    pgrust_protocol::notices::backend_notice_visible_for_client_min_messages(
+        severity,
+        client_min_messages,
+    )
 }
 
 fn backend_notice_severity_rank(severity: &str) -> u8 {
-    match severity.to_ascii_lowercase().as_str() {
-        "debug" | "debug1" | "debug2" | "debug3" | "debug4" | "debug5" => 10,
-        "info" | "log" => 20,
-        "notice" => 30,
-        "warning" => 40,
-        _ => 50,
-    }
+    pgrust_protocol::notices::backend_notice_severity_rank(severity)
 }
 
 fn client_min_messages_rank(value: &str) -> u8 {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "debug" | "debug1" | "debug2" | "debug3" | "debug4" | "debug5" => 10,
-        "info" | "log" => 20,
-        "notice" => 30,
-        "warning" => 40,
-        "error" => 50,
-        _ => 30,
-    }
+    pgrust_protocol::notices::client_min_messages_rank(value)
 }
 
 fn suppress_duplicate_alter_missing_relation_notice(sql: &str, message: &str) -> bool {
-    let compact = sql
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    compact.starts_with("alter foreign table if exists ")
-        && compact.contains(',')
-        && message.starts_with("relation \"")
-        && message.ends_with("\" does not exist, skipping")
+    pgrust_protocol::notices::suppress_duplicate_alter_missing_relation_notice(sql, message)
 }
 
 fn send_queued_notifications(
@@ -15440,231 +13827,39 @@ fn sql_with_describe_null_params(
 }
 
 fn substitute_params(sql: &str, params: &[BoundParam], catalog: &dyn CatalogLookup) -> String {
-    let mut out = sql.to_string();
-    for (i, param) in params.iter().enumerate() {
-        let placeholder = format!("${}", i + 1);
-        let regclass_value = match param {
-            BoundParam::Null => "null".to_string(),
-            BoundParam::Text(v) => resolve_regclass_param(v, catalog),
-            BoundParam::SqlExpression(expr) => expr.clone(),
-        };
-        out = out.replace(
-            &format!("{placeholder}::pg_catalog.regclass"),
-            &regclass_value,
-        );
-        out = out.replace(&format!("{placeholder}::regclass"), &regclass_value);
-        let value = match param {
-            BoundParam::Null => "null".to_string(),
-            BoundParam::Text(v) if v.parse::<i64>().is_ok() => v.clone(),
-            BoundParam::Text(v) => quote_sql_string(v),
-            BoundParam::SqlExpression(expr) => expr.clone(),
-        };
-        out = out.replace(&placeholder, &value);
+    struct Resolver<'a>(&'a dyn CatalogLookup);
+
+    impl RegclassParamResolver for Resolver<'_> {
+        fn resolve_regclass_param(&self, value: &str) -> String {
+            resolve_regclass_param(value, self.0)
+        }
     }
-    out
+
+    protocol_substitute_params(sql, params, &Resolver(catalog))
 }
 
 fn annotate_query_columns_with_wire_type_oids(
     columns: &mut [QueryColumn],
     catalog: &dyn CatalogLookup,
 ) {
-    for column in columns {
-        if column.wire_type_oid.is_some() {
-            continue;
-        }
-        if column.sql_type.is_array
-            || matches!(
-                column.sql_type.kind,
-                SqlTypeKind::Record | SqlTypeKind::Composite
-            )
-        {
-            column.wire_type_oid = catalog.type_oid_for_sql_type(column.sql_type);
-        }
-    }
-}
-
-fn parameter_format_code(format_codes: &[i16], index: usize) -> i16 {
-    match format_codes {
-        [] => 0,
-        [single] => *single,
-        many => many.get(index).copied().unwrap_or(0),
-    }
-}
-
-fn required_bind_param_count(stmt: &PreparedStatement) -> usize {
-    stmt.param_type_oids
-        .len()
-        .max(highest_sql_parameter_ref(&stmt.sql))
-}
-
-fn highest_sql_parameter_ref(sql: &str) -> usize {
-    sql_parameter_refs(sql, true).into_iter().max().unwrap_or(0)
+    // :HACK: keep old tcop helper path while wire type annotation lives in pgrust_commands.
+    pgrust_commands::wire::annotate_query_columns_with_wire_type_oids(columns, catalog)
 }
 
 fn normalize_extended_query_sql(
     sql: &str,
     standard_conforming_strings: bool,
 ) -> Result<String, ExecError> {
-    let statements = split_simple_query_statements(sql, standard_conforming_strings)
-        .into_iter()
-        .filter(|stmt| !extended_query_segment_is_empty(stmt))
-        .collect::<Vec<_>>();
-    if statements.len() > 1 {
-        return Err(ExecError::Parse(
-            crate::backend::parser::ParseError::DetailedError {
+    pgrust_protocol::sql::normalize_extended_query_sql(sql, standard_conforming_strings).map_err(
+        |_| {
+            ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
                 message: "cannot insert multiple commands into a prepared statement".into(),
                 detail: None,
                 hint: None,
                 sqlstate: "42601",
-            },
-        ));
-    }
-    let Some(statement) = statements.first() else {
-        return Ok(String::new());
-    };
-    Ok(strip_one_terminal_semicolon(statement).trim().to_string())
-}
-
-fn extended_query_segment_is_empty(sql: &str) -> bool {
-    let trimmed = sql.trim();
-    if sql_is_effectively_empty_after_comments(trimmed) {
-        return true;
-    }
-    let without_semicolons = trimmed.trim_matches(';').trim();
-    sql_is_effectively_empty_after_comments(without_semicolons)
-}
-
-fn strip_one_terminal_semicolon(sql: &str) -> &str {
-    let trimmed = sql.trim_end();
-    trimmed.strip_suffix(';').unwrap_or(trimmed)
-}
-
-fn first_missing_sql_parameter_ref(sql: &str, standard_conforming_strings: bool) -> Option<usize> {
-    let refs = sql_parameter_refs(sql, standard_conforming_strings);
-    let highest = refs.iter().copied().max()?;
-    (1..highest).find(|param| !refs.contains(param))
-}
-
-fn sql_parameter_refs(sql: &str, standard_conforming_strings: bool) -> Vec<usize> {
-    let bytes = sql.as_bytes();
-    let mut refs = Vec::new();
-    let mut index = 0usize;
-    let mut block_comment_depth = 0usize;
-    let mut single_quote = false;
-    let mut double_quote = false;
-    let mut line_comment = false;
-    let mut dollar_quote: Option<String> = None;
-    while index < bytes.len() {
-        if line_comment {
-            if bytes[index] == b'\n' {
-                line_comment = false;
-            }
-            index += 1;
-            continue;
-        }
-        if block_comment_depth > 0 {
-            if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
-                block_comment_depth += 1;
-                index += 2;
-                continue;
-            }
-            if index + 1 < bytes.len() && bytes[index] == b'*' && bytes[index + 1] == b'/' {
-                block_comment_depth -= 1;
-                index += 2;
-                continue;
-            }
-            index += 1;
-            continue;
-        }
-        if let Some(tag) = &dollar_quote {
-            if sql[index..].starts_with(tag) {
-                index += tag.len();
-                dollar_quote = None;
-            } else {
-                index += 1;
-            }
-            continue;
-        }
-        if single_quote {
-            if !standard_conforming_strings && bytes[index] == b'\\' && index + 1 < bytes.len() {
-                index += 2;
-            } else if bytes[index] == b'\'' {
-                if index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
-                    index += 2;
-                } else {
-                    single_quote = false;
-                    index += 1;
-                }
-            } else {
-                index += 1;
-            }
-            continue;
-        }
-        if double_quote {
-            if bytes[index] == b'"' {
-                if index + 1 < bytes.len() && bytes[index + 1] == b'"' {
-                    index += 2;
-                } else {
-                    double_quote = false;
-                    index += 1;
-                }
-            } else {
-                index += 1;
-            }
-            continue;
-        }
-
-        if index + 1 < bytes.len() && bytes[index] == b'-' && bytes[index + 1] == b'-' {
-            line_comment = true;
-            index += 2;
-            continue;
-        }
-        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
-            block_comment_depth = 1;
-            index += 2;
-            continue;
-        }
-        if bytes[index] == b'\'' {
-            single_quote = true;
-            index += 1;
-            continue;
-        }
-        if bytes[index] == b'"' {
-            double_quote = true;
-            index += 1;
-            continue;
-        }
-        if bytes[index] != b'$' {
-            index += 1;
-            continue;
-        }
-        if let Some(tag_end) = sql[index + 1..].find('$') {
-            let delimiter = &sql[index..=index + 1 + tag_end];
-            if delimiter[1..delimiter.len() - 1]
-                .chars()
-                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-                && !delimiter.as_bytes()[1].is_ascii_digit()
-            {
-                dollar_quote = Some(delimiter.to_string());
-                index += delimiter.len();
-                continue;
-            }
-        }
-        let start = index + 1;
-        let mut end = start;
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
-        }
-        if end > start {
-            if let Ok(param) = sql[start..end].parse::<usize>() {
-                refs.push(param);
-            }
-            index = end;
-        } else {
-            index += 1;
-        }
-    }
-    refs
+            })
+        },
+    )
 }
 
 fn feature_not_supported_error(feature: impl Into<String>) -> ExecError {
@@ -16038,40 +14233,42 @@ fn render_bound_value_base_sql(
             if v.is_finite() {
                 v.to_string()
             } else {
-                quote_sql_string(&v.to_string())
+                pgrust_protocol::sql::quote_sql_string(&v.to_string())
             }
         }
         Value::Bool(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
-        Value::Text(text) => quote_sql_string(text),
-        Value::TextRef(_, _) => quote_sql_string(value.as_text().unwrap_or_default()),
-        Value::Json(text) => quote_sql_string(text),
-        Value::JsonPath(text) => quote_sql_string(text),
-        Value::Bytea(bytes) => quote_sql_string(&format_bytea_text(
+        Value::Text(text) => pgrust_protocol::sql::quote_sql_string(text),
+        Value::TextRef(_, _) => {
+            pgrust_protocol::sql::quote_sql_string(value.as_text().unwrap_or_default())
+        }
+        Value::Json(text) => pgrust_protocol::sql::quote_sql_string(text),
+        Value::JsonPath(text) => pgrust_protocol::sql::quote_sql_string(text),
+        Value::Bytea(bytes) => pgrust_protocol::sql::quote_sql_string(&format_bytea_text(
             bytes,
             crate::pgrust::session::ByteaOutputFormat::Hex,
         )),
-        Value::InternalChar(byte) => {
-            quote_sql_string(&crate::backend::executor::render_internal_char_text(*byte))
-        }
+        Value::InternalChar(byte) => pgrust_protocol::sql::quote_sql_string(
+            &crate::backend::executor::render_internal_char_text(*byte),
+        ),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
         | Value::Timestamp(_)
-        | Value::TimestampTz(_) => quote_sql_string(
+        | Value::TimestampTz(_) => pgrust_protocol::sql::quote_sql_string(
             &crate::backend::executor::render_datetime_value_text_with_config(
                 value,
                 datetime_config,
             )
             .unwrap_or_default(),
         ),
-        Value::TsVector(vector) => {
-            quote_sql_string(&crate::backend::executor::render_tsvector_text(vector))
-        }
-        Value::TsQuery(query) => {
-            quote_sql_string(&crate::backend::executor::render_tsquery_text(query))
-        }
-        Value::Jsonb(bytes) => quote_sql_string(
+        Value::TsVector(vector) => pgrust_protocol::sql::quote_sql_string(
+            &crate::backend::executor::render_tsvector_text(vector),
+        ),
+        Value::TsQuery(query) => pgrust_protocol::sql::quote_sql_string(
+            &crate::backend::executor::render_tsquery_text(query),
+        ),
+        Value::Jsonb(bytes) => pgrust_protocol::sql::quote_sql_string(
             &crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap_or_default(),
         ),
         Value::Record(record) => {
@@ -16181,15 +14378,7 @@ fn render_type_name(type_oid: u32, catalog: &dyn CatalogLookup) -> Result<String
     let row = catalog
         .type_by_oid(type_oid)
         .ok_or_else(|| feature_not_supported_error(format!("type oid {type_oid}")))?;
-    Ok(quote_identifier(&row.typname))
-}
-
-fn quote_identifier(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
-}
-
-fn quote_sql_string(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    Ok(pgrust_protocol::sql::quote_identifier(&row.typname))
 }
 
 fn require_exact_len<'a>(
@@ -16252,6 +14441,7 @@ mod tests {
     use crate::backend::catalog::Catalog;
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
+    use crate::backend::libpq::pqcomm::read_cstr;
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::pgrust::cluster::Cluster;
     use crate::pgrust::database::Database;
@@ -17797,9 +15987,6 @@ mod tests {
 
     #[test]
     fn bind_param_count_uses_highest_sql_parameter_ref() {
-        assert_eq!(highest_sql_parameter_ref("select 1"), 0);
-        assert_eq!(highest_sql_parameter_ref("select $2, $10, $1"), 10);
-        assert_eq!(highest_sql_parameter_ref("select '$9', $1, $$ $8 $$"), 1);
         assert_eq!(
             required_bind_param_count(&PreparedStatement {
                 sql: "select $2".into(),
@@ -17837,13 +16024,16 @@ mod tests {
 
     #[test]
     fn skipped_extended_parameter_reports_first_missing_ref() {
-        assert_eq!(first_missing_sql_parameter_ref("SELECT $2", true), Some(1));
         assert_eq!(
-            first_missing_sql_parameter_ref("SELECT $1, $3", true),
+            pgrust_protocol::sql::first_missing_sql_parameter_ref("SELECT $2", true),
+            Some(1)
+        );
+        assert_eq!(
+            pgrust_protocol::sql::first_missing_sql_parameter_ref("SELECT $1, $3", true),
             Some(2)
         );
         assert_eq!(
-            first_missing_sql_parameter_ref("SELECT '$2', $1", true),
+            pgrust_protocol::sql::first_missing_sql_parameter_ref("SELECT '$2', $1", true),
             None
         );
     }

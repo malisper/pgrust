@@ -46,15 +46,15 @@ use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Value as SerdeJsonValue;
 
 pub(crate) fn validate_json_text(text: &str) -> Result<(), ExecError> {
-    validate_json_text_input(text)
+    validate_json_text_input(text).map_err(Into::into)
 }
 
 fn parse_json_text(text: &str) -> Result<SerdeJsonValue, ExecError> {
-    parse_json_text_input(text)
+    parse_json_text_input(text).map_err(Into::into)
 }
 
 fn validate_jsonpath_text(text: &str) -> Result<(), ExecError> {
-    validate_jsonpath(text).map_err(|err| jsonpath_input_error(text, err))
+    validate_jsonpath(text).map_err(|err| jsonpath_input_error(text, err.into()))
 }
 
 fn jsonpath_input_error(text: &str, err: ExecError) -> ExecError {
@@ -100,7 +100,7 @@ fn is_jsonpath_parse_error(details: &str) -> bool {
 pub(crate) fn canonicalize_jsonpath_text(text: &str) -> Result<CompactString, ExecError> {
     canonicalize_jsonpath(text)
         .map(CompactString::from_owned)
-        .map_err(|err| jsonpath_input_error(text, err))
+        .map_err(|err| jsonpath_input_error(text, err.into()))
 }
 
 enum ParsedJsonValue {
@@ -2361,7 +2361,9 @@ fn eval_sql_json_is_json(values: &[Value]) -> Result<Value, ExecError> {
         Value::Json(text) | Value::Text(text) | Value::JsonPath(text) => {
             parse_json_text(text.as_str())
         }
-        Value::Jsonb(bytes) => render_jsonb_bytes(bytes).and_then(|text| parse_json_text(&text)),
+        Value::Jsonb(bytes) => render_jsonb_bytes(bytes)
+            .map_err(ExecError::from)
+            .and_then(|text| parse_json_text(&text)),
         Value::TextRef(_, _) => parse_json_text(value.as_text().unwrap()),
         Value::Bytea(bytes) => String::from_utf8(bytes.clone())
             .map_err(|_| ExecError::DetailedError {
@@ -2585,7 +2587,7 @@ fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecErro
                         parts[1].clone(),
                     ));
                 }
-                return jsonb_object_from_pairs(&pairs);
+                return jsonb_object_from_pairs(&pairs).map_err(Into::into);
             }
             if items.len() % 2 != 0 {
                 return Err(ExecError::InvalidStorageValue {
@@ -2602,7 +2604,7 @@ fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecErro
                     ))
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?;
-            jsonb_object_from_pairs(&pairs)
+            jsonb_object_from_pairs(&pairs).map_err(Into::into)
         }
         [keys, vals] => {
             let keys = jsonb_object_two_arg_items(keys)?;
@@ -2618,7 +2620,7 @@ fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecErro
                 .zip(vals)
                 .map(|(k, v)| Ok((json_object_function_key(&k, "jsonb")?, v)))
                 .collect::<Result<Vec<_>, ExecError>>()?;
-            jsonb_object_from_pairs(&pairs)
+            jsonb_object_from_pairs(&pairs).map_err(Into::into)
         }
         _ => Err(ExecError::InvalidStorageValue {
             column: "jsonb".into(),
@@ -2807,7 +2809,7 @@ fn json_object_text_value(value: &Value, op: &'static str) -> Result<Option<Stri
         Value::JsonPath(v) => Ok(Some(v.to_string())),
         Value::Xml(v) => Ok(Some(v.to_string())),
         Value::Json(v) => Ok(Some(v.to_string())),
-        Value::Jsonb(v) => render_jsonb_bytes(v).map(Some),
+        Value::Jsonb(v) => render_jsonb_bytes(v).map(Some).map_err(Into::into),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
@@ -2871,7 +2873,7 @@ fn json_builder_key_for_object_constructor(
             hint: None,
             sqlstate: "22023",
         }),
-        _ => jsonb_builder_key(value),
+        _ => jsonb_builder_key(value).map_err(Into::into),
     }
 }
 
@@ -2884,7 +2886,7 @@ fn json_object_function_key(value: &Value, json_kind: &'static str) -> Result<St
             sqlstate: "22004",
         }),
         _ => match json_kind {
-            "jsonb" => jsonb_builder_key(value),
+            "jsonb" => jsonb_builder_key(value).map_err(Into::into),
             _ => json_object_key_text(value, "json_object"),
         },
     }
@@ -3031,9 +3033,9 @@ pub(crate) fn eval_jsonpath_operator(
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     if as_match {
-        jsonpath_match_result(result, true)
+        jsonpath_match_result(result.map_err(Into::into), true)
     } else {
-        jsonpath_exists_result(result, true)
+        jsonpath_exists_result(result.map_err(Into::into), true)
     }
 }
 
@@ -3079,17 +3081,17 @@ fn eval_jsonpath_function(
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     match kind {
-        JsonPathFunctionKind::Exists => jsonpath_exists_result(result, silent),
-        JsonPathFunctionKind::Match => jsonpath_match_result(result, silent),
+        JsonPathFunctionKind::Exists => jsonpath_exists_result(result.map_err(Into::into), silent),
+        JsonPathFunctionKind::Match => jsonpath_match_result(result.map_err(Into::into), silent),
         JsonPathFunctionKind::QueryArray => match result {
             Ok(items) => Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(items)))),
             Err(_) if silent => Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(vec![])))),
-            Err(err) => Err(err),
+            Err(err) => Err(err.into()),
         },
         JsonPathFunctionKind::QueryFirst => match result {
             Ok(items) => Ok(items.first().map(jsonb_to_value).unwrap_or(Value::Null)),
             Err(_) if silent => Ok(Value::Null),
-            Err(err) => Err(err),
+            Err(err) => Err(err.into()),
         },
     }
 }
@@ -3686,7 +3688,7 @@ fn jsonpath_match_result(
 
 fn parse_jsonpath_target_value(value: &Value) -> Result<JsonbValue, ExecError> {
     match value {
-        Value::Jsonb(bytes) => decode_jsonb(bytes),
+        Value::Jsonb(bytes) => decode_jsonb(bytes).map_err(Into::into),
         Value::Json(text) => Ok(JsonbValue::from_serde(parse_json_text(text.as_str())?)?),
         Value::Text(text) => Ok(decode_jsonb(&parse_jsonb_text(text.as_str())?)?),
         Value::TextRef(_, _) => Ok(decode_jsonb(&parse_jsonb_text(value.as_text().unwrap())?)?),
@@ -3751,10 +3753,14 @@ fn parse_optional_bool_flag(
 fn parse_jsonb_target(value: &Value, op: &'static str) -> Result<JsonbValue, ExecError> {
     match value {
         Value::Null => Ok(JsonbValue::Null),
-        Value::Jsonb(bytes) => decode_jsonb(bytes),
-        Value::Json(text) => JsonbValue::from_serde(parse_json_text(text.as_str())?),
-        Value::Text(text) => decode_jsonb(&parse_jsonb_text(text.as_str())?),
-        Value::TextRef(_, _) => decode_jsonb(&parse_jsonb_text(value.as_text().unwrap())?),
+        Value::Jsonb(bytes) => decode_jsonb(bytes).map_err(Into::into),
+        Value::Json(text) => {
+            JsonbValue::from_serde(parse_json_text(text.as_str())?).map_err(Into::into)
+        }
+        Value::Text(text) => decode_jsonb(&parse_jsonb_text(text.as_str())?).map_err(Into::into),
+        Value::TextRef(_, _) => {
+            decode_jsonb(&parse_jsonb_text(value.as_text().unwrap())?).map_err(Into::into)
+        }
         other => Err(ExecError::TypeMismatch {
             op,
             left: other.clone(),
@@ -5403,7 +5409,7 @@ fn eval_sql_json_path(
             let _ = err;
             Ok(Vec::new())
         }
-        Err(err) => Err(err),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -5986,6 +5992,6 @@ fn eval_jsonb_path_query_rows(
             .map(|item| TupleSlot::virtual_row(vec![jsonb_to_value(&item)]))
             .collect()),
         Err(_) if silent => Ok(Vec::new()),
-        Err(err) => Err(err),
+        Err(err) => Err(err.into()),
     }
 }

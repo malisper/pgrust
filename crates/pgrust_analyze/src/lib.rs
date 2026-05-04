@@ -75,6 +75,7 @@ use pgrust_nodes::primnodes::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub use notices::{AnalyzerNotice, clear_notices, take_notices};
+pub use partition::partition_value_to_value;
 use pgrust_nodes::parsenodes::*;
 pub use rewrite::{
     NonUpdatableViewColumn, NonUpdatableViewColumnReason, ResolvedAutoViewTarget, RlsWriteCheck,

@@ -22,9 +22,7 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 use pgrust_access::{AccessError, AccessHeapServices, AccessIndexServices, hash as access_hash};
 
-pub(crate) use support::{
-    HASH_PARTITION_SEED, hash_bytes_extended, hash_combine64, hash_value_extended,
-};
+pub(crate) use support::{HASH_PARTITION_SEED, hash_combine64, hash_value_extended};
 
 fn encode_hash_tuple_payload(
     desc: &RelationDesc,

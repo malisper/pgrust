@@ -14,12 +14,37 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::parsenodes::RawTypeName;
 use crate::pgrust::database::ddl::ensure_can_set_role;
+use pgrust_commands::operator::{
+    lookup_operator_row_in_rows, operator_signature_display as command_operator_signature_display,
+    resolve_operator_type_oid as command_resolve_operator_type_oid,
+    resolve_proc_oid_for_name as command_resolve_proc_oid_for_name,
+    unsupported_postfix_operator_error as command_unsupported_postfix_operator_error,
+};
 use std::collections::BTreeMap;
 
 const INTERNAL_TYPE_OID: u32 = 2281;
 const SCHEMA_CREATE_PRIVILEGE_CHAR: char = 'C';
 const TYPE_USAGE_PRIVILEGE_CHAR: char = 'U';
 const FUNCTION_EXECUTE_PRIVILEGE_CHAR: char = 'X';
+
+fn operator_command_error_to_exec(
+    error: pgrust_commands::operator::OperatorCommandError,
+) -> ExecError {
+    match error {
+        pgrust_commands::operator::OperatorCommandError::Parse(error) => ExecError::Parse(error),
+        pgrust_commands::operator::OperatorCommandError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+    }
+}
 
 fn normalize_operator_namespace(
     db: &Database,
@@ -140,25 +165,13 @@ pub(super) fn operator_signature_display(
     left_type: u32,
     right_type: u32,
 ) -> String {
-    match (left_type, right_type) {
-        (0, 0) => name.to_string(),
-        (0, right) => format!("{name} {}", format_type_text(right, None, catalog)),
-        (left, 0) => format!("{} {name}", format_type_text(left, None, catalog)),
-        (left, right) => format!(
-            "{} {name} {}",
-            format_type_text(left, None, catalog),
-            format_type_text(right, None, catalog)
-        ),
-    }
+    command_operator_signature_display(name, left_type, right_type, |oid| {
+        format_type_text(oid, None, catalog)
+    })
 }
 
 pub(super) fn unsupported_postfix_operator_error() -> ExecError {
-    ExecError::DetailedError {
-        message: "postfix operators are not supported".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "0A000",
-    }
+    operator_command_error_to_exec(command_unsupported_postfix_operator_error())
 }
 
 pub(super) fn lookup_operator_row(
@@ -170,16 +183,15 @@ pub(super) fn lookup_operator_row(
     left_type: u32,
     right_type: u32,
 ) -> Result<Option<PgOperatorRow>, ExecError> {
-    Ok(backend_catcache(db, client_id, txn_ctx)
-        .map_err(map_catalog_error)?
-        .operator_rows()
-        .into_iter()
-        .find(|row| {
-            row.oprname.eq_ignore_ascii_case(name)
-                && namespace_oid.is_none_or(|oid| row.oprnamespace == oid)
-                && row.oprleft == left_type
-                && row.oprright == right_type
-        }))
+    Ok(lookup_operator_row_in_rows(
+        backend_catcache(db, client_id, txn_ctx)
+            .map_err(map_catalog_error)?
+            .operator_rows(),
+        namespace_oid,
+        name,
+        left_type,
+        right_type,
+    ))
 }
 
 fn lookup_operator_row_by_oid(
@@ -199,26 +211,7 @@ pub(super) fn resolve_operator_type_oid(
     catalog: &dyn CatalogLookup,
     arg: &Option<RawTypeName>,
 ) -> Result<u32, ExecError> {
-    match arg {
-        Some(arg) => {
-            if matches!(
-                arg,
-                RawTypeName::Named { name, .. } if name.eq_ignore_ascii_case("setof")
-            ) {
-                return Err(ExecError::DetailedError {
-                    message: "SETOF type not allowed for operator argument".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42601",
-                });
-            }
-            let sql_type = resolve_raw_type_name(arg, catalog).map_err(ExecError::Parse)?;
-            catalog
-                .type_oid_for_sql_type(sql_type)
-                .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("{arg:?}"))))
-        }
-        None => Ok(0),
-    }
+    command_resolve_operator_type_oid(catalog, arg).map_err(operator_command_error_to_exec)
 }
 
 fn resolve_proc_oid_for_name(
@@ -227,39 +220,8 @@ fn resolve_proc_oid_for_name(
     arg_type_oids: &[u32],
     missing_message: String,
 ) -> Result<u32, ExecError> {
-    let target_namespace_oid = target.schema_name.as_deref().and_then(|schema| {
-        catalog
-            .namespace_rows()
-            .into_iter()
-            .find(|row| row.nspname.eq_ignore_ascii_case(schema))
-            .map(|row| row.oid)
-    });
-    let desired = arg_type_oids
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(" ");
-    catalog
-        .proc_rows_by_name(&target.name)
-        .into_iter()
-        .find(|row| {
-            row.proname.eq_ignore_ascii_case(&target.name)
-                && row.proargtypes == desired
-                && target
-                    .schema_name
-                    .as_ref()
-                    .map(|_| target_namespace_oid == Some(row.pronamespace))
-                    .unwrap_or(true)
-        })
-        .map(|row| row.oid)
-        .ok_or_else(|| {
-            ExecError::Parse(ParseError::DetailedError {
-                message: missing_message,
-                detail: None,
-                hint: None,
-                sqlstate: "42883",
-            })
-        })
+    command_resolve_proc_oid_for_name(catalog, target, arg_type_oids, missing_message)
+        .map_err(operator_command_error_to_exec)
 }
 
 fn resolve_create_operator_proc_oid(

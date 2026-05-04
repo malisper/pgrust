@@ -1,0 +1,20 @@
+[package]
+name = "pgrust_executor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+num-bigint = "0.4.6"
+num-traits = "0.2"
+parking_lot = "0.12"
+pgrust_access = { path = "../pgrust_access" }
+pgrust_catalog_data = { path = "../pgrust_catalog_data" }
+pgrust_catalog_store = { path = "../pgrust_catalog_store" }
+pgrust_core = { path = "../pgrust_core" }
+pgrust_expr = { path = "../pgrust_expr" }
+pgrust_nodes = { path = "../pgrust_nodes" }
+pgrust_storage = { path = "../pgrust_storage" }
