@@ -9,6 +9,7 @@ mod constraints;
 mod create_table;
 mod create_table_inherits;
 mod expr;
+mod foreign_keys;
 mod functions;
 mod generated;
 mod geometry;
@@ -108,6 +109,7 @@ pub use create_table::*;
 pub use create_table_inherits::*;
 pub use expr::bind_expr_with_outer_and_ctes;
 use expr::*;
+pub use foreign_keys::*;
 use functions::*;
 pub use functions::{ResolvedFunctionCall, resolve_function_call};
 pub use generated::{

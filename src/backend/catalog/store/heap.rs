@@ -13515,7 +13515,12 @@ fn collect_relation_drop_oids_visible(
         }
     }
     for constraint in catcache.constraint_rows_for_relation(relation_oid) {
-        if constraint.conindid != 0 && relcache.get_by_oid(constraint.conindid).is_some() {
+        if matches!(
+            constraint.contype,
+            CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE | CONSTRAINT_EXCLUSION
+        ) && constraint.conindid != 0
+            && relcache.get_by_oid(constraint.conindid).is_some()
+        {
             collect_relation_drop_oids_visible(
                 relcache,
                 catcache,
@@ -13553,7 +13558,10 @@ fn collect_relation_drop_oids_mvcc(
         }
     }
     for constraint in relation_constraints_mvcc(store, ctx, relation_oid)? {
-        if constraint.conindid != 0
+        if matches!(
+            constraint.contype,
+            CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE | CONSTRAINT_EXCLUSION
+        ) && constraint.conindid != 0
             && class_row_by_oid_mvcc(store, ctx, constraint.conindid)?.is_some()
         {
             collect_relation_drop_oids_mvcc(store, ctx, constraint.conindid, seen, order)?;

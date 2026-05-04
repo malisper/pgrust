@@ -19,6 +19,13 @@ use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, is_system_column_name, lookup_table_or_partitioned_table_for_alter_table,
 };
+use pgrust_commands::foreign_keys::{
+    attnums_by_parent_column_names, can_spawn_referenced_partition_foreign_key_clone,
+    choose_partition_clone_constraint_name, column_attnums_for_names, foreign_key_action_code,
+    foreign_key_attach_attributes_match, foreign_key_attach_key_matches, foreign_key_match_code,
+    is_referenced_side_foreign_key_clone, namespace_constraint_names,
+    plan_referenced_partition_foreign_key_clone, referenced_partition_clone_used_names,
+};
 
 fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
@@ -155,41 +162,6 @@ fn choose_available_constraint_name(
         }
     }
     unreachable!("constraint name suffix space exhausted")
-}
-
-fn choose_partition_clone_constraint_name(
-    base: &str,
-    used_names: &mut std::collections::BTreeSet<String>,
-) -> String {
-    for suffix in 1.. {
-        let candidate = format!("{base}_{suffix}");
-        if used_names.insert(candidate.to_ascii_lowercase()) {
-            return candidate;
-        }
-    }
-    unreachable!("constraint name suffix space exhausted")
-}
-
-fn namespace_constraint_names(
-    catalog: &dyn CatalogLookup,
-    namespace_oid: u32,
-) -> std::collections::BTreeSet<String> {
-    catalog
-        .constraint_rows()
-        .into_iter()
-        .filter(|row| row.connamespace == namespace_oid)
-        .map(|row| row.conname.to_ascii_lowercase())
-        .collect()
-}
-
-fn referenced_partition_clone_used_names(
-    catalog: &dyn CatalogLookup,
-    parent_constraint: &PgConstraintRow,
-) -> std::collections::BTreeSet<String> {
-    // PostgreSQL only asks ChooseConstraintName for FK partition clones after
-    // the supplied name is already used on the same relation.  That chooser
-    // avoids collisions across the namespace, not just the relation.
-    namespace_constraint_names(catalog, parent_constraint.connamespace)
 }
 
 fn ddl_not_null_contains_null_error(relation_name: &str, column_name: &str) -> ExecError {
@@ -770,164 +742,6 @@ fn validate_exclusion_constraint_rows(
     )
 }
 
-fn foreign_key_action_code(action: ForeignKeyAction) -> char {
-    match action {
-        ForeignKeyAction::NoAction => 'a',
-        ForeignKeyAction::Restrict => 'r',
-        ForeignKeyAction::Cascade => 'c',
-        ForeignKeyAction::SetNull => 'n',
-        ForeignKeyAction::SetDefault => 'd',
-    }
-}
-
-fn foreign_key_match_code(match_type: ForeignKeyMatchType) -> char {
-    match match_type {
-        ForeignKeyMatchType::Simple => 's',
-        ForeignKeyMatchType::Full => 'f',
-        ForeignKeyMatchType::Partial => 'p',
-    }
-}
-
-fn column_attnums_for_names(
-    desc: &crate::backend::executor::RelationDesc,
-    columns: &[String],
-) -> Result<Vec<i16>, ExecError> {
-    columns
-        .iter()
-        .map(|column_name| {
-            desc.columns
-                .iter()
-                .enumerate()
-                .find_map(|(index, column)| {
-                    (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
-                        .then_some(index as i16 + 1)
-                })
-                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
-        })
-        .collect()
-}
-
-fn attnums_by_parent_column_names(
-    parent_desc: &crate::backend::executor::RelationDesc,
-    child_desc: &crate::backend::executor::RelationDesc,
-    parent_attnums: &[i16],
-) -> Result<Vec<i16>, ExecError> {
-    parent_attnums
-        .iter()
-        .map(|attnum| {
-            let index = usize::try_from(attnum.saturating_sub(1)).map_err(|_| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "user column attnum",
-                    actual: attnum.to_string(),
-                })
-            })?;
-            let parent_column = parent_desc.columns.get(index).ok_or_else(|| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "user column attnum",
-                    actual: attnum.to_string(),
-                })
-            })?;
-            child_desc
-                .columns
-                .iter()
-                .enumerate()
-                .find_map(|(child_index, child_column)| {
-                    (!child_column.dropped
-                        && child_column.name.eq_ignore_ascii_case(&parent_column.name))
-                    .then_some(child_index as i16 + 1)
-                })
-                .ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnknownColumn(parent_column.name.clone()))
-                })
-        })
-        .collect()
-}
-
-fn index_key_attnums(index: &crate::backend::parser::BoundIndexRelation) -> Option<Vec<i16>> {
-    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).ok()?;
-    if key_count > index.index_meta.indkey.len() {
-        return None;
-    }
-    Some(
-        index
-            .index_meta
-            .indkey
-            .iter()
-            .take(key_count)
-            .copied()
-            .collect(),
-    )
-}
-
-fn find_referenced_foreign_key_index(
-    catalog: &dyn CatalogLookup,
-    relation_oid: u32,
-    attnums: &[i16],
-    conperiod: bool,
-) -> Option<crate::backend::parser::BoundIndexRelation> {
-    if conperiod {
-        let constraint = catalog
-            .constraint_rows_for_relation(relation_oid)
-            .into_iter()
-            .find(|row| {
-                matches!(row.contype, CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE)
-                    && row.conperiod
-                    && row.conindid != 0
-                    && row.conkey.as_deref() == Some(attnums)
-            })?;
-        return catalog
-            .index_relations_for_heap(relation_oid)
-            .into_iter()
-            .find(|index| {
-                index.relation_oid == constraint.conindid
-                    && index.index_meta.indisvalid
-                    && index.index_meta.indisready
-                    && index.index_meta.indisexclusion
-            });
-    }
-
-    catalog
-        .index_relations_for_heap(relation_oid)
-        .into_iter()
-        .find(|index| {
-            index.index_meta.indisunique
-                && index.index_meta.indisvalid
-                && index.index_meta.indisready
-                && index.index_meta.am_oid == crate::include::catalog::BTREE_AM_OID
-                && index_key_attnums(index).is_some_and(|key_attnums| key_attnums == attnums)
-                && !index
-                    .index_meta
-                    .indpred
-                    .as_deref()
-                    .is_some_and(|pred| !pred.is_empty())
-                && !index
-                    .index_meta
-                    .indexprs
-                    .as_deref()
-                    .is_some_and(|exprs| !exprs.is_empty())
-        })
-}
-
-fn is_referenced_side_foreign_key_clone(
-    row: &PgConstraintRow,
-    catalog: &dyn CatalogLookup,
-) -> bool {
-    if row.contype != CONSTRAINT_FOREIGN || row.conparentid == 0 {
-        return false;
-    }
-    catalog
-        .constraint_row_by_oid(row.conparentid)
-        .is_some_and(|parent| parent.conrelid == row.conrelid)
-}
-
-fn can_spawn_referenced_partition_foreign_key_clone(
-    row: &PgConstraintRow,
-    catalog: &dyn CatalogLookup,
-) -> bool {
-    row.contype == CONSTRAINT_FOREIGN
-        && (row.conparentid == 0 || is_referenced_side_foreign_key_clone(row, catalog))
-}
-
 fn partition_descendants(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
@@ -1314,37 +1128,6 @@ fn validate_attached_foreign_key_rows_if_needed(
         &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts,
     )
-}
-
-fn optional_attnums_equal(left: Option<&[i16]>, right: Option<&[i16]>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => left == right,
-        (None, None) => true,
-        (Some(left), None) | (None, Some(left)) => left.is_empty(),
-    }
-}
-
-fn foreign_key_attach_key_matches(
-    child: &PgConstraintRow,
-    parent: &PgConstraintRow,
-    local_attnums: &[i16],
-    referenced_attnums: &[i16],
-    delete_set_attnums: Option<&[i16]>,
-) -> bool {
-    child.contype == CONSTRAINT_FOREIGN
-        && child.confrelid == parent.confrelid
-        && child.conkey.as_deref() == Some(local_attnums)
-        && child.confkey.as_deref() == Some(referenced_attnums)
-        && optional_attnums_equal(child.confdelsetcols.as_deref(), delete_set_attnums)
-        && child.conperiod == parent.conperiod
-}
-
-fn foreign_key_attach_attributes_match(child: &PgConstraintRow, parent: &PgConstraintRow) -> bool {
-    child.condeferrable == parent.condeferrable
-        && child.condeferred == parent.condeferred
-        && child.confupdtype == parent.confupdtype
-        && child.confdeltype == parent.confdeltype
-        && child.confmatchtype == parent.confmatchtype
 }
 
 fn attnums_from_constraint(row: &PgConstraintRow) -> Result<Vec<i16>, ExecError> {
@@ -3769,36 +3552,16 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let referenced_attnums = attnums_by_parent_column_names(
-            &referenced_parent.desc,
-            &referenced_child.desc,
-            parent_referenced_attnums,
-        )?;
-        let referenced_index = find_referenced_foreign_key_index(
+        let clone_plan = plan_referenced_partition_foreign_key_clone(
             &catalog,
-            referenced_child.relation_oid,
-            &referenced_attnums,
-            parent_constraint.conperiod,
+            referenced_parent,
+            referenced_child,
+            parent_constraint,
+            parent_referenced_attnums,
+            clone_name_base,
+            used_names,
         )
-        .ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "referenced UNIQUE or PRIMARY KEY index",
-                actual: format!(
-                    "missing referenced index for partition {}",
-                    catalog
-                        .class_row_by_oid(referenced_child.relation_oid)
-                        .map(|row| row.relname)
-                        .unwrap_or_else(|| referenced_child.relation_oid.to_string())
-                ),
-            })
-        })?;
-        let local_attnums = parent_constraint.conkey.clone().ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "foreign key columns",
-                actual: format!("missing conkey for {}", parent_constraint.conname),
-            })
-        })?;
-        let constraint_name = choose_partition_clone_constraint_name(clone_name_base, used_names);
+        .map_err(ExecError::Parse)?;
         let interrupts = self.interrupt_state(client_id);
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -3814,21 +3577,21 @@ impl Database {
             .write()
             .create_foreign_key_constraint_mvcc(
                 parent_constraint.conrelid,
-                constraint_name,
-                parent_constraint.condeferrable,
-                parent_constraint.condeferred,
-                parent_constraint.conenforced,
-                parent_constraint.convalidated,
-                &local_attnums,
-                referenced_child.relation_oid,
-                referenced_index.relation_oid,
-                &referenced_attnums,
-                parent_constraint.confupdtype,
-                parent_constraint.confdeltype,
-                parent_constraint.confmatchtype,
-                parent_constraint.confdelsetcols.as_deref(),
-                parent_constraint.conperiod,
-                parent_constraint.oid,
+                clone_plan.constraint_name.clone(),
+                clone_plan.condeferrable,
+                clone_plan.condeferred,
+                clone_plan.conenforced,
+                clone_plan.convalidated,
+                &clone_plan.local_attnums,
+                clone_plan.referenced_relation_oid,
+                clone_plan.referenced_index_oid,
+                &clone_plan.referenced_attnums,
+                clone_plan.confupdtype,
+                clone_plan.confdeltype,
+                clone_plan.confmatchtype,
+                clone_plan.confdelsetcols.as_deref(),
+                clone_plan.conperiod,
+                clone_plan.conparentid,
                 false,
                 1,
                 &ctx,
@@ -3852,7 +3615,7 @@ impl Database {
             next_cid,
             referenced_child,
             &constraint_row,
-            &referenced_attnums,
+            &clone_plan.referenced_attnums,
             clone_name_base,
             used_names,
             skip_referenced_oids,
@@ -4052,7 +3815,7 @@ impl Database {
                             target.relation_oid,
                             existing.oid,
                             parent_constraint.oid,
-                            existing.conislocal,
+                            false,
                             existing.coninhcount.saturating_add(1),
                             &ctx,
                         )
@@ -4061,6 +3824,7 @@ impl Database {
                     catalog_effects.push(effect);
                     let mut row = existing.clone();
                     row.conparentid = parent_constraint.oid;
+                    row.conislocal = false;
                     row.coninhcount = row.coninhcount.saturating_add(1);
                     if row.convalidated != child_validated {
                         let attr_ctx = CatalogWriteContext {

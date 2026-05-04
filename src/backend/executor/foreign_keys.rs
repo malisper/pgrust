@@ -536,6 +536,7 @@ fn referenced_parent_key_exists_for_no_action(
 ) -> Result<bool, ExecError> {
     let mut snapshot = ctx.snapshot.clone();
     snapshot.current_cid = CommandId::MAX;
+    snapshot.heap_current_cid = None;
     let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
         catalog
             .relation_by_oid(constraint.referenced_relation_oid)
@@ -634,6 +635,7 @@ fn referenced_key_exists(
 ) -> Result<bool, ExecError> {
     let mut snapshot = ctx.snapshot.clone();
     snapshot.current_cid = CommandId::MAX;
+    snapshot.heap_current_cid = None;
     let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
         catalog
             .relation_by_oid(constraint.referenced_relation_oid)
@@ -816,6 +818,7 @@ fn temporal_referenced_key_exists(
     };
     let mut snapshot = ctx.snapshot.clone();
     snapshot.current_cid = CommandId::MAX;
+    snapshot.heap_current_cid = None;
     if let Some(catalog) = ctx.catalog.clone()
         && catalog
             .relation_by_oid(constraint.referenced_relation_oid)
@@ -887,6 +890,7 @@ fn temporal_child_reference_would_be_invalid(
     };
     let mut snapshot = ctx.snapshot.clone();
     snapshot.current_cid = CommandId::MAX;
+    snapshot.heap_current_cid = None;
     let mut scan = heap_scan_begin_visible(
         &ctx.pool,
         ctx.client_id,
@@ -1032,6 +1036,7 @@ fn child_row_exists(
 ) -> Result<bool, ExecError> {
     let mut snapshot = ctx.snapshot.clone();
     snapshot.current_cid = CommandId::MAX;
+    snapshot.heap_current_cid = None;
     let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
         catalog
             .relation_by_oid(constraint.child_relation_oid)

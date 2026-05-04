@@ -37558,7 +37558,7 @@ fn referenced_partition_foreign_key_clones_validate_and_enforce() {
     );
     match db.execute(1, "delete from pk_items where a = 2") {
         Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
-            assert_eq!(constraint, "fk_items_a_fkey");
+            assert_eq!(constraint, "fk_items_a_fkey_2");
         }
         other => panic!("expected referenced partition foreign key violation, got {other:?}"),
     }
@@ -38003,7 +38003,7 @@ fn self_referencing_partitioned_foreign_key_matches_pg_catalog_rows() {
     .unwrap();
     match db.execute(1, "delete from parted_self_fk where id = 2") {
         Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
-            assert_eq!(constraint, "parted_self_fk_id_abc_fkey");
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey_5");
         }
         other => panic!("expected detached partition foreign key violation, got {other:?}"),
     }
@@ -38125,7 +38125,7 @@ fn referenced_partition_foreign_key_detach_checks_and_drops_clones() {
 
     match db.execute(1, "alter table pk_items detach partition pk_items_1") {
         Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
-            assert_eq!(constraint, "fk_items_a_fkey");
+            assert_eq!(constraint, "fk_items_a_fkey_1");
         }
         other => panic!("expected detach foreign key violation, got {other:?}"),
     }
@@ -38738,7 +38738,7 @@ fn detached_self_referencing_partition_still_blocks_root_delete() {
             detail,
             ..
         }) => {
-            assert_eq!(constraint, "parted_self_fk_id_abc_fkey");
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey_3");
             assert!(message.contains("on table \"part2_self_fk\""));
             assert!(
                 detail
@@ -43786,6 +43786,57 @@ fn without_overlaps_remaining_period_foreign_keys_reject_unsupported_actions_bef
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn without_overlaps_dropping_child_foreign_key_table_preserves_parent_key() {
+    let base = temp_dir("period_fk_drop_child_preserves_parent_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_parent (
+            id int4range,
+            valid_at daterange,
+            primary key (id, valid_at without overlaps)
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table temporal_child (
+            id int4range,
+            valid_at daterange,
+            parent_id int4range,
+            primary key (id, valid_at without overlaps),
+            foreign key (parent_id, period valid_at)
+                references temporal_parent (id, period valid_at)
+        )",
+    )
+    .unwrap();
+    db.execute(1, "drop table temporal_child").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'temporal_parent_pkey'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(
+        1,
+        "create table temporal_child_again (
+            id int4range,
+            valid_at daterange,
+            parent_id int4range,
+            primary key (id, valid_at without overlaps),
+            foreign key (parent_id, period valid_at)
+                references temporal_parent
+        )",
+    )
+    .unwrap();
 }
 
 #[test]
