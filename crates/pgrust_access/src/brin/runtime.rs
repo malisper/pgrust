@@ -6,7 +6,7 @@ use pgrust_catalog_data::{
 };
 use pgrust_core::{ClientId, RelFileLocator, Snapshot};
 use pgrust_nodes::datum::Value;
-use pgrust_nodes::primnodes::{ColumnDesc, RelationDesc};
+use pgrust_nodes::primnodes::{ColumnDesc, RelationDesc, ToastRelationRef};
 use pgrust_nodes::relcache::IndexRelCacheEntry;
 use pgrust_storage::page::bufpage::{PageError, max_align, page_get_item, page_header};
 use pgrust_storage::smgr::{ForkNumber, StorageManager};
@@ -239,13 +239,26 @@ fn missing_column_value(column: &ColumnDesc) -> Value {
 
 fn materialize_heap_row_values(
     heap_desc: &RelationDesc,
+    heap: &dyn AccessHeapServices,
+    snapshot: &Snapshot,
+    heap_toast: Option<ToastRelationRef>,
     datums: &[Option<&[u8]>],
     scalar: &dyn AccessScalarServices,
 ) -> AccessResult<Vec<Value>> {
     let mut row_values = Vec::with_capacity(heap_desc.columns.len());
     for (index, column) in heap_desc.columns.iter().enumerate() {
         row_values.push(if let Some(datum) = datums.get(index) {
-            scalar.decode_value(column, *datum)?
+            if let Some(toast) = heap_toast {
+                let mut fetch_external =
+                    |raw: &[u8]| heap.fetch_toast_value_bytes(toast, snapshot, raw);
+                scalar.decode_value_with_external_toast(
+                    column,
+                    *datum,
+                    Some(&mut fetch_external),
+                )?
+            } else {
+                scalar.decode_value_with_external_toast(column, *datum, None)?
+            }
         } else {
             missing_column_value(column)
         });
@@ -277,6 +290,7 @@ fn scan_visible_heap_summaries(
     mut index: Option<&mut dyn AccessIndexServices>,
     scalar: &dyn AccessScalarServices,
     snapshot: Snapshot,
+    heap_toast: Option<ToastRelationRef>,
     heap_relation: RelFileLocator,
     heap_desc: &RelationDesc,
     index_desc: &RelationDesc,
@@ -287,6 +301,7 @@ fn scan_visible_heap_summaries(
     desc: &BrinDesc,
 ) -> AccessResult<u64> {
     let attr_descs = heap_desc.attribute_descs();
+    let decode_snapshot = snapshot.clone();
     let mut visible = 0u64;
     heap.for_each_visible_heap_tuple(heap_relation, snapshot, &mut |tid, tuple| {
         visible += 1;
@@ -297,7 +312,14 @@ fn scan_visible_heap_summaries(
         let datums = tuple
             .deform(&attr_descs)
             .map_err(|err| AccessError::Scalar(format!("brin heap deform failed: {err:?}")))?;
-        let row_values = materialize_heap_row_values(heap_desc, &datums, scalar)?;
+        let row_values = materialize_heap_row_values(
+            heap_desc,
+            heap,
+            &decode_snapshot,
+            heap_toast,
+            &datums,
+            scalar,
+        )?;
         let key_values = if let Some(index) = index.as_deref_mut() {
             let Some(key_values) = index.project_index_row(index_meta, &row_values, tid)? else {
                 return Ok(());
@@ -423,6 +445,7 @@ fn summarize_unsummarized_ranges(
         index,
         scalar,
         Snapshot::bootstrap(),
+        ctx.heap_toast,
         ctx.heap_relation,
         &ctx.heap_desc,
         &ctx.index_desc,
@@ -507,6 +530,7 @@ pub fn brin_summarize_range(
         index,
         scalar,
         Snapshot::bootstrap(),
+        ctx.heap_toast,
         ctx.heap_relation,
         &ctx.heap_desc,
         &ctx.index_desc,
@@ -670,6 +694,7 @@ pub fn brinbuild(
         Some(index),
         scalar,
         ctx.snapshot.clone(),
+        ctx.heap_toast,
         ctx.heap_relation,
         &ctx.heap_desc,
         &ctx.index_desc,

@@ -25,6 +25,25 @@ pub fn bootstrap_catalog_rel(kind: BootstrapCatalogKind, db_oid: u32) -> RelFile
     }
 }
 
+pub fn bootstrap_catalog_toast_rel(
+    kind: BootstrapCatalogKind,
+    db_oid: u32,
+) -> Option<RelFileLocator> {
+    let toast_oid = kind.toast_relation_oid();
+    (toast_oid != 0).then(|| match kind.scope() {
+        CatalogScope::Shared => RelFileLocator {
+            spc_oid: GLOBAL_TABLESPACE_OID,
+            db_oid: 0,
+            rel_number: toast_oid,
+        },
+        CatalogScope::Database(_) => RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: toast_oid,
+        },
+    })
+}
+
 pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
     CatalogEntry {
         rel: bootstrap_catalog_rel(kind, 1),

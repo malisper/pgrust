@@ -561,8 +561,18 @@ pub fn probe_system_catalog_rows_visible_in_db(
         else {
             continue;
         };
+        let txns_guard = txns.read();
         rows.push(
-            crate::backend::catalog::rowcodec::decode_catalog_tuple_values(&heap_desc, &tuple)?,
+            crate::backend::catalog::rowcodec::decode_catalog_tuple_values_with_toast(
+                pool,
+                &txns_guard,
+                snapshot,
+                client_id,
+                descriptor.heap_kind,
+                db_oid,
+                &heap_desc,
+                &tuple,
+            )?,
         );
     }
     index_endscan(scan, BTREE_AM_OID)?;

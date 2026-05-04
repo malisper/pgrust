@@ -2305,7 +2305,7 @@ pub(crate) fn coerce_assignment_value_with_catalog_and_config(
 }
 
 pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<Value, ExecError> {
-    decode_value_with_toast(column, bytes, None)
+    decode_value_with_external_toast(column, bytes, None)
 }
 
 fn unsupported_storage_type(column: &ColumnDesc, bytes: &[u8]) -> ExecError {
@@ -2322,6 +2322,20 @@ pub(crate) fn decode_value_with_toast(
     bytes: Option<&[u8]>,
     toast: Option<&ToastFetchContext>,
 ) -> Result<Value, ExecError> {
+    if let Some(toast) = toast {
+        let mut fetch_external =
+            |raw: &[u8]| crate::backend::access::common::detoast::detoast_value_bytes(toast, raw);
+        decode_value_with_external_toast(column, bytes, Some(&mut fetch_external))
+    } else {
+        decode_value_with_external_toast(column, bytes, None)
+    }
+}
+
+pub(crate) fn decode_value_with_external_toast(
+    column: &ColumnDesc,
+    bytes: Option<&[u8]>,
+    mut fetch_external: Option<&mut dyn FnMut(&[u8]) -> Result<Vec<u8>, ExecError>>,
+) -> Result<Value, ExecError> {
     let Some(bytes) = bytes else {
         return Ok(Value::Null);
     };
@@ -2337,11 +2351,14 @@ pub(crate) fn decode_value_with_toast(
         if bytes.len() == crate::include::varatt::TOAST_POINTER_SIZE
             && crate::include::access::detoast::is_ondisk_toast_pointer(bytes)
         {
-            let toast = toast.ok_or_else(|| ExecError::InvalidStorageValue {
-                column: column.name.clone(),
-                details: "toast pointer found without toast relation context".into(),
-            })?;
-            Some(crate::backend::access::common::detoast::detoast_value_bytes(toast, bytes)?)
+            let fetch_external =
+                fetch_external
+                    .as_mut()
+                    .ok_or_else(|| ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "toast pointer found without toast relation context".into(),
+                    })?;
+            Some(fetch_external(bytes)?)
         } else if crate::include::varatt::compressed_inline_total_size(bytes) == Some(bytes.len())
             && crate::include::access::detoast::is_compressed_inline_datum(bytes)
         {

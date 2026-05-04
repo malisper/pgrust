@@ -11,25 +11,30 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
-use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
+use crate::backend::catalog::bootstrap::{bootstrap_catalog_rel, bootstrap_catalog_toast_rel};
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::indexing::{
     catalog_index_insert_state_for_db, rebuild_system_catalog_indexes_for_db,
 };
-use crate::backend::catalog::rowcodec::{catalog_row_values_for_kind, decode_catalog_tuple_values};
+use crate::backend::catalog::rowcodec::catalog_row_values_for_kind;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::catalog::store::CatalogWriteContext;
 use crate::backend::executor::RelationDesc;
-use crate::backend::executor::value_io::tuple_from_values;
+use crate::backend::executor::value_io::{encode_tuple_values, tuple_from_values};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::InterruptState;
+use crate::include::access::heaptoast::{
+    ExternalToastValueInput, StoredToastValue, TOAST_MAX_CHUNK_SIZE,
+};
+use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc,
 };
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::primnodes::ToastRelationRef;
 
 #[allow(dead_code)]
 pub(crate) fn sync_catalog_rows(
@@ -56,6 +61,13 @@ pub(crate) fn sync_catalog_rows_subset(
         smgr.unlink(rel, None, false);
         smgr.create(rel, ForkNumber::Main, false)
             .map_err(|e| CatalogError::Io(e.to_string()))?;
+        if let Some(toast_rel) = bootstrap_catalog_toast_rel(kind, db_oid) {
+            smgr.open(toast_rel)
+                .map_err(|e| CatalogError::Io(e.to_string()))?;
+            smgr.unlink(toast_rel, None, false);
+            smgr.create(toast_rel, ForkNumber::Main, false)
+                .map_err(|e| CatalogError::Io(e.to_string()))?;
+        }
     }
 
     // Bulk bootstrap rewrites can safely defer fsync until the relation is
@@ -76,6 +88,8 @@ pub(crate) fn sync_catalog_rows_subset_in_pool(
     for &kind in kinds {
         insert_catalog_rows(
             pool,
+            kind,
+            db_oid,
             bootstrap_catalog_rel(kind, db_oid),
             &bootstrap_relation_desc(kind),
             catalog_row_values_for_kind(rows, kind),
@@ -94,8 +108,14 @@ pub(crate) fn insert_catalog_rows_subset_mvcc(
         let desc = bootstrap_relation_desc(kind);
         let index_state = catalog_index_insert_state_for_db(ctx, kind, db_oid)?;
         for values in catalog_row_values_for_kind(rows, kind) {
-            let tid =
-                catalog_tuple_insert(ctx, bootstrap_catalog_rel(kind, db_oid), &desc, &values)?;
+            let tid = catalog_tuple_insert(
+                ctx,
+                kind,
+                db_oid,
+                bootstrap_catalog_rel(kind, db_oid),
+                &desc,
+                &values,
+            )?;
             index_state.insert(tid, &values)?;
         }
     }
@@ -184,13 +204,14 @@ pub(crate) fn apply_catalog_row_changes_subset_incremental(
 
 fn insert_catalog_rows(
     pool: &BufferPool<SmgrStorageBackend>,
+    kind: BootstrapCatalogKind,
+    db_oid: u32,
     rel: RelFileLocator,
     desc: &RelationDesc,
     rows: Vec<Vec<Value>>,
 ) -> Result<(), CatalogError> {
     for values in rows {
-        let tuple = tuple_from_values(desc, &values)
-            .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
+        let tuple = catalog_tuple_from_values(pool, 0, kind, db_oid, desc, &values, None)?;
         heap_insert(pool, 0, rel, &tuple)
             .map_err(|e| CatalogError::Io(format!("catalog tuple insert failed: {e:?}")))?;
     }
@@ -208,14 +229,136 @@ fn insert_catalog_rows(
 
 fn catalog_tuple_insert(
     ctx: &CatalogWriteContext,
+    kind: BootstrapCatalogKind,
+    db_oid: u32,
     rel: RelFileLocator,
     desc: &RelationDesc,
     values: &[Value],
 ) -> Result<ItemPointerData, CatalogError> {
-    let tuple = tuple_from_values(desc, values)
-        .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
+    let tuple = catalog_tuple_from_values(
+        &ctx.pool,
+        ctx.client_id,
+        kind,
+        db_oid,
+        desc,
+        values,
+        Some(ctx),
+    )?;
     heap_insert_mvcc_with_cid(&ctx.pool, ctx.client_id, rel, ctx.xid, ctx.cid, &tuple)
         .map_err(|e| CatalogError::Io(format!("catalog tuple insert failed: {e:?}")))
+}
+
+fn catalog_tuple_from_values(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: crate::ClientId,
+    kind: BootstrapCatalogKind,
+    db_oid: u32,
+    desc: &RelationDesc,
+    values: &[Value],
+    mvcc: Option<&CatalogWriteContext>,
+) -> Result<HeapTuple, CatalogError> {
+    let mut tuple_values = encode_tuple_values(desc, values)
+        .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
+    if let Some(toast_rel) = catalog_toast_relation(kind, db_oid) {
+        pool.ensure_relation_fork(toast_rel.rel, ForkNumber::Main)
+            .map_err(|e| CatalogError::Io(format!("catalog toast fork create failed: {e:?}")))?;
+        let mut store_external = |value: ExternalToastValueInput| {
+            store_catalog_external_value(pool, client_id, toast_rel, &value, mvcc)
+                .map_err(|e| pgrust_access::AccessError::Io(format!("{e:?}")))
+        };
+        pgrust_access::table::toast_helper::toast_tuple_values_for_write_external_only_with_store(
+            desc,
+            &mut tuple_values,
+            toast_rel.relation_oid,
+            &mut store_external,
+        )
+        .map_err(|e| CatalogError::Io(format!("catalog tuple toast failed: {e:?}")))?;
+    }
+    HeapTuple::from_values(&desc.attribute_descs(), &tuple_values)
+        .map_err(|e| CatalogError::Io(format!("catalog tuple build failed: {e:?}")))
+}
+
+fn catalog_toast_relation(kind: BootstrapCatalogKind, db_oid: u32) -> Option<ToastRelationRef> {
+    bootstrap_catalog_toast_rel(kind, db_oid).map(|rel| ToastRelationRef {
+        rel,
+        relation_oid: kind.toast_relation_oid(),
+    })
+}
+
+fn next_catalog_toast_value_id(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: crate::ClientId,
+    toast: ToastRelationRef,
+) -> Result<u32, CatalogError> {
+    let mut scan = heap_scan_begin(pool, toast.rel)
+        .map_err(|e| CatalogError::Io(format!("catalog toast scan begin failed: {e:?}")))?;
+    let desc = pgrust_access::access::heaptoast::toast_relation_desc();
+    let attr_descs = desc.attribute_descs();
+    let mut max_value_id = 0u32;
+    while let Some((_tid, tuple)) = heap_scan_next(pool, client_id, &mut scan)
+        .map_err(|e| CatalogError::Io(format!("catalog toast scan failed: {e:?}")))?
+    {
+        let values = tuple
+            .deform(&attr_descs)
+            .map_err(|e| CatalogError::Io(format!("catalog toast deform failed: {e:?}")))?;
+        let Some(chunk_id) = pgrust_access::access::heaptoast::toast_chunk_id_from_values(&values)
+            .map_err(|e| CatalogError::Io(format!("catalog toast chunk decode failed: {e:?}")))?
+        else {
+            continue;
+        };
+        max_value_id = max_value_id.max(chunk_id);
+    }
+    Ok(max_value_id.saturating_add(1))
+}
+
+fn store_catalog_external_value(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: crate::ClientId,
+    toast: ToastRelationRef,
+    value: &ExternalToastValueInput,
+    mvcc: Option<&CatalogWriteContext>,
+) -> Result<StoredToastValue, CatalogError> {
+    let desc = pgrust_access::access::heaptoast::toast_relation_desc();
+    let value_id = next_catalog_toast_value_id(pool, client_id, toast)?;
+    let mut chunk_tids = Vec::new();
+
+    for (chunk_seq, chunk) in value.data.chunks(TOAST_MAX_CHUNK_SIZE).enumerate() {
+        let row = pgrust_access::access::heaptoast::toast_chunk_row_values(
+            value_id,
+            chunk_seq as i32,
+            chunk,
+        );
+        let tuple = tuple_from_values(&desc, &row)
+            .map_err(|e| CatalogError::Io(format!("catalog toast tuple encode failed: {e:?}")))?;
+        let tid = if let Some(ctx) = mvcc {
+            heap_insert_mvcc_with_cid(pool, client_id, toast.rel, ctx.xid, ctx.cid, &tuple)
+        } else {
+            heap_insert(pool, client_id, toast.rel, &tuple)
+        }
+        .map_err(|e| CatalogError::Io(format!("catalog toast chunk insert failed: {e:?}")))?;
+        chunk_tids.push(tid);
+    }
+
+    // :HACK: Catalog detoast readers scan the toast heap directly for now, so
+    // catalog toast index maintenance is not required for correctness.
+    Ok(StoredToastValue {
+        pointer: pgrust_access::varatt::VarattExternal {
+            va_rawsize: value.rawsize,
+            va_extinfo: if value.compression_id
+                == pgrust_access::access::toast_compression::ToastCompressionId::Invalid
+            {
+                value.data.len() as u32
+            } else {
+                pgrust_access::varatt::varatt_external_set_size_and_compression_method(
+                    value.data.len() as u32,
+                    value.compression_id as u32,
+                )
+            },
+            va_valueid: value_id,
+            va_toastrelid: toast.relation_oid,
+        },
+        chunk_tids,
+    })
 }
 
 #[allow(dead_code)]
@@ -288,7 +431,17 @@ fn catalog_tuples_delete_matching(
             if !snapshot.tuple_visible(&*txns, &tuple) {
                 continue;
             }
-            let decoded = decode_catalog_tuple_values(desc, &tuple)?;
+            let decoded =
+                crate::backend::catalog::rowcodec::decode_catalog_tuple_values_with_toast(
+                    &ctx.pool,
+                    &txns,
+                    snapshot,
+                    ctx.client_id,
+                    kind,
+                    rel.db_oid,
+                    desc,
+                    &tuple,
+                )?;
             let key = catalog_row_identity_key(kind, &decoded);
             if !remaining.contains_key(&key) {
                 continue;
@@ -373,13 +526,23 @@ fn find_catalog_tuple_tid(
     while let Some((tid, tuple)) = heap_scan_next(&ctx.pool, ctx.client_id, &mut scan)
         .map_err(|e| CatalogError::Io(format!("catalog scan failed: {e:?}")))?
     {
-        let decoded = decode_catalog_tuple_values(desc, &tuple)?;
+        if !snapshot.tuple_visible(&*txns, &tuple) {
+            continue;
+        }
+        let decoded = crate::backend::catalog::rowcodec::decode_catalog_tuple_values_with_toast(
+            &ctx.pool,
+            &txns,
+            snapshot,
+            ctx.client_id,
+            kind,
+            rel.db_oid,
+            desc,
+            &tuple,
+        )?;
         if !catalog_row_identity_matches(kind, &decoded, values) {
             continue;
         }
-        if snapshot.tuple_visible(&*txns, &tuple) {
-            return Ok(Some(tid));
-        }
+        return Ok(Some(tid));
     }
     Ok(None)
 }

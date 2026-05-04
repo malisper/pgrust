@@ -9,18 +9,18 @@ use pgrust_nodes::datum::{
     ArrayValue, GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue,
     Value,
 };
-use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc};
+use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc, ToastRelationRef};
 use pgrust_nodes::relcache::IndexRelCacheEntry;
 use pgrust_nodes::tsearch::{TsQuery, TsVector};
 use pgrust_storage::BufferTag;
 
-use crate::AccessResult;
 use crate::access::gin::GinEntryKey;
 use crate::access::heaptoast::ToastChunk;
 use crate::access::htup::HeapTuple;
 use crate::access::htup::TupleValue;
 use crate::access::itemptr::ItemPointerData;
 use crate::varatt::VarattExternal;
+use crate::{AccessError, AccessResult};
 
 pub trait AccessInterruptServices {
     fn check_interrupts(&self) -> Result<(), InterruptReason>;
@@ -71,6 +71,17 @@ pub trait AccessHeapServices {
         rel: RelFileLocator,
         tid: ItemPointerData,
     ) -> AccessResult<HeapTuple>;
+
+    fn fetch_toast_value_bytes(
+        &self,
+        _toast: ToastRelationRef,
+        _snapshot: &Snapshot,
+        _raw: &[u8],
+    ) -> AccessResult<Vec<u8>> {
+        Err(AccessError::Unsupported(
+            "access heap toast fetch missing runtime service".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +118,15 @@ pub trait AccessScalarServices {
     fn encode_value(&self, column: &ColumnDesc, value: &Value) -> AccessResult<TupleValue>;
 
     fn decode_value(&self, column: &ColumnDesc, raw: Option<&[u8]>) -> AccessResult<Value>;
+
+    fn decode_value_with_external_toast(
+        &self,
+        column: &ColumnDesc,
+        raw: Option<&[u8]>,
+        _fetch_external: Option<&mut dyn FnMut(&[u8]) -> AccessResult<Vec<u8>>>,
+    ) -> AccessResult<Value> {
+        self.decode_value(column, raw)
+    }
 
     fn format_unique_key_detail(&self, columns: &[ColumnDesc], values: &[Value]) -> String;
 
