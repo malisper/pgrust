@@ -116,6 +116,27 @@ pub const MACADDR_BRIN_BLOOM_OPCLASS_OID: u32 = 76141;
 pub const MACADDR8_BRIN_BLOOM_OPCLASS_OID: u32 = 76142;
 pub const NAME_BRIN_MINMAX_OPCLASS_OID: u32 = 76150;
 pub const INET_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76307;
+pub const BYTEA_BRIN_BLOOM_OPCLASS_OID: u32 = 76320;
+pub const CHAR_BRIN_BLOOM_OPCLASS_OID: u32 = 76321;
+pub const NAME_BRIN_BLOOM_OPCLASS_OID: u32 = 76322;
+pub const INT2_BRIN_BLOOM_OPCLASS_OID: u32 = 76323;
+pub const INT4_BRIN_BLOOM_OPCLASS_OID: u32 = 76324;
+pub const INT8_BRIN_BLOOM_OPCLASS_OID: u32 = 76325;
+pub const NUMERIC_BRIN_BLOOM_OPCLASS_OID: u32 = 76326;
+pub const OID_BRIN_BLOOM_OPCLASS_OID: u32 = 76327;
+pub const TID_BRIN_BLOOM_OPCLASS_OID: u32 = 76328;
+pub const FLOAT4_BRIN_BLOOM_OPCLASS_OID: u32 = 76329;
+pub const FLOAT8_BRIN_BLOOM_OPCLASS_OID: u32 = 76330;
+pub const INET_BRIN_BLOOM_OPCLASS_OID: u32 = 76331;
+pub const BPCHAR_BRIN_BLOOM_OPCLASS_OID: u32 = 76332;
+pub const TIME_BRIN_BLOOM_OPCLASS_OID: u32 = 76333;
+pub const DATE_BRIN_BLOOM_OPCLASS_OID: u32 = 76334;
+pub const TIMESTAMP_BRIN_BLOOM_OPCLASS_OID: u32 = 76335;
+pub const TIMESTAMPTZ_BRIN_BLOOM_OPCLASS_OID: u32 = 76336;
+pub const TIMETZ_BRIN_BLOOM_OPCLASS_OID: u32 = 76337;
+pub const INTERVAL_BRIN_BLOOM_OPCLASS_OID: u32 = 76338;
+pub const UUID_BRIN_BLOOM_OPCLASS_OID: u32 = 76339;
+pub const PG_LSN_BRIN_BLOOM_OPCLASS_OID: u32 = 76340;
 pub const BOOL_HASH_OPCLASS_OID: u32 = 76200;
 pub const INT2_HASH_OPCLASS_OID: u32 = 76201;
 pub const INT4_HASH_OPCLASS_OID: u32 = 76202;
@@ -641,10 +662,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_BYTEA_MINMAX_FAMILY_OID,
             BYTEA_TYPE_OID,
         ),
+        brin_non_default_row(
+            BYTEA_BRIN_BLOOM_OPCLASS_OID,
+            "bytea_bloom_ops",
+            BRIN_BYTEA_BLOOM_FAMILY_OID,
+            BYTEA_TYPE_OID,
+        ),
         brin_row(
             CHAR_BRIN_MINMAX_OPCLASS_OID,
             "char_minmax_ops",
             BRIN_CHAR_MINMAX_FAMILY_OID,
+            INTERNAL_CHAR_TYPE_OID,
+        ),
+        brin_non_default_row(
+            CHAR_BRIN_BLOOM_OPCLASS_OID,
+            "char_bloom_ops",
+            BRIN_CHAR_BLOOM_FAMILY_OID,
             INTERNAL_CHAR_TYPE_OID,
         ),
         brin_row(
@@ -659,6 +692,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID,
             INT2_TYPE_OID,
         ),
+        brin_non_default_row(
+            INT2_BRIN_BLOOM_OPCLASS_OID,
+            "int2_bloom_ops",
+            BRIN_INTEGER_BLOOM_FAMILY_OID,
+            INT2_TYPE_OID,
+        ),
         brin_row(
             INT4_BRIN_MINMAX_OPCLASS_OID,
             "int4_minmax_ops",
@@ -669,6 +708,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             INT4_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "int4_minmax_multi_ops",
             BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID,
+            INT4_TYPE_OID,
+        ),
+        brin_non_default_row(
+            INT4_BRIN_BLOOM_OPCLASS_OID,
+            "int4_bloom_ops",
+            BRIN_INTEGER_BLOOM_FAMILY_OID,
             INT4_TYPE_OID,
         ),
         brin_row(
@@ -683,6 +728,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID,
             INT8_TYPE_OID,
         ),
+        brin_non_default_row(
+            INT8_BRIN_BLOOM_OPCLASS_OID,
+            "int8_bloom_ops",
+            BRIN_INTEGER_BLOOM_FAMILY_OID,
+            INT8_TYPE_OID,
+        ),
         brin_row(
             NUMERIC_BRIN_MINMAX_OPCLASS_OID,
             "numeric_minmax_ops",
@@ -693,6 +744,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             NUMERIC_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "numeric_minmax_multi_ops",
             BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID,
+            NUMERIC_TYPE_OID,
+        ),
+        brin_non_default_row(
+            NUMERIC_BRIN_BLOOM_OPCLASS_OID,
+            "numeric_bloom_ops",
+            BRIN_NUMERIC_BLOOM_FAMILY_OID,
             NUMERIC_TYPE_OID,
         ),
         brin_row(
@@ -707,6 +764,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_OID_MINMAX_MULTI_FAMILY_OID,
             OID_TYPE_OID,
         ),
+        brin_non_default_row(
+            OID_BRIN_BLOOM_OPCLASS_OID,
+            "oid_bloom_ops",
+            BRIN_OID_BLOOM_FAMILY_OID,
+            OID_TYPE_OID,
+        ),
         brin_row(
             TID_BRIN_MINMAX_OPCLASS_OID,
             "tid_minmax_ops",
@@ -717,6 +780,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             TID_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "tid_minmax_multi_ops",
             BRIN_TID_MINMAX_MULTI_FAMILY_OID,
+            TID_TYPE_OID,
+        ),
+        brin_non_default_row(
+            TID_BRIN_BLOOM_OPCLASS_OID,
+            "tid_bloom_ops",
+            BRIN_TID_BLOOM_FAMILY_OID,
             TID_TYPE_OID,
         ),
         brin_row(
@@ -731,6 +800,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID,
             FLOAT4_TYPE_OID,
         ),
+        brin_non_default_row(
+            FLOAT4_BRIN_BLOOM_OPCLASS_OID,
+            "float4_bloom_ops",
+            BRIN_FLOAT_BLOOM_FAMILY_OID,
+            FLOAT4_TYPE_OID,
+        ),
         brin_row(
             FLOAT8_BRIN_MINMAX_OPCLASS_OID,
             "float8_minmax_ops",
@@ -741,6 +816,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             FLOAT8_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "float8_minmax_multi_ops",
             BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID,
+            FLOAT8_TYPE_OID,
+        ),
+        brin_non_default_row(
+            FLOAT8_BRIN_BLOOM_OPCLASS_OID,
+            "float8_bloom_ops",
+            BRIN_FLOAT_BLOOM_FAMILY_OID,
             FLOAT8_TYPE_OID,
         ),
         brin_row(
@@ -766,6 +847,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_BPCHAR_MINMAX_FAMILY_OID,
             BPCHAR_TYPE_OID,
         ),
+        brin_non_default_row(
+            BPCHAR_BRIN_BLOOM_OPCLASS_OID,
+            "bpchar_bloom_ops",
+            BRIN_BPCHAR_BLOOM_FAMILY_OID,
+            BPCHAR_TYPE_OID,
+        ),
         brin_row(
             TIME_BRIN_MINMAX_OPCLASS_OID,
             "time_minmax_ops",
@@ -776,6 +863,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             TIME_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "time_minmax_multi_ops",
             BRIN_TIME_MINMAX_MULTI_FAMILY_OID,
+            TIME_TYPE_OID,
+        ),
+        brin_non_default_row(
+            TIME_BRIN_BLOOM_OPCLASS_OID,
+            "time_bloom_ops",
+            BRIN_TIME_BLOOM_FAMILY_OID,
             TIME_TYPE_OID,
         ),
         brin_row(
@@ -790,6 +883,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID,
             DATE_TYPE_OID,
         ),
+        brin_non_default_row(
+            DATE_BRIN_BLOOM_OPCLASS_OID,
+            "date_bloom_ops",
+            BRIN_DATETIME_BLOOM_FAMILY_OID,
+            DATE_TYPE_OID,
+        ),
         brin_row(
             TIMESTAMP_BRIN_MINMAX_OPCLASS_OID,
             "timestamp_minmax_ops",
@@ -800,6 +899,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             TIMESTAMP_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "timestamp_minmax_multi_ops",
             BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID,
+            TIMESTAMP_TYPE_OID,
+        ),
+        brin_non_default_row(
+            TIMESTAMP_BRIN_BLOOM_OPCLASS_OID,
+            "timestamp_bloom_ops",
+            BRIN_DATETIME_BLOOM_FAMILY_OID,
             TIMESTAMP_TYPE_OID,
         ),
         brin_row(
@@ -814,6 +919,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID,
             TIMESTAMPTZ_TYPE_OID,
         ),
+        brin_non_default_row(
+            TIMESTAMPTZ_BRIN_BLOOM_OPCLASS_OID,
+            "timestamptz_bloom_ops",
+            BRIN_DATETIME_BLOOM_FAMILY_OID,
+            TIMESTAMPTZ_TYPE_OID,
+        ),
         brin_row(
             TIMETZ_BRIN_MINMAX_OPCLASS_OID,
             "timetz_minmax_ops",
@@ -826,6 +937,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID,
             TIMETZ_TYPE_OID,
         ),
+        brin_non_default_row(
+            TIMETZ_BRIN_BLOOM_OPCLASS_OID,
+            "timetz_bloom_ops",
+            BRIN_TIMETZ_BLOOM_FAMILY_OID,
+            TIMETZ_TYPE_OID,
+        ),
         brin_row(
             INTERVAL_BRIN_MINMAX_OPCLASS_OID,
             "interval_minmax_ops",
@@ -836,6 +953,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             INTERVAL_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "interval_minmax_multi_ops",
             BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID,
+            INTERVAL_TYPE_OID,
+        ),
+        brin_non_default_row(
+            INTERVAL_BRIN_BLOOM_OPCLASS_OID,
+            "interval_bloom_ops",
+            BRIN_INTERVAL_BLOOM_FAMILY_OID,
             INTERVAL_TYPE_OID,
         ),
         brin_row(
@@ -862,6 +985,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_UUID_MINMAX_MULTI_FAMILY_OID,
             UUID_TYPE_OID,
         ),
+        brin_non_default_row(
+            UUID_BRIN_BLOOM_OPCLASS_OID,
+            "uuid_bloom_ops",
+            BRIN_UUID_BLOOM_FAMILY_OID,
+            UUID_TYPE_OID,
+        ),
         brin_row(
             PG_LSN_BRIN_MINMAX_OPCLASS_OID,
             "pg_lsn_minmax_ops",
@@ -872,6 +1001,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             PG_LSN_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "pg_lsn_minmax_multi_ops",
             BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID,
+            PG_LSN_TYPE_OID,
+        ),
+        brin_non_default_row(
+            PG_LSN_BRIN_BLOOM_OPCLASS_OID,
+            "pg_lsn_bloom_ops",
+            BRIN_PG_LSN_BLOOM_FAMILY_OID,
             PG_LSN_TYPE_OID,
         ),
         brin_row(
@@ -890,6 +1025,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             NAME_BRIN_MINMAX_OPCLASS_OID,
             "name_minmax_ops",
             BRIN_NAME_MINMAX_FAMILY_OID,
+            NAME_TYPE_OID,
+        ),
+        brin_non_default_row(
+            NAME_BRIN_BLOOM_OPCLASS_OID,
+            "name_bloom_ops",
+            BRIN_NAME_BLOOM_FAMILY_OID,
             NAME_TYPE_OID,
         ),
         // :HACK: Generic BRIN minmax-multi and bloom runtime support is not
@@ -928,6 +1069,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             INET_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "inet_minmax_multi_ops",
             BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID,
+            INET_TYPE_OID,
+        ),
+        brin_non_default_row(
+            INET_BRIN_BLOOM_OPCLASS_OID,
+            "inet_bloom_ops",
+            BRIN_NETWORK_BLOOM_FAMILY_OID,
             INET_TYPE_OID,
         ),
         brin_row(
