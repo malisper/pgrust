@@ -311,6 +311,7 @@ pub fn finalize_regr_stats(
         | AggFunc::Max
         | AggFunc::StringAgg
         | AggFunc::ArrayAgg
+        | AggFunc::ArrayAggArray
         | AggFunc::JsonAgg
         | AggFunc::JsonbAgg
         | AggFunc::JsonObjectAgg

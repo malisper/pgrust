@@ -16,3 +16,53 @@ Tests run:
 
 Remaining:
 Arrays regression passes fully: 526/526 queries matched.
+
+2026-05-04 follow-up:
+Goal:
+Explain why CI showed `select array_agg('{}'::int[]) from generate_series(1,2);`
+returning a blank aggregate row instead of `ERROR: cannot accumulate empty arrays`.
+
+Key decisions:
+PostgreSQL has two catalog-visible `array_agg` aggregates. `array_agg(anyarray)`
+uses `array_agg_array_transfn`, which calls `accumArrayResultArr`; that transition
+errors immediately for NULL subarrays, empty subarrays, or mismatched dimensions.
+pgrust collapses builtin aggregate execution to one `AggFunc::ArrayAgg` and
+recovers the anyarray-vs-anynonarray distinction later with an `input_is_array`
+flag from `expr_sql_type_hint`. If that flag is false or type information is lost,
+the transition validator is skipped and `finalize_array_agg` returns NULL for an
+empty nested array.
+
+Files touched:
+Only this task note.
+
+Tests run:
+Attempted `scripts/cargo_isolated.sh run --features tools --bin query_sql_demo -- "select array_agg('{}'::int[]) from generate_series(1,2)"`, but the demo binary currently fails to compile due to an unrelated non-exhaustive `Value` match.
+
+Remaining:
+The likely fix is to make the builtin aggregate runtime preserve the PostgreSQL
+`array_agg(anyarray)` overload decision directly, rather than inferring it from
+lowered expression hints at executor initialization.
+
+2026-05-04 implementation:
+Goal:
+Add a separate pgrust builtin aggregate identity for PostgreSQL's
+`array_agg(anyarray)` overload.
+
+Key decisions:
+Added `AggFunc::ArrayAggArray`, mapped it to PostgreSQL aggregate oid 4053, and
+specialized `array_agg` resolution to that variant when the first argument type
+is an array. Executor aggregate state now initializes anyarray array_agg with
+array-input validation enabled, while retaining the old expression-hint fallback
+for compatibility.
+
+Files touched:
+`crates/pgrust_catalog_ids/src/lib.rs`, `crates/pgrust_analyze/src/*`,
+`src/backend/executor/agg.rs`, and `crates/pgrust_executor/src/aggregate.rs`.
+
+Tests run:
+`cargo fmt`
+`scripts/cargo_isolated.sh check`
+`scripts/run_regression.sh --test arrays --jobs 1 --timeout 180 --results-dir /tmp/diffs/arrays-array-agg-anyarray`
+
+Remaining:
+Arrays regression passes fully: 526/526 queries matched.

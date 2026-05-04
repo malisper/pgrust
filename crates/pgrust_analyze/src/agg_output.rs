@@ -601,6 +601,7 @@ fn bind_grouped_window_agg_call(
             grouped_infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer)
         })
         .collect::<Vec<_>>();
+    let func = specialize_builtin_aggregate(func, &arg_types);
     let resolved = resolve_builtin_aggregate_call(catalog, func, &arg_types, func_variadic);
     let bound_args = arg_values
         .iter()
@@ -5113,7 +5114,7 @@ fn preserve_array_agg_array_arg_type(
     arg_types: &[SqlType],
     mut args: Vec<Expr>,
 ) -> Vec<Expr> {
-    if func == Some(AggFunc::ArrayAgg)
+    if matches!(func, Some(AggFunc::ArrayAgg | AggFunc::ArrayAggArray))
         && let (Some(arg_type), Some(first_arg)) = (arg_types.first().copied(), args.first_mut())
         && arg_type.is_array
         && !expr_sql_type_hint(first_arg).is_some_and(|ty| ty.is_array)

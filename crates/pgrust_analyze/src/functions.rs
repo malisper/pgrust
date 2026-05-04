@@ -3217,6 +3217,7 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::Min
             | AggFunc::Max
             | AggFunc::ArrayAgg
+            | AggFunc::ArrayAggArray
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg
             | AggFunc::RangeAgg
