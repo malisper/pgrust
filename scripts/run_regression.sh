@@ -28,6 +28,19 @@
 #   --deadline-secs N Stop scheduling new files after N seconds and write a partial summary
 #   --ignore-deps     Don't fail if test dependencies fail to set up (default: fail on dependency errors)
 
+if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+    for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash bash; do
+        if command -v "$candidate" >/dev/null 2>&1 \
+            && "$candidate" -c '[[ "${BASH_VERSINFO[0]}" -ge 4 ]]' >/dev/null 2>&1
+        then
+            exec "$candidate" "$0" "$@"
+        fi
+    done
+    echo "ERROR: scripts/run_regression.sh requires bash 4 or newer." >&2
+    echo "Install a newer bash or run with PATH pointing at Homebrew bash." >&2
+    exit 1
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -1517,7 +1530,7 @@ else
     # broken production run, 25084823283).
     SHARD_ASSIGNMENTS=()
     if [[ ${#ALL_TEST_GROUPS[@]} -gt 0 ]]; then
-        lpt_script="$(mktemp "${TMPDIR:-/tmp}/lpt.XXXXXX.py")"
+        lpt_script="$(mktemp "${TMPDIR:-/tmp}/lpt.XXXXXX")"
         cat > "$lpt_script" <<'PY'
 import sys
 shard_total = int(sys.argv[1])
