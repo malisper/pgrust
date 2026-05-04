@@ -807,3 +807,23 @@ Remaining:
 - Move PL/pgSQL compile/runtime into the PL/pgSQL crate or a runtime crate.
 - Extract protocol/tcop late.
 - Add boundary checks and complete final root slimdown.
+
+## JSON/JSONB Helper Extraction
+
+Goal:
+Move a large pure JSON/JSONB helper cluster from root `expr_json` into `pgrust_expr`.
+
+Key decisions:
+Extracted JSON null stripping, JSONB delete/path set/subscript assignment, raw/serde JSON lookup/render helpers, and float JSON scalar helpers. Left root `value_to_json_*` and record/regclass rendering in place because they depend on root datetime/catalog/varlena/geometry/tsearch services.
+
+Files touched:
+`crates/pgrust_expr/src/backend/executor/expr_json.rs`
+`src/backend/executor/expr_json.rs`
+
+Tests run:
+`cargo fmt`
+`scripts/cargo_isolated.sh check -p pgrust_expr`
+`scripts/cargo_isolated.sh check --lib`
+
+Remaining:
+Rendering for full `Value` still has root-only service coupling; a future pass could introduce a narrow renderer callback trait if moving that subcluster becomes worthwhile.
