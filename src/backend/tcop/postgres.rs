@@ -4545,7 +4545,6 @@ fn apply_privileges_regression_error_compat(sql: &str, response: &mut ExecErrorR
         || response.message.contains(" is not a function")
         || response.message.contains(" is not a procedure")
         || response.message.contains(" is not a routine")
-        || response.message.contains(" does not exist")
     {
         response.message = normalize_routine_signature_type_aliases(&response.message);
     }
@@ -18917,6 +18916,20 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
                 find_reg_object_literal_position(sql)
             );
         }
+    }
+
+    #[test]
+    fn exec_error_response_preserves_regoperator_input_signature_aliases() {
+        let sql = "SELECT regoperator('++(int4,int4)');";
+        let err = ExecError::DetailedError {
+            message: "operator does not exist: ++(int4,int4)".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        };
+
+        let response = exec_error_response(sql, &err);
+        assert_eq!(response.message, "operator does not exist: ++(int4,int4)");
     }
 
     #[test]

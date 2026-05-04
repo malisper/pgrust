@@ -8021,9 +8021,11 @@ fn resolve_regoperator_signature(
     catalog
         .operator_by_name_left_right(operator_name, left_type_oid, right_type_oid)
         .map(|row| row.oid)
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "existing operator signature",
-            actual: signature.to_string(),
+        .ok_or_else(|| ParseError::DetailedError {
+            message: format!("operator does not exist: {signature}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
         })
 }
 

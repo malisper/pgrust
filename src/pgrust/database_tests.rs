@@ -25905,6 +25905,24 @@ fn regoperator_literal_cast_resolves_operator_signature() {
 }
 
 #[test]
+fn regoperator_type_constructor_reports_original_signature_on_missing_operator() {
+    let base = temp_dir("regoperator_missing_signature");
+    let db = Database::open(&base, 16).unwrap();
+
+    let err = db
+        .execute(1, "select regoperator('++(int4,int4)')")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            ref message,
+            sqlstate: "42883",
+            ..
+        } if message == "operator does not exist: ++(int4,int4)"
+    ));
+}
+
+#[test]
 fn case_and_nullif_preserve_array_domain_function_results() {
     let base = temp_dir("case_array_domain_function_result");
     let db = Database::open(&base, 16).unwrap();
