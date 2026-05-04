@@ -827,3 +827,24 @@ Tests run:
 
 Remaining:
 Rendering for full `Value` still has root-only service coupling; a future pass could introduce a narrow renderer callback trait if moving that subcluster becomes worthwhile.
+
+## EXPLAIN Expression Renderer Extraction
+
+Goal:
+Move the large render-only EXPLAIN expression helper block from root executor nodes into `pgrust_commands`.
+
+Key decisions:
+Added `crates/pgrust_commands/src/explain_expr.rs` for the contiguous expression renderer block and EXPLAIN datetime config stack. Kept old executor paths compiling with `pub(crate) use pgrust_commands::explain_expr::{...}` in `src/backend/executor/nodes.rs`. Left index scan metadata/operator lookup in root executor nodes, delegating to narrow expression-render helpers.
+
+Files touched:
+`crates/pgrust_commands/src/explain_expr.rs`
+`crates/pgrust_commands/src/lib.rs`
+`src/backend/executor/nodes.rs`
+
+Tests run:
+`cargo fmt`
+`scripts/cargo_isolated.sh check -p pgrust_commands`
+`scripts/cargo_isolated.sh check --lib`
+
+Remaining:
+`pgrust_commands::explain_expr` still exposes a small helper surface for root index/order-by EXPLAIN formatting.

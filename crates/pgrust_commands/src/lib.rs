@@ -7,6 +7,7 @@ pub mod copyto;
 pub mod database;
 pub mod event_trigger;
 pub mod explain;
+pub mod explain_expr;
 pub mod index;
 pub mod language;
 pub mod maintenance;
