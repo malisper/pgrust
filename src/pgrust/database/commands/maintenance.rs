@@ -2,7 +2,10 @@ use super::super::*;
 use super::alter_table_work_queue::{
     build_alter_table_work_queue, has_inheritance_children, relation_name_for_alter_error,
 };
-use super::constraint::{find_constraint_row, validate_check_rows, validate_not_null_rows};
+use super::constraint::{
+    ddl_not_null_contains_null_error, find_constraint_row, validate_check_rows,
+    validate_not_null_rows,
+};
 use super::create::{
     aggregate_signature_arg_oids, format_aggregate_signature, owned_sequence_dependency_kind,
     resolve_aggregate_proc_rows,
@@ -916,8 +919,10 @@ fn rewrite_tuple_from_values(
 
 fn rewrite_heap_rows_for_added_default_column(
     relation: &crate::backend::parser::BoundRelation,
+    relation_name: &str,
     new_desc: &RelationDesc,
     column_index: usize,
+    validate_not_null: bool,
     indexes: &[crate::backend::parser::BoundIndexRelation],
     ctx: &mut ExecutorContext,
     xid: TransactionId,
@@ -944,6 +949,12 @@ fn rewrite_heap_rows_for_added_default_column(
         } else {
             let value = evaluate_added_column_default_value(new_desc, column_index, ctx)?;
             values[column_index] = value;
+        }
+        if validate_not_null && matches!(values.get(column_index), Some(Value::Null) | None) {
+            return Err(ddl_not_null_contains_null_error(
+                relation_name,
+                &new_desc.columns[column_index].name,
+            ));
         }
         let replacement = rewrite_tuple_from_values(new_desc, &values)?;
         let new_tid = heap_update_with_waiter(
@@ -4191,8 +4202,15 @@ impl Database {
                 if relkind_has_storage(target.relation.relkind) {
                     rewrite_heap_rows_for_added_default_column(
                         &target.relation,
+                        &relation_name_for_add_column_notice(
+                            &catalog,
+                            target.relation.relation_oid,
+                        ),
                         &target.new_desc,
                         target.column_index,
+                        not_null_action
+                            .as_ref()
+                            .is_some_and(|action| !action.not_valid),
                         indexes
                             .get(&target.relation.relation_oid)
                             .expect("indexes for add-column target"),
@@ -4447,18 +4465,20 @@ impl Database {
             if let Some(action) = not_null_action.as_ref() {
                 if !(target.direct_parent_count > 0 && action.no_inherit) {
                     if !action.not_valid {
-                        validate_not_null_rows(
-                            self,
-                            &target_relation,
-                            &target_name,
-                            new_column_index,
-                            &action.constraint_name,
-                            &catalog,
-                            client_id,
-                            xid,
-                            cid,
-                            std::sync::Arc::clone(&interrupts),
-                        )?;
+                        if !target.rewrite_existing_rows {
+                            validate_not_null_rows(
+                                self,
+                                &target_relation,
+                                &target_name,
+                                new_column_index,
+                                &action.constraint_name,
+                                &catalog,
+                                client_id,
+                                xid,
+                                cid,
+                                std::sync::Arc::clone(&interrupts),
+                            )?;
+                        }
                     }
                     let set_ctx = CatalogWriteContext {
                         pool: self.pool.clone(),
@@ -4570,13 +4590,19 @@ impl Database {
                         action.constraint_name
                     ));
                 }
-                crate::backend::parser::bind_check_constraint_expr(
+                let bound_check = crate::backend::parser::bind_check_constraint_expr(
                     &action.expr_sql,
                     Some(&target_name),
                     &target_relation.desc,
                     &catalog,
                 )
                 .map_err(ExecError::Parse)?;
+                let expr_sql = crate::backend::rewrite::render_relation_expr_sql_for_constraint(
+                    &bound_check,
+                    Some(&target_name),
+                    &target_relation.desc,
+                    &catalog,
+                );
                 if !action.not_valid {
                     validate_check_rows(
                         self,
@@ -4611,7 +4637,7 @@ impl Database {
                         action.enforced,
                         action.enforced && !action.not_valid,
                         action.no_inherit,
-                        action.expr_sql.clone(),
+                        expr_sql,
                         action.parent_constraint_oid.unwrap_or(0),
                         action.is_local,
                         action.inhcount,

@@ -14,12 +14,12 @@ use crate::backend::parser::{RawTypeName, SequenceOptionsPatchSpec};
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
-    BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow, PgStatisticRow,
+    BTREE_AM_OID, CONSTRAINT_CHECK, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow, PgStatisticRow,
     default_btree_opclass_oid,
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use crate::pgrust::database::ddl::{
-    lookup_table_or_partitioned_table_for_alter_table,
+    format_sql_type_name, lookup_table_or_partitioned_table_for_alter_table,
     reject_column_type_change_with_rule_dependencies, relation_kind_name,
     validate_alter_table_add_column, validate_alter_table_alter_column_expression,
     validate_alter_table_alter_column_type,
@@ -36,6 +36,7 @@ struct AlterColumnTypeTarget {
     column_index: usize,
     indexes: Vec<crate::backend::parser::BoundIndexRelation>,
     fires_table_rewrite: bool,
+    check_expr_updates: Vec<(u32, String)>,
 }
 
 pub(super) struct RewrittenAlterColumnTypeRow {
@@ -47,6 +48,74 @@ pub(super) struct RewrittenAlterColumnTypeRow {
 struct BatchRewriteExpr {
     column_index: usize,
     expr: crate::backend::executor::Expr,
+}
+
+fn check_constraint_expr_updates_for_alter_column_types(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    old_desc: &RelationDesc,
+    new_desc: &RelationDesc,
+) -> Vec<(u32, String)> {
+    catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_CHECK)
+        .filter_map(|row| {
+            let mut expr_sql = row.conbin.clone()?;
+            for (index, old_column) in old_desc.columns.iter().enumerate() {
+                let Some(new_column) = new_desc.columns.get(index) else {
+                    continue;
+                };
+                if old_column.dropped
+                    || new_column.dropped
+                    || !old_column.name.eq_ignore_ascii_case(&new_column.name)
+                    || old_column.sql_type == new_column.sql_type
+                {
+                    continue;
+                }
+                if let Some(rewritten) = rewrite_simple_check_expr_for_alter_column_type(
+                    &expr_sql,
+                    &old_column.name,
+                    old_column.sql_type,
+                ) {
+                    expr_sql = rewritten;
+                }
+            }
+            (row.conbin.as_deref() != Some(expr_sql.as_str())).then_some((row.oid, expr_sql))
+        })
+        .collect()
+}
+
+fn rewrite_simple_check_expr_for_alter_column_type(
+    expr_sql: &str,
+    column_name: &str,
+    old_type: SqlType,
+) -> Option<String> {
+    // :HACK: PostgreSQL rewrites stored CHECK expression trees so references to
+    // an altered column are coerced back to the old type when that preserves
+    // the original semantics. Until casts carry ruleutils coercion metadata in
+    // Expr, cover the simple comparison form used by ALTER TABLE regressions.
+    let normalized = pgrust_protocol::sql::normalize_check_expr_operator_spacing(expr_sql);
+    let old_type_name = format_sql_type_name(old_type);
+    let typed_suffix = format!("::{old_type_name}");
+    let trimmed = normalized.trim();
+    let operators = [">=", "<=", "<>", "!=", "=", ">", "<"];
+    for operator in operators {
+        let needle = format!(" {operator} ");
+        let Some(index) = trimmed.find(&needle) else {
+            continue;
+        };
+        let left = trimmed[..index].trim();
+        let right = trimmed[index + needle.len()..].trim();
+        if !pgrust_protocol::sql::check_expr_column_matches(left, column_name)
+            || left.contains("::")
+            || !right.ends_with(&typed_suffix)
+        {
+            continue;
+        }
+        return Some(format!("{left}{typed_suffix} {operator} {right}"));
+    }
+    None
 }
 
 fn batchable_alter_table_actions(
@@ -961,6 +1030,12 @@ fn collect_alter_column_type_targets(
         let mut new_desc = target_relation.desc.clone();
         new_desc.columns[plan.column_index] = plan.new_column;
         let indexes = rewrite_bound_indexes_for_alter_column_type(indexes, &new_desc, catalog)?;
+        let check_expr_updates = check_constraint_expr_updates_for_alter_column_types(
+            catalog,
+            target_relation.relation_oid,
+            &target_relation.desc,
+            &new_desc,
+        );
         targets.push(AlterColumnTypeTarget {
             fires_table_rewrite: alter_column_type_fires_table_rewrite(
                 target_relation.desc.columns[plan.column_index].sql_type,
@@ -973,6 +1048,7 @@ fn collect_alter_column_type_targets(
             rewrite_expr: plan.rewrite_expr,
             column_index: plan.column_index,
             indexes,
+            check_expr_updates,
         });
     }
 
@@ -1278,6 +1354,12 @@ impl Database {
 
         crate::backend::parser::validate_generated_columns(&staged_desc, &catalog)
             .map_err(ExecError::Parse)?;
+        let check_expr_updates = check_constraint_expr_updates_for_alter_column_types(
+            &catalog,
+            relation.relation_oid,
+            &original_desc,
+            &staged_desc,
+        );
         let relation_name = relation_name_for_error(&catalog, relation.relation_oid);
         let relation_constraints = crate::backend::parser::bind_relation_constraints(
             Some(&relation_name),
@@ -1413,6 +1495,16 @@ impl Database {
             )
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
+        if !check_expr_updates.is_empty() {
+            let effect = store
+                .update_check_constraint_exprs_mvcc(
+                    relation.relation_oid,
+                    &check_expr_updates,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
         let effect = store
             .replace_relation_statistics_mvcc(
                 relation.relation_oid,
@@ -1692,6 +1784,16 @@ impl Database {
                 )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
+            if !target.check_expr_updates.is_empty() {
+                let effect = store
+                    .update_check_constraint_exprs_mvcc(
+                        target.relation.relation_oid,
+                        &target.check_expr_updates,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+            }
             if let Some(sequence_oid) =
                 target.new_desc.columns[target.column_index].default_sequence_oid
                 && target.new_desc.columns[target.column_index]

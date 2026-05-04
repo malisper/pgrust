@@ -3906,7 +3906,7 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
             if let Some(rendered) = render_datetime_cast_literal(inner, *ty) {
                 return rendered;
             }
-            if matches!(**inner, Expr::Const(_) | Expr::Var(_)) {
+            if matches!(**inner, Expr::Const(_) | Expr::Var(_) | Expr::Func(_)) {
                 let rendered_inner = render_expr(inner, ctx);
                 let rendered_inner =
                     if ctx.options.parenthesize_var_cast && matches!(**inner, Expr::Var(_)) {
@@ -3919,9 +3919,16 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
                     render_sql_type_with_catalog(*ty, ctx.catalog)
                 )
             } else {
+                let rendered_inner = render_expr(inner, ctx);
+                if rendered_expr_can_take_typecast(&rendered_inner) {
+                    return format!(
+                        "{rendered_inner}::{}",
+                        render_sql_type_with_catalog(*ty, ctx.catalog)
+                    );
+                }
                 format!(
                     "({})::{}",
-                    render_expr(inner, ctx),
+                    rendered_inner,
                     render_sql_type_with_catalog(*ty, ctx.catalog)
                 )
             }
@@ -4391,6 +4398,19 @@ enum ExprPrecedence {
 enum ChildSide {
     Left,
     Right,
+}
+
+fn rendered_expr_can_take_typecast(rendered: &str) -> bool {
+    let trimmed = rendered.trim();
+    let Some(open) = trimmed.find('(') else {
+        return false;
+    };
+    if !trimmed.ends_with(')') {
+        return false;
+    }
+    trimmed[..open]
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.'))
 }
 
 fn render_precedence_expr(
@@ -5114,6 +5134,12 @@ fn render_special_builtin_function(
             render_text_function_arg(&func.args[1], ctx),
             render_text_function_arg(&func.args[2], ctx)
         )),
+        BuiltinScalarFunction::TextToRegClass if func.args.len() == 1 => Some(
+            render_function_cast_arg(&func.args[0], SqlTypeKind::RegClass, ctx),
+        ),
+        BuiltinScalarFunction::RegClassToText if func.args.len() == 1 => Some(
+            render_function_cast_arg(&func.args[0], SqlTypeKind::Text, ctx),
+        ),
         BuiltinScalarFunction::BTrim if matches!(func.args.len(), 1 | 2) => {
             Some(render_trim_function("BOTH", &func.args, ctx))
         }
@@ -5124,6 +5150,22 @@ fn render_special_builtin_function(
             Some(render_trim_function("TRAILING", &func.args, ctx))
         }
         _ => None,
+    }
+}
+
+fn render_function_cast_arg(
+    arg: &Expr,
+    target_kind: SqlTypeKind,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    let rendered = render_expr(arg, ctx);
+    let target_type = render_sql_type_with_catalog(SqlType::new(target_kind), ctx.catalog);
+    if matches!(arg, Expr::Const(_) | Expr::Var(_) | Expr::Func(_))
+        || rendered_expr_can_take_typecast(&rendered)
+    {
+        format!("{rendered}::{target_type}")
+    } else {
+        format!("({rendered})::{target_type}")
     }
 }
 

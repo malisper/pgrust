@@ -7,6 +7,7 @@ use crate::backend::parser::{
     BoundTemporalConstraint, ForeignKeyConstraintAction, bind_index_predicate_sql_expr,
     bind_relation_expr,
 };
+use crate::backend::rewrite::render_relation_expr_sql_for_constraint;
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{
     CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
@@ -164,7 +165,10 @@ fn choose_available_constraint_name(
     unreachable!("constraint name suffix space exhausted")
 }
 
-fn ddl_not_null_contains_null_error(relation_name: &str, column_name: &str) -> ExecError {
+pub(super) fn ddl_not_null_contains_null_error(
+    relation_name: &str,
+    column_name: &str,
+) -> ExecError {
     ExecError::DetailedError {
         message: format!(
             "column \"{column_name}\" of relation \"{relation_name}\" contains null values"
@@ -2598,13 +2602,19 @@ impl Database {
                         sqlstate: "42P16",
                     });
                 }
-                crate::backend::parser::bind_check_constraint_expr(
+                let bound_check = crate::backend::parser::bind_check_constraint_expr(
                     &action.expr_sql,
                     Some(&table_name),
                     &relation.desc,
                     &catalog,
                 )
                 .map_err(ExecError::Parse)?;
+                let expr_sql = render_relation_expr_sql_for_constraint(
+                    &bound_check,
+                    Some(&table_name),
+                    &relation.desc,
+                    &catalog,
+                );
                 if action.enforced && !action.not_valid {
                     validate_check_rows(
                         self,
@@ -2633,7 +2643,7 @@ impl Database {
                         && row.conname.eq_ignore_ascii_case(&action.constraint_name)
                 });
                 let parent_constraint = if let Some(existing) = existing {
-                    if !check_constraint_exprs_match(existing, &action.expr_sql) {
+                    if !check_constraint_exprs_match(existing, &expr_sql) {
                         return Err(ExecError::Parse(ParseError::InvalidTableDefinition(
                             format!(
                                 "constraint \"{}\" conflicts with inherited constraint",
@@ -2686,7 +2696,7 @@ impl Database {
                             action.enforced,
                             action.enforced && !action.not_valid,
                             action.no_inherit,
-                            action.expr_sql.clone(),
+                            expr_sql.clone(),
                             action.parent_constraint_oid.unwrap_or(0),
                             action.is_local,
                             action.inhcount,
@@ -4051,13 +4061,19 @@ impl Database {
                     .unwrap_or_else(|| child_relation.relation_oid.to_string()),
             )
             .to_string();
-            crate::backend::parser::bind_check_constraint_expr(
+            let bound_check = crate::backend::parser::bind_check_constraint_expr(
                 &action.expr_sql,
                 Some(&child_name),
                 &child_relation.desc,
                 &catalog,
             )
             .map_err(ExecError::Parse)?;
+            let expr_sql = render_relation_expr_sql_for_constraint(
+                &bound_check,
+                Some(&child_name),
+                &child_relation.desc,
+                &catalog,
+            );
             if action.enforced && !action.not_valid {
                 validate_check_rows(
                     self,
@@ -4090,7 +4106,7 @@ impl Database {
                 interrupts: self.interrupt_state(client_id),
             };
             let child_constraint_oid = if let Some(existing) = existing {
-                if !check_constraint_exprs_match(&existing, &action.expr_sql) {
+                if !check_constraint_exprs_match(&existing, &expr_sql) {
                     return Err(ExecError::Parse(ParseError::InvalidTableDefinition(
                         format!(
                             "constraint \"{}\" conflicts with inherited constraint",
@@ -4165,7 +4181,7 @@ impl Database {
                         action.enforced,
                         action.enforced && !action.not_valid,
                         false,
-                        action.expr_sql.clone(),
+                        expr_sql.clone(),
                         parent_constraint_oid,
                         false,
                         1,

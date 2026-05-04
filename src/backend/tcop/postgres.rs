@@ -10791,6 +10791,9 @@ fn format_check_expr_for_constraint_display(
     if let Some(rendered) = format_simple_date_between_check(&normalized, relation) {
         return rendered;
     }
+    if let Some(rendered) = format_simple_stale_float8_check(&normalized, relation) {
+        return rendered;
+    }
     if expr_sql.contains("::") {
         return normalized;
     }
@@ -10833,12 +10836,53 @@ fn format_check_expr_for_constraint_display(
     normalized
 }
 
+fn format_simple_stale_float8_check(
+    expr_sql: &str,
+    relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
+) -> Option<String> {
+    let trimmed = expr_sql.trim();
+    let operators = [">=", "<=", "<>", "!=", "=", ">", "<"];
+    for operator in operators {
+        let needle = format!(" {operator} ");
+        let Some(index) = trimmed.find(&needle) else {
+            continue;
+        };
+        let left = trimmed[..index].trim();
+        let right = trimmed[index + needle.len()..].trim();
+        if left.contains("::") {
+            return None;
+        }
+        let right_literal = right.strip_suffix("::double precision")?.trim();
+        if !is_plain_numeric_literal(right_literal) {
+            continue;
+        }
+        let column = relation
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && check_expr_column_matches(left, &column.name))?;
+        if matches!(column.sql_type.kind, SqlTypeKind::Float8) {
+            return None;
+        }
+        return Some(format!(
+            "{left}::double precision {operator} {right_literal}::double precision"
+        ));
+    }
+    None
+}
+
 fn format_simple_date_between_check(
     expr_sql: &str,
     relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
 ) -> Option<String> {
-    let (column_name, rest) = expr_sql.split_once(" BETWEEN ")?;
-    let (lower, upper) = rest.split_once(" AND ")?;
+    let between = find_ascii_keyword(expr_sql, "between", 0)?;
+    let rest_start = skip_ascii_whitespace(expr_sql, between + "between".len(), expr_sql.len());
+    let rest = &expr_sql[rest_start..];
+    let and = find_ascii_keyword(rest, "and", 0)?;
+    let column_name = &expr_sql[..between];
+    let lower = &rest[..and];
+    let upper_start = skip_ascii_whitespace(rest, and + "and".len(), rest.len());
+    let upper = &rest[upper_start..];
     let column_name = column_name.trim();
     if !relation.desc.columns.iter().any(|column| {
         !column.dropped

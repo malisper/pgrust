@@ -18,7 +18,7 @@ use crate::backend::parser::{
     RawTypeName, RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement, parse_statement,
     pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
-use crate::backend::rewrite::render_view_query_sql;
+use crate::backend::rewrite::{render_relation_expr_sql_for_constraint, render_view_query_sql};
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::notices::{
     push_backend_notice, push_notice, push_notice_with_detail,
@@ -4108,12 +4108,18 @@ impl Database {
                 Some((xid, check_base_cid)),
                 configured_search_path,
             );
-            crate::backend::parser::bind_check_constraint_expr(
+            let bound_check = crate::backend::parser::bind_check_constraint_expr(
                 &action.expr_sql,
                 Some(table_name),
                 &relation.desc,
                 &catalog,
             )?;
+            let expr_sql = render_relation_expr_sql_for_constraint(
+                &bound_check,
+                Some(table_name),
+                &relation.desc,
+                &catalog,
+            );
             let constraint_ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -4132,7 +4138,7 @@ impl Database {
                     action.enforced,
                     action.enforced && (action.is_local || !action.not_valid),
                     action.no_inherit,
-                    action.expr_sql.clone(),
+                    expr_sql,
                     action.parent_constraint_oid.unwrap_or(0),
                     action.is_local,
                     action.inhcount,
