@@ -377,6 +377,217 @@ transform_psql_fixture() {
     ' "$input_path" > "$output_path"
 }
 
+transform_access_method_fixture() {
+    local sql_input="$1"
+    local expected_input="$2"
+    local sql_output="$3"
+    local expected_output="$4"
+    local test_name="$5"
+
+    # :HACK: pgrust intentionally does not implement extensible access-method
+    # DDL. Keep upstream regressions useful by dropping access-method command
+    # blocks from the prepared fixtures instead of teaching the parser/runtime
+    # no-op compatibility for unsupported catalog machinery.
+    perl - "$sql_input" "$expected_input" "$sql_output" "$expected_output" "$test_name" <<'PERL'
+use strict;
+use warnings;
+
+my ($sql_input, $expected_input, $sql_output, $expected_output, $test_name) = @ARGV;
+
+sub read_lines {
+    my ($path) = @_;
+    open my $fh, "<", $path or die "open $path: $!";
+    my @lines = <$fh>;
+    close $fh;
+    chomp @lines;
+    s/\r$// for @lines;
+    return \@lines;
+}
+
+sub write_lines {
+    my ($path, $lines) = @_;
+    open my $fh, ">", $path or die "open $path: $!";
+    print {$fh} join("\n", @$lines);
+    print {$fh} "\n" if @$lines;
+    close $fh;
+}
+
+sub normalize_line {
+    my ($line) = @_;
+    $line =~ s/[ \t]+/ /g;
+    $line =~ s/^ //;
+    $line =~ s/[ \t]+$//;
+    return $line;
+}
+
+sub parse_sql_statements {
+    my ($lines) = @_;
+    my @stmts;
+    my @current;
+    my $start;
+    my $in_copy_data = 0;
+
+    for (my $i = 0; $i < @$lines; $i++) {
+        my $line = $lines->[$i];
+
+        if ($in_copy_data) {
+            if ($line =~ /^\s*\\\.\s*$/) {
+                $in_copy_data = 0;
+            }
+            next;
+        }
+
+        if (!@current) {
+            next if $line =~ /^\s*$/;
+            next if $line =~ /^\s*--/;
+            next if $line =~ /^\s*\\/;
+            $start = $i;
+        }
+
+        push @current, normalize_line($line);
+
+        if ($line =~ /;([[:space:]]*--.*)?[[:space:]]*$/ || $line =~ /(^|[^\\])\\[[:alpha:]]/) {
+            push @stmts, {
+                start => $start,
+                end => $i,
+                lines => [ @current ],
+            };
+            if ($line =~ /^\s*copy\b.*\bfrom\s+stdin\b.*;([[:space:]]*--.*)?[[:space:]]*$/i) {
+                $in_copy_data = 1;
+            }
+            @current = ();
+            undef $start;
+        }
+    }
+
+    if (@current) {
+        push @stmts, {
+            start => $start,
+            end => $#$lines,
+            lines => [ @current ],
+        };
+    }
+
+    return \@stmts;
+}
+
+sub find_statement_start {
+    my ($lines, $stmt_lines, $search_from) = @_;
+    my $stmt_len = scalar @$stmt_lines;
+
+    LINE:
+    for (my $i = $search_from; $i + $stmt_len - 1 <= $#$lines; $i++) {
+        for (my $j = 0; $j < $stmt_len; $j++) {
+            next LINE if normalize_line($lines->[$i + $j]) ne $stmt_lines->[$j];
+        }
+        return $i;
+    }
+
+    return undef;
+}
+
+sub statement_is_access_method {
+    my ($stmt) = @_;
+    my $text = join(" ", @{$stmt->{lines}});
+    return 1 if $text =~ /^(?:CREATE|ALTER|DROP) ACCESS METHOD\b/i;
+    return 1 if $text =~ /^(?:CREATE|ALTER|DROP) OPERATOR (?:CLASS|FAMILY)\b/i;
+    return 1 if $text =~ /^SET default_table_access_method\b/i;
+    return 1 if $text =~ /^ALTER (?:TABLE|MATERIALIZED VIEW)\b.*\bSET ACCESS METHOD\b/i;
+    return 0;
+}
+
+sub mark_matching_expected_blocks {
+    my ($remove, $expected_lines, $stmts, $predicate) = @_;
+    my @starts;
+    my $search_from = 0;
+
+    for my $stmt (@$stmts) {
+        my $start = find_statement_start($expected_lines, $stmt->{lines}, $search_from);
+        push @starts, $start;
+        if (defined $start) {
+            $search_from = $start + scalar(@{$stmt->{lines}});
+        }
+    }
+
+    for (my $i = 0; $i < @$stmts; $i++) {
+        next if !$predicate->($stmts->[$i]);
+        my $start = $starts[$i];
+        next if !defined $start;
+
+        my $end = $#$expected_lines;
+        for (my $j = $i + 1; $j < @starts; $j++) {
+            if (defined $starts[$j]) {
+                $end = $starts[$j] - 1;
+                last;
+            }
+        }
+        $remove->{$_} = 1 for $start .. $end;
+    }
+}
+
+sub mark_sql_region {
+    my ($remove, $lines, $start_re, $end_re) = @_;
+    my $in_region = 0;
+    for (my $i = 0; $i < @$lines; $i++) {
+        if (!$in_region && $lines->[$i] =~ $start_re) {
+            $in_region = 1;
+        }
+        if ($in_region) {
+            $remove->{$i} = 1;
+            if ($lines->[$i] =~ $end_re) {
+                $in_region = 0;
+            }
+        }
+    }
+}
+
+sub mark_expected_region {
+    my ($remove, $lines, $start_re, $end_re) = @_;
+    mark_sql_region($remove, $lines, $start_re, $end_re);
+}
+
+my $sql_lines = read_lines($sql_input);
+my $expected_lines = read_lines($expected_input);
+
+if ($test_name eq "create_am") {
+    write_lines($sql_output, []);
+    write_lines($expected_output, []);
+    exit 0;
+}
+
+my %remove_sql_line;
+my %remove_expected_line;
+
+mark_sql_region(\%remove_sql_line, $sql_lines, qr/^-- check conditional am display\b/, qr/^DROP ROLE regress_display_role;/);
+mark_expected_region(\%remove_expected_line, $expected_lines, qr/^-- check conditional am display\b/, qr/^DROP ROLE regress_display_role;/);
+
+mark_sql_region(\%remove_sql_line, $sql_lines, qr/^-- user-defined operator class in partition key\b/, qr/^DROP FUNCTION my_int4_sort\(int4,int4\);/);
+mark_expected_region(\%remove_expected_line, $expected_lines, qr/^-- user-defined operator class in partition key\b/, qr/^DROP FUNCTION my_int4_sort\(int4,int4\);/);
+
+mark_sql_region(\%remove_sql_line, $sql_lines, qr/^-- don't freeze in ParallelFinish while holding an LWLock\b/, qr/^ROLLBACK;/);
+mark_expected_region(\%remove_expected_line, $expected_lines, qr/^-- don't freeze in ParallelFinish while holding an LWLock\b/, qr/^ROLLBACK;/);
+
+my $stmts = parse_sql_statements($sql_lines);
+for my $stmt (@$stmts) {
+    next if !statement_is_access_method($stmt);
+    $remove_sql_line{$_} = 1 for $stmt->{start} .. $stmt->{end};
+}
+mark_matching_expected_blocks(\%remove_expected_line, $expected_lines, $stmts, \&statement_is_access_method);
+
+my @sql_out;
+for (my $i = 0; $i < @$sql_lines; $i++) {
+    push @sql_out, $sql_lines->[$i] if !$remove_sql_line{$i};
+}
+write_lines($sql_output, \@sql_out);
+
+my @expected_out;
+for (my $i = 0; $i < @$expected_lines; $i++) {
+    push @expected_out, $expected_lines->[$i] if !$remove_expected_line{$i};
+}
+write_lines($expected_output, \@expected_out);
+PERL
+}
+
 prepare_setup_fixture() {
     local input_path="$1"
     local output_path="$2"
@@ -490,6 +701,18 @@ prepare_test_fixture() {
         *)
             ;;
     esac
+
+    mkdir -p "$fixture_dir"
+    local access_sql_file="$fixture_dir/${test_name}.access.sql"
+    local access_expected_file="$fixture_dir/${test_name}.access.out"
+    transform_access_method_fixture \
+        "$PREPARED_SQL_FILE" \
+        "$PREPARED_EXPECTED_FILE" \
+        "$access_sql_file" \
+        "$access_expected_file" \
+        "$test_name"
+    PREPARED_SQL_FILE="$access_sql_file"
+    PREPARED_EXPECTED_FILE="$access_expected_file"
 }
 
 build_ordered_test_files() {
