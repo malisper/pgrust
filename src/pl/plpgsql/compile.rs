@@ -3659,7 +3659,7 @@ pub(crate) fn compile_decl_type(type_name: &str) -> Result<SqlType, ParseError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::parser::BoundRelation;
+    use crate::backend::parser::{BoundRelation, InsertSource};
 
     struct EmptyCatalog;
 
