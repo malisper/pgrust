@@ -43,8 +43,8 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
     scan: &mut VisibleHeapScan,
     process: impl FnMut(ItemPointerData, &[u8]) -> Result<T, E>,
 ) -> Result<Option<T>, E> {
-    let txns_guard = txns.read();
-    access_heapam::heap_scan_next_visible_raw(pool, client_id, &*txns_guard, scan, process)
+    let txns_runtime = RootAccessRuntime::transaction_only(txns, None, None, client_id);
+    access_heapam::heap_scan_next_visible_raw(pool, client_id, &txns_runtime, scan, process)
 }
 
 // :HACK: Compatibility wrapper preserving the old root transaction-manager
@@ -55,8 +55,8 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
     txns: &std::sync::Arc<RwLock<TransactionManager>>,
     scan: &mut VisibleHeapScan,
 ) -> Result<Option<usize>, E> {
-    let txns_guard = txns.read();
-    access_heapam::heap_scan_prepare_next_page(pool, client_id, &*txns_guard, scan)
+    let txns_runtime = RootAccessRuntime::transaction_only(txns, None, None, client_id);
+    access_heapam::heap_scan_prepare_next_page(pool, client_id, &txns_runtime, scan)
 }
 
 // :HACK: Compatibility wrapper preserving the old root transaction-manager
@@ -68,8 +68,8 @@ pub fn heap_scan_prepare_page_at<E: From<HeapError>>(
     scan: &mut VisibleHeapScan,
     block: u32,
 ) -> Result<Option<usize>, E> {
-    let txns_guard = txns.read();
-    access_heapam::heap_scan_prepare_page_at(pool, client_id, &*txns_guard, scan, block)
+    let txns_runtime = RootAccessRuntime::transaction_only(txns, None, None, client_id);
+    access_heapam::heap_scan_prepare_page_at(pool, client_id, &txns_runtime, scan, block)
 }
 
 // :HACK: Compatibility wrapper preserving the old root transaction-manager
@@ -81,8 +81,8 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
     scan: &mut VisibleHeapScan,
     process: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<usize, E> {
-    let txns_guard = txns.read();
-    access_heapam::heap_scan_all_visible_raw(pool, client_id, &*txns_guard, scan, process)
+    let txns_runtime = RootAccessRuntime::transaction_only(txns, None, None, client_id);
+    access_heapam::heap_scan_all_visible_raw(pool, client_id, &txns_runtime, scan, process)
 }
 
 // :HACK: Compatibility wrapper preserving the old root transaction-manager
@@ -108,8 +108,8 @@ pub fn heap_fetch_visible_with_txns(
     txns: &RwLock<TransactionManager>,
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
-    let txns_guard = txns.read();
-    access_heapam::heap_fetch_visible(pool, client_id, rel, tid, &*txns_guard, snapshot)
+    let txns_runtime = RootAccessRuntime::transaction_only(txns, None, None, client_id);
+    access_heapam::heap_fetch_visible(pool, client_id, rel, tid, &txns_runtime, snapshot)
 }
 
 // :HACK: Compatibility wrapper preserving the old root transaction-manager
