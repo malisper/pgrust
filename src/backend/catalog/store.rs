@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 
 use crate::BufferPool;
-use crate::backend::access::transam::xact::{CommandId, TransactionId, TransactionManager};
+use crate::backend::access::transam::xact::{
+    CommandId, Snapshot, TransactionId, TransactionManager,
+};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_kinds;
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::persistence::{
@@ -87,6 +89,26 @@ pub struct CatalogWriteContext {
 impl CatalogWriteContext {
     pub fn check_for_interrupts(&self) -> Result<(), CatalogError> {
         check_for_interrupts(&self.interrupts).map_err(CatalogError::Interrupted)
+    }
+
+    pub fn snapshot_for_command(&self) -> Result<Snapshot, CatalogError> {
+        let mut snapshot = self
+            .txns
+            .read()
+            .snapshot_for_command(self.xid, self.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        if let Some(waiter) = &self.waiter {
+            let own_holder_xids = waiter
+                .holder_xids_for_client(self.client_id)
+                .into_iter()
+                .filter(|xid| *xid == snapshot.current_xid || snapshot.in_progress.contains(xid))
+                .collect::<Vec<_>>();
+            snapshot.own_xids.extend(own_holder_xids);
+            snapshot
+                .in_progress
+                .retain(|xid| !snapshot.own_xids.contains(xid));
+        }
+        Ok(snapshot)
     }
 }
 

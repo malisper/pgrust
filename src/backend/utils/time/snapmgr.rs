@@ -64,6 +64,19 @@ pub fn clear_transaction_snapshot_override(db: &Database, client_id: ClientId) {
     }
 }
 
+fn mark_client_xids_own(db: &Database, client_id: ClientId, snapshot: &mut Snapshot) {
+    let own_holder_xids = db
+        .txn_waiter
+        .holder_xids_for_client(client_id)
+        .into_iter()
+        .filter(|xid| *xid == snapshot.current_xid || snapshot.in_progress.contains(xid))
+        .collect::<Vec<_>>();
+    snapshot.own_xids.extend(own_holder_xids);
+    snapshot
+        .in_progress
+        .retain(|xid| !snapshot.own_xids.contains(xid));
+}
+
 pub fn get_catalog_snapshot(
     db: &Database,
     client_id: ClientId,
@@ -110,6 +123,10 @@ pub fn get_catalog_snapshot(
         let txns = db.txns.read();
         txns.snapshot(INVALID_TRANSACTION_ID).ok()
     }?;
+    let mut snapshot = snapshot;
+    if txn_ctx.is_some() {
+        mark_client_xids_own(db, client_id, &mut snapshot);
+    }
 
     if reusable_snapshot {
         let mut states = db.backend_cache_states.write();

@@ -108,11 +108,7 @@ pub(crate) fn delete_catalog_rows_subset_mvcc(
     db_oid: u32,
     kinds: &[BootstrapCatalogKind],
 ) -> Result<(), CatalogError> {
-    let snapshot = ctx
-        .txns
-        .read()
-        .snapshot_for_command(ctx.xid, ctx.cid)
-        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    let snapshot = ctx.snapshot_for_command()?;
     for &kind in kinds {
         let desc = bootstrap_relation_desc(kind);
         let rel = bootstrap_catalog_rel(kind, db_oid);
@@ -263,14 +259,22 @@ fn catalog_tuples_delete_matching(
     values: &[Vec<Value>],
     snapshot: &Snapshot,
 ) -> Result<(), CatalogError> {
-    let mut remaining = BTreeMap::<CatalogIdentityKey, usize>::new();
-    for row in values {
-        *remaining
-            .entry(catalog_row_identity_key(kind, row))
-            .or_default() += 1;
-    }
-
-    let mut tids = Vec::with_capacity(values.len());
+    let mut wanted = values
+        .iter()
+        .map(|row| WantedCatalogDelete {
+            values: row,
+            key: catalog_row_identity_key(kind, row),
+            tid: None,
+        })
+        .collect::<Vec<_>>();
+    let mut remaining = wanted.iter().fold(
+        BTreeMap::<CatalogIdentityKey, usize>::new(),
+        |mut acc, row| {
+            *acc.entry(row.key.clone()).or_default() += 1;
+            acc
+        },
+    );
+    let mut fallback_tids = BTreeMap::<CatalogIdentityKey, Vec<ItemPointerData>>::new();
     {
         let txns = ctx.txns.read();
         let mut scan = heap_scan_begin(&ctx.pool, rel)
@@ -286,14 +290,29 @@ fn catalog_tuples_delete_matching(
             }
             let decoded = decode_catalog_tuple_values(desc, &tuple)?;
             let key = catalog_row_identity_key(kind, &decoded);
-            let Some(count) = remaining.get_mut(&key) else {
+            if !remaining.contains_key(&key) {
                 continue;
             };
-            tids.push(tid);
-            *count -= 1;
-            if *count == 0 {
-                remaining.remove(&key);
+            if let Some(wanted_row) = wanted.iter_mut().find(|wanted| {
+                wanted.tid.is_none()
+                    && wanted.key == key
+                    && wanted.values.as_slice() == decoded.as_slice()
+            }) {
+                wanted_row.tid = Some(tid);
+                decrement_remaining_catalog_delete(&mut remaining, &key);
+            } else {
+                fallback_tids.entry(key).or_default().push(tid);
             }
+        }
+    }
+
+    for wanted_row in wanted.iter_mut().filter(|wanted| wanted.tid.is_none()) {
+        let Some(tids) = fallback_tids.get_mut(&wanted_row.key) else {
+            continue;
+        };
+        if let Some(tid) = tids.pop() {
+            wanted_row.tid = Some(tid);
+            decrement_remaining_catalog_delete(&mut remaining, &wanted_row.key);
         }
     }
 
@@ -305,7 +324,7 @@ fn catalog_tuples_delete_matching(
         .waiter
         .as_deref()
         .map(|waiter| (&*ctx.txns, waiter, ctx.interrupts.as_ref()));
-    for tid in tids {
+    for tid in wanted.into_iter().filter_map(|wanted| wanted.tid) {
         heap_delete_with_waiter(
             &ctx.pool,
             ctx.client_id,
@@ -319,6 +338,25 @@ fn catalog_tuples_delete_matching(
         .map_err(|e| CatalogError::Io(format!("catalog tuple delete failed: {e:?}")))?;
     }
     Ok(())
+}
+
+struct WantedCatalogDelete<'a> {
+    values: &'a Vec<Value>,
+    key: CatalogIdentityKey,
+    tid: Option<ItemPointerData>,
+}
+
+fn decrement_remaining_catalog_delete(
+    remaining: &mut BTreeMap<CatalogIdentityKey, usize>,
+    key: &CatalogIdentityKey,
+) {
+    let Some(count) = remaining.get_mut(key) else {
+        return;
+    };
+    *count -= 1;
+    if *count == 0 {
+        remaining.remove(key);
+    }
 }
 
 fn find_catalog_tuple_tid(

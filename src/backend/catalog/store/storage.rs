@@ -621,11 +621,7 @@ impl CatalogStore {
         &self,
         ctx: &CatalogWriteContext,
     ) -> Result<Catalog, CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let snapshot = ctx.snapshot_for_command()?;
         let txns = ctx.txns.read();
         let mut catalog = match &self.mode {
             CatalogStoreMode::Durable {
