@@ -573,16 +573,17 @@ impl Database {
                         ),
                     }
 
-                    let ctx = CatalogWriteContext {
-                        pool: self.pool.clone(),
-                        txns: self.txns.clone(),
-                        xid,
-                        cid,
-                        client_id,
-                        waiter: Some(self.txn_waiter.clone()),
-                        interrupts: Arc::clone(&interrupts),
-                    };
+                    let mut next_cid = cid;
                     for row in &proc_dependents {
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid: next_cid,
+                            client_id,
+                            waiter: Some(self.txn_waiter.clone()),
+                            interrupts: Arc::clone(&interrupts),
+                        };
                         let effect = self
                             .catalog
                             .write()
@@ -590,11 +591,21 @@ impl Database {
                             .map(|(_, effect)| effect)
                             .map_err(map_catalog_error)?;
                         catalog_effects.push(effect);
+                        next_cid = next_cid.saturating_add(1);
                     }
                     if !domain_dependents.is_empty() {
                         let mut domains = self.domains.write();
                         domains.retain(|_, domain| domain.sql_type.type_oid != type_oid);
                     }
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: next_cid,
+                        client_id,
+                        waiter: Some(self.txn_waiter.clone()),
+                        interrupts: Arc::clone(&interrupts),
+                    };
                     let effect = self
                         .catalog
                         .write()
