@@ -106,6 +106,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::SeqScan {
             plan_info,
             source_id,
+            parallel_scan_id,
             rel,
             relation_name,
             relation_oid,
@@ -134,6 +135,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relispopulated,
                 disabled,
                 parallel_aware,
+                parallel_scan_id,
                 toast_relation: toast,
                 column_names,
                 desc,
@@ -753,6 +755,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let Plan::SeqScan {
                 plan_info: _,
                 source_id,
+                parallel_scan_id,
                 rel,
                 relation_name,
                 relation_oid,
@@ -785,6 +788,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relispopulated,
                 disabled,
                 parallel_aware,
+                parallel_scan_id,
                 toast_relation: toast,
                 column_names,
                 desc,

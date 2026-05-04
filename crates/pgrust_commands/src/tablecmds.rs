@@ -1564,6 +1564,7 @@ mod tests {
         Plan::SeqScan {
             plan_info: PlanEstimate::default(),
             source_id: 0,
+            parallel_scan_id: None,
             rel: RelFileLocator {
                 spc_oid: 0,
                 db_oid: 0,

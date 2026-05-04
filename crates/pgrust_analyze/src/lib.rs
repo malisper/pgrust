@@ -8179,6 +8179,7 @@ fn bind_select_query_with_outer(
                                 order_by: bound_order_by,
                                 filter: bound_filter,
                                 distinct: agg.distinct,
+                                presorted: false,
                                 sql_type,
                             })
                         })

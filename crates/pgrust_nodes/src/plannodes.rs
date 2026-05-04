@@ -225,6 +225,7 @@ pub enum Plan {
     SeqScan {
         plan_info: PlanEstimate,
         source_id: usize,
+        parallel_scan_id: Option<usize>,
         rel: RelFileLocator,
         relation_name: String,
         relation_oid: u32,

@@ -2,8 +2,11 @@ use std::cmp::Ordering;
 
 use crate::runtime::collect_query_relation_privileges;
 use pgrust_analyze::CatalogLookup;
-use pgrust_catalog_data::builtin_aggregate_function_for_proc_oid;
 use pgrust_catalog_data::desc::column_desc;
+use pgrust_catalog_data::{
+    builtin_aggregate_function_for_proc_oid, builtin_hypothetical_aggregate_function_for_proc_oid,
+    builtin_ordered_set_aggregate_function_for_proc_oid,
+};
 use pgrust_nodes::datum::Value;
 use pgrust_nodes::parsenodes::{Query, RangeTblEntryKind, SqlType, SqlTypeKind};
 use pgrust_nodes::pathnodes::{
@@ -103,6 +106,130 @@ fn group_pathkeys(root: &PlannerInfo, group_by: &[Expr]) -> Vec<PathKey> {
         .collect()
 }
 
+fn group_pathkey_candidates(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    input_pathkeys: &[PathKey],
+) -> Vec<Vec<PathKey>> {
+    let mut candidates = Vec::new();
+    push_unique_group_pathkeys(root, &mut candidates, group_pathkeys(root, group_by));
+    if !root.query_pathkeys.is_empty() {
+        push_unique_group_pathkeys(
+            root,
+            &mut candidates,
+            reordered_group_pathkeys(root, group_by, &root.query_pathkeys),
+        );
+    }
+    if !input_pathkeys.is_empty() {
+        push_unique_group_pathkeys(
+            root,
+            &mut candidates,
+            reordered_group_pathkeys(root, group_by, input_pathkeys),
+        );
+    }
+    for pathkeys in permuted_group_pathkeys(root, group_by) {
+        push_unique_group_pathkeys(root, &mut candidates, pathkeys);
+    }
+    candidates
+}
+
+fn permuted_group_pathkeys(root: &PlannerInfo, group_by: &[Expr]) -> Vec<Vec<PathKey>> {
+    let base = group_pathkeys(root, group_by);
+    if base.len() <= 1 || base.len() > 4 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    let mut used = vec![false; base.len()];
+    let mut current = Vec::with_capacity(base.len());
+    permute_group_pathkeys(root, &base, &mut used, &mut current, &mut candidates);
+    candidates
+}
+
+fn permute_group_pathkeys(
+    root: &PlannerInfo,
+    base: &[PathKey],
+    used: &mut [bool],
+    current: &mut Vec<PathKey>,
+    candidates: &mut Vec<Vec<PathKey>>,
+) {
+    if current.len() == base.len() {
+        push_unique_group_pathkeys(root, candidates, current.clone());
+        return;
+    }
+    for index in 0..base.len() {
+        if used[index] {
+            continue;
+        }
+        used[index] = true;
+        current.push(base[index].clone());
+        permute_group_pathkeys(root, base, used, current, candidates);
+        current.pop();
+        used[index] = false;
+    }
+}
+
+fn reordered_group_pathkeys(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    preferred_pathkeys: &[PathKey],
+) -> Vec<PathKey> {
+    let base_pathkeys = group_pathkeys(root, group_by);
+    if base_pathkeys.is_empty() || preferred_pathkeys.is_empty() {
+        return base_pathkeys;
+    }
+
+    let mut used = vec![false; base_pathkeys.len()];
+    let mut reordered = Vec::with_capacity(base_pathkeys.len());
+    for preferred in preferred_pathkeys {
+        let Some((index, base)) = base_pathkeys.iter().enumerate().find(|(index, base)| {
+            !used[*index] && pathkey_same_expr_for_root(root, base, preferred)
+        }) else {
+            break;
+        };
+        let mut key = preferred.clone();
+        if key.ressortgroupref == 0 {
+            key.ressortgroupref = base.ressortgroupref;
+        }
+        if key.collation_oid.is_none() {
+            key.collation_oid = base.collation_oid;
+        }
+        used[index] = true;
+        reordered.push(key);
+    }
+
+    if reordered.is_empty() {
+        return base_pathkeys;
+    }
+    for (index, key) in base_pathkeys.into_iter().enumerate() {
+        if !used[index] {
+            reordered.push(key);
+        }
+    }
+    reordered
+}
+
+fn push_unique_group_pathkeys(
+    root: &PlannerInfo,
+    candidates: &mut Vec<Vec<PathKey>>,
+    pathkeys: Vec<PathKey>,
+) {
+    if candidates
+        .iter()
+        .any(|existing| pathkey_lists_match_for_root(root, existing, &pathkeys))
+    {
+        return;
+    }
+    candidates.push(pathkeys);
+}
+
+fn pathkey_lists_match_for_root(root: &PlannerInfo, left: &[PathKey], right: &[PathKey]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(left, right)| pathkey_matches_for_root(root, left, right))
+}
+
 fn accumulators_require_sorted_grouping(accumulators: &[AggAccum]) -> bool {
     accumulators
         .iter()
@@ -111,39 +238,291 @@ fn accumulators_require_sorted_grouping(accumulators: &[AggAccum]) -> bool {
 
 fn aggregate_input_pathkeys(
     root: &PlannerInfo,
-    group_by: &[Expr],
+    group_pathkeys: &[PathKey],
     accumulators: &[AggAccum],
-) -> Vec<PathKey> {
-    let mut pathkeys = group_pathkeys(root, group_by);
-    for accum in accumulators {
-        if accum.distinct
-            && let Some(arg) = accum.args.first()
-        {
-            if !pathkeys.iter().any(|key| key.expr == *arg) {
-                pathkeys.push(PathKey {
+    catalog: &dyn CatalogLookup,
+) -> (Vec<PathKey>, Vec<AggAccum>) {
+    let mut marked_accumulators = accumulators
+        .iter()
+        .cloned()
+        .map(|mut accum| {
+            accum.presorted = false;
+            accum
+        })
+        .collect::<Vec<_>>();
+    let candidates = accumulators
+        .iter()
+        .enumerate()
+        .filter_map(|(index, accum)| {
+            if !aggregate_accum_can_use_presort(accum, catalog) {
+                return None;
+            }
+            let agg_pathkeys = aggregate_accum_pathkeys(root, accum);
+            if agg_pathkeys.is_empty()
+                || agg_pathkeys
+                    .iter()
+                    .any(|key| expr_contains_volatile_for_presort(&key.expr, catalog))
+            {
+                return None;
+            }
+            let mut pathkeys = group_pathkeys.to_vec();
+            for key in agg_pathkeys {
+                push_unique_pathkey(root, &mut pathkeys, key);
+            }
+            Some((index, pathkeys))
+        })
+        .collect::<Vec<_>>();
+
+    let mut best_indexes = Vec::new();
+    let mut best_pathkeys = Vec::new();
+    let mut unprocessed = (0..candidates.len()).collect::<Vec<_>>();
+    while unprocessed.len() > best_indexes.len() {
+        let mut covered = Vec::new();
+        let mut current_pathkeys: Option<Vec<PathKey>> = None;
+        for candidate_index in unprocessed.iter().copied() {
+            let (_, candidate_pathkeys) = &candidates[candidate_index];
+            let Some(current) = current_pathkeys.as_mut() else {
+                current_pathkeys = Some(candidate_pathkeys.clone());
+                covered.push(candidate_index);
+                continue;
+            };
+            if pathkeys_satisfy_for_root(root, current, candidate_pathkeys) {
+                covered.push(candidate_index);
+            } else if pathkeys_satisfy_for_root(root, candidate_pathkeys, current) {
+                *current = candidate_pathkeys.clone();
+                covered.push(candidate_index);
+            }
+        }
+        if covered.is_empty() {
+            break;
+        }
+        unprocessed.retain(|index| !covered.contains(index));
+        if covered.len() > best_indexes.len() {
+            best_pathkeys = current_pathkeys.unwrap_or_default();
+            best_indexes = covered;
+        }
+    }
+
+    if best_pathkeys.is_empty() {
+        return (group_pathkeys.to_vec(), marked_accumulators);
+    }
+    for candidate_index in best_indexes {
+        let (accum_index, _) = candidates[candidate_index];
+        if let Some(accum) = marked_accumulators.get_mut(accum_index) {
+            accum.presorted = true;
+        }
+    }
+    (best_pathkeys, marked_accumulators)
+}
+
+fn aggregate_accum_can_use_presort(accum: &AggAccum, catalog: &dyn CatalogLookup) -> bool {
+    accum.direct_args.is_empty()
+        && builtin_hypothetical_aggregate_function_for_proc_oid(accum.aggfnoid).is_none()
+        && builtin_ordered_set_aggregate_function_for_proc_oid(accum.aggfnoid).is_none()
+        && catalog
+            .aggregate_by_fnoid(accum.aggfnoid)
+            .is_none_or(|row| row.aggkind == 'n')
+}
+
+fn aggregate_accum_pathkeys(root: &PlannerInfo, accum: &AggAccum) -> Vec<PathKey> {
+    let mut pathkeys = Vec::new();
+    for item in &accum.order_by {
+        push_unique_pathkey(
+            root,
+            &mut pathkeys,
+            PathKey {
+                expr: item.expr.clone(),
+                ressortgroupref: item.ressortgroupref,
+                descending: item.descending,
+                nulls_first: item.nulls_first,
+                collation_oid: item.collation_oid,
+            },
+        );
+    }
+    if accum.distinct {
+        for arg in &accum.args {
+            push_unique_pathkey(
+                root,
+                &mut pathkeys,
+                PathKey {
                     expr: arg.clone(),
                     ressortgroupref: 0,
                     descending: false,
                     nulls_first: None,
                     collation_oid: None,
-                });
-            }
-            break;
-        }
-        if let Some(item) = accum.order_by.first() {
-            if !pathkeys.iter().any(|key| key.expr == item.expr) {
-                pathkeys.push(PathKey {
-                    expr: item.expr.clone(),
-                    ressortgroupref: item.ressortgroupref,
-                    descending: item.descending,
-                    nulls_first: item.nulls_first,
-                    collation_oid: item.collation_oid,
-                });
-            }
-            break;
+                },
+            );
         }
     }
     pathkeys
+}
+
+fn push_unique_pathkey(root: &PlannerInfo, pathkeys: &mut Vec<PathKey>, key: PathKey) {
+    if !pathkeys
+        .iter()
+        .any(|existing| pathkey_same_expr_for_root(root, existing, &key))
+    {
+        pathkeys.push(key);
+    }
+}
+
+fn pathkeys_satisfy_for_root(root: &PlannerInfo, actual: &[PathKey], required: &[PathKey]) -> bool {
+    actual.len() >= required.len()
+        && actual
+            .iter()
+            .zip(required.iter())
+            .all(|(actual, required)| pathkey_matches_for_root(root, actual, required))
+}
+
+fn expr_contains_volatile_for_presort(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
+    match expr {
+        Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Op(op) => {
+            let proc_oid = (op.opfuncid != 0)
+                .then_some(op.opfuncid)
+                .or_else(|| catalog.operator_by_oid(op.opno).map(|row| row.oprcode));
+            proc_oid.is_some_and(|oid| proc_is_volatile_for_presort(oid, catalog))
+                || op
+                    .args
+                    .iter()
+                    .any(|arg| expr_contains_volatile_for_presort(arg, catalog))
+        }
+        Expr::Func(func) => {
+            matches!(
+                func.implementation,
+                ScalarFunctionImpl::UserDefined { proc_oid }
+                    if proc_is_volatile_for_presort(proc_oid, catalog)
+            ) || func
+                .args
+                .iter()
+                .any(|arg| expr_contains_volatile_for_presort(arg, catalog))
+        }
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .chain(aggref.args.iter())
+                .any(|arg| expr_contains_volatile_for_presort(arg, catalog))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| expr_contains_volatile_for_presort(&item.expr, catalog))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|filter| expr_contains_volatile_for_presort(filter, catalog))
+        }
+        Expr::GroupingKey(grouping_key) => {
+            expr_contains_volatile_for_presort(&grouping_key.expr, catalog)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|arg| expr_contains_volatile_for_presort(arg, catalog)),
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(|arg| expr_contains_volatile_for_presort(arg, catalog)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_contains_volatile_for_presort(arg, catalog)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|arg| expr_contains_volatile_for_presort(arg, catalog))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_volatile_for_presort(&arm.expr, catalog)
+                        || expr_contains_volatile_for_presort(&arm.result, catalog)
+                })
+                || expr_contains_volatile_for_presort(&case_expr.defresult, catalog)
+        }
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|expr| expr_contains_volatile_for_presort(expr, catalog)),
+        Expr::SetReturning(_) | Expr::SubLink(_) | Expr::SubPlan(_) => true,
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_volatile_for_presort(&saop.left, catalog)
+                || expr_contains_volatile_for_presort(&saop.right, catalog)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_contains_volatile_for_presort(expr, catalog)),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_volatile_for_presort(inner, catalog)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_volatile_for_presort(expr, catalog)
+                || expr_contains_volatile_for_presort(pattern, catalog)
+                || escape
+                    .as_ref()
+                    .is_some_and(|escape| expr_contains_volatile_for_presort(escape, catalog))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_contains_volatile_for_presort(inner, catalog)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_volatile_for_presort(left, catalog)
+                || expr_contains_volatile_for_presort(right, catalog)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_contains_volatile_for_presort(expr, catalog)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_volatile_for_presort(expr, catalog)),
+        Expr::FieldSelect { expr, .. } => expr_contains_volatile_for_presort(expr, catalog),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_volatile_for_presort(array, catalog)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_contains_volatile_for_presort(expr, catalog))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_contains_volatile_for_presort(expr, catalog))
+                })
+        }
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema => false,
+    }
+}
+
+fn proc_is_volatile_for_presort(proc_oid: u32, catalog: &dyn CatalogLookup) -> bool {
+    catalog
+        .proc_row_by_oid(proc_oid)
+        .is_none_or(|row| row.provolatile == 'v')
 }
 
 fn ordered_group_input(
@@ -154,6 +533,10 @@ fn ordered_group_input(
 ) -> Path {
     if bestpath::pathkeys_satisfy(&path.pathkeys(), required_pathkeys) {
         path
+    } else if let Some(index_path) =
+        ordered_index_group_input(root, &path, required_pathkeys, catalog)
+    {
+        index_path
     } else {
         let presorted_count = common_presorted_prefix_len(&path.pathkeys(), required_pathkeys);
         let display_items = sort_key_display_items(root, required_pathkeys, catalog);
@@ -183,6 +566,41 @@ fn ordered_group_input(
                 input: Box::new(path),
             }
         }
+    }
+}
+
+fn ordered_index_group_input(
+    root: &PlannerInfo,
+    input: &Path,
+    required_pathkeys: &[PathKey],
+    catalog: &dyn CatalogLookup,
+) -> Option<Path> {
+    if required_pathkeys.is_empty() {
+        return None;
+    }
+    let rtindex = path_base_scan_rtindex(input)?;
+    relation_ordered_index_paths(root, rtindex, required_pathkeys, catalog)
+        .into_iter()
+        .filter(|path| path.semantic_output_target() == input.semantic_output_target())
+        .min_by(|left, right| {
+            if bestpath::cheaper_than(left, Some(right), bestpath::CostSelector::Total) {
+                Ordering::Less
+            } else if bestpath::cheaper_than(right, Some(left), bestpath::CostSelector::Total) {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        })
+}
+
+fn path_base_scan_rtindex(path: &Path) -> Option<usize> {
+    match path {
+        Path::SeqScan { source_id, .. }
+        | Path::IndexOnlyScan { source_id, .. }
+        | Path::IndexScan { source_id, .. }
+        | Path::BitmapHeapScan { source_id, .. } => Some(*source_id),
+        Path::Filter { input, .. } => path_base_scan_rtindex(input),
+        _ => None,
     }
 }
 
@@ -360,12 +778,12 @@ fn prepare_aggregate_input_for_strategy(
     catalog: &dyn CatalogLookup,
 ) -> Path {
     match strategy {
-        AggregateStrategy::Sorted => ordered_group_input(
-            root,
-            input,
-            &aggregate_input_pathkeys(root, group_by, accumulators),
-            catalog,
-        ),
+        AggregateStrategy::Sorted => {
+            let group_pathkeys = group_pathkeys(root, group_by);
+            let (pathkeys, _) =
+                aggregate_input_pathkeys(root, &group_pathkeys, accumulators, catalog);
+            ordered_group_input(root, input, &pathkeys, catalog)
+        }
         AggregateStrategy::Plain | AggregateStrategy::Hashed | AggregateStrategy::Mixed => input,
     }
 }
@@ -449,6 +867,7 @@ fn final_accumulators_for_partial(accumulators: &[AggAccum]) -> Vec<AggAccum> {
             accum.args.clear();
             accum.order_by.clear();
             accum.filter = None;
+            accum.presorted = false;
             accum
         })
         .collect()
@@ -634,22 +1053,50 @@ fn aggregate_accums_contain_whole_row_rel(
     })
 }
 
-fn aggregate_is_partial_safe(accum: &AggAccum) -> bool {
-    if accum.distinct
-        || !accum.direct_args.is_empty()
-        || !accum.order_by.is_empty()
-        || builtin_aggregate_function_for_proc_oid(accum.aggfnoid).is_none()
-    {
+fn aggregate_is_partial_safe(accum: &AggAccum, catalog: &dyn CatalogLookup) -> bool {
+    if accum.distinct || !accum.direct_args.is_empty() || !accum.order_by.is_empty() {
         return false;
     }
-    matches!(
-        builtin_aggregate_function_for_proc_oid(accum.aggfnoid),
-        Some(AggFunc::Count | AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max)
-    )
+    let Some(aggregate) = catalog.aggregate_by_fnoid(accum.aggfnoid) else {
+        return false;
+    };
+    aggregate.aggkind == 'n'
+        && aggregate.aggcombinefn != 0
+        && aggregate_partial_state_supported(accum)
 }
 
-fn all_aggregates_are_partial_safe(accumulators: &[AggAccum]) -> bool {
-    accumulators.iter().all(aggregate_is_partial_safe)
+fn aggregate_partial_state_supported(accum: &AggAccum) -> bool {
+    match builtin_aggregate_function_for_proc_oid(accum.aggfnoid) {
+        Some(AggFunc::Count | AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max) => true,
+        Some(AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp) => {
+            matches!(
+                accum.sql_type.kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            )
+        }
+        Some(AggFunc::RegrCount) => true,
+        Some(
+            AggFunc::RegrSxx
+            | AggFunc::RegrSyy
+            | AggFunc::RegrSxy
+            | AggFunc::RegrAvgX
+            | AggFunc::RegrAvgY
+            | AggFunc::RegrR2
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::Corr,
+        ) => false,
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn all_aggregates_are_partial_safe(accumulators: &[AggAccum], catalog: &dyn CatalogLookup) -> bool {
+    accumulators
+        .iter()
+        .all(|accum| aggregate_is_partial_safe(accum, catalog))
 }
 
 fn prefer_partitionwise_aggregate_path_cost(path: Path, existing_paths: &[Path]) -> Path {
@@ -1144,7 +1591,7 @@ fn partitionwise_aggregate_path(
         ));
     }
 
-    if !all_aggregates_are_partial_safe(accumulators) {
+    if !all_aggregates_are_partial_safe(accumulators, catalog) {
         return None;
     }
     let force_sorted_final = rel_contains_outer_join(root, &input_rel.relids)
@@ -1218,7 +1665,7 @@ fn append_partitionwise_aggregate_fallback_path(
             catalog,
         ));
     }
-    if all_aggregates_are_partial_safe(accumulators) {
+    if all_aggregates_are_partial_safe(accumulators, catalog) {
         let force_sorted_final = rel_contains_outer_join(root, &input_rel.relids)
             || children.iter().any(path_contains_nested_append);
         return Some(partial_partitionwise_aggregate_path(
@@ -1321,7 +1768,7 @@ fn nested_partitionwise_aggregate_path(
             catalog,
         ));
     }
-    if all_aggregates_are_partial_safe(&child_accumulators) {
+    if all_aggregates_are_partial_safe(&child_accumulators, catalog) {
         return Some(partial_partitionwise_aggregate_path(
             root,
             relids,
@@ -1709,15 +2156,26 @@ fn make_aggregate_rel(
             continue;
         }
         if group_by.is_empty() {
+            let (input_pathkeys, plain_accumulators) =
+                if accumulators_require_sorted_grouping(&accumulators) {
+                    aggregate_input_pathkeys(root, &[], &accumulators, catalog)
+                } else {
+                    (Vec::new(), accumulators.clone())
+                };
+            let aggregate_input = if input_pathkeys.is_empty() {
+                path.clone()
+            } else {
+                ordered_group_input(root, path.clone(), &input_pathkeys, catalog)
+            };
             rel.add_path(aggregate_path(
                 AggregateStrategy::Plain,
                 AggregatePhase::Complete,
                 Vec::new(),
                 slot_id,
-                path,
+                aggregate_input,
                 group_by.clone(),
                 passthrough_exprs.clone(),
-                accumulators.clone(),
+                plain_accumulators,
                 having.clone(),
                 output_columns.clone(),
                 root.grouped_target.clone(),
@@ -1758,7 +2216,12 @@ fn make_aggregate_rel(
             continue;
         }
 
-        let group_pathkeys = group_pathkeys(root, &group_by);
+        let path_pathkeys = path.pathkeys();
+        let group_pathkey_candidates = group_pathkey_candidates(root, &group_by, &path_pathkeys);
+        let group_pathkeys = group_pathkey_candidates
+            .first()
+            .cloned()
+            .unwrap_or_else(|| group_pathkeys(root, &group_by));
         if path_is_const_false_filter(&path)
             && !matches!(root.parse.where_qual, Some(Expr::Const(Value::Bool(false))))
         {
@@ -1780,25 +2243,26 @@ fn make_aggregate_rel(
             continue;
         }
         if accumulators_require_sorted_grouping(&accumulators) {
-            let input_pathkeys = aggregate_input_pathkeys(root, &group_by, &accumulators);
-            rel.add_path(aggregate_path(
-                AggregateStrategy::Sorted,
-                AggregatePhase::Complete,
-                group_pathkeys.clone(),
-                slot_id,
-                ordered_group_input(root, path, &input_pathkeys, catalog),
-                group_by.clone(),
-                passthrough_exprs.clone(),
-                accumulators.clone(),
-                having.clone(),
-                output_columns.clone(),
-                root.grouped_target.clone(),
-                catalog,
-                root.config,
-            ));
+            for group_pathkeys in group_pathkey_candidates {
+                let (input_pathkeys, presorted_accumulators) =
+                    aggregate_input_pathkeys(root, &group_pathkeys, &accumulators, catalog);
+                rel.add_path(aggregate_path(
+                    AggregateStrategy::Sorted,
+                    AggregatePhase::Complete,
+                    group_pathkeys,
+                    slot_id,
+                    ordered_group_input(root, path.clone(), &input_pathkeys, catalog),
+                    group_by.clone(),
+                    passthrough_exprs.clone(),
+                    presorted_accumulators,
+                    having.clone(),
+                    output_columns.clone(),
+                    root.grouped_target.clone(),
+                    catalog,
+                    root.config,
+                ));
+            }
         } else {
-            let path_satisfies_group_order =
-                bestpath::pathkeys_satisfy(&path.pathkeys(), &group_pathkeys);
             if root.config.enable_hashagg {
                 rel.add_path(aggregate_path(
                     AggregateStrategy::Hashed,
@@ -1816,16 +2280,26 @@ fn make_aggregate_rel(
                     root.config,
                 ));
             }
-            if path_satisfies_group_order || !root.config.enable_hashagg {
+            for group_pathkeys in group_pathkey_candidates {
+                let path_satisfies_group_order =
+                    bestpath::pathkeys_satisfy(&path_pathkeys, &group_pathkeys);
+                let preserves_query_order = !root.query_pathkeys.is_empty()
+                    && bestpath::pathkeys_satisfy(&group_pathkeys, &root.query_pathkeys);
+                if !path_satisfies_group_order
+                    && root.config.enable_hashagg
+                    && !preserves_query_order
+                {
+                    continue;
+                }
                 rel.add_path(aggregate_path(
                     AggregateStrategy::Sorted,
                     AggregatePhase::Complete,
                     group_pathkeys.clone(),
                     slot_id,
                     if path_satisfies_group_order {
-                        path
+                        path.clone()
                     } else {
-                        ordered_group_input(root, path, &group_pathkeys, catalog)
+                        ordered_group_input(root, path.clone(), &group_pathkeys, catalog)
                     },
                     group_by.clone(),
                     passthrough_exprs.clone(),

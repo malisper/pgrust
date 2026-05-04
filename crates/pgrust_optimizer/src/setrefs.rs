@@ -13,7 +13,7 @@ use pgrust_catalog_data::{BTREE_AM_OID, builtin_aggregate_function_for_proc_oid}
 use pgrust_nodes::CommandType;
 use pgrust_nodes::datum::Value;
 use pgrust_nodes::parsenodes::{
-    Query, QueryRowMark, RangeTblEntryKind, SubqueryComparisonOp, TableSampleClause,
+    Query, QueryRowMark, RangeTblEntryKind, SqlTypeKind, SubqueryComparisonOp, TableSampleClause,
 };
 use pgrust_nodes::pathnodes::{Path, PathTarget, PlannerInfo, PlannerSubroot, RestrictInfo};
 use pgrust_nodes::plannodes::{
@@ -382,7 +382,7 @@ fn maybe_parallel_plain_aggregate(
             *strategy,
             AggregateStrategy::Plain | AggregateStrategy::Hashed | AggregateStrategy::Sorted
         )
-        || !all_aggregates_are_partial_safe(accumulators)
+        || !all_aggregates_are_partial_safe(accumulators, catalog)
         || !aggregate_expressions_worker_safe(
             group_by,
             passthrough_exprs,
@@ -709,22 +709,50 @@ fn parallel_worker_safe_plan_shape(
     }
 }
 
-fn aggregate_is_partial_safe(accum: &AggAccum) -> bool {
-    if accum.distinct
-        || !accum.direct_args.is_empty()
-        || !accum.order_by.is_empty()
-        || builtin_aggregate_function_for_proc_oid(accum.aggfnoid).is_none()
-    {
+fn aggregate_is_partial_safe(accum: &AggAccum, catalog: &dyn CatalogLookup) -> bool {
+    if accum.distinct || !accum.direct_args.is_empty() || !accum.order_by.is_empty() {
         return false;
     }
-    matches!(
-        builtin_aggregate_function_for_proc_oid(accum.aggfnoid),
-        Some(AggFunc::Count | AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max)
-    )
+    let Some(aggregate) = catalog.aggregate_by_fnoid(accum.aggfnoid) else {
+        return false;
+    };
+    aggregate.aggkind == 'n'
+        && aggregate.aggcombinefn != 0
+        && aggregate_partial_state_supported(accum)
 }
 
-fn all_aggregates_are_partial_safe(accumulators: &[AggAccum]) -> bool {
-    accumulators.iter().all(aggregate_is_partial_safe)
+fn aggregate_partial_state_supported(accum: &AggAccum) -> bool {
+    match builtin_aggregate_function_for_proc_oid(accum.aggfnoid) {
+        Some(AggFunc::Count | AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max) => true,
+        Some(AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp) => {
+            matches!(
+                accum.sql_type.kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            )
+        }
+        Some(AggFunc::RegrCount) => true,
+        Some(
+            AggFunc::RegrSxx
+            | AggFunc::RegrSyy
+            | AggFunc::RegrSxy
+            | AggFunc::RegrAvgX
+            | AggFunc::RegrAvgY
+            | AggFunc::RegrR2
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::Corr,
+        ) => false,
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn all_aggregates_are_partial_safe(accumulators: &[AggAccum], catalog: &dyn CatalogLookup) -> bool {
+    accumulators
+        .iter()
+        .all(|accum| aggregate_is_partial_safe(accum, catalog))
 }
 
 fn aggregate_expressions_worker_safe(
@@ -771,20 +799,29 @@ fn final_accumulators_for_partial(accumulators: &[AggAccum]) -> Vec<AggAccum> {
             accum.args.clear();
             accum.order_by.clear();
             accum.filter = None;
+            accum.presorted = false;
             accum
         })
         .collect()
 }
 
 fn mark_parallel_seq_scans(plan: &mut Plan) {
+    let mut next_scan_id = 1usize;
+    mark_parallel_seq_scans_inner(plan, &mut next_scan_id);
+}
+
+fn mark_parallel_seq_scans_inner(plan: &mut Plan, next_scan_id: &mut usize) {
     match plan {
         Plan::SeqScan {
             relkind,
             tablesample,
             parallel_aware,
+            parallel_scan_id,
             ..
         } if tablesample.is_none() && matches!(*relkind, 'r' | 'p' | 'm') => {
             *parallel_aware = true;
+            *parallel_scan_id = Some(*next_scan_id);
+            *next_scan_id += 1;
         }
         Plan::IndexOnlyScan {
             am_oid,
@@ -803,7 +840,7 @@ fn mark_parallel_seq_scans(plan: &mut Plan) {
             parallel_aware,
             ..
         } => {
-            mark_parallel_seq_scans(bitmapqual);
+            mark_parallel_seq_scans_inner(bitmapqual, next_scan_id);
             *parallel_aware = plan_contains_seqscan(bitmapqual);
         }
         Plan::Append {
@@ -812,7 +849,7 @@ fn mark_parallel_seq_scans(plan: &mut Plan) {
             ..
         } => {
             for child in children.iter_mut() {
-                mark_parallel_seq_scans(child);
+                mark_parallel_seq_scans_inner(child, next_scan_id);
             }
             *parallel_aware =
                 !children.is_empty() && children.iter().all(plan_contains_parallel_aware_seqscan);
@@ -822,7 +859,7 @@ fn mark_parallel_seq_scans(plan: &mut Plan) {
         | Plan::BitmapAnd { children, .. }
         | Plan::SetOp { children, .. } => {
             for child in children {
-                mark_parallel_seq_scans(child);
+                mark_parallel_seq_scans_inner(child, next_scan_id);
             }
         }
         Plan::Unique { input, .. }
@@ -840,7 +877,7 @@ fn mark_parallel_seq_scans(plan: &mut Plan) {
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::SubqueryScan { input, .. }
-        | Plan::ProjectSet { input, .. } => mark_parallel_seq_scans(input),
+        | Plan::ProjectSet { input, .. } => mark_parallel_seq_scans_inner(input, next_scan_id),
         Plan::NestedLoopJoin { left, .. }
         | Plan::HashJoin { left, .. }
         | Plan::MergeJoin { left, .. } => {
@@ -848,14 +885,14 @@ fn mark_parallel_seq_scans(plan: &mut Plan) {
             // dividing the outer side. The inner side stays worker-local and
             // serial to avoid duplicate/missing join pairs until real partial
             // path generation can choose both sides deliberately.
-            mark_parallel_seq_scans(left);
+            mark_parallel_seq_scans_inner(left, next_scan_id);
         }
-        Plan::CteScan { cte_plan, .. } => mark_parallel_seq_scans(cte_plan),
+        Plan::CteScan { cte_plan, .. } => mark_parallel_seq_scans_inner(cte_plan, next_scan_id),
         Plan::RecursiveUnion {
             anchor, recursive, ..
         } => {
-            mark_parallel_seq_scans(anchor);
-            mark_parallel_seq_scans(recursive);
+            mark_parallel_seq_scans_inner(anchor, next_scan_id);
+            mark_parallel_seq_scans_inner(recursive, next_scan_id);
         }
         Plan::Result { .. }
         | Plan::SeqScan { .. }
@@ -7328,6 +7365,7 @@ fn set_filter_references(
                     input: Box::new(Plan::SeqScan {
                         plan_info: seq_plan_info,
                         source_id,
+                        parallel_scan_id: None,
                         rel,
                         relation_name,
                         relation_oid,
@@ -8165,6 +8203,7 @@ fn set_seq_scan_references(
     Plan::SeqScan {
         plan_info,
         source_id,
+        parallel_scan_id: None,
         rel,
         relation_name,
         relation_oid,

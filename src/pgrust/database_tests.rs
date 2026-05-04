@@ -61726,6 +61726,137 @@ fn aggregate_regress_create_aggregate_support_signatures_and_final_extra() {
 }
 
 #[test]
+fn custom_aggregate_with_combine_uses_parallel_partial_aggregate() {
+    let dir = temp_dir("custom_aggregate_parallel_partial");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table custom_partial_input(v int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into custom_partial_input select g from generate_series(1, 300) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function custom_partial_combine(int8, int8) returns int8
+         as 'select coalesce($1, 0) + coalesce($2, 0)'
+         language sql immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate custom_partial_sum(int4) (
+             sfunc = int4_sum(int8, int4),
+             stype = int8,
+             combinefunc = custom_partial_combine(int8, int8),
+             initcond = '0',
+             parallel = safe
+         )",
+    )
+    .unwrap();
+    db.execute(1, "set parallel_setup_cost = 0").unwrap();
+    db.execute(1, "set parallel_tuple_cost = 0").unwrap();
+    db.execute(1, "set min_parallel_table_scan_size = 0")
+        .unwrap();
+    db.execute(1, "set max_parallel_workers_per_gather = 2")
+        .unwrap();
+
+    let plan = query_rows(
+        &db,
+        1,
+        "explain (costs off)
+         select custom_partial_sum(v) from custom_partial_input",
+    )
+    .into_iter()
+    .map(|row| match &row[0] {
+        Value::Text(text) => text.to_string(),
+        other => panic!("expected text explain line, got {other:?}"),
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        plan.iter().any(|line| line.contains("Finalize Aggregate")),
+        "expected finalize aggregate in plan, got {plan:?}"
+    );
+    assert!(
+        plan.iter().any(|line| line.contains("Partial Aggregate")),
+        "expected partial aggregate in plan, got {plan:?}"
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select custom_partial_sum(v) from custom_partial_input"
+        ),
+        vec![vec![Value::Int64(45150)]]
+    );
+}
+
+#[test]
+fn custom_parallel_combine_returning_null_finalizes_to_null() {
+    let dir = temp_dir("custom_parallel_combine_null");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table custom_partial_null_input(v int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into custom_partial_null_input select g from generate_series(1, 300) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function custom_partial_null_combine(int8, int8) returns int8
+         as 'select null::int8'
+         language sql immutable strict",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate custom_partial_null_sum(int4) (
+             sfunc = int4_sum(int8, int4),
+             stype = int8,
+             combinefunc = custom_partial_null_combine(int8, int8),
+             initcond = '0',
+             parallel = safe
+         )",
+    )
+    .unwrap();
+    db.execute(1, "set parallel_setup_cost = 0").unwrap();
+    db.execute(1, "set parallel_tuple_cost = 0").unwrap();
+    db.execute(1, "set min_parallel_table_scan_size = 0")
+        .unwrap();
+    db.execute(1, "set max_parallel_workers_per_gather = 2")
+        .unwrap();
+
+    let plan = query_rows(
+        &db,
+        1,
+        "explain (costs off)
+         select custom_partial_null_sum(v) from custom_partial_null_input",
+    )
+    .into_iter()
+    .map(|row| match &row[0] {
+        Value::Text(text) => text.to_string(),
+        other => panic!("expected text explain line, got {other:?}"),
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        plan.iter().any(|line| line.contains("Finalize Aggregate"))
+            && plan.iter().any(|line| line.contains("Partial Aggregate")),
+        "expected partial/finalize aggregate in plan, got {plan:?}"
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select custom_partial_null_sum(v) from custom_partial_null_input"
+        ),
+        vec![vec![Value::Null]]
+    );
+}
+
+#[test]
 fn create_recursive_view_executes_and_viewdef_keeps_with() {
     let dir = temp_dir("create_recursive_view_with");
     let db = Database::open(&dir, 64).unwrap();

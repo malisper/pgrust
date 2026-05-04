@@ -1670,6 +1670,7 @@ pub struct AggAccum {
     pub order_by: Vec<OrderByEntry>,
     pub filter: Option<Expr>,
     pub distinct: bool,
+    pub presorted: bool,
     pub sql_type: SqlType,
 }
 

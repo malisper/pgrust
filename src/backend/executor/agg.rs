@@ -1049,6 +1049,25 @@ impl AccumState {
     }
 }
 
+fn encode_float8_partial_state(values: &[f64]) -> Value {
+    Value::PgArray(
+        ArrayValue::from_1d(values.iter().copied().map(Value::Float64).collect())
+            .with_element_type_oid(FLOAT8_TYPE_OID),
+    )
+}
+
+fn decode_float8_partial_state(value: &Value, expected_len: usize) -> Option<Vec<f64>> {
+    let array = value.as_array_value()?;
+    if array.dimensions.len() != 1 || array.dimensions[0].length != expected_len {
+        return None;
+    }
+    array
+        .elements
+        .iter()
+        .map(|value| pgrust_executor::expect_float8_arg("partial aggregate", value).ok())
+        .collect()
+}
+
 impl AggregateRuntime {
     pub(crate) fn supports_custom_combine(&self) -> bool {
         matches!(
@@ -1272,6 +1291,46 @@ impl AggregateRuntime {
                     ("count".into(), Value::Int64(*count)),
                 ]),
             )),
+            (
+                AggregateRuntime::Builtin {
+                    func:
+                        AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp,
+                    ..
+                },
+                AccumState::FloatStats {
+                    count, sum, sum_sq, ..
+                },
+            ) => Ok(encode_float8_partial_state(&[*count, *sum, *sum_sq])),
+            (
+                AggregateRuntime::Builtin {
+                    func:
+                        AggFunc::RegrCount
+                        | AggFunc::RegrSxx
+                        | AggFunc::RegrSyy
+                        | AggFunc::RegrSxy
+                        | AggFunc::RegrAvgX
+                        | AggFunc::RegrAvgY
+                        | AggFunc::RegrR2
+                        | AggFunc::RegrSlope
+                        | AggFunc::RegrIntercept
+                        | AggFunc::CovarPop
+                        | AggFunc::CovarSamp
+                        | AggFunc::Corr,
+                    ..
+                },
+                AccumState::RegrStats {
+                    count,
+                    sum_x,
+                    sum_sq_x,
+                    sum_y,
+                    sum_sq_y,
+                    sum_xy,
+                    ..
+                },
+            ) => Ok(encode_float8_partial_state(&[
+                *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy,
+            ])),
+            (AggregateRuntime::Custom(_), AccumState::Custom { value }) => Ok(value.clone()),
             (AggregateRuntime::Builtin { func, .. }, _) => Err(ExecError::DetailedError {
                 message: format!("aggregate {func:?} is not partial-safe"),
                 detail: None,
@@ -1353,6 +1412,77 @@ impl AggregateRuntime {
             | AggregateRuntime::Builtin {
                 func: AggFunc::Max, ..
             } => self.transition(state, std::slice::from_ref(partial), ctx),
+            AggregateRuntime::Builtin {
+                func: AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp,
+                ..
+            } => {
+                let AccumState::FloatStats {
+                    count, sum, sum_sq, ..
+                } = state
+                else {
+                    return Ok(());
+                };
+                let current = encode_float8_partial_state(&[*count, *sum, *sum_sq]);
+                let combined =
+                    pgrust_executor::eval_float8_combine_function(&[current, partial.clone()])
+                        .map_err(aggregate_support_error)?;
+                if let Some(values) = decode_float8_partial_state(&combined, 3) {
+                    *count = values[0];
+                    *sum = values[1];
+                    *sum_sq = values[2];
+                }
+                Ok(())
+            }
+            AggregateRuntime::Builtin {
+                func:
+                    AggFunc::RegrCount
+                    | AggFunc::RegrSxx
+                    | AggFunc::RegrSyy
+                    | AggFunc::RegrSxy
+                    | AggFunc::RegrAvgX
+                    | AggFunc::RegrAvgY
+                    | AggFunc::RegrR2
+                    | AggFunc::RegrSlope
+                    | AggFunc::RegrIntercept
+                    | AggFunc::CovarPop
+                    | AggFunc::CovarSamp
+                    | AggFunc::Corr,
+                ..
+            } => {
+                let AccumState::RegrStats {
+                    count,
+                    sum_x,
+                    sum_sq_x,
+                    sum_y,
+                    sum_sq_y,
+                    sum_xy,
+                    all_x_equal,
+                    all_y_equal,
+                    ..
+                } = state
+                else {
+                    return Ok(());
+                };
+                let current = encode_float8_partial_state(&[
+                    *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy,
+                ]);
+                let combined =
+                    pgrust_executor::eval_float8_regr_combine_function(&[current, partial.clone()])
+                        .map_err(aggregate_support_error)?;
+                if let Some(values) = decode_float8_partial_state(&combined, 6) {
+                    *count = values[0];
+                    *sum_x = values[1];
+                    *sum_sq_x = values[2];
+                    *sum_y = values[3];
+                    *sum_sq_y = values[4];
+                    *sum_xy = values[5];
+                    if *count > 1.0 {
+                        *all_x_equal = false;
+                        *all_y_equal = false;
+                    }
+                }
+                Ok(())
+            }
             AggregateRuntime::Custom(custom) => {
                 let Some(proc_oid) = custom.combinefn_oid else {
                     return Err(ExecError::DetailedError {
