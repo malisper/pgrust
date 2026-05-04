@@ -5,7 +5,8 @@ use pgrust_catalog_data::{
     PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID, PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID,
     PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID, PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID,
     PERCENTILE_DISC_FINAL_PROC_OID, PERCENTILE_DISC_MULTI_FINAL_PROC_OID,
-    builtin_aggregate_function_for_proc_oid, builtin_hypothetical_aggregate_function_for_proc_oid,
+    aggregate_func_for_dynamic_range_proc_oid, builtin_aggregate_function_for_proc_oid,
+    builtin_hypothetical_aggregate_function_for_proc_oid,
     builtin_ordered_set_aggregate_function_for_proc_oid,
 };
 use pgrust_expr::parse_numeric_text;
@@ -158,6 +159,9 @@ pub fn aggregate_runtime_selection(
     final_proc_oid: Option<u32>,
 ) -> AggregateRuntimeSelection {
     if let Some(func) = builtin_aggregate_function_for_proc_oid(aggfnoid) {
+        return AggregateRuntimeSelection::Builtin(func);
+    }
+    if let Some(func) = aggregate_func_for_dynamic_range_proc_oid(aggfnoid) {
         return AggregateRuntimeSelection::Builtin(func);
     }
     if let Some(func) = builtin_hypothetical_aggregate_function_for_proc_oid(aggfnoid) {
@@ -1060,6 +1064,38 @@ fn hypothetical_aggregate_function_for_final_proc_oid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_range_aggregate_oids_use_builtin_runtime_selection() {
+        let type_rows = pgrust_catalog_data::builtin_type_rows();
+        let range_rows = pgrust_catalog_data::builtin_range_rows();
+
+        let range_agg =
+            pgrust_catalog_data::synthetic_range_aggregate_rows(&type_rows, &range_rows)
+                .into_iter()
+                .find(|row| {
+                    aggregate_func_for_dynamic_range_proc_oid(row.aggfnoid)
+                        == Some(AggFunc::RangeAgg)
+                })
+                .expect("dynamic range_agg aggregate");
+        assert_eq!(
+            aggregate_runtime_selection(range_agg.aggfnoid, None, None),
+            AggregateRuntimeSelection::Builtin(AggFunc::RangeAgg)
+        );
+
+        let range_intersect_agg =
+            pgrust_catalog_data::synthetic_range_aggregate_rows(&type_rows, &range_rows)
+                .into_iter()
+                .find(|row| {
+                    aggregate_func_for_dynamic_range_proc_oid(row.aggfnoid)
+                        == Some(AggFunc::RangeIntersectAgg)
+                })
+                .expect("dynamic range_intersect_agg aggregate");
+        assert_eq!(
+            aggregate_runtime_selection(range_intersect_agg.aggfnoid, None, None),
+            AggregateRuntimeSelection::Builtin(AggFunc::RangeIntersectAgg)
+        );
+    }
 
     #[test]
     fn aggregate_int8_pair_accepts_int8_and_int4_state_arrays() {
