@@ -74,6 +74,7 @@ WORKTREE_NAME="$(basename "$PGRUST_DIR")"
 TABLESPACE_VERSION_DIRECTORY="PG_18_202406281"
 REGRESS_TABLESPACE_DIR=""
 PREPARED_SETUP_SQL=""
+PREPARED_EXPECTED_CANDIDATES=()
 
 setup_pg_regress_env() {
     if command -v pg_config >/dev/null 2>&1; then
@@ -626,6 +627,7 @@ prepare_test_fixture() {
 
     PREPARED_SQL_FILE="$sql_file"
     PREPARED_EXPECTED_FILE="$expected_file"
+    PREPARED_EXPECTED_CANDIDATES=()
 
     local fixture_dir="$RESULTS_DIR/fixtures"
     case "$test_name" in
@@ -713,6 +715,24 @@ prepare_test_fixture() {
         "$test_name"
     PREPARED_SQL_FILE="$access_sql_file"
     PREPARED_EXPECTED_FILE="$access_expected_file"
+    PREPARED_EXPECTED_CANDIDATES=("$access_expected_file")
+
+    shopt -s nullglob
+    local alternate_expected_file=""
+    for alternate_expected_file in "$EXPECTED_DIR/${test_name}_"[0-9]*.out; do
+        local alternate_base
+        local alternate_access_expected_file
+        alternate_base="$(basename "$alternate_expected_file" .out)"
+        alternate_access_expected_file="$fixture_dir/${alternate_base}.access.out"
+        transform_access_method_fixture \
+            "$PREPARED_SQL_FILE" \
+            "$alternate_expected_file" \
+            "$access_sql_file" \
+            "$alternate_access_expected_file" \
+            "$test_name"
+        PREPARED_EXPECTED_CANDIDATES+=("$alternate_access_expected_file")
+    done
+    shopt -u nullglob
 }
 
 build_ordered_test_files() {
@@ -2225,6 +2245,7 @@ run_one_regression_test() {
     prepare_test_fixture "$sql_file" "$expected_file" "$test_name"
     sql_file="$PREPARED_SQL_FILE"
     expected_file="$PREPARED_EXPECTED_FILE"
+    candidates=("${PREPARED_EXPECTED_CANDIDATES[@]}")
 
     local file_timeout
     file_timeout="$(test_file_timeout "$test_name")"
@@ -2246,7 +2267,9 @@ run_one_regression_test() {
     # accidentally match unrelated siblings like psql_crosstab.out for psql.out.
     query_expected_file="$expected_file"
 
-    candidates=("$expected_file")
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+        candidates=("$expected_file")
+    fi
     # pgrust always reports UTF8 today; keep unicode failures diffed against
     # the UTF8 expected output instead of the short non-UTF8 skip alternate.
     if [[ "$expected_file" == "$EXPECTED_DIR/${test_name}.out" && "$test_name" != "unicode" ]]; then
