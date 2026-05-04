@@ -1,0 +1,872 @@
+Goal:
+Extract remaining root-owned subsystems into crates until root pgrust is mostly orchestration and compatibility shims.
+
+Key decisions:
+- Extracted `pgrust_rewrite` first because rewrite had a clean enough boundary once executor/value formatting helpers were taken from `pgrust_expr`.
+- Kept rewrite public data types in `pgrust_analyze::rewrite` to avoid introducing an analyze/rewrite dependency cycle.
+- Root `src/backend/rewrite/mod.rs` is now a compatibility shim with a `:HACK:` comment.
+- Moved pure role and role-membership helpers into `pgrust_catalog_store`; root catalog role modules are now compatibility shims.
+- Moved database-command dependency graph/drop-behavior helper types into `pgrust_catalog_store::dependency_drop`; root `pgrust::database::commands::dependency_drop` is now a compatibility shim.
+- Removed stale root storage implementation files that were no longer compiled because storage module roots already shim to `pgrust_storage`.
+- Moved shared `StatementResult`, `SessionReplicationRole`, `ConstraintTiming`, and `TypedFunctionArg` into `pgrust_nodes` and re-exported them from the old executor path.
+- Replaced root executor scalar helper modules for money, bit, bool, MAC/network, numeric, format, geometry, datetime/date, range/multirange, string, regex, text-search, JSONB, JSONPath, and math with compatibility shims to `pgrust_expr`; added explicit root `ExecError` conversions at JSON call sites that still live in the root executor.
+- Replaced root `executor::expr_reg` with a compatibility shim to the `pgrust_expr` implementation, including a root `CatalogLookup` to `ExprCatalogLookup` adapter and root `ExecError` mapping.
+- Split txid handling so pure txid snapshot parsing/visibility helpers live in `pgrust_expr`; root keeps transaction-context functions for current xid/snapshot/status.
+- Moved `PgPrngState` and numeric random-range support into `pgrust_expr`; root `executor::random` is now a compatibility re-export.
+- Added `pgrust_executor` and moved shared scalar function dispatch metadata (`ScalarFunctionCallInfo`), deferred-constraint tracker state, executor transaction state, and the lock-status service trait into it.
+- Moved shared executor plan-node instrumentation state (`NodeExecStats`) into `pgrust_executor`; old `include::nodes::execnodes` path re-exports it as a compatibility shim.
+- Moved hash-join and merge-join runtime state shapes into `pgrust_executor` as generic row containers; root executor keeps compatibility type aliases specialized to `MaterializedRow`.
+- Moved hash-join memory GUC parsing, row-memory estimation, batch-count calculation, and EXPLAIN instrumentation policy into `pgrust_executor`; root `node_hash` now only adapts root GUCs/materialized rows and does expression/PlanNode wiring.
+- Moved merge-join key comparison and same-key group-end mechanics into `pgrust_executor` behind a root-supplied value comparison callback; root `node_mergejoin` keeps expression evaluation, collation extraction, tuple materialization, and PlanNode wiring.
+- Moved shared expression-binding helpers for outer/inner tuple bindings and merged system bindings into `pgrust_executor::bindings`; root hash/merge join nodes now delegate that pure join plumbing.
+- Moved hash-key canonicalization and join value-vector assembly/null-extension helpers into `pgrust_executor`; root hash/merge join nodes now delegate the remaining pure `Value` row shaping and keep only materialized-row/PlanNode orchestration.
+- Moved `pg_notify` argument normalization and notification queue-usage `Value` shaping into `pgrust_executor::async_notify`; root `expr_async` now only adapts to the root async notification runtime and `ExecError`.
+- Moved advisory-lock builtin classification, key parsing, mode selection, operation selection, and owner-scope policy into `pgrust_executor::advisory_locks`; root `expr_locks` now only adapts the lock manager, warnings, and `ExecError`.
+- Moved `satisfies_hash_partition` OID/int argument coercion and modulus/remainder validation into `pgrust_executor::partition`; root `expr_partition` keeps catalog/spec lookup, expression evaluation, and support-proc execution.
+- Moved compiled tuple decoding into `pgrust_executor::exec_tuples`; root `executor::exec_tuples` is now a compatibility re-export and root `ExecError` maps the crate-owned tuple decode errors.
+- Moved compiled tuple decoder coverage into `pgrust_executor`; tests build real `pgrust_access` heap tuples from `pgrust_expr`-encoded tuple values so they exercise the decoder's storage format instead of the compatibility portable tuple wrapper.
+- Added `pgrust_executor::predicate` for compiled predicate fast paths: fixed-offset int4 comparisons, local int4 comparisons, boolean AND/OR flattening, and regex predicate fast paths over generic slot/context traits. Root `expr_compile` now supplies `TupleSlot`/`ExecutorContext` adapters and keeps only the fallback `eval_expr` path.
+- Expanded `pgrust_executor::fmgr` with scalar-function call-info classification from `pg_proc` rows and unsupported-internal-function detail shaping; root `fmgr` keeps proc catalog lookup plus the actual builtin/SQL/PLpgSQL execution callbacks.
+- Expanded `pgrust_executor::fmgr` with variadic scalar-function argument normalization over `PgProcRow`, `Value`, `SqlType`, and a root-supplied type-OID callback; root aggregate support now delegates VARIADIC array packing.
+- Added `pgrust_executor::aggregate` and moved custom aggregate runtime metadata there; root aggregate execution keeps `AccumState`, builtin transition functions, and executor-bound transition/final calls.
+- Expanded `pgrust_executor::aggregate` with aggregate runtime selection policy for builtin/hypothetical/ordered-set/custom aggregates plus polymorphic custom transition-type concretization; root aggregate support still loads catalog rows, casts init values, and builds the root runtime enum.
+- Added `pgrust_executor::window` and moved pure ROWS/RANGE window-frame boundary arithmetic plus `in_range` semantics for int/float/numeric/date/timestamp/time/interval values; root window execution now keeps expression evaluation, peer comparison, aggregation callbacks, and error adaptation.
+- Added `pgrust_executor::generate_series` and moved integral/numeric `generate_series` state, argument validation, zero-step detection, max-scale numeric output shaping, and per-call value progression; root SRF keeps expression evaluation, interrupt checks, timestamp/timezone variants, and `ExecError` mapping.
+- Expanded `pgrust_executor::generate_series` with plain timestamp/timestamptz interval stepping and bounded infinite-stop materialization state; root SRF now delegates non-timezone timestamp series iteration and keeps expression evaluation/interrupt checks plus timezone-aware stepping.
+- Added `pgrust_executor::srf` and moved `unnest` array-value extraction, single-composite expansion detection, null padding, record expansion, and row iteration; root SRF keeps argument evaluation, tsvector special handling, array normalization, interrupts, and `TupleSlot` adaptation.
+- Expanded `pgrust_executor::srf` with single-row function-scan value shaping, ordinality-output slicing, ROWS FROM item result combination/null padding, uncorrelated ROWS FROM cache-key selection, and outer-column detection over SRF expression trees. Root SRF keeps item execution, cache storage, materialization, and `TupleSlot` adaptation.
+- Expanded `pgrust_executor::srf` with `pg_options_to_table` option parsing and row iteration; root SRF keeps expression evaluation, array normalization, interrupts, and `TupleSlot` adaptation.
+- Expanded `pgrust_executor::srf` with SRF label selection used by EXPLAIN and `generate_subscripts` subscript-value generation; root SRF preserves the old label path and keeps argument evaluation/type coercion plus `TupleSlot` adaptation.
+- Expanded `pgrust_executor::srf` with static wait-event, timezone-name, and timezone-abbreviation row builders; root SRF now only adapts those crate-owned value rows into `TupleSlot`s.
+- Expanded `pgrust_executor::srf` with `pg_get_publication_tables` publication-name argument parsing, `pg_ls_*` timestamp/error formatting helpers, and typed array constructors for system SRF rows; root SRF now delegates those helpers and keeps catalog/filesystem execution.
+- Expanded `pgrust_executor::srf` with text-search table-function proc-src classification, `ts_stat` SELECT/weight parsing, and sequence type display metadata; root SRF maps crate parser errors and keeps heap/catalog execution.
+- Expanded `pgrust_executor::srf` with static system SRF row builders for `pg_get_catalog_foreign_keys`, `pg_tablespace_databases`, `pg_backend_memory_contexts`, fallback `pg_config`, and `pg_hba_file_rules`; root SRF now only wraps those crate rows in `TupleSlot`s.
+- Expanded `pgrust_executor::srf` with portable directory-entry row construction and local `pg_config` probing; root SRF now maps crate filesystem errors to SQL errors and keeps only data-directory resolution plus synthetic WAL/base rows.
+- Expanded `pgrust_executor::srf` with event-trigger dropped-object and DDL-command row shaping over `pgrust_nodes` event-trigger payloads; root SRF now only fetches the current PL/pgSQL event-trigger context and wraps crate rows in `TupleSlot`s.
+- Expanded `pgrust_executor::srf` with `pg_partition_tree`/`pg_partition_ancestors` regclass argument coercion; root SRF now delegates the pure value validation and keeps catalog traversal.
+- Expanded `pgrust_executor::srf` with `pg_show_all_settings` row construction and planner GUC metadata; root SRF now only supplies the WAL segment size and wraps crate rows.
+- Added `pgrust_executor::sqlfunc` and moved SQL-function body normalization/splitting, SQL command-prefix checks, standard `BEGIN ATOMIC` body extraction, quote-aware SQL-fragment substitution, and named-argument substitution. Root SQL-function runtime keeps catalog-aware literal rendering, statement execution, SQL-visible error shaping, and compatibility wrappers.
+- Expanded `pgrust_executor::sqlfunc` with pure SQL-function result-shaping helpers: single-composite-output detection, single-value whole-result detection, set-returning record packing policy, record-row packing, and post-coercion output-row expansion/null-padding.
+- Added `pgrust_executor::startup` and moved pure executor startup plan-analysis helpers for append sort-key qualifiers, network strict-less order-by tiebreak detection, and recursive-union distinct hashability; root startup now imports those helpers and keeps PlanState construction.
+- Expanded `pgrust_executor::startup` with worktable dependency/reference traversal and dependent CTE ID collection; root recursive-union startup now delegates that plan traversal.
+- Expanded `pgrust_executor::startup` with full plan outer-column dependency analysis, including SRF, aggregate, project-set, join, sort, window, and CTE traversal; root startup delegates the analysis and keeps only never-true qual pruning plus PlanState construction.
+- Expanded `pgrust_executor::startup` with never-true qual detection; root nested-loop startup now delegates that pure boolean-expression pruning helper.
+- Added `pgrust_executor::driver` for restricted non-system view access policy: GUC parsing, raw SELECT/CTE/FROM traversal, planned-statement relation privilege checks, and plan-tree traversal behind a small `RestrictedViewCatalog` boundary. Root `driver.rs` now only adapts `CatalogLookup` and maps the crate error to `ExecError`.
+- Expanded `pgrust_executor::driver` with read-only `CREATE STATISTICS` relation validation over the same restricted relation catalog boundary; root `driver.rs` now maps the crate validation errors into existing parse/detail errors.
+- Added `pgrust_executor::foreign_keys` for portable foreign-key helper logic: action trigger proc-OID mapping, partition column-name mapping, key extraction/change detection, equality scan-key construction, row/key matching, period-aware cross-index comparison, and temporal PERIOD overlap/coverage policy. Root `foreign_keys.rs` now keeps heap/index scans, trigger checks, catalog/runtime orchestration, and error rendering.
+- Moved SQL-function `proconfig` parsing and saved identity state shape into `pgrust_executor::function_guc`; root `function_guc` preserves the old path and keeps role authorization plus mutable `ExecutorContext` GUC application.
+- Added `pgrust_executor::parallel` and moved parallel scan runtime bookkeeping plus materialized worker tuple payloads into it; root executor keeps worker execution, context reconstruction, and error transport.
+- Added initial `pgrust_executor` service-boundary traits for transaction state, row locks, serializable predicate locks, and mutation sinks; root `ExecutorContext` implements them as adapters around current runtime state.
+- Moved PL/pgSQL trigger/event-trigger call data shapes and trigger function results into `pgrust_nodes`; root PL/pgSQL now re-exports them for compatibility.
+- Moved pure table privilege/RLS row helpers into `pgrust_catalog_store::privileges`; root executor keeps only the `ExecutorContext` adapter for error-detail visibility.
+- Added `pgrust_commands` and moved COPY text-array literal parsing into it; root `commands::copyfrom` is now a compatibility shim with a catalog adapter.
+- Added `pgrust_commands::language` for language-name normalization, language command error shapes, language row construction, and language-row lookup by name; root database language commands keep catalog writes, transactions, notices, and auth checks.
+- Expanded `pgrust_commands::copyto` from escaping helpers into COPY TO header/row/trailer byte serialization for text, CSV, and binary formats behind root-supplied value-formatting callbacks; root COPY TO keeps sinks, root value I/O, and notice capture.
+- Moved `SystemVarBinding` into `pgrust_nodes` and `ExprEvalBindings` into `pgrust_executor`; old root executor/include paths re-export them.
+- Moved PL/pgSQL function cache metadata and the generic cache store into `pgrust_plpgsql`; root binds the generic cache to root-owned `CompiledFunction`.
+- Moved `PlpgsqlNotice` into `pgrust_plpgsql`; root keeps notice queues and compatibility re-exports.
+- Moved PL/pgSQL SQL-context trimming and nonstandard backslash escape decoding into `pgrust_plpgsql`; root compile delegates. Root PL/pgSQL compile also delegates duplicated nonstandard string literal normalization to `pgrust_protocol::sql`.
+- Moved duplicated PL/pgSQL `pg_proc.proargtypes` OID-vector parsing into `pgrust_plpgsql`; root compile and exec now share the crate helper.
+- Moved PL/pgSQL `#print_strict_params`, `#variable_conflict`, variable-conflict GUC parsing, standard-conforming-string GUC parsing, and `PlpgsqlVariableConflict` into `pgrust_plpgsql`.
+- Moved PL/pgSQL internal positional-parameter, variable-alias, and labeled-scope alias naming helpers into `pgrust_plpgsql`; root compile imports the stable naming helpers.
+- Moved pure PL/pgSQL SQL string scanners, top-level keyword/token finders, top-level CSV splitting, SELECT INTO splitting, DML RETURNING INTO splitting, and unsupported transaction command detection into `pgrust_plpgsql`; root compile now imports those helpers.
+- Moved PL/pgSQL aggregate query-condition parsing/rewriting helpers and `QueryCompareOp` into `pgrust_plpgsql`; root compile re-exports the enum for existing exec imports.
+- Moved PL/pgSQL dynamic SQL literal extraction, dynamic SQL shape substitution for `USING` params, and target-entry-to-query-column conversion into `pgrust_plpgsql`; root compile keeps the catalog/planner wrapper.
+- Moved PL/pgSQL SELECT INTO target parsing and identifier-position matching into `pgrust_plpgsql`; root compile imports the parser/matcher helpers.
+- Centralized PL/pgSQL exception-condition SQLSTATE mapping in `pgrust_plpgsql` and reused it from compile/exec; removed the stale grammar-local duplicate and exposed the RAISE placeholder counter from the crate.
+- Moved PL/pgSQL static query-source known-column inference for `pg_get_catalog_foreign_keys()` into `pgrust_plpgsql`; root compile imports the known-shape helper.
+- Moved PL/pgSQL parser-error runtime fallback/defer predicates into `pgrust_plpgsql`; root compile imports the policy helpers.
+- Moved PL/pgSQL persistent-object transition-table reference detection into `pgrust_plpgsql`; root compile adapts local CTE names into the crate helper.
+- Moved PL/pgSQL runtime SQL external parameter ID base/function into `pgrust_plpgsql`; compile and exec import the shared ID helper.
+- Moved PL/pgSQL declared cursor argument context formatting into `pgrust_plpgsql`; root compile still validates and compiles cursor argument expressions.
+- Moved PL/pgSQL RAISE SQLSTATE resolution/static SQLSTATE whitelist into `pgrust_plpgsql`; exec keeps executor-dependent RAISE value rendering local.
+- Moved PL/pgSQL runtime thread-local notice queue, event-trigger context stacks, table-rewrite relation context, and PL/pgSQL context stack into `pgrust_plpgsql::runtime`; root exec now pushes/pops crate-owned guards and only performs executor-dependent evaluation/rendering.
+- Moved PL/pgSQL polymorphic function-row concretization into `pgrust_plpgsql::polymorphic`; root exec now delegates the anyelement/anyarray/anyrange/anycompatible inference and keeps only cache/compile orchestration plus catalog-context formatting.
+- Moved PL/pgSQL dynamic-query planner GUC parsing into `pgrust_plpgsql::gucs`; root exec now delegates construction of `PlannerConfig` from executor GUCs.
+- Moved PL/pgSQL materialized cursor movement semantics into `pgrust_plpgsql::runtime`; root exec now delegates cursor fetch/move/target-position behavior while keeping root portal direction mapping.
+- Moved PL/pgSQL routine/trigger cache-key construction into `pgrust_plpgsql::cache`; root exec now delegates polymorphic routine cache shaping and trigger relation/transition-table shape keys.
+- Moved PL/pgSQL function query row/value and `StatementResult` to `FunctionQueryResult` conversion helpers into `pgrust_plpgsql::runtime`; root exec now only maps the non-query case to root `ExecError`.
+- Moved PL/pgSQL extra-check GUC policy parsing and diagnostic text value formatting into `pgrust_plpgsql::runtime`; root exec now delegates `plpgsql.extra_errors`/`plpgsql.extra_warnings` level detection.
+- Moved PL/pgSQL compiled-slot-name traversal into `pgrust_plpgsql::compiled`; root exec now delegates cursor-name resolution over compiled function/block/statement slot shapes.
+- Moved PL/pgSQL CURRENT OF cursor binding lookup and predicate construction into `pgrust_plpgsql::runtime`; root exec now only maps missing positioned-row cases to root runtime errors.
+- Moved PL/pgSQL trigger outer-tuple construction, trigger row return shaping, and `FOUND` result detection into `pgrust_plpgsql::runtime`; root exec now only maps non-trigger misuse to root runtime errors.
+- Moved PL/pgSQL dynamic `EXECUTE` `$n` substitution and declared-cursor named-parameter substitution scanners into `pgrust_plpgsql::runtime`; root exec now supplies catalog-aware value renderers and maps crate substitution errors.
+- Moved PL/pgSQL dynamic DROP TABLE event-trigger command/dropped-object row shaping, event identity quoting, and nested undroppable audit notice text into `pgrust_plpgsql::runtime`; root exec keeps heap probing, notices, and root error construction.
+- Moved PL/pgSQL trigger and event-trigger runtime slot seeding into `pgrust_plpgsql::runtime`; root exec now delegates `TG_*`, `NEW`/`OLD`, and event-trigger value population over the root function state vector.
+- Moved CREATE INDEX access-method lookup, obsolete `rtree` notice detection, include-column validation, opclass/type/collation/build-option resolution, system-column rejection, and default index-name generation into `pgrust_commands::index`; root `tablecmds` now delegates through an `IndexBuildError` compatibility mapper.
+- Moved TRUNCATE relation resolution, cascade target expansion/notices, restrict foreign-key validation, owned-sequence discovery, and relation-name lookup into `pgrust_commands::truncate`; root `tablecmds` keeps storage truncation, trigger firing, privilege checks, and sequence state mutation.
+- Moved ANALYZE/VACUUM maintenance target validation, VACUUM main/toast relation selection, and per-relation `vacuum_index_cleanup`/`vacuum_truncate` reloption policy into `pgrust_commands::maintenance`; root keeps heap/index vacuum execution and stats recording.
+- Expanded `pgrust_commands::maintenance` with VACUUM execution-option parsing, boolean/integer option normalization, buffer-usage-limit validation, and GUC-backed defaults; root maintenance maps crate errors into `ExecError` and keeps heap/index execution.
+- Expanded `pgrust_commands::maintenance` with ANALYZE/VACUUM target validation, including relkind acceptance, duplicate-column detection, and PostgreSQL-style missing-column errors; root maintenance now delegates those checks.
+- Moved publication replica-identity enforcement policy into `pgrust_commands::publication`; root keeps the old `PublicationDmlAction`/`enforce_publication_replica_identity` paths as compatibility shims that map command errors back to `ExecError`.
+- Expanded `pgrust_commands::publication` with publication catalog-row defaults and publication-option application/duplicate validation; root publication DDL maps the crate-owned `ParseError` into `ExecError`.
+- Expanded `pgrust_commands::publication` with publication WHERE syntactic/type/collation validation/rendering, drop-filter rejection, schema/column-list conflict checks, column-list attribute resolution, and target-kind classification; root publication DDL keeps boolean type-inference fallback, object lookup, permissions, and catalog mutation.
+- Moved COPY TO DML event/notice payloads into `pgrust_nodes`; root `commands::copyto` re-exports the old names.
+- Replaced root `libpq::pqformat::format_bytea_text` implementation with a compatibility wrapper around `pgrust_expr`.
+- Added `pgrust_protocol` and moved pure protocol byte readers plus fixed-frame/auth/copy/error/notice response writers and command-tag inference into it.
+- Moved startup-parameter cstring parsing into `pgrust_protocol::pqcomm`; root `tcop` imports it through the compatibility `libpq::pqcomm` path.
+- Added `pgrust_protocol::sql` and moved nonstandard string literal normalization plus normalized command-prefix extraction there; root `tcop` delegates through thin wrappers.
+- Moved `COPY ... FROM STDIN` protocol text parsing, including column-list and NULL marker parsing, into `pgrust_protocol::sql`; root keeps COPY execution handling.
+- Moved E-string Unicode escape parsing into `pgrust_protocol::sql`; root keeps error-position mapping around it.
+- Moved query ID hashing into `pgrust_protocol::sql`; root `tcop` delegates through a compatibility wrapper.
+- Moved psql FDW option formatting and psql identifier quoting helpers into `pgrust_protocol::sql`; root keeps catalog-driven psql display assembly.
+- Moved SQL string literal quoting and `nextval(<oid>)` relation-OID parsing into `pgrust_protocol::sql`; root keeps catalog lookup/display for defaults.
+- Moved pure check-expression display helpers into `pgrust_protocol::sql`: operator spacing normalization, simple SQL string literal detection, column-name matching, and plain numeric literal detection.
+- Added `pgrust_protocol::notices` and moved client_min_messages severity ranking plus duplicate ALTER-missing-relation notice suppression there; root `tcop` delegates through compatibility wrappers.
+- Moved PostgreSQL-compatible float midpoint repair formatting fully into `pgrust_expr`; root `pqformat` delegates float text formatting to that crate.
+- Restored root JSONPath compatibility by wrapping `canonicalize_jsonpath` errors back into root `ExecError`; root tests still compile against the old error type.
+- Made generic PL/pgSQL cache `len()` available outside `cfg(test)` so root test builds can inspect the cache through the dependency crate.
+- Moved role settings storage into `pgrust_catalog_store::role_settings`; root `commands::rolecmds` keeps wrappers.
+- Moved trigger transition capture row buffers into `pgrust_nodes`; root trigger/PLpgSQL paths re-export the type.
+- Expanded `pgrust_commands::tablecmds` with command-facing row marker parsing and array-assignment value-shaping helpers; root `commands::tablecmds` keeps `ExecError` adapters for those paths.
+- Added `pgrust_executor::array_expr` and moved array scalar builtins, array subscript application, array concatenation/append/remove/sort/sample logic, string-to-array/table helpers, width-bucket threshold handling, and quantified-array comparison into it; root `exec_expr::arrays` now adapts expression evaluation for subscripts and re-exports the array builtin surface.
+- Replaced the duplicate root `executor::value_io::array` implementation with compatibility wrappers over the existing `pgrust_expr` array value-I/O implementation; root keeps `ExecError` adapters and old visibility.
+- Moved PL/pgSQL FOREACH target validation and array slice iteration shaping into `pgrust_plpgsql::runtime`; root exec now only maps crate runtime errors into `ExecError` and keeps executor casting/assignment.
+- Moved ACL privilege parsing, role membership checks, relation/schema/function/type ACL policy, and proc execute denial detail shaping into `pgrust_executor::permissions`; root `exec_expr` keeps value decoding, catalog object resolution, database-backed large-object checks, and compatibility error mapping.
+- Moved float8 aggregate transition-state builtins, float8 argument coercion, and regression transition math into `pgrust_executor::aggregate`; root aggregate/exec_expr now adapt crate errors through the existing aggregate support mapper.
+- Moved UUID builtin evaluation, enum support functions, and catalog visibility builtins into `pgrust_executor`; root `exec_expr` now keeps catalog-context adapters and error mapping.
+- Moved CREATE SCHEMA element normalization into `pgrust_commands::schemacmds`; root keeps auth/permission resolution.
+- Moved row-description construction, result-format resolution, and wire type metadata into `pgrust_protocol`; root keeps value encoding and delegates pure protocol metadata.
+- Moved portable role-command spec construction, SCRAM password normalization, self-grant parsing, drop-role name normalization, and membership-row construction into `pgrust_commands::rolecmds`; root keeps notice emission and authorization adapters.
+- Added `RoleAuthorizationContext` in `pgrust_commands::rolecmds` and moved role rename/grant authorization logic behind it; root adapts `AuthState`/`AuthCatalog`.
+- Moved index reloption validation/resolution for BRIN minmax-multi opclass options, GIN/hash/GiST/SP-GiST options, fillfactor parsing, and serialized reloption formatting into `pgrust_commands::reloptions`; root `tablecmds` maps command errors back to `ExecError`.
+- Moved pure partition expression display normalization and ACL-item privilege matching into `pgrust_commands::partition`; root partition routing keeps runtime/catalog work.
+- Moved psql ACL-item privilege matching into `pgrust_protocol::sql`; root psql display paths now delegate to protocol SQL helpers.
+- Moved COPY TO text/CSV field escaping and FORCE_QUOTE column matching into `pgrust_commands::copyto`; root COPY TO keeps sinks, row formatting, DML capture, notices, and error mapping.
+- Moved structured EXPLAIN JSON normalization plus JSON/XML/YAML ordering/rendering helpers into `pgrust_commands::explain`; root commands keep plan generation and compatibility re-exports.
+- Moved pure EXPLAIN JSON document wrapping, multiline indentation, and analyze InitPlan JSON post-processing into `pgrust_commands::explain`; root keeps PlanNode calls and thread-local capture state.
+- Moved string-only EXPLAIN text compatibility rewrites for verbose simple scans, temp objects, selected window cases, and window InitPlan/support output into `pgrust_commands::explain`; root keeps plan traversal and remaining plan-shape rewrites.
+- Moved EXPLAIN GUC boolean parsing and text option-line formatting for memory, settings, and serialization into `pgrust_commands::explain`; root `tablecmds` preserves compatibility wrapper names.
+- Moved EXPLAIN result-column metadata construction into `pgrust_commands::explain`; root `tablecmds::explain_query_column` remains as a compatibility wrapper.
+- Moved EXPLAIN MERGE target-name formatting into `pgrust_commands::explain`; root `tablecmds` delegates.
+- Moved EXPLAIN writable-CTE detection and statement-result text extraction helpers into `pgrust_commands::explain`; root `tablecmds` keeps compatibility wrapper names.
+- Moved EXPLAIN line-prefix formatting, insert CTE line reordering, update target-name formatting, and generic RETURNING target list rendering into `pgrust_commands::explain`; root `tablecmds` delegates through small wrappers.
+- Added `pgrust_commands::tablecmds` and moved expression-detail formatting helpers for expression index/constraint diagnostics there; root `tablecmds` keeps compatibility wrappers for existing local callers.
+- Moved CURRENT OF TID scan display detection into `pgrust_commands::tablecmds`; root `tablecmds` delegates through a compatibility wrapper.
+- Moved PL/pgSQL SQL quoting helpers into `pgrust_plpgsql`; root runtime now reuses crate-owned dollar-quote and identifier scanner helpers.
+- Moved PL/pgSQL compiled IR data types (`CompiledFunction`, `CompiledStmt`, return contracts, trigger bindings, cursor/open source shapes, runtime SQL scope, and related slots/targets) into `pgrust_plpgsql::compiled`; root compile/exec now import those shared shapes from the crate.
+- Moved PL/pgSQL runtime data shapes for exception diagnostics, context frames, cursor rows/results, and dynamic external parameter bindings into `pgrust_plpgsql::runtime`; root keeps executor-bound `FunctionState`.
+- Moved extended-query parameter reference scanning and parameter format-code selection into `pgrust_protocol::sql`; root protocol state now delegates those pure wire helpers.
+- Exposed protocol SQL identifier/literal quoting helpers and removed root `tcop` quoting wrappers from bound-parameter rendering.
+- Moved simple-query statement splitting, including SQL-standard routine body handling, into `pgrust_protocol::sql`; root keeps only the execution-flow wrapper.
+- Moved extended-query SQL normalization and empty/comment-only segment filtering into `pgrust_protocol::sql`; root now only maps the crate error into the PostgreSQL wire-facing parse error.
+- Added `pgrust_protocol::extended` for extended-query prepared statement state, bound parameter shape, bind-parameter count, and SQL parameter substitution behind a regclass-resolution trait; root keeps binary decoding and catalog adapter.
+- Expanded `pgrust_protocol::extended` with Parse/Bind/Execute message body decoders, including parameter/result format validation and raw bound-parameter extraction. Root `tcop` keeps SQL normalization, parameter value decoding, portal binding, and execution.
+- Expanded `pgrust_protocol::extended` with Describe/Close message body decoders and typed target enums; root `tcop` keeps prepared-statement/portal lookup, close side effects, and PostgreSQL error responses.
+- Added generic `pgrust_protocol::copy::CopyInState` for COPY FROM STDIN wire buffering; root stores it with root-owned `CopyCommand` and keeps execution/session handling.
+- Added generic `pgrust_protocol::connection::ConnectionState` for protocol connection bookkeeping; root now aliases it with root-owned `Session` and `CopyCommand`.
+- Added `pgrust_protocol::psql` for pure psql describe-query pattern extraction, query classification, relkind display names, regex matching, OID/literal extraction, and `col_description` argument parsing; root `tcop` keeps compatibility wrappers for existing psql display assembly.
+- Moved psql partition-bound display formatting (`FOR VALUES ...`, default-bound checks, range datum/value rendering, and describe SQL literal quoting) into `pgrust_commands::partition`; root `tcop` delegates through compatibility wrappers.
+- Expanded `pgrust_commands::partition` with partition tree metadata helpers: direct partition children, declarative parent lookup, ancestor/root OID resolution, tree-entry construction, relation-name lookup, generated-column kind names, and relkind participation checks. Root partition keeps tuple routing, bound validation, and constraint checks.
+- Moved pure EXPLAIN plan display/helper shims into `pgrust_commands::explain`: subplan arg varno selection, tenk1 window text rewrite, direct plan subplan discovery/labeling, passthrough child selection, filter-as-join-qual plan shaping, partition hash-join display swapping, dummy empty grouped aggregate display shaping, TID-scan/tsearch scan helpers, SQL quoted literal extraction, const-text extraction, and first-leaf relation-name matching. Root `commands::explain` keeps thin adapters where helpers need `VerboseExplainContext`, `const_false_filter_result_plan`, root expression renderers, `PlanNode`, or executor/catalog runtime.
+- Added `pgrust_commands::psql` and moved psql ACL, column-privilege, policy-column, policy-command, and describe-policy query row/column display formatting there; root `tcop` supplies the remaining policy-expression formatter callback and catalog fetch.
+- Expanded psql helper extraction with single-quoted describe literal parsing in `pgrust_protocol::psql` and statistics expression display normalization in `pgrust_commands::psql`; root statistics shortcuts still own catalog lookup/display assembly.
+- Moved the `pg_statistic_ext` shortcut row/column assembly for statistics-object data and namespace/owner probes into `pgrust_commands::psql`; root `tcop` now only obtains the session catalog and handles wire output.
+- Added `pgrust_commands::analyze` for ANALYZE sampling utilities: deterministic RNG, block sampler, reservoir sampler, default statistics target, and sample row/block target sizing. Root ANALYZE keeps heap scanning, visibility, expression evaluation, and pg_statistic row construction.
+- Expanded `pgrust_commands::analyze` with ANALYZE column selection, extended-statistics object naming/target helpers, stored-expression JSON parsing, distinct estimation, and sample correlation; root ANALYZE delegates these pure helpers and keeps heap sampling/stat row assembly.
+- Moved `SampledRow` and per-column `pg_statistic` row construction into `pgrust_commands::analyze`; root ANALYZE now passes the sampled rows plus the root statistics value-key callback.
+- Expanded `pgrust_commands::schemacmds` beyond element normalization with CREATE SCHEMA ownership/permission/name/existence resolution behind a `CreateSchemaAuthContext` trait; root `schemacmds` now adapts `AuthState`/`AuthCatalog` and maps crate errors.
+- Added `pgrust_commands::wire` for query-result catalog maps and wire type-OID annotation used by wire value formatting (`regrole`, `regclass`, `regproc`, `regprocedure`, `regnamespace`, enum labels, array/record wire OIDs). Root `tcop` supplies only the exact proc-signature callback still tied to root executor formatting.
+- Moved simple-query transaction-control classification (`BEGIN`, `COMMIT [AND CHAIN]`, `ROLLBACK`, savepoint commands, implicit-transaction detection) into `pgrust_protocol::sql`; root `tcop` keeps transaction side effects and error construction.
+- Replaced duplicated root `backend/tsearch` implementation files with compatibility shims to `pgrust_expr::backend::tsearch`; root keeps only the analyzer-catalog adapter for the old text-search API shape.
+- Deleted stale root `backend/utils/time/{date,datetime,instant,system_time,timestamp}.rs` implementations now that `backend/utils/time/mod.rs` re-exports the `pgrust_expr` time modules.
+- Deleted stale root `backend/access/common/pglz.rs` after confirming it was byte-for-byte duplicated in `pgrust_access` and no longer referenced by root modules.
+- Added `pgrust_commands::trigger` for trigger bit constants, event matching, trigger enablement, timing classification, row/instead checks, and transition-table detection; root trigger runtime delegates those metadata helpers.
+- Expanded `pgrust_commands::trigger` with trigger WHEN local system-column shapes and AST rewriting for `NEW/OLD.tableoid` and `NEW/OLD.ctid`; root trigger runtime now delegates this pure parse-tree rewrite.
+- Expanded `pgrust_commands::trigger` with trigger row cloning/materialization and relation-name/namespace resolution helpers; root trigger runtime keeps function loading, WHEN binding, and trigger execution.
+- Expanded `pgrust_commands::trigger` with trigger-function classification for PL/pgSQL vs supported internal builtins; root trigger runtime now maps crate load errors and keeps builtin execution.
+- Expanded `pgrust_commands::trigger` with supported internal trigger builtin execution policy (`suppress_redundant_updates_trigger` and `tsvector_update_trigger`) behind a root-supplied tsearch callback.
+- Moved pure instead-row-trigger metadata detection into `pgrust_commands::trigger`; root trigger runtime delegates the relation/event check.
+- Expanded `pgrust_commands::partition` with hash modulus compatibility/overlap helpers, column/NOT NULL lookup helpers, attach-partition constraint validation, and relation compatibility policy; root partition keeps executor-bound range/list comparison and tuple-routing/default-row checks.
+- Expanded `pgrust_commands::tablecmds` with rule enablement checks, modified-attnum collection, RETURNING column/result shaping, transaction system-var detection, partition user-layout checks, plan relation/lock-row traversal, foreign-key/temporal-constraint value/index mapping helpers, and relation write-state assembly for FK actions; root tablecmds delegates these metadata helpers and keeps row materialization/storage/executor paths.
+- Expanded `pgrust_commands::tablecmds` with ALTER TABLE ALTER COLUMN SET COMPRESSION relation lookup/type policy; root keeps the missing-relation notice, locking, ownership check, and catalog mutation.
+- Expanded `pgrust_commands::explain` with grouping-set display chain rendering, grouping hashability, PostgreSQL-compatible group-item ordering, direct subplan traversal over expressions/window clauses/project-set targets, external-param detection, plan-shape predicates, and projection passthrough checks; root EXPLAIN delegates these pure formatting/traversal blocks.
+- Expanded `pgrust_protocol::fastpath` from byte helpers into the large-object fastpath protocol boundary: it now owns the large-object fastpath call descriptor, OID signature table, argument decoding, null-call handling, result-type selection, and text/binary result framing. Root `tcop` keeps session execution and root `ExecError` mapping; `Session` executes the protocol-owned call enum.
+- Moved startup packet classification, SSL request response handling, protocol-version constants, and startup-parameter reading into `pgrust_protocol::pqcomm`; root `tcop` now only maps unsupported versions to the existing error response and performs session/database startup.
+- Moved btree and BRIN index reloption resolution into `pgrust_commands::reloptions`; root `tablecmds` now delegates through compatibility error mapping with the existing GIN/HASH/GiST/SP-GiST reloption shims.
+- Expanded `pgrust_commands::explain` to own INSERT `ON CONFLICT` EXPLAIN text/JSON display, conflict predicate/column-name shaping, bpchar conflict literal normalization, update/delete scan labels, update/delete index condition rendering, and const-false EXPLAIN pruning checks. Root `tablecmds` now delegates with callbacks only for executor-specific expression/literal rendering.
+- Collapsed root `commands::copyfrom`, `commands::schemacmds`, and `commands::rolecmds` to full-file compatibility shims. Root COPY FROM catalog adaptation now lives in `Session`; root CREATE SCHEMA auth/error adaptation now lives next to `Database::execute_create_schema...`; root role notice/auth adaptation now lives next to role command execution. Crate-local command tests cover the moved logic.
+- Expanded `pgrust_executor::constraints` with not-null, CHECK, and row-security write-check error policy. Root `executor::constraints` now keeps expression evaluation and row-detail formatting but delegates portable constraint naming, SQLSTATE/message selection, row-security source classification, and synthetic new-row TID construction.
+- Added `pgrust_executor::domain` with domain constraint lookup/runtime traits, recursive domain/array-domain enforcement, domain CHECK result policy, and domain violation message shaping. Root `executor::domain` now adapts catalog lookup plus parser/binder/evaluator callbacks.
+- Expanded `pgrust_executor::foreign_keys` with the insert foreign-key check phase enum plus inbound/RESTRICT foreign-key violation message/detail construction. Root executor now re-exports the phase enum directly from `pgrust_executor` and keeps only relation-visibility checks plus key-value rendering.
+- Expanded `pgrust_executor::advisory_locks` with an `AdvisoryLockRuntime` trait and advisory-lock execution dispatch. Root `expr_locks` now adapts the lock manager, interrupt mapping, and warning hook.
+- Expanded `pgrust_executor::window` with window frame-exclusion inclusion checks and first/last/nth included-frame index selection behind a peer comparison callback. Root `window` now supplies only the peer comparison over prepared rows and expression evaluation for non-null filtering.
+- Expanded `pgrust_executor::async_notify` with an async-notify eval context and wrappers for `pg_notify` and queue-usage builtins. Root `expr_async` now only maps errors and exposes pending-notification/runtime queue state.
+- Expanded `pgrust_executor::txid` with txid builtin dispatch behind a `TxidRuntime` trait. Root `expr_txid` now supplies transaction xid/status/snapshot callbacks and maps the crate-owned dispatch errors.
+- Expanded `pgrust_executor::partition` with SQL-visible hash-partition error message policy for key count/type mismatch, relation open, non-hash partition, unsupported hash key, and support-proc return-type failures. Root `expr_partition` now maps those crate messages into `ExecError` while keeping catalog type rendering and hash/support-proc execution.
+- Expanded `pgrust_executor::srf` with `pg_ls_dir`/`pg_ls_*dir` directory row construction, dot-entry synthesis, WAL segment fallback row shaping, directory sorting, and directory IO error policy. Root SRF now keeps argument evaluation, data-directory path resolution, interrupt checks, and `TupleSlot` adaptation.
+- Expanded `pgrust_executor::sqlfunc` with renderer-driven positional parameter substitution and SQL-function substitution error classification. Root SQL-function execution now supplies SQL-literal rendering callbacks and maps crate-owned substitution errors into the historical `ExecError` messages.
+- Expanded `pgrust_executor::sqlfunc` with `pg_proc.proargtypes` parsing, effective call-argument type overlay, and array-append SQL transition classification. Root SQL-function execution now maps crate-owned function metadata errors into the existing SQL-function runtime error.
+- Expanded `pgrust_executor::sqlfunc` with SQL identifier/string quoting and polymorphic SQL type/OID detection. Root SQL-function literal rendering now delegates these pure SQL text/type classification rules while keeping catalog-specific type-name lookup.
+- Added `pgrust_commands::tablecmds_assignment` for ordered UPDATE assignment navigation, point/jsonb/array/subscript assignment, and SQL type display names behind a root assignment runtime adapter.
+- Root `executor::expr_xml` now delegates XPath evaluation and XML indentation formatting to `pgrust_expr`; root keeps XML expression/XMLTABLE execution because those still call `eval_expr`.
+- Expanded `pgrust_executor::sqlfunc` with polymorphic runtime subtype merge/match and compatible numeric widening policy. Root SQL-function polymorphic validation now delegates these pure type-comparison rules while keeping SQL-visible undefined-function error construction.
+- Expanded `pgrust_executor::foreign_keys` with foreign-key key-value rendering behind a crate-owned render context trait for enum labels, indirect varlena decoding, and datetime configuration. Root foreign-key enforcement now only adapts those callbacks for violation detail formatting.
+- Expanded `pgrust_executor::sqlfunc` with SQL-function statement execution policy helpers: utility-statement detection, RETURN-to-SELECT normalization, inline SELECT-candidate detection, and row-security-off SET_CONFIG detection. Root SQL-function execution now delegates those string policy decisions.
+- Expanded `pgrust_executor::sqlfunc` with SQL-function record field type validation and return-type compatibility checks. Root SQL-function execution now maps the crate-owned mismatch into the historical SQL-visible return-type error.
+- Expanded `pgrust_executor::aggregate` with int8 aggregate state-pair decoding and aggregate-support error policy. Root aggregate support now maps the crate-owned helper errors into existing `ExecError` variants.
+- Expanded `pgrust_executor::aggregate` with regression aggregate finalization policy, including semidefinite-sum stabilization, correlation/R2 clamping, and null-on-empty result shaping. Root aggregate execution now delegates this pure numeric finalization block.
+- Expanded `pgrust_executor::aggregate` with string-aggregate byte extraction plus array-aggregate input validation, array normalization, and final array shaping. Root aggregate execution now delegates these portable value-shaping helpers and maps crate-owned validation errors through the aggregate support error adapter.
+- Moved typed-table composite-type resolution, typed-table DDL rejection, ALTER TABLE OF target validation, and compatibility checks into `pgrust_commands::typed_table`; root keeps transaction/catalog mutation and maps command errors into `ExecError`.
+- Moved ALTER COLUMN SET STORAGE validation and row-security action-to-catalog-update shaping into `pgrust_commands`; root keeps locks, ownership, transaction scope, and catalog mutation.
+- Moved statistics target normalization plus table/index ALTER COLUMN SET STATISTICS validation into `pgrust_commands::tablecmds`; root DDL keeps compatibility wrappers for existing command callers.
+- Moved ALTER COLUMN OPTIONS and ALTER COLUMN SET COMPRESSION validation into `pgrust_commands::tablecmds`; root DDL now maps those command errors through compatibility wrappers.
+- Moved generic reloption list set/reset mechanics and view reloption SET/RESET normalization into `pgrust_commands::reloptions`; root command files keep catalog mutation and compatibility wrappers.
+- Added `pgrust_commands::collation` for builtin collation option validation, collation-row construction, schema-qualified collation name splitting, and row lookup by namespace; root collation commands keep namespace resolution, auth, and catalog mutation.
+- Added `pgrust_commands::conversion` for the conversion entry state shape, conversion row construction, encoding-code mapping, and conversion object-name normalization; root `Database` re-exports the entry type for compatibility.
+- Added `pgrust_commands::tablespace` for tablespace option normalization/merge/reset and location validation; root tablespace commands keep filesystem changes, auth, and catalog mutation.
+- Added `pgrust_commands::database` for CREATE DATABASE option-default handling and database encoding-name mapping; root database commands keep auth, catalog writes, filesystem cloning, and buffer/WAL flushing.
+- Added `pgrust_commands::cast` for cast context encoding, cast type resolution, dependency construction, binary compatibility checks, domain base-type traversal, and cast-function validation; root cast commands keep function namespace lookup, notices, privileges, and catalog mutation.
+- Added `pgrust_commands::event_trigger` for event-trigger enabled-state constants, GUC parsing, event-name validation, WHEN tag normalization, and unsupported/unknown tag checks; root event-trigger commands keep execution, function lookup, auth, and catalog mutation.
+- Added `pgrust_commands::operator` for operator type resolution, operator signature display, postfix-operator error construction, proc lookup by name/signature, and row lookup over operator rows; root operator commands keep namespace/auth/privilege/catalog behavior and notices.
+- Added `scripts/check_crate_boundaries.sh` to catch workspace crates that depend upward on the root `pgrust` package.
+- Executor cannot be moved mechanically yet. It directly depends on root session/database runtime, PL/pgSQL runtime, command helpers, storage locks, tsearch, catalog role helpers, statistics, and root utility formatting. It needs explicit service traits or more lower-level extractions first.
+- Expanded `pgrust_executor::srf` with `pg_sequences` and `information_schema.sequences` row shaping over a crate-owned `SequenceViewRow`; root keeps sequence catalog/runtime scans and identity-sequence filtering.
+- Expanded `pgrust_executor::srf` with `pg_cursor`, `pg_prepared_statements`, and `pg_prepared_xacts` row shaping over crate-owned portable view rows; root keeps session/prepared-transaction lookup.
+- Expanded `pgrust_executor::srf` with `pg_stats_ext_mcvlist_items` payload decoding and row shaping using `pgrust_catalog_data` statistics payload types; root keeps only `ExecError` adaptation.
+- Expanded `pgrust_executor::partition` with `pg_partition_tree`/`pg_partition_ancestors` row shaping; root keeps catalog traversal and `TupleSlot` adaptation. Root command partition wrappers now use `pgrust_commands::partition::PartitionTreeEntry` directly instead of duplicating the type.
+- Tried collapsing root `executor::value_io` to the `pgrust_expr` implementation, but restored it because `pgrust_expr` still exposes compatibility stand-ins for `HeapTuple`, `TupleValue`, and `ToastFetchContext`; root storage callers need the real `pgrust_access`/root types. A full-file value_io shim needs that type boundary fixed first.
+- Added `pgrust_executor::permissions` for relation error-detail visibility decisions behind a crate-owned permission catalog trait; root `executor::permissions` now adapts the root executor catalog and keeps the old path.
+- Expanded `pgrust_executor::function_guc` with the SQL-function context wrapper behind a crate-owned `FunctionGucContext` trait; root now only implements role/GUC mutation and keeps the compatibility wrapper for existing SQL/PLpgSQL callers.
+- Expanded `pgrust_executor::async_notify` with pending notification types, size constants, validation, deduped queueing, merge helpers, and queue-byte accounting; root database async-notify now owns listener/delivery runtime and maps queue validation errors to `ExecError`.
+- Root executor `expr_async` and statement driver now queue pending notifications through `pgrust_executor::async_notify` directly; root database keeps compatibility wrappers for session/database callers.
+- Expanded `pgrust_executor::async_notify` to own the LISTEN/UNLISTEN runtime, listener registry, delivered-notification queue, drain/disconnect behavior, and queue-usage tracking; root database async-notify is now a compatibility wrapper for `ExecError` mapping.
+- Added `pgrust_executor::txid` for current txid snapshot text rendering and txid-status value mapping over access-layer transaction primitives; root `expr_txid` now only supplies live transaction-manager state and maps future-xid errors to `ExecError`.
+- Expanded `pgrust_executor::driver` with unsupported-statement error classification for SECURITY LABEL, ALTER TABLE SET WITH OIDS, and generic unsupported statements; root driver maps the crate-owned classification to existing parse errors.
+- Expanded `pgrust_plpgsql::runtime` with transition-table visible-row shaping for trigger transition tables; root PL/pgSQL execution now only materializes those rows into executor `MaterializedRow` CTE tables.
+- Expanded `pgrust_plpgsql::runtime` with routine prokind/language validation for PL/pgSQL functions and procedures; root performs catalog language lookup and maps the crate-owned validation enum into existing runtime errors.
+- Expanded `pgrust_plpgsql::runtime` with scalar-call return-contract validation for set-returning, trigger, and event-trigger contracts; root maps the crate-owned validation enum into the historical scalar-call error messages.
+- Expanded `pgrust_plpgsql::runtime` with trigger/event-trigger return-contract binding helpers; root maps the crate-owned contract errors into existing trigger runtime errors.
+- Moved PL/pgSQL `FunctionControl` and `DoControl` runtime control-flow enums into `pgrust_plpgsql::runtime`; root execution keeps statement dispatch but now uses crate-owned control-state types.
+- Expanded `pgrust_protocol::pqformat` with `send_data_row_body`; root `libpq::pqformat` still formats SQL values and binary payloads, then delegates the pure DataRow wire envelope.
+- Expanded `pgrust_protocol::pqformat` with result-format validation over `QueryColumn`/`Value` plus root-provided binary type/encoder callbacks; root keeps SQL type support policy and `ExecError` mapping.
+- Expanded `pgrust_protocol::pqformat` with query-result framing over row description, repeated DataRow callbacks, and command-complete; root keeps SQL value rendering and passes a typed-row writer callback.
+- Expanded `pgrust_protocol::pqformat` with binary-output SQL type support policy; root maps unsupported binary output back to the existing `ExecError::Parse`.
+- Expanded `pgrust_protocol::pqformat` with DataRow body field builders for column-count, NULL fields, binary fields, and text fields; root typed-row output now delegates length-prefixing while keeping SQL value rendering.
+- Expanded `pgrust_protocol::pqformat` with binary record and array body helpers for field counts, type OIDs, dimensions, NULLs, and length-prefixed payloads; root keeps recursive SQL value binary encoding and type-OID fallback logic.
+
+Files touched:
+- `Cargo.toml`
+- `Cargo.lock`
+- `crates/pgrust_catalog_store/src/role_memberships.rs`
+- `crates/pgrust_catalog_store/src/role_settings.rs`
+- `crates/pgrust_catalog_store/src/privileges.rs`
+- `crates/pgrust_catalog_store/src/dependency_drop.rs`
+- `crates/pgrust_catalog_store/src/roles.rs`
+- `crates/pgrust_executor/Cargo.toml`
+- `crates/pgrust_executor/src/lib.rs`
+- `crates/pgrust_executor/src/advisory_locks.rs`
+- `crates/pgrust_executor/src/aggregate.rs`
+- `crates/pgrust_executor/src/async_notify.rs`
+- `crates/pgrust_executor/src/bindings.rs`
+- `crates/pgrust_executor/src/constraints.rs`
+- `crates/pgrust_executor/src/driver.rs`
+- `crates/pgrust_executor/src/exec_tuples.rs`
+- `crates/pgrust_executor/src/fmgr.rs`
+- `crates/pgrust_executor/src/foreign_keys.rs`
+- `crates/pgrust_executor/src/function_guc.rs`
+- `crates/pgrust_executor/src/generate_series.rs`
+- `crates/pgrust_executor/src/hashjoin.rs`
+- `crates/pgrust_executor/src/mergejoin.rs`
+- `crates/pgrust_executor/src/parallel.rs`
+- `crates/pgrust_executor/src/partition.rs`
+- `crates/pgrust_executor/src/predicate.rs`
+- `crates/pgrust_executor/src/services.rs`
+- `crates/pgrust_executor/src/srf.rs`
+- `crates/pgrust_executor/src/stats.rs`
+- `crates/pgrust_executor/src/sqlfunc.rs`
+- `crates/pgrust_executor/src/transaction.rs`
+- `crates/pgrust_executor/src/startup.rs`
+- `crates/pgrust_executor/src/window.rs`
+- `crates/pgrust_nodes/src/exec.rs`
+- `crates/pgrust_nodes/src/copy.rs`
+- `crates/pgrust_nodes/src/trigger.rs`
+- `crates/pgrust_nodes/src/result.rs`
+- `crates/pgrust_commands/Cargo.toml`
+- `crates/pgrust_commands/src/analyze.rs`
+- `crates/pgrust_commands/src/cast.rs`
+- `crates/pgrust_commands/src/collation.rs`
+- `crates/pgrust_commands/src/conversion.rs`
+- `crates/pgrust_commands/src/database.rs`
+- `crates/pgrust_commands/src/event_trigger.rs`
+- `crates/pgrust_commands/src/lib.rs`
+- `crates/pgrust_commands/src/operator.rs`
+- `crates/pgrust_commands/src/copyfrom.rs`
+- `crates/pgrust_commands/src/copyto.rs`
+- `crates/pgrust_commands/src/explain.rs`
+- `crates/pgrust_commands/src/language.rs`
+- `crates/pgrust_commands/src/partition.rs`
+- `crates/pgrust_commands/src/psql.rs`
+- `crates/pgrust_commands/src/reloptions.rs`
+- `crates/pgrust_commands/src/rolecmds.rs`
+- `crates/pgrust_commands/src/row_security.rs`
+- `crates/pgrust_commands/src/schemacmds.rs`
+- `crates/pgrust_commands/src/tablecmds.rs`
+- `crates/pgrust_commands/src/tablespace.rs`
+- `crates/pgrust_commands/src/typed_table.rs`
+- `crates/pgrust_commands/src/wire.rs`
+- `crates/pgrust_protocol/Cargo.toml`
+- `crates/pgrust_protocol/src/extended.rs`
+- `crates/pgrust_protocol/src/fastpath.rs`
+- `crates/pgrust_protocol/src/lib.rs`
+- `crates/pgrust_protocol/src/notices.rs`
+- `crates/pgrust_protocol/src/pqcomm.rs`
+- `crates/pgrust_protocol/src/pqformat.rs`
+- `crates/pgrust_protocol/src/psql.rs`
+- `crates/pgrust_protocol/src/sql.rs`
+- `crates/pgrust_plpgsql/src/cache.rs`
+- `crates/pgrust_plpgsql/src/lib.rs`
+- `crates/pgrust_plpgsql/src/runtime.rs`
+- imports in obvious non-executor callers now use `pgrust_nodes` for shared result/session shapes.
+- `crates/pgrust_rewrite/Cargo.toml`
+- `crates/pgrust_rewrite/src/*`
+- `src/backend/rewrite/mod.rs`
+- deleted root rewrite implementation files under `src/backend/rewrite/`
+- deleted stale root storage sidecar implementation files under `src/backend/storage/{buffer,page,smgr}/`
+- root executor shim files: `expr_money.rs`, `expr_bit.rs`, `expr_bool.rs`, `expr_mac.rs`, `expr_network.rs`, `expr_numeric.rs`, `expr_format.rs`, `expr_geometry.rs`, `expr_datetime.rs`, `expr_date.rs`, `expr_range.rs`, `expr_multirange.rs`, `expr_string.rs`, `expr_math.rs`, `expr_txid.rs`, `random.rs`, `pg_regex.rs`, `jsonb.rs`, `jsonpath.rs`, `tsearch/mod.rs`
+- `crates/pgrust_expr/src/backend/executor/expr_txid.rs`
+- `crates/pgrust_expr/src/backend/executor/random.rs`
+- `crates/pgrust_expr/src/backend/libpq/pqformat.rs`
+- `src/backend/executor/fmgr.rs`
+- `src/backend/executor/foreign_keys.rs`
+- `src/backend/executor/agg.rs`
+- `src/backend/executor/exec_tuples.rs`
+- `src/backend/executor/expr_compile.rs`
+- `src/backend/executor/mod.rs`
+- `src/backend/executor/hashjoin.rs`
+- `src/backend/executor/mergejoin.rs`
+- `src/backend/executor/node_hash.rs`
+- `src/backend/executor/node_hashjoin.rs`
+- `src/backend/executor/node_mergejoin.rs`
+- `src/backend/executor/jsonpath.rs`
+- `src/backend/commands/copyfrom.rs`
+- `src/backend/commands/copyto.rs`
+- `src/backend/commands/analyze.rs`
+- `src/backend/commands/rolecmds.rs`
+- `src/backend/commands/schemacmds.rs`
+- `src/backend/commands/trigger.rs`
+- `src/backend/libpq/pqformat.rs`
+- `src/backend/libpq/pqcomm.rs`
+- `src/backend/tcop/postgres.rs`
+- `src/backend/executor/permissions.rs`
+- `src/backend/executor/parallel.rs`
+- `src/backend/executor/expr_async.rs`
+- `src/backend/executor/expr_locks.rs`
+- `src/backend/executor/expr_partition.rs`
+- `src/backend/executor/function_guc.rs`
+- `src/include/nodes/execnodes.rs`
+- `src/pl/plpgsql/cache.rs`
+- `src/pl/plpgsql/compile.rs`
+- `src/pl/plpgsql/exec.rs`
+- `src/pl/plpgsql/mod.rs`
+- `src/pgrust/session.rs`
+- `src/pgrust/database/commands/role.rs`
+- `src/pgrust/database/commands/schema.rs`
+- `src/pgrust/database/commands/dependency_drop.rs`
+- `src/pgrust/database/commands/language.rs`
+- `src/pgrust/database/commands/alter_column_compression.rs`
+- deleted root executor text-search implementation files under `src/backend/executor/tsearch/`
+- root text-search shims under `src/backend/tsearch/`
+- deleted stale root time utility implementation files under `src/backend/utils/time/`
+- deleted stale root `src/backend/access/common/pglz.rs`
+- root JSON call sites updated for `pgrust_expr` error conversion in `expr_json.rs` and `expr_casts.rs`
+- `scripts/check_crate_boundaries.sh`
+
+Tests run:
+- `cargo fmt`
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` (passed; existing dead-code warnings from dependent crates)
+- `scripts/cargo_isolated.sh check --lib --quiet` (passed; existing dead-code/unreachable-pattern warnings)
+- `cargo fmt`
+- `scripts/cargo_isolated.sh check --lib --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_expr --lib --quiet value_io`
+- `scripts/cargo_isolated.sh test --lib --quiet backend::executor::value_io`
+- `bash scripts/check_crate_boundaries.sh`
+- `scripts/cargo_isolated.sh check -p pgrust_catalog_store --quiet`
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet`
+- `scripts/cargo_isolated.sh check -p pgrust_nodes --quiet`
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet`
+- `scripts/cargo_isolated.sh check -p pgrust_plpgsql --quiet`
+- `scripts/cargo_isolated.sh check -p pgrust_protocol --quiet`
+- `scripts/cargo_isolated.sh check -p pgrust_expr --quiet`
+- `scripts/cargo_isolated.sh check -p pgrust_rewrite --quiet`
+- `scripts/cargo_isolated.sh test --lib --quiet pqformat`
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet copyto`
+- `scripts/cargo_isolated.sh test --lib --quiet copyto` (3 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet explain`
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet explain` (10 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet explain` (11 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet explain` (12 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet tablecmds`
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet tablecmds` (7 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet tablecmds` (8 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet tablecmds` (10 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet tablecmds` (11 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet partition`
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet partition` (5 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet partition` (8 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet partition` (13 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet reloptions`
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet psql`
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet analyze` (11 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet trigger` (7 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet publication` (12 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet maintenance` (7 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet schemacmds`
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet schemacmds` (3 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet rolecmds` (5 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet foreign_keys` (5 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet srf` (22 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet generate_series` (6 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet`
+- `scripts/cargo_isolated.sh check --lib --quiet`
+- `bash scripts/check_crate_boundaries.sh`
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_expr --quiet tsearch` (15 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_expr --quiet datetime` (10 tests)
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet gucs`
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet polymorphic`
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet runtime`
+- `scripts/cargo_isolated.sh test --lib --quiet copyto`
+- `scripts/cargo_isolated.sh test --lib --quiet explain`
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet sql`
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet psql`
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet fastpath`
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet extended`
+- `scripts/cargo_isolated.sh check --lib --quiet`
+- `bash scripts/check_crate_boundaries.sh`
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after join value/key helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after join value/key helper extraction
+- `bash scripts/check_crate_boundaries.sh` after join value/key helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after stale root pglz deletion
+- `bash scripts/check_crate_boundaries.sh` after stale root pglz deletion
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after async-notify helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after async-notify helper extraction
+- `bash scripts/check_crate_boundaries.sh` after async-notify helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after advisory-lock helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after advisory-lock helper extraction
+- `bash scripts/check_crate_boundaries.sh` after advisory-lock helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after hash-partition arg helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after hash-partition arg helper extraction
+- `bash scripts/check_crate_boundaries.sh` after hash-partition arg helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after function-GUC helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after function-GUC helper extraction
+- `bash scripts/check_crate_boundaries.sh` after function-GUC helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_protocol --quiet` after startup packet extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after startup packet extraction
+- `bash scripts/check_crate_boundaries.sh` after startup packet extraction
+- `scripts/cargo_isolated.sh check -p pgrust_catalog_store --quiet` after dependency graph helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after dependency graph helper extraction
+- `bash scripts/check_crate_boundaries.sh` after dependency graph helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after language helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after language helper extraction
+- `bash scripts/check_crate_boundaries.sh` after language helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after alter-column-compression lookup extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after alter-column-compression lookup extraction
+- `bash scripts/check_crate_boundaries.sh` after alter-column-compression lookup extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after typed-table helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after typed-table helper extraction
+- `bash scripts/check_crate_boundaries.sh` after typed-table helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after storage/row-security command-policy extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after storage/row-security command-policy extraction
+- `bash scripts/check_crate_boundaries.sh` after storage/row-security command-policy extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after column-statistics validation extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after column-statistics validation extraction
+- `bash scripts/check_crate_boundaries.sh` after column-statistics validation extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after column-options/compression validation extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after column-options/compression validation extraction
+- `bash scripts/check_crate_boundaries.sh` after column-options/compression validation extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after view-reloption extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after view-reloption extraction
+- `bash scripts/check_crate_boundaries.sh` after view-reloption extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after collation helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after collation helper extraction
+- `bash scripts/check_crate_boundaries.sh` after collation helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after conversion helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after conversion helper extraction
+- `bash scripts/check_crate_boundaries.sh` after conversion helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after tablespace helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after tablespace helper extraction
+- `bash scripts/check_crate_boundaries.sh` after tablespace helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after database helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after database helper extraction
+- `bash scripts/check_crate_boundaries.sh` after database helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after cast validation extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after cast validation extraction
+- `bash scripts/check_crate_boundaries.sh` after cast validation extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after event-trigger validation extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after event-trigger validation extraction
+- `bash scripts/check_crate_boundaries.sh` after event-trigger validation extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` after operator helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after operator helper extraction
+- `bash scripts/check_crate_boundaries.sh` after operator helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after compiled tuple decoder extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after compiled tuple decoder extraction
+- `bash scripts/check_crate_boundaries.sh` after compiled tuple decoder extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after compiled predicate fast-path extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet predicate` after compiled predicate fast-path extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after compiled predicate fast-path extraction
+- `bash scripts/check_crate_boundaries.sh` after compiled predicate fast-path extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after fmgr classification extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after fmgr classification extraction
+- `bash scripts/check_crate_boundaries.sh` after fmgr classification extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after custom aggregate runtime metadata extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after custom aggregate runtime metadata extraction
+- `bash scripts/check_crate_boundaries.sh` after custom aggregate runtime metadata extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after aggregate runtime selection extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after aggregate runtime selection extraction
+- `bash scripts/check_crate_boundaries.sh` after aggregate runtime selection extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after variadic scalar arg normalization extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after variadic scalar arg normalization extraction
+- `bash scripts/check_crate_boundaries.sh` after variadic scalar arg normalization extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet exec_tuples` after moving tuple decoder tests crate-local
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after moving tuple decoder tests crate-local
+- `scripts/cargo_isolated.sh check --lib --quiet` after moving tuple decoder tests crate-local
+- `bash scripts/check_crate_boundaries.sh` after moving tuple decoder tests crate-local
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet window` after window frame extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after window frame extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after window frame extraction
+- `bash scripts/check_crate_boundaries.sh` after window frame extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after window frame extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet generate_series` after integral/numeric generate_series extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after integral/numeric generate_series extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after integral/numeric generate_series extraction
+- `bash scripts/check_crate_boundaries.sh` after integral/numeric generate_series extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after integral/numeric generate_series extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet srf` after unnest row iterator extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after unnest row iterator extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after unnest row iterator extraction
+- `bash scripts/check_crate_boundaries.sh` after unnest row iterator extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after unnest row iterator extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet srf` after ROWS FROM shaping/cache helper extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after ROWS FROM shaping/cache helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after ROWS FROM shaping/cache helper extraction
+- `bash scripts/check_crate_boundaries.sh` after ROWS FROM shaping/cache helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after ROWS FROM shaping/cache helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet srf` after pg_options_to_table row parser extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after pg_options_to_table row parser extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after pg_options_to_table row parser extraction
+- `bash scripts/check_crate_boundaries.sh` after pg_options_to_table row parser extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after pg_options_to_table row parser extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet srf` after SRF label/generate_subscripts extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after SRF label/generate_subscripts extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SRF label/generate_subscripts extraction
+- `bash scripts/check_crate_boundaries.sh` after SRF label/generate_subscripts extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after SRF label/generate_subscripts extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet srf` after static SRF row-builder extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after static SRF row-builder extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after static SRF row-builder extraction
+- `bash scripts/check_crate_boundaries.sh` after static SRF row-builder extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after static SRF row-builder extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet sqlfunc` after SQL-function body/substitution extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after SQL-function body/substitution extraction
+- `scripts/cargo_isolated.sh test --lib --quiet sqlfunc` after SQL-function body/substitution extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SQL-function body/substitution extraction
+- `bash scripts/check_crate_boundaries.sh` after SQL-function body/substitution extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after SQL-function body/substitution extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet sqlfunc` after SQL-function result-shaping extraction
+- `scripts/cargo_isolated.sh test --lib --quiet sqlfunc` after SQL-function result-shaping extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SQL-function result-shaping extraction
+- `bash scripts/check_crate_boundaries.sh` after SQL-function result-shaping extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after SQL-function result-shaping extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet startup` after executor startup plan-analysis extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after executor startup plan-analysis extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after executor startup plan-analysis extraction
+- `bash scripts/check_crate_boundaries.sh` after executor startup plan-analysis extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after executor startup plan-analysis extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet startup` after executor startup worktable traversal extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after executor startup worktable traversal extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after executor startup worktable traversal extraction
+- `bash scripts/check_crate_boundaries.sh` after executor startup worktable traversal extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after executor startup worktable traversal extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet startup` after executor startup outer-column analysis extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after executor startup outer-column analysis extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after executor startup outer-column analysis extraction
+- `bash scripts/check_crate_boundaries.sh` after executor startup outer-column analysis extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after executor startup outer-column analysis extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet startup` after executor startup never-true qual extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after executor startup never-true qual extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after executor startup never-true qual extraction
+- `bash scripts/check_crate_boundaries.sh` after executor startup never-true qual extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after executor startup never-true qual extraction
+- `scripts/cargo_isolated.sh test -p pgrust_expr --quiet expr_reg` after root expr_reg shim collapse
+- `scripts/cargo_isolated.sh check --lib --quiet` after root expr_reg shim collapse
+- `bash scripts/check_crate_boundaries.sh` after root expr_reg shim collapse
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet startup` after root expr_reg shim collapse
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after root expr_reg shim collapse
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet driver` after restricted-view driver extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after restricted-view driver extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after restricted-view driver extraction
+- `bash scripts/check_crate_boundaries.sh` after restricted-view driver extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after restricted-view driver extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet driver` after read-only CREATE STATISTICS validation extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after read-only CREATE STATISTICS validation extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after read-only CREATE STATISTICS validation extraction
+- `bash scripts/check_crate_boundaries.sh` after read-only CREATE STATISTICS validation extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet srf` after sequence/session/prepared/MCV SRF extraction (27 SRF tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after sequence/session/prepared/MCV SRF extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after sequence/session/prepared/MCV SRF extraction
+- `bash scripts/check_crate_boundaries.sh` after sequence/session/prepared/MCV SRF extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet partition` after partition SRF row-shaping extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after partition SRF row-shaping extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after partition SRF row-shaping extraction
+- `bash scripts/check_crate_boundaries.sh` after partition SRF row-shaping extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after partition SRF row-shaping extraction (68 executor crate tests)
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet pqformat` after DataRow wire-envelope extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after DataRow wire-envelope extraction
+- `bash scripts/check_crate_boundaries.sh` after DataRow wire-envelope extraction
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet pqformat` after result-format validation extraction (3 pqformat tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after result-format validation extraction
+- `bash scripts/check_crate_boundaries.sh` after result-format validation extraction
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet pqformat` after query-result framing extraction (4 pqformat tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after query-result framing extraction
+- `bash scripts/check_crate_boundaries.sh` after query-result framing extraction
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet pqformat` after binary-output type-policy extraction (5 pqformat tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after binary-output type-policy extraction
+- `bash scripts/check_crate_boundaries.sh` after binary-output type-policy extraction
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet pqformat` after DataRow field-builder extraction (6 pqformat tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after DataRow field-builder extraction
+- `bash scripts/check_crate_boundaries.sh` after DataRow field-builder extraction
+- `scripts/cargo_isolated.sh test -p pgrust_protocol --quiet pqformat` after binary record/array framing extraction (8 pqformat tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after binary record/array framing extraction
+- `bash scripts/check_crate_boundaries.sh` after binary record/array framing extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet permissions` after permission visibility extraction (0 direct tests matched)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after permission visibility extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after permission visibility extraction
+- `bash scripts/check_crate_boundaries.sh` after permission visibility extraction
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after function GUC context extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet function_guc` after adding function GUC context tests (2 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after function GUC context extraction
+- `bash scripts/check_crate_boundaries.sh` after function GUC context extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet async_notify` after pending-notification queue extraction (2 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after pending-notification queue extraction
+- `bash scripts/check_crate_boundaries.sh` after pending-notification queue extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after switching executor NOTIFY call sites to pgrust_executor queue helpers
+- `bash scripts/check_crate_boundaries.sh` after switching executor NOTIFY call sites to pgrust_executor queue helpers
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet txid` after txid snapshot/status extraction (2 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after txid snapshot/status extraction
+- `bash scripts/check_crate_boundaries.sh` after txid snapshot/status extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet async_notify` after async-notify runtime extraction (3 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after async-notify runtime extraction
+- `bash scripts/check_crate_boundaries.sh` after async-notify runtime extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet unsupported_statement` after unsupported-statement classification extraction (1 test)
+- `scripts/cargo_isolated.sh check --lib --quiet` after unsupported-statement classification extraction
+- `bash scripts/check_crate_boundaries.sh` after unsupported-statement classification extraction
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet transition_table` after transition-table visible-row extraction (2 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after transition-table visible-row extraction
+- `bash scripts/check_crate_boundaries.sh` after transition-table visible-row extraction
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet routine_validation` after PL/pgSQL routine validation extraction (1 test)
+- `scripts/cargo_isolated.sh check --lib --quiet` after PL/pgSQL routine validation extraction
+- `bash scripts/check_crate_boundaries.sh` after PL/pgSQL routine validation extraction
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet scalar_call_validation` after PL/pgSQL scalar-call validation extraction (1 test)
+- `scripts/cargo_isolated.sh check --lib --quiet` after PL/pgSQL scalar-call validation extraction
+- `bash scripts/check_crate_boundaries.sh` after PL/pgSQL scalar-call validation extraction
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet scalar_call_validation` after PL/pgSQL trigger/event-trigger contract helper extraction (1 test)
+- `scripts/cargo_isolated.sh check --lib --quiet` after PL/pgSQL trigger/event-trigger contract helper extraction
+- `bash scripts/check_crate_boundaries.sh` after PL/pgSQL trigger/event-trigger contract helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet runtime` after moving PL/pgSQL control-flow enums (14 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after moving PL/pgSQL control-flow enums
+- `bash scripts/check_crate_boundaries.sh` after moving PL/pgSQL control-flow enums
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet constraints` after constraint error-policy extraction (3 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after constraint error-policy extraction
+- `bash scripts/check_crate_boundaries.sh` after constraint error-policy extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet domain` after domain constraint runtime extraction (2 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after domain constraint runtime extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after domain constraint runtime extraction
+- `bash scripts/check_crate_boundaries.sh` after domain constraint runtime extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet foreign_keys` after foreign-key violation/phase extraction (6 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after foreign-key violation/phase extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after foreign-key violation/phase extraction
+- `bash scripts/check_crate_boundaries.sh` after foreign-key violation/phase extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet advisory_locks` after advisory-lock runtime dispatch extraction (2 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after advisory-lock runtime dispatch extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after advisory-lock runtime dispatch extraction
+- `bash scripts/check_crate_boundaries.sh` after advisory-lock runtime dispatch extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet window` after window frame-exclusion helper extraction (5 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after window frame-exclusion helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after window frame-exclusion helper extraction
+- `bash scripts/check_crate_boundaries.sh` after window frame-exclusion helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet async_notify` after async-notify eval wrapper extraction (3 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after async-notify eval wrapper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after async-notify eval wrapper extraction
+- `bash scripts/check_crate_boundaries.sh` after async-notify eval wrapper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet txid` after txid builtin dispatch extraction (2 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after txid builtin dispatch extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after txid builtin dispatch extraction
+- `bash scripts/check_crate_boundaries.sh` after txid builtin dispatch extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet partition` after hash-partition error policy extraction (5 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after hash-partition error policy extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after hash-partition error policy extraction
+- `bash scripts/check_crate_boundaries.sh` after hash-partition error policy extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet srf` after SRF directory row extraction (27 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after SRF directory row extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SRF directory row extraction
+- `bash scripts/check_crate_boundaries.sh` after SRF directory row extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet sqlfunc` after SQL-function positional substitution extraction (8 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after SQL-function positional substitution extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SQL-function positional substitution extraction
+- `bash scripts/check_crate_boundaries.sh` after SQL-function positional substitution extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet sqlfunc` after SQL-function argument metadata helper extraction (9 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after SQL-function argument metadata helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SQL-function argument metadata helper extraction
+- `bash scripts/check_crate_boundaries.sh` after SQL-function argument metadata helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet sqlfunc` after SQL-function quoting/type classification extraction (10 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after SQL-function quoting/type classification extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SQL-function quoting/type classification extraction
+- `bash scripts/check_crate_boundaries.sh` after SQL-function quoting/type classification extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet sqlfunc` after SQL-function polymorphic subtype helper extraction (11 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after SQL-function polymorphic subtype helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SQL-function polymorphic subtype helper extraction
+- `bash scripts/check_crate_boundaries.sh` after SQL-function polymorphic subtype helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet foreign_keys` after foreign-key key rendering extraction (7 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after foreign-key key rendering extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after foreign-key key rendering extraction
+- `bash scripts/check_crate_boundaries.sh` after foreign-key key rendering extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet sqlfunc` after SQL-function statement policy extraction (11 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after SQL-function statement policy extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SQL-function statement policy extraction
+- `bash scripts/check_crate_boundaries.sh` after SQL-function statement policy extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet sqlfunc` after SQL-function record field validation extraction (12 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after SQL-function record field validation extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after SQL-function record field validation extraction
+- `bash scripts/check_crate_boundaries.sh` after SQL-function record field validation extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet aggregate` after aggregate int8-pair helper extraction (2 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after aggregate int8-pair helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after aggregate int8-pair helper extraction
+- `bash scripts/check_crate_boundaries.sh` after aggregate int8-pair helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet aggregate` after regression aggregate finalization extraction (4 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after regression aggregate finalization extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after regression aggregate finalization extraction
+- `bash scripts/check_crate_boundaries.sh` after regression aggregate finalization extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet aggregate` after array/string aggregate helper extraction (6 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after array/string aggregate helper extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after array/string aggregate helper extraction
+- `bash scripts/check_crate_boundaries.sh` after array/string aggregate helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet aggregate` after numeric aggregate accumulator extraction (8 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after numeric aggregate accumulator extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after numeric aggregate accumulator extraction
+- `bash scripts/check_crate_boundaries.sh` after numeric aggregate accumulator extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet stats` after stats builtin value-shaping extraction (3 tests)
+- `scripts/cargo_isolated.sh check -p pgrust_executor --quiet` after stats builtin value-shaping extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after stats builtin value-shaping extraction
+- `bash scripts/check_crate_boundaries.sh` after stats builtin value-shaping extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after batched misc builtin/control extraction (105 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after batched misc builtin/control extraction
+- `bash scripts/check_crate_boundaries.sh` after batched misc builtin/control extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after current-schema/search-path and time-warning extraction (106 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after current-schema/search-path and time-warning extraction
+- `bash scripts/check_crate_boundaries.sh` after current-schema/search-path and time-warning extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after num-null and greatest/least extraction (107 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after num-null and greatest/least extraction
+- `bash scripts/check_crate_boundaries.sh` after num-null and greatest/least extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after convert and pg_column_toast_chunk_id value-call extraction (107 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after convert and pg_column_toast_chunk_id value-call extraction
+- `bash scripts/check_crate_boundaries.sh` after convert and pg_column_toast_chunk_id value-call extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after encoding helper extraction (107 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after encoding helper extraction
+- `bash scripts/check_crate_boundaries.sh` after encoding helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after float8 aggregate transition extraction (107 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after float8 aggregate transition extraction
+- `bash scripts/check_crate_boundaries.sh` after float8 aggregate transition extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after UUID/enum/catalog-visibility extraction (107 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after UUID/enum/catalog-visibility extraction
+- `bash scripts/check_crate_boundaries.sh` after UUID/enum/catalog-visibility extraction
+- `cargo fmt` after PL/pgSQL SQL normalizer extraction
+- `scripts/cargo_isolated.sh check -p pgrust_plpgsql --quiet` after PL/pgSQL SQL normalizer extraction
+- `scripts/cargo_isolated.sh check --lib --quiet` after PL/pgSQL SQL normalizer extraction
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet` after PL/pgSQL SQL normalizer extraction (61 tests)
+- `bash scripts/check_crate_boundaries.sh` after PL/pgSQL SQL normalizer extraction
+- `cargo fmt` after root expr_casts shim conversion
+- `scripts/cargo_isolated.sh check -p pgrust_expr --quiet` after root expr_casts shim conversion
+- `scripts/cargo_isolated.sh check --lib --quiet` after root expr_casts shim conversion
+- `scripts/cargo_isolated.sh test -p pgrust_expr --quiet` after root expr_casts shim conversion (241 tests)
+- `scripts/cargo_isolated.sh test --lib --quiet expr_casts` after root expr_casts shim conversion (0 matched, test build passed)
+- `bash scripts/check_crate_boundaries.sh` after root expr_casts shim conversion
+- `cargo fmt` after root expr_ops shim conversion
+- `scripts/cargo_isolated.sh check --lib --quiet` after root expr_ops shim conversion
+- `scripts/cargo_isolated.sh test -p pgrust_expr --quiet` after root expr_ops shim conversion (241 tests)
+- `scripts/cargo_isolated.sh test --lib --quiet expr_ops` after root expr_ops shim conversion (0 matched, test build passed)
+- `bash scripts/check_crate_boundaries.sh` after root expr_ops shim conversion
+- `cargo fmt` after tablecmds assignment extraction
+- `scripts/cargo_isolated.sh check -p pgrust_commands` after tablecmds assignment extraction
+- `scripts/cargo_isolated.sh check --lib` after tablecmds assignment extraction
+- `bash scripts/check_crate_boundaries.sh` after tablecmds assignment extraction
+- `cargo fmt` after XML XPath/indent shim conversion
+- `scripts/cargo_isolated.sh check -p pgrust_expr --quiet` after XML XPath/indent shim conversion
+- `scripts/cargo_isolated.sh check --lib --quiet` after XML XPath/indent shim conversion
+- `scripts/cargo_isolated.sh test -p pgrust_expr --quiet expr_xml` after XML XPath/indent shim conversion (21 tests)
+- `bash scripts/check_crate_boundaries.sh` after XML XPath/indent shim conversion
+
+Remaining:
+- Continue executor service boundaries for PL/pgSQL callbacks, command callbacks, catalog role helpers, tsearch, and notices. Transaction state, row locks, serializable predicate locks, mutation sinks, aggregate helper clusters, stats value shaping, misc builtin/control value shaping, current-schema/search-path policy, num-null/extreme-value helpers, simple value-call helpers, encoding helpers, float8 aggregate transition helpers, UUID builtins, enum support, and catalog visibility helpers have initial traits/crate-local homes.
+- Extract `pgrust_executor` after the remaining boundary is in place.
+- Expand `pgrust_commands` beyond helper modules into larger utility command bodies.
+- Move PL/pgSQL compile/runtime into the PL/pgSQL crate or a runtime crate.
+- Extract protocol/tcop late.
+- Add boundary checks and complete final root slimdown.
+
+## JSON/JSONB Helper Extraction
+
+Goal:
+Move a large pure JSON/JSONB helper cluster from root `expr_json` into `pgrust_expr`.
+
+Key decisions:
+Extracted JSON null stripping, JSONB delete/path set/subscript assignment, raw/serde JSON lookup/render helpers, and float JSON scalar helpers. Left root `value_to_json_*` and record/regclass rendering in place because they depend on root datetime/catalog/varlena/geometry/tsearch services.
+
+Files touched:
+`crates/pgrust_expr/src/backend/executor/expr_json.rs`
+`src/backend/executor/expr_json.rs`
+
+Tests run:
+`cargo fmt`
+`scripts/cargo_isolated.sh check -p pgrust_expr`
+`scripts/cargo_isolated.sh check --lib`
+
+Remaining:
+Rendering for full `Value` still has root-only service coupling; a future pass could introduce a narrow renderer callback trait if moving that subcluster becomes worthwhile.
+
+## EXPLAIN Expression Renderer Extraction
+
+Goal:
+Move the large render-only EXPLAIN expression helper block from root executor nodes into `pgrust_commands`.
+
+Key decisions:
+Added `crates/pgrust_commands/src/explain_expr.rs` for the contiguous expression renderer block and EXPLAIN datetime config stack. Kept old executor paths compiling with `pub(crate) use pgrust_commands::explain_expr::{...}` in `src/backend/executor/nodes.rs`. Left index scan metadata/operator lookup in root executor nodes, delegating to narrow expression-render helpers.
+
+Files touched:
+`crates/pgrust_commands/src/explain_expr.rs`
+`crates/pgrust_commands/src/lib.rs`
+`src/backend/executor/nodes.rs`
+
+Tests run:
+`cargo fmt`
+`scripts/cargo_isolated.sh check -p pgrust_commands`
+`scripts/cargo_isolated.sh check --lib`
+
+Remaining:
+`pgrust_commands::explain_expr` still exposes a small helper surface for root index/order-by EXPLAIN formatting.
+
+## EXPLAIN Verbose Renderer Extraction
+
+Goal:
+Move the large verbose EXPLAIN plan rendering helper block from root `commands::explain` into `pgrust_commands`.
+
+Key decisions:
+Added `crates/pgrust_commands/src/explain_verbose.rs` for verbose plan labels, output-name derivation, condition rendering, child traversal helpers, and dynamic type-name rendering. Root keeps callback adapters for executor-derived plan labels/costs, const-false result detection, index condition formatting, and recursive plan formatting.
+
+Files touched:
+`crates/pgrust_commands/src/explain_verbose.rs`
+`crates/pgrust_commands/src/lib.rs`
+`src/backend/commands/explain.rs`
+
+Tests run:
+`cargo fmt`
+`scripts/cargo_isolated.sh check -p pgrust_commands --quiet`
+`scripts/cargo_isolated.sh check --lib --quiet`
+`bash scripts/check_crate_boundaries.sh`
+
+Remaining:
+Root `commands::explain` still owns executor-state formatting and root catalog/runtime callbacks. A later pass can narrow these callback shims once executor plan-state construction is crate-owned.

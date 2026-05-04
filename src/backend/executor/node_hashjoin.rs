@@ -9,6 +9,10 @@ use crate::include::nodes::execnodes::{
     HashJoinState, MaterializedRow, PlanNode, SystemVarBinding, TupleSlot,
 };
 use crate::include::nodes::primnodes::{Expr, JoinType};
+use pgrust_executor::{
+    combined_join_values, merge_system_bindings, null_extended_left_values,
+    null_extended_right_values,
+};
 
 fn eval_bool_expr(
     expr: &Expr,
@@ -48,30 +52,12 @@ fn set_active_system_bindings(ctx: &mut ExecutorContext, bindings: &[SystemVarBi
     ctx.system_bindings.extend_from_slice(bindings);
 }
 
-fn merge_system_bindings(
-    left: &[SystemVarBinding],
-    right: &[SystemVarBinding],
-) -> Vec<SystemVarBinding> {
-    let mut merged = left.to_vec();
-    for binding in right {
-        if !merged
-            .iter()
-            .any(|existing| existing.varno == binding.varno)
-        {
-            merged.push(*binding);
-        }
-    }
-    merged
-}
-
 fn store_virtual_row(slot: &mut TupleSlot, values: Vec<Value>) {
     slot.store_virtual_row(values, None, None);
 }
 
 fn combine_slots(left: &MaterializedRow, right: &[Value]) -> Vec<Value> {
-    let mut combined = left.slot.tts_values.clone();
-    combined.extend(right.iter().cloned());
-    combined
+    combined_join_values(&left.slot.tts_values, right)
 }
 
 impl PlanNode for HashJoinState {
@@ -237,8 +223,8 @@ impl PlanNode for HashJoinState {
                             .current_outer
                             .take()
                             .expect("current outer tuple must exist for outer fill");
-                        let mut values = outer.slot.tts_values;
-                        values.extend(std::iter::repeat_n(Value::Null, self.right_width));
+                        let values =
+                            null_extended_left_values(&outer.slot.tts_values, self.right_width);
                         store_virtual_row(&mut self.slot, values);
                         self.current_bindings = outer.system_bindings;
                         set_active_system_bindings(ctx, &self.current_bindings);
@@ -260,14 +246,9 @@ impl PlanNode for HashJoinState {
                             continue;
                         }
 
-                        let mut values = vec![Value::Null; self.left_width];
-                        values.extend(
-                            table.entries[entry_index]
-                                .row
-                                .slot
-                                .tts_values
-                                .iter()
-                                .cloned(),
+                        let values = null_extended_right_values(
+                            &table.entries[entry_index].row.slot.tts_values,
+                            self.left_width,
                         );
                         store_virtual_row(&mut self.slot, values);
                         self.current_bindings =

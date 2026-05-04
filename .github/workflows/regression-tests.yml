@@ -74,6 +74,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pgrust
+          cache-workspace-crates: true
 
       - name: Build pgrust_server (release)
         working-directory: pgrust

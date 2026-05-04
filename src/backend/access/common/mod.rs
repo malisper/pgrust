@@ -1,6 +1,5 @@
 pub mod detoast;
 pub mod heaptuple;
-mod pglz;
 pub mod toast_compression;
 pub mod toast_internals;
 

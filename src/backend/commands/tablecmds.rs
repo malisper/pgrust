@@ -20,7 +20,6 @@ use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{
     INVALID_TRANSACTION_ID, TransactionId, TransactionManager,
 };
-use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::value_io::{
     format_failing_row_detail, format_failing_row_detail_for_columns,
 };
@@ -42,7 +41,7 @@ use crate::backend::parser::{
     ParseError, RuleEvent, SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType,
     TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table, bind_delete,
     bind_generated_expr, bind_insert, bind_referenced_by_foreign_keys, bind_relation_constraints,
-    bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update, parse_expr,
+    bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update,
     rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
     rewrite_bound_update_auto_view_target, rewrite_local_vars_for_output_exprs,
     rewrite_planned_local_vars_for_output_exprs,
@@ -59,6 +58,12 @@ use crate::include::access::nbtree::BtreeOptions;
 use crate::include::executor::execdesc::CommandType;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pl::plpgsql::TriggerOperation;
+use pgrust_commands::explain::{
+    explain_lines_are_single_json_value, format_structured_explain_output,
+};
+use pgrust_commands::tablecmds_assignment::{
+    AssignmentError, AssignmentRuntime, ResolvedAssignmentIndirection, ResolvedAssignmentSubscript,
+};
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
@@ -67,9 +72,9 @@ use super::explain::{
     format_buffer_usage, format_explain_analyze_json, format_explain_child_plan_with_subplans,
     format_explain_json, format_explain_lines_with_costs, format_explain_lines_with_options,
     format_explain_plan_with_subplans, format_explain_plan_with_subplans_and_catalog,
-    format_explain_xml_from_json, format_explain_yaml_from_json, format_modify_expr_subplans,
-    format_verbose_explain_child_plan_with_catalog, format_verbose_explain_plan_json_with_catalog,
-    format_verbose_explain_plan_with_catalog, push_explain_line, render_modify_join_expr,
+    format_modify_expr_subplans, format_verbose_explain_child_plan_with_catalog,
+    format_verbose_explain_plan_json_with_catalog, format_verbose_explain_plan_with_catalog,
+    push_explain_line, render_modify_join_expr,
 };
 use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
@@ -79,7 +84,6 @@ use super::trigger::{RuntimeTriggers, TriggerTransitionCapture, relation_has_ins
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
-use crate::backend::executor::expr_geometry::circle_bound_box;
 use crate::backend::executor::value_io::{
     coerce_assignment_value_with_catalog_and_config, encode_tuple_values_with_config,
 };
@@ -92,36 +96,24 @@ use crate::backend::executor::{
 use crate::include::access::amapi::{IndexBuildContext, IndexBuildExprContext, IndexUniqueCheck};
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
-use crate::include::access::gist::{GistBufferingMode, GistOptions};
+use crate::include::access::gist::GistOptions;
 use crate::include::access::hash::HashOptions;
 use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BIT_TYPE_OID, BOOL_TYPE_OID,
-    BOX_TYPE_OID, BPCHAR_TYPE_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CIDR_TYPE_OID,
-    CONSTRAINT_FOREIGN, DATE_TYPE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, FLOAT4_TYPE_OID,
-    FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID, INET_TYPE_OID,
-    INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERVAL_TYPE_OID,
-    MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, PG_AM_RELATION_OID,
-    PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID, PG_AUTH_MEMBERS_RELATION_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_FOREIGN_SERVER_RELATION_OID, PG_FOREIGN_TABLE_RELATION_OID, PG_INDEX_RELATION_OID,
-    PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_LSN_TYPE_OID, PG_MAINTAIN_OID,
-    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
-    PG_PARTITIONED_TABLE_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    BTREE_AM_OID, PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID,
+    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_FOREIGN_SERVER_RELATION_OID,
+    PG_FOREIGN_TABLE_RELATION_OID, PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID,
+    PG_LANGUAGE_RELATION_OID, PG_MAINTAIN_OID, PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID,
+    PG_OPERATOR_RELATION_OID, PG_PARTITIONED_TABLE_RELATION_OID, PG_POLICY_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID,
     PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
-    PG_USER_MAPPING_RELATION_OID, PG_WRITE_ALL_DATA_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
-    PgOpclassRow, PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID,
-    TEXT_BRIN_MINMAX_OPCLASS_OID, TEXT_TYPE_OID, TID_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
-    builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    PG_USER_MAPPING_RELATION_OID, PG_WRITE_ALL_DATA_OID, PgAmRow, SPGIST_AM_OID,
 };
-use crate::include::nodes::datum::{
-    ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
-};
+use crate::include::nodes::datum::{RecordDescriptor, RecordValue, Value};
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::parsenodes::{
@@ -131,9 +123,8 @@ use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, OpExprKind, ParamKind, QueryColumn, RULE_OLD_VAR,
-    RelationPrivilegeMask, RelationPrivilegeRequirement, SELF_ITEM_POINTER_ATTR_NO, SubLinkType,
-    SubPlan, TargetEntry, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, expr_sql_type_hint,
-    user_attrno,
+    RelationPrivilegeMask, RelationPrivilegeRequirement, SubLinkType, SubPlan, TargetEntry, Var,
+    attrno_index, expr_sql_type_hint, user_attrno,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
@@ -900,450 +891,16 @@ pub(crate) fn execute_explain(
     })
 }
 
-fn explain_lines_are_single_json_value(format: ExplainFormat, lines: &[String]) -> bool {
-    if !matches!(format, ExplainFormat::Json) || lines.len() != 1 {
-        return false;
-    }
-    matches!(lines[0].trim_start().as_bytes().first(), Some(b'[' | b'{'))
-}
-
-fn format_structured_explain_output(
-    format: ExplainFormat,
-    json: String,
-    analyze: bool,
-    buffers: bool,
-    costs: bool,
-    summary: bool,
-    serialize: Option<ExplainSerializeFormat>,
-    settings: bool,
-    memory: bool,
-    track_io_timing: bool,
-) -> String {
-    let json = augment_structured_explain_json(
-        json,
-        analyze,
-        buffers,
-        costs,
-        summary,
-        serialize,
-        settings,
-        memory,
-        track_io_timing,
-    );
-    match format {
-        ExplainFormat::Json => json,
-        ExplainFormat::Xml => format_explain_xml_from_json(&json).unwrap_or(json),
-        ExplainFormat::Yaml => format_explain_yaml_from_json(&json).unwrap_or(json),
-        ExplainFormat::Text => json,
-    }
-}
-
-fn augment_structured_explain_json(
-    json: String,
-    analyze: bool,
-    buffers: bool,
-    costs: bool,
-    _summary: bool,
-    serialize: Option<ExplainSerializeFormat>,
-    settings: bool,
-    memory: bool,
-    track_io_timing: bool,
-) -> String {
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&json) else {
-        return json;
-    };
-    let Some(items) = value.as_array_mut() else {
-        return json;
-    };
-    let Some(first) = items.first_mut().and_then(|item| item.as_object_mut()) else {
-        return json;
-    };
-    if let Some(plan) = first.get_mut("Plan") {
-        // :HACK: the executor-state JSON path is still derived from text
-        // node labels such as "Seq Scan on rel alias". Normalize only the
-        // PostgreSQL-visible structured EXPLAIN fields here until PlanNode
-        // exposes structured node metadata directly.
-        normalize_structured_plan_json(
-            plan,
-            analyze,
-            buffers || (analyze && memory),
-            costs,
-            buffers && track_io_timing,
-        );
-    }
-    if settings {
-        first.insert(
-            "Settings".into(),
-            serde_json::json!({ "plan_cache_mode": "force_generic_plan" }),
-        );
-    }
-    if buffers || memory {
-        first.insert(
-            "Planning".into(),
-            structured_planning_object(
-                buffers || (analyze && memory),
-                memory,
-                buffers && track_io_timing,
-            ),
-        );
-    }
-    if memory || analyze {
-        first
-            .entry("Planning Time")
-            .or_insert_with(|| serde_json::json!(0.0));
-    }
-    if let Some(format) = serialize {
-        first.insert(
-            "Serialization".into(),
-            structured_serialization_object(format, buffers, true, buffers && track_io_timing),
-        );
-    }
-    if analyze {
-        first
-            .entry("Triggers")
-            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-        first
-            .entry("Execution Time")
-            .or_insert_with(|| serde_json::json!(0.0));
-    }
-    format_ordered_explain_json(&value, 0)
-}
-
-fn normalize_structured_plan_json(
-    plan: &mut serde_json::Value,
-    analyze: bool,
-    buffers: bool,
-    costs: bool,
-    track_io_timing: bool,
-) {
-    let Some(object) = plan.as_object_mut() else {
-        return;
-    };
-    let node_label = object
-        .get("Node Type")
-        .and_then(|value| value.as_str())
-        .map(str::to_owned);
-    if let Some(label) = node_label.as_deref()
-        && let Some(parts) = parse_explain_node_label(label)
-    {
-        object.insert(
-            "Node Type".into(),
-            serde_json::Value::String(parts.node_type.to_string()),
-        );
-        if let Some(relation_name) = parts.relation_name {
-            object.insert(
-                "Relation Name".into(),
-                serde_json::Value::String(relation_name.to_string()),
-            );
-        }
-        if let Some(alias) = parts.alias {
-            object.insert("Alias".into(), serde_json::Value::String(alias.to_string()));
-        }
-    }
-    object.insert("Parallel Aware".into(), serde_json::Value::Bool(false));
-    object.insert("Async Capable".into(), serde_json::Value::Bool(false));
-    if costs {
-        object
-            .entry("Startup Cost")
-            .or_insert_with(|| serde_json::json!(0.0));
-        object
-            .entry("Total Cost")
-            .or_insert_with(|| serde_json::json!(0.0));
-        object
-            .entry("Plan Rows")
-            .or_insert_with(|| serde_json::json!(0));
-        object
-            .entry("Plan Width")
-            .or_insert_with(|| serde_json::json!(0));
-    }
-    if analyze {
-        object
-            .entry("Actual Startup Time")
-            .or_insert_with(|| serde_json::json!(0.0));
-        object
-            .entry("Actual Total Time")
-            .or_insert_with(|| serde_json::json!(0.0));
-        object
-            .entry("Actual Loops")
-            .or_insert_with(|| serde_json::json!(1));
-    }
-    object
-        .entry("Disabled")
-        .or_insert_with(|| serde_json::Value::Bool(false));
-    let is_bitmap_heap_scan = object
-        .get("Node Type")
-        .and_then(|value| value.as_str())
-        .is_some_and(|node_type| node_type == "Bitmap Heap Scan");
-    if analyze && is_bitmap_heap_scan {
-        // :HACK: PostgreSQL's JSON EXPLAIN exposes this field on bitmap heap
-        // scans even when no rows fail recheck. Keep this local to structured
-        // EXPLAIN rendering until plan nodes expose PostgreSQL-shaped metadata.
-        object
-            .entry("Rows Removed by Index Recheck")
-            .or_insert_with(|| serde_json::json!(0));
-    } else if object
-        .get("Rows Removed by Index Recheck")
-        .is_some_and(|value| value.as_i64() == Some(0) || value.as_u64() == Some(0))
-    {
-        object.remove("Rows Removed by Index Recheck");
-    }
-    if buffers {
-        insert_structured_buffer_fields(object, track_io_timing);
-    }
-    if let Some(children) = object
-        .get_mut("Plans")
-        .and_then(|value| value.as_array_mut())
-    {
-        for child in children {
-            normalize_structured_plan_json(child, analyze, buffers, costs, track_io_timing);
-        }
-    }
-}
-
-struct ExplainNodeLabelParts<'a> {
-    node_type: &'a str,
-    relation_name: Option<&'a str>,
-    alias: Option<&'a str>,
-}
-
-fn parse_explain_node_label(label: &str) -> Option<ExplainNodeLabelParts<'_>> {
-    if let Some((node_type, rest)) = label.split_once(" on ") {
-        let (relation_name, alias) = parse_explain_relation_and_alias(rest);
-        return Some(ExplainNodeLabelParts {
-            node_type,
-            relation_name,
-            alias,
-        });
-    }
-    if let Some((node_type, rest)) = label.split_once(" using ")
-        && let Some((_, relation)) = rest.split_once(" on ")
-    {
-        let (relation_name, alias) = parse_explain_relation_and_alias(relation);
-        return Some(ExplainNodeLabelParts {
-            node_type,
-            relation_name,
-            alias,
-        });
-    }
-    None
-}
-
-fn parse_explain_relation_and_alias(input: &str) -> (Option<&str>, Option<&str>) {
-    let mut parts = input.split_whitespace();
-    let Some(relation) = parts.next() else {
-        return (None, None);
-    };
-    let relation_name = relation.rsplit('.').next().unwrap_or(relation);
-    let alias = parts.next().filter(|alias| *alias != relation_name);
-    (Some(relation_name), alias)
-}
-
-fn structured_planning_object(
-    buffers: bool,
-    memory: bool,
-    track_io_timing: bool,
-) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    if buffers {
-        insert_structured_buffer_fields(&mut object, track_io_timing);
-    }
-    if memory {
-        object.insert("Memory Used".into(), serde_json::json!(0));
-        object.insert("Memory Allocated".into(), serde_json::json!(0));
-    }
-    serde_json::Value::Object(object)
-}
-
-fn structured_serialization_object(
-    format: ExplainSerializeFormat,
-    buffers: bool,
-    timing: bool,
-    track_io_timing: bool,
-) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    if timing {
-        object.insert("Time".into(), serde_json::json!(0.0));
-    }
-    object.insert("Output Volume".into(), serde_json::json!(0));
-    object.insert(
-        "Format".into(),
-        serde_json::Value::String(
-            match format {
-                ExplainSerializeFormat::Text => "text",
-                ExplainSerializeFormat::Binary => "binary",
-            }
-            .into(),
-        ),
-    );
-    if buffers {
-        insert_structured_buffer_fields(&mut object, track_io_timing);
-    }
-    serde_json::Value::Object(object)
-}
-
-fn insert_structured_buffer_fields(
-    object: &mut serde_json::Map<String, serde_json::Value>,
-    track_io_timing: bool,
-) {
-    for key in [
-        "Shared Hit Blocks",
-        "Shared Read Blocks",
-        "Shared Dirtied Blocks",
-        "Shared Written Blocks",
-        "Local Hit Blocks",
-        "Local Read Blocks",
-        "Local Dirtied Blocks",
-        "Local Written Blocks",
-        "Temp Read Blocks",
-        "Temp Written Blocks",
-    ] {
-        object.entry(key).or_insert_with(|| serde_json::json!(0));
-    }
-    if track_io_timing {
-        for key in [
-            "Shared I/O Read Time",
-            "Shared I/O Write Time",
-            "Local I/O Read Time",
-            "Local I/O Write Time",
-            "Temp I/O Read Time",
-            "Temp I/O Write Time",
-        ] {
-            object.entry(key).or_insert_with(|| serde_json::json!(0.0));
-        }
-    }
-}
-
-fn format_ordered_explain_json(value: &serde_json::Value, indent: usize) -> String {
-    match value {
-        serde_json::Value::Object(map) => {
-            if map.is_empty() {
-                return "{}".into();
-            }
-            let pad = " ".repeat(indent);
-            let child_pad = " ".repeat(indent + 2);
-            let entries = ordered_explain_json_entries(map);
-            let mut lines = vec!["{".to_string()];
-            for (idx, (key, child)) in entries.iter().enumerate() {
-                let suffix = if idx + 1 == entries.len() { "" } else { "," };
-                lines.push(format!(
-                    "{child_pad}{}: {}{suffix}",
-                    serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into()),
-                    format_ordered_explain_json(child, indent + 2)
-                ));
-            }
-            lines.push(format!("{pad}}}"));
-            lines.join("\n")
-        }
-        serde_json::Value::Array(items) => {
-            if items.is_empty() {
-                let pad = " ".repeat(indent);
-                return format!("[\n{pad}]");
-            }
-            let pad = " ".repeat(indent);
-            let child_pad = " ".repeat(indent + 2);
-            let mut lines = vec!["[".to_string()];
-            for (idx, item) in items.iter().enumerate() {
-                let suffix = if idx + 1 == items.len() { "" } else { "," };
-                lines.push(format!(
-                    "{child_pad}{}{suffix}",
-                    format_ordered_explain_json(item, indent + 2)
-                ));
-            }
-            lines.push(format!("{pad}]"));
-            lines.join("\n")
-        }
-        scalar => serde_json::to_string(scalar).unwrap_or_else(|_| "null".into()),
-    }
-}
-
-fn ordered_explain_json_entries<'a>(
-    map: &'a serde_json::Map<String, serde_json::Value>,
-) -> Vec<(&'a String, &'a serde_json::Value)> {
-    let mut entries = map.iter().collect::<Vec<_>>();
-    entries.sort_by(|(left, _), (right, _)| {
-        explain_json_key_order(left)
-            .cmp(&explain_json_key_order(right))
-            .then_with(|| left.cmp(right))
-    });
-    entries
-}
-
-fn explain_json_key_order(key: &str) -> usize {
-    [
-        "Plan",
-        "Node Type",
-        "Parallel Aware",
-        "Async Capable",
-        "Relation Name",
-        "Alias",
-        "Schema",
-        "Startup Cost",
-        "Total Cost",
-        "Plan Rows",
-        "Plan Width",
-        "Actual Startup Time",
-        "Actual Total Time",
-        "Actual Rows",
-        "Actual Loops",
-        "Disabled",
-        "Output",
-        "Sort Key",
-        "Filter",
-        "Recheck Cond",
-        "Index Cond",
-        "Hash Cond",
-        "Join Filter",
-        "Rows Removed by Filter",
-        "Rows Removed by Index Recheck",
-        "Time",
-        "Output Volume",
-        "Format",
-        "Shared Hit Blocks",
-        "Shared Read Blocks",
-        "Shared Dirtied Blocks",
-        "Shared Written Blocks",
-        "Local Hit Blocks",
-        "Local Read Blocks",
-        "Local Dirtied Blocks",
-        "Local Written Blocks",
-        "Temp Read Blocks",
-        "Temp Written Blocks",
-        "Shared I/O Read Time",
-        "Shared I/O Write Time",
-        "Local I/O Read Time",
-        "Local I/O Write Time",
-        "Temp I/O Read Time",
-        "Temp I/O Write Time",
-        "Plans",
-        "Planning",
-        "Memory Used",
-        "Memory Allocated",
-        "Planning Time",
-        "Triggers",
-        "Serialization",
-        "Execution Time",
-    ]
-    .iter()
-    .position(|candidate| *candidate == key)
-    .unwrap_or(usize::MAX)
-}
-
 fn explain_guc_enabled(gucs: &HashMap<String, String>, name: &str) -> bool {
-    gucs.get(name).is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "on" | "true" | "yes" | "1" | "t"
-        )
-    })
+    pgrust_commands::explain::guc_enabled(gucs, name)
 }
 
 fn insert_explain_memory_line(lines: &mut Vec<String>) {
-    let index = usize::from(!lines.is_empty());
-    lines.insert(index, "  Memory: used=0kB  allocated=0kB".into());
+    pgrust_commands::explain::insert_memory_line(lines);
 }
 
 fn push_explain_settings_line(lines: &mut Vec<String>) {
-    lines.push("Settings: plan_cache_mode = 'force_generic_plan'".into());
+    pgrust_commands::explain::push_settings_line(lines);
 }
 
 fn insert_explain_serialization_line(
@@ -1351,51 +908,15 @@ fn insert_explain_serialization_line(
     format: ExplainSerializeFormat,
     timing: bool,
 ) {
-    let format = match format {
-        ExplainSerializeFormat::Text => "text",
-        ExplainSerializeFormat::Binary => "binary",
-    };
-    let line = if timing {
-        format!("Serialization: time=0.000 ms  output=0kB  format={format}")
-    } else {
-        format!("Serialization: output=0kB  format={format}")
-    };
-    let index = lines
-        .iter()
-        .position(|line| line.starts_with("Execution Time:"))
-        .unwrap_or(lines.len());
-    lines.insert(index, line);
+    pgrust_commands::explain::insert_serialization_line(lines, format, timing);
 }
 
 pub(crate) fn explain_query_column(json_output: bool) -> QueryColumn {
-    if json_output {
-        QueryColumn {
-            name: "QUERY PLAN".into(),
-            sql_type: SqlType::new(SqlTypeKind::Json),
-            wire_type_oid: None,
-        }
-    } else {
-        QueryColumn::text("QUERY PLAN")
-    }
+    pgrust_commands::explain::query_column(json_output)
 }
 
 fn explain_merge_target_name(target_name: &str, verbose: bool) -> String {
-    if !verbose {
-        return target_name.to_string();
-    }
-    let qualify = |name: &str| {
-        if name.contains('.') {
-            name.to_string()
-        } else {
-            format!("public.{name}")
-        }
-    };
-    match target_name.rsplit_once(' ') {
-        Some((relation, alias)) if !alias.is_empty() => {
-            format!("{} {alias}", qualify(relation))
-        }
-        _ => qualify(target_name),
-    }
+    pgrust_commands::explain::merge_target_name(target_name, verbose)
 }
 
 fn execute_explain_merge_analyze(
@@ -1684,63 +1205,19 @@ fn explain_writable_cte_producer_lines(
 }
 
 fn statement_result_text_lines(result: StatementResult) -> Vec<String> {
-    match result {
-        StatementResult::Query { rows, .. } => rows
-            .into_iter()
-            .filter_map(|row| match row.into_iter().next() {
-                Some(Value::Text(text)) => Some(text.to_string()),
-                _ => None,
-            })
-            .collect(),
-        StatementResult::AffectedRows(_) => Vec::new(),
-    }
+    pgrust_commands::explain::statement_result_text_lines(result)
 }
 
 fn statement_top_level_ctes(statement: &Statement) -> Vec<CommonTableExpr> {
-    match statement {
-        Statement::Select(stmt) => stmt.with.clone(),
-        Statement::Insert(stmt) => stmt.with.clone(),
-        Statement::Update(stmt) => stmt.with.clone(),
-        Statement::Delete(stmt) => stmt.with.clone(),
-        Statement::Merge(stmt) => stmt.with.clone(),
-        Statement::Values(stmt) => stmt.with.clone(),
-        _ => Vec::new(),
-    }
+    pgrust_commands::explain::statement_top_level_ctes(statement)
 }
 
 fn explain_statement_has_writable_ctes(statement: &Statement) -> bool {
-    match statement {
-        Statement::Select(stmt) => select_statement_has_writable_ctes(stmt),
-        Statement::Insert(stmt) => ctes_have_writable_body(&stmt.with),
-        Statement::Update(stmt) => ctes_have_writable_body(&stmt.with),
-        Statement::Delete(stmt) => ctes_have_writable_body(&stmt.with),
-        Statement::Merge(stmt) => ctes_have_writable_body(&stmt.with),
-        Statement::Values(stmt) => ctes_have_writable_body(&stmt.with),
-        _ => false,
-    }
-}
-
-fn ctes_have_writable_body(ctes: &[CommonTableExpr]) -> bool {
-    ctes.iter().any(|cte| cte_body_is_writable(&cte.body))
-}
-
-fn select_statement_has_writable_ctes(stmt: &SelectStatement) -> bool {
-    ctes_have_writable_body(&stmt.with)
-        || stmt
-            .set_operation
-            .as_ref()
-            .is_some_and(|setop| setop.inputs.iter().any(select_statement_has_writable_ctes))
+    pgrust_commands::explain::statement_has_writable_ctes(statement)
 }
 
 fn cte_body_is_writable(body: &CteBody) -> bool {
-    match body {
-        CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => true,
-        CteBody::Select(stmt) => select_statement_has_writable_ctes(stmt),
-        CteBody::Values(stmt) => ctes_have_writable_body(&stmt.with),
-        CteBody::RecursiveUnion {
-            anchor, recursive, ..
-        } => cte_body_is_writable(anchor) || select_statement_has_writable_ctes(recursive),
-    }
+    pgrust_commands::explain::cte_body_is_writable(body)
 }
 
 enum EitherExplainTarget {
@@ -2411,76 +1888,24 @@ fn push_explain_insert_on_conflict_lines(
     costs: bool,
     lines: &mut Vec<String>,
 ) {
-    let Some(on_conflict) = &bound.on_conflict else {
-        return;
-    };
-    match &on_conflict.action {
-        BoundOnConflictAction::Nothing => lines.push("  Conflict Resolution: NOTHING".into()),
-        BoundOnConflictAction::Update { predicate, .. } => {
-            lines.push("  Conflict Resolution: UPDATE".into());
-            if !on_conflict.arbiter_indexes.is_empty() {
-                lines.push(format!(
-                    "  Conflict Arbiter Indexes: {}",
-                    on_conflict
-                        .arbiter_indexes
-                        .iter()
-                        .map(|index| index.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            if let Some(predicate) = predicate {
-                let (outer_names, inner_names) =
-                    explain_insert_conflict_column_names(bound, conflict_target_prefix);
-                lines.push(format!(
-                    "  Conflict Filter: {}",
-                    render_modify_join_expr(predicate, &outer_names, &inner_names)
-                ));
-            }
-            return;
-        }
-    }
-    if !on_conflict.arbiter_indexes.is_empty() {
-        lines.push(format!(
-            "  Conflict Arbiter Indexes: {}",
-            on_conflict
-                .arbiter_indexes
-                .iter()
-                .map(|index| index.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
     let _ = costs;
+    pgrust_commands::explain::push_insert_on_conflict_lines(
+        bound,
+        conflict_target_prefix,
+        lines,
+        render_modify_join_expr,
+    );
 }
 
 fn explain_insert_conflict_predicate(bound: &BoundInsertStatement) -> Option<&Expr> {
-    match bound.on_conflict.as_ref().map(|clause| &clause.action) {
-        Some(BoundOnConflictAction::Update {
-            predicate: Some(predicate),
-            ..
-        }) => Some(predicate),
-        _ => None,
-    }
+    pgrust_commands::explain::insert_conflict_predicate(bound)
 }
 
 fn explain_insert_conflict_column_names(
     bound: &BoundInsertStatement,
     target_prefix: &str,
 ) -> (Vec<String>, Vec<String>) {
-    let outer = bound
-        .desc
-        .columns
-        .iter()
-        .map(|column| format!("{target_prefix}.{}", column.name))
-        .collect::<Vec<_>>();
-    let inner = bound
-        .desc
-        .columns
-        .iter()
-        .map(|column| format!("excluded.{}", column.name))
-        .collect::<Vec<_>>();
-    (outer, inner)
+    pgrust_commands::explain::insert_conflict_column_names(bound, target_prefix)
 }
 
 fn explain_insert_json(
@@ -2488,64 +1913,12 @@ fn explain_insert_json(
     bound: &BoundInsertStatement,
     conflict_target_prefix: &str,
 ) -> String {
-    let mut lines = vec![
-        "[".into(),
-        "  {".into(),
-        "    \"Plan\": {".into(),
-        "      \"Node Type\": \"ModifyTable\",".into(),
-        "      \"Operation\": \"Insert\",".into(),
-        "      \"Parallel Aware\": false,".into(),
-        "      \"Async Capable\": false,".into(),
-        format!("      \"Relation Name\": \"{target_name}\","),
-        format!("      \"Alias\": \"{target_name}\","),
-        "      \"Disabled\": false".into(),
-    ];
-    if let Some(on_conflict) = &bound.on_conflict {
-        match &on_conflict.action {
-            BoundOnConflictAction::Nothing => {
-                lines.last_mut().unwrap().push(',');
-                lines.push("      \"Conflict Resolution\": \"NOTHING\"".into());
-            }
-            BoundOnConflictAction::Update { predicate, .. } => {
-                lines.last_mut().unwrap().push(',');
-                lines.push("      \"Conflict Resolution\": \"UPDATE\",".into());
-                lines.push(format!(
-                    "      \"Conflict Arbiter Indexes\": [{}]{}",
-                    on_conflict
-                        .arbiter_indexes
-                        .iter()
-                        .map(|index| format!("\"{}\"", index.name))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    if predicate.is_some() { "," } else { "" }
-                ));
-                if let Some(predicate) = predicate {
-                    let (outer_names, inner_names) =
-                        explain_insert_conflict_column_names(bound, conflict_target_prefix);
-                    lines.push(format!(
-                        "      \"Conflict Filter\": \"{}\"",
-                        render_modify_join_expr(predicate, &outer_names, &inner_names)
-                    ));
-                }
-            }
-        }
-    }
-    lines.last_mut().unwrap().push(',');
-    lines.extend([
-        "      \"Plans\": [".into(),
-        "        {".into(),
-        "          \"Node Type\": \"Result\",".into(),
-        "          \"Parent Relationship\": \"Outer\",".into(),
-        "          \"Parallel Aware\": false,".into(),
-        "          \"Async Capable\": false,".into(),
-        "          \"Disabled\": false".into(),
-        "        }".into(),
-        "      ]".into(),
-        "    }".into(),
-        "  }".into(),
-        "]".into(),
-    ]);
-    lines.join("\n")
+    pgrust_commands::explain::insert_json(
+        target_name,
+        bound,
+        conflict_target_prefix,
+        render_modify_join_expr,
+    )
 }
 
 fn execute_explain_insert_with_merge_ctes(
@@ -3086,56 +2459,19 @@ fn render_merge_sql_expr(expr: &SqlExpr) -> String {
 }
 
 fn explain_child_prefix(indent: usize) -> String {
-    let spaces = if indent <= 1 {
-        indent * 2
-    } else {
-        2 + (indent - 1) * 6
-    };
-    format!("{}->  ", " ".repeat(spaces))
+    pgrust_commands::explain::child_prefix(indent)
 }
 
 fn explain_detail_prefix_local(indent: usize) -> String {
-    if indent == 0 {
-        "  ".into()
-    } else {
-        " ".repeat(2 + indent * 6)
-    }
+    pgrust_commands::explain::detail_prefix(indent)
 }
 
 fn plain_explain_prefix(indent: usize) -> String {
-    "  ".repeat(indent)
+    pgrust_commands::explain::plain_prefix(indent)
 }
 
 fn reorder_insert_explain_cte_lines(lines: Vec<String>) -> Vec<String> {
-    let mut cte_lines = Vec::new();
-    let mut other_lines = Vec::new();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = &lines[index];
-        if line.trim_start().starts_with("CTE ") {
-            let cte_indent = leading_spaces(line);
-            cte_lines.push(dedent_explain_line(line, 6));
-            index += 1;
-            while index < lines.len() && leading_spaces(&lines[index]) > cte_indent {
-                cte_lines.push(dedent_explain_line(&lines[index], 6));
-                index += 1;
-            }
-        } else {
-            other_lines.push(line.clone());
-            index += 1;
-        }
-    }
-    cte_lines.extend(other_lines);
-    cte_lines
-}
-
-fn leading_spaces(line: &str) -> usize {
-    line.bytes().take_while(|byte| *byte == b' ').count()
-}
-
-fn dedent_explain_line(line: &str, spaces: usize) -> String {
-    let remove = leading_spaces(line).min(spaces);
-    line[remove..].to_string()
+    pgrust_commands::explain::reorder_insert_cte_lines(lines)
 }
 
 fn explain_insert_source_plan(
@@ -3189,236 +2525,11 @@ fn explain_insert_rule_target(
 }
 
 fn push_explain_insert_conflict_lines(bound: &BoundInsertStatement, lines: &mut Vec<String>) {
-    let Some(on_conflict) = bound.on_conflict.as_ref() else {
-        return;
-    };
-    match &on_conflict.action {
-        BoundOnConflictAction::Nothing => lines.push("  Conflict Resolution: NOTHING".into()),
-        BoundOnConflictAction::Update { predicate, .. } => {
-            lines.push("  Conflict Resolution: UPDATE".into());
-            if !on_conflict.arbiter_indexes.is_empty() {
-                lines.push(format!(
-                    "  Conflict Arbiter Indexes: {}",
-                    on_conflict
-                        .arbiter_indexes
-                        .iter()
-                        .map(|index| index.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            if let Some(predicate) = predicate {
-                lines.push(format!(
-                    "  Conflict Filter: {}",
-                    render_insert_conflict_filter(bound, predicate)
-                ));
-            }
-        }
-    }
-}
-
-fn render_insert_conflict_filter(bound: &BoundInsertStatement, expr: &Expr) -> String {
-    let target_name = bound
-        .relation_name
-        .rsplit_once('.')
-        .map(|(_, name)| name)
-        .unwrap_or(&bound.relation_name);
-    let outer_names = bound
-        .desc
-        .columns
-        .iter()
-        .map(|column| format!("{target_name}.{}", column.name))
-        .collect::<Vec<_>>();
-    let inner_names = bound
-        .desc
-        .columns
-        .iter()
-        .map(|column| format!("excluded.{}", column.name))
-        .collect::<Vec<_>>();
-    let rendered = render_insert_conflict_expr(expr, target_name, &outer_names, &inner_names);
-    normalize_insert_conflict_bpchar_literals(&rendered, bound, target_name)
-}
-
-fn render_insert_conflict_expr(
-    expr: &Expr,
-    target_name: &str,
-    outer_names: &[String],
-    inner_names: &[String],
-) -> String {
-    match expr {
-        Expr::Var(var) if var.varno == OUTER_VAR && var.varattno == 0 => {
-            format!("{target_name}.*")
-        }
-        Expr::Var(var) if var.varno == INNER_VAR && var.varattno == 0 => "excluded.*".into(),
-        other if insert_conflict_expr_is_expanded_whole_row_neq(other) => {
-            format!("({target_name}.* <> excluded.*)")
-        }
-        Expr::Bool(bool_expr) if matches!(bool_expr.boolop, BoolExprType::And) => format!(
-            "({})",
-            bool_expr
-                .args
-                .iter()
-                .map(|arg| render_insert_conflict_expr(arg, target_name, outer_names, inner_names))
-                .collect::<Vec<_>>()
-                .join(" AND ")
-        ),
-        Expr::Op(op) if op.args.len() == 2 => {
-            let op_text = match op.op {
-                OpExprKind::Eq => "=",
-                OpExprKind::NotEq => "<>",
-                OpExprKind::Lt => "<",
-                OpExprKind::LtEq => "<=",
-                OpExprKind::Gt => ">",
-                OpExprKind::GtEq => ">=",
-                _ => {
-                    return crate::backend::executor::render_explain_join_expr(
-                        expr,
-                        outer_names,
-                        inner_names,
-                    );
-                }
-            };
-            format!(
-                "({} {op_text} {})",
-                render_insert_conflict_operand(
-                    &op.args[0],
-                    &op.args[1],
-                    target_name,
-                    outer_names,
-                    inner_names
-                ),
-                render_insert_conflict_operand(
-                    &op.args[1],
-                    &op.args[0],
-                    target_name,
-                    outer_names,
-                    inner_names
-                )
-            )
-        }
-        _ => crate::backend::executor::render_explain_join_expr(expr, outer_names, inner_names),
-    }
-}
-
-fn render_insert_conflict_operand(
-    expr: &Expr,
-    other: &Expr,
-    target_name: &str,
-    outer_names: &[String],
-    inner_names: &[String],
-) -> String {
-    if conflict_expr_type_is_bpchar(other)
-        && let Some(literal) = bpchar_literal_expr(expr)
-    {
-        return format!("{}::bpchar", quote_simple_sql_literal(&literal));
-    }
-    match expr {
-        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
-            render_insert_conflict_operand(inner, other, target_name, outer_names, inner_names)
-        }
-        Expr::Var(var) if var.varno == OUTER_VAR && var.varattno != 0 => attrno_index(var.varattno)
-            .and_then(|index| outer_names.get(index).cloned())
-            .unwrap_or_else(|| {
-                render_insert_conflict_expr(expr, target_name, outer_names, inner_names)
-            }),
-        Expr::Var(var) if var.varno == INNER_VAR && var.varattno != 0 => attrno_index(var.varattno)
-            .and_then(|index| inner_names.get(index).cloned())
-            .unwrap_or_else(|| {
-                render_insert_conflict_expr(expr, target_name, outer_names, inner_names)
-            }),
-        _ => render_insert_conflict_expr(expr, target_name, outer_names, inner_names),
-    }
-}
-
-fn bpchar_literal_expr(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Const(value) => value.as_text().map(ToString::to_string),
-        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => bpchar_literal_expr(inner),
-        _ => None,
-    }
-}
-
-fn conflict_expr_type_is_bpchar(expr: &Expr) -> bool {
-    match expr {
-        Expr::Var(var) => matches!(var.vartype.kind, SqlTypeKind::Char),
-        Expr::Cast(_, ty) => matches!(ty.kind, SqlTypeKind::Char),
-        Expr::Collate { expr, .. } => conflict_expr_type_is_bpchar(expr),
-        _ => expr_sql_type_hint(expr).is_some_and(|ty| matches!(ty.kind, SqlTypeKind::Char)),
-    }
-}
-
-fn quote_simple_sql_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn normalize_insert_conflict_bpchar_literals(
-    rendered: &str,
-    bound: &BoundInsertStatement,
-    target_name: &str,
-) -> String {
-    let mut normalized = rendered.to_string();
-    for column in &bound.desc.columns {
-        if !matches!(column.sql_type.kind, SqlTypeKind::Char) {
-            continue;
-        }
-        for qualifier in [target_name, "excluded"] {
-            let qualified = format!("{qualifier}.{}", column.name);
-            for op in ["<>", "="] {
-                normalized = normalize_bpchar_literal_comparison(&normalized, &qualified, op);
-            }
-        }
-    }
-    normalized
-}
-
-fn normalize_bpchar_literal_comparison(rendered: &str, qualified: &str, op: &str) -> String {
-    let prefix = format!("(({qualified}) {op} ('");
-    let suffix = "'::text))";
-    let mut remaining = rendered;
-    let mut out = String::new();
-    while let Some(start) = remaining.find(&prefix) {
-        out.push_str(&remaining[..start]);
-        let literal_start = start + prefix.len();
-        let after_prefix = &remaining[literal_start..];
-        let Some(end) = after_prefix.find(suffix) else {
-            out.push_str(&remaining[start..]);
-            return out;
-        };
-        let literal = &after_prefix[..end];
-        out.push_str(&format!(
-            "({qualified} {op} {}::bpchar)",
-            quote_simple_sql_literal(literal)
-        ));
-        remaining = &after_prefix[end + suffix.len()..];
-    }
-    out.push_str(remaining);
-    out
-}
-
-fn insert_conflict_expr_is_expanded_whole_row_neq(expr: &Expr) -> bool {
-    let Expr::Bool(bool_expr) = expr else {
-        return false;
-    };
-    if !matches!(bool_expr.boolop, BoolExprType::Or) || bool_expr.args.is_empty() {
-        return false;
-    }
-    bool_expr.args.iter().enumerate().all(|(index, arg)| {
-        let Expr::Op(op) = arg else {
-            return false;
-        };
-        if op.op != OpExprKind::NotEq || op.args.len() != 2 {
-            return false;
-        }
-        matches_conflict_column_var(&op.args[0], OUTER_VAR, index)
-            && matches_conflict_column_var(&op.args[1], INNER_VAR, index)
-    })
-}
-
-fn matches_conflict_column_var(expr: &Expr, varno: usize, index: usize) -> bool {
-    let Expr::Var(var) = expr else {
-        return false;
-    };
-    var.varno == varno && attrno_index(var.varattno) == Some(index)
+    pgrust_commands::explain::push_insert_conflict_lines(
+        bound,
+        lines,
+        crate::backend::executor::render_explain_join_expr,
+    );
 }
 
 #[derive(Clone)]
@@ -3608,11 +2719,7 @@ fn explain_delete_target_name(
 }
 
 fn render_delete_returning_targets(target_name: &str, returning: &[TargetEntry]) -> String {
-    returning
-        .iter()
-        .map(|target| format!("{target_name}.{}", target.name))
-        .collect::<Vec<_>>()
-        .join(", ")
+    pgrust_commands::explain::returning_targets(target_name, returning)
 }
 
 fn load_explain_delete_rules(
@@ -4139,25 +3246,7 @@ fn push_delete_scan_detail_lines(
 }
 
 fn explain_delete_index_cond(target: &BoundDeleteTarget) -> Option<String> {
-    let BoundModifyRowSource::Index { index, keys } = &target.row_source else {
-        return None;
-    };
-    let rendered = keys
-        .iter()
-        .filter_map(|key| {
-            let index_attno = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
-            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?)
-                .ok()?
-                .checked_sub(1)?;
-            let column_name = target.desc.columns.get(heap_attno)?.name.clone();
-            Some(format!(
-                "({column_name} {} {})",
-                explain_strategy_operator(key.strategy),
-                render_explain_index_value(&key.argument)
-            ))
-        })
-        .collect::<Vec<_>>();
-    format_explain_index_quals(rendered)
+    pgrust_commands::explain::delete_index_cond(target, render_explain_index_value)
 }
 
 fn substitute_old_constants_for_explain(expr: &Expr, event_target: &BoundDeleteTarget) -> Expr {
@@ -4537,66 +3626,24 @@ fn explain_update_lines(
 }
 
 fn current_of_tidscan_display_cursor(predicate: Option<&Expr>) -> Option<String> {
-    let predicate = predicate?;
-    let conjuncts = current_of_flatten_and(predicate);
-    let mut cursor = None;
-    let mut has_ctid_eq = false;
-    for conjunct in conjuncts {
-        if let Some(marker_cursor) = current_of_marker_cursor(conjunct) {
-            cursor = Some(marker_cursor);
-        } else if current_of_ctid_equality(conjunct) {
-            has_ctid_eq = true;
-        } else {
-            return None;
-        }
+    pgrust_commands::tablecmds::current_of_tidscan_display_cursor(predicate)
+}
+
+fn tablecmds_error_to_exec(err: pgrust_commands::tablecmds::TableCmdsError) -> ExecError {
+    match err {
+        pgrust_commands::tablecmds::TableCmdsError::Parse(error) => ExecError::Parse(error),
+        pgrust_commands::tablecmds::TableCmdsError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
     }
-    if has_ctid_eq { cursor } else { None }
-}
-
-fn current_of_flatten_and(expr: &Expr) -> Vec<&Expr> {
-    match expr {
-        Expr::Bool(bool_expr) if matches!(bool_expr.boolop, BoolExprType::And) => bool_expr
-            .args
-            .iter()
-            .flat_map(current_of_flatten_and)
-            .collect(),
-        _ => vec![expr],
-    }
-}
-
-fn current_of_marker_cursor(predicate: &Expr) -> Option<String> {
-    match predicate {
-        Expr::Op(op) if matches!(op.op, OpExprKind::Eq) && op.args.len() == 2 => {
-            let left = current_of_marker_text(&op.args[0])?;
-            let right = current_of_marker_text(&op.args[1])?;
-            (left == right).then(|| left.trim_start_matches("__pgrust_current_of:").to_string())
-        }
-        _ => None,
-    }
-}
-
-fn current_of_ctid_equality(predicate: &Expr) -> bool {
-    let Expr::Op(op) = predicate else {
-        return false;
-    };
-    matches!(op.op, OpExprKind::Eq) && op.args.len() == 2 && op.args.iter().any(expr_is_ctid_var)
-}
-
-fn expr_is_ctid_var(expr: &Expr) -> bool {
-    match expr {
-        Expr::Var(var) => var.varattno == SELF_ITEM_POINTER_ATTR_NO,
-        Expr::Cast(inner, _) => expr_is_ctid_var(inner),
-        _ => false,
-    }
-}
-
-fn current_of_marker_text(expr: &Expr) -> Option<&str> {
-    let Expr::Const(value) = expr else {
-        return None;
-    };
-    let text = value.as_text()?;
-    text.strip_prefix("__pgrust_current_of:")?;
-    Some(text)
 }
 
 fn explain_update_verbose_onetime_result(
@@ -5138,18 +4185,11 @@ fn explain_delete_scan_target<'a>(
 }
 
 fn explain_update_target_name(table_name: &str, verbose: bool) -> String {
-    if !verbose || table_name.contains('.') {
-        return table_name.to_string();
-    }
-    format!("public.{table_name}")
+    pgrust_commands::explain::update_target_name(table_name, verbose)
 }
 
 fn render_update_returning_targets(target_name: &str, returning: &[TargetEntry]) -> String {
-    returning
-        .iter()
-        .map(|target| format!("{target_name}.{}", target.name))
-        .collect::<Vec<_>>()
-        .join(", ")
+    pgrust_commands::explain::returning_targets(target_name, returning)
 }
 
 fn render_update_projection_output(target_name: &str, target: &BoundUpdateTarget) -> String {
@@ -5364,94 +4404,23 @@ fn update_assignments_replace_composite_field_values(target: &BoundUpdateTarget)
 }
 
 fn qualified_update_scan_column_names(target: &BoundUpdateTarget) -> Vec<String> {
-    target
-        .desc
-        .columns
-        .iter()
-        .map(|column| format!("{}.{}", target.relation_name, column.name))
-        .collect()
+    pgrust_commands::explain::qualified_update_scan_column_names(target)
 }
 
 fn explain_update_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) -> String {
-    match &target.row_source {
-        BoundModifyRowSource::Heap => match alias {
-            Some(alias) => format!("Seq Scan on {} {alias}", target.relation_name),
-            None => format!("Seq Scan on {}", target.relation_name),
-        },
-        BoundModifyRowSource::Index { index, .. } => match alias {
-            Some(alias) => format!(
-                "Index Scan using {} on {} {alias}",
-                index.name, target.relation_name
-            ),
-            None => format!(
-                "Index Scan using {} on {}",
-                index.name, target.relation_name
-            ),
-        },
-    }
+    pgrust_commands::explain::update_scan_label(target, alias)
 }
 
 fn explain_update_verbose_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) -> String {
-    let relation_name = explain_update_target_name(&target.relation_name, true);
-    match &target.row_source {
-        BoundModifyRowSource::Heap => match alias {
-            Some(alias) => format!("Seq Scan on {relation_name} {alias}"),
-            None => format!("Seq Scan on {relation_name}"),
-        },
-        BoundModifyRowSource::Index { index, .. } => match alias {
-            Some(alias) => format!("Index Scan using {} on {relation_name} {alias}", index.name),
-            None => format!("Index Scan using {} on {relation_name}", index.name),
-        },
-    }
+    pgrust_commands::explain::update_verbose_scan_label(target, alias)
 }
 
 fn explain_delete_scan_label(target: &BoundDeleteTarget, alias: Option<&str>) -> String {
-    match &target.row_source {
-        BoundModifyRowSource::Heap => match alias {
-            Some(alias) => format!("Seq Scan on {} {alias}", target.relation_name),
-            None => format!("Seq Scan on {}", target.relation_name),
-        },
-        BoundModifyRowSource::Index { index, .. } => match alias {
-            Some(alias) => format!(
-                "Index Scan using {} on {} {alias}",
-                index.name, target.relation_name
-            ),
-            None => format!(
-                "Index Scan using {} on {}",
-                index.name, target.relation_name
-            ),
-        },
-    }
+    pgrust_commands::explain::delete_scan_label(target, alias)
 }
 
 fn explain_update_index_cond(target: &BoundUpdateTarget) -> Option<String> {
-    let BoundModifyRowSource::Index { index, keys } = &target.row_source else {
-        return None;
-    };
-    let rendered = keys
-        .iter()
-        .filter_map(|key| {
-            let index_attno = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
-            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?)
-                .ok()?
-                .checked_sub(1)?;
-            let column_name = target.desc.columns.get(heap_attno)?.name.clone();
-            Some(format!(
-                "({column_name} {} {})",
-                explain_strategy_operator(key.strategy),
-                render_explain_index_value(&key.argument)
-            ))
-        })
-        .collect::<Vec<_>>();
-    format_explain_index_quals(rendered)
-}
-
-fn format_explain_index_quals(rendered: Vec<String>) -> Option<String> {
-    match rendered.as_slice() {
-        [] => None,
-        [single] => Some(single.clone()),
-        _ => Some(format!("({})", rendered.join(" AND "))),
-    }
+    pgrust_commands::explain::update_index_cond(target, render_explain_index_value)
 }
 
 fn render_explain_index_value(value: &Value) -> String {
@@ -5464,51 +4433,36 @@ fn render_explain_index_value(value: &Value) -> String {
 }
 
 fn explain_strategy_operator(strategy: u16) -> &'static str {
-    match strategy {
-        1 => "<",
-        2 => "<=",
-        3 => "=",
-        4 => ">=",
-        5 => ">",
-        _ => "=",
-    }
+    pgrust_commands::explain::strategy_operator(strategy)
 }
 
 fn is_const_false(expr: Option<&Expr>) -> bool {
-    matches!(expr, Some(Expr::Const(Value::Bool(false))))
+    pgrust_commands::explain::is_const_false(expr)
 }
 
 fn validate_maintenance_targets(
     targets: &[MaintenanceTarget],
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
-    for target in targets {
-        let entry = match catalog.lookup_any_relation(&target.table_name) {
-            Some(entry) if matches!(entry.relkind, 'r' | 'm') => entry,
-            Some(_) => {
-                return Err(ExecError::Parse(ParseError::WrongObjectType {
-                    name: target.table_name.clone(),
-                    expected: "table or materialized view",
-                }));
-            }
-            None => {
-                return Err(ExecError::Parse(ParseError::UnknownTable(
-                    target.table_name.clone(),
-                )));
-            }
-        };
-        for column in &target.columns {
-            if !entry
-                .desc
-                .columns
-                .iter()
-                .any(|desc| desc.name.eq_ignore_ascii_case(column))
-            {
-                return Err(ExecError::Parse(ParseError::UnknownColumn(column.clone())));
-            }
-        }
+    pgrust_commands::maintenance::validate_maintenance_targets(targets, catalog)
+        .map_err(maintenance_error_to_exec)
+}
+
+fn maintenance_error_to_exec(err: pgrust_commands::maintenance::MaintenanceError) -> ExecError {
+    match err {
+        pgrust_commands::maintenance::MaintenanceError::Parse(err) => ExecError::Parse(err),
+        pgrust_commands::maintenance::MaintenanceError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
     }
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -5539,286 +4493,31 @@ impl UpdatedRowWriteInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PublicationDmlAction {
-    Update,
-    Delete,
-}
+pub(crate) use pgrust_commands::publication::PublicationDmlAction;
 
-impl PublicationDmlAction {
-    fn publishes(self, publication: &PgPublicationRow) -> bool {
-        match self {
-            Self::Update => publication.pubupdate,
-            Self::Delete => publication.pubdelete,
-        }
-    }
-
-    fn verb(self) -> &'static str {
-        match self {
-            Self::Update => "update",
-            Self::Delete => "delete from",
-        }
-    }
-
-    fn noun(self) -> &'static str {
-        match self {
-            Self::Update => "updates",
-            Self::Delete => "deletes",
-        }
-    }
-
-    fn gerund(self) -> &'static str {
-        match self {
-            Self::Update => "updating",
-            Self::Delete => "deleting from",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplicaIdentityColumns {
-    None,
-    Full,
-    Columns,
-}
-
-fn publication_replica_identity_error(
-    relation_name: &str,
-    action: PublicationDmlAction,
-    detail: Option<&'static str>,
+fn publication_replica_identity_error_to_exec(
+    err: pgrust_commands::publication::PublicationReplicaIdentityError,
 ) -> ExecError {
-    match detail {
-        Some(detail) => ExecError::DetailedError {
-            message: format!("cannot {} table \"{relation_name}\"", action.verb()),
-            detail: Some(detail.into()),
-            hint: None,
-            sqlstate: "55000",
-        },
-        None => ExecError::DetailedError {
-            message: format!(
-                "cannot {} table \"{relation_name}\" because it does not have a replica identity and publishes {}",
-                action.verb(),
-                action.noun()
-            ),
-            detail: None,
-            hint: Some(format!(
-                "To enable {} the table, set REPLICA IDENTITY using ALTER TABLE.",
-                action.gerund()
-            )),
-            sqlstate: "55000",
+    match err {
+        pgrust_commands::publication::PublicationReplicaIdentityError::Parse(err) => {
+            ExecError::Parse(err)
+        }
+        pgrust_commands::publication::PublicationReplicaIdentityError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
         },
     }
 }
 
-fn relation_and_publication_parent_oids(
-    catalog: &dyn CatalogLookup,
-    relation_oid: u32,
-) -> Vec<u32> {
-    let mut oids = vec![relation_oid];
-    let mut pending = vec![relation_oid];
-    while let Some(oid) = pending.pop() {
-        for parent in catalog.inheritance_parents(oid) {
-            if !oids.contains(&parent.inhparent) {
-                oids.push(parent.inhparent);
-                pending.push(parent.inhparent);
-            }
-        }
-    }
-    oids
-}
-
-fn active_publication_memberships(
-    catalog: &dyn CatalogLookup,
-    relation_oid: u32,
-    namespace_oid: u32,
-    action: PublicationDmlAction,
-) -> Vec<(PgPublicationRow, Option<PgPublicationRelRow>)> {
-    let relation_oids = relation_and_publication_parent_oids(catalog, relation_oid);
-    let mut namespace_oids = relation_oids
-        .iter()
-        .filter_map(|oid| catalog.class_row_by_oid(*oid).map(|row| row.relnamespace))
-        .collect::<Vec<_>>();
-    if !namespace_oids.contains(&namespace_oid) {
-        namespace_oids.push(namespace_oid);
-    }
-    let publication_rows = catalog.publication_rows();
-    let publication_rel_rows = catalog.publication_rel_rows();
-    let publication_namespace_rows = catalog.publication_namespace_rows();
-    let mut memberships = Vec::new();
-
-    for publication in publication_rows {
-        if !action.publishes(&publication) {
-            continue;
-        }
-        let rel_rows = publication_rel_rows
-            .iter()
-            .filter(|row| row.prpubid == publication.oid && relation_oids.contains(&row.prrelid))
-            .collect::<Vec<_>>();
-        let excluded = rel_rows.iter().any(|row| row.prexcept);
-        if let Some(row) = rel_rows.into_iter().find(|row| !row.prexcept) {
-            memberships.push((publication, Some(row.clone())));
-            continue;
-        }
-        if publication.puballtables && !excluded {
-            memberships.push((publication, None));
-            continue;
-        }
-        if publication_namespace_rows
-            .iter()
-            .any(|row| row.pnpubid == publication.oid && namespace_oids.contains(&row.pnnspid))
-        {
-            memberships.push((publication, None));
-        }
-    }
-
-    memberships
-}
-
-fn replica_identity_columns(
-    relation_oid: u32,
-    desc: &RelationDesc,
-    indexes: &[BoundIndexRelation],
-    catalog: &dyn CatalogLookup,
-) -> (ReplicaIdentityColumns, Vec<i16>) {
-    match catalog
-        .class_row_by_oid(relation_oid)
-        .map(|row| row.relreplident)
-        .unwrap_or('d')
-    {
-        'f' => (
-            ReplicaIdentityColumns::Full,
-            desc.columns
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, column)| {
-                    (!column.dropped)
-                        .then(|| i16::try_from(idx + 1).ok())
-                        .flatten()
-                })
-                .collect(),
-        ),
-        'i' => indexes
-            .iter()
-            .find(|index| {
-                catalog
-                    .index_row_by_oid(index.relation_oid)
-                    .map(|row| row.indisreplident)
-                    .unwrap_or(index.index_meta.indisreplident)
-            })
-            .map(|index| {
-                (
-                    ReplicaIdentityColumns::Columns,
-                    index.index_meta.indkey.clone(),
-                )
-            })
-            .unwrap_or((ReplicaIdentityColumns::None, Vec::new())),
-        'n' => (ReplicaIdentityColumns::None, Vec::new()),
-        _ => indexes
-            .iter()
-            .find(|index| index.index_meta.indisprimary && index.index_meta.indimmediate)
-            .map(|index| {
-                (
-                    ReplicaIdentityColumns::Columns,
-                    index.index_meta.indkey.clone(),
-                )
-            })
-            .unwrap_or((ReplicaIdentityColumns::None, Vec::new())),
-    }
-}
-
-fn relation_column_attnum(desc: &RelationDesc, name: &str) -> Option<i16> {
-    let column_name = name.rsplit('.').next().unwrap_or(name);
-    desc.columns
-        .iter()
-        .enumerate()
-        .find(|(_, column)| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
-        .and_then(|(idx, _)| i16::try_from(idx + 1).ok())
-}
-
-fn publication_filter_attnums(qual: &str, desc: &RelationDesc) -> Result<Vec<i16>, ExecError> {
-    let expr = parse_expr(qual).map_err(ExecError::Parse)?;
-    let mut column_names = BTreeSet::new();
-    collect_sql_expr_column_names(&expr, &mut column_names);
-    Ok(column_names
-        .into_iter()
-        .filter_map(|name| relation_column_attnum(desc, &name))
-        .collect())
-}
-
-fn publication_membership_attnums(
-    relation_oid: u32,
-    desc: &RelationDesc,
-    membership: &PgPublicationRelRow,
-    catalog: &dyn CatalogLookup,
-) -> Option<Vec<i16>> {
-    let attrs = membership.prattrs.as_ref()?;
-    if membership.prrelid == relation_oid {
-        return Some(attrs.clone());
-    }
-    let membership_relation = catalog.relation_by_oid(membership.prrelid)?;
-    let translated = attrs
-        .iter()
-        .filter_map(|attnum| {
-            let column = attnum
-                .checked_sub(1)
-                .and_then(|idx| usize::try_from(idx).ok())
-                .and_then(|idx| membership_relation.desc.columns.get(idx))?;
-            (!column.dropped)
-                .then(|| relation_column_attnum(desc, &column.name))
-                .flatten()
-        })
-        .collect::<Vec<_>>();
-    Some(translated)
-}
-
-fn publication_filter_attnums_for_membership(
-    qual: &str,
-    relation_oid: u32,
-    desc: &RelationDesc,
-    membership: &PgPublicationRelRow,
-    _catalog: &dyn CatalogLookup,
-) -> Result<Vec<i16>, ExecError> {
-    if membership.prrelid == relation_oid {
-        return publication_filter_attnums(qual, desc);
-    }
-    let expr = parse_expr(qual).map_err(ExecError::Parse)?;
-    let mut column_names = BTreeSet::new();
-    collect_sql_expr_column_names(&expr, &mut column_names);
-    Ok(column_names
-        .into_iter()
-        .filter_map(|name| relation_column_attnum(desc, &name))
-        .collect())
-}
-
-fn publication_generated_identity_is_published(
-    publication: &PgPublicationRow,
-    membership: Option<&PgPublicationRelRow>,
-    attnum: i16,
-    desc: &RelationDesc,
-) -> bool {
-    let Some(column) = attnum
-        .checked_sub(1)
-        .and_then(|idx| usize::try_from(idx).ok())
-        .and_then(|idx| desc.columns.get(idx))
-    else {
-        return true;
-    };
-    let Some(generated) = column.generated else {
-        return true;
-    };
-    if membership
-        .and_then(|row| row.prattrs.as_ref())
-        .is_some_and(|attrs| attrs.contains(&attnum))
-    {
-        return true;
-    }
-    publication.pubgencols == PUBLISH_GENCOLS_STORED
-        && matches!(
-            generated,
-            crate::include::nodes::parsenodes::ColumnGeneratedKind::Stored
-        )
-}
-
+// :HACK: Preserve the old root command path while publication command policy
+// lives in pgrust_commands.
 pub(crate) fn enforce_publication_replica_identity(
     relation_name: &str,
     relation_oid: u32,
@@ -5829,74 +4528,17 @@ pub(crate) fn enforce_publication_replica_identity(
     action: PublicationDmlAction,
     require_identity: bool,
 ) -> Result<(), ExecError> {
-    let memberships = active_publication_memberships(catalog, relation_oid, namespace_oid, action);
-    if memberships.is_empty() {
-        return Ok(());
-    }
-
-    let (identity_kind, identity_attrs) =
-        replica_identity_columns(relation_oid, desc, indexes, catalog);
-    for (publication, membership) in &memberships {
-        if let Some(attrs) = membership
-            .as_ref()
-            .and_then(|row| publication_membership_attnums(relation_oid, desc, row, catalog))
-        {
-            if identity_kind == ReplicaIdentityColumns::Full
-                || identity_attrs.iter().any(|attnum| !attrs.contains(attnum))
-            {
-                return Err(publication_replica_identity_error(
-                    relation_name,
-                    action,
-                    Some(
-                        "Column list used by the publication does not cover the replica identity.",
-                    ),
-                ));
-            }
-        }
-        if let Some((row, qual)) = membership
-            .as_ref()
-            .and_then(|row| row.prqual.as_deref().map(|qual| (row, qual)))
-        {
-            let filter_attrs =
-                publication_filter_attnums_for_membership(qual, relation_oid, desc, row, catalog)?;
-            if filter_attrs
-                .iter()
-                .any(|attnum| !identity_attrs.contains(attnum))
-            {
-                return Err(publication_replica_identity_error(
-                    relation_name,
-                    action,
-                    Some(
-                        "Column used in the publication WHERE expression is not part of the replica identity.",
-                    ),
-                ));
-            }
-        }
-        if identity_attrs.iter().any(|attnum| {
-            !publication_generated_identity_is_published(
-                publication,
-                membership.as_ref(),
-                *attnum,
-                desc,
-            )
-        }) {
-            return Err(publication_replica_identity_error(
-                relation_name,
-                action,
-                Some("Replica identity must not contain unpublished generated columns."),
-            ));
-        }
-    }
-
-    if require_identity && identity_kind == ReplicaIdentityColumns::None {
-        return Err(publication_replica_identity_error(
-            relation_name,
-            action,
-            None,
-        ));
-    }
-
-    Ok(())
+    pgrust_commands::publication::enforce_publication_replica_identity(
+        relation_name,
+        relation_oid,
+        namespace_oid,
+        desc,
+        indexes,
+        catalog,
+        action,
+        require_identity,
+    )
+    .map_err(publication_replica_identity_error_to_exec)
 }
 
 fn predicate_is_const_false(predicate: Option<&Expr>) -> bool {
@@ -6065,65 +4707,15 @@ fn unique_detail_columns(
 }
 
 fn expression_detail_name(expr_sql: &str) -> String {
-    let trimmed = expr_sql.trim();
-    if let Some(function_call) = normalized_function_call_expression(trimmed) {
-        return function_call;
-    }
-    if (trimmed.starts_with('(') && trimmed.ends_with(')')) || looks_like_function_call(trimmed) {
-        trimmed.to_string()
-    } else {
-        format!("({trimmed})")
-    }
+    pgrust_commands::tablecmds::expression_detail_name(expr_sql)
 }
 
 fn normalized_function_call_expression(expr_sql: &str) -> Option<String> {
-    let trimmed = strip_outer_parens_once(expr_sql.trim());
-    if !looks_like_function_call(trimmed) {
-        return None;
-    }
-    let open = trimmed.find('(')?;
-    let name = trimmed[..open].trim();
-    let args = trimmed[open + 1..trimmed.len().saturating_sub(1)]
-        .split(',')
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!("{name}({args})"))
+    pgrust_commands::tablecmds::normalized_function_call_expression(expr_sql)
 }
 
 fn strip_outer_parens_once(input: &str) -> &str {
-    let trimmed = input.trim();
-    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
-        return trimmed;
-    }
-    let mut depth = 0i32;
-    for (idx, ch) in trimmed.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 && idx + ch.len_utf8() < trimmed.len() {
-                    return trimmed;
-                }
-            }
-            _ => {}
-        }
-    }
-    trimmed[1..trimmed.len().saturating_sub(1)].trim()
-}
-
-fn looks_like_function_call(expr_sql: &str) -> bool {
-    let Some(open_paren) = expr_sql.find('(') else {
-        return false;
-    };
-    expr_sql.ends_with(')')
-        && expr_sql[..open_paren].chars().enumerate().all(|(idx, ch)| {
-            if idx == 0 {
-                ch == '_' || ch.is_ascii_alphabetic()
-            } else {
-                ch == '_' || ch.is_ascii_alphanumeric()
-            }
-        })
+    pgrust_commands::tablecmds::strip_outer_parens_once(input)
 }
 
 pub(crate) fn row_matches_index_predicate(
@@ -6445,27 +5037,8 @@ pub(crate) fn coerce_index_key_to_opckeytype(
     am_oid: u32,
     opckeytype_oid: Option<u32>,
 ) -> Value {
-    if am_oid != GIST_AM_OID {
-        return value;
-    }
-    match opckeytype_oid {
-        Some(BOX_TYPE_OID) => match value {
-            Value::Polygon(poly) => Value::Box(poly.bound_box),
-            Value::Circle(circle) => Value::Box(circle_bound_box(&circle)),
-            other => other,
-        },
-        Some(GTSVECTOR_TYPE_OID) => match value {
-            Value::Null => Value::Null,
-            Value::TsVector(_) => {
-                // :HACK: pgrust's current GiST tsvector support is lossy and
-                // always heap-rechecks. Store a compact gtsvector placeholder
-                // instead of raw tsvector data so leaf tuples fit on pages.
-                Value::TsVector(Default::default())
-            }
-            other => other,
-        },
-        _ => value,
-    }
+    // :HACK: compatibility wrapper while table commands still own index expression evaluation.
+    pgrust_access::index::buildkeys::coerce_index_key_to_opckeytype(value, am_oid, opckeytype_oid)
 }
 
 pub(crate) fn slot_toast_context(
@@ -8243,22 +6816,14 @@ fn temporal_exclusion_violation(
 }
 
 fn constraint_key_values(constraint: &BoundTemporalConstraint, values: &[Value]) -> Vec<Value> {
-    constraint
-        .column_indexes
-        .iter()
-        .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
-        .collect()
+    pgrust_commands::tablecmds::constraint_key_values(constraint, values)
 }
 
 fn constraint_columns(
     desc: &RelationDesc,
     constraint: &BoundTemporalConstraint,
 ) -> Vec<crate::backend::executor::ColumnDesc> {
-    constraint
-        .column_indexes
-        .iter()
-        .filter_map(|index| desc.columns.get(*index).cloned())
-        .collect()
+    pgrust_commands::tablecmds::constraint_columns(desc, constraint)
 }
 
 pub(crate) fn collect_matching_rows_index(
@@ -8353,11 +6918,7 @@ fn first_toast_index(
     catalog: &dyn CatalogLookup,
     toast: Option<ToastRelationRef>,
 ) -> Option<BoundIndexRelation> {
-    let toast = toast?;
-    catalog
-        .index_relations_for_heap(toast.relation_oid)
-        .into_iter()
-        .next()
+    pgrust_commands::tablecmds::first_toast_index(catalog, toast)
 }
 
 fn build_equality_scan_keys(
@@ -8387,11 +6948,7 @@ fn row_matches_key(values: &[Value], key_indexes: &[usize], key_values: &[Value]
 }
 
 fn key_columns_changed(previous_values: &[Value], values: &[Value], indexes: &[usize]) -> bool {
-    indexes.iter().any(|index| {
-        let previous = previous_values.get(*index).unwrap_or(&Value::Null);
-        let current = values.get(*index).unwrap_or(&Value::Null);
-        previous != current
-    })
+    pgrust_commands::tablecmds::key_columns_changed(previous_values, values, indexes)
 }
 
 fn relation_write_state_for_relation(
@@ -8406,38 +6963,13 @@ fn relation_write_state_for_relation(
     ),
     ExecError,
 > {
-    let constraints = BoundRelationConstraints {
-        relation_oid: Some(relation.relation_oid),
-        not_nulls: relation
-            .desc
-            .columns
-            .iter()
-            .enumerate()
-            .filter_map(|(column_index, column)| {
-                column
-                    .not_null_constraint_name
-                    .as_ref()
-                    .map(
-                        |constraint_name| crate::backend::parser::BoundNotNullConstraint {
-                            column_index,
-                            constraint_name: constraint_name.clone(),
-                        },
-                    )
-            })
-            .collect(),
-        checks: Vec::new(),
-        foreign_keys: Vec::new(),
-        temporal: Vec::new(),
-        exclusions: Vec::new(),
-    };
-    let referenced_by =
-        bind_referenced_by_foreign_keys(relation.relation_oid, &relation.desc, catalog)
-            .map_err(ExecError::Parse)?;
+    let state = pgrust_commands::tablecmds::relation_write_state_for_relation(relation, catalog)
+        .map_err(ExecError::Parse)?;
     Ok((
-        constraints,
-        referenced_by,
-        catalog.index_relations_for_heap(relation.relation_oid),
-        first_toast_index(catalog, relation.toast),
+        state.constraints,
+        state.referenced_by,
+        state.indexes,
+        state.toast_index,
     ))
 }
 
@@ -8528,9 +7060,12 @@ fn remap_optional_column_indexes_by_name(
     child_desc: &RelationDesc,
     parent_indexes: Option<&[usize]>,
 ) -> Result<Option<Vec<usize>>, ExecError> {
-    parent_indexes
-        .map(|indexes| map_column_indexes_by_name(parent_desc, child_desc, indexes))
-        .transpose()
+    pgrust_commands::tablecmds::remap_optional_column_indexes_by_name(
+        parent_desc,
+        child_desc,
+        parent_indexes,
+    )
+    .map_err(tablecmds_error_to_exec)
 }
 
 fn partitioned_referencing_rows(
@@ -8598,35 +7133,8 @@ fn map_column_indexes_by_name(
     child_desc: &RelationDesc,
     parent_indexes: &[usize],
 ) -> Result<Vec<usize>, ExecError> {
-    parent_indexes
-        .iter()
-        .map(|parent_index| {
-            let parent_column =
-                parent_desc
-                    .columns
-                    .get(*parent_index)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: "foreign key validation failed".into(),
-                        detail: Some("invalid parent column index".into()),
-                        hint: None,
-                        sqlstate: "XX000",
-                    })?;
-            child_desc
-                .columns
-                .iter()
-                .enumerate()
-                .find(|(_, column)| {
-                    !column.dropped && column.name.eq_ignore_ascii_case(&parent_column.name)
-                })
-                .map(|(index, _)| index)
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: "foreign key validation failed".into(),
-                    detail: Some("missing partition foreign key column".into()),
-                    hint: None,
-                    sqlstate: "XX000",
-                })
-        })
-        .collect()
+    pgrust_commands::tablecmds::map_column_indexes_by_name(parent_desc, child_desc, parent_indexes)
+        .map_err(tablecmds_error_to_exec)
 }
 
 pub(crate) fn evaluate_default_value(
@@ -8952,10 +7460,7 @@ fn referenced_row_exists_for_no_action(
 }
 
 fn foreign_key_key_values(values: &[Value], indexes: &[usize]) -> Vec<Value> {
-    indexes
-        .iter()
-        .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
-        .collect()
+    pgrust_commands::tablecmds::foreign_key_key_values(values, indexes)
 }
 
 fn defer_foreign_key_if_needed(
@@ -8992,18 +7497,7 @@ fn foreign_key_constraint_ancestor_oids(
     catalog: &dyn CatalogLookup,
     constraint_oid: u32,
 ) -> BTreeSet<u32> {
-    let mut oids = BTreeSet::from([constraint_oid]);
-    let mut current_oid = constraint_oid;
-    while let Some(row) = catalog.constraint_row_by_oid(current_oid) {
-        if row.conparentid == 0 {
-            break;
-        }
-        if !oids.insert(row.conparentid) {
-            break;
-        }
-        current_oid = row.conparentid;
-    }
-    oids
+    pgrust_commands::tablecmds::foreign_key_constraint_ancestor_oids(catalog, constraint_oid)
 }
 
 fn collect_no_action_checks_on_update(
@@ -9636,26 +8130,12 @@ pub fn collect_vacuum_stats_with_options(
     truncate: Option<bool>,
     default_truncate: bool,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
-    let mut relations = Vec::with_capacity(targets.len());
-    let mut seen = BTreeSet::new();
-    for target in targets {
-        let Some(entry) = catalog
-            .lookup_any_relation(&target.table_name)
-            .filter(|entry| matches!(entry.relkind, 'r' | 'm'))
-        else {
-            continue;
-        };
-        if process_main && seen.insert(entry.relation_oid) {
-            relations.push(entry.clone());
-        }
-        if process_toast
-            && let Some(toast) = entry.toast
-            && seen.insert(toast.relation_oid)
-            && let Some(toast_relation) = catalog.relation_by_oid(toast.relation_oid)
-        {
-            relations.push(toast_relation);
-        }
-    }
+    let relations = pgrust_commands::maintenance::vacuum_relations_for_targets(
+        targets,
+        catalog,
+        process_main,
+        process_toast,
+    );
     collect_vacuum_stats_for_relations_with_truncate_policy(
         &relations,
         catalog,
@@ -9695,24 +8175,11 @@ fn relation_vacuum_index_cleanup(
     catalog: &dyn CatalogLookup,
     index_cleanup: Option<bool>,
 ) -> bool {
-    if let Some(index_cleanup) = index_cleanup {
-        return index_cleanup;
-    }
-    catalog
-        .class_row_by_oid(relation_oid)
-        .and_then(|row| row.reloptions)
-        .and_then(|options| {
-            options.into_iter().find_map(|option| {
-                let (name, value) = option.split_once('=')?;
-                name.eq_ignore_ascii_case("vacuum_index_cleanup").then(|| {
-                    !matches!(
-                        value.to_ascii_lowercase().as_str(),
-                        "false" | "off" | "no" | "0"
-                    )
-                })
-            })
-        })
-        .unwrap_or(true)
+    pgrust_commands::maintenance::relation_vacuum_index_cleanup(
+        relation_oid,
+        catalog,
+        index_cleanup,
+    )
 }
 
 fn relation_vacuum_truncate(
@@ -9721,24 +8188,12 @@ fn relation_vacuum_truncate(
     truncate: Option<bool>,
     default_truncate: bool,
 ) -> bool {
-    if let Some(truncate) = truncate {
-        return truncate;
-    }
-    catalog
-        .class_row_by_oid(relation_oid)
-        .and_then(|row| row.reloptions)
-        .and_then(|options| {
-            options.into_iter().find_map(|option| {
-                let (name, value) = option.split_once('=')?;
-                name.eq_ignore_ascii_case("vacuum_truncate").then(|| {
-                    !matches!(
-                        value.to_ascii_lowercase().as_str(),
-                        "false" | "off" | "no" | "0"
-                    )
-                })
-            })
-        })
-        .unwrap_or(default_truncate)
+    pgrust_commands::maintenance::relation_vacuum_truncate(
+        relation_oid,
+        catalog,
+        truncate,
+        default_truncate,
+    )
 }
 
 fn collect_vacuum_stats_for_relations_with_truncate_policy(
@@ -9844,336 +8299,48 @@ pub fn execute_create_table(
     Ok(StatementResult::AffectedRows(0))
 }
 
-fn create_index_access_method_row(method: Option<&str>) -> Result<PgAmRow, ExecError> {
-    let method = method.unwrap_or("btree");
-    let method = if method.eq_ignore_ascii_case("rtree") {
-        crate::backend::utils::misc::notices::push_notice(
-            "substituting access method \"gist\" for obsolete method \"rtree\"",
-        );
-        "gist"
-    } else {
-        method
-    };
-    bootstrap_pg_am_rows()
-        .into_iter()
-        .find(|row| row.amtype == 'i' && row.amname.eq_ignore_ascii_case(method))
-        .ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "supported index access method",
-                actual: "unsupported index access method".into(),
-            })
-        })
-}
-
-fn access_method_can_include(access_method_oid: u32) -> bool {
-    matches!(
-        access_method_oid,
-        BTREE_AM_OID | GIST_AM_OID | SPGIST_AM_OID
-    )
-}
-
 fn resolve_brin_options(options: &[RelOption]) -> Result<BrinOptions, ExecError> {
-    let mut resolved = BrinOptions::default();
-    for option in options {
-        if option.name.eq_ignore_ascii_case("pages_per_range") {
-            let pages_per_range = option.value.parse::<u32>().map_err(|_| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "positive integer pages_per_range",
-                    actual: option.value.clone(),
-                })
-            })?;
-            if pages_per_range == 0 {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "positive integer pages_per_range",
-                    actual: option.value.clone(),
-                }));
-            }
-            resolved.pages_per_range = pages_per_range;
-            continue;
-        }
-
-        if option.name.eq_ignore_ascii_case("autosummarize") {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "BRIN option \"autosummarize\"".into(),
-            )));
-        }
-
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-            "BRIN option \"{}\"",
-            option.name
-        ))));
-    }
-    Ok(resolved)
-}
-
-fn is_brin_minmax_multi_opclass(opclass: &PgOpclassRow) -> bool {
-    matches!(
-        opclass.opcfamily,
-        crate::include::catalog::BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_OID_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_TID_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_TIME_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_UUID_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID
-            | crate::include::catalog::BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID
-    )
-}
-
-fn reloption_bounds_error(name: &str, value: &str, min: &str, max: &str) -> ExecError {
-    ExecError::DetailedError {
-        message: format!("value {value} out of bounds for option \"{name}\""),
-        detail: Some(format!("Valid values are between \"{min}\" and \"{max}\".")),
-        hint: None,
-        sqlstate: "22023",
-    }
-}
-
-fn validate_brin_minmax_multi_opclass_options(
-    options: &[RelOption],
-) -> Result<Vec<(String, String)>, ExecError> {
-    let mut seen_values_per_range = false;
-    let mut resolved = Vec::with_capacity(options.len());
-    for option in options {
-        if !option.name.eq_ignore_ascii_case("values_per_range") {
-            return Err(ExecError::DetailedError {
-                message: format!("unrecognized parameter \"{}\"", option.name),
-                detail: None,
-                hint: None,
-                sqlstate: "22023",
-            });
-        }
-        if seen_values_per_range {
-            return Err(ExecError::DetailedError {
-                message: "parameter \"values_per_range\" specified more than once".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "22023",
-            });
-        }
-        seen_values_per_range = true;
-        let value = option
-            .value
-            .parse::<i32>()
-            .map_err(|_| ExecError::DetailedError {
-                message: format!(
-                    "invalid value for option \"values_per_range\": \"{}\"",
-                    option.value
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "22023",
-            })?;
-        if !(8..=256).contains(&value) {
-            return Err(reloption_bounds_error(
-                "values_per_range",
-                &option.value,
-                "8",
-                "256",
-            ));
-        }
-        resolved.push((option.name.clone(), option.value.clone()));
-    }
-    Ok(resolved)
-}
-
-fn resolve_index_opclass_options(
-    access_method_oid: u32,
-    opclass: &PgOpclassRow,
-    column: &IndexColumnDef,
-) -> Result<Vec<(String, String)>, ExecError> {
-    if column.opclass_options.is_empty() {
-        return Ok(Vec::new());
-    }
-    if access_method_oid == BRIN_AM_OID && is_brin_minmax_multi_opclass(opclass) {
-        return validate_brin_minmax_multi_opclass_options(&column.opclass_options);
-    }
-    Ok(Vec::new())
+    pgrust_commands::reloptions::resolve_brin_options(options).map_err(reloption_error_to_exec)
 }
 
 fn resolve_gin_options(options: &[RelOption]) -> Result<GinOptions, ExecError> {
-    let mut resolved = GinOptions::default();
-    for option in options {
-        if option.name.eq_ignore_ascii_case("fastupdate") {
-            resolved.fastupdate = match option.value.to_ascii_lowercase().as_str() {
-                "on" | "true" | "yes" | "1" => true,
-                "off" | "false" | "no" | "0" => false,
-                _ => {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "boolean fastupdate",
-                        actual: option.value.clone(),
-                    }));
-                }
-            };
-            continue;
-        }
-
-        if option.name.eq_ignore_ascii_case("gin_pending_list_limit") {
-            let pending_list_limit_kb = option.value.parse::<u32>().map_err(|_| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "positive integer gin_pending_list_limit",
-                    actual: option.value.clone(),
-                })
-            })?;
-            if pending_list_limit_kb == 0 {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "positive integer gin_pending_list_limit",
-                    actual: option.value.clone(),
-                }));
-            }
-            resolved.pending_list_limit_kb = pending_list_limit_kb;
-            continue;
-        }
-
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-            "GIN option \"{}\"",
-            option.name
-        ))));
-    }
-    Ok(resolved)
+    pgrust_commands::reloptions::resolve_gin_options(options).map_err(reloption_error_to_exec)
 }
 
 fn resolve_hash_options(options: &[RelOption]) -> Result<HashOptions, ExecError> {
-    let mut resolved = HashOptions::default();
-    for option in options {
-        if option.name.eq_ignore_ascii_case("fillfactor") {
-            let fillfactor = option.value.parse::<u16>().map_err(|_| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "integer fillfactor between 10 and 100",
-                    actual: option.value.clone(),
-                })
-            })?;
-            if !(10..=100).contains(&fillfactor) {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "integer fillfactor between 10 and 100",
-                    actual: option.value.clone(),
-                }));
-            }
-            resolved.fillfactor = fillfactor;
-            continue;
-        }
-
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-            "hash index option \"{}\"",
-            option.name
-        ))));
-    }
-    Ok(resolved)
+    pgrust_commands::reloptions::resolve_hash_options(options).map_err(reloption_error_to_exec)
 }
 
 fn resolve_gist_options(options: &[RelOption]) -> Result<GistOptions, ExecError> {
-    let mut resolved = GistOptions::default();
-    for option in options {
-        if option.name.eq_ignore_ascii_case("fillfactor") {
-            resolved.fillfactor = parse_index_fillfactor(option)?;
-            continue;
-        }
-
-        if option.name.eq_ignore_ascii_case("buffering") {
-            resolved.buffering_mode = match option.value.to_ascii_lowercase().as_str() {
-                "auto" => GistBufferingMode::Auto,
-                "on" => GistBufferingMode::On,
-                "off" => GistBufferingMode::Off,
-                _ => {
-                    return Err(ExecError::DetailedError {
-                        message: format!(
-                            "invalid value for enum option \"buffering\": {}",
-                            option.value
-                        ),
-                        detail: Some("Valid values are \"on\", \"off\", and \"auto\".".into()),
-                        hint: None,
-                        sqlstate: "22023",
-                    });
-                }
-            };
-            continue;
-        }
-
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-            "GiST option \"{}\"",
-            option.name
-        ))));
-    }
-    Ok(resolved)
+    pgrust_commands::reloptions::resolve_gist_options(options).map_err(reloption_error_to_exec)
 }
 
 fn resolve_spgist_options(options: &[RelOption]) -> Result<(), ExecError> {
-    for option in options {
-        if option.name.eq_ignore_ascii_case("fillfactor") {
-            parse_index_fillfactor(option)?;
-            continue;
-        }
-
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-            "SP-GiST option \"{}\"",
-            option.name
-        ))));
-    }
-    Ok(())
+    pgrust_commands::reloptions::resolve_spgist_options(options).map_err(reloption_error_to_exec)
 }
 
 fn parse_index_fillfactor(option: &RelOption) -> Result<u16, ExecError> {
-    let fillfactor = option
-        .value
-        .parse::<u16>()
-        .map_err(|_| invalid_fillfactor_error(&option.value))?;
-    if !(10..=100).contains(&fillfactor) {
-        return Err(invalid_fillfactor_error(&option.value));
-    }
-    Ok(fillfactor)
-}
-
-fn invalid_fillfactor_error(value: &str) -> ExecError {
-    ExecError::DetailedError {
-        message: format!("value {value} out of bounds for option \"fillfactor\""),
-        detail: Some("Valid values are between \"10\" and \"100\".".into()),
-        hint: None,
-        sqlstate: "22023",
-    }
+    pgrust_commands::reloptions::parse_index_fillfactor(option).map_err(reloption_error_to_exec)
 }
 
 fn index_reloptions(options: &[RelOption]) -> Option<Vec<String>> {
-    (!options.is_empty()).then(|| {
-        options
-            .iter()
-            .map(|option| format!("{}={}", option.name.to_ascii_lowercase(), option.value))
-            .collect()
-    })
+    pgrust_commands::reloptions::index_reloptions(options)
 }
 
-fn index_column_sql_type(
-    relation: &BoundRelation,
-    column: &IndexColumnDef,
-) -> Result<SqlType, ExecError> {
-    if column.expr_sql.is_some() {
-        return column.expr_type.ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "inferred expression index type",
-                actual: "missing expression index type".into(),
-            })
-        });
-    }
-    relation
-        .desc
-        .columns
-        .iter()
-        .find(|desc| desc.name.eq_ignore_ascii_case(&column.name))
-        .map(|desc| desc.sql_type)
-        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column.name.clone())))
-}
-
-fn index_system_column_error() -> ExecError {
-    ExecError::DetailedError {
-        message: "index creation on system columns is not supported".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "0A000",
+fn reloption_error_to_exec(err: pgrust_commands::reloptions::RelOptionError) -> ExecError {
+    match err {
+        pgrust_commands::reloptions::RelOptionError::Parse(err) => ExecError::Parse(err),
+        pgrust_commands::reloptions::RelOptionError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
     }
 }
 
@@ -10181,163 +8348,17 @@ fn reject_system_columns_in_index(
     columns: &[IndexColumnDef],
     predicate_sql: Option<&str>,
 ) -> Result<(), ExecError> {
-    for column in columns {
-        if column
-            .expr_sql
-            .as_deref()
-            .is_some_and(crate::backend::parser::sql_expr_mentions_system_column)
-            || (column.expr_sql.is_none()
-                && crate::backend::parser::is_system_column_name(&column.name))
-        {
-            return Err(index_system_column_error());
-        }
-    }
-    if predicate_sql.is_some_and(crate::backend::parser::sql_expr_mentions_system_column) {
-        return Err(index_system_column_error());
-    }
-    Ok(())
+    pgrust_commands::index::reject_system_columns_in_index(columns, predicate_sql)
+        .map_err(index_build_error_to_exec)
 }
 
-fn index_column_type_oid(catalog: &Catalog, sql_type: SqlType) -> Option<u32> {
-    let catalog_oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
-    if catalog_oid != 0 {
-        return Some(catalog_oid);
-    }
-    if (sql_type.is_range() || sql_type.is_multirange()) && sql_type.type_oid != 0 {
-        return Some(sql_type.type_oid);
-    }
-    range_type_ref_for_sql_type(sql_type)
-        .map(|range_type| range_type.type_oid())
-        .or_else(|| {
-            multirange_type_ref_for_sql_type(sql_type)
-                .map(|multirange_type| multirange_type.type_oid())
-        })
-        .or_else(|| {
-            (matches!(sql_type.element_type().kind, SqlTypeKind::Enum)
-                && sql_type.element_type().type_oid != 0)
-                .then_some(sql_type.element_type().type_oid)
-        })
-        .or_else(|| {
-            catalog
-                .type_rows()
-                .into_iter()
-                .find(|row| row.sql_type == sql_type)
-                .map(|row| row.oid)
-        })
-}
-
-fn opclass_accepts_type(opclass: &PgOpclassRow, type_oid: u32, sql_type: SqlType) -> bool {
-    opclass.opcintype == type_oid
-        || opclass_accepts_sql_type(opclass.opcintype, sql_type)
-        || (matches!(
-            opclass.opcintype,
-            TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
-        ) && (matches!(
-            type_oid,
-            NAME_TYPE_OID | TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
-        ) || matches!(
-            sql_type.kind,
-            SqlTypeKind::Name | SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
-        )))
-        || (opclass.opcintype == INET_TYPE_OID && type_oid == CIDR_TYPE_OID)
-        || (opclass.opcintype == ANYARRAYOID && sql_type.is_array)
-        || (opclass.opcintype == ANYRANGEOID
-            && (sql_type.is_range()
-                || range_type_ref_for_sql_type(sql_type).is_some()
-                || crate::include::catalog::builtin_range_rows()
-                    .iter()
-                    .any(|row| row.rngtypid == type_oid)))
-        || (opclass.opcintype == ANYMULTIRANGEOID
-            && (sql_type.is_multirange() || multirange_type_ref_for_sql_type(sql_type).is_some()))
-        || (opclass.opcintype == ANYENUMOID
-            && matches!(sql_type.element_type().kind, SqlTypeKind::Enum))
-        || (opclass.opcintype == RECORD_TYPE_OID
-            && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite))
-}
-
-fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
-    if sql_type.is_array {
-        return opcintype == ANYARRAYOID;
-    }
-    match sql_type.kind {
-        SqlTypeKind::Bool => opcintype == BOOL_TYPE_OID,
-        SqlTypeKind::Int2 => opcintype == INT2_TYPE_OID,
-        SqlTypeKind::Int4 => opcintype == INT4_TYPE_OID,
-        SqlTypeKind::Int8 => opcintype == INT8_TYPE_OID,
-        SqlTypeKind::Oid => opcintype == OID_TYPE_OID,
-        SqlTypeKind::Tid => opcintype == TID_TYPE_OID,
-        SqlTypeKind::InternalChar => opcintype == INTERNAL_CHAR_TYPE_OID,
-        SqlTypeKind::Name => opcintype == NAME_TYPE_OID,
-        SqlTypeKind::Text => opcintype == TEXT_TYPE_OID,
-        SqlTypeKind::Varchar => opcintype == VARCHAR_TYPE_OID,
-        SqlTypeKind::Char => opcintype == BPCHAR_TYPE_OID,
-        SqlTypeKind::Float4 => opcintype == FLOAT4_TYPE_OID,
-        SqlTypeKind::Float8 => opcintype == FLOAT8_TYPE_OID,
-        SqlTypeKind::Numeric => opcintype == NUMERIC_TYPE_OID,
-        SqlTypeKind::Money => opcintype == MONEY_TYPE_OID,
-        SqlTypeKind::Interval => opcintype == INTERVAL_TYPE_OID,
-        SqlTypeKind::Date => opcintype == DATE_TYPE_OID,
-        SqlTypeKind::Timestamp => opcintype == TIMESTAMP_TYPE_OID,
-        SqlTypeKind::TimestampTz => opcintype == TIMESTAMPTZ_TYPE_OID,
-        SqlTypeKind::Bytea => opcintype == BYTEA_TYPE_OID,
-        SqlTypeKind::Uuid => opcintype == UUID_TYPE_OID,
-        SqlTypeKind::Bit => opcintype == BIT_TYPE_OID,
-        SqlTypeKind::VarBit => opcintype == VARBIT_TYPE_OID,
-        SqlTypeKind::Cidr => matches!(opcintype, CIDR_TYPE_OID | INET_TYPE_OID),
-        SqlTypeKind::Inet => opcintype == INET_TYPE_OID,
-        SqlTypeKind::PgLsn => opcintype == PG_LSN_TYPE_OID,
-        SqlTypeKind::Composite | SqlTypeKind::Record => opcintype == RECORD_TYPE_OID,
-        _ => false,
-    }
-}
-
-fn default_opclass_for_catalog_type(
-    catalog: &Catalog,
-    opclass_rows: &[PgOpclassRow],
-    access_method_oid: u32,
-    type_oid: u32,
-    sql_type: SqlType,
-) -> Option<PgOpclassRow> {
-    if access_method_oid == BRIN_AM_OID
-        && (type_oid == NAME_TYPE_OID || matches!(sql_type.kind, SqlTypeKind::Name))
-    {
-        return opclass_rows
-            .iter()
-            .find(|row| row.oid == TEXT_BRIN_MINMAX_OPCLASS_OID)
-            .cloned();
-    }
-    if matches!(sql_type.element_type().kind, SqlTypeKind::Enum)
-        || catalog
-            .enum_rows()
-            .iter()
-            .any(|row| row.enumtypid == type_oid)
-    {
-        let fallback_oid = match access_method_oid {
-            BTREE_AM_OID => Some(crate::include::catalog::ENUM_BTREE_OPCLASS_OID),
-            HASH_AM_OID => Some(crate::include::catalog::ENUM_HASH_OPCLASS_OID),
-            _ => None,
-        };
-        if let Some(fallback_oid) = fallback_oid {
-            return opclass_rows
-                .iter()
-                .find(|row| row.oid == fallback_oid)
-                .cloned();
-        }
-        return opclass_rows
-            .iter()
-            .find(|row| {
-                row.opcmethod == access_method_oid && row.opcdefault && row.opcintype == ANYENUMOID
-            })
-            .cloned();
-    }
-    opclass_rows
-        .iter()
-        .find(|row| {
-            row.opcmethod == access_method_oid
-                && row.opcdefault
-                && opclass_accepts_type(row, type_oid, sql_type)
-        })
-        .cloned()
+fn index_system_column_error() -> ExecError {
+    index_build_error_to_exec(pgrust_commands::index::IndexBuildError::Detailed {
+        message: "index creation on system columns is not supported".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })
 }
 
 fn resolve_create_index_build_options(
@@ -10347,117 +8368,14 @@ fn resolve_create_index_build_options(
     columns: &[IndexColumnDef],
     options: &[RelOption],
 ) -> Result<crate::backend::catalog::CatalogIndexBuildOptions, ExecError> {
-    let opclass_rows = catalog.opclass_rows();
-    let mut indclass = Vec::with_capacity(columns.len());
-    let mut indclass_options = Vec::with_capacity(columns.len());
-    let mut indcollation = Vec::with_capacity(columns.len());
-    let mut indoption = Vec::with_capacity(columns.len());
-
-    for column in columns {
-        let sql_type = index_column_sql_type(relation, column)?;
-        let type_oid = index_column_type_oid(catalog, sql_type).ok_or_else(|| {
-            ExecError::Parse(ParseError::UnsupportedType(
-                column
-                    .expr_sql
-                    .clone()
-                    .unwrap_or_else(|| column.name.clone()),
-            ))
-        })?;
-        let type_name = catalog
-            .type_by_oid(type_oid)
-            .map(|row| row.typname)
-            .unwrap_or_else(|| type_oid.to_string());
-        let opclass = if let Some(opclass_name) = column.opclass.as_deref() {
-            let opclass_lookup_name = opclass_name
-                .rsplit_once('.')
-                .map(|(_, name)| name)
-                .unwrap_or(opclass_name);
-            opclass_rows
-                .iter()
-                .find(|row| {
-                    row.opcmethod == access_method.oid
-                        && row.opcname.eq_ignore_ascii_case(opclass_lookup_name)
-                        && opclass_accepts_type(row, type_oid, sql_type)
-                })
-                .cloned()
-        } else {
-            default_opclass_for_catalog_type(
-                catalog,
-                &opclass_rows,
-                access_method.oid,
-                type_oid,
-                sql_type,
-            )
-        }
-        .ok_or_else(|| {
-            ExecError::Parse(ParseError::MissingDefaultOpclass {
-                access_method: access_method.amname.clone(),
-                type_name,
-            })
-        })?;
-        indclass_options.push(resolve_index_opclass_options(
-            access_method.oid,
-            &opclass,
-            column,
-        )?);
-        indclass.push(opclass.oid);
-        indcollation.push(
-            column
-                .collation
-                .as_deref()
-                .map(|collation| crate::backend::parser::resolve_collation_oid(collation, catalog))
-                .transpose()
-                .map_err(ExecError::Parse)?
-                .unwrap_or(0),
-        );
-        let mut option = 0i16;
-        if column.descending {
-            option |= 0x0001;
-        }
-        if column.nulls_first.unwrap_or(column.descending) {
-            option |= 0x0002;
-        }
-        indoption.push(option);
-    }
-
-    let (btree_options, brin_options, gist_options, gin_options, hash_options) =
-        match access_method.oid {
-            BTREE_AM_OID => (resolve_btree_options(options)?, None, None, None, None),
-            BRIN_AM_OID => (None, Some(resolve_brin_options(options)?), None, None, None),
-            GIST_AM_OID => (None, None, Some(resolve_gist_options(options)?), None, None),
-            GIN_AM_OID => (None, None, None, Some(resolve_gin_options(options)?), None),
-            HASH_AM_OID => (None, None, None, None, Some(resolve_hash_options(options)?)),
-            SPGIST_AM_OID => {
-                resolve_spgist_options(options)?;
-                (None, None, None, None, None)
-            }
-            _ => {
-                if !options.is_empty() {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "simple index definition",
-                        actual: "unsupported CREATE INDEX feature".into(),
-                    }));
-                }
-                (None, None, None, None, None)
-            }
-        };
-
-    Ok(crate::backend::catalog::CatalogIndexBuildOptions {
-        am_oid: access_method.oid,
-        indclass,
-        indclass_options,
-        indcollation,
-        indoption,
-        reloptions: index_reloptions(options),
-        indnullsnotdistinct: false,
-        indisexclusion: false,
-        indimmediate: true,
-        btree_options,
-        brin_options,
-        gist_options,
-        gin_options,
-        hash_options,
-    })
+    pgrust_commands::index::resolve_create_index_build_options(
+        catalog,
+        relation,
+        access_method,
+        columns,
+        options,
+    )
+    .map_err(index_build_error_to_exec)
 }
 
 fn default_create_index_name(
@@ -10465,39 +8383,29 @@ fn default_create_index_name(
     table_name: &str,
     columns: &[IndexColumnDef],
 ) -> String {
-    let schema = table_name.rsplit_once('.').map(|(schema, _)| schema);
-    let relname = table_name.rsplit('.').next().unwrap_or(table_name);
-    let key = columns
-        .iter()
-        .find_map(|column| {
-            (!column.name.trim().is_empty()).then(|| column.name.trim().to_ascii_lowercase())
-        })
-        .unwrap_or_else(|| "expr".into());
-    let key = key
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let base = format!("{relname}_{key}_idx").to_ascii_lowercase();
-    for suffix in 0usize.. {
-        let local = if suffix == 0 {
-            base.clone()
-        } else {
-            format!("{base}{suffix}")
-        };
-        let qualified = schema
-            .map(|schema| format!("{schema}.{local}"))
-            .unwrap_or_else(|| local.clone());
-        if catalog.get(&qualified).is_none() {
-            return qualified;
-        }
+    pgrust_commands::index::default_create_index_name(
+        |qualified| catalog.get(qualified).is_some(),
+        table_name,
+        columns,
+    )
+}
+
+fn index_build_error_to_exec(err: pgrust_commands::index::IndexBuildError) -> ExecError {
+    match err {
+        pgrust_commands::index::IndexBuildError::Parse(err) => ExecError::Parse(err),
+        pgrust_commands::index::IndexBuildError::RelOption(err) => reloption_error_to_exec(err),
+        pgrust_commands::index::IndexBuildError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
     }
-    unreachable!("unbounded index name search should always return")
 }
 
 pub fn execute_create_index(
@@ -10516,7 +8424,12 @@ pub fn execute_create_index(
         }));
     }
 
-    let access_method = create_index_access_method_row(stmt.using_method.as_deref())?;
+    let (access_method, access_method_notice) =
+        pgrust_commands::index::create_index_access_method_row(stmt.using_method.as_deref())
+            .map_err(index_build_error_to_exec)?;
+    if let Some(notice) = access_method_notice {
+        crate::backend::utils::misc::notices::push_notice(notice);
+    }
     let table_alias = stmt
         .table_name
         .rsplit('.')
@@ -10558,35 +8471,12 @@ pub fn execute_create_index(
         }
     }
 
-    let include_columns = stmt
-        .include_columns
-        .iter()
-        .map(|name| {
-            if crate::backend::parser::is_system_column_name(name) {
-                return Err(index_system_column_error());
-            }
-            if !relation
-                .desc
-                .columns
-                .iter()
-                .any(|column| column.name.eq_ignore_ascii_case(name))
-            {
-                return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
-            }
-            Ok(IndexColumnDef::from(name.clone()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if !include_columns.is_empty() && !access_method_can_include(access_method.oid) {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "access method \"{}\" does not support included columns",
-                access_method.amname
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
+    let include_columns = pgrust_commands::index::resolve_index_include_columns(
+        &relation,
+        &stmt.include_columns,
+        &access_method,
+    )
+    .map_err(index_build_error_to_exec)?;
 
     if let Some(predicate_sql) = stmt.predicate_sql.as_deref() {
         crate::backend::parser::bind_index_predicate_sql_expr(
@@ -10692,51 +8582,7 @@ pub fn execute_create_index(
 fn resolve_btree_options(
     options: &[crate::backend::parser::RelOption],
 ) -> Result<Option<BtreeOptions>, ExecError> {
-    if options.is_empty() {
-        return Ok(None);
-    }
-
-    let mut resolved = BtreeOptions::default();
-    for option in options {
-        if option.name.eq_ignore_ascii_case("fillfactor") {
-            let fillfactor = option.value.parse::<u16>().map_err(|_| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "integer fillfactor between 10 and 100",
-                    actual: option.value.clone(),
-                })
-            })?;
-            if !(10..=100).contains(&fillfactor) {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "integer fillfactor between 10 and 100",
-                    actual: option.value.clone(),
-                }));
-            }
-            resolved.fillfactor = fillfactor;
-            continue;
-        }
-
-        if option.name.eq_ignore_ascii_case("deduplicate_items") {
-            // :HACK: accepted for catalog compatibility; nbtree posting-list
-            // deduplication still needs storage/executor support.
-            resolved.deduplicate_items = match option.value.to_ascii_lowercase().as_str() {
-                "on" | "true" | "yes" | "1" => true,
-                "off" | "false" | "no" | "0" => false,
-                _ => {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "boolean deduplicate_items",
-                        actual: option.value.clone(),
-                    }));
-                }
-            };
-            continue;
-        }
-
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-            "btree index option \"{}\"",
-            option.name
-        ))));
-    }
-    Ok(Some(resolved))
+    pgrust_commands::reloptions::resolve_btree_options(options).map_err(reloption_error_to_exec)
 }
 
 pub fn execute_drop_table(
@@ -10810,7 +8656,7 @@ pub fn execute_truncate_table(
             .note_relation_truncate(target.relation_oid);
     }
     if stmt.restart_identity {
-        restart_owned_sequences_for_truncate(&targets, catalog, ctx);
+        restart_owned_sequences_for_truncate(&targets, catalog, ctx)?;
     }
     fire_after_truncate_triggers(&triggers, ctx)?;
     Ok(StatementResult::AffectedRows(0))
@@ -10831,15 +8677,12 @@ pub(crate) fn resolve_truncate_relations(
     catalog: &dyn CatalogLookup,
     emit_cascade_notices: bool,
 ) -> Result<Vec<BoundRelation>, ExecError> {
-    let mut targets = Vec::new();
-    for target in &stmt.targets {
-        let entry = lookup_truncate_relation(catalog, &target.relation_name)?;
-        push_truncate_relation(catalog, entry, target.include_descendants, &mut targets)?;
-    }
-    if stmt.cascade {
-        expand_truncate_cascade(catalog, &mut targets, emit_cascade_notices)?;
-    } else {
-        check_truncate_restrict_foreign_keys(catalog, &targets)?;
+    let (targets, notices) = pgrust_commands::truncate::resolve_truncate_relations(stmt, catalog)
+        .map_err(truncate_error_to_exec)?;
+    if emit_cascade_notices {
+        for notice in notices {
+            crate::backend::utils::misc::notices::push_notice(notice);
+        }
     }
     Ok(targets)
 }
@@ -10881,236 +8724,50 @@ pub(crate) fn owned_sequence_oids_for_truncate(
     targets: &[BoundRelation],
     catalog: &dyn CatalogLookup,
 ) -> Vec<u32> {
-    let mut sequence_oids = Vec::new();
-    for target in targets {
-        for depend in
-            catalog.depend_rows_referencing(PG_CLASS_RELATION_OID, target.relation_oid, None)
-        {
-            if depend.classid == PG_CLASS_RELATION_OID
-                && depend.objsubid == 0
-                && depend.refobjsubid > 0
-                && matches!(depend.deptype, DEPENDENCY_AUTO | DEPENDENCY_INTERNAL)
-                && catalog
-                    .class_row_by_oid(depend.objid)
-                    .is_some_and(|row| row.relkind == 'S')
-                && !sequence_oids.contains(&depend.objid)
-            {
-                sequence_oids.push(depend.objid);
-            }
-        }
-    }
-    sequence_oids
+    pgrust_commands::truncate::owned_sequence_oids_for_truncate(targets, catalog)
 }
 
 fn restart_owned_sequences_for_truncate(
     targets: &[BoundRelation],
     catalog: &dyn CatalogLookup,
     ctx: &ExecutorContext,
-) {
+) -> Result<(), ExecError> {
     let Some(sequences) = &ctx.sequences else {
-        return;
+        return Ok(());
     };
     for sequence_oid in owned_sequence_oids_for_truncate(targets, catalog) {
-        let Some(mut data) = sequences.sequence_data(sequence_oid) else {
+        let persistent = catalog
+            .relation_by_oid(sequence_oid)
+            .is_some_and(|relation| relation.relpersistence != 't');
+        let Some(mut data) = sequences.sequence_data(sequence_oid, persistent)? else {
             continue;
         };
         data.state.last_value = data.options.start;
         data.state.log_cnt = 0;
         data.state.is_called = false;
-        let persistent = catalog
-            .relation_by_oid(sequence_oid)
-            .is_some_and(|relation| relation.relpersistence != 't');
         let _ = sequences.apply_upsert(sequence_oid, data, persistent);
     }
-}
-
-fn lookup_truncate_relation(
-    catalog: &dyn CatalogLookup,
-    relation_name: &str,
-) -> Result<BoundRelation, ExecError> {
-    match catalog.lookup_any_relation(relation_name) {
-        Some(entry) if entry.relkind == 'r' || entry.relkind == 'p' => Ok(entry),
-        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
-            name: relation_name.to_string(),
-            expected: "table",
-        })),
-        None => Err(ExecError::Parse(ParseError::UnknownTable(
-            relation_name.to_string(),
-        ))),
-    }
-}
-
-fn push_truncate_relation(
-    catalog: &dyn CatalogLookup,
-    entry: BoundRelation,
-    include_descendants: bool,
-    targets: &mut Vec<BoundRelation>,
-) -> Result<(), ExecError> {
-    if !include_descendants && entry.relkind == 'p' {
-        return Err(cannot_truncate_only_partitioned_table_error());
-    }
-    if include_descendants {
-        let inheritors = catalog.find_all_inheritors(entry.relation_oid);
-        if inheritors.is_empty() {
-            push_unique_truncate_relation(targets, entry);
-        } else {
-            for oid in inheritors {
-                if let Some(relation) = catalog.relation_by_oid(oid)
-                    && (relation.relkind == 'r' || relation.relkind == 'p')
-                {
-                    push_unique_truncate_relation(targets, relation);
-                }
-            }
-        }
-    } else {
-        push_unique_truncate_relation(targets, entry);
-    }
     Ok(())
-}
-
-fn push_unique_truncate_relation(targets: &mut Vec<BoundRelation>, relation: BoundRelation) {
-    if !targets
-        .iter()
-        .any(|target| target.relation_oid == relation.relation_oid)
-    {
-        targets.push(relation);
-    }
-}
-
-fn expand_truncate_cascade(
-    catalog: &dyn CatalogLookup,
-    targets: &mut Vec<BoundRelation>,
-    emit_notices: bool,
-) -> Result<(), ExecError> {
-    loop {
-        let covered = target_relation_oids(targets);
-        let mut additions = truncate_foreign_key_rows(catalog, &covered)
-            .into_iter()
-            .filter(|row| {
-                relation_covered_by_truncate(catalog, row.confrelid, &covered)
-                    && !relation_covered_by_truncate(catalog, row.conrelid, &covered)
-            })
-            .filter_map(|row| catalog.relation_by_oid(row.conrelid))
-            .collect::<Vec<_>>();
-        additions.sort_by_key(|relation| relation.relation_oid);
-        additions.dedup_by_key(|relation| relation.relation_oid);
-        if additions.is_empty() {
-            break;
-        }
-        for relation in additions {
-            let start = targets.len();
-            let include_descendants = relation.relkind == 'p';
-            push_truncate_relation(catalog, relation, include_descendants, targets)?;
-            if emit_notices {
-                for added in &targets[start..] {
-                    crate::backend::utils::misc::notices::push_notice(format!(
-                        "truncate cascades to table \"{}\"",
-                        relation_name_for_oid(catalog, added.relation_oid)
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn check_truncate_restrict_foreign_keys(
-    catalog: &dyn CatalogLookup,
-    targets: &[BoundRelation],
-) -> Result<(), ExecError> {
-    let covered = target_relation_oids(targets);
-    let rows = truncate_foreign_key_rows(catalog, &covered);
-    for target in targets {
-        let mut references = rows
-            .iter()
-            .filter(|row| {
-                relation_covered_by_truncate(catalog, row.confrelid, &[target.relation_oid])
-                    && !relation_covered_by_truncate(catalog, row.conrelid, &covered)
-            })
-            .map(|row| {
-                (
-                    row.conrelid,
-                    relation_name_for_oid(catalog, row.conrelid),
-                    relation_name_for_oid(catalog, row.confrelid),
-                )
-            })
-            .collect::<Vec<_>>();
-        references.sort();
-        references.dedup();
-        if let Some((_, child, referenced)) = references.into_iter().next() {
-            return Err(ExecError::DetailedError {
-                message: "cannot truncate a table referenced in a foreign key constraint".into(),
-                detail: Some(format!("Table \"{child}\" references \"{referenced}\".")),
-                hint: Some(format!(
-                    "Truncate table \"{child}\" at the same time, or use TRUNCATE ... CASCADE."
-                )),
-                sqlstate: "0A000",
-            });
-        }
-    }
-    Ok(())
-}
-
-fn truncate_foreign_key_rows(
-    catalog: &dyn CatalogLookup,
-    covered: &[u32],
-) -> Vec<crate::include::catalog::PgConstraintRow> {
-    let mut rows = catalog
-        .constraint_rows()
-        .into_iter()
-        .filter(|row| row.contype == CONSTRAINT_FOREIGN)
-        .map(|row| (row.oid, row))
-        .collect::<BTreeMap<_, _>>();
-    for relation_oid in covered {
-        for row in catalog.foreign_key_constraint_rows_referencing_relation(*relation_oid) {
-            rows.entry(row.oid).or_insert(row);
-        }
-    }
-    rows.into_values().collect()
-}
-
-fn relation_covered_by_truncate(
-    catalog: &dyn CatalogLookup,
-    relation_oid: u32,
-    covered: &[u32],
-) -> bool {
-    if covered.contains(&relation_oid) {
-        return true;
-    }
-    let mut seen = BTreeSet::new();
-    let mut pending = catalog.inheritance_parents(relation_oid);
-    while let Some(parent) = pending.pop() {
-        if !seen.insert(parent.inhparent) {
-            continue;
-        }
-        if covered.contains(&parent.inhparent) {
-            return true;
-        }
-        pending.extend(catalog.inheritance_parents(parent.inhparent));
-    }
-    false
-}
-
-fn target_relation_oids(targets: &[BoundRelation]) -> Vec<u32> {
-    targets.iter().map(|target| target.relation_oid).collect()
 }
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
-    catalog
-        .class_row_by_oid(relation_oid)
-        .map(|row| row.relname)
-        .unwrap_or_else(|| relation_oid.to_string())
+    pgrust_commands::truncate::relation_name_for_oid(catalog, relation_oid)
 }
 
-fn cannot_truncate_only_partitioned_table_error() -> ExecError {
-    ExecError::DetailedError {
-        message: "cannot truncate only a partitioned table".into(),
-        detail: None,
-        hint: Some(
-            "Do not specify the ONLY keyword, or use TRUNCATE ONLY on the partitions directly."
-                .into(),
-        ),
-        sqlstate: "42809",
+fn truncate_error_to_exec(err: pgrust_commands::truncate::TruncateError) -> ExecError {
+    match err {
+        pgrust_commands::truncate::TruncateError::Parse(err) => ExecError::Parse(err),
+        pgrust_commands::truncate::TruncateError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
     }
 }
 
@@ -11994,98 +9651,15 @@ fn remap_routed_insert_error_detail(
 }
 
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
-    let text = match value {
-        Value::Null => return Ok(None),
-        Value::Tid(tid) => return Ok(Some(*tid)),
-        Value::Text(text) => text.as_str(),
-        Value::TextRef(_, _) => {
-            return Err(ExecError::DetailedError {
-                message: "row ctid marker must be materialized".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            });
-        }
-        other => {
-            return Err(ExecError::DetailedError {
-                message: format!("row ctid marker has unexpected value {:?}", other),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            });
-        }
-    };
-    let inner = text
-        .strip_prefix('(')
-        .and_then(|rest| rest.strip_suffix(')'))
-        .ok_or(ExecError::DetailedError {
-            message: format!("invalid row ctid marker: {text}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })?;
-    let (block, offset) = inner.split_once(',').ok_or(ExecError::DetailedError {
-        message: format!("invalid row ctid marker: {text}"),
-        detail: None,
-        hint: None,
-        sqlstate: "XX000",
-    })?;
-    Ok(Some(ItemPointerData {
-        block_number: block.parse().map_err(|_| ExecError::DetailedError {
-            message: format!("invalid row ctid marker: {text}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })?,
-        offset_number: offset.parse().map_err(|_| ExecError::DetailedError {
-            message: format!("invalid row ctid marker: {text}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })?,
-    }))
+    pgrust_commands::tablecmds::parse_tid_text(value).map_err(tablecmds_error_to_exec)
 }
 
 fn parse_update_tableoid(value: &Value) -> Result<u32, ExecError> {
-    match value {
-        Value::Int32(value) => u32::try_from(*value).map_err(|_| ExecError::DetailedError {
-            message: format!("invalid update tableoid marker: {value}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-        Value::Int64(value) => u32::try_from(*value).map_err(|_| ExecError::DetailedError {
-            message: format!("invalid update tableoid marker: {value}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-        Value::Null => Err(ExecError::DetailedError {
-            message: "update input row is missing target tableoid marker".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-        other => Err(ExecError::DetailedError {
-            message: format!("update tableoid marker has unexpected value {:?}", other),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-    }
+    pgrust_commands::tablecmds::parse_update_tableoid(value).map_err(tablecmds_error_to_exec)
 }
 
 fn merge_source_present(value: &Value) -> Result<bool, ExecError> {
-    match value {
-        Value::Bool(value) => Ok(*value),
-        Value::Null => Ok(false),
-        other => Err(ExecError::DetailedError {
-            message: format!("merge source marker has unexpected value {:?}", other),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-    }
+    pgrust_commands::tablecmds::merge_source_present(value).map_err(tablecmds_error_to_exec)
 }
 
 fn merge_condition_matches(
@@ -12447,119 +10021,6 @@ fn check_relation_privilege_requirements_for_update(
     Ok(())
 }
 
-fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
-    match plan {
-        Plan::SeqScan { relation_oid, .. }
-        | Plan::TidScan { relation_oid, .. }
-        | Plan::IndexOnlyScan { relation_oid, .. }
-        | Plan::IndexScan { relation_oid, .. }
-        | Plan::BitmapHeapScan { relation_oid, .. } => {
-            oids.insert(*relation_oid);
-        }
-        Plan::BitmapIndexScan { relation_oid, .. } => {
-            oids.insert(*relation_oid);
-        }
-        Plan::Append { children, .. }
-        | Plan::MergeAppend { children, .. }
-        | Plan::BitmapOr { children, .. }
-        | Plan::BitmapAnd { children, .. } => {
-            for child in children {
-                collect_plan_relation_oids(child, oids);
-            }
-        }
-        Plan::Unique { input, .. }
-        | Plan::Hash { input, .. }
-        | Plan::Materialize { input, .. }
-        | Plan::Memoize { input, .. }
-        | Plan::Gather { input, .. }
-        | Plan::GatherMerge { input, .. }
-        | Plan::Filter { input, .. }
-        | Plan::OrderBy { input, .. }
-        | Plan::IncrementalSort { input, .. }
-        | Plan::Projection { input, .. }
-        | Plan::Limit { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::Aggregate { input, .. }
-        | Plan::WindowAgg { input, .. }
-        | Plan::SubqueryScan { input, .. }
-        | Plan::ProjectSet { input, .. } => collect_plan_relation_oids(input, oids),
-        Plan::NestedLoopJoin { left, right, .. }
-        | Plan::HashJoin { left, right, .. }
-        | Plan::MergeJoin { left, right, .. } => {
-            collect_plan_relation_oids(left, oids);
-            collect_plan_relation_oids(right, oids);
-        }
-        Plan::CteScan { cte_plan, .. } => collect_plan_relation_oids(cte_plan, oids),
-        Plan::Result { .. }
-        | Plan::Values { .. }
-        | Plan::FunctionScan { .. }
-        | Plan::WorkTableScan { .. } => {}
-        Plan::RecursiveUnion {
-            anchor, recursive, ..
-        } => {
-            collect_plan_relation_oids(anchor, oids);
-            collect_plan_relation_oids(recursive, oids);
-        }
-        Plan::SetOp { children, .. } => {
-            for child in children {
-                collect_plan_relation_oids(child, oids);
-            }
-        }
-    }
-}
-
-fn collect_planned_stmt_relation_oids(planned_stmt: &PlannedStmt, oids: &mut BTreeSet<u32>) {
-    collect_plan_relation_oids(&planned_stmt.plan_tree, oids);
-    for subplan in &planned_stmt.subplans {
-        collect_plan_relation_oids(subplan, oids);
-    }
-}
-
-fn plan_contains_lock_rows(plan: &Plan) -> bool {
-    match plan {
-        Plan::LockRows { .. } => true,
-        Plan::Append { children, .. }
-        | Plan::MergeAppend { children, .. }
-        | Plan::BitmapOr { children, .. }
-        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_lock_rows),
-        Plan::Unique { input, .. }
-        | Plan::Hash { input, .. }
-        | Plan::Materialize { input, .. }
-        | Plan::Memoize { input, .. }
-        | Plan::Gather { input, .. }
-        | Plan::GatherMerge { input, .. }
-        | Plan::Filter { input, .. }
-        | Plan::OrderBy { input, .. }
-        | Plan::IncrementalSort { input, .. }
-        | Plan::Projection { input, .. }
-        | Plan::Limit { input, .. }
-        | Plan::Aggregate { input, .. }
-        | Plan::WindowAgg { input, .. }
-        | Plan::SubqueryScan { input, .. }
-        | Plan::ProjectSet { input, .. } => plan_contains_lock_rows(input),
-        Plan::NestedLoopJoin { left, right, .. }
-        | Plan::HashJoin { left, right, .. }
-        | Plan::MergeJoin { left, right, .. } => {
-            plan_contains_lock_rows(left) || plan_contains_lock_rows(right)
-        }
-        Plan::RecursiveUnion {
-            anchor, recursive, ..
-        } => plan_contains_lock_rows(anchor) || plan_contains_lock_rows(recursive),
-        Plan::SetOp { children, .. } => children.iter().any(plan_contains_lock_rows),
-        Plan::CteScan { cte_plan, .. } => plan_contains_lock_rows(cte_plan),
-        Plan::Result { .. }
-        | Plan::SeqScan { .. }
-        | Plan::TidScan { .. }
-        | Plan::IndexOnlyScan { .. }
-        | Plan::IndexScan { .. }
-        | Plan::BitmapIndexScan { .. }
-        | Plan::BitmapHeapScan { .. }
-        | Plan::Values { .. }
-        | Plan::FunctionScan { .. }
-        | Plan::WorkTableScan { .. } => false,
-    }
-}
-
 pub(crate) fn check_relation_privilege(
     ctx: &ExecutorContext,
     relation_oid: u32,
@@ -12590,9 +10051,7 @@ pub(crate) fn check_plan_relation_privileges(
     ctx: &ExecutorContext,
     privilege: char,
 ) -> Result<(), ExecError> {
-    let mut relation_oids = BTreeSet::new();
-    collect_plan_relation_oids(plan, &mut relation_oids);
-    for relation_oid in relation_oids {
+    for relation_oid in pgrust_commands::tablecmds::plan_relation_oids(plan) {
         check_relation_privilege(ctx, relation_oid, privilege)?;
     }
     Ok(())
@@ -12631,7 +10090,9 @@ fn check_planned_stmt_select_privileges_inner(
     require_update: bool,
 ) -> Result<(), ExecError> {
     check_relation_privilege_requirements(ctx, &planned_stmt.relation_privileges)?;
-    if require_update || plan_contains_lock_rows(&planned_stmt.plan_tree) {
+    if require_update
+        || pgrust_commands::tablecmds::plan_contains_lock_rows(&planned_stmt.plan_tree)
+    {
         check_relation_privilege_requirements_for_update(ctx, &planned_stmt.relation_privileges)?;
     }
     Ok(())
@@ -14332,25 +11793,11 @@ fn relation_has_active_user_rules(
     relation_oid: u32,
     session_replication_role: crate::backend::executor::SessionReplicationRole,
 ) -> bool {
-    catalog
-        .rewrite_rows_for_relation(relation_oid)
-        .into_iter()
-        .any(|row| {
-            row.rulename != "_RETURN"
-                && match row.ev_enabled {
-                    'D' => false,
-                    'A' => true,
-                    'R' => {
-                        session_replication_role
-                            == crate::backend::executor::SessionReplicationRole::Replica
-                    }
-                    'O' => {
-                        session_replication_role
-                            != crate::backend::executor::SessionReplicationRole::Replica
-                    }
-                    _ => true,
-                }
-        })
+    pgrust_commands::tablecmds::relation_has_active_user_rules(
+        catalog,
+        relation_oid,
+        session_replication_role,
+    )
 }
 
 fn eval_implicit_insert_defaults(
@@ -14882,115 +12329,7 @@ fn rewrite_subscripted_assignment_error(
 }
 
 fn sql_type_display_name(ty: SqlType) -> String {
-    if ty.is_range() {
-        let base = builtin_range_name_for_sql_type(ty).unwrap_or("range");
-        return if ty.is_array {
-            format!("{base}[]")
-        } else {
-            base.to_string()
-        };
-    }
-    if ty.is_multirange() {
-        let base = crate::include::catalog::builtin_multirange_name_for_sql_type(ty)
-            .unwrap_or("multirange");
-        return if ty.is_array {
-            format!("{base}[]")
-        } else {
-            base.to_string()
-        };
-    }
-    let base = match ty.kind {
-        SqlTypeKind::AnyElement => "anyelement",
-        SqlTypeKind::AnyArray => "anyarray",
-        SqlTypeKind::AnyRange => "anyrange",
-        SqlTypeKind::AnyMultirange => "anymultirange",
-        SqlTypeKind::AnyCompatible => "anycompatible",
-        SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
-        SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
-        SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
-        SqlTypeKind::AnyEnum => "anyenum",
-        SqlTypeKind::Enum => return ty.type_oid.to_string(),
-        SqlTypeKind::Record | SqlTypeKind::Composite => "record",
-        SqlTypeKind::Shell => "shell",
-        SqlTypeKind::Internal => "internal",
-        SqlTypeKind::Cstring => "cstring",
-        SqlTypeKind::Void => "void",
-        SqlTypeKind::Trigger => "trigger",
-        SqlTypeKind::EventTrigger => "event_trigger",
-        SqlTypeKind::FdwHandler => "fdw_handler",
-        SqlTypeKind::Int2 => "smallint",
-        SqlTypeKind::Int2Vector => "int2vector",
-        SqlTypeKind::Int4 => "integer",
-        SqlTypeKind::Int8 => "bigint",
-        SqlTypeKind::Name => "name",
-        SqlTypeKind::Oid => "oid",
-        SqlTypeKind::RegProc => "regproc",
-        SqlTypeKind::RegClass => "regclass",
-        SqlTypeKind::RegType => "regtype",
-        SqlTypeKind::RegRole => "regrole",
-        SqlTypeKind::RegNamespace => "regnamespace",
-        SqlTypeKind::RegOper => "regoper",
-        SqlTypeKind::RegOperator => "regoperator",
-        SqlTypeKind::RegProcedure => "regprocedure",
-        SqlTypeKind::RegCollation => "regcollation",
-        SqlTypeKind::Tid => "tid",
-        SqlTypeKind::Xid => "xid",
-        SqlTypeKind::OidVector => "oidvector",
-        SqlTypeKind::Bit => "bit",
-        SqlTypeKind::VarBit => "bit varying",
-        SqlTypeKind::Bytea => "bytea",
-        SqlTypeKind::Uuid => "uuid",
-        SqlTypeKind::Inet => "inet",
-        SqlTypeKind::Cidr => "cidr",
-        SqlTypeKind::MacAddr => "macaddr",
-        SqlTypeKind::MacAddr8 => "macaddr8",
-        SqlTypeKind::Float4 => "real",
-        SqlTypeKind::Float8 => "double precision",
-        SqlTypeKind::Money => "money",
-        SqlTypeKind::PgLsn => "pg_lsn",
-        SqlTypeKind::Numeric => "numeric",
-        SqlTypeKind::Json => "json",
-        SqlTypeKind::Jsonb => "jsonb",
-        SqlTypeKind::JsonPath => "jsonpath",
-        SqlTypeKind::Xml => "xml",
-        SqlTypeKind::Date => "date",
-        SqlTypeKind::Time => "time without time zone",
-        SqlTypeKind::TimeTz => "time with time zone",
-        SqlTypeKind::Interval => "interval",
-        SqlTypeKind::TsVector => "tsvector",
-        SqlTypeKind::TsQuery => "tsquery",
-        SqlTypeKind::RegConfig => "regconfig",
-        SqlTypeKind::RegDictionary => "regdictionary",
-        SqlTypeKind::Text => "text",
-        SqlTypeKind::Bool => "boolean",
-        SqlTypeKind::Point => "point",
-        SqlTypeKind::Lseg => "lseg",
-        SqlTypeKind::Path => "path",
-        SqlTypeKind::Box => "box",
-        SqlTypeKind::Polygon => "polygon",
-        SqlTypeKind::Line => "line",
-        SqlTypeKind::Circle => "circle",
-        SqlTypeKind::Timestamp => "timestamp without time zone",
-        SqlTypeKind::TimestampTz => "timestamp with time zone",
-        SqlTypeKind::PgNodeTree => "pg_node_tree",
-        SqlTypeKind::InternalChar => "\"char\"",
-        SqlTypeKind::Char => "character",
-        SqlTypeKind::Varchar => "character varying",
-        SqlTypeKind::Range
-        | SqlTypeKind::Int4Range
-        | SqlTypeKind::Int8Range
-        | SqlTypeKind::NumericRange
-        | SqlTypeKind::DateRange
-        | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
-        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
-    };
-
-    if ty.is_array {
-        format!("{base}[]")
-    } else {
-        base.to_string()
-    }
+    pgrust_commands::tablecmds_assignment::sql_type_display_name(ty)
 }
 
 fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarget) -> SqlType {
@@ -15027,37 +12366,31 @@ fn assignment_navigation_sql_type(sql_type: SqlType, ctx: &ExecutorContext) -> S
     sql_type
 }
 
-#[derive(Clone)]
-struct ResolvedAssignmentSubscript {
-    is_slice: bool,
-    lower: Option<Value>,
-    upper: Option<Value>,
+struct RootAssignmentRuntime<'a> {
+    ctx: &'a mut ExecutorContext,
 }
 
-#[derive(Clone)]
-enum ResolvedAssignmentIndirection {
-    Subscript(ResolvedAssignmentSubscript),
-    Field(String),
-}
+impl AssignmentRuntime for RootAssignmentRuntime<'_> {
+    fn assignment_navigation_sql_type(&self, sql_type: SqlType) -> SqlType {
+        assignment_navigation_sql_type(sql_type, self.ctx)
+    }
 
-fn leading_assignment_subscripts(
-    indirection: &[ResolvedAssignmentIndirection],
-) -> (
-    Vec<ResolvedAssignmentSubscript>,
-    &[ResolvedAssignmentIndirection],
-) {
-    let split = indirection
-        .iter()
-        .position(|step| matches!(step, ResolvedAssignmentIndirection::Field(_)))
-        .unwrap_or(indirection.len());
-    let subscripts = indirection[..split]
-        .iter()
-        .filter_map(|step| match step {
-            ResolvedAssignmentIndirection::Subscript(subscript) => Some(subscript.clone()),
-            ResolvedAssignmentIndirection::Field(_) => None,
-        })
-        .collect();
-    (subscripts, &indirection[split..])
+    fn assignment_record_descriptor(
+        &self,
+        sql_type: SqlType,
+    ) -> Result<RecordDescriptor, AssignmentError> {
+        assignment_record_descriptor(sql_type, self.ctx).map_err(assignment_error_from_exec)
+    }
+
+    fn apply_jsonb_subscript_assignment(
+        &mut self,
+        current: &Value,
+        path: &[Value],
+        replacement: &Value,
+    ) -> Result<Value, AssignmentError> {
+        apply_jsonb_subscript_assignment(current, path, replacement)
+            .map_err(assignment_error_from_exec)
+    }
 }
 
 fn resolve_assignment_indirection(
@@ -15090,59 +12423,6 @@ fn resolve_assignment_indirection(
         .collect()
 }
 
-fn assign_point_value(
-    current: Value,
-    subscripts: &[ResolvedAssignmentSubscript],
-    replacement: Value,
-) -> Result<Value, ExecError> {
-    if subscripts.len() != 1 {
-        return Err(array_assignment_error("wrong number of array subscripts"));
-    }
-    let subscript = &subscripts[0];
-    if subscript.is_slice {
-        return Err(ExecError::DetailedError {
-            message: "slices of fixed-length arrays not implemented".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
-        return Err(assignment_null_subscript_error());
-    };
-    if !(0..=1).contains(&index) {
-        return Err(array_assignment_error("array subscript out of range"));
-    }
-    let Value::Point(mut point) = current else {
-        return if matches!(current, Value::Null) {
-            Ok(Value::Null)
-        } else {
-            Err(ExecError::TypeMismatch {
-                op: "array assignment",
-                left: current,
-                right: Value::Null,
-            })
-        };
-    };
-    let coordinate = match replacement {
-        Value::Null => return Ok(Value::Point(point)),
-        Value::Float64(value) => value,
-        other => {
-            return Err(ExecError::TypeMismatch {
-                op: "array assignment",
-                left: Value::Point(point),
-                right: other,
-            });
-        }
-    };
-    if index == 0 {
-        point.x = coordinate;
-    } else {
-        point.y = coordinate;
-    }
-    Ok(Value::Point(point))
-}
-
 fn assign_typed_value_ordered(
     current: Value,
     sql_type: SqlType,
@@ -15150,195 +12430,57 @@ fn assign_typed_value_ordered(
     replacement: Value,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let Some((first, rest)) = indirection.split_first() else {
-        return Ok(replacement);
-    };
-    let sql_type = assignment_navigation_sql_type(sql_type, ctx);
-    match first {
-        ResolvedAssignmentIndirection::Field(field) => {
-            assign_record_field_ordered(current, sql_type, field, rest, replacement, ctx)
-        }
-        ResolvedAssignmentIndirection::Subscript(subscript) => {
-            let (leading_subscripts, after_subscripts) = leading_assignment_subscripts(indirection);
-            if sql_type.kind == SqlTypeKind::Point && !sql_type.is_array {
-                if !after_subscripts.is_empty() || leading_subscripts.len() != 1 {
-                    return Err(ExecError::DetailedError {
-                        message: "cannot assign through a subscripted point value".into(),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42804",
-                    });
-                }
-                return assign_point_value(current, &leading_subscripts, replacement);
-            }
-            if sql_type.kind == SqlTypeKind::Jsonb && !sql_type.is_array {
-                if !after_subscripts.is_empty() {
-                    return Err(ExecError::DetailedError {
-                        message: "cannot assign through a subscripted jsonb value".into(),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42804",
-                    });
-                }
-                return assign_jsonb_value(current, &leading_subscripts, replacement);
-            }
-            if after_subscripts.is_empty() {
-                return assign_array_value(current, &leading_subscripts, replacement);
-            }
-            assign_array_value_ordered(current, sql_type, subscript, rest, replacement, ctx)
-        }
-    }
-}
-
-fn assign_record_field_ordered(
-    current: Value,
-    sql_type: SqlType,
-    field: &str,
-    rest: &[ResolvedAssignmentIndirection],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    let mut record = assignment_record_value(current, sql_type, ctx)?;
-    let (field_index, field_type) = record
-        .descriptor
-        .fields
-        .iter()
-        .enumerate()
-        .find(|(_, candidate)| candidate.name.eq_ignore_ascii_case(field))
-        .map(|(index, candidate)| (index, candidate.sql_type))
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("record has no field \"{field}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "42703",
-        })?;
-    record.fields[field_index] = assign_typed_value_ordered(
-        record.fields[field_index].clone(),
-        field_type,
-        rest,
+    let mut runtime = RootAssignmentRuntime { ctx };
+    pgrust_commands::tablecmds_assignment::assign_typed_value_ordered(
+        current,
+        sql_type,
+        indirection,
         replacement,
-        ctx,
-    )?;
-    Ok(Value::Record(record))
+        &mut runtime,
+    )
+    .map_err(assignment_error_to_exec)
 }
 
-fn assign_array_value_ordered(
-    current: Value,
-    array_type: SqlType,
-    subscript: &ResolvedAssignmentSubscript,
-    rest: &[ResolvedAssignmentIndirection],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    if !array_type.is_array {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "cannot subscript type {} because it does not support subscripting",
-                sql_type_display_name(array_type)
-            ),
+fn assignment_error_from_exec(err: ExecError) -> AssignmentError {
+    match err {
+        ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => AssignmentError::TableCmds(pgrust_commands::tablecmds::TableCmdsError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }),
+        ExecError::InvalidStorageValue { column, details } => {
+            AssignmentError::InvalidStorageValue { column, details }
+        }
+        ExecError::Int4OutOfRange => AssignmentError::Int4OutOfRange,
+        ExecError::TypeMismatch { op, left, right } => {
+            AssignmentError::TypeMismatch { op, left, right }
+        }
+        other => AssignmentError::TableCmds(pgrust_commands::tablecmds::TableCmdsError::Detailed {
+            message: format!("{other:?}"),
             detail: None,
             hint: None,
-            sqlstate: "42804",
-        });
+            sqlstate: "XX000",
+        }),
     }
-    if rest.is_empty() {
-        return assign_array_value(current, std::slice::from_ref(subscript), replacement);
-    }
-    if subscript.is_slice {
-        return Err(ExecError::DetailedError {
-            message: "sliced assignment into nested fields is not supported".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    let (mut lower_bound, mut items) = assignment_top_level(current)?;
-    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
-        return Err(ExecError::InvalidStorageValue {
-            column: "<array>".into(),
-            details: "array subscript in assignment must not be null".into(),
-        });
-    };
-    if items.is_empty() {
-        lower_bound = index;
-    }
-    extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
-    let item_index = usize::try_from(i64::from(index) - i64::from(lower_bound))
-        .map_err(|_| array_assignment_limit_error())?;
-    items[item_index] = assign_typed_value_ordered(
-        items[item_index].clone(),
-        array_type.element_type(),
-        rest,
-        replacement,
-        ctx,
-    )?;
-    build_assignment_array_value(lower_bound, items)
 }
 
-fn assign_typed_value(
-    current: Value,
-    sql_type: SqlType,
-    subscripts: &[ResolvedAssignmentSubscript],
-    field_path: &[String],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    if subscripts.is_empty() {
-        if field_path.is_empty() {
-            return Ok(replacement);
+fn assignment_error_to_exec(err: AssignmentError) -> ExecError {
+    match err {
+        AssignmentError::TableCmds(err) => tablecmds_error_to_exec(err),
+        AssignmentError::TypeMismatch { op, left, right } => {
+            ExecError::TypeMismatch { op, left, right }
         }
-        return assign_record_field_path(current, sql_type, field_path, replacement, ctx);
-    }
-
-    if sql_type.kind == SqlTypeKind::Point && !sql_type.is_array {
-        if !field_path.is_empty() {
-            return Err(ExecError::DetailedError {
-                message: "cannot assign to a named field of type point".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
+        AssignmentError::InvalidStorageValue { column, details } => {
+            ExecError::InvalidStorageValue { column, details }
         }
-        return assign_point_value(current, subscripts, replacement);
+        AssignmentError::Int4OutOfRange => ExecError::Int4OutOfRange,
     }
-
-    if sql_type.kind == SqlTypeKind::Jsonb && !sql_type.is_array {
-        if !field_path.is_empty() {
-            return Err(ExecError::DetailedError {
-                message: "cannot assign to a named field of type jsonb".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
-        }
-        return assign_jsonb_value(current, subscripts, replacement);
-    }
-
-    if field_path.is_empty() {
-        return assign_array_value(current, subscripts, replacement);
-    }
-
-    assign_array_value_with_fields(current, sql_type, subscripts, field_path, replacement, ctx)
-}
-
-fn assign_jsonb_value(
-    current: Value,
-    subscripts: &[ResolvedAssignmentSubscript],
-    replacement: Value,
-) -> Result<Value, ExecError> {
-    let mut path = Vec::with_capacity(subscripts.len());
-    for subscript in subscripts {
-        if subscript.is_slice {
-            return Err(ExecError::DetailedError {
-                message: "jsonb subscript does not support slices".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "0A000",
-            });
-        }
-        path.push(subscript.lower.clone().unwrap_or(Value::Int64(1)));
-    }
-    apply_jsonb_subscript_assignment(&current, &path, &replacement)
 }
 
 fn assignment_record_descriptor(
@@ -15397,728 +12539,12 @@ fn assignment_record_descriptor(
     })
 }
 
-fn assignment_record_value(
-    current: Value,
-    sql_type: SqlType,
-    ctx: &ExecutorContext,
-) -> Result<RecordValue, ExecError> {
-    match current {
-        Value::Record(record) => normalize_assignment_record_value(record, sql_type, ctx),
-        Value::Null => {
-            let descriptor = assignment_record_descriptor(sql_type, ctx)?;
-            Ok(RecordValue::from_descriptor(
-                descriptor.clone(),
-                vec![Value::Null; descriptor.fields.len()],
-            ))
-        }
-        other => Err(ExecError::TypeMismatch {
-            op: "record assignment",
-            left: other,
-            right: Value::Null,
-        }),
-    }
-}
-
-fn normalize_assignment_record_value(
-    record: RecordValue,
-    sql_type: SqlType,
-    ctx: &ExecutorContext,
-) -> Result<RecordValue, ExecError> {
-    let descriptor = assignment_record_descriptor(sql_type, ctx)?;
-    if descriptor.fields == record.descriptor.fields {
-        return Ok(record);
-    }
-    let fields = descriptor
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(index, target_field)| {
-            record
-                .descriptor
-                .fields
-                .iter()
-                .position(|source_field| source_field.name.eq_ignore_ascii_case(&target_field.name))
-                .and_then(|source_index| record.fields.get(source_index).cloned())
-                .or_else(|| record.fields.get(index).cloned())
-                .unwrap_or(Value::Null)
-        })
-        .collect();
-    Ok(RecordValue::from_descriptor(descriptor, fields))
-}
-
-fn assign_record_field_path(
-    current: Value,
-    sql_type: SqlType,
-    field_path: &[String],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    let mut record = assignment_record_value(current, sql_type, ctx)?;
-    let field = field_path.first().ok_or_else(|| ExecError::DetailedError {
-        message: "empty record field assignment path".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "XX000",
-    })?;
-    let (field_index, field_type) = record
-        .descriptor
-        .fields
-        .iter()
-        .enumerate()
-        .find(|(_, candidate)| candidate.name.eq_ignore_ascii_case(field))
-        .map(|(index, candidate)| (index, candidate.sql_type))
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("record has no field \"{field}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "42703",
-        })?;
-
-    record.fields[field_index] = if field_path.len() == 1 {
-        replacement
-    } else {
-        assign_record_field_path(
-            record.fields[field_index].clone(),
-            field_type,
-            &field_path[1..],
-            replacement,
-            ctx,
-        )?
-    };
-    Ok(Value::Record(record))
-}
-
-fn assign_array_value_with_fields(
-    current: Value,
-    array_type: SqlType,
-    subscripts: &[ResolvedAssignmentSubscript],
-    field_path: &[String],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    if subscripts.is_empty() {
-        return assign_record_field_path(current, array_type, field_path, replacement, ctx);
-    }
-    if subscripts.iter().any(|subscript| subscript.is_slice) {
-        return Err(ExecError::DetailedError {
-            message: "sliced assignment into composite fields is not supported".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-
-    let subscript = &subscripts[0];
-    let (mut lower_bound, mut items) = assignment_top_level(current)?;
-    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
-        return Err(ExecError::InvalidStorageValue {
-            column: "<array>".into(),
-            details: "array subscript in assignment must not be null".into(),
-        });
-    };
-    if items.is_empty() {
-        lower_bound = index;
-    }
-    extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
-    let index = usize::try_from(i64::from(index) - i64::from(lower_bound))
-        .map_err(|_| array_assignment_limit_error())?;
-    items[index] = assign_typed_value(
-        items[index].clone(),
-        array_type.element_type(),
-        &subscripts[1..],
-        field_path,
-        replacement,
-        ctx,
-    )?;
-    build_assignment_array_value(lower_bound, items)
-}
-
-fn assign_array_value(
-    current: Value,
-    subscripts: &[ResolvedAssignmentSubscript],
-    replacement: Value,
-) -> Result<Value, ExecError> {
-    if subscripts.is_empty() {
-        return Ok(replacement);
-    }
-    if subscripts.iter().any(|subscript| subscript.is_slice) {
-        return assign_array_slice_value(current, subscripts, replacement);
-    }
-    let subscript = &subscripts[0];
-    let (mut lower_bound, mut items) = assignment_top_level(current)?;
-    if subscript.is_slice {
-        let Some(start) = assignment_subscript_index(subscript.lower.as_ref())? else {
-            return Err(ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "array subscript in assignment must not be null".into(),
-            });
-        };
-        let Some(end) = assignment_subscript_index(subscript.upper.as_ref())? else {
-            return Err(ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "array subscript in assignment must not be null".into(),
-            });
-        };
-        let replacement_items = assignment_replacement_items(replacement.clone())?;
-        if items.is_empty() {
-            lower_bound = start;
-        }
-        extend_assignment_items(&mut lower_bound, &mut items, start, end)?;
-        let start_idx = usize::try_from(i64::from(start) - i64::from(lower_bound))
-            .map_err(|_| array_assignment_limit_error())?;
-        let end_idx = usize::try_from(i64::from(end) - i64::from(lower_bound))
-            .map_err(|_| array_assignment_limit_error())?;
-        let span = end_idx - start_idx + 1;
-        if replacement_items.len() != span {
-            return Err(ExecError::TypeMismatch {
-                op: "array slice assignment",
-                left: build_assignment_array_value(lower_bound, items.clone())?,
-                right: replacement,
-            });
-        }
-        for (idx, item) in replacement_items.into_iter().enumerate() {
-            items[start_idx + idx] = if subscripts.len() == 1 {
-                item
-            } else {
-                assign_array_value(items[start_idx + idx].clone(), &subscripts[1..], item)?
-            };
-        }
-        build_assignment_array_value(lower_bound, items)
-    } else {
-        let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
-            return Err(ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "array subscript in assignment must not be null".into(),
-            });
-        };
-        if items.is_empty() {
-            lower_bound = index;
-        }
-        extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
-        let index = usize::try_from(i64::from(index) - i64::from(lower_bound))
-            .map_err(|_| array_assignment_limit_error())?;
-        items[index] = if subscripts.len() == 1 {
-            replacement
-        } else {
-            assign_array_value(items[index].clone(), &subscripts[1..], replacement)?
-        };
-        build_assignment_array_value(lower_bound, items)
-    }
-}
-
-fn assign_array_slice_value(
-    current: Value,
-    subscripts: &[ResolvedAssignmentSubscript],
-    replacement: Value,
-) -> Result<Value, ExecError> {
-    if matches!(replacement, Value::Null) {
-        return Ok(current);
-    }
-
-    let current_array = assignment_current_array(current)?;
-    let source_array = assignment_source_array(replacement)?;
-
-    if subscripts.len() > 6 {
-        return Err(array_assignment_error("wrong number of array subscripts"));
-    }
-
-    if current_array.ndim() == 0 {
-        return assign_array_slice_into_empty(subscripts, source_array);
-    }
-
-    let ndim = current_array.ndim();
-    if ndim < subscripts.len() || ndim > 6 {
-        return Err(array_assignment_error("wrong number of array subscripts"));
-    }
-
-    let mut dimensions = current_array.dimensions.clone();
-    let mut lower_bounds = Vec::with_capacity(ndim);
-    let mut upper_bounds = Vec::with_capacity(ndim);
-
-    for (dim_idx, subscript) in subscripts.iter().enumerate() {
-        let dim = &dimensions[dim_idx];
-        let lower = resolve_assignment_slice_bound(
-            subscript.lower.as_ref(),
-            dim.lower_bound,
-            subscript.is_slice,
-        )?;
-        let upper = resolve_assignment_slice_bound(
-            if subscript.is_slice {
-                subscript.upper.as_ref()
-            } else {
-                subscript.lower.as_ref()
-            },
-            checked_array_upper_bound(dim.lower_bound, dim.length)?,
-            subscript.is_slice,
-        )?;
-        if lower > upper {
-            return Err(array_assignment_error(
-                "upper bound cannot be less than lower bound",
-            ));
-        }
-
-        if ndim == 1 {
-            if lower < dimensions[0].lower_bound {
-                let extension =
-                    usize::try_from(i64::from(dimensions[0].lower_bound) - i64::from(lower))
-                        .map_err(|_| array_assignment_limit_error())?;
-                dimensions[0].lower_bound = lower;
-                dimensions[0].length = dimensions[0]
-                    .length
-                    .checked_add(extension)
-                    .ok_or_else(array_assignment_limit_error)?;
-                dimensions[0].length = checked_array_item_count(dimensions[0].length)?;
-            }
-            let current_upper =
-                checked_array_upper_bound(dimensions[0].lower_bound, dimensions[0].length)?;
-            if upper > current_upper {
-                let extension = usize::try_from(i64::from(upper) - i64::from(current_upper))
-                    .map_err(|_| array_assignment_limit_error())?;
-                dimensions[0].length = dimensions[0]
-                    .length
-                    .checked_add(extension)
-                    .ok_or_else(array_assignment_limit_error)?;
-                dimensions[0].length = checked_array_item_count(dimensions[0].length)?;
-            }
-        } else if lower < dim.lower_bound
-            || upper > checked_array_upper_bound(dim.lower_bound, dim.length)?
-        {
-            return Err(array_assignment_error("array subscript out of range"));
-        }
-
-        lower_bounds.push(lower);
-        upper_bounds.push(upper);
-    }
-
-    for dim in dimensions.iter().skip(subscripts.len()) {
-        lower_bounds.push(dim.lower_bound);
-        upper_bounds.push(checked_array_upper_bound(dim.lower_bound, dim.length)?);
-    }
-
-    let span_lengths = lower_bounds
-        .iter()
-        .zip(upper_bounds.iter())
-        .map(|(lower, upper)| checked_array_span_length(*lower, *upper))
-        .collect::<Result<Vec<_>, _>>()?;
-    let target_items = span_lengths
-        .iter()
-        .try_fold(1usize, |count, span| count.checked_mul(*span))
-        .ok_or_else(|| array_assignment_limit_error())
-        .and_then(checked_array_item_count)?;
-    if source_array.elements.len() < target_items {
-        return Err(array_assignment_error("source array too small"));
-    }
-
-    let element_type_oid = current_array
-        .element_type_oid
-        .or(source_array.element_type_oid);
-    if ndim == 1 {
-        let mut elements = vec![Value::Null; dimensions[0].length];
-        let original_lower = current_array.lower_bound(0).unwrap_or(1);
-        for (idx, value) in current_array.elements.iter().enumerate() {
-            let target_idx = usize::try_from(
-                i64::from(original_lower)
-                    + i64::try_from(idx).map_err(|_| array_assignment_limit_error())?
-                    - i64::from(dimensions[0].lower_bound),
-            )
-            .map_err(|_| array_assignment_limit_error())?;
-            elements[target_idx] = value.clone();
-        }
-        let start_idx =
-            usize::try_from(i64::from(lower_bounds[0]) - i64::from(dimensions[0].lower_bound))
-                .map_err(|_| array_assignment_limit_error())?;
-        for (offset, value) in source_array
-            .elements
-            .into_iter()
-            .take(target_items)
-            .enumerate()
-        {
-            elements[start_idx + offset] = value;
-        }
-        return Ok(Value::PgArray(array_with_element_type(
-            ArrayValue::from_dimensions(dimensions, elements),
-            element_type_oid,
-        )));
-    }
-
-    let mut elements = current_array.elements.clone();
-    for (offset, value) in source_array
-        .elements
-        .into_iter()
-        .take(target_items)
-        .enumerate()
-    {
-        let coords = linear_index_to_assignment_coords(offset, &lower_bounds, &span_lengths);
-        let target_idx = assignment_coords_to_linear_index(&coords, &dimensions);
-        elements[target_idx] = value;
-    }
-    Ok(Value::PgArray(array_with_element_type(
-        ArrayValue::from_dimensions(dimensions, elements),
-        element_type_oid,
-    )))
-}
-
-fn assign_array_slice_into_empty(
-    subscripts: &[ResolvedAssignmentSubscript],
-    source_array: ArrayValue,
-) -> Result<Value, ExecError> {
-    let mut dimensions = Vec::with_capacity(subscripts.len());
-    for subscript in subscripts {
-        let Some(lower_value) = subscript.lower.as_ref() else {
-            return Err(ExecError::DetailedError {
-                message: "array slice subscript must provide both boundaries".into(),
-                detail: Some(
-                    "When assigning to a slice of an empty array value, slice boundaries must be fully specified."
-                        .into(),
-                ),
-                hint: None,
-                sqlstate: "2202E",
-            });
-        };
-        let Some(upper_value) = (if subscript.is_slice {
-            subscript.upper.as_ref()
-        } else {
-            subscript.lower.as_ref()
-        }) else {
-            return Err(ExecError::DetailedError {
-                message: "array slice subscript must provide both boundaries".into(),
-                detail: Some(
-                    "When assigning to a slice of an empty array value, slice boundaries must be fully specified."
-                        .into(),
-                ),
-                hint: None,
-                sqlstate: "2202E",
-            });
-        };
-        let lower = assignment_subscript_index(Some(lower_value))?
-            .ok_or_else(|| assignment_null_subscript_error())?;
-        let upper = assignment_subscript_index(Some(upper_value))?
-            .ok_or_else(|| assignment_null_subscript_error())?;
-        if lower > upper {
-            return Err(array_assignment_error(
-                "upper bound cannot be less than lower bound",
-            ));
-        }
-        dimensions.push(ArrayDimension {
-            lower_bound: lower,
-            length: checked_array_span_length(lower, upper)?,
-        });
-    }
-
-    let target_items = dimensions
-        .iter()
-        .try_fold(1usize, |count, dim| count.checked_mul(dim.length))
-        .ok_or_else(|| array_assignment_limit_error())
-        .and_then(checked_array_item_count)?;
-    if source_array.elements.len() < target_items {
-        return Err(array_assignment_error("source array too small"));
-    }
-
-    Ok(Value::PgArray(array_with_element_type(
-        ArrayValue::from_dimensions(
-            dimensions,
-            source_array
-                .elements
-                .into_iter()
-                .take(target_items)
-                .collect(),
-        ),
-        source_array.element_type_oid,
-    )))
-}
-
-fn assignment_current_array(current: Value) -> Result<ArrayValue, ExecError> {
-    match current {
-        Value::Null => Ok(ArrayValue::empty()),
-        other => array_value_from_value(&other).ok_or(ExecError::TypeMismatch {
-            op: "array assignment",
-            left: other,
-            right: Value::Null,
-        }),
-    }
-}
-
-fn assignment_source_array(replacement: Value) -> Result<ArrayValue, ExecError> {
-    array_value_from_value(&replacement).ok_or(ExecError::TypeMismatch {
-        op: "array slice assignment",
-        left: Value::Null,
-        right: replacement,
-    })
-}
-
-fn resolve_assignment_slice_bound(
-    value: Option<&Value>,
-    default: i32,
-    is_slice: bool,
-) -> Result<i32, ExecError> {
-    match value {
-        None if is_slice => Ok(default),
-        None => assignment_subscript_index(None)?.ok_or_else(assignment_null_subscript_error),
-        Some(_) => assignment_subscript_index(value)?.ok_or_else(assignment_null_subscript_error),
-    }
-}
-
-fn assignment_null_subscript_error() -> ExecError {
-    ExecError::InvalidStorageValue {
-        column: "<array>".into(),
-        details: "array subscript in assignment must not be null".into(),
-    }
-}
-
-const MAX_ASSIGNMENT_ARRAY_ITEMS: usize = i32::MAX as usize;
-
-fn checked_array_item_count(count: usize) -> Result<usize, ExecError> {
-    if count > MAX_ASSIGNMENT_ARRAY_ITEMS {
-        Err(array_assignment_limit_error())
-    } else {
-        Ok(count)
-    }
-}
-
-fn checked_array_upper_bound(lower_bound: i32, length: usize) -> Result<i32, ExecError> {
-    let length = i64::try_from(checked_array_item_count(length)?)
-        .map_err(|_| array_assignment_limit_error())?;
-    i32::try_from(
-        i64::from(lower_bound)
-            .checked_add(length)
-            .and_then(|bound| bound.checked_sub(1))
-            .ok_or_else(array_assignment_limit_error)?,
-    )
-    .map_err(|_| array_assignment_limit_error())
-}
-
-fn checked_array_span_length(lower: i32, upper: i32) -> Result<usize, ExecError> {
-    let span = usize::try_from(
-        i64::from(upper)
-            .checked_sub(i64::from(lower))
-            .and_then(|span| span.checked_add(1))
-            .ok_or_else(array_assignment_limit_error)?,
-    )
-    .map_err(|_| array_assignment_limit_error())?;
-    checked_array_item_count(span)
-}
-
-fn array_assignment_error(message: &str) -> ExecError {
-    ExecError::DetailedError {
-        message: message.into(),
-        detail: None,
-        hint: None,
-        sqlstate: "2202E",
-    }
-}
-
-fn array_assignment_limit_error() -> ExecError {
-    ExecError::DetailedError {
-        message: "array size exceeds the maximum allowed".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "54000",
-    }
-}
-
-fn array_with_element_type(mut array: ArrayValue, element_type_oid: Option<u32>) -> ArrayValue {
-    array.element_type_oid = element_type_oid;
-    array
-}
-
-fn linear_index_to_assignment_coords(
-    mut offset: usize,
-    lower_bounds: &[i32],
-    lengths: &[usize],
-) -> Vec<i32> {
-    let mut coords = vec![0; lengths.len()];
-    for dim_idx in 0..lengths.len() {
-        let stride = lengths[dim_idx + 1..]
-            .iter()
-            .fold(1usize, |product, length| product.saturating_mul(*length));
-        let axis_offset = if stride == 0 { 0 } else { offset / stride };
-        if stride != 0 {
-            offset %= stride;
-        }
-        coords[dim_idx] = lower_bounds[dim_idx] + axis_offset as i32;
-    }
-    coords
-}
-
-fn assignment_coords_to_linear_index(coords: &[i32], dimensions: &[ArrayDimension]) -> usize {
-    let mut offset = 0usize;
-    for (dim_idx, coord) in coords.iter().enumerate() {
-        let stride = dimensions[dim_idx + 1..]
-            .iter()
-            .fold(1usize, |product, dim| product.saturating_mul(dim.length));
-        offset += (*coord - dimensions[dim_idx].lower_bound) as usize * stride;
-    }
-    offset
-}
-
-fn assignment_top_level(current: Value) -> Result<(i32, Vec<Value>), ExecError> {
-    match current {
-        Value::Null => Ok((1, Vec::new())),
-        Value::Array(items) => Ok((1, items)),
-        Value::PgArray(array) => Ok((
-            array.lower_bound(0).unwrap_or(1),
-            assignment_top_level_items(&array),
-        )),
-        other => Err(ExecError::TypeMismatch {
-            op: "array assignment",
-            left: other,
-            right: Value::Null,
-        }),
-    }
-}
-
-fn assignment_top_level_items(array: &ArrayValue) -> Vec<Value> {
-    if array.dimensions.len() <= 1 {
-        return array.elements.clone();
-    }
-    let child_dims = array.dimensions[1..].to_vec();
-    let child_width = child_dims
-        .iter()
-        .fold(1usize, |acc, dim| acc.saturating_mul(dim.length));
-    let mut out = Vec::with_capacity(array.dimensions[0].length);
-    for idx in 0..array.dimensions[0].length {
-        let start = idx * child_width;
-        out.push(Value::PgArray(ArrayValue::from_dimensions(
-            child_dims.clone(),
-            array.elements[start..start + child_width].to_vec(),
-        )));
-    }
-    out
-}
-
-fn assignment_replacement_items(replacement: Value) -> Result<Vec<Value>, ExecError> {
-    match replacement {
-        Value::Array(items) => Ok(items),
-        Value::PgArray(array) => Ok(assignment_top_level_items(&array)),
-        other => Err(ExecError::TypeMismatch {
-            op: "array slice assignment",
-            left: Value::Null,
-            right: other,
-        }),
-    }
-}
-
-fn extend_assignment_items(
-    lower_bound: &mut i32,
-    items: &mut Vec<Value>,
-    start: i32,
-    end: i32,
-) -> Result<(), ExecError> {
-    if items.is_empty() {
-        *lower_bound = start;
-    }
-    if start < *lower_bound {
-        let prepend = i64::from(*lower_bound)
-            .checked_sub(i64::from(start))
-            .and_then(|delta| usize::try_from(delta).ok())
-            .ok_or_else(array_assignment_limit_error)?;
-        items.splice(0..0, std::iter::repeat_n(Value::Null, prepend));
-        *lower_bound = start;
-    }
-    let upper_bound = i64::from(*lower_bound)
-        .checked_add(i64::try_from(items.len()).map_err(|_| array_assignment_limit_error())?)
-        .and_then(|bound| bound.checked_sub(1))
-        .ok_or_else(array_assignment_limit_error)?;
-    if i64::from(end) > upper_bound {
-        let append = i64::from(end)
-            .checked_sub(upper_bound)
-            .and_then(|delta| usize::try_from(delta).ok())
-            .ok_or_else(array_assignment_limit_error)?;
-        let new_len = items
-            .len()
-            .checked_add(append)
-            .ok_or_else(array_assignment_limit_error)?;
-        items.resize(checked_array_item_count(new_len)?, Value::Null);
-    }
-    Ok(())
-}
-
-fn build_assignment_array_value(lower_bound: i32, items: Vec<Value>) -> Result<Value, ExecError> {
-    if items.is_empty() {
-        return Ok(Value::PgArray(ArrayValue::empty()));
-    }
-    let child_arrays = items
-        .iter()
-        .filter_map(|item| match item {
-            Value::PgArray(array) => Some(Some(array.clone())),
-            Value::Array(values) => {
-                Some(ArrayValue::from_nested_values(values.clone(), vec![1]).ok())
-            }
-            Value::Null => Some(None),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if child_arrays.len() != items.len() {
-        return Ok(Value::PgArray(ArrayValue::from_dimensions(
-            vec![ArrayDimension {
-                lower_bound,
-                length: items.len(),
-            }],
-            items,
-        )));
-    }
-    let Some(template) = child_arrays.iter().find_map(|entry| entry.clone()) else {
-        return Ok(Value::PgArray(ArrayValue::from_dimensions(
-            vec![ArrayDimension {
-                lower_bound,
-                length: items.len(),
-            }],
-            items,
-        )));
-    };
-    let child_width = template.elements.len();
-    let mut elements = Vec::with_capacity(items.len() * child_width);
-    for entry in child_arrays {
-        match entry {
-            Some(array) => elements.extend(array.elements),
-            None => elements.extend(std::iter::repeat_n(Value::Null, child_width)),
-        }
-    }
-    let mut dimensions = vec![ArrayDimension {
-        lower_bound,
-        length: items.len(),
-    }];
-    dimensions.extend(template.dimensions);
-    Ok(Value::PgArray(ArrayValue::from_dimensions(
-        dimensions, elements,
-    )))
-}
-
-fn assignment_subscript_index(value: Option<&Value>) -> Result<Option<i32>, ExecError> {
-    match value {
-        None => Ok(Some(1)),
-        Some(Value::Null) => Ok(None),
-        Some(Value::Int16(v)) => Ok(Some(*v as i32)),
-        Some(Value::Int32(v)) => Ok(Some(*v)),
-        Some(Value::Int64(v)) => i32::try_from(*v)
-            .map(Some)
-            .map_err(|_| ExecError::Int4OutOfRange),
-        Some(other) => Err(ExecError::TypeMismatch {
-            op: "array assignment",
-            left: other.clone(),
-            right: Value::Null,
-        }),
-    }
-}
-
 fn modified_attnums_for_update(assignments: &[BoundAssignment]) -> Vec<i16> {
-    assignments
-        .iter()
-        .map(|assignment| assignment.column_index as i16 + 1)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    pgrust_commands::tablecmds::modified_attnums_for_update(assignments)
 }
 
 fn returning_result_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
-    targets
-        .iter()
-        .map(|target| QueryColumn {
-            name: target.name.clone(),
-            sql_type: target.sql_type,
-            wire_type_oid: None,
-        })
-        .collect()
+    pgrust_commands::tablecmds::returning_result_columns(targets)
 }
 
 fn project_returning_row(
@@ -16251,12 +12677,7 @@ fn returning_tuple_system_binding(
 }
 
 fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> StatementResult {
-    let column_names = columns.iter().map(|column| column.name.clone()).collect();
-    StatementResult::Query {
-        columns,
-        column_names,
-        rows,
-    }
+    pgrust_commands::tablecmds::build_returning_result(columns, rows)
 }
 
 fn cannot_retrieve_system_column_in_context() -> ExecError {
@@ -16269,46 +12690,7 @@ fn cannot_retrieve_system_column_in_context() -> ExecError {
 }
 
 fn returning_contains_transaction_system_var(returning: &[TargetEntry]) -> bool {
-    returning
-        .iter()
-        .any(|target| expr_contains_transaction_system_var(&target.expr))
-}
-
-fn expr_contains_transaction_system_var(expr: &Expr) -> bool {
-    match expr {
-        Expr::Var(var) => matches!(var.varattno, XMIN_ATTR_NO | XMAX_ATTR_NO),
-        Expr::Cast(inner, _)
-        | Expr::FieldSelect { expr: inner, .. }
-        | Expr::Collate { expr: inner, .. } => expr_contains_transaction_system_var(inner),
-        Expr::Func(func) => func.args.iter().any(expr_contains_transaction_system_var),
-        Expr::Op(op) => op.args.iter().any(expr_contains_transaction_system_var),
-        Expr::Bool(bool_expr) => bool_expr
-            .args
-            .iter()
-            .any(expr_contains_transaction_system_var),
-        Expr::Coalesce(left, right) => {
-            expr_contains_transaction_system_var(left)
-                || expr_contains_transaction_system_var(right)
-        }
-        Expr::Case(case_expr) => {
-            case_expr
-                .arg
-                .as_deref()
-                .is_some_and(expr_contains_transaction_system_var)
-                || case_expr.args.iter().any(|arm| {
-                    expr_contains_transaction_system_var(&arm.expr)
-                        || expr_contains_transaction_system_var(&arm.result)
-                })
-                || expr_contains_transaction_system_var(&case_expr.defresult)
-        }
-        Expr::ArrayLiteral { elements, .. } => {
-            elements.iter().any(expr_contains_transaction_system_var)
-        }
-        Expr::Row { fields, .. } => fields
-            .iter()
-            .any(|(_, expr)| expr_contains_transaction_system_var(expr)),
-        _ => false,
-    }
+    pgrust_commands::tablecmds::returning_contains_transaction_system_var(returning)
 }
 
 fn partition_tree_has_nonmatching_user_layout(
@@ -16316,27 +12698,15 @@ fn partition_tree_has_nonmatching_user_layout(
     relation_oid: u32,
     parent_desc: &RelationDesc,
 ) -> bool {
-    catalog
-        .find_all_inheritors(relation_oid)
-        .into_iter()
-        .filter(|oid| *oid != relation_oid)
-        .filter_map(|oid| catalog.relation_by_oid(oid))
-        .filter(|relation| relation.relkind == 'r')
-        .any(|relation| !relation_user_layout_matches(parent_desc, &relation.desc))
+    pgrust_commands::tablecmds::partition_tree_has_nonmatching_user_layout(
+        catalog,
+        relation_oid,
+        parent_desc,
+    )
 }
 
 fn relation_user_layout_matches(parent_desc: &RelationDesc, child_desc: &RelationDesc) -> bool {
-    let parent_columns = &parent_desc.columns;
-    let child_columns = &child_desc.columns;
-    parent_columns.len() == child_columns.len()
-        && parent_columns
-            .iter()
-            .zip(child_columns.iter())
-            .all(|(parent, child)| {
-                parent.dropped == child.dropped
-                    && parent.name.eq_ignore_ascii_case(&child.name)
-                    && parent.sql_type == child.sql_type
-            })
+    pgrust_commands::tablecmds::relation_user_layout_matches(parent_desc, child_desc)
 }
 
 pub(crate) fn execute_insert_rows(

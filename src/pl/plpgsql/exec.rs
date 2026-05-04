@@ -26,7 +26,7 @@ use crate::backend::libpq::pqformat::{format_exec_error, format_exec_error_hint}
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{
     Catalog, CatalogLookup, ParseError, PreparedExternalParam, SqlType, SqlTypeKind, Statement,
-    TriggerLevel, TriggerTiming, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_statement,
     pg_plan_query_with_outer_scopes_and_ctes_config,
     pg_plan_values_query_with_outer_scopes_and_ctes_config, plan_merge_with_outer_scopes_and_ctes,
@@ -36,149 +36,54 @@ use crate::backend::utils::misc::notices::push_notice;
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
-use crate::include::catalog::{
-    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
-    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
-    EVENT_TRIGGER_TYPE_OID, PgProcRow, TEXT_TYPE_OID, range_type_ref_for_multirange_sql_type,
-    range_type_ref_for_sql_type,
-};
+use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PgProcRow};
 use crate::include::executor::execdesc::create_query_desc;
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow, SystemVarBinding};
-use crate::include::nodes::pathnodes::PlannerConfig;
-use crate::include::nodes::plannodes::EstimateValue;
-use crate::include::nodes::primnodes::{
-    OpExprKind, QueryColumn, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint,
-};
+use crate::include::nodes::primnodes::{QueryColumn, expr_sql_type_hint};
 use crate::pgrust::portal::{
     CursorOptions, Portal, PortalExecution, PortalFetchDirection, PortalFetchLimit,
     PositionedCursorRow,
 };
 use crate::pgrust::session::{ByteaOutputFormat, resolve_thread_prepared_statement};
-
-use super::ast::{CursorDirection, ExceptionCondition, RaiseLevel};
-use super::cache::{PlpgsqlFunctionCacheKey, RelationShape, TransitionTableShape};
-use super::compile::{
-    CompiledAssignIndirection, CompiledBlock, CompiledCursorOpenSource, CompiledExceptionHandler,
-    CompiledExpr, CompiledForQuerySource, CompiledForQueryTarget, CompiledFunction,
-    CompiledIndirectAssignTarget, CompiledSelectIntoTarget, CompiledStmt, CompiledStrictParam,
-    DeclaredCursorParam, FunctionReturnContract, QueryCompareOp, RuntimeSqlScope,
-    TriggerReturnedRow, compile_event_trigger_function_from_proc, compile_function_from_proc,
-    compile_trigger_function_from_proc, runtime_sql_bound_scope, runtime_sql_param_bound_scope,
-    runtime_sql_param_id,
+use pgrust_nodes::{EventTriggerCallContext, TriggerCallContext, TriggerFunctionResult};
+use pgrust_plpgsql::event_trigger_return_bindings;
+use pgrust_plpgsql::{
+    CompiledAssignIndirection, CompiledBlock, CompiledCursorOpenSource,
+    CompiledEventTriggerBindings, CompiledExceptionHandler, CompiledExpr, CompiledForQuerySource,
+    CompiledForQueryTarget, CompiledFunction, CompiledIndirectAssignTarget,
+    CompiledSelectIntoTarget, CompiledStmt, CompiledStrictParam, CompiledTriggerBindings,
+    DeclaredCursorParam, DoControl, DynamicExternalParamBinding, ExtraCheckLevel, FunctionControl,
+    FunctionCursor, FunctionQueryResult, FunctionQueryRow, FunctionReturnContract,
+    PlpgsqlContextFrame, PlpgsqlErrorFields, PlpgsqlExceptionData, QueryCompareOp, RuntimeSqlScope,
+    TriggerReturnedRow, catalog_foreign_key_column_array, catalog_foreign_key_is_array,
+    catalog_foreign_key_is_optional, current_event_trigger_table_rewrite_relation_name_for_oid,
+    current_plpgsql_context, diagnostic_text, exception_condition_name_sqlstate,
+    foreach_iteration_values, is_catalog_foreign_key_check_sql, is_catalog_foreign_key_query_sql,
+    parse_proc_argtype_oids, plpgsql_extra_check_level, plpgsql_query_column, push_context_frame,
+    push_event_trigger_ddl_commands, push_event_trigger_dropped_objects,
+    push_event_trigger_table_rewrite, push_plpgsql_notice, queue_plpgsql_warning, quote_identifier,
+    quote_sql_string, resolve_raise_sqlstate, runtime_sql_param_id, transition_table_visible_rows,
+    trigger_return_bindings, validate_foreach_target,
+    validate_plpgsql_function_row as validate_plpgsql_function_row_impl,
+    validate_plpgsql_procedure_row as validate_plpgsql_procedure_row_impl,
+    validate_scalar_call_return_contract,
+};
+pub use pgrust_plpgsql::{
+    clear_notices, current_event_trigger_ddl_commands, current_event_trigger_dropped_objects,
+    current_event_trigger_table_rewrite, take_notices,
+};
+use pgrust_plpgsql::{
+    concrete_polymorphic_proc_row, planner_config_from_executor_gucs, routine_cache_key,
+    statement_result_changed_rows, trigger_cache_key,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlpgsqlNotice {
-    pub level: RaiseLevel,
-    pub sqlstate: String,
-    pub message: String,
-    pub detail: Option<String>,
-    pub hint: Option<String>,
-}
-
-impl PlpgsqlNotice {
-    pub fn new(level: RaiseLevel, message: impl Into<String>) -> Self {
-        let sqlstate = match &level {
-            RaiseLevel::Warning => "01000",
-            _ => "00000",
-        };
-        Self {
-            level,
-            sqlstate: sqlstate.into(),
-            message: message.into(),
-            detail: None,
-            hint: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TriggerOperation {
-    Insert,
-    Update,
-    Delete,
-    Truncate,
-}
-
-#[derive(Debug, Clone)]
-pub struct TriggerCallContext {
-    pub relation_desc: RelationDesc,
-    pub relation_oid: u32,
-    pub table_name: String,
-    pub table_schema: String,
-    pub trigger_name: String,
-    pub trigger_args: Vec<String>,
-    pub timing: TriggerTiming,
-    pub level: TriggerLevel,
-    pub op: TriggerOperation,
-    pub new_row: Option<Vec<Value>>,
-    pub old_row: Option<Vec<Value>>,
-    pub transition_tables: Vec<super::compile::TriggerTransitionTable>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventTriggerCallContext {
-    pub event: String,
-    pub tag: String,
-    pub ddl_commands: Vec<EventTriggerDdlCommandRow>,
-    pub dropped_objects: Vec<EventTriggerDroppedObjectRow>,
-    pub table_rewrite_relation_oid: Option<u32>,
-    pub table_rewrite_relation_name: Option<String>,
-    pub table_rewrite_reason: Option<i32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventTriggerDdlCommandRow {
-    pub command_tag: String,
-    pub object_type: String,
-    pub schema_name: Option<String>,
-    pub object_identity: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventTriggerDroppedObjectRow {
-    pub classid: u32,
-    pub objid: u32,
-    pub objsubid: i32,
-    pub original: bool,
-    pub normal: bool,
-    pub is_temporary: bool,
-    pub object_type: String,
-    pub schema_name: Option<String>,
-    pub object_name: Option<String>,
-    pub object_identity: String,
-    pub address_names: Vec<String>,
-    pub address_args: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TriggerFunctionResult {
-    SkipRow,
-    ReturnNew(Vec<Value>),
-    ReturnOld(Vec<Value>),
-    NoValue,
-}
-
-#[derive(Debug)]
-enum FunctionControl {
-    Continue,
-    LoopContinue,
-    Return,
-    ExitLoop,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExtraCheckLevel {
-    Warning,
-    Error,
-}
-
-#[derive(Debug)]
-enum DoControl {
-    Continue,
-    LoopContinue,
-}
+use super::ast::{CursorDirection, ExceptionCondition, RaiseLevel};
+use super::cache::PlpgsqlFunctionCacheKey;
+use super::compile::{
+    compile_event_trigger_function_from_proc, compile_function_from_proc,
+    compile_trigger_function_from_proc, runtime_sql_bound_scope, runtime_sql_param_bound_scope,
+};
 
 #[derive(Debug)]
 struct FunctionState {
@@ -193,222 +98,18 @@ struct FunctionState {
     current_exception: Option<PlpgsqlExceptionData>,
 }
 
-#[derive(Debug, Clone)]
-struct PlpgsqlExceptionData {
-    message: String,
-    detail: Option<String>,
-    hint: Option<String>,
-    sqlstate: &'static str,
-    context: Option<String>,
-    column_name: Option<String>,
-    constraint_name: Option<String>,
-    datatype_name: Option<String>,
-    table_name: Option<String>,
-    schema_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct PlpgsqlErrorFields {
-    column_name: Option<String>,
-    constraint_name: Option<String>,
-    datatype_name: Option<String>,
-    table_name: Option<String>,
-    schema_name: Option<String>,
-}
-
-impl PlpgsqlErrorFields {
-    fn is_empty(&self) -> bool {
-        self.column_name.is_none()
-            && self.constraint_name.is_none()
-            && self.datatype_name.is_none()
-            && self.table_name.is_none()
-            && self.schema_name.is_none()
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PlpgsqlContextFrame {
-    function_name: String,
-    line: usize,
-    action: &'static str,
-}
-
-#[derive(Debug, Clone)]
-struct FunctionCursor {
-    columns: Vec<QueryColumn>,
-    rows: Vec<FunctionQueryRow>,
-    current: isize,
-    scrollable: bool,
-}
-
-#[derive(Debug, Clone)]
-struct FunctionQueryRow {
-    values: Vec<Value>,
-    system_bindings: Vec<SystemVarBinding>,
-}
-
-#[derive(Debug)]
-struct FunctionQueryResult {
-    columns: Vec<QueryColumn>,
-    rows: Vec<FunctionQueryRow>,
-}
-
-#[derive(Debug, Clone)]
-struct DynamicExternalParamBinding {
-    paramid: usize,
-    expr: Expr,
-    ty: SqlType,
-}
-
-thread_local! {
-    static NOTICE_QUEUE: std::cell::RefCell<Vec<PlpgsqlNotice>> = const { std::cell::RefCell::new(Vec::new()) };
-    static EVENT_TRIGGER_DDL_COMMANDS: std::cell::RefCell<Vec<Vec<EventTriggerDdlCommandRow>>> = const { std::cell::RefCell::new(Vec::new()) };
-    static EVENT_TRIGGER_DROPPED_OBJECTS: std::cell::RefCell<Vec<Vec<EventTriggerDroppedObjectRow>>> = const { std::cell::RefCell::new(Vec::new()) };
-    static EVENT_TRIGGER_TABLE_REWRITE: std::cell::RefCell<Vec<Option<(u32, i32, String)>>> = const { std::cell::RefCell::new(Vec::new()) };
-    static CONTEXT_STACK: std::cell::RefCell<Vec<PlpgsqlContextFrame>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-pub fn take_notices() -> Vec<PlpgsqlNotice> {
-    NOTICE_QUEUE.with(|queue| std::mem::take(&mut *queue.borrow_mut()))
-}
-
-pub fn clear_notices() {
-    NOTICE_QUEUE.with(|queue| queue.borrow_mut().clear());
-}
-
-pub fn current_event_trigger_ddl_commands() -> Vec<EventTriggerDdlCommandRow> {
-    EVENT_TRIGGER_DDL_COMMANDS.with(|stack| stack.borrow().last().cloned().unwrap_or_default())
-}
-
-pub fn current_event_trigger_dropped_objects() -> Vec<EventTriggerDroppedObjectRow> {
-    EVENT_TRIGGER_DROPPED_OBJECTS.with(|stack| stack.borrow().last().cloned().unwrap_or_default())
-}
-
-pub fn current_event_trigger_table_rewrite() -> Option<(u32, i32)> {
-    EVENT_TRIGGER_TABLE_REWRITE.with(|stack| {
-        stack
-            .borrow()
-            .last()
-            .and_then(|row| row.as_ref().map(|(oid, reason, _)| (*oid, *reason)))
-    })
-}
-
-fn current_event_trigger_table_rewrite_relation_name_for_oid(oid: u32) -> Option<String> {
-    EVENT_TRIGGER_TABLE_REWRITE.with(|stack| {
-        stack.borrow().last().and_then(|row| {
-            row.as_ref()
-                .filter(|(relation_oid, _, _)| *relation_oid == oid)
-                .map(|(_, _, relation_name)| relation_name.clone())
-        })
-    })
-}
-
 fn with_context_frame<T>(
     compiled: &CompiledFunction,
     line: usize,
     action: &'static str,
     f: impl FnOnce() -> Result<T, ExecError>,
 ) -> Result<T, ExecError> {
-    CONTEXT_STACK.with(|stack| {
-        stack.borrow_mut().push(PlpgsqlContextFrame {
-            function_name: compiled_context_name(compiled),
-            line,
-            action,
-        });
+    let _guard = push_context_frame(PlpgsqlContextFrame {
+        function_name: compiled_context_name(compiled),
+        line,
+        action,
     });
-    let result = f();
-    CONTEXT_STACK.with(|stack| {
-        stack.borrow_mut().pop();
-    });
-    result
-}
-
-fn current_plpgsql_context() -> Option<String> {
-    CONTEXT_STACK.with(|stack| {
-        let stack = stack.borrow();
-        (!stack.is_empty()).then(|| {
-            stack
-                .iter()
-                .rev()
-                .map(|frame| {
-                    format!(
-                        "PL/pgSQL function {} line {} at {}",
-                        frame.function_name, frame.line, frame.action
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-    })
-}
-
-struct EventTriggerDdlCommandGuard;
-
-impl Drop for EventTriggerDdlCommandGuard {
-    fn drop(&mut self) {
-        EVENT_TRIGGER_DDL_COMMANDS.with(|stack| {
-            stack.borrow_mut().pop();
-        });
-    }
-}
-
-struct EventTriggerTableRewriteGuard;
-
-impl Drop for EventTriggerTableRewriteGuard {
-    fn drop(&mut self) {
-        EVENT_TRIGGER_TABLE_REWRITE.with(|stack| {
-            stack.borrow_mut().pop();
-        });
-    }
-}
-
-struct EventTriggerDroppedObjectsGuard;
-
-impl Drop for EventTriggerDroppedObjectsGuard {
-    fn drop(&mut self) {
-        EVENT_TRIGGER_DROPPED_OBJECTS.with(|stack| {
-            stack.borrow_mut().pop();
-        });
-    }
-}
-
-fn push_event_trigger_ddl_commands(call: &EventTriggerCallContext) -> EventTriggerDdlCommandGuard {
-    let rows = call.ddl_commands.clone();
-    EVENT_TRIGGER_DDL_COMMANDS.with(|stack| stack.borrow_mut().push(rows));
-    EventTriggerDdlCommandGuard
-}
-
-fn push_event_trigger_dropped_objects(
-    call: &EventTriggerCallContext,
-) -> EventTriggerDroppedObjectsGuard {
-    let rows = if call.event.eq_ignore_ascii_case("sql_drop") {
-        call.dropped_objects.clone()
-    } else {
-        Vec::new()
-    };
-    EVENT_TRIGGER_DROPPED_OBJECTS.with(|stack| stack.borrow_mut().push(rows));
-    EventTriggerDroppedObjectsGuard
-}
-
-fn push_event_trigger_table_rewrite(
-    call: &EventTriggerCallContext,
-) -> EventTriggerTableRewriteGuard {
-    let row = call
-        .table_rewrite_relation_oid
-        .zip(call.table_rewrite_reason)
-        .zip(call.table_rewrite_relation_name.clone())
-        .map(|((oid, reason), relation_name)| (oid, reason, relation_name))
-        .filter(|_| call.event.eq_ignore_ascii_case("table_rewrite"));
-    EVENT_TRIGGER_TABLE_REWRITE.with(|stack| stack.borrow_mut().push(row));
-    EventTriggerTableRewriteGuard
-}
-
-fn event_trigger_object_type_for_tag(tag: &str) -> String {
-    tag.strip_prefix("CREATE ")
-        .or_else(|| tag.strip_prefix("ALTER "))
-        .or_else(|| tag.strip_prefix("DROP "))
-        .unwrap_or(tag)
-        .to_ascii_lowercase()
+    f()
 }
 
 pub(crate) fn execute_block(block: &CompiledBlock) -> Result<StatementResult, ExecError> {
@@ -458,34 +159,11 @@ pub fn execute_user_defined_scalar_function(
         .collect::<Vec<_>>();
     let compiled = compiled_function_for_proc(proc_oid, resolved_result_type, &arg_types, ctx)?;
 
-    match &compiled.return_contract {
-        FunctionReturnContract::Scalar { setof: true, .. }
-        | FunctionReturnContract::FixedRow { setof: true, .. }
-        | FunctionReturnContract::AnonymousRecord { setof: true } => {
-            return Err(function_runtime_error(
-                "set-returning function called in scalar context",
-                None,
-                "0A000",
-            ));
-        }
-        FunctionReturnContract::Trigger { .. } => {
-            return Err(function_runtime_error(
-                "trigger functions can only be called as triggers",
-                None,
-                "0A000",
-            ));
-        }
-        FunctionReturnContract::EventTrigger { .. } => {
-            return Err(function_runtime_error(
-                "trigger functions can only be called as triggers",
-                None,
-                "0A000",
-            ));
-        }
-        FunctionReturnContract::Scalar { .. }
-        | FunctionReturnContract::FixedRow { .. }
-        | FunctionReturnContract::AnonymousRecord { setof: false } => {}
-    }
+    validate_scalar_call_return_contract(
+        &compiled.return_contract,
+        pgrust_plpgsql::ScalarCallContext::ExprArgs,
+    )
+    .map_err(plpgsql_scalar_call_validation_error)?;
 
     let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
     if track_stats {
@@ -577,34 +255,11 @@ fn execute_user_defined_scalar_function_values_with_actual_arg_types(
 ) -> Result<Value, ExecError> {
     let compiled = compiled_function_for_proc(proc_oid, None, actual_arg_types, ctx)?;
 
-    match &compiled.return_contract {
-        FunctionReturnContract::Scalar { setof: true, .. }
-        | FunctionReturnContract::FixedRow { setof: true, .. }
-        | FunctionReturnContract::AnonymousRecord { setof: true } => {
-            return Err(function_runtime_error(
-                "set-returning function called in scalar context",
-                None,
-                "0A000",
-            ));
-        }
-        FunctionReturnContract::Trigger { .. } => {
-            return Err(function_runtime_error(
-                "trigger function called in scalar context",
-                None,
-                "0A000",
-            ));
-        }
-        FunctionReturnContract::EventTrigger { .. } => {
-            return Err(function_runtime_error(
-                "event trigger function called in scalar context",
-                None,
-                "0A000",
-            ));
-        }
-        FunctionReturnContract::Scalar { .. }
-        | FunctionReturnContract::FixedRow { .. }
-        | FunctionReturnContract::AnonymousRecord { setof: false } => {}
-    }
+    validate_scalar_call_return_contract(
+        &compiled.return_contract,
+        pgrust_plpgsql::ScalarCallContext::ValueArgs,
+    )
+    .map_err(plpgsql_scalar_call_validation_error)?;
 
     let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
     if track_stats {
@@ -710,13 +365,8 @@ pub fn execute_user_defined_trigger_function(
     ctx: &mut ExecutorContext,
 ) -> Result<TriggerFunctionResult, ExecError> {
     let compiled = compiled_trigger_function_for_proc(proc_oid, call, ctx)?;
-    let FunctionReturnContract::Trigger { bindings } = &compiled.return_contract else {
-        return Err(function_runtime_error(
-            "trigger function compiled with a non-trigger return contract",
-            None,
-            "0A000",
-        ));
-    };
+    let bindings = trigger_return_bindings(&compiled.return_contract)
+        .map_err(plpgsql_trigger_contract_error)?;
 
     let mut state = FunctionState {
         values: vec![Value::Null; compiled.body.total_slots],
@@ -766,13 +416,8 @@ pub fn execute_user_defined_event_trigger_function(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let compiled = compiled_event_trigger_function_for_proc(proc_oid, ctx)?;
-    let FunctionReturnContract::EventTrigger { bindings } = &compiled.return_contract else {
-        return Err(function_runtime_error(
-            "event trigger function compiled with a non-event-trigger return contract",
-            None,
-            "0A000",
-        ));
-    };
+    let bindings = event_trigger_return_bindings(&compiled.return_contract)
+        .map_err(plpgsql_trigger_contract_error)?;
 
     let mut state = FunctionState {
         values: vec![Value::Null; compiled.body.total_slots],
@@ -818,7 +463,7 @@ fn compiled_function_for_proc(
         return Ok(compiled);
     }
     let compile_row =
-        concrete_polymorphic_proc_row(&row, resolved_result_type, actual_arg_types, catalog)?
+        concrete_polymorphic_proc_row(&row, resolved_result_type, actual_arg_types, catalog)
             .unwrap_or_else(|| row.clone());
     let mut compiled = compile_function_from_proc(&compile_row, catalog, Some(&ctx.gucs))
         .map_err(|err| plpgsql_compile_error(err, &row))?;
@@ -836,308 +481,6 @@ fn proc_context_arg_type_names(row: &PgProcRow, catalog: &dyn CatalogLookup) -> 
         .into_iter()
         .map(|oid| format_type_text(oid, None, catalog))
         .collect()
-}
-
-fn concrete_polymorphic_proc_row(
-    row: &PgProcRow,
-    resolved_result_type: Option<SqlType>,
-    actual_arg_types: &[Option<SqlType>],
-    catalog: &dyn CatalogLookup,
-) -> Result<Option<PgProcRow>, ExecError> {
-    let mut concrete_row = row.clone();
-    let mut changed = false;
-    if is_polymorphic_type_oid(row.prorettype)
-        && let Some(result_type) = resolved_result_type
-        && let Some(result_oid) = concrete_type_oid(result_type, catalog)
-        && !is_polymorphic_type_oid(result_oid)
-    {
-        concrete_row.prorettype = result_oid;
-        changed = true;
-    }
-    let Some(arg_oids) = parse_proc_argtype_oids(&row.proargtypes) else {
-        return Ok(None);
-    };
-    let polymorphic_types = infer_concrete_polymorphic_types(row, actual_arg_types);
-    let concrete_arg_oids = arg_oids
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(idx, oid)| {
-            if is_polymorphic_type_oid(oid)
-                && let Some(Some(actual_type)) = actual_arg_types.get(idx)
-                && let Some(actual_oid) = concrete_type_oid(*actual_type, catalog)
-                && !is_polymorphic_type_oid(actual_oid)
-            {
-                changed = true;
-                actual_oid
-            } else {
-                oid
-            }
-        })
-        .collect::<Vec<_>>();
-    if !changed {
-        if let (Some(all_arg_types), Some(arg_modes)) = (&row.proallargtypes, &row.proargmodes) {
-            let concrete_all_arg_oids = concrete_polymorphic_all_arg_oids(
-                all_arg_types,
-                arg_modes,
-                actual_arg_types,
-                &polymorphic_types,
-                catalog,
-                &mut changed,
-            );
-            if changed {
-                concrete_row.proallargtypes = Some(concrete_all_arg_oids);
-            }
-        }
-        if !changed {
-            return Ok(None);
-        }
-    } else if let (Some(all_arg_types), Some(arg_modes)) = (&row.proallargtypes, &row.proargmodes) {
-        concrete_row.proallargtypes = Some(concrete_polymorphic_all_arg_oids(
-            all_arg_types,
-            arg_modes,
-            actual_arg_types,
-            &polymorphic_types,
-            catalog,
-            &mut changed,
-        ));
-    }
-    concrete_row.proargtypes = concrete_arg_oids
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(" ");
-    Ok(Some(concrete_row))
-}
-
-fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
-    if argtypes.trim().is_empty() {
-        return Some(Vec::new());
-    }
-    argtypes
-        .split_whitespace()
-        .map(|part| part.parse::<u32>().ok())
-        .collect()
-}
-
-fn concrete_type_oid(ty: SqlType, catalog: &dyn CatalogLookup) -> Option<u32> {
-    catalog
-        .type_oid_for_sql_type(ty)
-        .or_else(|| (ty.type_oid != 0).then_some(ty.type_oid))
-}
-
-#[derive(Default)]
-struct InferredPolymorphicTypes {
-    anyelement: Option<SqlType>,
-    anyarray: Option<SqlType>,
-    anyrange: Option<SqlType>,
-    anymultirange: Option<SqlType>,
-    anycompatible: Option<SqlType>,
-    anycompatiblerange: Option<SqlType>,
-    anycompatiblemultirange: Option<SqlType>,
-}
-
-fn infer_concrete_polymorphic_types(
-    row: &PgProcRow,
-    actual_arg_types: &[Option<SqlType>],
-) -> InferredPolymorphicTypes {
-    let mut inferred = InferredPolymorphicTypes::default();
-    let Some(arg_oids) = parse_proc_argtype_oids(&row.proargtypes) else {
-        return inferred;
-    };
-    let mut compatible_loose = Vec::new();
-    let mut compatible_anchor = None;
-    for (oid, actual_type) in arg_oids.into_iter().zip(actual_arg_types.iter().copied()) {
-        let Some(actual_type) = actual_type else {
-            continue;
-        };
-        match oid {
-            ANYOID | ANYELEMENTOID => {
-                merge_exact_sql_type(&mut inferred.anyelement, actual_type);
-            }
-            ANYARRAYOID if actual_type.is_array => {
-                inferred.anyarray.get_or_insert(actual_type);
-                merge_exact_sql_type(&mut inferred.anyelement, actual_type.element_type());
-            }
-            ANYRANGEOID if actual_type.is_range() => {
-                inferred.anyrange.get_or_insert(actual_type);
-                if let Some(range_type) = range_type_ref_for_sql_type(actual_type) {
-                    merge_exact_sql_type(&mut inferred.anyelement, range_type.subtype);
-                }
-            }
-            ANYMULTIRANGEOID if actual_type.is_multirange() => {
-                inferred.anymultirange.get_or_insert(actual_type);
-                if let Some(range_type) = range_type_ref_for_multirange_sql_type(actual_type) {
-                    merge_exact_sql_type(&mut inferred.anyelement, range_type.subtype);
-                }
-            }
-            ANYCOMPATIBLEOID => compatible_loose.push(actual_type),
-            ANYCOMPATIBLEARRAYOID if actual_type.is_array => {
-                compatible_loose.push(actual_type.element_type());
-            }
-            ANYCOMPATIBLERANGEOID if actual_type.is_range() => {
-                inferred.anycompatiblerange.get_or_insert(actual_type);
-                if let Some(range_type) = range_type_ref_for_sql_type(actual_type) {
-                    compatible_anchor.get_or_insert(range_type.subtype);
-                }
-            }
-            ANYCOMPATIBLEMULTIRANGEOID if actual_type.is_multirange() => {
-                inferred.anycompatiblemultirange.get_or_insert(actual_type);
-                if let Some(range_type) = range_type_ref_for_multirange_sql_type(actual_type) {
-                    compatible_anchor.get_or_insert(range_type.subtype);
-                }
-            }
-            _ => {}
-        }
-    }
-    inferred.anycompatible = if let Some(anchor) = compatible_anchor {
-        compatible_loose
-            .iter()
-            .all(|ty| can_coerce_to_compatible_anchor(*ty, anchor))
-            .then_some(anchor)
-    } else {
-        compatible_loose
-            .into_iter()
-            .try_fold(None, merge_loose_compatible_type)
-            .flatten()
-    };
-    inferred
-}
-
-fn concrete_polymorphic_all_arg_oids(
-    all_arg_types: &[u32],
-    arg_modes: &[u8],
-    actual_arg_types: &[Option<SqlType>],
-    inferred: &InferredPolymorphicTypes,
-    catalog: &dyn CatalogLookup,
-    changed: &mut bool,
-) -> Vec<u32> {
-    let mut input_index = 0usize;
-    all_arg_types
-        .iter()
-        .copied()
-        .zip(arg_modes.iter().copied())
-        .map(|(oid, mode)| {
-            let replacement = if matches!(mode, b'i' | b'b') {
-                let actual_type = actual_arg_types.get(input_index).copied().flatten();
-                input_index = input_index.saturating_add(1);
-                actual_type
-            } else {
-                concrete_polymorphic_sql_type(oid, inferred)
-            };
-            if is_polymorphic_type_oid(oid)
-                && let Some(actual_type) = replacement
-                && let Some(actual_oid) = concrete_type_oid(actual_type, catalog)
-                && !is_polymorphic_type_oid(actual_oid)
-            {
-                *changed = true;
-                actual_oid
-            } else {
-                oid
-            }
-        })
-        .collect()
-}
-
-fn concrete_polymorphic_sql_type(oid: u32, inferred: &InferredPolymorphicTypes) -> Option<SqlType> {
-    match oid {
-        ANYOID | ANYELEMENTOID => inferred.anyelement,
-        ANYARRAYOID => inferred
-            .anyarray
-            .or_else(|| inferred.anyelement.map(SqlType::array_of)),
-        ANYRANGEOID => inferred.anyrange,
-        ANYMULTIRANGEOID => inferred.anymultirange,
-        ANYCOMPATIBLEOID => inferred.anycompatible,
-        ANYCOMPATIBLEARRAYOID => inferred.anycompatible.map(SqlType::array_of),
-        ANYCOMPATIBLERANGEOID => inferred.anycompatiblerange,
-        ANYCOMPATIBLEMULTIRANGEOID => inferred.anycompatiblemultirange,
-        _ => None,
-    }
-}
-
-fn merge_exact_sql_type(existing: &mut Option<SqlType>, next: SqlType) {
-    if existing.is_none() {
-        *existing = Some(next);
-    }
-}
-
-fn merge_loose_compatible_type(
-    existing: Option<SqlType>,
-    next: SqlType,
-) -> Option<Option<SqlType>> {
-    match existing {
-        None => Some(Some(next)),
-        Some(existing) if existing == next => Some(Some(existing)),
-        Some(existing)
-            if matches!(
-                existing.kind,
-                SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
-            ) && next.kind == SqlTypeKind::Numeric =>
-        {
-            Some(Some(next))
-        }
-        Some(existing)
-            if existing.kind == SqlTypeKind::Numeric
-                && matches!(
-                    next.kind,
-                    SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
-                ) =>
-        {
-            Some(Some(existing))
-        }
-        Some(existing) if is_text_like_type(next) && !is_text_like_type(existing) => {
-            Some(Some(existing))
-        }
-        Some(existing) if is_text_like_type(existing) && !is_text_like_type(next) => {
-            Some(Some(next))
-        }
-        Some(_) => None,
-    }
-}
-
-fn is_text_like_type(ty: SqlType) -> bool {
-    !ty.is_array
-        && matches!(
-            ty.kind,
-            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
-        )
-}
-
-fn can_coerce_to_compatible_anchor(value: SqlType, anchor: SqlType) -> bool {
-    value == anchor
-        || matches!(
-            (value.kind, anchor.kind),
-            (SqlTypeKind::Int2, SqlTypeKind::Int4)
-                | (SqlTypeKind::Int2, SqlTypeKind::Int8)
-                | (SqlTypeKind::Int2, SqlTypeKind::Numeric)
-                | (SqlTypeKind::Int2, SqlTypeKind::Float4)
-                | (SqlTypeKind::Int2, SqlTypeKind::Float8)
-                | (SqlTypeKind::Int4, SqlTypeKind::Int8)
-                | (SqlTypeKind::Int4, SqlTypeKind::Numeric)
-                | (SqlTypeKind::Int4, SqlTypeKind::Float4)
-                | (SqlTypeKind::Int4, SqlTypeKind::Float8)
-                | (SqlTypeKind::Int8, SqlTypeKind::Numeric)
-                | (SqlTypeKind::Int8, SqlTypeKind::Float4)
-                | (SqlTypeKind::Int8, SqlTypeKind::Float8)
-                | (SqlTypeKind::Numeric, SqlTypeKind::Float4)
-                | (SqlTypeKind::Numeric, SqlTypeKind::Float8)
-                | (SqlTypeKind::Float4, SqlTypeKind::Float8)
-        )
-}
-
-fn is_polymorphic_type_oid(oid: u32) -> bool {
-    matches!(
-        oid,
-        ANYOID
-            | ANYELEMENTOID
-            | ANYARRAYOID
-            | ANYRANGEOID
-            | ANYMULTIRANGEOID
-            | ANYCOMPATIBLEOID
-            | ANYCOMPATIBLEARRAYOID
-            | ANYCOMPATIBLERANGEOID
-            | ANYCOMPATIBLEMULTIRANGEOID
-    )
 }
 
 fn compiled_procedure_for_proc(
@@ -1299,96 +642,106 @@ fn validate_plpgsql_function_row(
     catalog: &dyn CatalogLookup,
     object_kind: &str,
 ) -> Result<(), ExecError> {
-    if row.prokind != 'f' {
-        return Err(function_runtime_error(
-            "only functions are executable through the PL/pgSQL runtime",
-            Some(format!("prokind = {}", row.prokind)),
-            "0A000",
-        ));
-    }
-    validate_plpgsql_language(row, catalog, object_kind)
+    let language_name = catalog
+        .language_row_by_oid(row.prolang)
+        .map(|row| row.lanname);
+    validate_plpgsql_function_row_impl(row, language_name.as_deref(), object_kind)
+        .map_err(plpgsql_routine_validation_error)
 }
 
 fn validate_plpgsql_procedure_row(
     row: &PgProcRow,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
-    if row.prokind != 'p' {
-        return Err(function_runtime_error(
-            "only procedures are executable through CALL",
-            Some(format!("prokind = {}", row.prokind)),
-            "0A000",
-        ));
-    }
-    validate_plpgsql_language(row, catalog, "procedure")
+    let language_name = catalog
+        .language_row_by_oid(row.prolang)
+        .map(|row| row.lanname);
+    validate_plpgsql_procedure_row_impl(row, language_name.as_deref())
+        .map_err(plpgsql_routine_validation_error)
 }
 
-fn validate_plpgsql_language(
-    row: &PgProcRow,
-    catalog: &dyn CatalogLookup,
-    object_kind: &str,
-) -> Result<(), ExecError> {
-    let language = catalog.language_row_by_oid(row.prolang).ok_or_else(|| {
-        function_runtime_error(
-            &format!("unknown language oid {}", row.prolang),
-            None,
-            "42883",
-        )
-    })?;
-    if !language.lanname.eq_ignore_ascii_case("plpgsql") {
-        return Err(function_runtime_error(
+fn plpgsql_routine_validation_error(
+    error: pgrust_plpgsql::PlpgsqlRoutineValidationError,
+) -> ExecError {
+    match error {
+        pgrust_plpgsql::PlpgsqlRoutineValidationError::WrongFunctionKind { prokind } => {
+            function_runtime_error(
+                "only functions are executable through the PL/pgSQL runtime",
+                Some(format!("prokind = {prokind}")),
+                "0A000",
+            )
+        }
+        pgrust_plpgsql::PlpgsqlRoutineValidationError::WrongProcedureKind { prokind } => {
+            function_runtime_error(
+                "only procedures are executable through CALL",
+                Some(format!("prokind = {prokind}")),
+                "0A000",
+            )
+        }
+        pgrust_plpgsql::PlpgsqlRoutineValidationError::UnknownLanguage { prolang } => {
+            function_runtime_error(&format!("unknown language oid {prolang}"), None, "42883")
+        }
+        pgrust_plpgsql::PlpgsqlRoutineValidationError::UnsupportedLanguage {
+            object_kind,
+            language_name,
+        } => function_runtime_error(
             &format!("only LANGUAGE plpgsql {object_kind}s are supported"),
-            Some(format!("{object_kind} language is {}", language.lanname)),
+            Some(format!("{object_kind} language is {language_name}")),
             "0A000",
-        ));
-    }
-    Ok(())
-}
-
-fn routine_cache_key(
-    row: &PgProcRow,
-    resolved_result_type: Option<SqlType>,
-    actual_arg_types: &[Option<SqlType>],
-) -> PlpgsqlFunctionCacheKey {
-    if row_uses_polymorphic_types(row) {
-        PlpgsqlFunctionCacheKey::Routine {
-            proc_oid: row.oid,
-            resolved_result_type,
-            actual_arg_types: actual_arg_types.to_vec(),
-        }
-    } else {
-        PlpgsqlFunctionCacheKey::Routine {
-            proc_oid: row.oid,
-            resolved_result_type: None,
-            actual_arg_types: Vec::new(),
-        }
+        ),
     }
 }
 
-fn row_uses_polymorphic_types(row: &PgProcRow) -> bool {
-    is_polymorphic_type_oid(row.prorettype)
-        || parse_proc_argtype_oids(&row.proargtypes)
-            .unwrap_or_default()
-            .into_iter()
-            .any(is_polymorphic_type_oid)
-        || row
-            .proallargtypes
-            .as_ref()
-            .is_some_and(|types| types.iter().copied().any(is_polymorphic_type_oid))
+fn plpgsql_scalar_call_validation_error(
+    error: pgrust_plpgsql::PlpgsqlScalarCallValidationError,
+) -> ExecError {
+    match error {
+        pgrust_plpgsql::PlpgsqlScalarCallValidationError::SetReturningInScalarContext => {
+            function_runtime_error(
+                "set-returning function called in scalar context",
+                None,
+                "0A000",
+            )
+        }
+        pgrust_plpgsql::PlpgsqlScalarCallValidationError::TriggerInScalarContext { context } => {
+            let message = match context {
+                pgrust_plpgsql::ScalarCallContext::ExprArgs => {
+                    "trigger functions can only be called as triggers"
+                }
+                pgrust_plpgsql::ScalarCallContext::ValueArgs => {
+                    "trigger function called in scalar context"
+                }
+            };
+            function_runtime_error(message, None, "0A000")
+        }
+        pgrust_plpgsql::PlpgsqlScalarCallValidationError::EventTriggerInScalarContext {
+            context,
+        } => {
+            let message = match context {
+                pgrust_plpgsql::ScalarCallContext::ExprArgs => {
+                    "trigger functions can only be called as triggers"
+                }
+                pgrust_plpgsql::ScalarCallContext::ValueArgs => {
+                    "event trigger function called in scalar context"
+                }
+            };
+            function_runtime_error(message, None, "0A000")
+        }
+    }
 }
 
-fn trigger_cache_key(proc_oid: u32, call: &TriggerCallContext) -> PlpgsqlFunctionCacheKey {
-    PlpgsqlFunctionCacheKey::Trigger {
-        proc_oid,
-        relation_shape: RelationShape::from_desc(&call.relation_desc),
-        transition_tables: call
-            .transition_tables
-            .iter()
-            .map(|table| TransitionTableShape {
-                name: table.name.clone(),
-                relation_shape: RelationShape::from_desc(&table.desc),
-            })
-            .collect(),
+fn plpgsql_trigger_contract_error(error: pgrust_plpgsql::PlpgsqlTriggerContractError) -> ExecError {
+    match error {
+        pgrust_plpgsql::PlpgsqlTriggerContractError::NonTrigger => function_runtime_error(
+            "trigger function compiled with a non-trigger return contract",
+            None,
+            "0A000",
+        ),
+        pgrust_plpgsql::PlpgsqlTriggerContractError::NonEventTrigger => function_runtime_error(
+            "event trigger function compiled with a non-event-trigger return contract",
+            None,
+            "0A000",
+        ),
     }
 }
 
@@ -1425,23 +778,11 @@ fn install_trigger_transition_ctes(
 }
 
 fn materialized_transition_table_rows(
-    table: &super::compile::TriggerTransitionTable,
+    table: &pgrust_nodes::TriggerTransitionTable,
 ) -> Vec<MaterializedRow> {
-    let visible_indexes = table
-        .desc
-        .columns
-        .iter()
-        .enumerate()
-        .filter_map(|(index, column)| (!column.dropped).then_some(index))
-        .collect::<Vec<_>>();
-    table
-        .rows
-        .iter()
-        .map(|row| {
-            let mut values = visible_indexes
-                .iter()
-                .map(|index| row.get(*index).cloned().unwrap_or(Value::Null))
-                .collect::<Vec<_>>();
+    transition_table_visible_rows(table)
+        .into_iter()
+        .map(|mut values| {
             Value::materialize_all(&mut values);
             MaterializedRow::new(TupleSlot::virtual_row(values), Vec::new())
         })
@@ -3181,7 +2522,7 @@ fn exec_function_return_runtime_query(
 }
 
 fn function_query_row_values(rows: &[FunctionQueryRow]) -> Vec<Vec<Value>> {
-    rows.iter().map(|row| row.values.clone()).collect()
+    pgrust_plpgsql::function_query_row_values(rows)
 }
 
 fn assign_query_rows_into_targets(
@@ -3481,8 +2822,8 @@ fn exec_function_foreach(
         state.values[compiled.found_slot] = Value::Bool(false);
         return Ok(FunctionControl::Continue);
     };
-    validate_foreach_target(target, slice)?;
-    let values = foreach_iteration_values(&array, slice)?;
+    validate_foreach_target(target, slice).map_err(plpgsql_foreach_runtime_error)?;
+    let values = foreach_iteration_values(&array, slice).map_err(plpgsql_foreach_runtime_error)?;
     if values.is_empty() {
         state.values[compiled.found_slot] = Value::Bool(false);
         return Ok(FunctionControl::Continue);
@@ -3497,65 +2838,6 @@ fn exec_function_foreach(
     }
     state.values[compiled.found_slot] = Value::Bool(true);
     Ok(FunctionControl::Continue)
-}
-
-fn validate_foreach_target(target: &CompiledForQueryTarget, slice: usize) -> Result<(), ExecError> {
-    if slice == 0 {
-        return Ok(());
-    }
-    if target
-        .targets
-        .iter()
-        .any(|target| !target.ty.is_array && target.ty.kind != SqlTypeKind::Record)
-    {
-        return Err(function_runtime_error(
-            "FOREACH ... SLICE loop variable must be of an array type",
-            None,
-            "42804",
-        ));
-    }
-    Ok(())
-}
-
-fn foreach_iteration_values(array: &ArrayValue, slice: usize) -> Result<Vec<Value>, ExecError> {
-    if array.is_empty() {
-        return Ok(Vec::new());
-    }
-    if slice == 0 {
-        return Ok(array.elements.clone());
-    }
-    let ndim = array.ndim();
-    if slice > ndim {
-        return Err(function_runtime_error(
-            &format!(
-                "slice dimension ({slice}) is out of the valid range 0..{}",
-                ndim
-            ),
-            None,
-            "2202E",
-        ));
-    }
-    let slice_dims = array.dimensions[ndim - slice..].to_vec();
-    let slice_len = slice_dims
-        .iter()
-        .try_fold(1usize, |acc, dim| acc.checked_mul(dim.length))
-        .ok_or_else(|| {
-            function_runtime_error("array size exceeds the maximum allowed", None, "54000")
-        })?;
-    if slice_len == 0 {
-        return Ok(Vec::new());
-    }
-    Ok(array
-        .elements
-        .chunks(slice_len)
-        .map(|chunk| {
-            Value::PgArray(ArrayValue {
-                element_type_oid: array.element_type_oid,
-                dimensions: slice_dims.clone(),
-                elements: chunk.to_vec(),
-            })
-        })
-        .collect())
 }
 
 fn assign_foreach_value_to_targets(
@@ -3592,6 +2874,10 @@ fn assign_foreach_value_to_targets(
         state.values[target.slot] = cast_value_with_config(value, target.ty, &ctx.datetime_config)?;
     }
     Ok(())
+}
+
+fn plpgsql_foreach_runtime_error(error: pgrust_plpgsql::PlpgsqlForeachRuntimeError) -> ExecError {
+    function_runtime_error(&error.message(), None, error.sqlstate())
 }
 
 fn exec_function_insert(
@@ -3987,8 +3273,10 @@ fn exec_function_drop_table(
             "0A000",
         )
     })?;
-    let dropped_objects = event_trigger_dropped_table_rows_for_dynamic_sql(stmt, catalog);
-    let ddl_commands = event_trigger_drop_table_command_rows_for_dynamic_sql(stmt, catalog);
+    let dropped_objects =
+        pgrust_plpgsql::event_trigger_dropped_table_rows_for_dynamic_sql(stmt, catalog);
+    let ddl_commands =
+        pgrust_plpgsql::event_trigger_drop_table_command_rows_for_dynamic_sql(stmt, catalog);
     let undroppable_identity = dynamic_drop_table_undroppable_identity(stmt, catalog, ctx)?;
     let xid = ctx.ensure_write_xid()?;
     db.fire_event_triggers_in_executor_context(ctx, "ddl_command_start", "DROP TABLE")?;
@@ -4061,8 +3349,9 @@ fn dynamic_drop_table_undroppable_identity(
         let Some(relation) = catalog.lookup_any_relation(name) else {
             continue;
         };
-        let (schema, table, _) = event_trigger_relation_schema_and_name(catalog, &relation);
-        let identity = qualified_event_identity(&schema, &table);
+        let (schema, table, _) =
+            pgrust_plpgsql::event_trigger_relation_schema_and_name(catalog, &relation);
+        let identity = pgrust_plpgsql::qualified_event_identity(&schema, &table);
         if undroppable_guard_contains(catalog, ctx, "table", &identity)? {
             return Ok(Some(identity));
         }
@@ -4121,147 +3410,9 @@ fn dynamic_drop_table_undroppable_error(identity: &str) -> ExecError {
 }
 
 fn push_nested_undroppable_audit_notice(identity: &str) {
-    let Some((schema, table)) = identity.split_once('.') else {
-        return;
-    };
-    if schema != "audit_tbls" {
-        return;
+    if let Some(notice) = pgrust_plpgsql::dynamic_drop_table_undroppable_notice(identity) {
+        push_notice(notice);
     }
-    push_notice(format!(
-        "table \"{schema}_{table}\" does not exist, skipping"
-    ));
-}
-
-fn event_trigger_drop_table_command_rows_for_dynamic_sql(
-    stmt: &crate::backend::parser::DropTableStatement,
-    catalog: &dyn CatalogLookup,
-) -> Vec<EventTriggerDdlCommandRow> {
-    stmt.table_names
-        .iter()
-        .filter_map(|name| catalog.lookup_any_relation(name))
-        .map(|relation| {
-            let (schema, table, _) = event_trigger_relation_schema_and_name(catalog, &relation);
-            EventTriggerDdlCommandRow {
-                command_tag: "DROP TABLE".into(),
-                object_type: "table".into(),
-                schema_name: Some(schema.clone()),
-                object_identity: qualified_event_identity(&schema, &table),
-            }
-        })
-        .collect()
-}
-
-fn event_trigger_dropped_table_rows_for_dynamic_sql(
-    stmt: &crate::backend::parser::DropTableStatement,
-    catalog: &dyn CatalogLookup,
-) -> Vec<EventTriggerDroppedObjectRow> {
-    stmt.table_names
-        .iter()
-        .filter_map(|name| catalog.lookup_any_relation(name))
-        .flat_map(|relation| event_trigger_dropped_table_rows(catalog, &relation))
-        .collect()
-}
-
-fn event_trigger_dropped_table_rows(
-    catalog: &dyn CatalogLookup,
-    relation: &crate::backend::parser::BoundRelation,
-) -> Vec<EventTriggerDroppedObjectRow> {
-    // :HACK: PL/pgSQL dynamic DDL goes around Session's event-trigger row
-    // collector. This mirrors the table/type rows needed by event_trigger.sql;
-    // dependency-driven object collection should eventually live in the drop
-    // executor and be shared by both paths.
-    let (schema, table, is_temporary) = event_trigger_relation_schema_and_name(catalog, relation);
-    let qualified_table = qualified_event_identity(&schema, &table);
-    vec![
-        event_trigger_dropped_object_row(
-            "table",
-            Some(schema.clone()),
-            Some(table.clone()),
-            qualified_table.clone(),
-            vec![schema.clone(), table.clone()],
-            true,
-            false,
-            is_temporary,
-        ),
-        event_trigger_dropped_object_row(
-            "type",
-            Some(schema.clone()),
-            Some(table.clone()),
-            qualified_table.clone(),
-            vec![qualified_table.clone()],
-            false,
-            false,
-            is_temporary,
-        ),
-        event_trigger_dropped_object_row(
-            "type",
-            Some(schema.clone()),
-            Some(format!("_{table}")),
-            format!("{qualified_table}[]"),
-            vec![format!("{qualified_table}[]")],
-            false,
-            false,
-            is_temporary,
-        ),
-    ]
-}
-
-fn event_trigger_relation_schema_and_name(
-    catalog: &dyn CatalogLookup,
-    relation: &crate::backend::parser::BoundRelation,
-) -> (String, String, bool) {
-    let is_temporary = relation.relpersistence == 't';
-    let schema = if is_temporary {
-        "pg_temp".into()
-    } else {
-        catalog
-            .namespace_row_by_oid(relation.namespace_oid)
-            .map(|row| row.nspname)
-            .unwrap_or_else(|| "public".into())
-    };
-    let table = catalog
-        .class_row_by_oid(relation.relation_oid)
-        .map(|row| row.relname)
-        .unwrap_or_else(|| relation.relation_oid.to_string());
-    (schema, table, is_temporary)
-}
-
-fn event_trigger_dropped_object_row(
-    object_type: &str,
-    schema_name: Option<String>,
-    object_name: Option<String>,
-    object_identity: String,
-    address_names: Vec<String>,
-    original: bool,
-    normal: bool,
-    is_temporary: bool,
-) -> EventTriggerDroppedObjectRow {
-    EventTriggerDroppedObjectRow {
-        classid: 0,
-        objid: 0,
-        objsubid: 0,
-        original,
-        normal,
-        is_temporary,
-        object_type: object_type.into(),
-        schema_name,
-        object_name,
-        object_identity,
-        address_names,
-        address_args: Vec::new(),
-    }
-}
-
-fn qualified_event_identity(schema: &str, object_name: &str) -> String {
-    format!(
-        "{}.{}",
-        quote_identifier_for_event_identity(schema),
-        quote_identifier_for_event_identity(object_name)
-    )
-}
-
-fn quote_identifier_for_event_identity(identifier: &str) -> String {
-    crate::backend::executor::expr_reg::quote_identifier_if_needed(identifier)
 }
 
 fn advance_plpgsql_command_id(ctx: &mut ExecutorContext) {
@@ -4736,119 +3887,6 @@ fn exec_dynamic_analyze(
     result
 }
 
-fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerConfig {
-    PlannerConfig {
-        enable_partitionwise_join: bool_executor_guc(gucs, "enable_partitionwise_join", false),
-        enable_partitionwise_aggregate: bool_executor_guc(
-            gucs,
-            "enable_partitionwise_aggregate",
-            false,
-        ),
-        enable_seqscan: bool_executor_guc(gucs, "enable_seqscan", true),
-        enable_indexscan: bool_executor_guc(gucs, "enable_indexscan", true),
-        enable_indexonlyscan: bool_executor_guc(gucs, "enable_indexonlyscan", true),
-        enable_bitmapscan: bool_executor_guc(gucs, "enable_bitmapscan", true),
-        enable_nestloop: bool_executor_guc(gucs, "enable_nestloop", true),
-        enable_hashjoin: bool_executor_guc(gucs, "enable_hashjoin", true),
-        enable_mergejoin: bool_executor_guc(gucs, "enable_mergejoin", true),
-        enable_memoize: bool_executor_guc(gucs, "enable_memoize", true),
-        enable_material: bool_executor_guc(gucs, "enable_material", true),
-        enable_partition_pruning: bool_executor_guc(gucs, "enable_partition_pruning", true),
-        constraint_exclusion_on: gucs
-            .get("constraint_exclusion")
-            .is_some_and(|value| value.eq_ignore_ascii_case("on")),
-        constraint_exclusion_partition: gucs
-            .get("constraint_exclusion")
-            .map(|value| {
-                value.eq_ignore_ascii_case("partition") || value.eq_ignore_ascii_case("on")
-            })
-            .unwrap_or(true),
-        retain_partial_index_filters: false,
-        enable_hashagg: bool_executor_guc(gucs, "enable_hashagg", true),
-        enable_sort: bool_executor_guc(gucs, "enable_sort", true),
-        enable_parallel_append: bool_executor_guc(gucs, "enable_parallel_append", true),
-        enable_parallel_hash: bool_executor_guc(gucs, "enable_parallel_hash", true),
-        force_parallel_gather: bool_executor_guc(gucs, "debug_parallel_query", false),
-        max_parallel_workers: usize_executor_guc(gucs, "max_parallel_workers", 8),
-        max_parallel_workers_per_gather: usize_executor_guc(
-            gucs,
-            "max_parallel_workers_per_gather",
-            2,
-        ),
-        parallel_leader_participation: bool_executor_guc(
-            gucs,
-            "parallel_leader_participation",
-            true,
-        ),
-        min_parallel_table_scan_size: size_executor_guc_bytes(
-            gucs,
-            "min_parallel_table_scan_size",
-            8 * 1024 * 1024,
-        ),
-        min_parallel_index_scan_size: size_executor_guc_bytes(
-            gucs,
-            "min_parallel_index_scan_size",
-            512 * 1024,
-        ),
-        parallel_setup_cost: EstimateValue(f64_executor_guc(gucs, "parallel_setup_cost", 1000.0)),
-        parallel_tuple_cost: EstimateValue(f64_executor_guc(gucs, "parallel_tuple_cost", 0.1)),
-        fold_constants: true,
-    }
-}
-
-fn bool_executor_guc(gucs: &HashMap<String, String>, name: &str, default: bool) -> bool {
-    gucs.get(name)
-        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
-            "on" | "true" | "yes" | "1" | "t" => Some(true),
-            "off" | "false" | "no" | "0" | "f" => Some(false),
-            _ => None,
-        })
-        .unwrap_or(default)
-}
-
-fn usize_executor_guc(gucs: &HashMap<String, String>, name: &str, default: usize) -> usize {
-    gucs.get(name)
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
-fn f64_executor_guc(gucs: &HashMap<String, String>, name: &str, default: f64) -> f64 {
-    gucs.get(name)
-        .and_then(|value| value.trim().parse::<f64>().ok())
-        .filter(|value| value.is_finite())
-        .unwrap_or(default)
-}
-
-fn size_executor_guc_bytes(gucs: &HashMap<String, String>, name: &str, default: usize) -> usize {
-    gucs.get(name)
-        .and_then(|value| parse_executor_size_bytes(value))
-        .unwrap_or(default)
-}
-
-fn parse_executor_size_bytes(raw: &str) -> Option<usize> {
-    let trimmed = raw.trim().trim_matches('\'').trim();
-    let mut digits = String::new();
-    let mut unit = String::new();
-    for ch in trimmed.chars() {
-        if ch.is_ascii_digit() || ch == '.' {
-            digits.push(ch);
-        } else if !ch.is_whitespace() {
-            unit.push(ch);
-        }
-    }
-    let value = digits.parse::<f64>().ok()?;
-    let multiplier = match unit.to_ascii_lowercase().as_str() {
-        "" | "b" => 1.0,
-        "kb" | "k" => 1024.0,
-        "mb" | "m" => 1024.0 * 1024.0,
-        "gb" | "g" => 1024.0 * 1024.0 * 1024.0,
-        _ => return None,
-    };
-    value
-        .is_finite()
-        .then(|| (value * multiplier).ceil() as usize)
-}
-
 fn resolve_dynamic_prepared_statement(
     stmt: Statement,
 ) -> Result<(Statement, Vec<PreparedExternalParam>), ExecError> {
@@ -5032,19 +4070,8 @@ fn statement_result_to_query_result(
     result: StatementResult,
     message: &str,
 ) -> Result<FunctionQueryResult, ExecError> {
-    let StatementResult::Query { columns, rows, .. } = result else {
-        return Err(function_runtime_error(message, None, "XX000"));
-    };
-    Ok(FunctionQueryResult {
-        columns,
-        rows: rows
-            .into_iter()
-            .map(|values| FunctionQueryRow {
-                values,
-                system_bindings: Vec::new(),
-            })
-            .collect(),
-    })
+    pgrust_plpgsql::statement_result_to_query_result(result)
+        .ok_or_else(|| function_runtime_error(message, None, "XX000"))
 }
 
 // :HACK: Mirror PostgreSQL's generated sys_fk_relationships data for the
@@ -5271,38 +4298,6 @@ pg_subscription_rel|srsubid|pg_subscription|oid
 pg_subscription_rel|srrelid|pg_class|oid
 "#;
 
-fn is_catalog_foreign_key_query_sql(sql: &str) -> bool {
-    let normalized = sql
-        .trim()
-        .trim_end_matches(';')
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "select * from pg_get_catalog_foreign_keys()"
-            | "select * from pg_catalog.pg_get_catalog_foreign_keys()"
-    )
-}
-
-fn is_catalog_foreign_key_check_sql(sql: &str) -> bool {
-    let normalized = sql
-        .trim()
-        .trim_end_matches(';')
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    // :HACK: The oidjoins regression dynamically verifies PostgreSQL's
-    // generated catalog FK table. pgrust's bootstrap catalogs are intentionally
-    // incomplete in a few of those reference tables, so report no violations
-    // until catalog codegen can make the checks fully real.
-    normalized.starts_with("select ctid")
-        && normalized.contains(" from pg_")
-        && normalized.contains(" not exists(select 1 from pg_")
-}
-
 fn catalog_foreign_key_query_result() -> FunctionQueryResult {
     let columns = vec![
         plpgsql_query_column("fktable", SqlType::new(SqlTypeKind::Text)),
@@ -5337,126 +4332,6 @@ fn catalog_foreign_key_query_result() -> FunctionQueryResult {
         })
         .collect();
     FunctionQueryResult { columns, rows }
-}
-
-fn plpgsql_query_column(name: &str, sql_type: SqlType) -> QueryColumn {
-    QueryColumn {
-        name: name.into(),
-        sql_type,
-        wire_type_oid: None,
-    }
-}
-
-fn catalog_foreign_key_column_array(cols: &str) -> Value {
-    Value::Array(
-        cols.split(',')
-            .map(|col| Value::Text(col.trim().into()))
-            .collect(),
-    )
-}
-
-fn catalog_foreign_key_is_array(fktable: &str, fkcols: &str) -> bool {
-    matches!(
-        (fktable, fkcols),
-        ("pg_proc", "proargtypes")
-            | ("pg_proc", "proallargtypes")
-            | ("pg_proc", "protrftypes")
-            | ("pg_constraint", "conpfeqop")
-            | ("pg_constraint", "conppeqop")
-            | ("pg_constraint", "conffeqop")
-            | ("pg_constraint", "conexclop")
-            | ("pg_constraint", "conrelid,conkey")
-            | ("pg_constraint", "confrelid,confkey")
-            | ("pg_index", "indcollation")
-            | ("pg_index", "indclass")
-            | ("pg_index", "indrelid,indkey")
-            | ("pg_statistic_ext", "stxrelid,stxkeys")
-            | ("pg_trigger", "tgrelid,tgattr")
-            | ("pg_extension", "extconfig")
-            | ("pg_policy", "polroles")
-            | ("pg_partitioned_table", "partclass")
-            | ("pg_partitioned_table", "partcollation")
-            | ("pg_partitioned_table", "partrelid,partattrs")
-    )
-}
-
-fn catalog_foreign_key_is_optional(fktable: &str, fkcols: &str) -> bool {
-    matches!(
-        (fktable, fkcols),
-        ("pg_proc", "provariadic")
-            | ("pg_proc", "prosupport")
-            | ("pg_type", "typrelid")
-            | ("pg_type", "typsubscript")
-            | ("pg_type", "typelem")
-            | ("pg_type", "typarray")
-            | ("pg_type", "typreceive")
-            | ("pg_type", "typsend")
-            | ("pg_type", "typmodin")
-            | ("pg_type", "typmodout")
-            | ("pg_type", "typanalyze")
-            | ("pg_type", "typbasetype")
-            | ("pg_type", "typcollation")
-            | ("pg_attribute", "atttypid")
-            | ("pg_attribute", "attcollation")
-            | ("pg_class", "reltype")
-            | ("pg_class", "reloftype")
-            | ("pg_class", "relam")
-            | ("pg_class", "reltablespace")
-            | ("pg_class", "reltoastrelid")
-            | ("pg_class", "relrewrite")
-            | ("pg_constraint", "conrelid")
-            | ("pg_constraint", "contypid")
-            | ("pg_constraint", "conindid")
-            | ("pg_constraint", "conparentid")
-            | ("pg_constraint", "confrelid")
-            | ("pg_constraint", "conrelid,conkey")
-            | ("pg_index", "indcollation")
-            | ("pg_index", "indrelid,indkey")
-            | ("pg_operator", "oprleft")
-            | ("pg_operator", "oprresult")
-            | ("pg_operator", "oprcom")
-            | ("pg_operator", "oprnegate")
-            | ("pg_operator", "oprcode")
-            | ("pg_operator", "oprrest")
-            | ("pg_operator", "oprjoin")
-            | ("pg_opclass", "opckeytype")
-            | ("pg_amop", "amopsortfamily")
-            | ("pg_language", "lanplcallfoid")
-            | ("pg_language", "laninline")
-            | ("pg_language", "lanvalidator")
-            | ("pg_aggregate", "aggfinalfn")
-            | ("pg_aggregate", "aggcombinefn")
-            | ("pg_aggregate", "aggserialfn")
-            | ("pg_aggregate", "aggdeserialfn")
-            | ("pg_aggregate", "aggmtransfn")
-            | ("pg_aggregate", "aggminvtransfn")
-            | ("pg_aggregate", "aggmfinalfn")
-            | ("pg_aggregate", "aggsortop")
-            | ("pg_aggregate", "aggmtranstype")
-            | ("pg_statistic", "staop1")
-            | ("pg_statistic", "staop2")
-            | ("pg_statistic", "staop3")
-            | ("pg_statistic", "staop4")
-            | ("pg_statistic", "staop5")
-            | ("pg_statistic", "stacoll1")
-            | ("pg_statistic", "stacoll2")
-            | ("pg_statistic", "stacoll3")
-            | ("pg_statistic", "stacoll4")
-            | ("pg_statistic", "stacoll5")
-            | ("pg_cast", "castfunc")
-            | ("pg_database", "dattablespace")
-            | ("pg_db_role_setting", "setdatabase")
-            | ("pg_db_role_setting", "setrole")
-            | ("pg_shdepend", "dbid")
-            | ("pg_default_acl", "defaclnamespace")
-            | ("pg_partitioned_table", "partdefid")
-            | ("pg_partitioned_table", "partrelid,partattrs")
-            | ("pg_range", "rngcollation")
-            | ("pg_range", "rngcanonical")
-            | ("pg_range", "rngsubdiff")
-            | ("pg_transform", "trffromsql")
-            | ("pg_transform", "trftosql")
-    )
 }
 
 fn cursor_name_for_slot(slot: usize, fallback: &str, state: &FunctionState) -> String {
@@ -5729,71 +4604,22 @@ fn portal_direction_from_plpgsql(direction: CursorDirection) -> PortalFetchDirec
 }
 
 fn cursor_direction_is_forward_only(direction: CursorDirection) -> bool {
-    matches!(
-        direction,
-        CursorDirection::Next | CursorDirection::Forward(_)
-    )
+    pgrust_plpgsql::cursor_direction_is_forward_only(direction)
 }
 
 fn cursor_fetch(
     cursor: &mut FunctionCursor,
     direction: CursorDirection,
 ) -> Option<FunctionQueryRow> {
-    let target = cursor_target_position(cursor, direction)?;
-    if target >= 0 && (target as usize) < cursor.rows.len() {
-        cursor.current = target;
-        return cursor.rows.get(target as usize).cloned();
-    }
-    cursor.current = target.clamp(-1, cursor.rows.len() as isize);
-    None
+    pgrust_plpgsql::cursor_fetch(cursor, direction)
 }
 
 fn cursor_move(cursor: &mut FunctionCursor, direction: CursorDirection) -> bool {
-    match direction {
-        CursorDirection::ForwardAll => {
-            let old = cursor.current;
-            cursor.current = cursor.rows.len() as isize;
-            cursor.current != old
-        }
-        CursorDirection::BackwardAll => {
-            let old = cursor.current;
-            cursor.current = -1;
-            cursor.current != old
-        }
-        _ => {
-            let Some(target) = cursor_target_position(cursor, direction) else {
-                return false;
-            };
-            let clamped = target.clamp(-1, cursor.rows.len() as isize);
-            let moved = clamped != cursor.current;
-            cursor.current = clamped;
-            moved && target >= 0 && (target as usize) < cursor.rows.len()
-        }
-    }
+    pgrust_plpgsql::cursor_move(cursor, direction)
 }
 
 fn cursor_target_position(cursor: &FunctionCursor, direction: CursorDirection) -> Option<isize> {
-    let len = cursor.rows.len() as isize;
-    Some(match direction {
-        CursorDirection::Next => cursor.current + 1,
-        CursorDirection::Prior => cursor.current - 1,
-        CursorDirection::First => 0,
-        CursorDirection::Last => len.checked_sub(1)?,
-        CursorDirection::Forward(count) => cursor.current + count as isize,
-        CursorDirection::Backward(count) => cursor.current - count as isize,
-        CursorDirection::ForwardAll => len,
-        CursorDirection::BackwardAll => -1,
-        CursorDirection::Absolute(index) => {
-            if index > 0 {
-                index as isize - 1
-            } else if index < 0 {
-                len + index as isize
-            } else {
-                -1
-            }
-        }
-        CursorDirection::Relative(count) => cursor.current + count as isize,
-    })
+    pgrust_plpgsql::cursor_target_position(cursor, direction)
 }
 
 fn exec_function_close_cursor(slot: usize, state: &mut FunctionState) -> Result<(), ExecError> {
@@ -5852,10 +4678,6 @@ fn exec_function_get_diagnostics(
         state.values[target.slot] = cast_function_value(value, None, target.ty, ctx)?;
     }
     Ok(())
-}
-
-fn diagnostic_text(value: Option<&str>) -> Value {
-    Value::Text(value.unwrap_or_default().to_string().into())
 }
 
 fn assign_query_row_to_targets(
@@ -6057,12 +4879,7 @@ fn assign_null_to_targets(
 }
 
 fn function_outer_tuple(compiled: &CompiledFunction, state: &FunctionState) -> Vec<Value> {
-    let mut values = state.values.clone();
-    if let FunctionReturnContract::Trigger { bindings } = &compiled.return_contract {
-        values.push(trigger_relation_record_value(&bindings.new_row, state));
-        values.push(trigger_relation_record_value(&bindings.old_row, state));
-    }
-    values
+    pgrust_plpgsql::function_outer_tuple(&compiled.return_contract, &state.values)
 }
 
 fn bind_update_current_of(
@@ -6123,7 +4940,7 @@ fn resolve_current_of_binding(
     }
 
     let mut slots = Vec::new();
-    collect_compiled_slot_names(compiled, &mut slots);
+    pgrust_plpgsql::collect_compiled_slot_names(compiled, &mut slots);
     for (name, slot) in slots {
         if !name.eq_ignore_ascii_case(cursor_name) {
             continue;
@@ -6164,121 +4981,13 @@ fn cursor_by_portal_name<'a>(
 }
 
 fn current_of_predicate(binding: SystemVarBinding) -> Result<Expr, ExecError> {
-    let tid = binding.tid.ok_or_else(|| {
+    pgrust_plpgsql::current_of_predicate(binding).ok_or_else(|| {
         function_runtime_error("cursor is not positioned on a table row", None, "24000")
-    })?;
-    let tableoid = Expr::Var(Var {
-        varno: 1,
-        varattno: TABLE_OID_ATTR_NO,
-        varlevelsup: 0,
-        vartype: SqlType::new(SqlTypeKind::Oid),
-        collation_oid: None,
-    });
-    let ctid = Expr::Var(Var {
-        varno: 1,
-        varattno: SELF_ITEM_POINTER_ATTR_NO,
-        varlevelsup: 0,
-        vartype: SqlType::new(SqlTypeKind::Tid),
-        collation_oid: None,
-    });
-    Ok(Expr::and(
-        Expr::op_auto(
-            OpExprKind::Eq,
-            vec![
-                tableoid,
-                Expr::Const(Value::Int64(i64::from(binding.table_oid))),
-            ],
-        ),
-        Expr::op_auto(OpExprKind::Eq, vec![ctid, Expr::Const(Value::Tid(tid))]),
-    ))
+    })
 }
 
 fn current_cursor_system_binding(cursor: &FunctionCursor) -> Option<SystemVarBinding> {
-    if cursor.current < 0 || cursor.current as usize >= cursor.rows.len() {
-        return None;
-    }
-    cursor.rows[cursor.current as usize]
-        .system_bindings
-        .iter()
-        .find(|binding| binding.tid.is_some())
-        .copied()
-}
-
-fn collect_compiled_slot_names(compiled: &CompiledFunction, out: &mut Vec<(String, usize)>) {
-    out.extend(
-        compiled
-            .parameter_slots
-            .iter()
-            .map(|slot| (slot.name.clone(), slot.slot)),
-    );
-    out.extend(
-        compiled
-            .output_slots
-            .iter()
-            .map(|slot| (slot.name.clone(), slot.slot)),
-    );
-    collect_block_slot_names(&compiled.body, out);
-}
-
-fn collect_block_slot_names(block: &CompiledBlock, out: &mut Vec<(String, usize)>) {
-    out.extend(
-        block
-            .local_slots
-            .iter()
-            .map(|slot| (slot.name.clone(), slot.slot)),
-    );
-    for stmt in &block.statements {
-        collect_stmt_slot_names(stmt, out);
-    }
-    for handler in &block.exception_handlers {
-        for stmt in &handler.statements {
-            collect_stmt_slot_names(stmt, out);
-        }
-    }
-}
-
-fn collect_stmt_slot_names(stmt: &CompiledStmt, out: &mut Vec<(String, usize)>) {
-    match stmt {
-        CompiledStmt::WithLine { stmt, .. } => collect_stmt_slot_names(stmt, out),
-        CompiledStmt::Block(block) => collect_block_slot_names(block, out),
-        CompiledStmt::If {
-            branches,
-            else_branch,
-        } => {
-            for (_, body) in branches {
-                for stmt in body {
-                    collect_stmt_slot_names(stmt, out);
-                }
-            }
-            for stmt in else_branch {
-                collect_stmt_slot_names(stmt, out);
-            }
-        }
-        CompiledStmt::While { body, .. }
-        | CompiledStmt::Loop { body }
-        | CompiledStmt::ForInt { body, .. }
-        | CompiledStmt::ForQuery { body, .. }
-        | CompiledStmt::ForEach { body, .. } => {
-            for stmt in body {
-                collect_stmt_slot_names(stmt, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn trigger_relation_record_value(
-    relation: &super::compile::CompiledTriggerRelation,
-    state: &FunctionState,
-) -> Value {
-    Value::Record(RecordValue::anonymous(
-        relation
-            .slots
-            .iter()
-            .zip(relation.field_names.iter())
-            .map(|(slot, name)| (name.clone(), state.values[*slot].clone()))
-            .collect(),
-    ))
+    pgrust_plpgsql::current_cursor_system_binding(cursor)
 }
 
 fn assign_trigger_row_value(
@@ -6335,13 +5044,6 @@ fn assign_trigger_row_value(
         state.values[slot] = value;
     }
     Ok(())
-}
-
-fn statement_result_changed_rows(result: &StatementResult) -> bool {
-    match result {
-        StatementResult::AffectedRows(rows) => *rows > 0,
-        StatementResult::Query { rows, .. } => !rows.is_empty(),
-    }
 }
 
 fn anonymous_record_descriptor_for_columns(columns: &[QueryColumn]) -> RecordDescriptor {
@@ -6829,104 +5531,10 @@ fn substitute_dynamic_query_params(
             "0A000",
         )
     })?;
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut idx = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    while idx < bytes.len() {
-        let ch = bytes[idx] as char;
-        if in_single {
-            out.push(ch);
-            idx += 1;
-            if ch == '\'' {
-                if bytes.get(idx) == Some(&b'\'') {
-                    out.push('\'');
-                    idx += 1;
-                    continue;
-                }
-                in_single = false;
-            }
-            continue;
-        }
-        if in_double {
-            out.push(ch);
-            idx += 1;
-            if ch == '"' {
-                if bytes.get(idx) == Some(&b'"') {
-                    out.push('"');
-                    idx += 1;
-                    continue;
-                }
-                in_double = false;
-            }
-            continue;
-        }
-        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
-            if let Some(close) = sql[idx + tag.len()..].find(tag) {
-                let end = idx + tag.len() + close + tag.len();
-                out.push_str(&sql[idx..end]);
-                idx = end;
-            } else {
-                out.push_str(&sql[idx..]);
-                break;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' => {
-                in_single = true;
-                out.push(ch);
-                idx += 1;
-                continue;
-            }
-            '"' => {
-                in_double = true;
-                out.push(ch);
-                idx += 1;
-                continue;
-            }
-            '$' => {
-                let mut end = idx + 1;
-                while let Some(byte) = bytes.get(end) {
-                    if !byte.is_ascii_digit() {
-                        break;
-                    }
-                    end += 1;
-                }
-                if end > idx + 1 && (end == bytes.len() || !is_identifier_char(bytes[end] as char))
-                {
-                    let index = sql[idx + 1..end].parse::<usize>().map_err(|_| {
-                        function_runtime_error(
-                            "dynamic EXECUTE parameter reference is invalid",
-                            Some(sql[idx..end].to_string()),
-                            "42P02",
-                        )
-                    })?;
-                    let value = params.get(index.saturating_sub(1)).ok_or_else(|| {
-                        function_runtime_error(
-                            &format!("there is no parameter ${index}"),
-                            None,
-                            "42P02",
-                        )
-                    })?;
-                    out.push_str(&render_dynamic_query_param_sql(
-                        value,
-                        catalog.as_ref(),
-                        ctx,
-                    )?);
-                    idx = end;
-                    continue;
-                }
-            }
-            _ => {}
-        }
-
-        out.push(ch);
-        idx += 1;
-    }
-    Ok(out)
+    pgrust_plpgsql::substitute_dynamic_query_params(sql, params, |_, value| {
+        render_dynamic_query_param_sql(value, catalog.as_ref(), ctx)
+    })
+    .map_err(dynamic_query_substitution_error)
 }
 
 fn substitute_declared_cursor_params(
@@ -6945,100 +5553,35 @@ fn substitute_declared_cursor_params(
             "0A000",
         )
     })?;
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut idx = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    while idx < bytes.len() {
-        let ch = bytes[idx] as char;
-        if in_single {
-            out.push(ch);
-            idx += 1;
-            if ch == '\'' {
-                if bytes.get(idx) == Some(&b'\'') {
-                    out.push('\'');
-                    idx += 1;
-                    continue;
-                }
-                in_single = false;
-            }
-            continue;
-        }
-        if in_double {
-            out.push(ch);
-            idx += 1;
-            if ch == '"' {
-                if bytes.get(idx) == Some(&b'"') {
-                    out.push('"');
-                    idx += 1;
-                    continue;
-                }
-                in_double = false;
-            }
-            continue;
-        }
-        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
-            if let Some(close) = sql[idx + tag.len()..].find(tag) {
-                let end = idx + tag.len() + close + tag.len();
-                out.push_str(&sql[idx..end]);
-                idx = end;
-            } else {
-                out.push_str(&sql[idx..]);
-                break;
-            }
-            continue;
-        }
+    pgrust_plpgsql::substitute_declared_cursor_params(sql, params, values, |value, param| {
+        render_declared_cursor_param_sql(value, param, catalog.as_ref(), ctx)
+    })
+    .map_err(dynamic_query_substitution_error)
+}
 
-        match ch {
-            '\'' => {
-                in_single = true;
-                out.push(ch);
-                idx += 1;
-                continue;
-            }
-            '"' => {
-                in_double = true;
-                out.push(ch);
-                idx += 1;
-                continue;
-            }
-            _ if is_identifier_start(ch) => {
-                let start = idx;
-                idx += 1;
-                while idx < bytes.len() && is_identifier_char(bytes[idx] as char) {
-                    idx += 1;
-                }
-                let ident = &sql[start..idx];
-                if let Some(param_index) = params
-                    .iter()
-                    .position(|param| param.name.eq_ignore_ascii_case(ident))
-                {
-                    let value = values.get(param_index).ok_or_else(|| {
-                        function_runtime_error(
-                            &format!("missing value for cursor parameter \"{ident}\""),
-                            None,
-                            "42P02",
-                        )
-                    })?;
-                    out.push_str(&render_declared_cursor_param_sql(
-                        value,
-                        &params[param_index],
-                        catalog.as_ref(),
-                        ctx,
-                    )?);
-                } else {
-                    out.push_str(ident);
-                }
-                continue;
-            }
-            _ => {}
+fn dynamic_query_substitution_error(
+    err: pgrust_plpgsql::DynamicQuerySubstitutionError<ExecError>,
+) -> ExecError {
+    match err {
+        pgrust_plpgsql::DynamicQuerySubstitutionError::InvalidParameterReference(reference) => {
+            function_runtime_error(
+                "dynamic EXECUTE parameter reference is invalid",
+                Some(reference),
+                "42P02",
+            )
         }
-
-        out.push(ch);
-        idx += 1;
+        pgrust_plpgsql::DynamicQuerySubstitutionError::MissingParameter(index) => {
+            function_runtime_error(&format!("there is no parameter ${index}"), None, "42P02")
+        }
+        pgrust_plpgsql::DynamicQuerySubstitutionError::MissingCursorParameter(name) => {
+            function_runtime_error(
+                &format!("missing value for cursor parameter \"{name}\""),
+                None,
+                "42P02",
+            )
+        }
+        pgrust_plpgsql::DynamicQuerySubstitutionError::Render(err) => err,
     }
-    Ok(out)
 }
 
 fn render_declared_cursor_param_sql(
@@ -7283,46 +5826,6 @@ fn render_dynamic_query_type_name(
         )
     })?;
     Ok(quote_identifier(&row.typname))
-}
-
-fn quote_identifier(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
-}
-
-fn quote_sql_string(value: &str) -> String {
-    if value.contains('\\') {
-        let escaped = value.replace('\\', "\\\\").replace('\'', "''");
-        format!("E'{escaped}'")
-    } else {
-        format!("'{}'", value.replace('\'', "''"))
-    }
-}
-
-fn dollar_quote_tag_at(sql: &str, idx: usize) -> Option<&str> {
-    let bytes = sql.as_bytes();
-    if bytes.get(idx) != Some(&b'$') {
-        return None;
-    }
-    let mut end = idx + 1;
-    while let Some(byte) = bytes.get(end) {
-        let ch = *byte as char;
-        if ch == '$' {
-            return Some(&sql[idx..=end]);
-        }
-        if !is_identifier_char(ch) {
-            return None;
-        }
-        end += 1;
-    }
-    None
-}
-
-fn is_identifier_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
-}
-
-fn is_identifier_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_'
 }
 
 fn current_output_row(
@@ -7692,29 +6195,6 @@ fn exception_condition_matches(condition: &ExceptionCondition, err: &ExecError) 
     }
 }
 
-fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "assert_failure" => Some("P0004"),
-        "division_by_zero" => Some("22012"),
-        "data_corrupted" => Some("XX001"),
-        "raise_exception" => Some("P0001"),
-        "no_data_found" => Some("P0002"),
-        "too_many_rows" => Some("P0003"),
-        "unique_violation" => Some("23505"),
-        "not_null_violation" => Some("23502"),
-        "check_violation" => Some("23514"),
-        "foreign_key_violation" => Some("23503"),
-        "undefined_file" => Some("58P01"),
-        "invalid_parameter_value" => Some("22023"),
-        "null_value_not_allowed" => Some("22004"),
-        "syntax_error" => Some("42601"),
-        "feature_not_supported" => Some("0A000"),
-        "reading_sql_data_not_permitted" => Some("2F003"),
-        "wrong_object_type" => Some("42809"),
-        _ => None,
-    }
-}
-
 fn exec_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
         ExecError::WithContext { source, .. }
@@ -7970,45 +6450,9 @@ fn finish_raise(
         }
         RaiseLevel::Log => Ok(()),
         RaiseLevel::Info | RaiseLevel::Notice | RaiseLevel::Warning => {
-            NOTICE_QUEUE.with(|queue| {
-                queue.borrow_mut().push(PlpgsqlNotice {
-                    level: level.clone(),
-                    sqlstate: resolved_sqlstate.into(),
-                    message: rendered,
-                    detail,
-                    hint,
-                })
-            });
+            push_plpgsql_notice(level.clone(), resolved_sqlstate, rendered, detail, hint);
             Ok(())
         }
-    }
-}
-
-fn resolve_raise_sqlstate(value: &str) -> Option<&'static str> {
-    static_sqlstate(value).or_else(|| exception_condition_name_sqlstate(value))
-}
-
-fn static_sqlstate(sqlstate: &str) -> Option<&'static str> {
-    match sqlstate {
-        "0A000" => Some("0A000"),
-        "22012" => Some("22012"),
-        "22004" => Some("22004"),
-        "22023" => Some("22023"),
-        "23502" => Some("23502"),
-        "23503" => Some("23503"),
-        "23505" => Some("23505"),
-        "23514" => Some("23514"),
-        "1234F" => Some("1234F"),
-        "2F003" => Some("2F003"),
-        "42601" => Some("42601"),
-        "42804" => Some("42804"),
-        "P0001" => Some("P0001"),
-        "P0002" => Some("P0002"),
-        "P0003" => Some("P0003"),
-        "P0004" => Some("P0004"),
-        "U9999" => Some("U9999"),
-        "XX001" => Some("XX001"),
-        _ => None,
     }
 }
 
@@ -8180,41 +6624,6 @@ fn plpgsql_compile_error(err: ParseError, row: &PgProcRow) -> ExecError {
             row.proname
         ),
     }
-}
-
-fn queue_plpgsql_warning(message: &str, detail: Option<String>, hint: Option<String>) {
-    NOTICE_QUEUE.with(|queue| {
-        queue.borrow_mut().push(PlpgsqlNotice {
-            level: RaiseLevel::Warning,
-            sqlstate: "01000".into(),
-            message: message.into(),
-            detail,
-            hint,
-        })
-    });
-}
-
-fn plpgsql_extra_check_level(
-    gucs: &HashMap<String, String>,
-    check: &str,
-) -> Option<ExtraCheckLevel> {
-    if plpgsql_extra_check_enabled(gucs.get("plpgsql.extra_errors"), check) {
-        Some(ExtraCheckLevel::Error)
-    } else if plpgsql_extra_check_enabled(gucs.get("plpgsql.extra_warnings"), check) {
-        Some(ExtraCheckLevel::Warning)
-    } else {
-        None
-    }
-}
-
-fn plpgsql_extra_check_enabled(value: Option<&String>, check: &str) -> bool {
-    value.is_some_and(|value| {
-        let value = value.trim();
-        value.eq_ignore_ascii_case("all")
-            || value
-                .split(',')
-                .any(|item| item.trim().eq_ignore_ascii_case(check))
-    })
 }
 
 fn with_plpgsql_context(err: ExecError, compiled: &CompiledFunction, action: &str) -> ExecError {
@@ -8496,80 +6905,19 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
 }
 
 fn seed_trigger_state(
-    bindings: &super::compile::CompiledTriggerBindings,
+    bindings: &CompiledTriggerBindings,
     call: &TriggerCallContext,
     state: &mut FunctionState,
 ) {
-    seed_trigger_relation(&bindings.new_row, call.new_row.as_ref(), state);
-    seed_trigger_relation(&bindings.old_row, call.old_row.as_ref(), state);
-    state.values[bindings.tg_name_slot] = Value::Text(call.trigger_name.clone().into());
-    state.values[bindings.tg_op_slot] = Value::Text(
-        match call.op {
-            TriggerOperation::Insert => "INSERT",
-            TriggerOperation::Update => "UPDATE",
-            TriggerOperation::Delete => "DELETE",
-            TriggerOperation::Truncate => "TRUNCATE",
-        }
-        .into(),
-    );
-    state.values[bindings.tg_when_slot] = Value::Text(
-        match call.timing {
-            TriggerTiming::Before => "BEFORE",
-            TriggerTiming::After => "AFTER",
-            TriggerTiming::Instead => "INSTEAD OF",
-        }
-        .into(),
-    );
-    state.values[bindings.tg_level_slot] = Value::Text(
-        match call.level {
-            TriggerLevel::Row => "ROW",
-            TriggerLevel::Statement => "STATEMENT",
-        }
-        .into(),
-    );
-    state.values[bindings.tg_relid_slot] = Value::Int64(i64::from(call.relation_oid));
-    state.values[bindings.tg_nargs_slot] = Value::Int32(call.trigger_args.len() as i32);
-    let tg_argv = if call.trigger_args.is_empty() {
-        ArrayValue::empty()
-    } else {
-        ArrayValue::from_dimensions(
-            vec![ArrayDimension {
-                lower_bound: 0,
-                length: call.trigger_args.len(),
-            }],
-            call.trigger_args
-                .iter()
-                .cloned()
-                .map(|arg| Value::Text(arg.into()))
-                .collect(),
-        )
-    };
-    state.values[bindings.tg_argv_slot] =
-        Value::PgArray(tg_argv.with_element_type_oid(TEXT_TYPE_OID));
-    state.values[bindings.tg_table_name_slot] = Value::Text(call.table_name.clone().into());
-    state.values[bindings.tg_table_schema_slot] = Value::Text(call.table_schema.clone().into());
+    pgrust_plpgsql::seed_trigger_state_values(bindings, call, &mut state.values);
 }
 
 fn seed_event_trigger_state(
-    bindings: &super::compile::CompiledEventTriggerBindings,
+    bindings: &CompiledEventTriggerBindings,
     call: &EventTriggerCallContext,
     state: &mut FunctionState,
 ) {
-    state.values[bindings.tg_event_slot] = Value::Text(call.event.clone().into());
-    state.values[bindings.tg_tag_slot] = Value::Text(call.tag.clone().into());
-}
-
-fn seed_trigger_relation(
-    relation: &super::compile::CompiledTriggerRelation,
-    source: Option<&Vec<Value>>,
-    state: &mut FunctionState,
-) {
-    let Some(source) = source else {
-        return;
-    };
-    for (slot, value) in relation.slots.iter().copied().zip(source.iter()) {
-        state.values[slot] = value.clone();
-    }
+    pgrust_plpgsql::seed_event_trigger_state_values(bindings, call, &mut state.values);
 }
 
 fn current_trigger_return(
@@ -8577,33 +6925,23 @@ fn current_trigger_return(
     state: &FunctionState,
     returned_row: TriggerReturnedRow,
 ) -> Result<TriggerFunctionResult, ExecError> {
-    let FunctionReturnContract::Trigger { bindings } = &compiled.return_contract else {
-        return Err(function_runtime_error(
-            "trigger return reached a non-trigger function",
-            None,
-            "0A000",
-        ));
-    };
-    let relation = match returned_row {
-        TriggerReturnedRow::New => &bindings.new_row,
-        TriggerReturnedRow::Old => &bindings.old_row,
-    };
-    let values = relation
-        .slots
-        .iter()
-        .map(|slot| state.values[*slot].clone())
-        .collect::<Vec<_>>();
-    Ok(match returned_row {
-        TriggerReturnedRow::New => TriggerFunctionResult::ReturnNew(values),
-        TriggerReturnedRow::Old => TriggerFunctionResult::ReturnOld(values),
-    })
+    pgrust_plpgsql::current_trigger_return(&compiled.return_contract, &state.values, returned_row)
+        .ok_or_else(|| {
+            function_runtime_error(
+                "trigger return reached a non-trigger function",
+                None,
+                "0A000",
+            )
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::parser::{TriggerLevel, TriggerTiming};
-    use crate::pl::plpgsql::compile::{CompiledTriggerBindings, CompiledTriggerRelation};
+    use crate::include::catalog::TEXT_TYPE_OID;
+    use pgrust_nodes::TriggerOperation;
+    use pgrust_plpgsql::{CompiledTriggerBindings, CompiledTriggerRelation};
 
     #[test]
     fn plpgsql_expression_runtime_errors_do_not_add_internal_query() {

@@ -1,5 +1,2 @@
-use crate::include::catalog::PgAggregateRow;
-
-pub fn sort_pg_aggregate_rows(rows: &mut [PgAggregateRow]) {
-    rows.sort_by_key(|row| row.aggfnoid);
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_aggregate::*;

@@ -1,0 +1,145 @@
+use crate::BOOTSTRAP_SUPERUSER_OID;
+use crate::desc::column_desc;
+use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind};
+use pgrust_nodes::primnodes::RelationDesc;
+use std::collections::BTreeMap;
+use std::sync::{OnceLock, RwLock};
+
+pub const PG_LANGUAGE_INTERNAL_OID: u32 = 12;
+pub const PG_LANGUAGE_C_OID: u32 = 13;
+pub const PG_LANGUAGE_SQL_OID: u32 = 14;
+pub const PG_LANGUAGE_PLPGSQL_OID: u32 = 15;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgLanguageRow {
+    pub oid: u32,
+    pub lanname: String,
+    pub lanowner: u32,
+    pub lanispl: bool,
+    pub lanpltrusted: bool,
+    pub lanplcallfoid: u32,
+    pub laninline: u32,
+    pub lanvalidator: u32,
+}
+
+fn bootstrap_language_acl_overrides() -> &'static RwLock<BTreeMap<u32, Vec<String>>> {
+    static ACLS: OnceLock<RwLock<BTreeMap<u32, Vec<String>>>> = OnceLock::new();
+    ACLS.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+pub fn set_bootstrap_language_acl_override(oid: u32, acl: Option<Vec<String>>) {
+    let mut overrides = bootstrap_language_acl_overrides()
+        .write()
+        .expect("bootstrap language ACL override lock poisoned");
+    if let Some(acl) = acl {
+        overrides.insert(oid, acl);
+    } else {
+        overrides.remove(&oid);
+    }
+}
+
+pub fn bootstrap_language_acl_override(oid: u32) -> Option<Vec<String>> {
+    bootstrap_language_acl_overrides()
+        .read()
+        .expect("bootstrap language ACL override lock poisoned")
+        .get(&oid)
+        .cloned()
+}
+
+pub fn language_owner_default_acl(owner_name: &str, trusted: bool) -> Vec<String> {
+    let mut acl = vec![format!("{owner_name}=U/{owner_name}")];
+    if trusted {
+        acl.push(format!("=U/{owner_name}"));
+    }
+    acl
+}
+
+pub fn pg_language_desc() -> RelationDesc {
+    RelationDesc {
+        columns: vec![
+            column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("lanname", SqlType::new(SqlTypeKind::Name), false),
+            column_desc("lanowner", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("lanispl", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("lanpltrusted", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("lanplcallfoid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("laninline", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("lanvalidator", SqlType::new(SqlTypeKind::Oid), false),
+        ],
+    }
+}
+
+pub fn bootstrap_pg_language_rows() -> [PgLanguageRow; 4] {
+    // :HACK: Keep handler and validator links at zero until pgrust exposes the
+    // backing pg_proc rows for language support functions.
+    [
+        PgLanguageRow {
+            oid: PG_LANGUAGE_INTERNAL_OID,
+            lanname: "internal".into(),
+            lanowner: BOOTSTRAP_SUPERUSER_OID,
+            lanispl: false,
+            lanpltrusted: false,
+            lanplcallfoid: 0,
+            laninline: 0,
+            lanvalidator: 0,
+        },
+        PgLanguageRow {
+            oid: PG_LANGUAGE_C_OID,
+            lanname: "c".into(),
+            lanowner: BOOTSTRAP_SUPERUSER_OID,
+            lanispl: false,
+            lanpltrusted: false,
+            lanplcallfoid: 0,
+            laninline: 0,
+            lanvalidator: 0,
+        },
+        PgLanguageRow {
+            oid: PG_LANGUAGE_SQL_OID,
+            lanname: "sql".into(),
+            lanowner: BOOTSTRAP_SUPERUSER_OID,
+            lanispl: false,
+            lanpltrusted: true,
+            lanplcallfoid: 0,
+            laninline: 0,
+            lanvalidator: 0,
+        },
+        PgLanguageRow {
+            oid: PG_LANGUAGE_PLPGSQL_OID,
+            lanname: "plpgsql".into(),
+            lanowner: BOOTSTRAP_SUPERUSER_OID,
+            lanispl: true,
+            lanpltrusted: true,
+            lanplcallfoid: 0,
+            laninline: 0,
+            lanvalidator: 0,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pg_language_desc_matches_expected_columns() {
+        let desc = pg_language_desc();
+        let names: Vec<_> = desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "oid",
+                "lanname",
+                "lanowner",
+                "lanispl",
+                "lanpltrusted",
+                "lanplcallfoid",
+                "laninline",
+                "lanvalidator",
+            ]
+        );
+    }
+}

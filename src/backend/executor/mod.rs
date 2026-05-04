@@ -129,7 +129,6 @@ pub(crate) use expr_txid::{
     cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
 };
 pub(crate) use expr_xml::{render_xml_output_text, strip_xml_declaration, validate_xml_input};
-pub use fmgr::ScalarFunctionCallInfo;
 pub(crate) use nodes::{
     ensure_no_deferred_column_errors, pg_sql_sort_by, push_explain_datetime_config,
     render_explain_expr, render_explain_join_expr, render_explain_join_expr_inner,
@@ -138,6 +137,7 @@ pub(crate) use nodes::{
     render_index_scan_condition_with_key_names_and_runtime_renderer,
     render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
 };
+pub use pgrust_executor::ScalarFunctionCallInfo;
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
 pub(crate) use srf::set_returning_call_label;
@@ -188,7 +188,7 @@ use crate::pgrust::database::{
     SequenceRuntime, SessionStatsState, TempMutationEffect, TransactionWaiter,
 };
 use crate::pgrust::portal::Portal;
-use crate::pl::plpgsql::{PlpgsqlFunctionCache, TriggerCallContext};
+use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 pub type ExecutorCatalog = std::sync::Arc<dyn CatalogLookup>;
@@ -200,7 +200,7 @@ where
     std::sync::Arc::new(catalog)
 }
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -211,349 +211,24 @@ pub(crate) use constraints::{
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{
-    InsertForeignKeyCheckPhase, enforce_deferred_inbound_foreign_key_check,
-    enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
-    enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
-    enforce_outbound_foreign_keys_for_insert, foreign_key_action_trigger_enabled_on_delete,
-    foreign_key_action_trigger_enabled_on_update, validate_outbound_foreign_key_for_ddl,
+    enforce_deferred_inbound_foreign_key_check, enforce_inbound_foreign_key_reference,
+    enforce_inbound_foreign_keys_on_delete, enforce_inbound_foreign_keys_on_update,
+    enforce_outbound_foreign_keys, enforce_outbound_foreign_keys_for_insert,
+    foreign_key_action_trigger_enabled_on_delete, foreign_key_action_trigger_enabled_on_update,
+    validate_outbound_foreign_key_for_ddl,
 };
 pub(crate) use permissions::relation_values_visible_for_error_detail;
-
-#[derive(Debug, Clone, Default)]
-pub struct ExprEvalBindings {
-    pub exec_params: HashMap<usize, Value>,
-    pub initplan_values: HashMap<usize, Value>,
-    pub external_params: HashMap<usize, Value>,
-    pub outer_tuple: Option<Vec<Value>>,
-    pub outer_system_bindings: Vec<SystemVarBinding>,
-    pub grouping_ref_stack: Vec<Vec<usize>>,
-    pub inner_tuple: Option<Vec<Value>>,
-    pub inner_system_bindings: Vec<SystemVarBinding>,
-    pub index_tuple: Option<Vec<Value>>,
-    pub index_system_bindings: Vec<SystemVarBinding>,
-    pub rule_old_tuple: Option<Vec<Value>>,
-    pub rule_new_tuple: Option<Vec<Value>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ConstraintTiming {
-    Immediate,
-    Deferred,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PendingUniqueCheck {
-    pub heap_tid: ItemPointerData,
-    pub key_values: Vec<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingParentForeignKeyCheck {
-    pub constraint_oid: u32,
-    pub relation_name: String,
-    pub old_parent_values: Vec<Value>,
-    pub replacement_parent_values: Option<Vec<Value>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingForeignKeyCheck {
-    pub constraint_oid: u32,
-    pub relation_name: String,
-    pub values: Vec<Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingUserConstraintTrigger {
-    pub trigger_oid: u32,
-    pub proc_oid: u32,
-    pub call: TriggerCallContext,
-}
-
-#[derive(Debug, Clone, Default)]
-struct DeferredConstraintState {
-    all_override: Option<ConstraintTiming>,
-    named_overrides: BTreeMap<u32, ConstraintTiming>,
-    affected_constraint_oids: BTreeSet<u32>,
-    pending_foreign_key_checks: Vec<PendingForeignKeyCheck>,
-    pending_parent_foreign_key_checks: Vec<PendingParentForeignKeyCheck>,
-    pending_unique_checks: HashMap<u32, HashSet<PendingUniqueCheck>>,
-    pending_user_constraint_triggers: Vec<PendingUserConstraintTrigger>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct DeferredConstraintSnapshot {
-    state: DeferredConstraintState,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct DeferredConstraintTracker {
-    state: Arc<parking_lot::Mutex<DeferredConstraintState>>,
-}
-
-pub type DeferredForeignKeyTracker = DeferredConstraintTracker;
-
-impl DeferredConstraintTracker {
-    pub fn record(&self, constraint_oid: u32) {
-        if constraint_oid == 0 {
-            return;
-        }
-        self.state
-            .lock()
-            .affected_constraint_oids
-            .insert(constraint_oid);
-    }
-
-    pub fn record_foreign_key_check(
-        &self,
-        constraint_oid: u32,
-        relation_name: String,
-        mut values: Vec<Value>,
-    ) {
-        if constraint_oid == 0 {
-            return;
-        }
-        Value::materialize_all(&mut values);
-        let mut state = self.state.lock();
-        state.affected_constraint_oids.insert(constraint_oid);
-        state
-            .pending_foreign_key_checks
-            .push(PendingForeignKeyCheck {
-                constraint_oid,
-                relation_name,
-                values,
-            });
-    }
-
-    pub fn cancel_foreign_key_check(&self, constraint_oid: u32, values: &[Value]) {
-        if constraint_oid == 0 {
-            return;
-        }
-        let mut values = values.iter().map(Value::to_owned_value).collect::<Vec<_>>();
-        Value::materialize_all(&mut values);
-        self.state
-            .lock()
-            .pending_foreign_key_checks
-            .retain(|check| check.constraint_oid != constraint_oid || check.values != values);
-    }
-
-    pub fn record_parent_foreign_key_check(
-        &self,
-        constraint_oid: u32,
-        relation_name: String,
-        mut old_parent_values: Vec<Value>,
-        mut replacement_parent_values: Option<Vec<Value>>,
-    ) {
-        if constraint_oid == 0 {
-            return;
-        }
-        Value::materialize_all(&mut old_parent_values);
-        if let Some(values) = replacement_parent_values.as_mut() {
-            Value::materialize_all(values);
-        }
-        self.state
-            .lock()
-            .pending_parent_foreign_key_checks
-            .push(PendingParentForeignKeyCheck {
-                constraint_oid,
-                relation_name,
-                old_parent_values,
-                replacement_parent_values,
-            });
-    }
-
-    pub fn record_unique(
-        &self,
-        constraint_oid: u32,
-        heap_tid: ItemPointerData,
-        mut key_values: Vec<Value>,
-    ) {
-        if constraint_oid == 0 {
-            return;
-        }
-        Value::materialize_all(&mut key_values);
-        self.state
-            .lock()
-            .pending_unique_checks
-            .entry(constraint_oid)
-            .or_default()
-            .insert(PendingUniqueCheck {
-                heap_tid,
-                key_values,
-            });
-    }
-
-    pub fn record_user_constraint_trigger(
-        &self,
-        trigger_oid: u32,
-        proc_oid: u32,
-        mut call: TriggerCallContext,
-    ) {
-        if trigger_oid == 0 {
-            return;
-        }
-        if let Some(row) = call.old_row.as_mut() {
-            Value::materialize_all(row);
-        }
-        if let Some(row) = call.new_row.as_mut() {
-            Value::materialize_all(row);
-        }
-        for table in &mut call.transition_tables {
-            for row in &mut table.rows {
-                Value::materialize_all(row);
-            }
-        }
-        self.state
-            .lock()
-            .pending_user_constraint_triggers
-            .push(PendingUserConstraintTrigger {
-                trigger_oid,
-                proc_oid,
-                call,
-            });
-    }
-
-    pub fn affected_constraint_oids(&self) -> Vec<u32> {
-        self.state
-            .lock()
-            .affected_constraint_oids
-            .iter()
-            .copied()
-            .collect()
-    }
-
-    pub fn pending_foreign_key_checks(&self) -> Vec<PendingForeignKeyCheck> {
-        self.state.lock().pending_foreign_key_checks.clone()
-    }
-
-    pub fn pending_unique_constraint_oids(&self) -> Vec<u32> {
-        self.state
-            .lock()
-            .pending_unique_checks
-            .keys()
-            .copied()
-            .collect()
-    }
-
-    pub fn pending_parent_foreign_key_checks(&self) -> Vec<PendingParentForeignKeyCheck> {
-        self.state.lock().pending_parent_foreign_key_checks.clone()
-    }
-
-    pub fn pending_unique_checks(&self, constraint_oid: u32) -> Vec<PendingUniqueCheck> {
-        self.state
-            .lock()
-            .pending_unique_checks
-            .get(&constraint_oid)
-            .map(|checks| checks.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    pub fn pending_user_constraint_triggers(&self) -> Vec<PendingUserConstraintTrigger> {
-        self.state.lock().pending_user_constraint_triggers.clone()
-    }
-
-    pub fn clear_foreign_key_constraints(&self, constraint_oids: &BTreeSet<u32>) {
-        let mut state = self.state.lock();
-        for constraint_oid in constraint_oids {
-            state.affected_constraint_oids.remove(constraint_oid);
-        }
-    }
-
-    pub fn clear_foreign_key_checks(&self, constraint_oids: &BTreeSet<u32>) {
-        self.state
-            .lock()
-            .pending_foreign_key_checks
-            .retain(|check| !constraint_oids.contains(&check.constraint_oid));
-    }
-
-    pub fn clear_parent_foreign_key_checks(&self, constraint_oids: &BTreeSet<u32>) {
-        self.state
-            .lock()
-            .pending_parent_foreign_key_checks
-            .retain(|check| !constraint_oids.contains(&check.constraint_oid));
-    }
-
-    pub fn clear_unique_constraints(&self, constraint_oids: &BTreeSet<u32>) {
-        let mut state = self.state.lock();
-        for constraint_oid in constraint_oids {
-            state.pending_unique_checks.remove(constraint_oid);
-        }
-    }
-
-    pub fn clear_user_constraint_triggers(&self, trigger_oids: &BTreeSet<u32>) {
-        self.state
-            .lock()
-            .pending_user_constraint_triggers
-            .retain(|trigger| !trigger_oids.contains(&trigger.trigger_oid));
-    }
-
-    pub fn set_all_timing(&self, timing: ConstraintTiming) {
-        let mut state = self.state.lock();
-        state.named_overrides.clear();
-        state.all_override = Some(timing);
-    }
-
-    pub fn set_constraint_timing(&self, constraint_oid: u32, timing: ConstraintTiming) {
-        if constraint_oid == 0 {
-            return;
-        }
-        self.state
-            .lock()
-            .named_overrides
-            .insert(constraint_oid, timing);
-    }
-
-    pub fn effective_timing(
-        &self,
-        constraint_oid: u32,
-        deferrable: bool,
-        initially_deferred: bool,
-    ) -> ConstraintTiming {
-        if !deferrable {
-            return ConstraintTiming::Immediate;
-        }
-        let state = self.state.lock();
-        state
-            .named_overrides
-            .get(&constraint_oid)
-            .copied()
-            .or(state.all_override)
-            .unwrap_or(if initially_deferred {
-                ConstraintTiming::Deferred
-            } else {
-                ConstraintTiming::Immediate
-            })
-    }
-
-    pub fn snapshot(&self) -> DeferredConstraintSnapshot {
-        DeferredConstraintSnapshot {
-            state: self.state.lock().clone(),
-        }
-    }
-
-    pub fn restore(&self, snapshot: DeferredConstraintSnapshot) {
-        *self.state.lock() = snapshot.state;
-    }
-
-    pub fn is_empty(&self) -> bool {
-        let state = self.state.lock();
-        state.affected_constraint_oids.is_empty()
-            && state.pending_foreign_key_checks.is_empty()
-            && state.pending_parent_foreign_key_checks.is_empty()
-            && state.pending_unique_checks.is_empty()
-            && state.pending_user_constraint_triggers.is_empty()
-    }
-}
-
-pub trait LockStatusProvider: Send + Sync {
-    fn pg_lock_status_rows(&self, current_client_id: ClientId) -> Vec<Vec<Value>>;
-    fn pg_blocking_pids(&self, blocked_pid: ClientId) -> Vec<ClientId>;
-}
-
-#[derive(Debug, Clone)]
-pub struct TypedFunctionArg {
-    pub value: Value,
-    pub sql_type: Option<SqlType>,
-}
+pub(crate) use pgrust_executor::InsertForeignKeyCheckPhase;
+pub use pgrust_executor::{
+    DeferredConstraintSnapshot, DeferredConstraintTracker, DeferredForeignKeyTracker,
+    ExecutorMutationSink, ExecutorPredicateLockServices, ExecutorRowLockServices,
+    ExecutorTransactionServices, ExecutorTransactionState, ExprEvalBindings, LockStatusProvider,
+    PendingForeignKeyCheck, PendingParentForeignKeyCheck, PendingUniqueCheck,
+    PendingUserConstraintTrigger, SharedExecutorTransactionState,
+};
+pub use pgrust_nodes::{
+    ConstraintTiming, SessionReplicationRole, StatementResult, TypedFunctionArg,
+};
 
 pub trait StatsImportRuntime: Send + Sync {
     fn pg_restore_relation_stats(
@@ -583,14 +258,6 @@ pub trait StatsImportRuntime: Send + Sync {
         attname: Value,
         inherited: Value,
     ) -> Result<Value, ExecError>;
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SessionReplicationRole {
-    #[default]
-    Origin,
-    Replica,
-    Local,
 }
 
 pub struct ExecutorContext {
@@ -654,16 +321,6 @@ pub struct ExecutorContext {
     pub deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
     pub trigger_depth: usize,
 }
-
-#[derive(Debug)]
-pub struct ExecutorTransactionState {
-    pub xid: Option<TransactionId>,
-    pub cid: CommandId,
-    pub transaction_snapshot: Option<Snapshot>,
-    pub serializable_xact: Option<SerializableXactId>,
-}
-
-pub type SharedExecutorTransactionState = Arc<parking_lot::Mutex<ExecutorTransactionState>>;
 
 impl ExecutorContext {
     pub fn check_for_interrupts(&self) -> Result<(), ExecError> {
@@ -970,6 +627,105 @@ impl ExecutorContext {
     }
 }
 
+impl ExecutorTransactionServices for ExecutorContext {
+    type Error = ExecError;
+
+    fn transaction_xid(&self) -> Option<TransactionId> {
+        ExecutorContext::transaction_xid(self)
+    }
+
+    fn write_snapshot(&self) -> Snapshot {
+        ExecutorContext::write_snapshot(self)
+    }
+
+    fn uses_transaction_snapshot(&self) -> bool {
+        ExecutorContext::uses_transaction_snapshot(self)
+    }
+
+    fn ensure_write_xid(&mut self) -> Result<TransactionId, Self::Error> {
+        ExecutorContext::ensure_write_xid(self)
+    }
+}
+
+impl ExecutorRowLockServices for ExecutorContext {
+    type Error = ExecError;
+
+    fn row_lock_owner(&self) -> RowLockOwner {
+        ExecutorContext::row_lock_owner(self)
+    }
+
+    fn acquire_row_lock(
+        &self,
+        relation_oid: u32,
+        tid: ItemPointerData,
+        mode: RowLockMode,
+    ) -> Result<(), Self::Error> {
+        ExecutorContext::acquire_row_lock(self, relation_oid, tid, mode)
+    }
+
+    fn try_acquire_row_lock(
+        &self,
+        relation_oid: u32,
+        tid: ItemPointerData,
+        mode: RowLockMode,
+    ) -> bool {
+        ExecutorContext::try_acquire_row_lock(self, relation_oid, tid, mode)
+    }
+}
+
+impl ExecutorPredicateLockServices for ExecutorContext {
+    type Error = ExecError;
+
+    fn serializable_xact_id(&self) -> Option<SerializableXactId> {
+        ExecutorContext::serializable_xact_id(self)
+    }
+
+    fn predicate_lock_relation(&self, relation_oid: u32) -> Result<(), Self::Error> {
+        ExecutorContext::predicate_lock_relation(self, relation_oid)
+    }
+
+    fn predicate_lock_page(&self, relation_oid: u32, block_number: u32) -> Result<(), Self::Error> {
+        ExecutorContext::predicate_lock_page(self, relation_oid, block_number)
+    }
+
+    fn predicate_lock_tuple(
+        &self,
+        relation_oid: u32,
+        tid: ItemPointerData,
+    ) -> Result<(), Self::Error> {
+        ExecutorContext::predicate_lock_tuple(self, relation_oid, tid)
+    }
+
+    fn check_serializable_visible_tuple_xmax(
+        &self,
+        xmax: Option<TransactionId>,
+    ) -> Result<(), Self::Error> {
+        ExecutorContext::check_serializable_visible_tuple_xmax(self, xmax)
+    }
+
+    fn check_serializable_write_relation(&self, relation_oid: u32) -> Result<(), Self::Error> {
+        ExecutorContext::check_serializable_write_relation(self, relation_oid)
+    }
+
+    fn check_serializable_write_tuple(
+        &self,
+        relation_oid: u32,
+        tid: ItemPointerData,
+    ) -> Result<(), Self::Error> {
+        ExecutorContext::check_serializable_write_tuple(self, relation_oid, tid)
+    }
+}
+
+impl ExecutorMutationSink for ExecutorContext {
+    fn record_catalog_effect(&mut self, effect: CatalogMutationEffect) {
+        ExecutorContext::record_catalog_effect(self, effect);
+    }
+
+    fn record_table_lock(&mut self, rel: RelFileLocator) {
+        ExecutorContext::record_table_lock(self, rel);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegexError {
     pub sqlstate: &'static str,
@@ -1179,9 +935,255 @@ impl From<TupleError> for ExecError {
     }
 }
 
+impl From<pgrust_executor::TupleDecodeError> for ExecError {
+    fn from(value: pgrust_executor::TupleDecodeError) -> Self {
+        match value {
+            pgrust_executor::TupleDecodeError::Tuple(error) => Self::Tuple(error),
+            pgrust_executor::TupleDecodeError::Expr(error) => error.into(),
+            pgrust_executor::TupleDecodeError::ToastCompression(error) => error.into(),
+            pgrust_executor::TupleDecodeError::InvalidStorageValue { column, details } => {
+                Self::InvalidStorageValue { column, details }
+            }
+        }
+    }
+}
+
+impl From<pgrust_executor::GenerateSeriesError> for ExecError {
+    fn from(value: pgrust_executor::GenerateSeriesError) -> Self {
+        match value {
+            pgrust_executor::GenerateSeriesError::TypeMismatch { op, left, right } => {
+                Self::TypeMismatch { op, left, right }
+            }
+            pgrust_executor::GenerateSeriesError::ZeroStep => Self::GenerateSeriesZeroStep,
+            pgrust_executor::GenerateSeriesError::InfiniteStep => Self::DetailedError {
+                message: "step size cannot be infinite".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            },
+            pgrust_executor::GenerateSeriesError::InvalidArg(arg, detail) => {
+                Self::GenerateSeriesInvalidArg(arg, detail)
+            }
+        }
+    }
+}
+
+impl From<pgrust_executor::UnnestError> for ExecError {
+    fn from(value: pgrust_executor::UnnestError) -> Self {
+        match value {
+            pgrust_executor::UnnestError::TypeMismatch { op, left, right } => {
+                Self::TypeMismatch { op, left, right }
+            }
+        }
+    }
+}
+
+impl From<pgrust_executor::PgOptionsToTableError> for ExecError {
+    fn from(value: pgrust_executor::PgOptionsToTableError) -> Self {
+        match value {
+            pgrust_executor::PgOptionsToTableError::TypeMismatch { op, left, right } => {
+                Self::TypeMismatch { op, left, right }
+            }
+        }
+    }
+}
+
+impl From<pgrust_executor::GenerateSubscriptsError> for ExecError {
+    fn from(value: pgrust_executor::GenerateSubscriptsError) -> Self {
+        match value {
+            pgrust_executor::GenerateSubscriptsError::Int4OutOfRange => Self::Int4OutOfRange,
+        }
+    }
+}
+
+impl From<pgrust_executor::SqlFunctionBodyError> for ExecError {
+    fn from(value: pgrust_executor::SqlFunctionBodyError) -> Self {
+        match value {
+            pgrust_executor::SqlFunctionBodyError::UnexpectedEof => {
+                Self::Parse(ParseError::UnexpectedEof)
+            }
+        }
+    }
+}
+
 impl From<ParseError> for ExecError {
     fn from(value: ParseError) -> Self {
         Self::Parse(value)
+    }
+}
+
+impl From<pgrust_expr::ExprError> for ExecError {
+    fn from(value: pgrust_expr::ExprError) -> Self {
+        match value {
+            pgrust_expr::ExprError::WithContext { source, context } => Self::WithContext {
+                source: Box::new((*source).into()),
+                context,
+            },
+            pgrust_expr::ExprError::Parse(error) => Self::Parse(error),
+            pgrust_expr::ExprError::TypeMismatch { op, left, right } => {
+                Self::TypeMismatch { op, left, right }
+            }
+            pgrust_expr::ExprError::NonBoolQual(value) => Self::NonBoolQual(value),
+            pgrust_expr::ExprError::UnsupportedStorageType {
+                column,
+                ty,
+                attlen,
+                actual_len,
+            } => Self::UnsupportedStorageType {
+                column,
+                ty,
+                attlen,
+                actual_len,
+            },
+            pgrust_expr::ExprError::InvalidStorageValue { column, details } => {
+                Self::InvalidStorageValue { column, details }
+            }
+            pgrust_expr::ExprError::JsonInput {
+                raw_input,
+                message,
+                detail,
+                context,
+                sqlstate,
+            } => Self::JsonInput {
+                raw_input,
+                message,
+                detail,
+                context,
+                sqlstate,
+            },
+            pgrust_expr::ExprError::XmlInput {
+                raw_input,
+                message,
+                detail,
+                context,
+                sqlstate,
+            } => Self::XmlInput {
+                raw_input,
+                message,
+                detail,
+                context,
+                sqlstate,
+            },
+            pgrust_expr::ExprError::ArrayInput {
+                message,
+                value,
+                detail,
+                sqlstate,
+            } => Self::ArrayInput {
+                message,
+                value,
+                detail,
+                sqlstate,
+            },
+            pgrust_expr::ExprError::DetailedError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+            } => Self::DetailedError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+            },
+            pgrust_expr::ExprError::DiagnosticError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+                column_name,
+                constraint_name,
+                datatype_name,
+                table_name,
+                schema_name,
+            } => Self::DiagnosticError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+                column_name,
+                constraint_name,
+                datatype_name,
+                table_name,
+                schema_name,
+            },
+            pgrust_expr::ExprError::StringDataRightTruncation { ty } => {
+                Self::StringDataRightTruncation { ty }
+            }
+            pgrust_expr::ExprError::MissingRequiredColumn(column) => {
+                Self::MissingRequiredColumn(column)
+            }
+            pgrust_expr::ExprError::Regex(error) => Self::Regex(RegexError {
+                sqlstate: error.sqlstate,
+                message: error.message,
+                detail: error.detail,
+                hint: error.hint,
+                context: error.context,
+            }),
+            pgrust_expr::ExprError::InvalidRegex(message) => Self::InvalidRegex(message),
+            pgrust_expr::ExprError::RaiseException(message) => Self::RaiseException(message),
+            pgrust_expr::ExprError::DivisionByZero(op) => Self::DivisionByZero(op),
+            pgrust_expr::ExprError::InvalidIntegerInput { ty, value } => {
+                Self::InvalidIntegerInput { ty, value }
+            }
+            pgrust_expr::ExprError::IntegerOutOfRange { ty, value } => {
+                Self::IntegerOutOfRange { ty, value }
+            }
+            pgrust_expr::ExprError::InvalidNumericInput(value) => Self::InvalidNumericInput(value),
+            pgrust_expr::ExprError::InvalidByteaInput { value } => {
+                Self::InvalidByteaInput { value }
+            }
+            pgrust_expr::ExprError::InvalidUuidInput { value } => Self::InvalidUuidInput { value },
+            pgrust_expr::ExprError::InvalidByteaHexDigit { value, digit } => {
+                Self::InvalidByteaHexDigit { value, digit }
+            }
+            pgrust_expr::ExprError::InvalidByteaHexOddDigits { value } => {
+                Self::InvalidByteaHexOddDigits { value }
+            }
+            pgrust_expr::ExprError::InvalidGeometryInput { ty, value } => {
+                Self::InvalidGeometryInput { ty, value }
+            }
+            pgrust_expr::ExprError::InvalidRangeInput { ty, value } => {
+                Self::InvalidRangeInput { ty, value }
+            }
+            pgrust_expr::ExprError::InvalidBitInput { digit, is_hex } => {
+                Self::InvalidBitInput { digit, is_hex }
+            }
+            pgrust_expr::ExprError::BitStringLengthMismatch { actual, expected } => {
+                Self::BitStringLengthMismatch { actual, expected }
+            }
+            pgrust_expr::ExprError::BitStringTooLong { actual, limit } => {
+                Self::BitStringTooLong { actual, limit }
+            }
+            pgrust_expr::ExprError::BitStringSizeMismatch { op } => {
+                Self::BitStringSizeMismatch { op }
+            }
+            pgrust_expr::ExprError::BitIndexOutOfRange { index, max_index } => {
+                Self::BitIndexOutOfRange { index, max_index }
+            }
+            pgrust_expr::ExprError::NegativeSubstringLength => Self::NegativeSubstringLength,
+            pgrust_expr::ExprError::InvalidBooleanInput { value } => {
+                Self::InvalidBooleanInput { value }
+            }
+            pgrust_expr::ExprError::InvalidFloatInput { ty, value } => {
+                Self::InvalidFloatInput { ty, value }
+            }
+            pgrust_expr::ExprError::FloatOutOfRange { ty, value } => {
+                Self::FloatOutOfRange { ty, value }
+            }
+            pgrust_expr::ExprError::FloatOverflow => Self::FloatOverflow,
+            pgrust_expr::ExprError::FloatUnderflow => Self::FloatUnderflow,
+            pgrust_expr::ExprError::NumericNaNToInt { ty } => Self::NumericNaNToInt { ty },
+            pgrust_expr::ExprError::NumericInfinityToInt { ty } => {
+                Self::NumericInfinityToInt { ty }
+            }
+            pgrust_expr::ExprError::Int2OutOfRange => Self::Int2OutOfRange,
+            pgrust_expr::ExprError::Int4OutOfRange => Self::Int4OutOfRange,
+            pgrust_expr::ExprError::Int8OutOfRange => Self::Int8OutOfRange,
+            pgrust_expr::ExprError::OidOutOfRange => Self::OidOutOfRange,
+            pgrust_expr::ExprError::NumericFieldOverflow => Self::NumericFieldOverflow,
+            pgrust_expr::ExprError::RequestedLengthTooLarge => Self::RequestedLengthTooLarge,
+        }
     }
 }
 
@@ -1240,16 +1242,6 @@ impl From<MvccError> for ExecError {
     fn from(value: MvccError) -> Self {
         Self::Heap(HeapError::Mvcc(value))
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StatementResult {
-    Query {
-        columns: Vec<QueryColumn>,
-        column_names: Vec<String>,
-        rows: Vec<Vec<Value>>,
-    },
-    AffectedRows(usize),
 }
 
 #[cfg(test)]

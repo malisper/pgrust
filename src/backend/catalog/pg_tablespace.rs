@@ -1,5 +1,2 @@
-use crate::include::catalog::PgTablespaceRow;
-
-pub fn sort_pg_tablespace_rows(rows: &mut [PgTablespaceRow]) {
-    rows.sort_by_key(|row| (row.oid, row.spcname.clone()));
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_tablespace::*;

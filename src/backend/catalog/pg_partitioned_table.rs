@@ -1,5 +1,2 @@
-use crate::include::catalog::PgPartitionedTableRow;
-
-pub fn sort_pg_partitioned_table_rows(rows: &mut [PgPartitionedTableRow]) {
-    crate::include::catalog::sort_pg_partitioned_table_rows(rows);
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_partitioned_table::*;

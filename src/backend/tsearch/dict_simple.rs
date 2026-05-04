@@ -1,4 +1,5 @@
-pub(crate) fn lexize_simple(token: &str) -> Option<String> {
-    let normalized = token.trim().to_ascii_lowercase();
-    (!normalized.is_empty()).then_some(normalized)
-}
+#![allow(unused_imports)]
+
+// :HACK: Preserve the historical root text-search path while implementation
+// lives in `pgrust_expr`.
+pub(crate) use pgrust_expr::backend::tsearch::dict_simple::*;

@@ -245,8 +245,14 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
                     if let Some(projection) = &projection {
                         row = project_sql_function_row(row, projection);
                     }
-                    if should_pack_sql_set_returning_record_row(output_columns, row.as_slice()) {
-                        let coerced = vec![pack_sql_function_record_row(row, returned_columns)];
+                    if pgrust_executor::should_pack_sql_set_returning_record_row(
+                        output_columns,
+                        row.as_slice(),
+                    ) {
+                        let coerced = vec![pgrust_executor::pack_sql_function_record_row(
+                            row,
+                            returned_columns,
+                        )];
                         return Ok(TupleSlot::virtual_row(coerced));
                     }
                     if row.len() == 1
@@ -424,11 +430,7 @@ fn find_live_composite_column_at_or_after(
 }
 
 fn sql_function_outputs_single_composite_column(output_columns: &[QueryColumn]) -> bool {
-    output_columns.len() == 1
-        && matches!(
-            output_columns[0].sql_type.kind,
-            SqlTypeKind::Composite | SqlTypeKind::Record
-        )
+    pgrust_executor::sql_function_outputs_single_composite_column(output_columns)
 }
 
 fn sql_function_single_value_is_whole_result(
@@ -436,32 +438,18 @@ fn sql_function_single_value_is_whole_result(
     output_columns: &[QueryColumn],
     values: &[Value],
 ) -> bool {
-    if matches!(values, [Value::Record(_)]) {
-        return true;
-    }
-    let Some(return_type) = runtime_result_type else {
-        return true;
-    };
-    if !matches!(
-        return_type.kind,
-        SqlTypeKind::Composite | SqlTypeKind::Record
-    ) {
-        return true;
-    }
-    output_columns.len() == 1
-        && matches!(
-            output_columns[0].sql_type.kind,
-            SqlTypeKind::Composite | SqlTypeKind::Record
-        )
+    pgrust_executor::sql_function_single_value_is_whole_result(
+        runtime_result_type,
+        output_columns,
+        values,
+    )
 }
 
 fn should_pack_sql_set_returning_record_row(
     output_columns: &[QueryColumn],
     values: &[Value],
 ) -> bool {
-    output_columns.len() == 1
-        && matches!(output_columns[0].sql_type.kind, SqlTypeKind::Record)
-        && !matches!(values, [Value::Record(_)])
+    pgrust_executor::should_pack_sql_set_returning_record_row(output_columns, values)
 }
 
 fn sql_function_result_row_for_output(
@@ -476,23 +464,13 @@ fn sql_function_result_row_for_output(
     if let Some(return_type) = runtime_result_type {
         value = coerce_sql_function_value_to_type(value, return_type, catalog, ctx)?;
     }
-    if (expand_single_record || output_columns.len() > 1)
-        && let Value::Record(record) = value
-    {
-        let mut fields = record.fields;
-        if fields.len() < output_columns.len() {
-            fields.resize(output_columns.len(), Value::Null);
-        }
-        fields.truncate(output_columns.len());
-        return Ok(TupleSlot::virtual_row(fields));
-    }
-
-    let mut row = vec![value];
-    if row.len() < output_columns.len() {
-        row.resize(output_columns.len(), Value::Null);
-    }
-    row.truncate(output_columns.len());
-    Ok(TupleSlot::virtual_row(row))
+    Ok(TupleSlot::virtual_row(
+        pgrust_executor::sql_function_result_row_for_output(
+            value,
+            output_columns.len(),
+            expand_single_record,
+        ),
+    ))
 }
 
 fn sql_function_declares_record_result(row: &PgProcRow, catalog: &dyn CatalogLookup) -> bool {
@@ -508,14 +486,7 @@ fn sql_function_declares_record_result(row: &PgProcRow, catalog: &dyn CatalogLoo
 }
 
 fn pack_sql_function_record_row(values: Vec<Value>, columns: &[QueryColumn]) -> Value {
-    let descriptor = RecordDescriptor::anonymous(
-        columns
-            .iter()
-            .map(|column| (column.name.clone(), column.sql_type))
-            .collect(),
-        -1,
-    );
-    Value::Record(RecordValue::from_descriptor(descriptor, values))
+    pgrust_executor::pack_sql_function_record_row(values, columns)
 }
 
 fn validate_sql_function_query_columns(
@@ -653,27 +624,11 @@ fn execute_sql_function_query(
 }
 
 fn sql_function_statement_needs_database_executor(statement: &str) -> bool {
-    let lower = statement.trim_start().to_ascii_lowercase();
-    starts_with_sql_command(&lower, "create")
-        || starts_with_sql_command(&lower, "alter")
-        || starts_with_sql_command(&lower, "grant")
-        || starts_with_sql_command(&lower, "revoke")
+    pgrust_executor::sql_function_statement_needs_database_executor(statement)
 }
 
 fn normalize_sql_function_statement_for_execution(statement: &str) -> std::borrow::Cow<'_, str> {
-    let trimmed = statement.trim_start();
-    if trimmed
-        .get(.."return".len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("return"))
-        && trimmed
-            .get("return".len()..)
-            .and_then(|rest| rest.chars().next())
-            .is_none_or(|ch| ch.is_whitespace())
-    {
-        std::borrow::Cow::Owned(format!("select {}", trimmed["return".len()..].trim()))
-    } else {
-        std::borrow::Cow::Borrowed(statement)
-    }
+    pgrust_executor::normalize_sql_function_statement_for_execution(statement)
 }
 
 fn execute_sql_function_statement_with_database(
@@ -780,13 +735,7 @@ fn restore_sql_function_row_security_set_config_effect(
 }
 
 fn sql_function_sets_row_security_off(sql: &str) -> bool {
-    let compact: String = sql
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect();
-    compact.contains("set_config('row_security','false',")
-        || compact.contains("set_config('row_security','off',")
+    pgrust_executor::sql_function_sets_row_security_off(sql)
 }
 
 fn execute_sql_function_statement(
@@ -1041,27 +990,15 @@ fn validate_sql_function_record_field_types(
     record: &RecordValue,
     expected_columns: &[QueryColumn],
 ) -> Result<(), ExecError> {
-    if record.descriptor.fields.len() != expected_columns.len() {
-        return Ok(());
-    }
-    for (index, ((returned, value), expected)) in record
-        .descriptor
-        .fields
-        .iter()
-        .zip(record.fields.iter())
-        .zip(expected_columns.iter())
-        .enumerate()
-    {
-        let returned_type = value.sql_type_hint().unwrap_or(returned.sql_type);
-        if returned_type != expected.sql_type {
-            return Err(sql_function_return_type_mismatch(
-                index + 1,
-                returned_type,
-                expected.sql_type,
-            ));
-        }
-    }
-    Ok(())
+    pgrust_executor::validate_sql_function_record_field_types(record, expected_columns).map_err(
+        |mismatch| {
+            sql_function_return_type_mismatch(
+                mismatch.ordinal,
+                mismatch.returned_type,
+                mismatch.expected_type,
+            )
+        },
+    )
 }
 
 fn sql_function_return_row_mismatch(expected: usize, actual: usize) -> ExecError {
@@ -1225,17 +1162,7 @@ fn sql_function_out_parameter_record_descriptor(
 }
 
 fn is_sql_function_polymorphic_type_oid(type_oid: u32) -> bool {
-    matches!(
-        type_oid,
-        ANYELEMENTOID
-            | ANYARRAYOID
-            | ANYRANGEOID
-            | ANYMULTIRANGEOID
-            | ANYCOMPATIBLEOID
-            | ANYCOMPATIBLEARRAYOID
-            | ANYCOMPATIBLERANGEOID
-            | ANYCOMPATIBLEMULTIRANGEOID
-    )
+    pgrust_executor::is_sql_function_polymorphic_type_oid(type_oid)
 }
 
 fn sql_scalar_function_record_fields(
@@ -1298,11 +1225,7 @@ fn validate_sql_function_value_types(
 }
 
 fn sql_function_return_types_match(returned_type: SqlType, expected_type: SqlType) -> bool {
-    returned_type.kind == expected_type.kind
-        && returned_type.is_array == expected_type.is_array
-        && (returned_type.type_oid == expected_type.type_oid
-            || returned_type.type_oid == 0
-            || expected_type.type_oid == 0)
+    pgrust_executor::sql_function_return_types_match(returned_type, expected_type)
 }
 
 fn execute_sql_utility_function(
@@ -1343,13 +1266,7 @@ fn execute_sql_utility_function(
 }
 
 fn starts_with_sql_command(sql: &str, command: &str) -> bool {
-    let Some(rest) = sql.strip_prefix(command) else {
-        return false;
-    };
-    rest.chars()
-        .next()
-        .map(|ch| ch.is_whitespace() || ch == '(' || ch == ';')
-        .unwrap_or(true)
+    pgrust_executor::starts_with_sql_command(sql, command)
 }
 
 fn sql_function_context_error(row: &PgProcRow, err: ExecError) -> ExecError {
@@ -1469,118 +1386,48 @@ fn sql_function_inlining_error(
 }
 
 fn normalized_sql_function_body(source: &str) -> String {
-    let body = source.trim().trim_end_matches(';').trim();
-    if body
-        .get(.."return".len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("return"))
-        && body
-            .get("return".len()..)
-            .and_then(|rest| rest.chars().next())
-            .is_none_or(|ch| ch.is_whitespace())
-    {
-        return format!("select {}", body["return".len()..].trim());
-    }
-    sql_standard_function_body_inner(body)
-        .unwrap_or(body)
-        .trim()
-        .trim_end_matches(';')
-        .trim()
-        .to_string()
+    pgrust_executor::normalized_sql_function_body(source)
 }
 
 fn split_sql_function_body(body: &str) -> Result<Vec<String>, ExecError> {
-    let body = sql_standard_function_body_inner(body).unwrap_or(body);
-    let mut statements = Vec::new();
-    let mut start = 0usize;
-    let bytes = body.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => {
-                i = scan_sql_delimited_end(bytes, i, b'\'')?;
-                continue;
-            }
-            b'"' => {
-                i = scan_sql_delimited_end(bytes, i, b'"')?;
-                continue;
-            }
-            b'$' => {
-                if let Some(end) = scan_sql_dollar_string_end(body, i) {
-                    i = end;
-                    continue;
-                }
-            }
-            b';' => {
-                let statement = body[start..i].trim();
-                if !statement.is_empty() && !statement.eq_ignore_ascii_case("end") {
-                    statements.push(statement.to_string());
-                }
-                start = i + 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    let statement = body[start..].trim();
-    if !statement.is_empty() && !statement.eq_ignore_ascii_case("end") {
-        statements.push(statement.to_string());
-    }
-    Ok(statements)
+    pgrust_executor::split_sql_function_body(body).map_err(ExecError::from)
 }
 
-fn scan_sql_delimited_end(bytes: &[u8], start: usize, delimiter: u8) -> Result<usize, ExecError> {
-    let mut i = start + 1;
-    while i < bytes.len() {
-        if bytes[i] == delimiter {
-            if i + 1 < bytes.len() && bytes[i + 1] == delimiter {
-                i += 2;
-                continue;
-            }
-            return Ok(i + 1);
+fn sql_function_substitution_error<E>(
+    err: pgrust_executor::SqlFunctionSubstitutionError<E>,
+) -> ExecError
+where
+    ExecError: From<E>,
+{
+    match err {
+        pgrust_executor::SqlFunctionSubstitutionError::InvalidParameterReference => {
+            sql_function_runtime_error("invalid SQL function parameter reference", None, "42P02")
         }
-        i += 1;
+        pgrust_executor::SqlFunctionSubstitutionError::ParameterOutOfRange { position } => {
+            sql_function_runtime_error(
+                "SQL function parameter reference out of range",
+                Some(format!("${position}")),
+                "42P02",
+            )
+        }
+        pgrust_executor::SqlFunctionSubstitutionError::Render(err) => ExecError::from(err),
     }
-    Err(ExecError::Parse(
-        crate::backend::parser::ParseError::UnexpectedEof,
-    ))
 }
 
-fn scan_sql_dollar_string_end(input: &str, start: usize) -> Option<usize> {
-    let bytes = input.as_bytes();
-    if bytes.get(start) != Some(&b'$') {
-        return None;
-    }
-    let mut tag_end = start + 1;
-    while tag_end < bytes.len() && bytes[tag_end] != b'$' {
-        let ch = bytes[tag_end] as char;
-        if !(ch == '_' || ch.is_ascii_alphanumeric()) {
-            return None;
+fn sql_function_metadata_error(err: pgrust_executor::SqlFunctionMetadataError) -> ExecError {
+    match err {
+        pgrust_executor::SqlFunctionMetadataError::InvalidArgumentMetadata { metadata } => {
+            sql_function_runtime_error(
+                "invalid SQL function argument metadata",
+                Some(metadata),
+                "XX000",
+            )
         }
-        tag_end += 1;
     }
-    if tag_end >= bytes.len() {
-        return None;
-    }
-    let tag = &input[start..=tag_end];
-    let rest = &input[tag_end + 1..];
-    let closing = rest.find(tag)?;
-    Some(tag_end + 1 + closing + tag.len())
 }
 
 fn sql_standard_function_body_inner(body: &str) -> Option<&str> {
-    let trimmed = body.trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    if !lowered.starts_with("begin atomic") {
-        return None;
-    }
-    let without_trailing_semicolon = trimmed.trim_end_matches(';').trim_end();
-    let lowered_without_semicolon = without_trailing_semicolon.to_ascii_lowercase();
-    let end = if lowered_without_semicolon.ends_with("end") {
-        without_trailing_semicolon.len().saturating_sub("end".len())
-    } else {
-        trimmed.len()
-    };
-    trimmed.get("begin atomic".len()..end).map(str::trim)
+    pgrust_executor::sql_standard_function_body_inner(body)
 }
 
 fn execute_known_lightweight_sql_function(
@@ -1610,11 +1457,8 @@ fn execute_known_lightweight_sql_function(
 }
 
 fn sql_function_is_array_append_transition(row: &PgProcRow) -> Result<bool, ExecError> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
-    Ok(matches!(
-        declared_oids.as_slice(),
-        [ANYARRAYOID, ANYELEMENTOID] | [ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEOID]
-    ))
+    pgrust_executor::sql_function_is_array_append_transition(row)
+        .map_err(sql_function_metadata_error)
 }
 
 fn validate_sql_polymorphic_runtime_args(
@@ -1673,62 +1517,19 @@ fn validate_sql_polymorphic_runtime_args(
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Result<Vec<u32>, ExecError> {
-    if argtypes.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    argtypes
-        .split_whitespace()
-        .map(|part| {
-            part.parse::<u32>().map_err(|_| {
-                sql_function_runtime_error(
-                    "invalid SQL function argument metadata",
-                    Some(argtypes.into()),
-                    "XX000",
-                )
-            })
-        })
-        .collect()
+    pgrust_executor::parse_proc_argtype_oids(argtypes).map_err(sql_function_metadata_error)
 }
 
 fn merge_polymorphic_runtime_subtype(current: &mut Option<SqlType>, inferred: SqlType) -> bool {
-    match *current {
-        None => {
-            *current = Some(inferred);
-            true
-        }
-        Some(existing) => sql_types_match_for_polymorphic_runtime(existing, inferred),
-    }
+    pgrust_executor::merge_polymorphic_runtime_subtype(current, inferred)
 }
 
 fn sql_types_match_for_polymorphic_runtime(left: SqlType, right: SqlType) -> bool {
-    left.kind == right.kind
-        && left.is_array == right.is_array
-        && (left.type_oid == 0 || right.type_oid == 0 || left.type_oid == right.type_oid)
+    pgrust_executor::sql_types_match_for_polymorphic_runtime(left, right)
 }
 
 fn can_coerce_to_compatible_runtime_anchor(actual: SqlType, target: SqlType) -> bool {
-    if sql_types_match_for_polymorphic_runtime(actual, target) {
-        return true;
-    }
-    if actual.is_array || target.is_array {
-        return false;
-    }
-    matches!(
-        (actual.kind, target.kind),
-        (SqlTypeKind::Int2, SqlTypeKind::Int4)
-            | (SqlTypeKind::Int2, SqlTypeKind::Int8)
-            | (SqlTypeKind::Int2, SqlTypeKind::Numeric)
-            | (SqlTypeKind::Int2, SqlTypeKind::Float4)
-            | (SqlTypeKind::Int2, SqlTypeKind::Float8)
-            | (SqlTypeKind::Int4, SqlTypeKind::Int8)
-            | (SqlTypeKind::Int4, SqlTypeKind::Numeric)
-            | (SqlTypeKind::Int4, SqlTypeKind::Float4)
-            | (SqlTypeKind::Int4, SqlTypeKind::Float8)
-            | (SqlTypeKind::Int8, SqlTypeKind::Numeric)
-            | (SqlTypeKind::Int8, SqlTypeKind::Float4)
-            | (SqlTypeKind::Int8, SqlTypeKind::Float8)
-            | (SqlTypeKind::Float4, SqlTypeKind::Float8)
-    )
+    pgrust_executor::can_coerce_to_compatible_runtime_anchor(actual, target)
 }
 
 fn sql_function_undefined_runtime_error(row: &PgProcRow, arg_values: &[Value]) -> ExecError {
@@ -1844,10 +1645,7 @@ fn inline_sql_function_body_for_execution(
 }
 
 fn sql_function_body_is_inline_select_candidate(body: &str) -> bool {
-    let lower = body.trim_start().to_ascii_lowercase();
-    starts_with_sql_command(&lower, "select")
-        || starts_with_sql_command(&lower, "with")
-        || starts_with_sql_command(&lower, "values")
+    pgrust_executor::sql_function_body_is_inline_select_candidate(body)
 }
 
 fn substitute_sql_function_body_args(
@@ -1919,78 +1717,7 @@ fn composite_field_list_sql(
 }
 
 fn substitute_sql_fragment_outside_quotes(input: &str, needle: &str, replacement: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    while i < bytes.len() {
-        let ch = bytes[i] as char;
-        if in_single_quote {
-            out.push(ch);
-            if ch == '\'' {
-                if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
-                    out.push('\'');
-                    i += 2;
-                    continue;
-                }
-                in_single_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_double_quote {
-            out.push(ch);
-            if ch == '"' {
-                if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
-                    out.push('"');
-                    i += 2;
-                    continue;
-                }
-                in_double_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        match ch {
-            '\'' => {
-                in_single_quote = true;
-                out.push(ch);
-                i += 1;
-            }
-            '"' => {
-                in_double_quote = true;
-                out.push(ch);
-                i += 1;
-            }
-            _ if sql_fragment_matches_at(input, needle, i) => {
-                out.push_str(replacement);
-                i += needle.len();
-            }
-            _ => {
-                out.push(ch);
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
-fn sql_fragment_matches_at(input: &str, needle: &str, index: usize) -> bool {
-    let Some(candidate) = input.get(index..index.saturating_add(needle.len())) else {
-        return false;
-    };
-    if !candidate.eq_ignore_ascii_case(needle) {
-        return false;
-    }
-    let before = input[..index].chars().next_back();
-    let after = input[index + needle.len()..].chars().next();
-    !before.is_some_and(|ch| ch == '.' || is_sql_identifier_char(ch))
-        && !after.is_some_and(is_sql_identifier_char)
-}
-
-fn is_sql_identifier_char(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
+    pgrust_executor::substitute_sql_fragment_outside_quotes(input, needle, replacement)
 }
 
 fn effective_sql_function_arg_type_oids(
@@ -1998,16 +1725,7 @@ fn effective_sql_function_arg_type_oids(
     arg_count: usize,
     call_arg_type_oids: Option<&[u32]>,
 ) -> Vec<u32> {
-    let declared = proc_input_arg_type_oids(row);
-    (0..arg_count)
-        .map(|index| {
-            call_arg_type_oids
-                .and_then(|oids| oids.get(index).copied())
-                .filter(|oid| *oid != 0)
-                .or_else(|| declared.get(index).copied())
-                .unwrap_or(0)
-        })
-        .collect()
+    pgrust_executor::effective_sql_function_arg_type_oids(row, arg_count, call_arg_type_oids)
 }
 
 fn substitute_positional_args_with_catalog(
@@ -2017,90 +1735,15 @@ fn substitute_positional_args_with_catalog(
     catalog: &dyn CatalogLookup,
     datetime_config: &DateTimeConfig,
 ) -> Result<String, ExecError> {
-    let mut out = String::with_capacity(input.len());
-    let chars = input.as_bytes();
-    let mut i = 0usize;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    while i < chars.len() {
-        let ch = chars[i] as char;
-        if in_single_quote {
-            out.push(ch);
-            if ch == '\'' {
-                if i + 1 < chars.len() && chars[i + 1] as char == '\'' {
-                    out.push('\'');
-                    i += 2;
-                    continue;
-                }
-                in_single_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_double_quote {
-            out.push(ch);
-            if ch == '"' {
-                if i + 1 < chars.len() && chars[i + 1] as char == '"' {
-                    out.push('"');
-                    i += 2;
-                    continue;
-                }
-                in_double_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        match ch {
-            '\'' => {
-                in_single_quote = true;
-                out.push(ch);
-                i += 1;
-            }
-            '"' => {
-                in_double_quote = true;
-                out.push(ch);
-                i += 1;
-            }
-            '$' => {
-                let start = i + 1;
-                let mut end = start;
-                while end < chars.len() && (chars[end] as char).is_ascii_digit() {
-                    end += 1;
-                }
-                if end == start {
-                    out.push(ch);
-                    i += 1;
-                    continue;
-                }
-                let position = input[start..end].parse::<usize>().map_err(|_| {
-                    sql_function_runtime_error(
-                        "invalid SQL function parameter reference",
-                        None,
-                        "42P02",
-                    )
-                })?;
-                let arg = args.get(position.saturating_sub(1)).ok_or_else(|| {
-                    sql_function_runtime_error(
-                        "SQL function parameter reference out of range",
-                        Some(format!("${position}")),
-                        "42P02",
-                    )
-                })?;
-                out.push_str(&parenthesized_sql_literal(
-                    arg,
-                    arg_type_oids.get(position.saturating_sub(1)).copied(),
-                    catalog,
-                    datetime_config,
-                )?);
-                i = end;
-            }
-            _ => {
-                out.push(ch);
-                i += 1;
-            }
-        }
-    }
-    Ok(out)
+    pgrust_executor::substitute_positional_args_with_renderer(input, args.len(), |index| {
+        parenthesized_sql_literal(
+            &args[index],
+            arg_type_oids.get(index).copied(),
+            catalog,
+            datetime_config,
+        )
+    })
+    .map_err(sql_function_substitution_error)
 }
 
 fn parenthesized_sql_literal(
@@ -2116,298 +1759,18 @@ fn parenthesized_sql_literal(
 }
 
 pub(crate) fn substitute_positional_args(input: &str, args: &[Value]) -> Result<String, ExecError> {
-    let mut out = String::with_capacity(input.len());
-    let chars = input.as_bytes();
-    let mut i = 0usize;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    while i < chars.len() {
-        let ch = chars[i] as char;
-        if in_single_quote {
-            out.push(ch);
-            if ch == '\'' {
-                if i + 1 < chars.len() && chars[i + 1] as char == '\'' {
-                    out.push('\'');
-                    i += 2;
-                    continue;
-                }
-                in_single_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_double_quote {
-            out.push(ch);
-            if ch == '"' {
-                if i + 1 < chars.len() && chars[i + 1] as char == '"' {
-                    out.push('"');
-                    i += 2;
-                    continue;
-                }
-                in_double_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        match ch {
-            '\'' => {
-                in_single_quote = true;
-                out.push(ch);
-                i += 1;
-            }
-            '"' => {
-                in_double_quote = true;
-                out.push(ch);
-                i += 1;
-            }
-            '$' => {
-                let start = i + 1;
-                let mut end = start;
-                while end < chars.len() && (chars[end] as char).is_ascii_digit() {
-                    end += 1;
-                }
-                if end == start {
-                    out.push(ch);
-                    i += 1;
-                    continue;
-                }
-                let position = input[start..end].parse::<usize>().map_err(|_| {
-                    sql_function_runtime_error(
-                        "invalid SQL function parameter reference",
-                        None,
-                        "42P02",
-                    )
-                })?;
-                let arg = args.get(position.saturating_sub(1)).ok_or_else(|| {
-                    sql_function_runtime_error(
-                        "SQL function parameter reference out of range",
-                        Some(format!("${position}")),
-                        "42P02",
-                    )
-                })?;
-                out.push_str(&render_sql_literal(arg)?);
-                i = end;
-            }
-            _ => {
-                out.push(ch);
-                i += 1;
-            }
-        }
-    }
-    Ok(out)
+    pgrust_executor::substitute_positional_args_with_renderer(input, args.len(), |index| {
+        render_sql_literal(&args[index])
+    })
+    .map_err(sql_function_substitution_error)
 }
 
 fn proc_input_arg_type_oids(row: &PgProcRow) -> Vec<u32> {
-    row.proargtypes
-        .split_whitespace()
-        .filter_map(|oid| oid.parse::<u32>().ok())
-        .collect()
+    pgrust_executor::proc_input_arg_type_oids(row)
 }
 
 pub(crate) fn substitute_named_arg(input: &str, name: &str, replacement: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let chars = input.as_bytes();
-    let mut i = 0usize;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    while i < chars.len() {
-        let ch = chars[i] as char;
-        if in_single_quote {
-            out.push(ch);
-            if ch == '\'' {
-                if i + 1 < chars.len() && chars[i + 1] as char == '\'' {
-                    out.push('\'');
-                    i += 2;
-                    continue;
-                }
-                in_single_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_double_quote {
-            out.push(ch);
-            if ch == '"' {
-                if i + 1 < chars.len() && chars[i + 1] as char == '"' {
-                    out.push('"');
-                    i += 2;
-                    continue;
-                }
-                in_double_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        match ch {
-            '\'' => {
-                in_single_quote = true;
-                out.push(ch);
-                i += 1;
-            }
-            '"' => {
-                in_double_quote = true;
-                out.push(ch);
-                i += 1;
-            }
-            _ if ch == '_' || ch.is_ascii_alphabetic() => {
-                let start = i;
-                i += 1;
-                while i < chars.len() {
-                    let ch = chars[i] as char;
-                    if ch == '_' || ch.is_ascii_alphanumeric() {
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-                let ident = &input[start..i];
-                if ident.eq_ignore_ascii_case(name) {
-                    if named_arg_occurrence_is_window_unbounded_keyword(input, name, i)
-                        || named_arg_occurrence_is_qualified_field(input, start)
-                        || named_arg_occurrence_is_column_alias_list(input, start)
-                        || named_arg_occurrence_is_update_set_target(input, start, i)
-                    {
-                        out.push_str(ident);
-                    } else {
-                        out.push_str(replacement);
-                    }
-                } else {
-                    out.push_str(ident);
-                }
-            }
-            _ => {
-                out.push(ch);
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
-fn named_arg_occurrence_is_qualified_field(input: &str, start: usize) -> bool {
-    input[..start]
-        .chars()
-        .rev()
-        .find(|ch| !ch.is_whitespace())
-        .is_some_and(|ch| ch == '.')
-}
-
-fn named_arg_occurrence_is_column_alias_list(input: &str, start: usize) -> bool {
-    let Some(open) = nearest_open_paren_before(input, start) else {
-        return false;
-    };
-    if !input[open + 1..start]
-        .chars()
-        .all(|ch| ch == '_' || ch == ',' || ch.is_ascii_alphanumeric() || ch.is_whitespace())
-    {
-        return false;
-    }
-    let Some((token, token_start)) = token_before(input, open) else {
-        return false;
-    };
-    if token.eq_ignore_ascii_case("insert") {
-        return true;
-    }
-    let Some((previous, _)) = token_before(input, token_start) else {
-        return false;
-    };
-    previous.eq_ignore_ascii_case("as") || previous.eq_ignore_ascii_case("into")
-}
-
-fn named_arg_occurrence_is_update_set_target(input: &str, start: usize, end: usize) -> bool {
-    let rest = input[end..].trim_start();
-    if !rest.starts_with('=') {
-        return false;
-    }
-
-    let mut best: Option<(&str, usize)> = None;
-    let mut index = 0usize;
-    while index < start {
-        let ch = input.as_bytes()[index] as char;
-        if ch == '_' || ch.is_ascii_alphabetic() {
-            let token_start = index;
-            index += 1;
-            while index < start {
-                let ch = input.as_bytes()[index] as char;
-                if ch == '_' || ch.is_ascii_alphanumeric() {
-                    index += 1;
-                } else {
-                    break;
-                }
-            }
-            let token = &input[token_start..index];
-            if matches!(
-                token.to_ascii_lowercase().as_str(),
-                "set"
-                    | "where"
-                    | "when"
-                    | "then"
-                    | "returning"
-                    | "values"
-                    | "from"
-                    | "on"
-                    | "insert"
-                    | "update"
-                    | "delete"
-                    | "merge"
-            ) {
-                best = Some((token, token_start));
-            }
-        } else {
-            index += 1;
-        }
-    }
-    best.is_some_and(|(token, _)| token.eq_ignore_ascii_case("set"))
-}
-
-fn nearest_open_paren_before(input: &str, start: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (idx, ch) in input[..start].char_indices().rev() {
-        match ch {
-            ')' => depth += 1,
-            '(' if depth == 0 => return Some(idx),
-            '(' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn token_before(input: &str, end: usize) -> Option<(&str, usize)> {
-    let bytes = input.as_bytes();
-    let mut idx = end;
-    while idx > 0 && bytes[idx - 1].is_ascii_whitespace() {
-        idx -= 1;
-    }
-    let token_end = idx;
-    while idx > 0 {
-        let byte = bytes[idx - 1];
-        if byte == b'_' || byte.is_ascii_alphanumeric() {
-            idx -= 1;
-        } else {
-            break;
-        }
-    }
-    (idx < token_end).then_some((&input[idx..token_end], idx))
-}
-
-fn named_arg_occurrence_is_window_unbounded_keyword(input: &str, name: &str, end: usize) -> bool {
-    if !name.eq_ignore_ascii_case("unbounded") {
-        return false;
-    }
-    let rest = input[end..].trim_start();
-    keyword_at_start_ascii(rest, "preceding") || keyword_at_start_ascii(rest, "following")
-}
-
-fn keyword_at_start_ascii(input: &str, keyword: &str) -> bool {
-    let Some(prefix) = input.get(..keyword.len()) else {
-        return false;
-    };
-    prefix.eq_ignore_ascii_case(keyword)
-        && input[keyword.len()..]
-            .chars()
-            .next()
-            .is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()))
+    pgrust_executor::substitute_named_arg(input, name, replacement)
 }
 
 fn render_sql_literal_with_catalog(
@@ -2602,18 +1965,7 @@ fn render_sql_literal_with_catalog_and_type(
 }
 
 fn is_polymorphic_sql_type(ty: SqlType) -> bool {
-    matches!(
-        ty.kind,
-        SqlTypeKind::AnyArray
-            | SqlTypeKind::AnyElement
-            | SqlTypeKind::AnyRange
-            | SqlTypeKind::AnyMultirange
-            | SqlTypeKind::AnyCompatible
-            | SqlTypeKind::AnyCompatibleArray
-            | SqlTypeKind::AnyCompatibleRange
-            | SqlTypeKind::AnyCompatibleMultirange
-            | SqlTypeKind::AnyEnum
-    )
+    pgrust_executor::is_polymorphic_sql_type(ty)
 }
 
 fn expected_array_element_type_oid(catalog: &dyn CatalogLookup, type_oid: u32) -> Option<u32> {
@@ -2667,29 +2019,15 @@ fn type_name_for_oid(catalog: &dyn CatalogLookup, type_oid: u32) -> Result<Strin
 }
 
 fn quote_sql_identifier(name: &str) -> String {
-    if is_plain_sql_identifier(name) {
-        return name.to_string();
-    }
-    format!("\"{}\"", name.replace('"', "\"\""))
+    pgrust_executor::quote_sql_identifier(name)
 }
 
 fn is_plain_sql_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_lowercase())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit())
+    pgrust_executor::is_plain_sql_identifier(name)
 }
 
 fn quote_sql_string(text: &str) -> String {
-    let escaped = text.replace('\'', "''");
-    if text.contains('\\') {
-        let escaped = escaped.replace('\\', "\\\\");
-        format!("E'{escaped}'")
-    } else {
-        format!("'{escaped}'")
-    }
+    pgrust_executor::quote_sql_string(text)
 }
 
 fn sql_function_runtime_error(

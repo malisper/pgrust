@@ -1,458 +1,130 @@
-#![allow(dead_code)]
+// :HACK: Keep the historical root optimizer path while planning lives in
+// `pgrust_optimizer`. Root services bridge planner calls back to executor,
+// rewrite, access-method, and datetime runtime code that still belongs here.
 
-use std::collections::HashMap;
-
-mod bestpath;
-mod constfold;
-mod groupby_rewrite;
-mod grouping_sets;
-mod inherit;
-mod joininfo;
-mod partition_cache;
-pub(crate) mod partition_prune;
-mod partitionwise;
-mod path;
-mod pathnodes;
-mod plan;
-mod rewrite;
-mod root;
-mod setrefs;
-mod sublink_pullup;
 #[cfg(test)]
 mod tests;
-mod upperrels;
-mod util;
 
-use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType};
-use crate::backend::statistics::types::{
-    PgDependenciesPayload, PgMcvListPayload, PgNdistinctPayload,
+#[cfg(test)]
+pub(crate) use pgrust_optimizer::{
+    CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, build_join_paths,
+    extract_hash_join_clauses, extract_merge_join_clauses, make_restrict_info, predicate_cost,
+    pull_up_sublinks,
 };
-use crate::include::catalog::PgStatisticRow;
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query};
-use crate::include::nodes::pathnodes::{Path, PlannerConfig, PlannerInfo, RestrictInfo};
-use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, Plan, PlannedStmt};
-use crate::include::nodes::primnodes::{Expr, JoinType, OpExprKind};
 
-const DEFAULT_EQ_SEL: f64 = 0.005;
-const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
-const DEFAULT_BOOL_SEL: f64 = 0.5;
-const DEFAULT_NUM_ROWS: f64 = 1000.0;
-const DEFAULT_NUM_PAGES: f64 = 10.0;
+use pgrust_optimizer::runtime::{
+    BinaryEvalOp, DateTimeConfig, OptimizerEvalError, OptimizerServices, UnaryEvalOp,
+};
 
-const SEQ_PAGE_COST: f64 = 1.0;
-const RANDOM_PAGE_COST: f64 = 4.0;
-const CPU_TUPLE_COST: f64 = 0.01;
-const CPU_INDEX_TUPLE_COST: f64 = 0.005;
-const CPU_OPERATOR_COST: f64 = 0.0025;
+use crate::backend::parser::CatalogLookup;
+use crate::include::nodes::datetime::DateADT;
+use crate::include::nodes::datum::{RecordValue, Value};
+use crate::include::nodes::parsenodes::{ParseError, Query, SqlType};
+use crate::include::nodes::pathnodes::PlannerConfig;
+use crate::include::nodes::plannodes::{Plan, PlannedStmt};
+use crate::include::nodes::primnodes::{BuiltinScalarFunction, Expr, RelationPrivilegeRequirement};
 
-const STATISTIC_KIND_MCV: i16 = 1;
-const STATISTIC_KIND_HISTOGRAM: i16 = 2;
-const STATISTIC_KIND_CORRELATION: i16 = 3;
-
-#[derive(Debug, Clone)]
-struct RelationStats {
-    relpages: f64,
-    reltuples: f64,
-    width: usize,
-    stats_by_attnum: HashMap<i16, PgStatisticRow>,
-    extended_stats: Vec<ExtendedStatistic>,
-}
-
-#[derive(Debug, Clone)]
-struct ExtendedStatistic {
-    target_ids: Vec<i16>,
-    expressions: Vec<(i16, Expr)>,
-    expression_stats: HashMap<i16, PgStatisticRow>,
-    statistics_target: usize,
-    ndistinct: Option<PgNdistinctPayload>,
-    dependencies: Option<PgDependenciesPayload>,
-    mcv: Option<PgMcvListPayload>,
-}
-
-#[derive(Debug, Clone)]
-enum IndexStrategyLookup {
-    Operator { oid: u32, kind: OpExprKind },
-    Proc(u32),
-    RegexPrefix { exact: bool },
-}
-
-#[derive(Debug, Clone)]
-struct IndexableQual {
-    column: Option<usize>,
-    key_expr: Expr,
-    lookup: IndexStrategyLookup,
-    argument: IndexScanKeyArgument,
-    index_expr: Expr,
-    recheck_expr: Option<Expr>,
-    expr: Expr,
-    residual_expr: Option<Expr>,
-    is_not_null: bool,
-    row_prefix: bool,
-}
-
-#[derive(Debug, Clone)]
-struct IndexPathSpec {
-    index: BoundIndexRelation,
-    keys: Vec<IndexScanKey>,
-    order_by_keys: Vec<IndexScanKey>,
-    residual: Option<Expr>,
-    used_quals: Vec<Expr>,
-    scan_quals: Vec<Expr>,
-    recheck_quals: Vec<Expr>,
-    filter_quals: Vec<Expr>,
-    direction: crate::include::access::relscan::ScanDirection,
-    removes_order: bool,
-    btree_prefix_columns: usize,
-    row_prefix: bool,
-    disable_extended_selectivity: bool,
-}
-
-#[derive(Debug, Clone)]
-struct AccessCandidate {
-    total_cost: f64,
-    plan: Path,
-}
-
-#[derive(Debug, Clone)]
-struct JoinBuildSpec {
-    kind: JoinType,
-    reversed: bool,
-    rtindex: Option<usize>,
-    explicit_qual: Option<Expr>,
-}
-
-#[derive(Debug, Clone)]
-struct HashJoinClauses {
-    hash_clauses: Vec<RestrictInfo>,
-    outer_hash_keys: Vec<Expr>,
-    inner_hash_keys: Vec<Expr>,
-    join_clauses: Vec<RestrictInfo>,
-}
-
-#[derive(Debug, Clone)]
-struct MergeJoinClauses {
-    merge_clauses: Vec<RestrictInfo>,
-    outer_merge_keys: Vec<Expr>,
-    inner_merge_keys: Vec<Expr>,
-    join_clauses: Vec<RestrictInfo>,
-}
-
-fn create_plan(
-    root: &PlannerInfo,
-    path: Path,
-    catalog: &dyn CatalogLookup,
-    subplans: &mut Vec<Plan>,
-) -> (Plan, Vec<crate::include::nodes::plannodes::ExecParamSource>) {
-    setrefs::create_plan(root, path, catalog, subplans)
-}
-
-fn create_plan_with_param_base(
-    root: &PlannerInfo,
-    path: Path,
-    catalog: &dyn CatalogLookup,
-    subplans: &mut Vec<Plan>,
-    next_param_id: usize,
-) -> (
-    Plan,
-    Vec<crate::include::nodes::plannodes::ExecParamSource>,
-    usize,
-) {
-    setrefs::create_plan_with_param_base(root, path, catalog, subplans, next_param_id)
-}
-
-fn has_outer_joins(root: &PlannerInfo) -> bool {
-    root.join_info_list.iter().any(|sjinfo| {
-        matches!(
-            sjinfo.jointype,
-            JoinType::Left | JoinType::Right | JoinType::Full
-        )
-    })
-}
-
-fn nullable_relids_by_outer_joins(root: &PlannerInfo) -> Vec<usize> {
-    let mut relids = Vec::new();
-    for sjinfo in &root.join_info_list {
-        match sjinfo.jointype {
-            JoinType::Left => relids.extend(sjinfo.syn_righthand.iter().copied()),
-            JoinType::Right => relids.extend(sjinfo.syn_lefthand.iter().copied()),
-            JoinType::Full => {
-                relids.extend(sjinfo.syn_lefthand.iter().copied());
-                relids.extend(sjinfo.syn_righthand.iter().copied());
-            }
-            JoinType::Inner | JoinType::Cross | JoinType::Semi | JoinType::Anti => {}
-        }
-    }
-    relids.sort_unstable();
-    relids.dedup();
-    relids
-}
-
-fn base_rel_is_nullable_by_outer_join(root: &PlannerInfo, relid: usize) -> bool {
-    nullable_relids_by_outer_joins(root).contains(&relid)
-}
-
-fn has_grouping(root: &PlannerInfo) -> bool {
-    !root.parse.group_by.is_empty()
-        || !root.parse.accumulators.is_empty()
-        || root.parse.having_qual.is_some()
-}
-
-fn relids_union(left: &[usize], right: &[usize]) -> Vec<usize> {
-    joininfo::relids_union(left, right)
-}
-
-fn relids_subset(required: &[usize], available: &[usize]) -> bool {
-    joininfo::relids_subset(required, available)
-}
-
-fn relids_overlap(left: &[usize], right: &[usize]) -> bool {
-    joininfo::relids_overlap(left, right)
-}
-
-fn relids_disjoint(left: &[usize], right: &[usize]) -> bool {
-    joininfo::relids_disjoint(left, right)
-}
-
-fn is_pushable_base_clause(root: &PlannerInfo, relids: &[usize]) -> bool {
-    relids.len() == 1
-        && !base_rel_is_nullable_by_outer_join(root, relids[0])
-        && root
-            .simple_rel_array
-            .get(relids[0])
-            .and_then(Option::as_ref)
-            .is_some()
-}
-
-fn expr_relids(expr: &Expr) -> Vec<usize> {
-    joininfo::expr_relids(expr)
-}
-
-fn path_relids(path: &Path) -> Vec<usize> {
-    let slot_relid = |slot_id: usize| pathnodes::rte_slot_varno(slot_id).unwrap_or(slot_id);
-    match path {
-        Path::Result { .. } => Vec::new(),
-        Path::Append { relids, .. } => relids.clone(),
-        Path::MergeAppend { source_id, .. } => vec![*source_id],
-        Path::SetOp { slot_id, .. } => vec![*slot_id],
-        Path::Unique { input, .. } => path_relids(input),
-        Path::SeqScan { source_id, .. }
-        | Path::IndexOnlyScan { source_id, .. }
-        | Path::IndexScan { source_id, .. }
-        | Path::BitmapIndexScan { source_id, .. }
-        | Path::BitmapHeapScan { source_id, .. } => vec![*source_id],
-        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
-            children.iter().flat_map(path_relids).collect()
-        }
-        Path::Filter { input, .. }
-        | Path::Projection { input, .. }
-        | Path::OrderBy { input, .. }
-        | Path::IncrementalSort { input, .. }
-        | Path::Limit { input, .. }
-        | Path::LockRows { input, .. }
-        | Path::Aggregate { input, .. }
-        | Path::WindowAgg { input, .. }
-        | Path::ProjectSet { input, .. } => path_relids(input),
-        Path::SubqueryScan { rtindex, .. } => vec![*rtindex],
-        Path::Values { slot_id, .. }
-        | Path::FunctionScan { slot_id, .. }
-        | Path::CteScan { slot_id, .. }
-        | Path::WorkTableScan { slot_id, .. } => vec![slot_relid(*slot_id)],
-        Path::RecursiveUnion {
-            anchor, recursive, ..
-        } => relids_union(&path_relids(anchor), &path_relids(recursive)),
-        Path::NestedLoopJoin { left, right, .. }
-        | Path::HashJoin { left, right, .. }
-        | Path::MergeJoin { left, right, .. } => {
-            relids_union(&path_relids(left), &path_relids(right))
-        }
-    }
-}
-
-fn reverse_join_type(kind: JoinType) -> JoinType {
-    match kind {
-        JoinType::Left => JoinType::Right,
-        JoinType::Right => JoinType::Left,
-        JoinType::Semi | JoinType::Anti => kind,
-        other => other,
-    }
-}
-
-fn exact_join_rtindex_for_relids(node: &JoinTreeNode, target_relids: &[usize]) -> Option<usize> {
-    match node {
-        JoinTreeNode::RangeTblRef(_) => None,
-        JoinTreeNode::JoinExpr {
-            left,
-            right,
-            rtindex,
-            ..
-        } => {
-            let left_match = exact_join_rtindex_for_relids(left, target_relids);
-            let right_match = exact_join_rtindex_for_relids(right, target_relids);
-            let mut relids = jointree_relids(left);
-            relids.extend(jointree_relids(right));
-            relids.sort_unstable();
-            relids.dedup();
-            if relids == target_relids {
-                Some(*rtindex)
-            } else {
-                left_match.or(right_match)
-            }
-        }
-    }
-}
-
-fn jointree_relids(node: &JoinTreeNode) -> Vec<usize> {
-    match node {
-        JoinTreeNode::RangeTblRef(rtindex) => vec![*rtindex],
-        JoinTreeNode::JoinExpr { left, right, .. } => {
-            let mut relids = jointree_relids(left);
-            relids.extend(jointree_relids(right));
-            relids.sort_unstable();
-            relids.dedup();
-            relids
-        }
-    }
-}
-
-fn exact_join_rtindex(root: &PlannerInfo, relids: &[usize]) -> Option<usize> {
-    root.parse
-        .jointree
-        .as_ref()
-        .and_then(|jointree| exact_join_rtindex_for_relids(jointree, relids))
-}
-
-fn expand_join_rte_vars(root: &PlannerInfo, expr: Expr) -> Expr {
-    joininfo::expand_join_rte_vars(root, expr)
-}
-
-fn flatten_join_alias_vars(root: &PlannerInfo, expr: Expr) -> Expr {
-    joininfo::flatten_join_alias_vars(root, expr)
+pub(crate) mod partition_prune {
+    pub(crate) use pgrust_optimizer::partition_prune::{
+        partition_may_satisfy_filter_with_runtime_values, relation_may_satisfy_own_partition_bound,
+        relation_may_satisfy_own_partition_bound_with_runtime_values,
+    };
 }
 
 #[cfg(test)]
-fn make_restrict_info(clause: Expr) -> RestrictInfo {
-    joininfo::make_restrict_info(clause)
+pub(crate) mod bestpath {
+    pub(crate) use pgrust_optimizer::bestpath::*;
 }
 
-fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
-    util::aggregate_group_by(path)
+#[cfg(test)]
+pub(crate) mod groupby_rewrite {
+    pub(crate) use pgrust_optimizer::groupby_rewrite::*;
 }
 
-fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
-    path::optimize_path(plan, catalog)
+#[cfg(test)]
+pub(crate) mod joininfo {
+    pub(crate) use pgrust_optimizer::joininfo::*;
 }
 
-fn optimize_path_with_config(
-    plan: Path,
-    catalog: &dyn CatalogLookup,
-    config: PlannerConfig,
-) -> Path {
-    path::optimize_path_with_config(plan, catalog, config)
+#[cfg(test)]
+pub(crate) mod path {
+    pub(crate) use pgrust_optimizer::path::*;
 }
 
-fn pull_up_sublinks(query: Query, catalog: &dyn CatalogLookup) -> Query {
-    sublink_pullup::pull_up_sublinks(query, catalog)
+#[cfg(test)]
+pub(crate) mod pathnodes {
+    pub(crate) use pgrust_optimizer::pathnodes::{PathMethods, rte_slot_id};
 }
 
-fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
-    path::flatten_and_conjuncts(expr)
+#[cfg(test)]
+pub(crate) mod rewrite {
+    pub(crate) use pgrust_optimizer::rewrite::*;
 }
 
-fn and_exprs(exprs: Vec<Expr>) -> Option<Expr> {
-    path::and_exprs(exprs)
+#[cfg(test)]
+pub(crate) mod root {
+    pub(crate) use pgrust_optimizer::root::*;
 }
 
-fn estimate_sql_type_width(sql_type: SqlType) -> usize {
-    path::estimate_sql_type_width(sql_type)
+#[cfg(test)]
+pub(crate) mod setrefs {
+    pub(crate) use pgrust_optimizer::setrefs::{
+        validate_executable_plan_for_tests, validate_executable_plan_for_tests_with_params,
+        validate_planner_path_for_tests,
+    };
 }
 
-fn predicate_cost(expr: &Expr) -> f64 {
-    path::predicate_cost(expr)
+#[cfg(test)]
+pub(crate) mod util {
+    pub(crate) use pgrust_optimizer::util::{
+        lower_pathkeys_for_path, lower_pathkeys_for_rel, normalize_rte_path,
+        path_exposes_required_pathkey_identity, project_to_slot_layout_internal,
+        rel_exposes_required_pathkey_identity, required_query_pathkeys_for_path,
+        required_query_pathkeys_for_rel,
+    };
 }
 
-fn clamp_rows(rows: f64) -> f64 {
-    path::clamp_rows(rows)
-}
+struct RootOptimizerServices;
 
-fn build_join_paths(
-    left: Path,
-    right: Path,
-    left_relids: &[usize],
-    right_relids: &[usize],
-    kind: JoinType,
-    restrict_clauses: Vec<RestrictInfo>,
-) -> Vec<Path> {
-    let mut output_columns = left.columns();
-    if !matches!(kind, JoinType::Semi | JoinType::Anti) {
-        output_columns.extend(right.columns());
-    }
-    let mut exprs = left.semantic_output_target().exprs;
-    let mut sortgrouprefs = left.semantic_output_target().sortgrouprefs;
-    if !matches!(kind, JoinType::Semi | JoinType::Anti) {
-        exprs.extend(right.semantic_output_target().exprs);
-        sortgrouprefs.extend(right.semantic_output_target().sortgrouprefs);
-    }
-    path::build_join_paths(
-        left,
-        right,
-        left_relids,
-        right_relids,
-        kind,
-        restrict_clauses,
-        crate::include::nodes::pathnodes::PathTarget::with_sortgrouprefs(exprs, sortgrouprefs),
-        output_columns,
-    )
-}
+static ROOT_OPTIMIZER_SERVICES: RootOptimizerServices = RootOptimizerServices;
 
-fn extract_hash_join_clauses(
-    restrict_clauses: &[RestrictInfo],
-    left_relids: &[usize],
-    right_relids: &[usize],
-) -> Option<HashJoinClauses> {
-    path::extract_hash_join_clauses(restrict_clauses, left_relids, right_relids)
-}
-
-fn extract_merge_join_clauses(
-    restrict_clauses: &[RestrictInfo],
-    left_relids: &[usize],
-    right_relids: &[usize],
-) -> Option<MergeJoinClauses> {
-    path::extract_merge_join_clauses(restrict_clauses, left_relids, right_relids)
+fn with_root_optimizer_services<T>(f: impl FnOnce() -> T) -> T {
+    crate::backend::parser::analyze::with_root_analyze_services(|| {
+        pgrust_optimizer::with_optimizer_services(&ROOT_OPTIMIZER_SERVICES, f)
+    })
 }
 
 pub(crate) fn planner(
     query: Query,
     catalog: &dyn CatalogLookup,
-) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
-    plan::planner(query, catalog)
+) -> Result<PlannedStmt, ParseError> {
+    with_root_optimizer_services(|| pgrust_optimizer::planner(query, catalog))
 }
 
 pub(crate) fn planner_with_config(
     query: Query,
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
-) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
-    plan::planner_with_config(query, catalog, config)
+) -> Result<PlannedStmt, ParseError> {
+    with_root_optimizer_services(|| pgrust_optimizer::planner_with_config(query, catalog, config))
 }
 
-pub(crate) fn fold_query_constants(
-    query: Query,
-) -> Result<Query, crate::backend::parser::ParseError> {
-    constfold::fold_query_constants(query)
+pub(crate) fn fold_query_constants(query: Query) -> Result<Query, ParseError> {
+    with_root_optimizer_services(|| pgrust_optimizer::fold_query_constants(query))
 }
 
-pub(crate) fn fold_expr_constants(
-    expr: crate::include::nodes::primnodes::Expr,
-) -> Result<crate::include::nodes::primnodes::Expr, crate::backend::parser::ParseError> {
-    constfold::fold_expr_constants(expr)
+pub(crate) fn fold_expr_constants(expr: Expr) -> Result<Expr, ParseError> {
+    with_root_optimizer_services(|| pgrust_optimizer::fold_expr_constants(expr))
 }
 
 pub(crate) fn planner_with_param_base(
     query: Query,
     catalog: &dyn CatalogLookup,
     next_param_id: usize,
-) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
-    plan::planner_with_param_base(query, catalog, next_param_id)
+) -> Result<(PlannedStmt, usize), ParseError> {
+    with_root_optimizer_services(|| {
+        pgrust_optimizer::planner_with_param_base(query, catalog, next_param_id)
+    })
 }
 
 pub(crate) fn planner_with_param_base_and_config(
@@ -460,8 +132,10 @@ pub(crate) fn planner_with_param_base_and_config(
     catalog: &dyn CatalogLookup,
     next_param_id: usize,
     config: PlannerConfig,
-) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
-    plan::planner_with_param_base_and_config(query, catalog, next_param_id, config)
+) -> Result<(PlannedStmt, usize), ParseError> {
+    with_root_optimizer_services(|| {
+        pgrust_optimizer::planner_with_param_base_and_config(query, catalog, next_param_id, config)
+    })
 }
 
 pub(crate) fn finalize_expr_subqueries(
@@ -469,7 +143,9 @@ pub(crate) fn finalize_expr_subqueries(
     catalog: &dyn CatalogLookup,
     subplans: &mut Vec<Plan>,
 ) -> Expr {
-    plan::finalize_expr_subqueries(expr, catalog, subplans)
+    with_root_optimizer_services(|| {
+        pgrust_optimizer::finalize_expr_subqueries(expr, catalog, subplans)
+    })
 }
 
 pub(crate) fn finalize_plan_subqueries(
@@ -477,5 +153,248 @@ pub(crate) fn finalize_plan_subqueries(
     catalog: &dyn CatalogLookup,
     subplans: &mut Vec<Plan>,
 ) -> Plan {
-    plan::finalize_plan_subqueries(plan, catalog, subplans)
+    with_root_optimizer_services(|| {
+        pgrust_optimizer::finalize_plan_subqueries(plan, catalog, subplans)
+    })
+}
+
+fn optimizer_error_from_exec(err: crate::backend::executor::ExecError) -> OptimizerEvalError {
+    match err {
+        crate::backend::executor::ExecError::Parse(err) => OptimizerEvalError::Parse(err),
+        crate::backend::executor::ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => OptimizerEvalError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+        crate::backend::executor::ExecError::DivisionByZero(message) => {
+            OptimizerEvalError::DivisionByZero(message.into())
+        }
+        other => OptimizerEvalError::Other(format!("{other:?}")),
+    }
+}
+
+impl OptimizerServices for RootOptimizerServices {
+    fn cast_value(&self, value: Value, ty: SqlType) -> Result<Value, OptimizerEvalError> {
+        crate::backend::executor::cast_value(value, ty).map_err(optimizer_error_from_exec)
+    }
+
+    fn cast_value_with_source_type(
+        &self,
+        value: Value,
+        source_type: Option<SqlType>,
+        ty: SqlType,
+        catalog: Option<&dyn CatalogLookup>,
+        _datetime_config: &DateTimeConfig,
+    ) -> Result<Value, OptimizerEvalError> {
+        crate::backend::executor::cast_value_with_source_type_catalog_and_config(
+            value,
+            source_type,
+            ty,
+            catalog,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        )
+        .map_err(optimizer_error_from_exec)
+    }
+
+    fn compare_order_values(
+        &self,
+        left: &Value,
+        right: &Value,
+        collation_oid: Option<u32>,
+        nulls_first: Option<bool>,
+        descending: bool,
+    ) -> Result<std::cmp::Ordering, OptimizerEvalError> {
+        crate::backend::executor::compare_order_values(
+            left,
+            right,
+            collation_oid,
+            nulls_first,
+            descending,
+        )
+        .map_err(optimizer_error_from_exec)
+    }
+
+    fn compare_values(
+        &self,
+        op: &'static str,
+        left: Value,
+        right: Value,
+        collation_oid: Option<u32>,
+    ) -> Result<Value, OptimizerEvalError> {
+        crate::backend::executor::expr_ops::compare_values(op, left, right, collation_oid)
+            .map_err(optimizer_error_from_exec)
+    }
+
+    fn eval_unary_op(&self, op: UnaryEvalOp, value: Value) -> Result<Value, OptimizerEvalError> {
+        let result = match op {
+            UnaryEvalOp::Negate => crate::backend::executor::expr_ops::negate_value(value),
+            UnaryEvalOp::BitwiseNot => crate::backend::executor::expr_ops::bitwise_not_value(value),
+        };
+        result.map_err(optimizer_error_from_exec)
+    }
+
+    fn eval_binary_op(
+        &self,
+        op: BinaryEvalOp,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, OptimizerEvalError> {
+        let result = match op {
+            BinaryEvalOp::Add => crate::backend::executor::expr_ops::add_values(left, right),
+            BinaryEvalOp::Sub => crate::backend::executor::expr_ops::sub_values(left, right),
+            BinaryEvalOp::BitwiseAnd => {
+                crate::backend::executor::expr_ops::bitwise_and_values(left, right)
+            }
+            BinaryEvalOp::BitwiseOr => {
+                crate::backend::executor::expr_ops::bitwise_or_values(left, right)
+            }
+            BinaryEvalOp::BitwiseXor => {
+                crate::backend::executor::expr_ops::bitwise_xor_values(left, right)
+            }
+            BinaryEvalOp::ShiftLeft => {
+                crate::backend::executor::expr_ops::shift_left_values(left, right)
+            }
+            BinaryEvalOp::ShiftRight => {
+                crate::backend::executor::expr_ops::shift_right_values(left, right)
+            }
+            BinaryEvalOp::Mul => crate::backend::executor::expr_ops::mul_values(left, right),
+            BinaryEvalOp::Div => crate::backend::executor::expr_ops::div_values(left, right),
+            BinaryEvalOp::Mod => crate::backend::executor::expr_ops::mod_values(left, right),
+            BinaryEvalOp::Concat => crate::backend::executor::expr_ops::concat_values(left, right),
+        };
+        result.map_err(optimizer_error_from_exec)
+    }
+
+    fn not_equal_values(
+        &self,
+        left: Value,
+        right: Value,
+        collation_oid: Option<u32>,
+    ) -> Result<Value, OptimizerEvalError> {
+        crate::backend::executor::expr_ops::not_equal_values(left, right, collation_oid)
+            .map_err(optimizer_error_from_exec)
+    }
+
+    fn order_values(
+        &self,
+        op: &'static str,
+        left: Value,
+        right: Value,
+        collation_oid: Option<u32>,
+    ) -> Result<Value, OptimizerEvalError> {
+        crate::backend::executor::expr_ops::order_values(op, left, right, collation_oid)
+            .map_err(optimizer_error_from_exec)
+    }
+
+    fn order_record_image_values(
+        &self,
+        op: &'static str,
+        left: &RecordValue,
+        right: &RecordValue,
+    ) -> Result<Value, OptimizerEvalError> {
+        crate::backend::executor::expr_ops::order_record_image_values(op, left, right)
+            .map_err(optimizer_error_from_exec)
+    }
+
+    fn values_are_distinct(&self, left: &Value, right: &Value) -> bool {
+        crate::backend::executor::expr_ops::values_are_distinct(left, right)
+    }
+
+    fn statistics_value_key(&self, value: &Value) -> Option<String> {
+        crate::backend::statistics::types::statistics_value_key(value)
+    }
+
+    fn eval_geometry_function(
+        &self,
+        func: BuiltinScalarFunction,
+        values: &[Value],
+    ) -> Option<Result<Value, OptimizerEvalError>> {
+        crate::backend::executor::expr_geometry::eval_geometry_function(func, values)
+            .map(|result| result.map_err(optimizer_error_from_exec))
+    }
+
+    fn eval_power_function(&self, values: &[Value]) -> Result<Value, OptimizerEvalError> {
+        crate::backend::executor::expr_numeric::eval_power_function(values)
+            .map_err(optimizer_error_from_exec)
+    }
+
+    fn eval_range_function(
+        &self,
+        func: BuiltinScalarFunction,
+        values: &[Value],
+        result_type: Option<SqlType>,
+        func_variadic: bool,
+        catalog: Option<&dyn CatalogLookup>,
+        _datetime_config: &DateTimeConfig,
+    ) -> Option<Result<Value, OptimizerEvalError>> {
+        crate::backend::executor::expr_range::eval_range_function(
+            func,
+            values,
+            result_type,
+            func_variadic,
+            catalog,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        )
+        .map(|result| result.map_err(optimizer_error_from_exec))
+    }
+
+    fn parse_date_text(
+        &self,
+        text: &str,
+        _datetime_config: &DateTimeConfig,
+    ) -> Result<DateADT, String> {
+        crate::backend::utils::time::date::parse_date_text(
+            text,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        )
+        .map_err(|err| format!("{err:?}"))
+    }
+
+    fn hash_value_extended(
+        &self,
+        value: &Value,
+        opclass: Option<u32>,
+        seed: u64,
+    ) -> Result<Option<u64>, String> {
+        crate::backend::access::hash::support::hash_value_extended(value, opclass, seed)
+    }
+
+    fn hash_combine64(&self, left: u64, right: u64) -> u64 {
+        crate::backend::access::hash::support::hash_combine64(left, right)
+    }
+
+    fn access_method_supports_index_scan(&self, am_oid: u32) -> bool {
+        crate::backend::access::index::amapi::index_am_handler(am_oid)
+            .is_some_and(|routine| routine.amgettuple.is_some())
+    }
+
+    fn access_method_supports_bitmap_scan(&self, am_oid: u32) -> bool {
+        crate::backend::access::index::amapi::index_am_handler(am_oid)
+            .is_some_and(|routine| routine.amgetbitmap.is_some())
+    }
+
+    fn pg_rewrite_query(
+        &self,
+        query: Query,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<Vec<Query>, ParseError> {
+        crate::backend::rewrite::pg_rewrite_query(query, catalog)
+    }
+
+    fn collect_query_relation_privileges(
+        &self,
+        query: &Query,
+    ) -> Vec<RelationPrivilegeRequirement> {
+        crate::backend::rewrite::collect_query_relation_privileges(query)
+    }
+
+    fn render_explain_expr(&self, expr: &Expr, column_names: &[String]) -> String {
+        crate::backend::executor::render_explain_expr(expr, column_names)
+    }
 }

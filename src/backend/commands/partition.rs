@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
 use crate::backend::executor::value_io::format_failing_row_detail;
@@ -13,47 +13,19 @@ use crate::backend::parser::{
     deserialize_partition_bound, partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::include::catalog::{
-    ANYARRAYOID, ANYOID, BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL,
-    PgConstraintRow,
-};
+use crate::include::catalog::{ANYARRAYOID, ANYOID, BOOTSTRAP_SUPERUSER_OID};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::ColumnGeneratedKind;
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
-    catalog
-        .class_row_by_oid(relation_oid)
-        .map(|row| row.relname)
-        .unwrap_or_else(|| relation_oid.to_string())
-}
-
-fn generated_kind_name(kind: ColumnGeneratedKind) -> &'static str {
-    match kind {
-        ColumnGeneratedKind::Virtual => "VIRTUAL",
-        ColumnGeneratedKind::Stored => "STORED",
-    }
+    pgrust_commands::partition::relation_name_for_oid(catalog, relation_oid)
 }
 
 fn direct_partition_children(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
 ) -> Result<Vec<BoundRelation>, ExecError> {
-    let mut inherits = catalog.inheritance_children(relation_oid);
-    inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
-    inherits
-        .into_iter()
-        .filter(|row| !row.inhdetachpending)
-        .map(|row| {
-            catalog
-                .relation_by_oid(row.inhrelid)
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: format!("missing partition relation {}", row.inhrelid),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                })
-        })
-        .collect()
+    pgrust_commands::partition::direct_partition_children(catalog, relation_oid)
+        .map_err(partition_error_to_exec)
 }
 
 const PARTITION_CACHED_FIND_THRESHOLD: usize = 16;
@@ -180,123 +152,76 @@ fn exec_init_partition_dispatch_info(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PartitionTreeEntry {
-    pub relid: u32,
-    pub parentrelid: Option<u32>,
-    pub isleaf: bool,
-    pub level: i32,
-}
+pub(crate) use pgrust_commands::partition::PartitionTreeEntry;
 
 fn relkind_has_partitions(relkind: char) -> bool {
-    matches!(relkind, 'p' | 'I')
+    pgrust_commands::partition::relkind_has_partitions(relkind)
 }
 
 fn relation_can_participate_in_partition_tree(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
 ) -> bool {
-    catalog
-        .relation_by_oid(relation_oid)
-        .is_some_and(|relation| relation.relispartition || relkind_has_partitions(relation.relkind))
+    pgrust_commands::partition::relation_can_participate_in_partition_tree(catalog, relation_oid)
 }
 
 fn declarative_parent(
     catalog: &dyn CatalogLookup,
     relation: &BoundRelation,
 ) -> Result<Option<BoundRelation>, ExecError> {
-    let parent_oid = catalog
-        .inheritance_parents(relation.relation_oid)
-        .into_iter()
-        .filter(|row| !row.inhdetachpending)
-        .find_map(|row| {
-            catalog
-                .relation_by_oid(row.inhparent)
-                .filter(|parent| relkind_has_partitions(parent.relkind))
-                .map(|parent| parent.relation_oid)
-        });
-    parent_oid
-        .map(|oid| {
-            catalog
-                .relation_by_oid(oid)
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: format!("missing partitioned parent {}", oid),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                })
-        })
-        .transpose()
+    pgrust_commands::partition::declarative_parent(catalog, relation)
+        .map_err(partition_error_to_exec)
 }
 
 pub(crate) fn partition_parent_oid(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
 ) -> Result<Option<u32>, ExecError> {
-    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
-        return Ok(None);
-    };
-    declarative_parent(catalog, &relation).map(|parent| parent.map(|parent| parent.relation_oid))
+    pgrust_commands::partition::partition_parent_oid(catalog, relation_oid)
+        .map_err(partition_error_to_exec)
 }
 
 pub(crate) fn partition_ancestor_oids(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
 ) -> Result<Vec<u32>, ExecError> {
-    if !relation_can_participate_in_partition_tree(catalog, relation_oid) {
-        return Ok(Vec::new());
-    }
-
-    let mut ancestors = Vec::new();
-    let mut current = Some(relation_oid);
-    while let Some(relid) = current {
-        ancestors.push(relid);
-        current = partition_parent_oid(catalog, relid)?;
-    }
-    Ok(ancestors)
+    pgrust_commands::partition::partition_ancestor_oids(catalog, relation_oid)
+        .map_err(partition_error_to_exec)
 }
 
 pub(crate) fn partition_root_oid(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
 ) -> Result<Option<u32>, ExecError> {
-    Ok(partition_ancestor_oids(catalog, relation_oid)?
-        .into_iter()
-        .last())
+    pgrust_commands::partition::partition_root_oid(catalog, relation_oid)
+        .map_err(partition_error_to_exec)
 }
 
 pub(crate) fn partition_tree_entries(
     catalog: &dyn CatalogLookup,
     root_oid: u32,
 ) -> Result<Vec<PartitionTreeEntry>, ExecError> {
-    if !relation_can_participate_in_partition_tree(catalog, root_oid) {
-        return Ok(Vec::new());
-    }
+    pgrust_commands::partition::partition_tree_entries(catalog, root_oid)
+        .map_err(partition_error_to_exec)
+}
 
-    let mut entries = Vec::new();
-    let mut queue = VecDeque::from([(root_oid, 0_i32)]);
-    while let Some((relation_oid, level)) = queue.pop_front() {
-        let Some(relation) = catalog.relation_by_oid(relation_oid) else {
-            continue;
-        };
-        entries.push(PartitionTreeEntry {
-            relid: relation_oid,
-            parentrelid: partition_parent_oid(catalog, relation_oid)?,
-            isleaf: !relkind_has_partitions(relation.relkind),
-            level,
-        });
-        if !relkind_has_partitions(relation.relkind) {
-            continue;
-        }
-        for child in direct_partition_children(catalog, relation_oid)? {
-            if !child.relispartition {
-                continue;
-            }
-            queue.push_back((child.relation_oid, level + 1));
+fn partition_error_to_exec(err: pgrust_commands::partition::PartitionError) -> ExecError {
+    match err {
+        pgrust_commands::partition::PartitionError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+        pgrust_commands::partition::PartitionError::WrongObjectType { name, expected } => {
+            ExecError::Parse(crate::backend::parser::ParseError::WrongObjectType { name, expected })
         }
     }
-
-    Ok(entries)
 }
 
 fn child_partition_bound(child: &BoundRelation) -> Result<PartitionBoundSpec, ExecError> {
@@ -352,7 +277,7 @@ fn partition_key_names(relation: &BoundRelation, spec: &LoweredPartitionSpec) ->
                 return spec
                     .key_sqls
                     .get(index)
-                    .map(|expr| format_partition_key_expr_name(expr))
+                    .map(|expr| pgrust_commands::partition::format_partition_key_expr_name(expr))
                     .unwrap_or_else(|| format!("partition key {}", index + 1));
             }
             relation
@@ -363,76 +288,6 @@ fn partition_key_names(relation: &BoundRelation, spec: &LoweredPartitionSpec) ->
                 .unwrap_or_else(|| format!("partition key {}", index + 1))
         })
         .collect()
-}
-
-fn format_partition_key_expr_name(expr_sql: &str) -> String {
-    let stripped = strip_outer_expr_parens(expr_sql.trim());
-    let normalized = normalize_partition_expr_operator_spacing(stripped);
-    if normalized.contains(" + ")
-        || normalized.contains(" - ")
-        || normalized.contains(" * ")
-        || normalized.contains(" / ")
-        || normalized.contains(" % ")
-    {
-        format!("({normalized})")
-    } else {
-        normalized
-    }
-}
-
-fn strip_outer_expr_parens(expr: &str) -> &str {
-    if !expr.starts_with('(') || !expr.ends_with(')') {
-        return expr;
-    }
-    let mut depth = 0_i32;
-    for (index, ch) in expr.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 && index != expr.len() - 1 {
-                    return expr;
-                }
-            }
-            _ => {}
-        }
-    }
-    expr[1..expr.len() - 1].trim()
-}
-
-fn normalize_partition_expr_operator_spacing(expr: &str) -> String {
-    let mut out = String::with_capacity(expr.len());
-    let mut chars = expr.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if matches!(ch, '+' | '*' | '/' | '%') || (ch == '-' && !out.trim_end().is_empty()) {
-            while out.ends_with(' ') {
-                out.pop();
-            }
-            out.push(' ');
-            out.push(ch);
-            out.push(' ');
-            while chars.peek().is_some_and(|next| next.is_ascii_whitespace()) {
-                chars.next();
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn acl_item_grants_privilege(
-    item: &str,
-    effective_names: &BTreeSet<String>,
-    privilege: char,
-) -> bool {
-    let Some((grantee, rest)) = item.split_once('=') else {
-        return false;
-    };
-    let Some((privileges, _grantor)) = rest.split_once('/') else {
-        return false;
-    };
-    effective_names.contains(grantee) && privileges.contains(privilege)
 }
 
 fn effective_acl_names(catalog: &dyn CatalogLookup, current_user_oid: u32) -> BTreeSet<String> {
@@ -460,7 +315,9 @@ fn column_acl_grants_select(
         .and_then(|row| row.attacl)
         .unwrap_or_default()
         .iter()
-        .any(|item| acl_item_grants_privilege(item, effective_names, 'r'))
+        .any(|item| {
+            pgrust_commands::partition::acl_item_grants_privilege(item, effective_names, 'r')
+        })
 }
 
 fn partition_key_detail_visible(
@@ -482,7 +339,9 @@ fn partition_key_detail_visible(
         .and_then(|row| row.relacl)
         .unwrap_or_default()
         .iter()
-        .any(|item| acl_item_grants_privilege(item, &effective_names, 'r'))
+        .any(|item| {
+            pgrust_commands::partition::acl_item_grants_privilege(item, &effective_names, 'r')
+        })
     {
         return true;
     }
@@ -1033,9 +892,7 @@ fn bounds_overlap(
 }
 
 fn hash_moduli_compatible(left: i32, right: i32) -> bool {
-    let lower = left.min(right);
-    let higher = left.max(right);
-    higher % lower == 0
+    pgrust_commands::partition::hash_moduli_compatible(left, right)
 }
 
 fn hash_modulus_compatibility_detail(
@@ -1043,15 +900,11 @@ fn hash_modulus_compatibility_detail(
     existing_modulus: i32,
     existing_name: &str,
 ) -> String {
-    if new_modulus > existing_modulus {
-        format!(
-            "The new modulus {new_modulus} is not divisible by {existing_modulus}, the modulus of existing partition \"{existing_name}\"."
-        )
-    } else {
-        format!(
-            "The new modulus {new_modulus} is not a factor of {existing_modulus}, the modulus of existing partition \"{existing_name}\"."
-        )
-    }
+    pgrust_commands::partition::hash_modulus_compatibility_detail(
+        new_modulus,
+        existing_modulus,
+        existing_name,
+    )
 }
 
 fn hash_bounds_overlap(
@@ -1060,14 +913,12 @@ fn hash_bounds_overlap(
     right_modulus: i32,
     right_remainder: i32,
 ) -> bool {
-    if !hash_moduli_compatible(left_modulus, right_modulus) {
-        return false;
-    }
-    if left_modulus <= right_modulus {
-        right_remainder % left_modulus == left_remainder
-    } else {
-        left_remainder % right_modulus == right_remainder
-    }
+    pgrust_commands::partition::hash_bounds_overlap(
+        left_modulus,
+        left_remainder,
+        right_modulus,
+        right_remainder,
+    )
 }
 
 pub(crate) fn validate_new_partition_bound(
@@ -1203,185 +1054,13 @@ fn format_range_bound_for_error(bound: &[PartitionRangeDatumValue]) -> String {
         .join(", ")
 }
 
-fn column_attnum_by_name(relation: &BoundRelation, column_name: &str) -> Option<i16> {
-    relation
-        .desc
-        .columns
-        .iter()
-        .enumerate()
-        .find_map(|(index, column)| {
-            (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
-                .then_some(index.saturating_add(1) as i16)
-        })
-}
-
-fn column_name_for_attnum(relation: &BoundRelation, attnum: i16) -> Option<&str> {
-    relation
-        .desc
-        .columns
-        .get(attnum.saturating_sub(1) as usize)
-        .filter(|column| !column.dropped)
-        .map(|column| column.name.as_str())
-}
-
-fn not_null_constraint_for_attnum(
-    catalog: &dyn CatalogLookup,
-    relation_oid: u32,
-    attnum: i16,
-) -> Option<PgConstraintRow> {
-    catalog
-        .constraint_rows_for_relation(relation_oid)
-        .into_iter()
-        .find(|row| {
-            row.contype == CONSTRAINT_NOTNULL
-                && row
-                    .conkey
-                    .as_ref()
-                    .is_some_and(|keys| keys.contains(&attnum))
-        })
-}
-
-fn validate_attach_check_constraints(
-    catalog: &dyn CatalogLookup,
-    parent: &BoundRelation,
-    child: &BoundRelation,
-    child_name: &str,
-) -> Result<(), ExecError> {
-    let child_constraints = catalog
-        .constraint_rows_for_relation(child.relation_oid)
-        .into_iter()
-        .filter(|row| row.contype == CONSTRAINT_CHECK)
-        .collect::<Vec<_>>();
-    for parent_constraint in catalog
-        .constraint_rows_for_relation(parent.relation_oid)
-        .into_iter()
-        .filter(|row| row.contype == CONSTRAINT_CHECK && !row.connoinherit)
-    {
-        let Some(child_constraint) = child_constraints
-            .iter()
-            .find(|row| row.conname.eq_ignore_ascii_case(&parent_constraint.conname))
-        else {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "child table is missing constraint \"{}\"",
-                    parent_constraint.conname
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
-        };
-        if child_constraint.conbin != parent_constraint.conbin {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "child table \"{child_name}\" has different definition for check constraint \"{}\"",
-                    parent_constraint.conname
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
-        }
-        validate_attach_constraint_merge_state(&parent_constraint, child_constraint, child_name)?;
-    }
-    Ok(())
-}
-
-fn validate_attach_not_null_constraints(
-    catalog: &dyn CatalogLookup,
-    parent: &BoundRelation,
-    child: &BoundRelation,
-    child_name: &str,
-) -> Result<(), ExecError> {
-    for parent_constraint in catalog
-        .constraint_rows_for_relation(parent.relation_oid)
-        .into_iter()
-        .filter(|row| row.contype == CONSTRAINT_NOTNULL && !row.connoinherit)
-    {
-        let Some(parent_attnum) = parent_constraint
-            .conkey
-            .as_ref()
-            .and_then(|keys| keys.first())
-            .copied()
-        else {
-            continue;
-        };
-        let Some(column_name) = column_name_for_attnum(parent, parent_attnum) else {
-            continue;
-        };
-        let Some(child_attnum) = column_attnum_by_name(child, column_name) else {
-            continue;
-        };
-        let Some(child_constraint) =
-            not_null_constraint_for_attnum(catalog, child.relation_oid, child_attnum)
-        else {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "column \"{column_name}\" in child table \"{child_name}\" must be marked NOT NULL"
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
-        };
-        validate_attach_constraint_merge_state(&parent_constraint, &child_constraint, child_name)?;
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_attach_partition_constraints(
     catalog: &dyn CatalogLookup,
     parent: &BoundRelation,
     child: &BoundRelation,
 ) -> Result<(), ExecError> {
-    let child_name = relation_name_for_oid(catalog, child.relation_oid);
-    validate_attach_check_constraints(catalog, parent, child, &child_name)?;
-    validate_attach_not_null_constraints(catalog, parent, child, &child_name)?;
-    Ok(())
-}
-
-fn validate_attach_constraint_merge_state(
-    parent_constraint: &PgConstraintRow,
-    child_constraint: &PgConstraintRow,
-    child_name: &str,
-) -> Result<(), ExecError> {
-    if child_constraint.connoinherit {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "constraint \"{}\" conflicts with non-inherited constraint on child table \"{child_name}\"",
-                child_constraint.conname
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "42P17",
-        });
-    }
-    if parent_constraint.convalidated
-        && child_constraint.conenforced
-        && !child_constraint.convalidated
-    {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "constraint \"{}\" conflicts with NOT VALID constraint on child table \"{child_name}\"",
-                child_constraint.conname
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "42P17",
-        });
-    }
-    if parent_constraint.conenforced && !child_constraint.conenforced {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "constraint \"{}\" conflicts with NOT ENFORCED constraint on child table \"{child_name}\"",
-                child_constraint.conname
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "42P17",
-        });
-    }
-    Ok(())
+    pgrust_commands::partition::validate_attach_partition_constraints(catalog, parent, child)
+        .map_err(partition_error_to_exec)
 }
 
 pub(crate) fn validate_partition_relation_compatibility(
@@ -1391,189 +1070,8 @@ pub(crate) fn validate_partition_relation_compatibility(
     child: &BoundRelation,
     _child_name: &str,
 ) -> Result<(), ExecError> {
-    let parent_name = relation_name_for_oid(catalog, parent.relation_oid);
-    let child_name = relation_name_for_oid(catalog, child.relation_oid);
-    if parent.relkind != 'p' || parent.partitioned_table.is_none() {
-        if matches!(parent.relkind, 'i' | 'I' | 'p')
-            || catalog.index_row_by_oid(parent.relation_oid).is_some()
-        {
-            return Err(ExecError::DetailedError {
-                message: format!("\"{parent_name}\" is not a partitioned table"),
-                detail: None,
-                hint: None,
-                sqlstate: "42809",
-            });
-        }
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "ALTER action ATTACH PARTITION cannot be performed on relation \"{parent_name}\""
-            ),
-            detail: Some("This operation is not supported for tables.".into()),
-            hint: None,
-            sqlstate: "42809",
-        });
-    }
-    if !matches!(child.relkind, 'r' | 'p' | 'f') {
-        return Err(ExecError::Parse(
-            crate::backend::parser::ParseError::WrongObjectType {
-                name: child_name.to_string(),
-                expected: "table",
-            },
-        ));
-    }
-    if child.relispartition {
-        return Err(ExecError::DetailedError {
-            message: format!("\"{child_name}\" is already a partition"),
-            detail: None,
-            hint: None,
-            sqlstate: "42P16",
-        });
-    }
-    if !catalog.inheritance_parents(child.relation_oid).is_empty() {
-        return Err(ExecError::DetailedError {
-            message: "cannot attach inheritance child as partition".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42P16",
-        });
-    }
-    if matches!(child.relkind, 'r' | 'f')
-        && !catalog.inheritance_children(child.relation_oid).is_empty()
-    {
-        return Err(ExecError::DetailedError {
-            message: "cannot attach inheritance parent as partition".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42P16",
-        });
-    }
-    if child.relpersistence != parent.relpersistence {
-        let child_persistence = if child.relpersistence == 't' {
-            "temporary"
-        } else {
-            "permanent"
-        };
-        let parent_persistence = if parent.relpersistence == 't' {
-            "temporary"
-        } else {
-            "permanent"
-        };
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "cannot attach a {child_persistence} relation as partition of {parent_persistence} relation \"{parent_name}\""
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "42809",
-        });
-    }
-    let parent_columns = parent
-        .desc
-        .columns
-        .iter()
-        .filter(|column| !column.dropped)
-        .collect::<Vec<_>>();
-    let child_columns = child
-        .desc
-        .columns
-        .iter()
-        .filter(|column| !column.dropped)
-        .collect::<Vec<_>>();
-    for child_column in &child_columns {
-        if parent_columns
-            .iter()
-            .any(|column| column.name.eq_ignore_ascii_case(&child_column.name))
-        {
-            continue;
-        }
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "table \"{child_name}\" contains column \"{}\" not found in parent \"{parent_name}\"",
-                child_column.name
-            ),
-            detail: Some(
-                "The new partition may contain only the columns present in parent.".into(),
-            ),
-            hint: None,
-            sqlstate: "42804",
-        });
-    }
-    for parent_column in &parent_columns {
-        let Some(child_column) = child_columns
-            .iter()
-            .find(|column| column.name.eq_ignore_ascii_case(&parent_column.name))
-        else {
-            return Err(ExecError::DetailedError {
-                message: format!("child table is missing column \"{}\"", parent_column.name),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
-        };
-        if parent_column.sql_type != child_column.sql_type {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "child table \"{child_name}\" has different type for column \"{}\"",
-                    parent_column.name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
-        }
-        if parent_column.collation_oid != child_column.collation_oid {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "child table \"{child_name}\" has different collation for column \"{}\"",
-                    parent_column.name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42P21",
-            });
-        }
-        match (parent_column.generated, child_column.generated) {
-            (None, Some(_)) => {
-                return Err(ExecError::DetailedError {
-                    message: format!(
-                        "column \"{}\" in child table must not be a generated column",
-                        parent_column.name
-                    ),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42804",
-                });
-            }
-            (Some(_), None) => {
-                return Err(ExecError::DetailedError {
-                    message: format!(
-                        "column \"{}\" in child table must be a generated column",
-                        parent_column.name
-                    ),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42804",
-                });
-            }
-            (Some(parent_kind), Some(child_kind)) if parent_kind != child_kind => {
-                return Err(ExecError::DetailedError {
-                    message: format!(
-                        "column \"{}\" inherits from generated column of different kind",
-                        parent_column.name
-                    ),
-                    detail: Some(format!(
-                        "Parent column is {}, child column is {}.",
-                        generated_kind_name(parent_kind),
-                        generated_kind_name(child_kind)
-                    )),
-                    hint: None,
-                    sqlstate: "42P16",
-                });
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    pgrust_commands::partition::validate_partition_relation_compatibility(catalog, parent, child)
+        .map_err(partition_error_to_exec)
 }
 
 pub(crate) fn validate_default_partition_rows_for_new_bound(

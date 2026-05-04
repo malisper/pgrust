@@ -1,9 +1,6 @@
 mod build;
-mod build_buffers;
 mod insert;
-mod page;
 mod scan;
-mod state;
 mod support;
 mod tuple;
 mod vacuum;

@@ -1,7 +1,7 @@
 use super::bestpath::{self, CostSelector};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::{Catalog, CatalogIndexBuildOptions};
-use crate::backend::optimizer::pathnodes::rte_slot_id;
+use crate::backend::optimizer::pathnodes::{PathMethods, rte_slot_id};
 use crate::backend::optimizer::util;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::LiteralDefaultCatalog;
@@ -656,7 +656,7 @@ fn planner_info_for_sql(sql: &str) -> PlannerInfo {
     let query = super::root::prepare_query_for_planning(query, &catalog);
     let query = super::pull_up_sublinks(query, &catalog);
     let aggregate_layout = super::groupby_rewrite::build_aggregate_layout(&query, &catalog);
-    PlannerInfo::new(query, aggregate_layout)
+    super::root::planner_info_new(query, aggregate_layout)
 }
 
 fn planned_stmt_for_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
@@ -1482,8 +1482,10 @@ fn catalog_with_inherited_indexed_items()
             .expect("seed inherited index stats");
     }
 
-    crate::backend::parser::CatalogLookup::materialize_visible_catalog(&catalog)
-        .expect("materialize inherited optimizer test catalog")
+    crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(
+        crate::backend::utils::cache::relcache::RelCache::from_catalog(&catalog),
+        Some(crate::backend::utils::cache::catcache::CatCache::from_catalog(&catalog)),
+    )
 }
 
 fn catalog_with_people_and_pets() -> Catalog {

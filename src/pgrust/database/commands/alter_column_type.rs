@@ -1699,9 +1699,12 @@ impl Database {
                     .is_some()
                 && updated_identity_sequence_oids.insert(sequence_oid)
             {
-                let current = self.sequences.sequence_data(sequence_oid).ok_or_else(|| {
-                    ExecError::Parse(ParseError::TableDoesNotExist(sequence_oid.to_string()))
-                })?;
+                let current = self
+                    .sequences
+                    .sequence_data(sequence_oid, target.relation.relpersistence != 't')?
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(sequence_oid.to_string()))
+                    })?;
                 let target_type = target.new_desc.columns[target.column_index].sql_type;
                 let _ = sequence_type_oid_for_sql_type(target_type).map_err(ExecError::Parse)?;
                 let patch = SequenceOptionsPatchSpec {

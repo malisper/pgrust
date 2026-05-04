@@ -1,0 +1,14 @@
+[package]
+name = "pgrust_protocol"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pgrust_catalog_data = { path = "../pgrust_catalog_data" }
+pgrust_nodes = { path = "../pgrust_nodes" }
+pgrust_parser = { path = "../pgrust_parser" }
+regex = "1"

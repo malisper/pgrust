@@ -8,6 +8,29 @@ repository = "https://github.com/malisper/pgrust"
 readme = "README.md"
 autobins = false
 
+[workspace]
+members = [
+    ".",
+    "crates/pgrust_analyze",
+    "crates/pgrust_access",
+    "crates/pgrust_catalog_store",
+    "crates/pgrust_commands",
+    "crates/pgrust_catalog_data",
+    "crates/pgrust_catalog_ids",
+    "crates/pgrust_core",
+    "crates/pgrust_executor",
+    "crates/pgrust_expr",
+    "crates/pgrust_nodes",
+    "crates/pgrust_optimizer",
+    "crates/pgrust_parser",
+    "crates/pgrust_plpgsql",
+    "crates/pgrust_plpgsql_grammar",
+    "crates/pgrust_protocol",
+    "crates/pgrust_rewrite",
+    "crates/pgrust_storage",
+    "crates/pgrust_sql_grammar",
+]
+
 [lib]
 name = "pgrust"
 path = "src/lib.rs"
@@ -16,7 +39,7 @@ crate-type = ["rlib"]
 [features]
 default = []
 deadlock_detection = ["parking_lot/deadlock_detection"]
-lz4 = ["dep:lz4_flex"]
+lz4 = ["pgrust_access/lz4", "pgrust_analyze/lz4"]
 tools = []
 
 [[bin]]
@@ -176,8 +199,22 @@ num-traits = "0.2.19"
 parking_lot = "0.12"
 pest = "2.7"
 pbkdf2 = "0.12"
+pgrust_analyze = { path = "crates/pgrust_analyze" }
+pgrust_access = { path = "crates/pgrust_access" }
+pgrust_catalog_data = { path = "crates/pgrust_catalog_data" }
+pgrust_catalog_store = { path = "crates/pgrust_catalog_store" }
+pgrust_commands = { path = "crates/pgrust_commands" }
+pgrust_core = { path = "crates/pgrust_core" }
+pgrust_executor = { path = "crates/pgrust_executor" }
+pgrust_expr = { path = "crates/pgrust_expr" }
+pgrust_nodes = { path = "crates/pgrust_nodes" }
+pgrust_optimizer = { path = "crates/pgrust_optimizer" }
+pgrust_parser = { path = "crates/pgrust_parser" }
+pgrust_plpgsql = { path = "crates/pgrust_plpgsql" }
 pgrust_plpgsql_grammar = { path = "crates/pgrust_plpgsql_grammar" }
-pgrust_sql_grammar = { path = "crates/pgrust_sql_grammar" }
+pgrust_protocol = { path = "crates/pgrust_protocol" }
+pgrust_rewrite = { path = "crates/pgrust_rewrite" }
+pgrust_storage = { path = "crates/pgrust_storage" }
 rand = "0.8"
 regex = "1"
 rustc-hash = "2.1.2"
@@ -189,7 +226,6 @@ stacker = "0.1.23"
 encoding_rs = "0.8"
 md-5 = "0.10"
 rust-stemmers = "1"
-lz4_flex = { version = "0.11", optional = true }
 quick-xml = "0.38"
 unicode-normalization = "0.1.25"
 unicode-general-category = "1.1.0"

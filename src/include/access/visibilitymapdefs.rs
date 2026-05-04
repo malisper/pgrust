@@ -1,5 +1,2 @@
-pub const BITS_PER_HEAPBLOCK: usize = 2;
-
-pub const VISIBILITYMAP_ALL_VISIBLE: u8 = 0x01;
-pub const VISIBILITYMAP_ALL_FROZEN: u8 = 0x02;
-pub const VISIBILITYMAP_VALID_BITS: u8 = VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN;
+// :HACK: root compatibility shim while access formats live in `pgrust_access`.
+pub use pgrust_access::access::visibilitymapdefs::*;

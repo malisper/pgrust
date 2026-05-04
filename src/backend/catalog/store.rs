@@ -1,25 +1,29 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::ops::{Deref, DerefMut};
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
 use crate::BufferPool;
 use crate::backend::access::transam::xact::{CommandId, TransactionId, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_kinds;
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError};
+use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::persistence::{
     delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
 };
 use crate::backend::catalog::rows::{
     PhysicalCatalogRows, extend_physical_catalog_rows, physical_catalog_rows_for_catalog_entry,
 };
-use crate::backend::catalog::toasting::ToastCatalogChanges;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::TransactionWaiter;
-use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
-use crate::include::catalog::PgTypeRow;
-use crate::include::catalog::{BootstrapCatalogKind, CatalogScope};
+use crate::include::nodes::parsenodes::Query;
+pub(crate) use pgrust_catalog_store::store::{
+    CatalogControl, CatalogStoreCore, CatalogStoreMode, CatalogStoreSnapshot,
+};
 
 // Mirror PostgreSQL's catalog split: durable control/storage lives in `storage`,
 // while relation DDL and catalog row mutation paths live in `heap`.
@@ -35,78 +39,40 @@ mod storage;
 pub(crate) use storage::sync_catalog_heaps_for_tests;
 
 const CONTROL_FILE_MAGIC: u32 = 0x5052_4743;
-pub(crate) const DEFAULT_FIRST_REL_NUMBER: u32 = 16000;
-pub(crate) const DEFAULT_FIRST_USER_OID: u32 = 16_384;
+pub(crate) const DEFAULT_FIRST_REL_NUMBER: u32 = pgrust_catalog_store::DEFAULT_FIRST_REL_NUMBER;
+pub(crate) const DEFAULT_FIRST_USER_OID: u32 = pgrust_catalog_store::DEFAULT_FIRST_USER_OID;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CatalogStoreMode {
-    Durable {
-        base_dir: PathBuf,
-        control_path: PathBuf,
-    },
-    Ephemeral,
-}
-
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CatalogStore {
-    mode: CatalogStoreMode,
-    scope: CatalogScope,
-    oid_control_path: Option<PathBuf>,
-    catalog: Catalog,
-    control: CatalogControl,
-    extra_type_rows: Vec<PgTypeRow>,
+    core: CatalogStoreCore,
+    #[cfg(test)]
+    catcache_call_count: Arc<AtomicU64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CatalogStoreSnapshot {
-    catalog: Catalog,
-    control: CatalogControl,
-    extra_type_rows: Vec<PgTypeRow>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub struct CatalogMutationEffect {
-    pub touched_catalogs: Vec<BootstrapCatalogKind>,
-    pub created_rels: Vec<RelFileLocator>,
-    pub dropped_rels: Vec<RelFileLocator>,
-    pub relation_oids: Vec<u32>,
-    pub namespace_oids: Vec<u32>,
-    pub type_oids: Vec<u32>,
-    pub full_reset: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CreateTableResult {
-    pub entry: CatalogEntry,
-    pub toast: Option<ToastCatalogChanges>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleOwnerDependency {
-    Auto,
-    Internal,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RuleDependencies {
-    pub relation_oids: Vec<u32>,
-    pub column_refs: Vec<(u32, i16)>,
-    pub constraint_oids: Vec<u32>,
-    pub proc_oids: Vec<u32>,
-    pub type_oids: Vec<u32>,
-}
-
-impl RuleDependencies {
-    pub fn from_relation_oids(relation_oids: &[u32]) -> Self {
-        Self {
-            relation_oids: relation_oids.to_vec(),
-            column_refs: Vec::new(),
-            constraint_oids: Vec::new(),
-            proc_oids: Vec::new(),
-            type_oids: Vec::new(),
-        }
+impl PartialEq for CatalogStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.core == other.core
     }
 }
+
+impl Deref for CatalogStore {
+    type Target = CatalogStoreCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl DerefMut for CatalogStore {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
+}
+
+pub type CatalogMutationEffect = pgrust_catalog_store::store::CatalogMutationEffect;
+pub type CreateTableResult = pgrust_catalog_store::store::CreateTableResult;
+pub type RuleOwnerDependency = pgrust_catalog_store::store::RuleOwnerDependency;
+pub type RuleDependencies = pgrust_catalog_store::store::RuleDependencies;
 
 pub struct CatalogWriteContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
@@ -124,19 +90,66 @@ impl CatalogWriteContext {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CatalogControl {
-    next_oid: u32,
-    next_rel_number: u32,
-    bootstrap_complete: bool,
+impl pgrust_catalog_store::store::CatalogReadRuntime for CatalogWriteContext {
+    type Error = CatalogError;
+
+    fn check_catalog_interrupts(&self) -> Result<(), Self::Error> {
+        self.check_for_interrupts()
+    }
+}
+
+impl pgrust_catalog_store::store::CatalogWriteRuntime for CatalogWriteContext {
+    fn insert_catalog_rows(
+        &self,
+        rows: &PhysicalCatalogRows,
+        db_oid: u32,
+        kinds: &[pgrust_catalog_data::BootstrapCatalogKind],
+    ) -> Result<(), Self::Error> {
+        insert_catalog_rows_subset_mvcc(self, rows, db_oid, kinds)
+    }
+
+    fn delete_catalog_rows(
+        &self,
+        rows: &PhysicalCatalogRows,
+        db_oid: u32,
+        kinds: &[pgrust_catalog_data::BootstrapCatalogKind],
+    ) -> Result<(), Self::Error> {
+        delete_catalog_rows_subset_mvcc(self, rows, db_oid, kinds)
+    }
 }
 
 impl CatalogStore {
+    fn from_core(core: CatalogStoreCore) -> Self {
+        Self {
+            core,
+            #[cfg(test)]
+            catcache_call_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_catcache_call_for_tests(&self) {
+        self.catcache_call_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_catcache_call_count_for_tests(&self) {
+        self.catcache_call_count.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn catcache_call_count_for_tests(&self) -> u64 {
+        self.catcache_call_count.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn snapshot(&self) -> CatalogStoreSnapshot {
         CatalogStoreSnapshot {
             catalog: self.catalog.clone(),
+            catalog_materialized: self.catalog_materialized,
             control: self.control.clone(),
+            scope: self.scope,
             extra_type_rows: self.extra_type_rows.clone(),
+            stored_view_queries: self.stored_view_queries.clone(),
         }
     }
 
@@ -150,15 +163,37 @@ impl CatalogStore {
         };
         Ok(CatalogStoreSnapshot {
             catalog,
+            catalog_materialized: true,
             control: self.control_state()?,
+            scope: self.scope,
             extra_type_rows: self.extra_type_rows.clone(),
+            stored_view_queries: self.stored_view_queries.clone(),
         })
     }
 
     pub(crate) fn restore_snapshot(&mut self, snapshot: CatalogStoreSnapshot) {
         self.catalog = snapshot.catalog;
+        self.catalog_materialized = snapshot.catalog_materialized;
         self.control = snapshot.control;
+        self.scope = snapshot.scope;
         self.extra_type_rows = snapshot.extra_type_rows;
+        self.stored_view_queries = snapshot.stored_view_queries;
+    }
+
+    pub(crate) fn stored_view_query_for_rule(&self, rewrite_oid: u32) -> Option<Query> {
+        self.stored_view_queries.get(&rewrite_oid).cloned()
+    }
+
+    pub(crate) fn has_stored_view_query(&self, rewrite_oid: u32) -> bool {
+        self.stored_view_queries.contains_key(&rewrite_oid)
+    }
+
+    pub(crate) fn register_stored_view_query(&mut self, rewrite_oid: u32, query: Query) {
+        self.stored_view_queries.insert(rewrite_oid, query);
+    }
+
+    pub(crate) fn remove_stored_view_query(&mut self, rewrite_oid: u32) {
+        self.stored_view_queries.remove(&rewrite_oid);
     }
 
     pub(crate) fn restore_snapshot_for_savepoint_rollback(
@@ -213,8 +248,11 @@ impl CatalogStore {
         }
 
         self.catalog = snapshot.catalog;
+        self.catalog_materialized = snapshot.catalog_materialized;
         self.control = snapshot.control;
+        self.scope = snapshot.scope;
         self.extra_type_rows = snapshot.extra_type_rows;
+        self.stored_view_queries = snapshot.stored_view_queries;
         Ok(effect)
     }
 }
@@ -223,6 +261,7 @@ impl CatalogStore {
 mod tests {
     use super::*;
     use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
+    use crate::backend::catalog::Catalog;
     use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
     use crate::backend::catalog::column_desc;
     use crate::backend::catalog::loader::{
@@ -234,25 +273,26 @@ mod tests {
     use crate::backend::catalog::rows::physical_catalog_rows_for_catalog_entry;
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::storage::smgr::{
-        BLCKSZ, ForkNumber, MdStorageManager, StorageManager, segment_path,
+        BLCKSZ, ForkNumber, MdStorageManager, RelFileLocator, StorageManager, segment_path,
     };
     use crate::include::access::nbtree::{BTP_DELETED, bt_page_data_items, bt_page_get_opaque};
     use crate::include::catalog::{
-        BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
-        CURRENT_DATABASE_NAME, CatalogScope, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID,
-        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID,
-        INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID,
-        PG_C_UTF8_COLLATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-        PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-        PG_TYPE_RELATION_OID, PG_UNICODE_FAST_COLLATION_OID, POSIX_COLLATION_OID,
-        PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, UCS_BASIC_COLLATION_OID, UNICODE_COLLATION_OID,
-        VARCHAR_TYPE_OID, system_catalog_indexes,
+        BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind,
+        C_COLLATION_OID, CURRENT_DATABASE_NAME, CatalogScope, DEFAULT_COLLATION_OID,
+        DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
+        HEAP_TABLE_AM_OID, INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID,
+        PG_ATTRDEF_RELATION_OID, PG_C_UTF8_COLLATION_OID, PG_CLASS_RELATION_OID,
+        PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID,
+        PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID, PG_UNICODE_FAST_COLLATION_OID,
+        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, UCS_BASIC_COLLATION_OID,
+        UNICODE_COLLATION_OID, VARCHAR_TYPE_OID, system_catalog_indexes,
     };
     use crate::include::nodes::parsenodes::IndexColumnDef;
     use crate::include::nodes::primnodes::RelationDesc;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -741,6 +781,33 @@ mod tests {
         let reopened_entry = reopened_catalog.get("people").unwrap();
         assert_eq!(reopened_entry.rel.rel_number, DEFAULT_FIRST_REL_NUMBER);
         assert_eq!(reopened_entry.desc.columns.len(), 3);
+    }
+
+    #[test]
+    fn durable_reopen_keeps_catalog_lightweight_until_broad_scan() {
+        let base = temp_dir("lazy_reopen");
+        let first = CatalogStore::load(&base).unwrap();
+        assert!(
+            first.catalog_materialized,
+            "initial bootstrap owns a full catalog to seed physical catalogs"
+        );
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        assert!(
+            !reopened.catalog_materialized,
+            "reopen should only read control/cache metadata, not materialize the catalog"
+        );
+        assert!(
+            reopened
+                .catalog_snapshot()
+                .unwrap()
+                .get("pg_class")
+                .is_some()
+        );
+        assert!(
+            !reopened.catalog_materialized,
+            "compatibility snapshots should not make normal open state eager"
+        );
     }
 
     #[test]
@@ -2494,7 +2561,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_store_migrates_legacy_defaults_json_into_pg_attrdef() {
+    fn catalog_store_rejects_legacy_defaults_json_without_pg_attrdef_relfile() {
         let base = temp_dir("legacy_defaults_migration");
         let mut store = CatalogStore::load(&base).unwrap();
         let mut desc = RelationDesc {
@@ -2528,23 +2595,11 @@ mod tests {
         )
         .unwrap();
 
-        let reopened = CatalogStore::load(&base).unwrap();
-        let relcache = reopened.relcache().unwrap();
-        let migrated = relcache.get_by_name("notes").unwrap();
-        assert_eq!(
-            migrated.desc.columns[1].default_expr.as_deref(),
-            Some("'legacy'")
-        );
-        assert!(migrated.desc.columns[1].attrdef_oid.is_some());
-
-        let rows = load_physical_catalog_rows(&base).unwrap();
-        let attrdef = rows
-            .attrdefs
-            .iter()
-            .find(|row| row.adrelid == entry.relation_oid && row.adnum == 2)
-            .unwrap();
-        assert_eq!(attrdef.adbin, "'legacy'");
-        assert!(attrdef.oid > entry.row_type_oid);
+        let err = CatalogStore::load(&base).unwrap_err();
+        assert!(matches!(
+            err,
+            CatalogError::Corrupt("missing physical relation relfile")
+        ));
     }
 
     fn assert_missing_bootstrap_relfile_fails(label: &str, kind: BootstrapCatalogKind) {

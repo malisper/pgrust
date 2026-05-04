@@ -39,8 +39,7 @@ use crate::backend::catalog::{
 };
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{
-    ExecError, ExecutorContext, LockStatusProvider, SessionReplicationRole, StatementResult, Value,
-    execute_readonly_statement,
+    ExecError, ExecutorContext, LockStatusProvider, Value, execute_readonly_statement,
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
@@ -90,10 +89,10 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::{InterruptReason, InterruptState};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID,
-    PgConstraintRow, PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization, UNKNOWN_TYPE_OID,
-    annotate_catalog_type_io_procs, builtin_type_row_by_oid, builtin_type_rows,
-    synthetic_type_output_proc_oid, system_catalog_indexes,
+    CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgEnumRow,
+    PgRangeRow, PgTypeRow, RangeCanonicalization, UNKNOWN_TYPE_OID, annotate_catalog_type_io_procs,
+    builtin_type_row_by_oid, builtin_type_rows, synthetic_type_output_proc_oid,
+    system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 pub use crate::pgrust::autovacuum::AutovacuumConfig;
@@ -109,6 +108,7 @@ pub(crate) use large_objects::{
     INV_WRITE, LargeObjectRuntime, ensure_large_object_write_allowed,
     parse_large_object_default_privileges_sql,
 };
+use pgrust_nodes::{SessionReplicationRole, StatementResult};
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 pub(crate) use sequences::{
     SequenceData, SequenceMutationEffect, SequenceOwnedByRef, SequenceRuntime,
@@ -532,6 +532,7 @@ impl PreparedTransactionManager {
 pub struct Database {
     pub(crate) cluster: Arc<ClusterShared>,
     pub database_oid: u32,
+    pub(crate) database_name: String,
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub wal: Option<Arc<WalWriter>>,
     pub autovacuum_config: AutovacuumConfig,
@@ -575,6 +576,29 @@ pub struct Database {
     pub(crate) stats: Arc<RwLock<DatabaseStatsStore>>,
     pub(crate) large_objects: Arc<LargeObjectRuntime>,
     pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,
+    #[cfg(test)]
+    pub(crate) broad_catalog_load_counters: Arc<BroadCatalogLoadCounters>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct BroadCatalogLoadCounters {
+    backend_catcache_loads: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct BroadCatalogLoadCounts {
+    pub backend_catcache: u64,
+    pub local_store_catcache: u64,
+    pub shared_store_catcache: u64,
+}
+
+#[cfg(test)]
+impl BroadCatalogLoadCounts {
+    pub(crate) fn total(self) -> u64 {
+        self.backend_catcache + self.local_store_catcache + self.shared_store_catcache
+    }
 }
 
 const TEMP_DB_OID_BASE: u32 = 0x7000_0000;
@@ -877,18 +901,7 @@ pub(crate) struct StatisticsObjectEntry {
     pub targets: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConversionEntry {
-    pub oid: u32,
-    pub name: String,
-    pub namespace_oid: u32,
-    pub for_encoding: String,
-    pub to_encoding: String,
-    pub function_name: String,
-    pub is_default: bool,
-    pub owner_oid: u32,
-    pub comment: Option<String>,
-}
+pub(crate) use pgrust_commands::conversion::ConversionEntry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DatabaseCreateGrant {
@@ -1196,6 +1209,41 @@ impl Database {
         txn_ctx: CatalogTxnContext,
     ) -> Result<CatCache, CatalogError> {
         syscache_backend_catcache(self, client_id, txn_ctx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_backend_catcache_load_for_tests(&self) {
+        self.broad_catalog_load_counters
+            .backend_catcache_loads
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_broad_catalog_load_counters_for_tests(&self) {
+        self.broad_catalog_load_counters
+            .backend_catcache_loads
+            .store(0, Ordering::Relaxed);
+        self.catalog.read().reset_catcache_call_count_for_tests();
+        self.shared_catalog
+            .read()
+            .reset_catcache_call_count_for_tests();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn broad_catalog_load_counts_for_tests(&self) -> BroadCatalogLoadCounts {
+        BroadCatalogLoadCounts {
+            backend_catcache: self
+                .broad_catalog_load_counters
+                .backend_catcache_loads
+                .load(Ordering::Relaxed),
+            local_store_catcache: self.catalog.read().catcache_call_count_for_tests(),
+            shared_store_catcache: self.shared_catalog.read().catcache_call_count_for_tests(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn broad_catalog_load_count_for_tests(&self) -> u64 {
+        self.broad_catalog_load_counts_for_tests().total()
     }
 
     pub(crate) fn txn_auth_catalog(
@@ -2342,18 +2390,7 @@ impl Database {
     }
 
     pub(crate) fn current_database_name(&self) -> String {
-        self.shared_catalog
-            .read()
-            .catcache()
-            .ok()
-            .and_then(|cache| {
-                cache
-                    .database_rows()
-                    .into_iter()
-                    .find(|row| row.oid == self.database_oid)
-                    .map(|row| row.datname)
-            })
-            .unwrap_or_else(|| CURRENT_DATABASE_NAME.to_string())
+        self.database_name.clone()
     }
 
     pub(crate) fn checkpoint_config_value(&self, name: &str) -> Option<String> {

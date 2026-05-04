@@ -1,3 +1,5 @@
+// :HACK: Compatibility shim while transam/WAL ownership lives in
+// `pgrust_access`; root still owns database/session orchestration.
 pub mod checkpoint;
 pub mod clog;
 pub mod controlfile;

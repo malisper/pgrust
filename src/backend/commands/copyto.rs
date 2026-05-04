@@ -5,28 +5,17 @@ use crate::backend::libpq::pqformat::{
     FloatFormatOptions, encode_binary_data_row_value, format_text_data_value,
 };
 use crate::backend::utils::misc::notices::take_notices as take_backend_notices;
-use crate::include::nodes::parsenodes::{CopyForceQuote, CopyFormat, CopyToOptions};
+use crate::include::nodes::parsenodes::{CopyFormat, CopyToOptions};
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, take_notices as take_plpgsql_notices};
+use pgrust_commands::copyto::{
+    CopyToSerializeError, begin_copy_to_bytes, copy_to_row_bytes, finish_copy_to_bytes,
+};
+pub use pgrust_nodes::{CopyToDmlEvent, CopyToNotice};
 
 thread_local! {
     static COPY_TO_DML_CAPTURE: std::cell::RefCell<Option<Vec<CopyToDmlEvent>>> =
         const { std::cell::RefCell::new(None) };
-}
-
-#[derive(Debug, Clone)]
-pub struct CopyToNotice {
-    pub severity: &'static str,
-    pub sqlstate: &'static str,
-    pub message: String,
-    pub detail: Option<String>,
-    pub position: Option<usize>,
-}
-
-#[derive(Debug, Clone)]
-pub enum CopyToDmlEvent {
-    Notice(CopyToNotice),
-    Row(Vec<Value>),
 }
 
 pub trait CopyToSink {
@@ -74,19 +63,7 @@ pub fn begin_copy_to<S: CopyToSink + ?Sized>(
     options: &CopyToOptions,
 ) -> Result<(), ExecError> {
     sink.begin(options.format, columns.len())?;
-    match options.format {
-        CopyFormat::Text => {}
-        CopyFormat::Csv => {
-            if options.header {
-                write_csv_header(sink, columns, options)?;
-            }
-        }
-        CopyFormat::Binary => {
-            sink.write_all(b"PGCOPY\n\xff\r\n\0")?;
-            sink.write_all(&0_i32.to_be_bytes())?;
-            sink.write_all(&0_i32.to_be_bytes())?;
-        }
-    }
+    sink.write_all(&begin_copy_to_bytes(columns, options))?;
     Ok(())
 }
 
@@ -97,20 +74,24 @@ pub fn write_copy_to_row<S: CopyToSink + ?Sized>(
     options: &CopyToOptions,
     float_format: &FloatFormatOptions,
 ) -> Result<(), ExecError> {
-    match options.format {
-        CopyFormat::Text => write_text_copy_row(sink, columns, row, options, float_format),
-        CopyFormat::Csv => write_csv_copy_row(sink, columns, row, options, float_format),
-        CopyFormat::Binary => write_binary_copy_row(sink, columns, row),
-    }
+    let data = copy_to_row_bytes(
+        columns,
+        row,
+        options,
+        |value, column| {
+            format_text_data_value(value, column, float_format.clone(), None, None, None, None)
+        },
+        |value, column| encode_binary_data_row_value(value, column.sql_type),
+    )
+    .map_err(copy_to_serialize_error_to_exec)?;
+    sink.write_all(&data)
 }
 
 pub fn finish_copy_to<S: CopyToSink + ?Sized>(
     sink: &mut S,
     options: &CopyToOptions,
 ) -> Result<(), ExecError> {
-    if matches!(options.format, CopyFormat::Binary) {
-        sink.write_all(&(-1_i16).to_be_bytes())?;
-    }
+    sink.write_all(&finish_copy_to_bytes(options))?;
     sink.finish()
 }
 
@@ -127,167 +108,6 @@ pub fn write_copy_to<S: CopyToSink + ?Sized>(
     }
     finish_copy_to(sink, options)?;
     Ok(rows.len())
-}
-
-fn write_text_copy_row<S: CopyToSink + ?Sized>(
-    sink: &mut S,
-    columns: &[QueryColumn],
-    row: &[Value],
-    options: &CopyToOptions,
-    float_format: &FloatFormatOptions,
-) -> Result<(), ExecError> {
-    let delimiter = options.delimiter.as_bytes()[0];
-    validate_copy_row_width(row, columns)?;
-    let mut line = Vec::new();
-    for (idx, (value, column)) in row.iter().zip(columns).enumerate() {
-        if idx > 0 {
-            line.push(delimiter);
-        }
-        match format_text_data_value(value, column, float_format.clone(), None, None, None, None)? {
-            Some(text) => append_copy_text_field(&mut line, text.as_bytes(), delimiter),
-            None => line.extend_from_slice(options.null.as_bytes()),
-        }
-    }
-    line.push(b'\n');
-    sink.write_all(&line)
-}
-
-fn append_copy_text_field(out: &mut Vec<u8>, bytes: &[u8], delimiter: u8) {
-    for &byte in bytes {
-        match byte {
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            b'\n' => out.extend_from_slice(b"\\n"),
-            b'\r' => out.extend_from_slice(b"\\r"),
-            b'\t' => out.extend_from_slice(b"\\t"),
-            0x08 => out.extend_from_slice(b"\\b"),
-            0x0b => out.extend_from_slice(b"\\v"),
-            0x0c => out.extend_from_slice(b"\\f"),
-            byte if byte == delimiter => {
-                out.push(b'\\');
-                out.push(byte);
-            }
-            _ => out.push(byte),
-        }
-    }
-}
-
-fn write_csv_header<S: CopyToSink + ?Sized>(
-    sink: &mut S,
-    columns: &[QueryColumn],
-    options: &CopyToOptions,
-) -> Result<(), ExecError> {
-    let delimiter = options.delimiter.as_bytes()[0];
-    let quote = options.quote.as_bytes()[0];
-    let escape = options.escape.as_bytes()[0];
-    let mut line = Vec::new();
-    for (idx, column) in columns.iter().enumerate() {
-        if idx > 0 {
-            line.push(delimiter);
-        }
-        append_csv_field(
-            &mut line,
-            column.name.as_bytes(),
-            false,
-            options.null.as_bytes(),
-            delimiter,
-            quote,
-            escape,
-        );
-    }
-    line.push(b'\n');
-    sink.write_all(&line)
-}
-
-fn write_csv_copy_row<S: CopyToSink + ?Sized>(
-    sink: &mut S,
-    columns: &[QueryColumn],
-    row: &[Value],
-    options: &CopyToOptions,
-    float_format: &FloatFormatOptions,
-) -> Result<(), ExecError> {
-    let delimiter = options.delimiter.as_bytes()[0];
-    let quote = options.quote.as_bytes()[0];
-    let escape = options.escape.as_bytes()[0];
-    validate_copy_row_width(row, columns)?;
-    let mut line = Vec::new();
-    for (idx, (value, column)) in row.iter().zip(columns).enumerate() {
-        if idx > 0 {
-            line.push(delimiter);
-        }
-        if matches!(value, Value::Null) {
-            line.extend_from_slice(options.null.as_bytes());
-            continue;
-        }
-        let text =
-            format_text_data_value(value, column, float_format.clone(), None, None, None, None)?
-                .unwrap_or_default();
-        append_csv_field(
-            &mut line,
-            text.as_bytes(),
-            force_quote_column(&options.force_quote, columns, idx),
-            options.null.as_bytes(),
-            delimiter,
-            quote,
-            escape,
-        );
-    }
-    line.push(b'\n');
-    sink.write_all(&line)
-}
-
-fn append_csv_field(
-    out: &mut Vec<u8>,
-    bytes: &[u8],
-    force_quote: bool,
-    null_marker: &[u8],
-    delimiter: u8,
-    quote: u8,
-    escape: u8,
-) {
-    let needs_quote = force_quote
-        || bytes == null_marker
-        || bytes
-            .iter()
-            .any(|byte| matches!(*byte, b'\n' | b'\r') || *byte == delimiter || *byte == quote);
-    if !needs_quote {
-        out.extend_from_slice(bytes);
-        return;
-    }
-    out.push(quote);
-    for &byte in bytes {
-        if byte == quote || byte == escape {
-            out.push(escape);
-        }
-        out.push(byte);
-    }
-    out.push(quote);
-}
-
-fn force_quote_column(force_quote: &CopyForceQuote, columns: &[QueryColumn], idx: usize) -> bool {
-    match force_quote {
-        CopyForceQuote::None => false,
-        CopyForceQuote::All => true,
-        CopyForceQuote::Columns(names) => names.iter().any(|name| name == &columns[idx].name),
-    }
-}
-
-fn write_binary_copy_row<S: CopyToSink + ?Sized>(
-    sink: &mut S,
-    columns: &[QueryColumn],
-    row: &[Value],
-) -> Result<(), ExecError> {
-    validate_copy_row_width(row, columns)?;
-    sink.write_all(&(columns.len() as i16).to_be_bytes())?;
-    for (value, column) in row.iter().zip(columns) {
-        if matches!(value, Value::Null) {
-            sink.write_all(&(-1_i32).to_be_bytes())?;
-            continue;
-        }
-        let payload = encode_binary_data_row_value(value, column.sql_type)?;
-        sink.write_all(&(payload.len() as i32).to_be_bytes())?;
-        sink.write_all(&payload)?;
-    }
-    Ok(())
 }
 
 pub fn begin_copy_to_dml_capture() {
@@ -359,20 +179,16 @@ fn normalize_plpgsql_notice(notice: PlpgsqlNotice) -> Option<CopyToNotice> {
     })
 }
 
-fn validate_copy_row_width(row: &[Value], columns: &[QueryColumn]) -> Result<(), ExecError> {
-    if row.len() == columns.len() {
-        return Ok(());
+fn copy_to_serialize_error_to_exec(err: CopyToSerializeError<ExecError>) -> ExecError {
+    match err {
+        CopyToSerializeError::WrongColumnCount { expected, actual } => ExecError::DetailedError {
+            message: "COPY row has wrong number of columns".into(),
+            detail: Some(format!("Expected {expected} columns but found {actual}.")),
+            hint: None,
+            sqlstate: "XX000",
+        },
+        CopyToSerializeError::Format(err) => err,
     }
-    Err(ExecError::DetailedError {
-        message: "COPY row has wrong number of columns".into(),
-        detail: Some(format!(
-            "Expected {} columns but found {}.",
-            columns.len(),
-            row.len()
-        )),
-        hint: None,
-        sqlstate: "XX000",
-    })
 }
 
 fn copy_io_error(err: std::io::Error) -> ExecError {
@@ -388,6 +204,7 @@ fn copy_io_error(err: std::io::Error) -> ExecError {
 mod tests {
     use super::*;
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::parsenodes::CopyForceQuote;
 
     fn text_column(name: &str) -> QueryColumn {
         QueryColumn {

@@ -477,7 +477,6 @@ dependencies = [
  "hmac",
  "itoa",
  "libc",
- "lz4_flex",
  "md-5",
  "mimalloc",
  "num-bigint",
@@ -486,8 +485,22 @@ dependencies = [
  "parking_lot",
  "pbkdf2",
  "pest",
+ "pgrust_access",
+ "pgrust_analyze",
+ "pgrust_catalog_data",
+ "pgrust_catalog_store",
+ "pgrust_commands",
+ "pgrust_core",
+ "pgrust_executor",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_optimizer",
+ "pgrust_parser",
+ "pgrust_plpgsql",
  "pgrust_plpgsql_grammar",
- "pgrust_sql_grammar",
+ "pgrust_protocol",
+ "pgrust_rewrite",
+ "pgrust_storage",
  "quick-xml",
  "rand",
  "regex",
@@ -505,6 +518,195 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgrust_access"
+version = "0.1.0"
+dependencies = [
+ "lz4_flex",
+ "parking_lot",
+ "pgrust_catalog_data",
+ "pgrust_core",
+ "pgrust_nodes",
+ "pgrust_storage",
+ "rand",
+ "serde",
+]
+
+[[package]]
+name = "pgrust_analyze"
+version = "0.1.0"
+dependencies = [
+ "pgrust_catalog_data",
+ "pgrust_catalog_ids",
+ "pgrust_catalog_store",
+ "pgrust_core",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "serde_json",
+]
+
+[[package]]
+name = "pgrust_catalog_data"
+version = "0.1.0"
+dependencies = [
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "pgrust_nodes",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pgrust_catalog_ids"
+version = "0.1.0"
+
+[[package]]
+name = "pgrust_catalog_store"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "pgrust_catalog_data",
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pgrust_commands"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hmac",
+ "pbkdf2",
+ "pgrust_access",
+ "pgrust_analyze",
+ "pgrust_catalog_data",
+ "pgrust_catalog_store",
+ "pgrust_core",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "pgrust_protocol",
+ "rand",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "pgrust_core"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "parking_lot",
+ "serde",
+ "stacker",
+ "web-time",
+]
+
+[[package]]
+name = "pgrust_executor"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "parking_lot",
+ "pgrust_access",
+ "pgrust_analyze",
+ "pgrust_catalog_data",
+ "pgrust_catalog_store",
+ "pgrust_core",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_storage",
+ "rand",
+]
+
+[[package]]
+name = "pgrust_expr"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "chrono-tz",
+ "crc32fast",
+ "encoding_rs",
+ "lz4_flex",
+ "md-5",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "parking_lot",
+ "pgrust_catalog_data",
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "quick-xml",
+ "rand",
+ "regex",
+ "rust-stemmers",
+ "ryu",
+ "serde_json",
+ "sha2",
+ "unicode-general-category",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "pgrust_nodes"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "serde",
+]
+
+[[package]]
+name = "pgrust_optimizer"
+version = "0.1.0"
+dependencies = [
+ "pgrust_analyze",
+ "pgrust_catalog_data",
+ "pgrust_catalog_ids",
+ "pgrust_core",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "serde_json",
+]
+
+[[package]]
+name = "pgrust_parser"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
+ "pest",
+ "pgrust_catalog_data",
+ "pgrust_core",
+ "pgrust_nodes",
+ "pgrust_sql_grammar",
+]
+
+[[package]]
+name = "pgrust_plpgsql"
+version = "0.1.0"
+dependencies = [
+ "pest",
+ "pgrust_analyze",
+ "pgrust_catalog_data",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "pgrust_plpgsql_grammar",
+]
+
+[[package]]
 name = "pgrust_plpgsql_grammar"
 version = "0.1.0"
 dependencies = [
@@ -513,11 +715,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgrust_protocol"
+version = "0.1.0"
+dependencies = [
+ "pgrust_catalog_data",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "regex",
+]
+
+[[package]]
+name = "pgrust_rewrite"
+version = "0.1.0"
+dependencies = [
+ "pgrust_analyze",
+ "pgrust_catalog_data",
+ "pgrust_catalog_store",
+ "pgrust_expr",
+ "pgrust_nodes",
+ "pgrust_parser",
+ "stacker",
+]
+
+[[package]]
 name = "pgrust_sql_grammar"
 version = "0.1.0"
 dependencies = [
  "pest",
  "pest_derive",
+]
+
+[[package]]
+name = "pgrust_storage"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "parking_lot",
+ "pgrust_core",
+ "pgrust_nodes",
+ "rustc-hash",
+ "serde",
+ "web-time",
 ]
 
 [[package]]

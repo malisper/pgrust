@@ -4890,7 +4890,10 @@ fn index_only_scan_uses_virtual_slot_and_falls_back_when_visibility_bit_cleared(
         .unwrap();
 
     let catalog = catalog_with_people_primary_key();
-    let visible = catalog.materialize_visible_catalog().unwrap();
+    let visible = crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(
+        crate::backend::utils::cache::relcache::RelCache::from_catalog(&catalog),
+        Some(crate::backend::utils::cache::catcache::CatCache::from_catalog(&catalog)),
+    );
     let people = visible.relcache().get_by_name("people").unwrap();
     let index = visible.relcache().get_by_name("people_pkey").unwrap();
     let index_meta = index.index.clone().expect("people primary key metadata");

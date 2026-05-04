@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::{CatalogTxnContext, ClientId, Database};
-use crate::backend::access::common::toast_compression::ensure_attribute_compression_supported;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
@@ -625,8 +624,11 @@ pub(crate) fn rewrite_dependent_views(
                     ),
                 })
             })?;
-        if crate::backend::rewrite::has_stored_view_query(rewrite_oid) {
-            crate::backend::rewrite::register_stored_view_query(rewrite_oid, query);
+        let has_cached_query = db.catalog.read().has_stored_view_query(rewrite_oid);
+        if has_cached_query {
+            db.catalog
+                .write()
+                .register_stored_view_query(rewrite_oid, query);
             continue;
         }
         let mut sql = crate::backend::rewrite::render_view_query_sql(&query, &catalog);
@@ -1714,41 +1716,15 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct NormalizedStatisticsTarget {
-    pub value: i16,
-    pub warning: Option<&'static str>,
-}
+pub(super) type NormalizedStatisticsTarget = pgrust_commands::tablecmds::NormalizedStatisticsTarget;
 
 pub(super) fn normalize_statistics_target(
     statistics_target: i32,
 ) -> Result<NormalizedStatisticsTarget, ExecError> {
-    if statistics_target == -1 {
-        return Ok(NormalizedStatisticsTarget {
-            value: -1,
-            warning: None,
-        });
-    }
-    if statistics_target < 0 {
-        return Err(ExecError::DetailedError {
-            message: format!("statistics target {} is too low", statistics_target),
-            detail: None,
-            hint: None,
-            sqlstate: "22023",
-        });
-    }
-    if statistics_target > 10000 {
-        return Ok(NormalizedStatisticsTarget {
-            value: 10000,
-            warning: Some("lowering statistics target to 10000"),
-        });
-    }
-    Ok(NormalizedStatisticsTarget {
-        value: i16::try_from(statistics_target).map_err(|_| {
-            ExecError::Parse(ParseError::InvalidInteger(statistics_target.to_string()))
-        })?,
-        warning: None,
-    })
+    // :HACK: Preserve the old DDL helper path while command validation lives in
+    // `pgrust_commands`.
+    pgrust_commands::tablecmds::normalize_statistics_target(statistics_target)
+        .map_err(tablecmds_error_to_exec)
 }
 
 pub(super) fn automatic_alter_type_cast_allowed(
@@ -2061,20 +2037,10 @@ pub(super) fn validate_alter_table_alter_column_options(
     desc: &RelationDesc,
     column_name: &str,
 ) -> Result<String, ExecError> {
-    if is_system_column_name(column_name) {
-        return Err(ExecError::DetailedError {
-            message: format!("cannot alter system column \"{column_name}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    let column = desc
-        .columns
-        .iter()
-        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
-        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
-    Ok(column.name.clone())
+    // :HACK: Preserve the old DDL helper path while command validation lives in
+    // `pgrust_commands`.
+    pgrust_commands::tablecmds::validate_alter_table_alter_column_options(desc, column_name)
+        .map_err(tablecmds_error_to_exec)
 }
 
 pub(super) fn validate_alter_table_alter_column_storage(
@@ -2082,34 +2048,31 @@ pub(super) fn validate_alter_table_alter_column_storage(
     column_name: &str,
     storage: AttributeStorage,
 ) -> Result<(String, AttributeStorage), ExecError> {
-    if is_system_column_name(column_name) {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "user column name for ALTER COLUMN SET STORAGE",
-            actual: column_name.to_string(),
-        }));
-    }
-    let column = desc
-        .columns
-        .iter()
-        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
-        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+    // :HACK: Preserve the old DDL helper path while command validation lives in
+    // `pgrust_commands`.
+    pgrust_commands::tablecmds::validate_alter_table_alter_column_storage(
+        desc,
+        column_name,
+        storage,
+    )
+    .map_err(tablecmds_error_to_exec)
+}
 
-    let type_default = column_desc("attstorage_check", column.sql_type, column.storage.nullable)
-        .storage
-        .attstorage;
-    if storage != AttributeStorage::Plain && type_default == AttributeStorage::Plain {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "column data type {} can only have storage PLAIN",
-                format_sql_type_name(column.sql_type)
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
+fn tablecmds_error_to_exec(err: pgrust_commands::tablecmds::TableCmdsError) -> ExecError {
+    match err {
+        pgrust_commands::tablecmds::TableCmdsError::Parse(error) => ExecError::Parse(error),
+        pgrust_commands::tablecmds::TableCmdsError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
     }
-
-    Ok((column.name.clone(), storage))
 }
 
 pub(super) fn validate_alter_table_alter_column_compression(
@@ -2117,40 +2080,14 @@ pub(super) fn validate_alter_table_alter_column_compression(
     column_name: &str,
     compression: AttributeCompression,
 ) -> Result<(String, AttributeCompression), ExecError> {
-    if is_system_column_name(column_name) {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "user column name for ALTER COLUMN SET COMPRESSION",
-            actual: column_name.to_string(),
-        }));
-    }
-    let column = desc
-        .columns
-        .iter()
-        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
-        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
-
-    ensure_attribute_compression_supported(compression)?;
-
-    let type_default = column_desc(
-        "attcompression_check",
-        column.sql_type,
-        column.storage.nullable,
+    // :HACK: Preserve the old DDL helper path while command validation lives in
+    // `pgrust_commands`.
+    pgrust_commands::tablecmds::validate_alter_table_alter_column_compression(
+        desc,
+        column_name,
+        compression,
     )
-    .storage
-    .attstorage;
-    if compression != AttributeCompression::Default && type_default == AttributeStorage::Plain {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "column data type {} does not support compression",
-                format_sql_type_name(column.sql_type)
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-
-    Ok((column.name.clone(), compression))
+    .map_err(tablecmds_error_to_exec)
 }
 
 pub(super) fn validate_alter_table_alter_column_statistics(
@@ -2158,21 +2095,14 @@ pub(super) fn validate_alter_table_alter_column_statistics(
     column_name: &str,
     statistics_target: i32,
 ) -> Result<(String, NormalizedStatisticsTarget), ExecError> {
-    if is_system_column_name(column_name) {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "user column name for ALTER COLUMN SET STATISTICS",
-            actual: column_name.to_string(),
-        }));
-    }
-    let column = desc
-        .columns
-        .iter()
-        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
-        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
-    Ok((
-        column.name.clone(),
-        normalize_statistics_target(statistics_target)?,
-    ))
+    // :HACK: Preserve the old DDL helper path while command validation lives in
+    // `pgrust_commands`.
+    pgrust_commands::tablecmds::validate_alter_table_alter_column_statistics(
+        desc,
+        column_name,
+        statistics_target,
+    )
+    .map_err(tablecmds_error_to_exec)
 }
 
 pub(super) fn validate_alter_index_alter_column_statistics(
@@ -2181,68 +2111,15 @@ pub(super) fn validate_alter_index_alter_column_statistics(
     column_number: i16,
     statistics_target: i32,
 ) -> Result<(String, NormalizedStatisticsTarget), ExecError> {
-    let index_meta = entry
-        .index
-        .as_ref()
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("relation \"{index_name}\" is not an index"),
-            detail: None,
-            hint: None,
-            sqlstate: "42809",
-        })?;
-    if column_number < 1 {
-        return Err(ExecError::DetailedError {
-            message: "column number must be in range from 1 to 32767".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "22023",
-        });
-    }
-    let column_index = usize::try_from(column_number - 1).unwrap_or(usize::MAX);
-    let column = entry
-        .desc
-        .columns
-        .get(column_index)
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!(
-                "column number {} of relation \"{}\" does not exist",
-                column_number, index_name
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "42703",
-        })?;
-    if column_number > index_meta.indnkeyatts {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "cannot alter statistics on included column \"{}\" of index \"{}\"",
-                column.name, index_name
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    if index_meta
-        .indkey
-        .get(column_index)
-        .copied()
-        .is_none_or(|attnum| attnum != 0)
-    {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "cannot alter statistics on non-expression column \"{}\" of index \"{}\"",
-                column.name, index_name
-            ),
-            detail: None,
-            hint: Some("Alter statistics on table column instead.".into()),
-            sqlstate: "0A000",
-        });
-    }
-    Ok((
-        column.name.clone(),
-        normalize_statistics_target(statistics_target)?,
-    ))
+    // :HACK: Preserve the old DDL helper path while command validation lives in
+    // `pgrust_commands`.
+    pgrust_commands::tablecmds::validate_alter_index_alter_column_statistics(
+        entry,
+        index_name,
+        column_number,
+        statistics_target,
+    )
+    .map_err(tablecmds_error_to_exec)
 }
 
 fn alter_column_type_error(

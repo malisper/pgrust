@@ -1,5 +1,2 @@
-use crate::include::catalog::PgAmRow;
-
-pub fn sort_pg_am_rows(rows: &mut [PgAmRow]) {
-    rows.sort_by_key(|row| (row.oid, row.amname.clone()));
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_am::*;

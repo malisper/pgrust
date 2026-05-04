@@ -1,0 +1,60 @@
+use crate::catalog::CatalogEntry;
+use pgrust_catalog_data::{
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, CatalogScope, GLOBAL_TABLESPACE_OID,
+    bootstrap_catalog_kinds as shared_bootstrap_catalog_kinds, bootstrap_namespace_oid,
+    bootstrap_relation_desc,
+};
+use pgrust_core::RelFileLocator;
+
+pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 57] {
+    shared_bootstrap_catalog_kinds()
+}
+
+pub fn bootstrap_catalog_rel(kind: BootstrapCatalogKind, db_oid: u32) -> RelFileLocator {
+    match kind.scope() {
+        CatalogScope::Shared => RelFileLocator {
+            spc_oid: GLOBAL_TABLESPACE_OID,
+            db_oid: 0,
+            rel_number: kind.relation_oid(),
+        },
+        CatalogScope::Database(_) => RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: kind.relation_oid(),
+        },
+    }
+}
+
+pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
+    CatalogEntry {
+        rel: bootstrap_catalog_rel(kind, 1),
+        relation_oid: kind.relation_oid(),
+        namespace_oid: bootstrap_namespace_oid(),
+        owner_oid: BOOTSTRAP_SUPERUSER_OID,
+        relacl: None,
+        reloptions: None,
+        of_type_oid: 0,
+        row_type_oid: kind.row_type_oid(),
+        array_type_oid: kind.array_type_oid(),
+        reltoastrelid: kind.toast_relation_oid(),
+        relhasindex: false,
+        relpersistence: 'p',
+        relkind: 'r',
+        am_oid: pgrust_catalog_data::relam_for_relkind('r'),
+        relhassubclass: false,
+        relhastriggers: false,
+        relispartition: false,
+        relispopulated: true,
+        relpartbound: None,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+        relpages: 0,
+        reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::FROZEN_TRANSACTION_ID,
+        desc: bootstrap_relation_desc(kind),
+        partitioned_table: None,
+        index_meta: None,
+    }
+}

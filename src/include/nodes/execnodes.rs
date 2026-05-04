@@ -11,14 +11,12 @@ use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::plannodes::{
     IndexScanKey, PartitionPrunePlan, PlanEstimate, TidScanCond,
 };
-use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::backend::executor::{AggregateRuntime, ExecError, ExecutorContext};
 pub use crate::include::nodes::datum::{NumericValue, Value};
@@ -30,6 +28,7 @@ pub use crate::include::nodes::primnodes::{
     OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall,
     SubPlan, TargetEntry, ToastRelationRef, WindowClause,
 };
+pub use pgrust_nodes::SystemVarBinding;
 
 pub struct TupleSlot {
     pub(crate) kind: SlotKind,
@@ -57,23 +56,6 @@ pub(crate) struct ToastFetchContext {
     pub(crate) txns: Arc<RwLock<TransactionManager>>,
     pub(crate) snapshot: Snapshot,
     pub(crate) client_id: ClientId,
-}
-
-/// Executor-local binding for system Vars like `tableoid`.
-///
-/// PostgreSQL resolves these against dedicated scan/outer/inner slots rather
-/// than against projected user-column layouts. pgrust does not mirror that
-/// slot/opcode machinery exactly yet, so upper executor nodes carry the active
-/// base-relation bindings explicitly and `eval_expr` consults them when
-/// evaluating a system Var.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SystemVarBinding {
-    pub(crate) varno: usize,
-    pub(crate) table_oid: u32,
-    pub(crate) tid: Option<ItemPointerData>,
-    pub(crate) xmin: Option<u32>,
-    pub(crate) cmin: Option<u32>,
-    pub(crate) xmax: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,20 +186,8 @@ impl PartialEq for TupleSlot {
 
 impl Eq for TupleSlot {}
 
-#[derive(Debug, Clone, Default)]
-pub struct NodeExecStats {
-    pub loops: u64,
-    pub rows: u64,
-    pub total_time: Duration,
-    pub first_tuple_time: Option<Duration>,
-    pub rows_removed_by_filter: u64,
-    pub rows_removed_by_index_recheck: u64,
-    pub index_searches: u64,
-    pub heap_fetches: u64,
-    pub stack_depth_checked: bool,
-    pub buffer_usage: BufferUsageStats,
-    pub buffer_usage_start: Option<BufferUsageStats>,
-}
+// :HACK: old include/nodes path while executor runtime stats live in pgrust_executor.
+pub use pgrust_executor::NodeExecStats;
 
 /// Trait for executor plan nodes, like PostgreSQL's ExecProcNode vtable.
 /// Each node type implements this trait, and dispatch is via trait object.

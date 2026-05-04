@@ -6,6 +6,11 @@ use crate::include::access::htup::ItemPointerData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::primnodes::RelationDesc;
+use pgrust_executor::{
+    BooleanConstraintResult, NotNullConstraintDescriptor, RlsDetailSource, RlsWriteCheckSource,
+    check_constraint_failure, find_not_null_violation, rls_write_check_failure,
+    row_security_new_row_tid,
+};
 
 use super::{ExecError, ExecutorContext};
 
@@ -16,29 +21,27 @@ pub(crate) fn enforce_relation_constraints(
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    for (index, column) in desc.columns.iter().enumerate() {
-        if column.storage.nullable {
-            continue;
-        }
-        if matches!(values.get(index), Some(Value::Null) | None) {
-            let constraint_name = constraints
-                .not_nulls
-                .iter()
-                .find(|constraint| constraint.column_index == index)
-                .map(|constraint| constraint.constraint_name.clone())
-                .or_else(|| column.not_null_constraint_name.clone())
-                .unwrap_or_else(|| format!("{relation_name}_{}_not_null", column.name));
-            return Err(ExecError::NotNullViolation {
-                relation: relation_name.to_string(),
-                column: column.name.clone(),
-                constraint: constraint_name,
-                detail: Some(format_failing_row_detail_for_columns(
-                    values,
-                    &desc.columns,
-                    &ctx.datetime_config,
-                )),
-            });
-        }
+    let not_nulls = constraints
+        .not_nulls
+        .iter()
+        .map(|constraint| NotNullConstraintDescriptor {
+            column_index: constraint.column_index,
+            constraint_name: constraint.constraint_name.clone(),
+        })
+        .collect::<Vec<_>>();
+    if let Some(violation) =
+        find_not_null_violation(relation_name, &desc.columns, &not_nulls, values)
+    {
+        return Err(ExecError::NotNullViolation {
+            relation: relation_name.to_string(),
+            column: violation.column,
+            constraint: violation.constraint,
+            detail: Some(format_failing_row_detail_for_columns(
+                values,
+                &desc.columns,
+                &ctx.datetime_config,
+            )),
+        });
     }
 
     if constraints.checks.is_empty() {
@@ -65,14 +68,17 @@ pub(crate) fn enforce_relation_constraints(
                 });
             }
             _ => {
+                let failure = check_constraint_failure(
+                    relation_name,
+                    &check.constraint_name,
+                    BooleanConstraintResult::NonBool,
+                )
+                .expect("non-boolean check result must produce a failure");
                 return Err(ExecError::DetailedError {
-                    message: "CHECK constraint expression must return boolean".into(),
-                    detail: Some(format!(
-                        "constraint \"{}\" on relation \"{}\" produced a non-boolean value",
-                        check.constraint_name, relation_name
-                    )),
+                    message: failure.message,
+                    detail: failure.detail,
                     hint: None,
-                    sqlstate: "42804",
+                    sqlstate: failure.sqlstate,
                 });
             }
         }
@@ -112,128 +118,73 @@ pub(crate) fn enforce_row_security_write_checks_with_tid(
 
     let mut slot = TupleSlot::virtual_row_with_metadata(values.to_vec(), row_tid, None);
     for check in checks {
-        match eval_expr(&check.expr, &mut slot, ctx)? {
-            Value::Bool(true) => {}
-            Value::Null | Value::Bool(false) => {
-                if let crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(view_name) =
-                    &check.source
-                {
-                    let detail = if check.display_exprs.is_empty() {
-                        format_failing_row_detail_for_columns(
-                            values,
-                            &desc.columns,
-                            &ctx.datetime_config,
-                        )
-                    } else {
-                        let mut display_values = check
-                            .display_exprs
-                            .iter()
-                            .map(|expr| {
-                                eval_expr(expr, &mut slot, ctx).map(|value| value.to_owned_value())
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        Value::materialize_all(&mut display_values);
+        let result = match eval_expr(&check.expr, &mut slot, ctx)? {
+            Value::Bool(true) => BooleanConstraintResult::Pass,
+            Value::Null | Value::Bool(false) => BooleanConstraintResult::Fail,
+            _ => BooleanConstraintResult::NonBool,
+        };
+        if let Some(failure) = rls_write_check_failure(
+            relation_name,
+            check.policy_name.as_deref(),
+            &root_rls_source(&check.source),
+            !check.display_exprs.is_empty(),
+            result,
+        ) {
+            let (message, static_detail, detail_source, sqlstate) = failure.split_static_detail();
+            let detail = match detail_source {
+                RlsDetailSource::BaseRow => Some(format_failing_row_detail_for_columns(
+                    values,
+                    &desc.columns,
+                    &ctx.datetime_config,
+                )),
+                RlsDetailSource::DisplayExpressions => {
+                    let mut display_values = check
+                        .display_exprs
+                        .iter()
+                        .map(|expr| {
+                            eval_expr(expr, &mut slot, ctx).map(|value| value.to_owned_value())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Value::materialize_all(&mut display_values);
+                    Some(
                         crate::backend::executor::value_io::format_failing_row_detail(
                             &display_values,
                             &ctx.datetime_config,
-                        )
-                    };
-                    return Err(ExecError::DetailedError {
-                        message: format!("new row violates check option for view \"{view_name}\""),
-                        detail: Some(detail),
-                        hint: None,
-                        sqlstate: "44000",
-                    });
-                }
-                if matches!(
-                    check.source,
-                    crate::backend::rewrite::RlsWriteCheckSource::ConflictUpdateVisibility
-                ) {
-                    return Err(ExecError::DetailedError {
-                        message: format!(
-                            "new row violates row-level security policy (USING expression) for table \"{relation_name}\""
                         ),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42501",
-                    });
+                    )
                 }
-                if matches!(
-                    check.source,
-                    crate::backend::rewrite::RlsWriteCheckSource::MergeUpdateVisibility
-                        | crate::backend::rewrite::RlsWriteCheckSource::MergeDeleteVisibility
-                ) {
-                    return Err(ExecError::DetailedError {
-                        message: format!(
-                            "target row violates row-level security policy (USING expression) for table \"{relation_name}\""
-                        ),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42501",
-                    });
-                }
-                return Err(ExecError::DetailedError {
-                    message: check
-                        .policy_name
-                        .as_ref()
-                        .map(|policy_name| {
-                            format!(
-                                "new row violates row-level security policy \"{policy_name}\" for table \"{relation_name}\""
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            format!(
-                                "new row violates row-level security policy for table \"{relation_name}\""
-                            )
-                        }),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42501",
-                });
-            }
-            _ => {
-                if let crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(view_name) =
-                    &check.source
-                {
-                    return Err(ExecError::DetailedError {
-                        message: "view CHECK OPTION expression must return boolean".into(),
-                        detail: Some(format!(
-                            "check option for view \"{view_name}\" produced a non-boolean value"
-                        )),
-                        hint: None,
-                        sqlstate: "42804",
-                    });
-                }
-                return Err(ExecError::DetailedError {
-                    message: "row-level security policy expression must return boolean".into(),
-                    detail: Some(
-                        check
-                            .policy_name
-                            .as_ref()
-                            .map(|policy_name| {
-                                format!(
-                                    "policy \"{policy_name}\" on relation \"{relation_name}\" produced a non-boolean value"
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                format!(
-                                    "row-level security policy on relation \"{relation_name}\" produced a non-boolean value"
-                                )
-                            }),
-                    ),
-                    hint: None,
-                    sqlstate: "42804",
-                });
-            }
+                RlsDetailSource::None => static_detail,
+            };
+            return Err(ExecError::DetailedError {
+                message,
+                detail,
+                hint: None,
+                sqlstate,
+            });
         }
     }
 
     Ok(())
 }
 
-fn row_security_new_row_tid() -> ItemPointerData {
-    ItemPointerData {
-        block_number: u32::MAX,
-        offset_number: 0,
+fn root_rls_source(source: &crate::backend::rewrite::RlsWriteCheckSource) -> RlsWriteCheckSource {
+    match source {
+        crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(view_name) => {
+            RlsWriteCheckSource::ViewCheckOption(view_name.clone())
+        }
+        crate::backend::rewrite::RlsWriteCheckSource::ConflictUpdateVisibility => {
+            RlsWriteCheckSource::ConflictUpdateVisibility
+        }
+        crate::backend::rewrite::RlsWriteCheckSource::MergeUpdateVisibility => {
+            RlsWriteCheckSource::MergeUpdateVisibility
+        }
+        crate::backend::rewrite::RlsWriteCheckSource::MergeDeleteVisibility => {
+            RlsWriteCheckSource::MergeDeleteVisibility
+        }
+        crate::backend::rewrite::RlsWriteCheckSource::Insert
+        | crate::backend::rewrite::RlsWriteCheckSource::Update
+        | crate::backend::rewrite::RlsWriteCheckSource::SelectVisibility => {
+            RlsWriteCheckSource::Policy
+        }
     }
 }

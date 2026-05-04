@@ -3,21 +3,13 @@ use super::expr_xml::unsupported_xml_feature_error;
 use super::sqlfunc::execute_user_defined_sql_scalar_function;
 use super::{ExecError, ExecutorContext, TupleSlot, Value};
 use crate::backend::parser::CatalogLookup;
-use crate::include::catalog::{
-    PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
-    PgProcRow, builtin_scalar_function_for_proc_row,
-};
-use crate::include::nodes::primnodes::{BuiltinScalarFunction, FuncExpr, ScalarFunctionImpl};
+use crate::include::catalog::PgProcRow;
+use crate::include::nodes::primnodes::{FuncExpr, ScalarFunctionImpl};
 use crate::pl::plpgsql::execute_user_defined_scalar_function;
-
-#[derive(Debug, Clone)]
-pub enum ScalarFunctionCallInfo {
-    Builtin(BuiltinScalarFunction),
-    Sql(PgProcRow),
-    PlPgSql { proc_oid: u32 },
-    UnsupportedInternal(PgProcRow),
-    PlHandler { proc_oid: u32 },
-}
+use pgrust_executor::{
+    ScalarFunctionCallInfo, UnsupportedInternalFunctionDetail,
+    scalar_function_call_info_for_proc_row, unsupported_internal_function_detail,
+};
 
 pub(crate) fn call_scalar_function(
     func: &FuncExpr,
@@ -65,18 +57,7 @@ fn scalar_function_call_info(
     }
 
     let row = proc_row_for_fmgr_call(proc_oid, ctx)?;
-    let info = if let Some(builtin) = builtin_scalar_function_for_proc_row(&row) {
-        ScalarFunctionCallInfo::Builtin(builtin)
-    } else {
-        match row.prolang {
-            PG_LANGUAGE_SQL_OID => ScalarFunctionCallInfo::Sql(row),
-            PG_LANGUAGE_PLPGSQL_OID => ScalarFunctionCallInfo::PlPgSql { proc_oid },
-            PG_LANGUAGE_INTERNAL_OID | PG_LANGUAGE_C_OID => {
-                ScalarFunctionCallInfo::UnsupportedInternal(row)
-            }
-            _ => ScalarFunctionCallInfo::PlHandler { proc_oid },
-        }
-    };
+    let info = scalar_function_call_info_for_proc_row(row);
     ctx.scalar_function_cache.insert(proc_oid, info.clone());
     Ok(info)
 }
@@ -102,37 +83,19 @@ fn proc_row_for_fmgr_call(funcid: u32, ctx: &ExecutorContext) -> Result<PgProcRo
 }
 
 fn unsupported_internal_function(row: &PgProcRow) -> ExecError {
-    if is_unsupported_xml_mapping_function(row.prosrc.as_str())
-        || is_unsupported_xml_mapping_function(row.proname.as_str())
-    {
-        return unsupported_xml_feature_error();
+    match unsupported_internal_function_detail(row) {
+        UnsupportedInternalFunctionDetail::UnsupportedXmlFeature => unsupported_xml_feature_error(),
+        UnsupportedInternalFunctionDetail::UnsupportedInternal { proname, prosrc } => {
+            // :HACK: pgrust exposes some pg_proc rows for catalog compatibility before
+            // implementing their runtime behavior. PostgreSQL still has real fmgr
+            // entries for these; fail explicitly instead of silently treating them as
+            // PL/pgSQL or another executable language.
+            ExecError::DetailedError {
+                message: format!("function {proname} is not supported").into(),
+                detail: Some(format!("internal symbol = {prosrc}").into()),
+                hint: None,
+                sqlstate: "0A000",
+            }
+        }
     }
-
-    // :HACK: pgrust exposes some pg_proc rows for catalog compatibility before
-    // implementing their runtime behavior. PostgreSQL still has real fmgr
-    // entries for these; fail explicitly instead of silently treating them as
-    // PL/pgSQL or another executable language.
-    ExecError::DetailedError {
-        message: format!("function {} is not supported", row.proname).into(),
-        detail: Some(format!("internal symbol = {}", row.prosrc).into()),
-        hint: None,
-        sqlstate: "0A000",
-    }
-}
-
-fn is_unsupported_xml_mapping_function(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "table_to_xml"
-            | "table_to_xmlschema"
-            | "table_to_xml_and_xmlschema"
-            | "query_to_xml"
-            | "query_to_xmlschema"
-            | "query_to_xml_and_xmlschema"
-            | "cursor_to_xml"
-            | "cursor_to_xmlschema"
-            | "schema_to_xml"
-            | "schema_to_xmlschema"
-            | "schema_to_xml_and_xmlschema"
-    )
 }

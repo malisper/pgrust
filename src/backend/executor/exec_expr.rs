@@ -1,4 +1,3 @@
-use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -15,12 +14,11 @@ use crate::include::nodes::datetime::{
     MAX_TIME_PRECISION, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-use rand::RngCore;
-use std::sync::Mutex;
 
 use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
 use super::expr_agg_support::{
-    execute_builtin_scalar_function_value_call, execute_scalar_function_value_call,
+    aggregate_support_error, execute_builtin_scalar_function_value_call,
+    execute_scalar_function_value_call,
 };
 use super::expr_async::{eval_pg_notification_queue_usage_function, eval_pg_notify_function};
 use super::expr_bit::{
@@ -31,9 +29,8 @@ use super::expr_bit::{
 use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_boolor_statefunc};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
-    cast_value_with_source_type_catalog_and_config, parse_interval_text_value,
-    parse_text_array_literal_with_catalog_and_op, parse_text_array_literal_with_op,
-    soft_input_error_info_with_catalog_and_config,
+    cast_value_with_source_type_catalog_and_config, parse_text_array_literal_with_catalog_and_op,
+    parse_text_array_literal_with_op, soft_input_error_info_with_catalog_and_config,
 };
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
@@ -164,7 +161,7 @@ use crate::backend::parser::{
 use crate::backend::rewrite::{
     format_stored_rule_definition_with_catalog, format_view_definition,
     format_view_definition_unpretty, render_relation_expr_sql,
-    render_relation_expr_sql_for_constraint, stored_view_query_for_rule,
+    render_relation_expr_sql_for_constraint,
 };
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
@@ -173,29 +170,27 @@ use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::backend::utils::misc::guc::{
     normalize_guc_name, pg_settings_flags, plpgsql_guc_default_value,
 };
-use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::htup::AttributeStorage;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::toast_compression::ToastCompressionId;
-use crate::include::catalog::pg_proc::{bootstrap_pg_proc_row_by_oid, bootstrap_proc_acl_override};
+use crate::include::catalog::pg_proc::bootstrap_pg_proc_row_by_oid;
 use crate::include::catalog::{
     ANYOID, ARRAY_BTREE_OPCLASS_OID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID,
     BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID,
-    DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID,
-    GLOBAL_TABLESPACE_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, INT4_TYPE_OID,
-    KD_POINT_SPGIST_OPCLASS_OID, NAME_TYPE_OID, OID_TYPE_OID, PG_AUTHID_RELATION_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
-    PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_LARGEOBJECT_RELATION_OID, PG_MAINTAIN_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
-    PG_READ_ALL_DATA_OID, PG_SIGNAL_BACKEND_OID, PG_STATISTIC_EXT_RELATION_OID,
-    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow, PgConversionRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_ARRAY_TYPE_OID,
-    TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
-    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
-    default_hash_opclass_oid,
+    DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, GIN_AM_OID, GIST_AM_OID, GLOBAL_TABLESPACE_OID,
+    HASH_AM_OID, INET_SPGIST_OPCLASS_OID, INT4_TYPE_OID, KD_POINT_SPGIST_OPCLASS_OID,
+    NAME_TYPE_OID, OID_TYPE_OID, PG_AUTHID_RELATION_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID, PG_DATABASE_RELATION_OID,
+    PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_LARGEOBJECT_RELATION_OID,
+    PG_MAINTAIN_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID,
+    PG_SIGNAL_BACKEND_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+    PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
+    PgClassRow, PgCollationRow, PgConversionRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_ARRAY_TYPE_OID, TEXT_SPGIST_OPCLASS_OID,
+    TEXT_TYPE_OID, bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid,
+    builtin_type_name_for_oid, default_btree_opclass_oid, default_hash_opclass_oid,
 };
 
 const SET_CONFIG_EFFECT_PREFIX: &str = "__pgrust_set_config_effect__";
@@ -283,15 +278,69 @@ fn sql_type_from_builtin_oid(oid: u32) -> Option<SqlType> {
 }
 
 fn stats_oid_arg(values: &[Value], op: &'static str) -> Result<u32, ExecError> {
-    match values.first() {
-        Some(Value::Int32(v)) if *v >= 0 => Ok(*v as u32),
-        Some(Value::Int64(v)) if *v >= 0 && *v <= i64::from(u32::MAX) => Ok(*v as u32),
-        Some(other) => Err(ExecError::TypeMismatch {
-            op,
-            left: other.clone(),
-            right: Value::Int64(i64::from(crate::include::catalog::OID_TYPE_OID)),
-        }),
-        None => Err(malformed_expr_error(op)),
+    pgrust_executor::stats_oid_arg(values, op).map_err(|error| match error {
+        pgrust_executor::StatsArgError::MalformedCall { op } => malformed_expr_error(op),
+        pgrust_executor::StatsArgError::TypeMismatch { op, left, right } => {
+            ExecError::TypeMismatch { op, left, right }
+        }
+    })
+}
+
+fn relation_stats_snapshot(
+    entry: crate::backend::utils::activity::RelationStatsEntry,
+) -> pgrust_executor::RelationStatsSnapshot {
+    pgrust_executor::RelationStatsSnapshot {
+        numscans: entry.numscans,
+        tuples_returned: entry.tuples_returned,
+        tuples_fetched: entry.tuples_fetched,
+        tuples_inserted: entry.tuples_inserted,
+        tuples_updated: entry.tuples_updated,
+        tuples_hot_updated: entry.tuples_hot_updated,
+        tuples_deleted: entry.tuples_deleted,
+        live_tuples: entry.live_tuples,
+        dead_tuples: entry.dead_tuples,
+        blocks_fetched: entry.blocks_fetched,
+        blocks_hit: entry.blocks_hit,
+        lastscan: entry.lastscan,
+    }
+}
+
+fn relation_xact_stats_snapshot(
+    entry: crate::backend::utils::activity::RelationStatsDelta,
+) -> pgrust_executor::RelationStatsSnapshot {
+    pgrust_executor::RelationStatsSnapshot {
+        numscans: entry.numscans,
+        tuples_returned: entry.tuples_returned,
+        tuples_fetched: entry.tuples_fetched,
+        tuples_inserted: entry.tuples_inserted,
+        tuples_updated: entry.tuples_updated,
+        tuples_hot_updated: entry.tuples_hot_updated,
+        tuples_deleted: entry.tuples_deleted,
+        live_tuples: entry.live_tuples,
+        dead_tuples: entry.dead_tuples,
+        blocks_fetched: entry.blocks_fetched,
+        blocks_hit: entry.blocks_hit,
+        lastscan: entry.lastscan,
+    }
+}
+
+fn function_stats_snapshot(
+    entry: crate::backend::utils::activity::FunctionStatsEntry,
+) -> pgrust_executor::FunctionStatsSnapshot {
+    pgrust_executor::FunctionStatsSnapshot {
+        calls: entry.calls,
+        total_time_micros: entry.total_time_micros,
+        self_time_micros: entry.self_time_micros,
+    }
+}
+
+fn function_xact_stats_snapshot(
+    entry: crate::backend::utils::activity::FunctionStatsDelta,
+) -> pgrust_executor::FunctionStatsSnapshot {
+    pgrust_executor::FunctionStatsSnapshot {
+        calls: entry.calls,
+        total_time_micros: entry.total_time_micros,
+        self_time_micros: entry.self_time_micros,
     }
 }
 
@@ -305,24 +354,10 @@ fn relation_stats_value(
         .write()
         .visible_relation_entry(&ctx.stats, oid)
         .unwrap_or_default();
-    Ok(match func {
-        BuiltinScalarFunction::PgStatGetNumscans => Value::Int64(entry.numscans),
-        BuiltinScalarFunction::PgStatGetLastscan => entry
-            .lastscan
-            .map(Value::TimestampTz)
-            .unwrap_or(Value::Null),
-        BuiltinScalarFunction::PgStatGetTuplesReturned => Value::Int64(entry.tuples_returned),
-        BuiltinScalarFunction::PgStatGetTuplesFetched => Value::Int64(entry.tuples_fetched),
-        BuiltinScalarFunction::PgStatGetTuplesInserted => Value::Int64(entry.tuples_inserted),
-        BuiltinScalarFunction::PgStatGetTuplesUpdated => Value::Int64(entry.tuples_updated),
-        BuiltinScalarFunction::PgStatGetTuplesHotUpdated => Value::Int64(entry.tuples_hot_updated),
-        BuiltinScalarFunction::PgStatGetTuplesDeleted => Value::Int64(entry.tuples_deleted),
-        BuiltinScalarFunction::PgStatGetLiveTuples => Value::Int64(entry.live_tuples),
-        BuiltinScalarFunction::PgStatGetDeadTuples => Value::Int64(entry.dead_tuples),
-        BuiltinScalarFunction::PgStatGetBlocksFetched => Value::Int64(entry.blocks_fetched),
-        BuiltinScalarFunction::PgStatGetBlocksHit => Value::Int64(entry.blocks_hit),
-        _ => unreachable!("non-relation stats builtin in relation_stats_value"),
-    })
+    Ok(pgrust_executor::relation_stats_value(
+        func,
+        &relation_stats_snapshot(entry),
+    ))
 }
 
 fn relation_xact_stats_value(
@@ -340,15 +375,10 @@ fn relation_xact_stats_value(
         .map(|entry| &entry.current)
         .cloned()
         .unwrap_or_default();
-    Ok(match func {
-        BuiltinScalarFunction::PgStatGetXactNumscans => Value::Int64(current.numscans),
-        BuiltinScalarFunction::PgStatGetXactTuplesReturned => Value::Int64(current.tuples_returned),
-        BuiltinScalarFunction::PgStatGetXactTuplesFetched => Value::Int64(current.tuples_fetched),
-        BuiltinScalarFunction::PgStatGetXactTuplesInserted => Value::Int64(current.tuples_inserted),
-        BuiltinScalarFunction::PgStatGetXactTuplesUpdated => Value::Int64(current.tuples_updated),
-        BuiltinScalarFunction::PgStatGetXactTuplesDeleted => Value::Int64(current.tuples_deleted),
-        _ => unreachable!("non-xact relation stats builtin in relation_xact_stats_value"),
-    })
+    Ok(pgrust_executor::relation_xact_stats_value(
+        func,
+        &relation_xact_stats_snapshot(current),
+    ))
 }
 
 fn function_stats_value(
@@ -364,16 +394,10 @@ fn function_stats_value(
     } else {
         return Ok(Value::Null);
     };
-    Ok(match func {
-        BuiltinScalarFunction::PgStatGetFunctionCalls => Value::Int64(entry.calls),
-        BuiltinScalarFunction::PgStatGetFunctionTotalTime => {
-            Value::Float64(entry.total_time_micros as f64 / 1000.0)
-        }
-        BuiltinScalarFunction::PgStatGetFunctionSelfTime => {
-            Value::Float64(entry.self_time_micros as f64 / 1000.0)
-        }
-        _ => unreachable!("non-function stats builtin in function_stats_value"),
-    })
+    Ok(pgrust_executor::function_stats_value(
+        func,
+        &function_stats_snapshot(entry),
+    ))
 }
 
 fn function_xact_stats_value(
@@ -388,16 +412,10 @@ fn function_xact_stats_value(
     let Some(entry) = session.function_xact.get(&oid) else {
         return Ok(Value::Null);
     };
-    Ok(match func {
-        BuiltinScalarFunction::PgStatGetXactFunctionCalls => Value::Int64(entry.calls),
-        BuiltinScalarFunction::PgStatGetXactFunctionTotalTime => {
-            Value::Float64(entry.total_time_micros as f64 / 1000.0)
-        }
-        BuiltinScalarFunction::PgStatGetXactFunctionSelfTime => {
-            Value::Float64(entry.self_time_micros as f64 / 1000.0)
-        }
-        _ => unreachable!("non-xact function stats builtin in function_xact_stats_value"),
-    })
+    Ok(pgrust_executor::function_xact_stats_value(
+        func,
+        &function_xact_stats_snapshot(entry.clone()),
+    ))
 }
 
 fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
@@ -2211,378 +2229,87 @@ fn statistics_visible_in_search_path(
     false
 }
 
-fn catalog_is_temp_schema_name(schema_name: &str) -> bool {
-    schema_name.eq_ignore_ascii_case("pg_temp")
-        || schema_name.to_ascii_lowercase().starts_with("pg_temp_")
-}
-
-fn catalog_visibility_search_path(catalog: &dyn CatalogLookup) -> Vec<String> {
-    let configured = catalog.search_path();
-    let mut search_path = Vec::new();
-    if !configured
-        .iter()
-        .any(|schema| schema.eq_ignore_ascii_case("pg_catalog"))
-    {
-        search_path.push("pg_catalog".into());
-    }
-    search_path.extend(configured);
-    search_path
-}
-
-fn catalog_object_visible_in_search_path(
-    catalog: &dyn CatalogLookup,
-    target_oid: u32,
-    target_namespace_oid: u32,
-    target_name: &str,
-    mut same_name_oid_in_namespace: impl FnMut(u32, &str) -> Option<u32>,
-) -> bool {
-    if catalog
-        .namespace_row_by_oid(target_namespace_oid)
-        .is_some_and(|namespace| catalog_is_temp_schema_name(&namespace.nspname))
-    {
-        return false;
-    }
-    for schema_name in catalog_visibility_search_path(catalog) {
-        if catalog_is_temp_schema_name(&schema_name) {
-            continue;
-        }
-        let Some(namespace) = catalog
-            .namespace_rows()
-            .into_iter()
-            .find(|row| row.nspname.eq_ignore_ascii_case(&schema_name))
-        else {
-            continue;
-        };
-        if let Some(candidate_oid) = same_name_oid_in_namespace(namespace.oid, target_name) {
-            return candidate_oid == target_oid;
-        }
-    }
-    false
-}
-
-fn eval_catalog_visibility_result(
-    values: &[Value],
+fn catalog_visibility_catalog<'a>(
+    ctx: &'a ExecutorContext,
     function_name: &'static str,
-    mut is_visible: impl FnMut(u32) -> Result<Option<bool>, ExecError>,
-) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null] => Ok(Value::Null),
-        [value] => {
-            let oid = oid_arg_to_u32(value, function_name)?;
-            Ok(is_visible(oid)?.map(Value::Bool).unwrap_or(Value::Null))
-        }
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: function_name,
-            actual: format!("{function_name}({} args)", values.len()),
-        })),
-    }
+) -> Result<&'a dyn CatalogLookup, ExecError> {
+    executor_catalog(ctx).map_err(|_| ExecError::DetailedError {
+        message: format!("{function_name} requires catalog context"),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })
 }
 
 fn eval_pg_type_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_type_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog.type_by_oid(oid) else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.typnamespace,
-            &row.typname,
-            |namespace_oid, typname| {
-                catalog
-                    .type_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTypeRow| {
-                        candidate.typnamespace == namespace_oid
-                            && candidate.typname.eq_ignore_ascii_case(typname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_type_is_visible")?;
+    pgrust_executor::eval_pg_type_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_operator_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_operator_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog.operator_by_oid(oid) else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.oprnamespace,
-            &row.oprname,
-            |namespace_oid, oprname| {
-                catalog
-                    .operator_rows()
-                    .into_iter()
-                    .find(|candidate: &PgOperatorRow| {
-                        candidate.oprnamespace == namespace_oid
-                            && candidate.oprname.eq_ignore_ascii_case(oprname)
-                            && candidate.oprleft == row.oprleft
-                            && candidate.oprright == row.oprright
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_operator_is_visible")?;
+    pgrust_executor::eval_pg_operator_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_opclass_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_opclass_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .opclass_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.opcnamespace,
-            &row.opcname,
-            |namespace_oid, opcname| {
-                catalog
-                    .opclass_rows()
-                    .into_iter()
-                    .find(|candidate: &PgOpclassRow| {
-                        candidate.opcnamespace == namespace_oid
-                            && candidate.opcmethod == row.opcmethod
-                            && candidate.opcname.eq_ignore_ascii_case(opcname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_opclass_is_visible")?;
+    pgrust_executor::eval_pg_opclass_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_opfamily_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_opfamily_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .opfamily_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.opfnamespace,
-            &row.opfname,
-            |namespace_oid, opfname| {
-                catalog
-                    .opfamily_rows()
-                    .into_iter()
-                    .find(|candidate: &PgOpfamilyRow| {
-                        candidate.opfnamespace == namespace_oid
-                            && candidate.opfmethod == row.opfmethod
-                            && candidate.opfname.eq_ignore_ascii_case(opfname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_opfamily_is_visible")?;
+    pgrust_executor::eval_pg_opfamily_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_conversion_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_conversion_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .conversion_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.connamespace,
-            &row.conname,
-            |namespace_oid, conname| {
-                catalog
-                    .conversion_rows()
-                    .into_iter()
-                    .find(|candidate: &PgConversionRow| {
-                        candidate.connamespace == namespace_oid
-                            && candidate.conname.eq_ignore_ascii_case(conname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_conversion_is_visible")?;
+    pgrust_executor::eval_pg_conversion_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_collation_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_collation_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .collation_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.collnamespace,
-            &row.collname,
-            |namespace_oid, collname| {
-                catalog
-                    .collation_rows()
-                    .into_iter()
-                    .find(|candidate: &PgCollationRow| {
-                        candidate.collnamespace == namespace_oid
-                            && candidate.collname.eq_ignore_ascii_case(collname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_collation_is_visible")?;
+    pgrust_executor::eval_pg_collation_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_ts_parser_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_ts_parser_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .ts_parser_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.prsnamespace,
-            &row.prsname,
-            |namespace_oid, prsname| {
-                catalog
-                    .ts_parser_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTsParserRow| {
-                        candidate.prsnamespace == namespace_oid
-                            && candidate.prsname.eq_ignore_ascii_case(prsname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_ts_parser_is_visible")?;
+    pgrust_executor::eval_pg_ts_parser_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_ts_dict_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_ts_dict_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .ts_dict_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.dictnamespace,
-            &row.dictname,
-            |namespace_oid, dictname| {
-                catalog
-                    .ts_dict_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTsDictRow| {
-                        candidate.dictnamespace == namespace_oid
-                            && candidate.dictname.eq_ignore_ascii_case(dictname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_ts_dict_is_visible")?;
+    pgrust_executor::eval_pg_ts_dict_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_ts_template_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_ts_template_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .ts_template_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.tmplnamespace,
-            &row.tmplname,
-            |namespace_oid, tmplname| {
-                catalog
-                    .ts_template_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTsTemplateRow| {
-                        candidate.tmplnamespace == namespace_oid
-                            && candidate.tmplname.eq_ignore_ascii_case(tmplname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_ts_template_is_visible")?;
+    pgrust_executor::eval_pg_ts_template_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_ts_config_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_ts_config_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .ts_config_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.cfgnamespace,
-            &row.cfgname,
-            |namespace_oid, cfgname| {
-                catalog
-                    .ts_config_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTsConfigRow| {
-                        candidate.cfgnamespace == namespace_oid
-                            && candidate.cfgname.eq_ignore_ascii_case(cfgname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_ts_config_is_visible")?;
+    pgrust_executor::eval_pg_ts_config_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, ExecError> {
@@ -2619,142 +2346,23 @@ fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, Exe
 }
 
 fn eval_pg_encoding_to_char(values: &[Value]) -> Result<Value, ExecError> {
-    let encoding = match values {
-        [Value::Int16(value)] => i32::from(*value),
-        [Value::Int32(value)] => *value,
-        [Value::Int64(value)] => i32::try_from(*value).unwrap_or(-1),
-        [Value::Null] => return Ok(Value::Null),
-        _ => {
-            return Err(ExecError::TypeMismatch {
-                op: "pg_encoding_to_char",
-                left: values.first().cloned().unwrap_or(Value::Null),
-                right: Value::Int32(0),
-            });
-        }
-    };
-    let name = match encoding {
-        0 => "SQL_ASCII",
-        6 => "UTF8",
-        _ => "",
-    };
-    Ok(Value::Text(name.into()))
+    pgrust_executor::eval_pg_encoding_to_char(values).map_err(misc_builtin_error)
 }
 
 fn eval_pg_char_to_encoding(values: &[Value]) -> Result<Value, ExecError> {
-    let name = match values {
-        [value] if value.as_text().is_some() => value.as_text().expect("guarded above"),
-        [Value::Null] => return Ok(Value::Null),
-        _ => {
-            return Err(ExecError::TypeMismatch {
-                op: "pg_char_to_encoding",
-                left: values.first().cloned().unwrap_or(Value::Null),
-                right: Value::Text(String::new().into()),
-            });
-        }
-    };
-    let cleaned: String = name
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .map(|ch| ch.to_ascii_lowercase())
-        .collect();
-    let encoding = match cleaned.as_str() {
-        "" => -1,
-        "sqlascii" => 0,
-        "eucjp" => 1,
-        "euccn" => 2,
-        "euckr" => 3,
-        "euctw" => 4,
-        "eucjis2004" => 5,
-        "utf8" | "unicode" => 6,
-        "muleinternal" => 7,
-        "latin1" | "iso88591" => 8,
-        "latin2" | "iso88592" => 9,
-        "latin3" | "iso88593" => 10,
-        "latin4" | "iso88594" => 11,
-        "latin5" | "iso88599" => 12,
-        "latin6" | "iso885910" => 13,
-        "latin7" | "iso885913" => 14,
-        "latin8" | "iso885914" => 15,
-        "latin9" | "iso885915" => 16,
-        "latin10" | "iso885916" => 17,
-        "win1256" | "windows1256" => 18,
-        "win1258" | "windows1258" | "abc" | "tcvn" | "tcvn5712" | "vscii" => 19,
-        "win866" | "windows866" | "alt" => 20,
-        "win874" | "windows874" => 21,
-        "koi8r" | "koi8" => 22,
-        "win1251" | "windows1251" | "win" => 23,
-        "win1252" | "windows1252" => 24,
-        "iso88595" => 25,
-        "iso88596" => 26,
-        "iso88597" => 27,
-        "iso88598" => 28,
-        "win1250" | "windows1250" => 29,
-        "win1253" | "windows1253" => 30,
-        "win1254" | "windows1254" => 31,
-        "win1255" | "windows1255" => 32,
-        "win1257" | "windows1257" => 33,
-        "koi8u" => 34,
-        "sjis" | "shiftjis" | "mskanji" | "win932" | "windows932" => 35,
-        "big5" | "win950" | "windows950" => 36,
-        "gbk" | "win936" | "windows936" => 37,
-        "uhc" | "win949" | "windows949" => 38,
-        "gb18030" => 39,
-        "johab" => 40,
-        "shiftjis2004" => 41,
-        _ => -1,
-    };
-    Ok(Value::Int32(encoding))
+    pgrust_executor::eval_pg_char_to_encoding(values).map_err(misc_builtin_error)
 }
 
 fn eval_convert(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
-        [Value::Bytea(bytes), _, _] => Ok(Value::Bytea(bytes.clone())),
-        _ => Err(ExecError::TypeMismatch {
-            op: "convert",
-            left: values.first().cloned().unwrap_or(Value::Null),
-            right: values.get(1).cloned().unwrap_or(Value::Null),
-        }),
-    }
+    pgrust_executor::eval_convert(values).map_err(misc_builtin_error)
 }
 
 fn eval_greatest(values: &[Value]) -> Result<Value, ExecError> {
-    let mut best: Option<Value> = None;
-    for value in values {
-        if matches!(value, Value::Null) {
-            continue;
-        }
-        let replace = match best.as_ref() {
-            None => true,
-            Some(current) => {
-                compare_order_values(current, value, None, None, false)? == std::cmp::Ordering::Less
-            }
-        };
-        if replace {
-            best = Some(value.clone());
-        }
-    }
-    Ok(best.unwrap_or(Value::Null))
+    pgrust_executor::eval_greatest(values).map_err(misc_builtin_error)
 }
 
 fn eval_least(values: &[Value]) -> Result<Value, ExecError> {
-    let mut best: Option<Value> = None;
-    for value in values {
-        if matches!(value, Value::Null) {
-            continue;
-        }
-        let replace = match best.as_ref() {
-            None => true,
-            Some(current) => {
-                compare_order_values(current, value, None, None, false)?
-                    == std::cmp::Ordering::Greater
-            }
-        };
-        if replace {
-            best = Some(value.clone());
-        }
-    }
-    Ok(best.unwrap_or(Value::Null))
+    pgrust_executor::eval_least(values).map_err(misc_builtin_error)
 }
 
 fn lookup_system_binding(
@@ -6545,44 +6153,11 @@ fn eval_pg_column_toast_chunk_id_raw(raw: &[u8]) -> Result<Value, ExecError> {
 }
 
 fn eval_pg_column_toast_chunk_id_values(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null] => Ok(Value::Null),
-        [_] => Ok(Value::Null),
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "pg_column_toast_chunk_id(any)",
-            actual: format!("PgColumnToastChunkId({} args)", values.len()),
-        })),
-    }
+    pgrust_executor::eval_pg_column_toast_chunk_id_values(values).map_err(misc_builtin_error)
 }
 
 fn eval_num_nulls(values: &[Value], func_variadic: bool, count_nulls: bool) -> Value {
-    if func_variadic {
-        let Some(value) = values.first() else {
-            return Value::Int32(0);
-        };
-        if matches!(value, Value::Null) {
-            return Value::Null;
-        }
-        let Some(array) = crate::include::nodes::datum::array_value_from_value(value) else {
-            return Value::Int32(if matches!(value, Value::Null) == count_nulls {
-                1
-            } else {
-                0
-            });
-        };
-        let count = array
-            .elements
-            .iter()
-            .filter(|value| matches!(value, Value::Null) == count_nulls)
-            .count();
-        return Value::Int32(count as i32);
-    }
-    Value::Int32(
-        values
-            .iter()
-            .filter(|value| matches!(value, Value::Null) == count_nulls)
-            .count() as i32,
-    )
+    pgrust_executor::eval_num_nulls(values, func_variadic, count_nulls)
 }
 
 fn data_dir_path(ctx: &ExecutorContext) -> Result<std::path::PathBuf, ExecError> {
@@ -6955,100 +6530,25 @@ fn eval_pg_control_record(func: BuiltinScalarFunction, ctx: &ExecutorContext) ->
     Value::Record(crate::include::nodes::datum::RecordValue::anonymous(fields))
 }
 
-fn canonicalize_path_text(path: &str) -> String {
-    let absolute = path.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            if parts.last().is_some_and(|last| *last != "..") {
-                parts.pop();
-            } else if !absolute {
-                parts.push(part);
-            }
-        } else {
-            parts.push(part);
-        }
-    }
-    if absolute {
-        if parts.is_empty() {
-            "/".into()
-        } else {
-            format!("/{}", parts.join("/"))
-        }
-    } else if parts.is_empty() {
-        ".".into()
-    } else {
-        parts.join("/")
-    }
-}
-
 fn eval_test_canonicalize_path(values: &[Value]) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(malformed_expr_error("test_canonicalize_path"));
-    };
-    Ok(value
-        .as_text()
-        .map(canonicalize_path_text)
-        .map(Into::into)
-        .map(Value::Text)
-        .unwrap_or(Value::Null))
+    pgrust_executor::eval_test_canonicalize_path(values).map_err(misc_builtin_error)
 }
 
 fn eval_gist_translate_cmptype_common(values: &[Value]) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(malformed_expr_error("gist_translate_cmptype_common"));
-    };
-    let strategy = int32_arg(value, "gist_translate_cmptype_common")?;
-    Ok(Value::Int16(match strategy {
-        3 => 18,
-        7 => 3,
-        other => other as i16,
-    }))
+    pgrust_executor::eval_gist_translate_cmptype_common(values).map_err(misc_builtin_error)
 }
 
 fn eval_pg_log_backend_memory_contexts(values: &[Value]) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(malformed_expr_error("pg_log_backend_memory_contexts"));
-    };
-    let _pid = int32_arg(value, "pg_log_backend_memory_contexts")?;
-    Ok(Value::Bool(true))
+    pgrust_executor::eval_pg_log_backend_memory_contexts(values).map_err(misc_builtin_error)
 }
 
 fn eval_pg_current_logfile(values: &[Value]) -> Result<Value, ExecError> {
-    if values.len() > 1 {
-        return Err(malformed_expr_error("pg_current_logfile"));
-    }
-    Ok(Value::Null)
+    pgrust_executor::eval_pg_current_logfile(values).map_err(misc_builtin_error)
 }
 
-fn acl_item_parts(item: &str) -> Option<(&str, &str, &str)> {
-    let (grantee, rest) = item.split_once('=')?;
-    let (privileges, grantor) = rest.split_once('/')?;
-    Some((grantee, privileges, grantor))
-}
-
-#[derive(Clone, Copy)]
-struct PrivilegeSpec {
-    acl_char: char,
-    grant_option: bool,
-}
-
-#[derive(Clone, Copy)]
-enum RolePrivilegeSpec {
-    Usage,
-    Member,
-    Set,
-    Admin,
-}
-
-#[derive(Clone, Copy)]
-enum PrivilegeRelationKind {
-    Table,
-    Sequence,
-}
+type PrivilegeSpec = pgrust_executor::PrivilegeSpec;
+type RolePrivilegeSpec = pgrust_executor::RolePrivilegeSpec;
+type PrivilegeRelationKind = pgrust_executor::PrivilegeRelationKind;
 
 #[derive(Clone, Copy)]
 enum ColumnLookup {
@@ -7091,19 +6591,11 @@ fn parse_privilege_specs(
             right: Value::Text("".into()),
         });
     };
-    privilege_text
-        .split(',')
-        .map(str::trim)
-        .map(|chunk| {
-            map.iter()
-                .find(|(name, _, _)| chunk.eq_ignore_ascii_case(name))
-                .map(|(_, acl_char, grant_option)| PrivilegeSpec {
-                    acl_char: *acl_char,
-                    grant_option: *grant_option,
-                })
-                .ok_or_else(|| invalid_privilege_type_error(chunk))
-        })
-        .collect()
+    pgrust_executor::parse_privilege_specs_text(privilege_text, map).map_err(|err| match err {
+        pgrust_executor::PermissionError::InvalidPrivilegeType(privilege) => {
+            invalid_privilege_type_error(&privilege)
+        }
+    })
 }
 
 fn parse_role_privilege_specs(value: &Value) -> Result<Vec<RolePrivilegeSpec>, ExecError> {
@@ -7114,39 +6606,11 @@ fn parse_role_privilege_specs(value: &Value) -> Result<Vec<RolePrivilegeSpec>, E
             right: Value::Text("".into()),
         });
     };
-    privilege_text
-        .split(',')
-        .map(str::trim)
-        .map(|chunk| {
-            if chunk.eq_ignore_ascii_case("USAGE") {
-                Ok(RolePrivilegeSpec::Usage)
-            } else if chunk.eq_ignore_ascii_case("MEMBER") {
-                Ok(RolePrivilegeSpec::Member)
-            } else if chunk.eq_ignore_ascii_case("SET") {
-                Ok(RolePrivilegeSpec::Set)
-            } else if chunk.eq_ignore_ascii_case("USAGE WITH GRANT OPTION")
-                || chunk.eq_ignore_ascii_case("USAGE WITH ADMIN OPTION")
-                || chunk.eq_ignore_ascii_case("MEMBER WITH GRANT OPTION")
-                || chunk.eq_ignore_ascii_case("MEMBER WITH ADMIN OPTION")
-                || chunk.eq_ignore_ascii_case("SET WITH GRANT OPTION")
-                || chunk.eq_ignore_ascii_case("SET WITH ADMIN OPTION")
-            {
-                Ok(RolePrivilegeSpec::Admin)
-            } else {
-                Err(invalid_privilege_type_error(chunk))
-            }
-        })
-        .collect()
-}
-
-fn acl_privileges_contain(privileges: &str, spec: PrivilegeSpec) -> bool {
-    let mut chars = privileges.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == spec.acl_char {
-            return !spec.grant_option || matches!(chars.peek(), Some('*'));
+    pgrust_executor::parse_role_privilege_specs_text(privilege_text).map_err(|err| match err {
+        pgrust_executor::PermissionError::InvalidPrivilegeType(privilege) => {
+            invalid_privilege_type_error(&privilege)
         }
-    }
-    false
+    })
 }
 
 fn acl_grants_privilege_to_names(
@@ -7154,43 +6618,18 @@ fn acl_grants_privilege_to_names(
     effective_names: &std::collections::BTreeSet<String>,
     spec: PrivilegeSpec,
 ) -> bool {
-    acl.iter().any(|item| {
-        acl_item_parts(item).is_some_and(|(grantee, privileges, _)| {
-            effective_names.contains(grantee) && acl_privileges_contain(privileges, spec)
-        })
-    })
-}
-
-fn role_row_by_oid(authid_rows: &[PgAuthIdRow], role_oid: u32) -> Option<&PgAuthIdRow> {
-    authid_rows.iter().find(|role| role.oid == role_oid)
+    pgrust_executor::acl_grants_privilege_to_names(acl, effective_names, spec)
 }
 
 fn role_is_superuser(authid_rows: &[PgAuthIdRow], role_oid: u32) -> bool {
-    role_oid == crate::include::catalog::BOOTSTRAP_SUPERUSER_OID
-        || role_row_by_oid(authid_rows, role_oid).is_some_and(|role| role.rolsuper)
+    pgrust_executor::role_is_superuser(authid_rows, role_oid)
 }
 
 fn effective_role_names_for_oid(
     catalog: &dyn CatalogLookup,
     role_oid: u32,
 ) -> std::collections::BTreeSet<String> {
-    let roles = catalog.authid_rows();
-    let memberships = catalog.auth_members_rows();
-    let mut names = std::collections::BTreeSet::from([String::new()]);
-    if role_oid == 0 {
-        return names;
-    }
-    for role in &roles {
-        if crate::backend::catalog::role_memberships::has_effective_membership(
-            role_oid,
-            role.oid,
-            &roles,
-            &memberships,
-        ) {
-            names.insert(role.rolname.clone());
-        }
-    }
-    names
+    pgrust_executor::effective_role_names_for_oid(catalog, role_oid)
 }
 
 fn numeric_role_oid_from_value(value: &Value) -> Option<u32> {
@@ -7288,31 +6727,13 @@ fn relation_name_for_error(class_row: &PgClassRow) -> String {
     class_row.relname.clone()
 }
 
-fn is_protected_system_class(class_row: &PgClassRow) -> bool {
-    matches!(
-        class_row.relnamespace,
-        PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
-    ) && class_row.relkind != 'v'
-}
-
-fn system_catalog_public_select(class_row: &PgClassRow) -> bool {
-    class_row.relnamespace == PG_CATALOG_NAMESPACE_OID
-        && !matches!(
-            class_row.oid,
-            PG_AUTHID_RELATION_OID | PG_LARGEOBJECT_RELATION_OID
-        )
-}
-
 fn role_has_effective_membership(
     role_oid: u32,
     target_oid: u32,
     authid_rows: &[PgAuthIdRow],
     auth_members_rows: &[PgAuthMembersRow],
 ) -> bool {
-    if role_oid == 0 {
-        return false;
-    }
-    crate::backend::catalog::role_memberships::has_effective_membership(
+    pgrust_executor::role_has_effective_membership(
         role_oid,
         target_oid,
         authid_rows,
@@ -7326,61 +6747,7 @@ fn relation_acl_allows_role(
     class_row: &PgClassRow,
     spec: PrivilegeSpec,
 ) -> bool {
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if !role_is_superuser(&authid_rows, role_oid)
-        && is_protected_system_class(class_row)
-        && matches!(spec.acl_char, 'a' | 'w' | 'd' | 'D' | 'm' | 'U')
-    {
-        return false;
-    }
-    if role_is_superuser(&authid_rows, role_oid) {
-        return true;
-    }
-    if role_has_effective_membership(
-        role_oid,
-        class_row.relowner,
-        &authid_rows,
-        &auth_members_rows,
-    ) {
-        return true;
-    }
-    if spec.acl_char == 'r' && system_catalog_public_select(class_row) && !spec.grant_option {
-        return true;
-    }
-    if spec.acl_char == 'r'
-        && role_has_effective_membership(
-            role_oid,
-            PG_READ_ALL_DATA_OID,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    if matches!(spec.acl_char, 'a' | 'w' | 'd')
-        && role_has_effective_membership(
-            role_oid,
-            PG_WRITE_ALL_DATA_OID,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    if spec.acl_char == 'm'
-        && role_has_effective_membership(
-            role_oid,
-            PG_MAINTAIN_OID,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    class_row.relacl.as_deref().is_some_and(|acl| {
-        acl_grants_privilege_to_names(acl, &effective_role_names_for_oid(catalog, role_oid), spec)
-    })
+    pgrust_executor::relation_acl_allows_role(catalog, role_oid, class_row, spec)
 }
 
 fn namespace_row_from_value(
@@ -7405,54 +6772,13 @@ fn namespace_row_from_value(
     Ok((catalog.namespace_row_by_oid(oid), true))
 }
 
-fn schema_owner_default_acl(owner_name: &str) -> Vec<String> {
-    vec![format!("{owner_name}=UC/{owner_name}")]
-}
-
 fn schema_acl_allows_role(
     catalog: &dyn CatalogLookup,
     role_oid: u32,
     namespace: &PgNamespaceRow,
     spec: PrivilegeSpec,
 ) -> bool {
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if role_is_superuser(&authid_rows, role_oid)
-        || role_has_effective_membership(
-            role_oid,
-            namespace.nspowner,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    if spec.acl_char == 'U'
-        && !spec.grant_option
-        && (role_has_effective_membership(
-            role_oid,
-            PG_READ_ALL_DATA_OID,
-            &authid_rows,
-            &auth_members_rows,
-        ) || role_has_effective_membership(
-            role_oid,
-            PG_WRITE_ALL_DATA_OID,
-            &authid_rows,
-            &auth_members_rows,
-        ))
-    {
-        return true;
-    }
-    let owner_name = authid_rows
-        .iter()
-        .find(|row| row.oid == namespace.nspowner)
-        .map(|row| row.rolname.clone())
-        .unwrap_or_else(|| "postgres".into());
-    let acl = namespace
-        .nspacl
-        .clone()
-        .unwrap_or_else(|| schema_owner_default_acl(&owner_name));
-    acl_grants_privilege_to_names(&acl, &effective_role_names_for_oid(catalog, role_oid), spec)
+    pgrust_executor::schema_acl_allows_role(catalog, role_oid, namespace, spec)
 }
 
 fn eval_has_schema_privilege(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -7802,51 +7128,6 @@ fn eval_has_largeobject_privilege(
     }
 }
 
-fn membership_path_with(
-    start_member: u32,
-    target_role: u32,
-    rows: &[PgAuthMembersRow],
-    edge_allows: impl Fn(&PgAuthMembersRow) -> bool,
-) -> bool {
-    let mut pending = std::collections::VecDeque::from([start_member]);
-    let mut visited = std::collections::BTreeSet::new();
-    while let Some(member) = pending.pop_front() {
-        if !visited.insert(member) {
-            continue;
-        }
-        for edge in rows
-            .iter()
-            .filter(|row| row.member == member && edge_allows(row))
-        {
-            if edge.roleid == target_role {
-                return true;
-            }
-            pending.push_back(edge.roleid);
-        }
-    }
-    false
-}
-
-fn current_database_owner_oid(catalog: &dyn CatalogLookup, ctx: &ExecutorContext) -> Option<u32> {
-    catalog
-        .database_rows()
-        .into_iter()
-        .find(|row| row.datname.eq_ignore_ascii_case(&ctx.current_database_name))
-        .map(|row| row.datdba)
-}
-
-fn effective_pg_has_role_target(
-    target_oid: u32,
-    catalog: &dyn CatalogLookup,
-    ctx: &ExecutorContext,
-) -> Option<u32> {
-    if target_oid == PG_DATABASE_OWNER_OID {
-        current_database_owner_oid(catalog, ctx)
-    } else {
-        Some(target_oid)
-    }
-}
-
 fn role_privilege_allowed(
     role_oid: u32,
     target_oid: u32,
@@ -7854,46 +7135,13 @@ fn role_privilege_allowed(
     catalog: &dyn CatalogLookup,
     ctx: &ExecutorContext,
 ) -> bool {
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if role_is_superuser(&authid_rows, role_oid) {
-        return true;
-    }
-    let Some(effective_target_oid) = effective_pg_has_role_target(target_oid, catalog, ctx) else {
-        return false;
-    };
-    match spec {
-        RolePrivilegeSpec::Usage => role_has_effective_membership(
-            role_oid,
-            effective_target_oid,
-            &authid_rows,
-            &auth_members_rows,
-        ),
-        RolePrivilegeSpec::Member => {
-            role_oid == effective_target_oid
-                || membership_path_with(role_oid, effective_target_oid, &auth_members_rows, |_| {
-                    true
-                })
-        }
-        RolePrivilegeSpec::Set => {
-            role_oid == effective_target_oid
-                || membership_path_with(
-                    role_oid,
-                    effective_target_oid,
-                    &auth_members_rows,
-                    |edge| edge.set_option,
-                )
-        }
-        RolePrivilegeSpec::Admin => {
-            target_oid != PG_DATABASE_OWNER_OID
-                && membership_path_with(
-                    role_oid,
-                    effective_target_oid,
-                    &auth_members_rows,
-                    |edge| edge.admin_option,
-                )
-        }
-    }
+    pgrust_executor::role_privilege_allowed(
+        role_oid,
+        target_oid,
+        spec,
+        catalog,
+        &ctx.current_database_name,
+    )
 }
 
 fn eval_pg_has_role(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -8014,50 +7262,15 @@ pub(crate) fn proc_execute_acl_allows_role(
     row: &crate::include::catalog::PgProcRow,
     grant_option: bool,
 ) -> bool {
-    let explicit_acl = bootstrap_proc_acl_override(row.oid).or_else(|| row.proacl.clone());
-    if !grant_option && explicit_acl.is_none() {
-        return true;
-    }
-
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if role_is_superuser(&authid_rows, role_oid)
-        || role_has_effective_membership(role_oid, row.proowner, &authid_rows, &auth_members_rows)
-    {
-        return true;
-    }
-    let owner_name = authid_rows
-        .iter()
-        .find(|role| role.oid == row.proowner)
-        .map(|role| role.rolname.clone())
-        .unwrap_or_else(|| "postgres".into());
-    let acl = explicit_acl.unwrap_or_else(|| {
-        vec![
-            format!("{owner_name}=X/{owner_name}"),
-            format!("=X/{owner_name}"),
-        ]
-    });
-    let effective_names = effective_role_names_for_oid(catalog, role_oid);
-    acl_grants_privilege_to_names(
-        &acl,
-        &effective_names,
-        PrivilegeSpec {
-            acl_char: 'X',
-            grant_option,
-        },
-    )
+    pgrust_executor::proc_execute_acl_allows_role(catalog, role_oid, row, grant_option)
 }
 
 pub(crate) fn proc_execute_permission_denied(
     row: &crate::include::catalog::PgProcRow,
 ) -> ExecError {
-    let object_kind = match row.prokind {
-        'a' => "aggregate",
-        'p' => "procedure",
-        _ => "function",
-    };
+    let (object_kind, name) = pgrust_executor::proc_execute_permission_denied_detail(row);
     ExecError::DetailedError {
-        message: format!("permission denied for {object_kind} {}", row.proname),
+        message: format!("permission denied for {object_kind} {name}"),
         detail: None,
         hint: None,
         sqlstate: "42501",
@@ -8172,21 +7385,7 @@ fn type_row_for_privilege_value(
 }
 
 fn type_privilege_acl_row(catalog: &dyn CatalogLookup, row: PgTypeRow) -> PgTypeRow {
-    if row.typelem != 0 && row.typtype == 'b' {
-        if let Some(element) = catalog.type_by_oid(row.typelem) {
-            return type_privilege_acl_row(catalog, element);
-        }
-    }
-    if row.typtype == 'm'
-        && let Some(range_row) = catalog
-            .range_rows()
-            .into_iter()
-            .find(|range| range.rngmultitypid == row.oid)
-            .and_then(|range| catalog.type_by_oid(range.rngtypid))
-    {
-        return range_row;
-    }
-    row
+    pgrust_executor::type_privilege_acl_row(catalog, row)
 }
 
 fn type_acl_allows_role(
@@ -8195,30 +7394,7 @@ fn type_acl_allows_role(
     type_row: &PgTypeRow,
     spec: PrivilegeSpec,
 ) -> bool {
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if role_is_superuser(&authid_rows, role_oid)
-        || role_has_effective_membership(
-            role_oid,
-            type_row.typowner,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    let owner_name = authid_rows
-        .iter()
-        .find(|row| row.oid == type_row.typowner)
-        .map(|row| row.rolname.clone())
-        .unwrap_or_else(|| "postgres".into());
-    let acl = type_row.typacl.clone().unwrap_or_else(|| {
-        vec![
-            format!("{owner_name}=U/{owner_name}"),
-            format!("=U/{owner_name}"),
-        ]
-    });
-    acl_grants_privilege_to_names(&acl, &effective_role_names_for_oid(catalog, role_oid), spec)
+    pgrust_executor::type_acl_allows_role(catalog, role_oid, type_row, spec)
 }
 
 fn eval_has_type_privilege(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -9377,7 +8553,9 @@ fn check_setval_bounds(
     target: &SequenceCallTarget,
     value: i64,
 ) -> Result<(), ExecError> {
-    let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+    let Some(data) =
+        sequence_runtime(ctx)?.sequence_data(target.relation_oid, target.persistent)?
+    else {
         return Ok(());
     };
     if value < data.options.minvalue || value > data.options.maxvalue {
@@ -9394,7 +8572,7 @@ fn map_nextval_sequence_error(
     if let ExecError::DetailedError { message, .. } = &error
         && message.starts_with("nextval: reached")
         && let Ok(runtime) = sequence_runtime(ctx)
-        && let Some(data) = runtime.sequence_data(target.relation_oid)
+        && let Ok(Some(data)) = runtime.sequence_data(target.relation_oid, target.persistent)
     {
         return nextval_bounds_error(target, &data);
     }
@@ -9473,12 +8651,14 @@ fn currtid_view_source_relation(
             hint: None,
             sqlstate: "0A000",
         })?;
-    let query = stored_view_query_for_rule(rule.oid).ok_or_else(|| ExecError::DetailedError {
-        message: "currtid cannot handle views with no CTID".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "0A000",
-    })?;
+    let query = catalog
+        .stored_view_query_for_rule(rule.oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
     let target = query
         .target_list
         .iter()
@@ -9726,7 +8906,9 @@ fn eval_sequence_builtin_function(
             let catalog = sequence_catalog(ctx)?;
             let target = resolve_sequence_call_target(ctx, target)?;
             ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
-            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+            let Some(data) =
+                sequence_runtime(ctx)?.sequence_data(target.relation_oid, target.persistent)?
+            else {
                 return Ok(Value::Null);
             };
             Ok(Value::Record(RecordValue::anonymous(vec![
@@ -9753,7 +8935,9 @@ fn eval_sequence_builtin_function(
             ) {
                 return Ok(Value::Null);
             }
-            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+            let Some(data) =
+                sequence_runtime(ctx)?.sequence_data(target.relation_oid, target.persistent)?
+            else {
                 return Ok(Value::Null);
             };
             if data.state.is_called {
@@ -9766,7 +8950,9 @@ fn eval_sequence_builtin_function(
             let catalog = sequence_catalog(ctx)?;
             let target = resolve_sequence_call_target(ctx, target)?;
             ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
-            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+            let Some(data) =
+                sequence_runtime(ctx)?.sequence_data(target.relation_oid, target.persistent)?
+            else {
                 return Ok(Value::Null);
             };
             Ok(Value::Record(RecordValue::anonymous(vec![
@@ -10541,23 +9727,9 @@ fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
 }
 
 fn configured_current_schema_search_path(ctx: &ExecutorContext) -> Vec<String> {
-    ctx.gucs
-        .get("search_path")
-        .filter(|value| !value.trim().eq_ignore_ascii_case("default"))
-        .map(|value| {
-            value
-                .split(',')
-                .map(|schema| {
-                    schema
-                        .trim()
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .to_ascii_lowercase()
-                })
-                .filter(|schema| !schema.is_empty())
-                .collect()
-        })
-        .unwrap_or_else(|| vec!["public".into()])
+    pgrust_executor::configured_current_schema_search_path(
+        ctx.gucs.get("search_path").map(String::as_str),
+    )
 }
 
 fn current_schema_value(ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
@@ -10576,29 +9748,14 @@ fn current_schema_value(ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
     };
     let namespaces = catalog.namespace_rows();
     let catalog_search_path = catalog.search_path();
-    let mut search_path = if catalog_search_path.is_empty() {
-        configured_current_schema_search_path(ctx)
-    } else {
-        catalog_search_path
-    };
-    if search_path.len() > 1
-        && search_path
-            .first()
-            .is_some_and(|schema| schema == "pg_catalog")
-    {
-        search_path.remove(0);
-    }
-    search_path
-        .into_iter()
-        .filter(|schema| schema != "$user" && !current_schema_is_temp(schema))
-        .find(|schema| {
-            namespaces
-                .iter()
-                .any(|namespace| namespace.nspname.eq_ignore_ascii_case(schema))
-        })
-        .map(|schema| Value::Text(schema.into()))
-        .map(Ok)
-        .unwrap_or(Ok(Value::Null))
+    Ok(pgrust_executor::current_schema_from_search_path(
+        catalog_search_path,
+        configured_current_schema_search_path(ctx),
+        namespaces
+            .into_iter()
+            .map(|namespace| namespace.nspname.to_string())
+            .collect(),
+    ))
 }
 
 fn ensure_current_schema_temp_namespace(
@@ -10621,82 +9778,29 @@ fn ensure_current_schema_temp_namespace(
 }
 
 fn current_schema_is_temp(schema: &str) -> bool {
-    schema.eq_ignore_ascii_case("pg_temp") || schema.to_ascii_lowercase().starts_with("pg_temp_")
+    pgrust_executor::current_schema_is_temp(schema)
 }
 
 fn current_schemas_value(include_implicit: bool, ctx: &ExecutorContext) -> Value {
-    let mut schemas = Vec::<String>::new();
-    let mut push_schema = |schema: String| {
-        if !schemas
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(&schema))
-        {
-            schemas.push(schema);
-        }
-    };
-
-    if include_implicit {
-        if let Some(temp_schema) = current_temp_namespace_name(ctx) {
-            push_schema(temp_schema.to_string());
-        }
-        push_schema("pg_catalog".into());
-    }
-
-    let configured_path = ctx
-        .catalog
-        .as_deref()
-        .map(|catalog| catalog.search_path())
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| configured_current_schema_search_path(ctx));
-    for schema in configured_path {
-        if schema == "$user" {
-            continue;
-        }
-        if schema.eq_ignore_ascii_case("pg_temp") {
-            if include_implicit {
-                if let Some(temp_schema) = current_temp_namespace_name(ctx) {
-                    push_schema(temp_schema.to_string());
-                }
-            }
-            continue;
-        }
-        if schema.eq_ignore_ascii_case("pg_catalog") && include_implicit {
-            continue;
-        }
-        push_schema(schema);
-    }
-
-    Value::PgArray(
-        ArrayValue::from_1d(
-            schemas
-                .into_iter()
-                .map(|schema| Value::Text(schema.into()))
-                .collect(),
-        )
-        .with_element_type_oid(NAME_TYPE_OID),
+    pgrust_executor::current_schemas_value(
+        include_implicit,
+        current_temp_namespace_name(ctx).map(|name| name.to_string()),
+        ctx.catalog
+            .as_deref()
+            .map(|catalog| catalog.search_path())
+            .unwrap_or_default(),
+        configured_current_schema_search_path(ctx),
     )
 }
 
 fn pg_stat_get_backend_wal_value(values: &[Value], ctx: &ExecutorContext) -> Value {
-    let pid = values.first().and_then(|value| match value {
-        Value::Int32(value) => Some(*value),
-        Value::Int64(value) => i32::try_from(*value).ok(),
-        _ => None,
-    });
-    if pid != Some(ctx.client_id as i32) {
-        return Value::Null;
-    }
     let wal_bytes = ctx.session_stats.read().backend_wal_write_bytes();
-    Value::Record(crate::include::nodes::datum::RecordValue::anonymous(vec![
-        ("wal_records".into(), Value::Int64(0)),
-        ("wal_fpi".into(), Value::Int64(0)),
-        ("wal_bytes".into(), Value::Int64(wal_bytes)),
-        ("wal_buffers_full".into(), Value::Int64(0)),
-        (
-            "stats_reset".into(),
-            Value::TimestampTz(crate::backend::utils::activity::now_timestamptz()),
-        ),
-    ]))
+    pgrust_executor::pg_stat_get_backend_wal_value(
+        values,
+        ctx.client_id,
+        wal_bytes,
+        crate::backend::utils::activity::now_timestamptz(),
+    )
 }
 
 fn current_temp_namespace_oid(ctx: &ExecutorContext) -> Option<u32> {
@@ -10710,12 +9814,13 @@ fn current_temp_namespace_oid(ctx: &ExecutorContext) -> Option<u32> {
 }
 
 fn warn_time_precision_overflow(precision: Option<i32>, type_name: &str, suffix: &str) {
-    if let Some(precision) = precision
-        && precision > MAX_TIME_PRECISION
-    {
-        crate::backend::utils::misc::notices::push_warning(format!(
-            "{type_name}({precision}){suffix} precision reduced to maximum allowed, {MAX_TIME_PRECISION}"
-        ));
+    if let Some(warning) = pgrust_executor::time_precision_overflow_warning(
+        precision,
+        MAX_TIME_PRECISION,
+        type_name,
+        suffix,
+    ) {
+        crate::backend::utils::misc::notices::push_warning(warning);
     }
 }
 
@@ -13009,39 +12114,7 @@ fn eval_plpgsql_builtin_function(
 }
 
 fn eval_pg_sleep_function(values: &[Value]) -> Result<Value, ExecError> {
-    let seconds = match values {
-        [Value::Null] => return Ok(Value::Null),
-        [Value::Float64(value)] => *value,
-        [Value::Int32(value)] => *value as f64,
-        [Value::Int64(value)] => *value as f64,
-        [Value::Interval(value)] if value.is_finite() => value.cmp_key() as f64 / 1_000_000.0,
-        [value] if value.as_text().is_some() => {
-            let interval = parse_interval_text_value(value.as_text().unwrap())?;
-            interval.cmp_key() as f64 / 1_000_000.0
-        }
-        [other] => {
-            return Err(ExecError::TypeMismatch {
-                op: "pg_sleep",
-                left: other.clone(),
-                right: Value::Null,
-            });
-        }
-        _ => {
-            return Err(ExecError::TypeMismatch {
-                op: "pg_sleep",
-                left: values.first().cloned().unwrap_or(Value::Null),
-                right: values.get(1).cloned().unwrap_or(Value::Null),
-            });
-        }
-    };
-    if !seconds.is_finite() || seconds < 0.0 {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "non-negative finite sleep duration",
-            actual: seconds.to_string(),
-        }));
-    }
-    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
-    Ok(Value::Null)
+    pgrust_executor::eval_pg_sleep_function(values).map_err(misc_builtin_error)
 }
 
 fn eval_timezone_function(
@@ -13311,10 +12384,10 @@ fn eval_text_search_builtin_function(
             });
         }
         Ok([
-            expect_float8_arg(op, &items[0])?,
-            expect_float8_arg(op, &items[1])?,
-            expect_float8_arg(op, &items[2])?,
-            expect_float8_arg(op, &items[3])?,
+            pgrust_executor::expect_float8_arg(op, &items[0]).map_err(aggregate_support_error)?,
+            pgrust_executor::expect_float8_arg(op, &items[1]).map_err(aggregate_support_error)?,
+            pgrust_executor::expect_float8_arg(op, &items[2]).map_err(aggregate_support_error)?,
+            pgrust_executor::expect_float8_arg(op, &items[3]).map_err(aggregate_support_error)?,
         ])
     }
 
@@ -13796,294 +12869,6 @@ fn eval_text_search_builtin_function(
     }
 }
 
-fn eval_float8_accum_function(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
-        [state, newval] => {
-            let state = expect_float8_transition_state("float8_accum", state, 3)?;
-            let newval = expect_float8_arg("float8_accum", newval)?;
-            let [count, sum, sum_sq] = float8_accum_state(state[0], state[1], state[2], newval)?;
-            Ok(encode_float8_transition_state([count, sum, sum_sq]))
-        }
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "float8_accum(state, value)",
-            actual: format!("{} args", values.len()),
-        })),
-    }
-}
-
-fn eval_float8_combine_function(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
-        [left, right] => {
-            let left = expect_float8_transition_state("float8_combine", left, 3)?;
-            let right = expect_float8_transition_state("float8_combine", right, 3)?;
-            let [count, sum, sum_sq] =
-                float8_combine_state(left[0], left[1], left[2], right[0], right[1], right[2])?;
-            Ok(encode_float8_transition_state([count, sum, sum_sq]))
-        }
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "float8_combine(state1, state2)",
-            actual: format!("{} args", values.len()),
-        })),
-    }
-}
-
-fn eval_float8_regr_accum_function(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
-        [state, y, x] => {
-            let state = expect_float8_transition_state("float8_regr_accum", state, 6)?;
-            let y = expect_float8_arg("float8_regr_accum", y)?;
-            let x = expect_float8_arg("float8_regr_accum", x)?;
-            let [count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy] = float8_regr_accum_state(
-                state[0], state[1], state[2], state[3], state[4], state[5], y, x,
-            )?;
-            Ok(encode_float8_transition_state([
-                count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy,
-            ]))
-        }
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "float8_regr_accum(state, y, x)",
-            actual: format!("{} args", values.len()),
-        })),
-    }
-}
-
-fn eval_float8_regr_combine_function(values: &[Value]) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
-        [left, right] => {
-            let left = expect_float8_transition_state("float8_regr_combine", left, 6)?;
-            let right = expect_float8_transition_state("float8_regr_combine", right, 6)?;
-            let [count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy] = float8_regr_combine_state(
-                [left[0], left[1], left[2], left[3], left[4], left[5]],
-                [right[0], right[1], right[2], right[3], right[4], right[5]],
-            )?;
-            Ok(encode_float8_transition_state([
-                count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy,
-            ]))
-        }
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "float8_regr_combine(state1, state2)",
-            actual: format!("{} args", values.len()),
-        })),
-    }
-}
-
-fn expect_float8_transition_state(
-    op: &'static str,
-    value: &Value,
-    expected_len: usize,
-) -> Result<Vec<f64>, ExecError> {
-    let array = value
-        .as_array_value()
-        .ok_or_else(|| ExecError::TypeMismatch {
-            op,
-            left: value.clone(),
-            right: Value::PgArray(ArrayValue::empty().with_element_type_oid(FLOAT8_TYPE_OID)),
-        })?;
-    if array.dimensions.len() != 1 || array.dimensions[0].length != expected_len {
-        return Err(ExecError::DetailedError {
-            message: format!("{op} requires a float8[] transition state of length {expected_len}"),
-            detail: None,
-            hint: None,
-            sqlstate: "22023",
-        });
-    }
-    array
-        .elements
-        .iter()
-        .map(|element| expect_float8_arg(op, element))
-        .collect()
-}
-
-pub(crate) fn expect_float8_arg(op: &'static str, value: &Value) -> Result<f64, ExecError> {
-    match value {
-        Value::Int16(v) => Ok(f64::from(*v)),
-        Value::Int32(v) => Ok(f64::from(*v)),
-        Value::Int64(v) => Ok(*v as f64),
-        Value::Float64(v) => Ok(*v),
-        Value::Numeric(numeric) => match numeric {
-            NumericValue::PosInf => Ok(f64::INFINITY),
-            NumericValue::NegInf => Ok(f64::NEG_INFINITY),
-            NumericValue::NaN => Ok(f64::NAN),
-            NumericValue::Finite { coeff, scale, .. } => {
-                let coeff = coeff.to_f64().ok_or_else(|| ExecError::TypeMismatch {
-                    op,
-                    left: value.clone(),
-                    right: Value::Float64(0.0),
-                })?;
-                Ok(coeff / 10f64.powi(*scale as i32))
-            }
-        },
-        _ => Err(ExecError::TypeMismatch {
-            op,
-            left: value.clone(),
-            right: Value::Float64(0.0),
-        }),
-    }
-}
-
-fn encode_float8_transition_state<const N: usize>(values: [f64; N]) -> Value {
-    Value::PgArray(
-        ArrayValue::from_1d(values.into_iter().map(Value::Float64).collect())
-            .with_element_type_oid(FLOAT8_TYPE_OID),
-    )
-}
-
-fn float8_accum_state(
-    prev_count: f64,
-    prev_sum: f64,
-    mut prev_sum_sq: f64,
-    newval: f64,
-) -> Result<[f64; 3], ExecError> {
-    let count = prev_count + 1.0;
-    let sum = prev_sum + newval;
-    if prev_count > 0.0 {
-        let tmp = newval * count - sum;
-        prev_sum_sq += tmp * tmp / (count * prev_count);
-        if sum.is_infinite() || prev_sum_sq.is_infinite() {
-            if !prev_sum.is_infinite() && !newval.is_infinite() {
-                return Err(float8_overflow_error());
-            }
-            prev_sum_sq = f64::NAN;
-        }
-    } else if newval.is_nan() || newval.is_infinite() {
-        prev_sum_sq = f64::NAN;
-    }
-    Ok([count, sum, prev_sum_sq])
-}
-
-fn float8_combine_state(
-    count1: f64,
-    sum1: f64,
-    sum_sq1: f64,
-    count2: f64,
-    sum2: f64,
-    sum_sq2: f64,
-) -> Result<[f64; 3], ExecError> {
-    if count1 == 0.0 {
-        return Ok([count2, sum2, sum_sq2]);
-    }
-    if count2 == 0.0 {
-        return Ok([count1, sum1, sum_sq1]);
-    }
-    let count = count1 + count2;
-    let sum = sum1 + sum2;
-    let tmp = sum1 / count1 - sum2 / count2;
-    let sum_sq = sum_sq1 + sum_sq2 + count1 * count2 * tmp * tmp / count;
-    if sum_sq.is_infinite() && !sum_sq1.is_infinite() && !sum_sq2.is_infinite() {
-        return Err(float8_overflow_error());
-    }
-    Ok([count, sum, sum_sq])
-}
-
-pub(crate) fn float8_regr_accum_state(
-    prev_count: f64,
-    prev_sum_x: f64,
-    mut prev_sum_sq_x: f64,
-    prev_sum_y: f64,
-    mut prev_sum_sq_y: f64,
-    mut prev_sum_xy: f64,
-    new_y: f64,
-    new_x: f64,
-) -> Result<[f64; 6], ExecError> {
-    let count = prev_count + 1.0;
-    let sum_x = prev_sum_x + new_x;
-    let sum_y = prev_sum_y + new_y;
-    if prev_count > 0.0 {
-        let tmp_x = new_x * count - sum_x;
-        let tmp_y = new_y * count - sum_y;
-        let scale = 1.0 / (count * prev_count);
-        prev_sum_sq_x += tmp_x * tmp_x * scale;
-        prev_sum_sq_y += tmp_y * tmp_y * scale;
-        prev_sum_xy += tmp_x * tmp_y * scale;
-        if sum_x.is_infinite()
-            || prev_sum_sq_x.is_infinite()
-            || sum_y.is_infinite()
-            || prev_sum_sq_y.is_infinite()
-            || prev_sum_xy.is_infinite()
-        {
-            if ((sum_x.is_infinite() || prev_sum_sq_x.is_infinite())
-                && !prev_sum_x.is_infinite()
-                && !new_x.is_infinite())
-                || ((sum_y.is_infinite() || prev_sum_sq_y.is_infinite())
-                    && !prev_sum_y.is_infinite()
-                    && !new_y.is_infinite())
-                || (prev_sum_xy.is_infinite()
-                    && !prev_sum_x.is_infinite()
-                    && !new_x.is_infinite()
-                    && !prev_sum_y.is_infinite()
-                    && !new_y.is_infinite())
-            {
-                return Err(float8_overflow_error());
-            }
-            if prev_sum_sq_x.is_infinite() {
-                prev_sum_sq_x = f64::NAN;
-            }
-            if prev_sum_sq_y.is_infinite() {
-                prev_sum_sq_y = f64::NAN;
-            }
-            if prev_sum_xy.is_infinite() {
-                prev_sum_xy = f64::NAN;
-            }
-        }
-    } else {
-        if new_x.is_nan() || new_x.is_infinite() {
-            prev_sum_sq_x = f64::NAN;
-            prev_sum_xy = f64::NAN;
-        }
-        if new_y.is_nan() || new_y.is_infinite() {
-            prev_sum_sq_y = f64::NAN;
-            prev_sum_xy = f64::NAN;
-        }
-    }
-    Ok([
-        count,
-        sum_x,
-        prev_sum_sq_x,
-        sum_y,
-        prev_sum_sq_y,
-        prev_sum_xy,
-    ])
-}
-
-fn float8_regr_combine_state(left: [f64; 6], right: [f64; 6]) -> Result<[f64; 6], ExecError> {
-    let [count1, sum_x1, sum_sq_x1, sum_y1, sum_sq_y1, sum_xy1] = left;
-    let [count2, sum_x2, sum_sq_x2, sum_y2, sum_sq_y2, sum_xy2] = right;
-    if count1 == 0.0 {
-        return Ok(right);
-    }
-    if count2 == 0.0 {
-        return Ok(left);
-    }
-    let count = count1 + count2;
-    let sum_x = sum_x1 + sum_x2;
-    let sum_y = sum_y1 + sum_y2;
-    let tmp_x = sum_x1 / count1 - sum_x2 / count2;
-    let tmp_y = sum_y1 / count1 - sum_y2 / count2;
-    let sum_sq_x = sum_sq_x1 + sum_sq_x2 + count1 * count2 * tmp_x * tmp_x / count;
-    let sum_sq_y = sum_sq_y1 + sum_sq_y2 + count1 * count2 * tmp_y * tmp_y / count;
-    let sum_xy = sum_xy1 + sum_xy2 + count1 * count2 * tmp_x * tmp_y / count;
-    if (sum_sq_x.is_infinite() && !sum_sq_x1.is_infinite() && !sum_sq_x2.is_infinite())
-        || (sum_sq_y.is_infinite() && !sum_sq_y1.is_infinite() && !sum_sq_y2.is_infinite())
-        || (sum_xy.is_infinite() && !sum_xy1.is_infinite() && !sum_xy2.is_infinite())
-    {
-        return Err(float8_overflow_error());
-    }
-    Ok([count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy])
-}
-
-fn float8_overflow_error() -> ExecError {
-    ExecError::DetailedError {
-        message: "value out of range: overflow".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "22003",
-    }
-}
-
 fn pg_version_text() -> String {
     format!("PostgreSQL-compatible pgrust {}", env!("CARGO_PKG_VERSION"))
 }
@@ -14307,56 +13092,69 @@ fn pg_typeof_type_name(ty: SqlType, ctx: &ExecutorContext) -> String {
     sql_type_name(ty)
 }
 
-fn int4_array_from_client_ids(pids: Vec<crate::ClientId>) -> Value {
-    Value::PgArray(
-        ArrayValue::from_1d(
-            pids.into_iter()
-                .map(|pid| Value::Int32(pid as i32))
-                .collect(),
-        )
-        .with_element_type_oid(INT4_TYPE_OID),
-    )
-}
-
-fn client_id_arg(value: &Value, op: &'static str) -> Result<Option<crate::ClientId>, ExecError> {
-    match value {
-        Value::Null => Ok(None),
-        Value::Int32(pid) if *pid > 0 => Ok(Some(*pid as crate::ClientId)),
-        Value::Int32(_) => Ok(None),
-        other => Err(ExecError::TypeMismatch {
-            op,
-            left: other.clone(),
-            right: Value::Int32(0),
-        }),
+fn misc_builtin_error(error: pgrust_executor::MiscBuiltinError) -> ExecError {
+    match error {
+        pgrust_executor::MiscBuiltinError::MalformedCall { op } => malformed_expr_error(op),
+        pgrust_executor::MiscBuiltinError::TypeMismatch { op, left, right } => {
+            ExecError::TypeMismatch { op, left, right }
+        }
+        pgrust_executor::MiscBuiltinError::InvalidSleepDuration { actual } => {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "non-negative finite sleep duration",
+                actual,
+            })
+        }
+        pgrust_executor::MiscBuiltinError::UnexpectedToken { expected, actual } => {
+            ExecError::Parse(ParseError::UnexpectedToken { expected, actual })
+        }
+        pgrust_executor::MiscBuiltinError::NegativeTerminateTimeout => ExecError::DetailedError {
+            message: "\"timeout\" must not be negative".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22003",
+        },
+        pgrust_executor::MiscBuiltinError::Expr(error) => error.into(),
     }
 }
 
+fn catalog_builtin_error(error: pgrust_executor::CatalogBuiltinError) -> ExecError {
+    match error {
+        pgrust_executor::CatalogBuiltinError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+        pgrust_executor::CatalogBuiltinError::UnexpectedToken { expected, actual } => {
+            ExecError::Parse(ParseError::UnexpectedToken { expected, actual })
+        }
+        pgrust_executor::CatalogBuiltinError::TypeMismatch { op, left, right } => {
+            ExecError::TypeMismatch { op, left, right }
+        }
+        pgrust_executor::CatalogBuiltinError::Parse(error) => ExecError::Parse(error),
+    }
+}
+
+fn int4_array_from_client_ids(pids: Vec<crate::ClientId>) -> Value {
+    pgrust_executor::int4_array_from_client_ids(pids)
+}
+
+fn client_id_arg(value: &Value, op: &'static str) -> Result<Option<crate::ClientId>, ExecError> {
+    pgrust_executor::client_id_arg(value, op)
+        .map(|pid| pid.map(|pid| pid as crate::ClientId))
+        .map_err(misc_builtin_error)
+}
+
 fn pg_signal_permission_error(func: BuiltinScalarFunction, superuser_target: bool) -> ExecError {
-    let (message, detail) = match (func, superuser_target) {
-        (BuiltinScalarFunction::PgCancelBackend, true) => (
-            "permission denied to cancel query",
-            "Only roles with the SUPERUSER attribute may cancel queries of roles with the SUPERUSER attribute.",
-        ),
-        (BuiltinScalarFunction::PgCancelBackend, false) => (
-            "permission denied to cancel query",
-            "Only roles with privileges of the role whose query is being canceled or with privileges of the \"pg_signal_backend\" role may cancel this query.",
-        ),
-        (BuiltinScalarFunction::PgTerminateBackend, true) => (
-            "permission denied to terminate process",
-            "Only roles with the SUPERUSER attribute may terminate processes of roles with the SUPERUSER attribute.",
-        ),
-        (BuiltinScalarFunction::PgTerminateBackend, false) => (
-            "permission denied to terminate process",
-            "Only roles with privileges of the role whose process is being terminated or with privileges of the \"pg_signal_backend\" role may terminate this process.",
-        ),
-        _ => (
-            "permission denied to signal backend",
-            "Insufficient privileges.",
-        ),
-    };
+    let permission = pgrust_executor::backend_signal_permission(func, superuser_target);
     ExecError::DetailedError {
-        message: message.into(),
-        detail: Some(detail.into()),
+        message: permission.message.into(),
+        detail: Some(permission.detail.into()),
         hint: None,
         sqlstate: "42501",
     }
@@ -14367,33 +13165,15 @@ fn eval_pg_signal_backend_function(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let Some(pid_value) = values.first() else {
-        return Err(malformed_expr_error("pg_signal_backend"));
-    };
-    if matches!(pid_value, Value::Null) {
+    if values
+        .first()
+        .is_some_and(|value| matches!(value, Value::Null))
+    {
         return Ok(Value::Null);
     }
-    let op = match func {
-        BuiltinScalarFunction::PgCancelBackend => "pg_cancel_backend",
-        BuiltinScalarFunction::PgTerminateBackend => "pg_terminate_backend",
-        _ => "pg_signal_backend",
-    };
-    if matches!(func, BuiltinScalarFunction::PgTerminateBackend) {
-        let timeout = values
-            .get(1)
-            .map(|value| int64_arg(value, "pg_terminate_backend"))
-            .transpose()?
-            .unwrap_or(0);
-        if timeout < 0 {
-            return Err(ExecError::DetailedError {
-                message: "\"timeout\" must not be negative".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "22003",
-            });
-        }
-    }
-    let Some(target_pid) = client_id_arg(pid_value, op)? else {
+    let Some(target_pid) =
+        pgrust_executor::validate_backend_signal_args(func, values).map_err(misc_builtin_error)?
+    else {
         return Ok(Value::Bool(false));
     };
     let Some(db) = ctx.database.as_ref() else {
@@ -14537,10 +13317,9 @@ fn eval_pg_isolation_test_session_is_blocked(
         .unwrap_or_default();
     // :HACK: pgrust does not yet model PostgreSQL isolationtester injection
     // points or safe-snapshot waits, so this checks modeled lock blockers only.
-    Ok(Value::Bool(
-        blockers
-            .iter()
-            .any(|blocker| interesting_pids.contains(blocker)),
+    Ok(pgrust_executor::isolation_session_is_blocked(
+        &blockers,
+        &interesting_pids,
     ))
 }
 
@@ -14804,7 +13583,9 @@ pub(crate) fn eval_builtin_function(
         | BuiltinScalarFunction::GenRandomUuid
         | BuiltinScalarFunction::UuidV7
         | BuiltinScalarFunction::UuidExtractVersion
-        | BuiltinScalarFunction::UuidExtractTimestamp => eval_uuid_function(func, &values),
+        | BuiltinScalarFunction::UuidExtractTimestamp => {
+            pgrust_executor::eval_uuid_function(func, &values).map_err(misc_builtin_error)
+        }
         BuiltinScalarFunction::Xid8Cmp => match values.as_slice() {
             [Value::Xid8(left), Value::Xid8(right)] => Ok(Value::Int32(match left.cmp(right) {
                 std::cmp::Ordering::Less => -1,
@@ -15007,7 +13788,9 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::HashValueExtended(kind) => {
             eval_hash_builtin_function(kind, true, &values)
         }
-        BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
+        BuiltinScalarFunction::GetDatabaseEncoding => {
+            Ok(pgrust_executor::eval_get_database_encoding())
+        }
         BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
         BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
         BuiltinScalarFunction::Normalize => eval_unicode_normalize_function(&values),
@@ -15082,20 +13865,15 @@ pub(crate) fn eval_builtin_function(
             Ok(Value::Null)
         }
         BuiltinScalarFunction::PgStatGetBackendPid => {
-            let beid = values.first().and_then(|value| match value {
-                Value::Int32(value) => Some(*value),
-                Value::Int64(value) => i32::try_from(*value).ok(),
-                _ => None,
-            });
             let current_beid = ctx
                 .database
                 .as_ref()
                 .map(|db| db.temp_backend_id(ctx.client_id) as i32)
                 .unwrap_or(ctx.client_id as i32);
-            Ok(Value::Int32(
-                (beid == Some(current_beid))
-                    .then_some(ctx.client_id as i32)
-                    .unwrap_or(0),
+            Ok(pgrust_executor::pg_stat_get_backend_pid_value(
+                &values,
+                current_beid,
+                ctx.client_id,
             ))
         }
         BuiltinScalarFunction::PgStatGetBackendWal => {
@@ -15532,10 +14310,20 @@ pub(crate) fn eval_builtin_function(
         }),
         BuiltinScalarFunction::Float4Send => eval_float_send_function("float4send", &values, true),
         BuiltinScalarFunction::Float8Send => eval_float_send_function("float8send", &values, false),
-        BuiltinScalarFunction::Float8Accum => eval_float8_accum_function(&values),
-        BuiltinScalarFunction::Float8Combine => eval_float8_combine_function(&values),
-        BuiltinScalarFunction::Float8RegrAccum => eval_float8_regr_accum_function(&values),
-        BuiltinScalarFunction::Float8RegrCombine => eval_float8_regr_combine_function(&values),
+        BuiltinScalarFunction::Float8Accum => {
+            pgrust_executor::eval_float8_accum_function(&values).map_err(aggregate_support_error)
+        }
+        BuiltinScalarFunction::Float8Combine => {
+            pgrust_executor::eval_float8_combine_function(&values).map_err(aggregate_support_error)
+        }
+        BuiltinScalarFunction::Float8RegrAccum => {
+            pgrust_executor::eval_float8_regr_accum_function(&values)
+                .map_err(aggregate_support_error)
+        }
+        BuiltinScalarFunction::Float8RegrCombine => {
+            pgrust_executor::eval_float8_regr_combine_function(&values)
+                .map_err(aggregate_support_error)
+        }
         BuiltinScalarFunction::Erf => eval_unary_float_function("erf", &values, eval_erf),
         BuiltinScalarFunction::Erfc => eval_unary_float_function("erfc", &values, eval_erfc),
         BuiltinScalarFunction::Gamma => eval_unary_float_function("gamma", &values, eval_gamma),
@@ -15859,124 +14647,26 @@ fn eval_enum_function(
     result_type: Option<SqlType>,
     ctx: &ExecutorContext,
 ) -> Option<Result<Value, ExecError>> {
-    if !matches!(
-        func,
-        BuiltinScalarFunction::EnumFirst
-            | BuiltinScalarFunction::EnumLast
-            | BuiltinScalarFunction::EnumRange
-    ) {
-        return None;
-    }
-    Some(eval_enum_function_inner(func, values, result_type, ctx))
-}
-
-fn eval_enum_function_inner(
-    func: BuiltinScalarFunction,
-    values: &[Value],
-    result_type: Option<SqlType>,
-    ctx: &ExecutorContext,
-) -> Result<Value, ExecError> {
-    let enum_type = result_type
-        .map(|ty| if ty.is_array { ty.element_type() } else { ty })
-        .filter(|ty| matches!(ty.kind, SqlTypeKind::Enum) && ty.type_oid != 0)
-        .ok_or_else(|| ExecError::DetailedError {
-            message: "enum support function requires a concrete enum type".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42804",
-        })?;
-    let catalog = executor_catalog(ctx)?;
-    let enum_type_oid = if enum_type.typrelid != 0 {
-        enum_type.typrelid
-    } else {
-        enum_type.type_oid
-    };
-    let mut labels = catalog
-        .enum_rows()
-        .into_iter()
-        .filter(|row| row.enumtypid == enum_type_oid)
-        .collect::<Vec<_>>();
-    labels.sort_by(|left, right| {
-        left.enumsortorder
-            .partial_cmp(&right.enumsortorder)
-            .unwrap_or(Ordering::Equal)
-    });
-    match func {
-        BuiltinScalarFunction::EnumFirst => labels
-            .first()
-            .map(|row| {
-                ensure_enum_function_label_safe(catalog, enum_type_oid, row.oid)?;
-                Ok(Value::EnumOid(row.oid))
-            })
-            .unwrap_or(Ok(Value::Null)),
-        BuiltinScalarFunction::EnumLast => labels
-            .last()
-            .map(|row| {
-                ensure_enum_function_label_safe(catalog, enum_type_oid, row.oid)?;
-                Ok(Value::EnumOid(row.oid))
-            })
-            .unwrap_or(Ok(Value::Null)),
-        BuiltinScalarFunction::EnumRange => {
-            let lower = values.first().and_then(|value| match value {
-                Value::EnumOid(oid) => labels.iter().position(|row| row.oid == *oid),
-                Value::Null => Some(0),
-                _ => None,
-            });
-            let upper = values.get(1).and_then(|value| match value {
-                Value::EnumOid(oid) => labels.iter().position(|row| row.oid == *oid),
-                Value::Null => labels.len().checked_sub(1),
-                _ => None,
-            });
-            let (start, end) = match values.len() {
-                1 => (0, labels.len().saturating_sub(1)),
-                2 => (lower.unwrap_or(labels.len()), upper.unwrap_or(0)),
-                _ => {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "enum_range(anyenum [, anyenum])",
-                        actual: format!("enum_range({} args)", values.len()),
-                    }));
-                }
-            };
-            let items = if labels.is_empty() || start > end {
-                Vec::new()
-            } else {
-                let mut items = Vec::new();
-                for row in &labels[start..=end] {
-                    ensure_enum_function_label_safe(catalog, enum_type_oid, row.oid)?;
-                    items.push(Value::EnumOid(row.oid));
-                }
-                items
-            };
-            Ok(Value::PgArray(
-                ArrayValue::from_1d(items).with_element_type_oid(enum_type_oid),
-            ))
+    let catalog = match ctx.catalog.as_deref() {
+        Some(catalog) => catalog,
+        None if matches!(
+            func,
+            BuiltinScalarFunction::EnumFirst
+                | BuiltinScalarFunction::EnumLast
+                | BuiltinScalarFunction::EnumRange
+        ) =>
+        {
+            return Some(Err(ExecError::DetailedError {
+                message: "enum support function requires catalog context".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            }));
         }
-        _ => unreachable!(),
-    }
-}
-
-fn ensure_enum_function_label_safe(
-    catalog: &dyn CatalogLookup,
-    enum_type_oid: u32,
-    label_oid: u32,
-) -> Result<(), ExecError> {
-    if catalog.enum_label_is_committed(enum_type_oid, label_oid) {
-        return Ok(());
-    }
-    let label = catalog
-        .enum_label(enum_type_oid, label_oid)
-        .or_else(|| catalog.enum_label_by_oid(label_oid))
-        .unwrap_or_else(|| label_oid.to_string());
-    let type_name = catalog
-        .type_by_oid(enum_type_oid)
-        .map(|row| row.typname)
-        .unwrap_or_else(|| enum_type_oid.to_string());
-    Err(ExecError::DetailedError {
-        message: format!("unsafe use of new value \"{label}\" of enum type {type_name}"),
-        detail: None,
-        hint: Some("New enum values must be committed before they can be used.".into()),
-        sqlstate: "55P04",
-    })
+        None => return None,
+    };
+    pgrust_executor::eval_enum_catalog_function(func, values, result_type, catalog)
+        .map(|result| result.map_err(catalog_builtin_error))
 }
 
 fn eval_jsonb_contains(left: Value, right: Value) -> Result<Value, ExecError> {
@@ -16128,236 +14818,6 @@ fn eval_random_function(values: &[Value], ctx: &mut ExecutorContext) -> Result<V
     }
 }
 
-fn eval_uuid_function(func: BuiltinScalarFunction, values: &[Value]) -> Result<Value, ExecError> {
-    match func {
-        BuiltinScalarFunction::UuidIn => match values {
-            [Value::Text(text)] => Ok(Value::Uuid(super::expr_casts::parse_uuid_text(text)?)),
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_in",
-                left: value.clone(),
-                right: Value::Text("".into()),
-            }),
-            _ => Err(malformed_expr_error("uuid_in")),
-        },
-        BuiltinScalarFunction::UuidOut => match values {
-            [Value::Uuid(value)] => {
-                Ok(Value::Text(super::value_io::render_uuid_text(value).into()))
-            }
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_out",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_out")),
-        },
-        BuiltinScalarFunction::UuidRecv => match values {
-            [Value::Bytea(bytes)] if bytes.len() == 16 => {
-                Ok(Value::Uuid(bytes.as_slice().try_into().unwrap()))
-            }
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_recv",
-                left: value.clone(),
-                right: Value::Bytea(vec![0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_recv")),
-        },
-        BuiltinScalarFunction::UuidSend => match values {
-            [Value::Uuid(value)] => Ok(Value::Bytea(value.to_vec())),
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_send",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_send")),
-        },
-        BuiltinScalarFunction::UuidEq
-        | BuiltinScalarFunction::UuidNe
-        | BuiltinScalarFunction::UuidLt
-        | BuiltinScalarFunction::UuidLe
-        | BuiltinScalarFunction::UuidGt
-        | BuiltinScalarFunction::UuidGe
-        | BuiltinScalarFunction::UuidCmp => match values {
-            [Value::Uuid(left), Value::Uuid(right)] => Ok(match func {
-                BuiltinScalarFunction::UuidEq => Value::Bool(left == right),
-                BuiltinScalarFunction::UuidNe => Value::Bool(left != right),
-                BuiltinScalarFunction::UuidLt => Value::Bool(left < right),
-                BuiltinScalarFunction::UuidLe => Value::Bool(left <= right),
-                BuiltinScalarFunction::UuidGt => Value::Bool(left > right),
-                BuiltinScalarFunction::UuidGe => Value::Bool(left >= right),
-                BuiltinScalarFunction::UuidCmp => Value::Int32(match left.cmp(right) {
-                    std::cmp::Ordering::Less => -1,
-                    std::cmp::Ordering::Equal => 0,
-                    std::cmp::Ordering::Greater => 1,
-                }),
-                _ => unreachable!(),
-            }),
-            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
-            [left, right] => Err(ExecError::TypeMismatch {
-                op: "uuid",
-                left: left.clone(),
-                right: right.clone(),
-            }),
-            _ => Err(malformed_expr_error("uuid")),
-        },
-        BuiltinScalarFunction::UuidHash => match values {
-            [Value::Uuid(value)] => Ok(Value::Int32(uuid_hash(value) as i32)),
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_hash",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_hash")),
-        },
-        BuiltinScalarFunction::UuidHashExtended => match values {
-            [Value::Uuid(value), Value::Int64(seed)] => {
-                Ok(Value::Int64(uuid_hash_extended(value, *seed as u64) as i64))
-            }
-            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
-            [left, right] => Err(ExecError::TypeMismatch {
-                op: "uuid_hash_extended",
-                left: left.clone(),
-                right: right.clone(),
-            }),
-            _ => Err(malformed_expr_error("uuid_hash_extended")),
-        },
-        BuiltinScalarFunction::GenRandomUuid => match values {
-            [] => Ok(Value::Uuid(generate_uuid_v4())),
-            _ => Err(malformed_expr_error("gen_random_uuid")),
-        },
-        BuiltinScalarFunction::UuidV7 => match values {
-            [] => Ok(Value::Uuid(generate_uuid_v7(0))),
-            [Value::Interval(interval)] => {
-                let shift_millis = interval.time_micros / 1_000
-                    + i64::from(interval.days) * 86_400_000
-                    + i64::from(interval.months) * 30 * 86_400_000;
-                Ok(Value::Uuid(generate_uuid_v7(shift_millis)))
-            }
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuidv7",
-                left: value.clone(),
-                right: Value::Interval(crate::include::nodes::datum::IntervalValue::zero()),
-            }),
-            _ => Err(malformed_expr_error("uuidv7")),
-        },
-        BuiltinScalarFunction::UuidExtractVersion => match values {
-            [Value::Uuid(value)] => {
-                Ok(uuid_version(value).map(Value::Int16).unwrap_or(Value::Null))
-            }
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_extract_version",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_extract_version")),
-        },
-        BuiltinScalarFunction::UuidExtractTimestamp => match values {
-            [Value::Uuid(value)] if uuid_version(value) == Some(1) => uuid_v1_timestamp(value)
-                .map_or(Ok(Value::Null), |postgres_usecs| {
-                    Ok(Value::TimestampTz(
-                        crate::include::nodes::datetime::TimestampTzADT(postgres_usecs),
-                    ))
-                }),
-            [Value::Uuid(value)] if uuid_version(value) == Some(7) => Ok(Value::TimestampTz(
-                crate::include::nodes::datetime::TimestampTzADT(uuid_v7_timestamp(value)),
-            )),
-            [Value::Uuid(_)] | [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_extract_timestamp",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_extract_timestamp")),
-        },
-        _ => unreachable!("uuid dispatcher called for non-uuid builtin"),
-    }
-}
-
-fn generate_uuid_v4() -> [u8; 16] {
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    bytes
-}
-
-static UUID_V7_STATE: Mutex<(u64, u64)> = Mutex::new((0, 0));
-
-fn generate_uuid_v7(shift_millis: i64) -> [u8; 16] {
-    let millis = current_postgres_timestamp_usecs()
-        .saturating_div(1_000)
-        .saturating_add(10_957 * 86_400_000)
-        .saturating_add(shift_millis)
-        .max(0) as u64;
-    let mut bytes = [0u8; 16];
-    bytes[0] = (millis >> 40) as u8;
-    bytes[1] = (millis >> 32) as u8;
-    bytes[2] = (millis >> 24) as u8;
-    bytes[3] = (millis >> 16) as u8;
-    bytes[4] = (millis >> 8) as u8;
-    bytes[5] = millis as u8;
-    rand::thread_rng().fill_bytes(&mut bytes[6..]);
-    let sequence = {
-        let mut state = UUID_V7_STATE.lock().expect("uuidv7 state mutex poisoned");
-        if state.0 == millis {
-            state.1 = state.1.wrapping_add(1) & ((1u64 << 42) - 1);
-        } else {
-            state.0 = millis;
-            state.1 = 0;
-        }
-        state.1
-    };
-    bytes[6] = 0x70 | (((sequence >> 38) as u8) & 0x0f);
-    bytes[7] = (sequence >> 30) as u8;
-    bytes[8] = 0x80 | (((sequence >> 24) as u8) & 0x3f);
-    bytes[9] = (sequence >> 16) as u8;
-    bytes[10] = (sequence >> 8) as u8;
-    bytes[11] = sequence as u8;
-    bytes
-}
-
-fn uuid_version(value: &[u8; 16]) -> Option<i16> {
-    ((value[8] & 0xc0) == 0x80).then_some(i16::from(value[6] >> 4))
-}
-
-fn uuid_v1_timestamp(value: &[u8; 16]) -> Option<i64> {
-    let timestamp_100ns = ((u64::from(value[6] & 0x0f)) << 56)
-        | (u64::from(value[7]) << 48)
-        | (u64::from(value[4]) << 40)
-        | (u64::from(value[5]) << 32)
-        | (u64::from(value[0]) << 24)
-        | (u64::from(value[1]) << 16)
-        | (u64::from(value[2]) << 8)
-        | u64::from(value[3]);
-    let unix_100ns = timestamp_100ns.checked_sub(122_192_928_000_000_000)?;
-    let unix_usecs = i64::try_from(unix_100ns / 10).ok()?;
-    Some(unix_usecs - 10_957 * 86_400_000_000)
-}
-
-fn uuid_v7_timestamp(value: &[u8; 16]) -> i64 {
-    let millis = ((value[0] as i64) << 40)
-        | ((value[1] as i64) << 32)
-        | ((value[2] as i64) << 24)
-        | ((value[3] as i64) << 16)
-        | ((value[4] as i64) << 8)
-        | value[5] as i64;
-    millis * 1_000 - 10_957 * 86_400_000_000
-}
-
-fn uuid_hash(value: &[u8; 16]) -> u32 {
-    crate::backend::access::hash::support::hash_bytes_extended(value, 0) as u32
-}
-
-fn uuid_hash_extended(value: &[u8; 16], seed: u64) -> u64 {
-    crate::backend::access::hash::support::hash_bytes_extended(value, seed)
-}
-
 fn eval_random_normal_function(
     values: &[Value],
     ctx: &mut ExecutorContext,
@@ -16392,7 +14852,8 @@ fn eval_random_normal_function(
 fn eval_setseed_function(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
     match values {
         [value] => {
-            let seed = expect_float8_arg("setseed", value)?;
+            let seed = pgrust_executor::expect_float8_arg("setseed", value)
+                .map_err(aggregate_support_error)?;
             if !seed.is_finite() || !(-1.0..=1.0).contains(&seed) {
                 return Err(ExecError::DetailedError {
                     message: format!("setseed parameter {seed} is out of allowed range [-1,1]")

@@ -1,0 +1,16 @@
+[package]
+name = "pgrust_nodes"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+num-bigint = "0.4.6"
+num-integer = "0.1.46"
+num-traits = "0.2.19"
+pgrust_catalog_ids = { path = "../pgrust_catalog_ids" }
+pgrust_core = { path = "../pgrust_core" }
+serde = { version = "1", features = ["derive"] }

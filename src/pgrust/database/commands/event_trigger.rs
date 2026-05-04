@@ -4,18 +4,35 @@ use super::super::*;
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::parser::{
     AlterEventTriggerOwnerStatement, AlterEventTriggerRenameStatement, AlterEventTriggerStatement,
-    AlterTableTriggerMode, CatalogLookup, CommentOnEventTriggerStatement,
-    CreateEventTriggerStatement, DropEventTriggerStatement,
+    CatalogLookup, CommentOnEventTriggerStatement, CreateEventTriggerStatement,
+    DropEventTriggerStatement,
 };
 use crate::backend::utils::cache::evtcache::event_trigger_cache;
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PG_LANGUAGE_SQL_OID, PgEventTriggerRow};
 use crate::pl::plpgsql::{EventTriggerCallContext, execute_user_defined_event_trigger_function};
+use pgrust_commands::event_trigger::{
+    EVENT_TRIGGER_DISABLED, EVENT_TRIGGER_ENABLED_ORIGIN, event_trigger_enabled_char,
+    event_triggers_guc_enabled, normalize_event_trigger_when_clauses, validate_event_trigger_event,
+};
 
-const EVENT_TRIGGER_DISABLED: char = 'D';
-const EVENT_TRIGGER_ENABLED_ORIGIN: char = 'O';
-const EVENT_TRIGGER_ENABLED_REPLICA: char = 'R';
-const EVENT_TRIGGER_ENABLED_ALWAYS: char = 'A';
+fn event_trigger_error_to_exec(
+    error: pgrust_commands::event_trigger::EventTriggerError,
+) -> ExecError {
+    match error {
+        pgrust_commands::event_trigger::EventTriggerError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+    }
+}
 
 impl Database {
     pub(crate) fn fire_event_triggers_in_executor_context(
@@ -169,8 +186,9 @@ impl Database {
             Some((xid, cid)),
             EventTriggerSuperuserAction::Create(&stmt.trigger_name),
         )?;
-        validate_event_trigger_event(&stmt.event_name)?;
-        let tags = normalize_event_trigger_when_clauses(stmt)?;
+        validate_event_trigger_event(&stmt.event_name).map_err(event_trigger_error_to_exec)?;
+        let tags =
+            normalize_event_trigger_when_clauses(stmt).map_err(event_trigger_error_to_exec)?;
         let event_name = stmt.event_name.to_ascii_lowercase();
         let function = resolve_event_trigger_function(
             self,
@@ -669,159 +687,6 @@ fn current_role_missing_error() -> ExecError {
         hint: None,
         sqlstate: "42704",
     }
-}
-
-fn event_trigger_enabled_char(mode: AlterTableTriggerMode) -> char {
-    match mode {
-        AlterTableTriggerMode::Disable => EVENT_TRIGGER_DISABLED,
-        AlterTableTriggerMode::EnableOrigin => EVENT_TRIGGER_ENABLED_ORIGIN,
-        AlterTableTriggerMode::EnableReplica => EVENT_TRIGGER_ENABLED_REPLICA,
-        AlterTableTriggerMode::EnableAlways => EVENT_TRIGGER_ENABLED_ALWAYS,
-    }
-}
-
-fn event_triggers_guc_enabled(gucs: &std::collections::HashMap<String, String>) -> bool {
-    !gucs.get("event_triggers").is_some_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "off" | "false" | "0" | "no"
-        )
-    })
-}
-
-fn validate_event_trigger_event(event_name: &str) -> Result<(), ExecError> {
-    match event_name.to_ascii_lowercase().as_str() {
-        "ddl_command_start" | "ddl_command_end" | "sql_drop" | "login" | "table_rewrite" => Ok(()),
-        _ => Err(ExecError::DetailedError {
-            message: format!("unrecognized event name \"{}\"", event_name),
-            detail: None,
-            hint: None,
-            sqlstate: "42601",
-        }),
-    }
-}
-
-fn normalize_event_trigger_when_clauses(
-    stmt: &CreateEventTriggerStatement,
-) -> Result<Option<Vec<String>>, ExecError> {
-    let is_login_event = stmt.event_name.eq_ignore_ascii_case("login");
-    let mut saw_tag = false;
-    let mut tags = Vec::new();
-    for clause in &stmt.when_clauses {
-        if !clause.variable.eq_ignore_ascii_case("tag") {
-            return Err(ExecError::DetailedError {
-                message: format!("unrecognized filter variable \"{}\"", clause.variable),
-                detail: None,
-                hint: None,
-                sqlstate: "42601",
-            });
-        }
-        if saw_tag {
-            return Err(ExecError::DetailedError {
-                message: "filter variable \"tag\" specified more than once".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42601",
-            });
-        }
-        saw_tag = true;
-        for value in &clause.values {
-            if !is_login_event {
-                validate_event_trigger_tag(value)?;
-            }
-            tags.push(value.to_ascii_uppercase());
-        }
-    }
-    if is_login_event && saw_tag {
-        return Err(ExecError::DetailedError {
-            message: "tag filtering is not supported for login event triggers".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    if tags.is_empty() {
-        Ok(None)
-    } else {
-        tags.sort();
-        tags.dedup();
-        Ok(Some(tags))
-    }
-}
-
-fn validate_event_trigger_tag(tag: &str) -> Result<(), ExecError> {
-    let normalized = tag.to_ascii_uppercase();
-    if matches!(
-        normalized.as_str(),
-        "CREATE EVENT TRIGGER"
-            | "ALTER EVENT TRIGGER"
-            | "DROP EVENT TRIGGER"
-            | "CREATE DATABASE"
-            | "DROP DATABASE"
-            | "CREATE TABLESPACE"
-            | "DROP TABLESPACE"
-            | "CREATE ROLE"
-            | "ALTER ROLE"
-            | "DROP ROLE"
-    ) {
-        return Err(ExecError::DetailedError {
-            message: format!("event triggers are not supported for {}", tag),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    if !event_trigger_tag_is_known(&normalized) {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "filter value \"{}\" not recognized for filter variable \"tag\"",
-                tag
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "42601",
-        });
-    }
-    Ok(())
-}
-
-fn event_trigger_tag_is_known(tag: &str) -> bool {
-    matches!(
-        tag,
-        "ALTER DEFAULT PRIVILEGES"
-            | "ALTER POLICY"
-            | "ALTER TABLE"
-            | "COMMENT"
-            | "CREATE AGGREGATE"
-            | "CREATE FOREIGN DATA WRAPPER"
-            | "CREATE FUNCTION"
-            | "CREATE INDEX"
-            | "CREATE MATERIALIZED VIEW"
-            | "CREATE OPERATOR CLASS"
-            | "CREATE OPERATOR FAMILY"
-            | "CREATE POLICY"
-            | "CREATE PROCEDURE"
-            | "CREATE SCHEMA"
-            | "CREATE SERVER"
-            | "CREATE TABLE"
-            | "CREATE TYPE"
-            | "CREATE USER MAPPING"
-            | "CREATE VIEW"
-            | "DROP AGGREGATE"
-            | "DROP FUNCTION"
-            | "DROP INDEX"
-            | "DROP MATERIALIZED VIEW"
-            | "DROP OWNED"
-            | "DROP POLICY"
-            | "DROP PROCEDURE"
-            | "DROP ROUTINE"
-            | "DROP SCHEMA"
-            | "DROP TABLE"
-            | "DROP VIEW"
-            | "GRANT"
-            | "REINDEX"
-            | "REVOKE"
-    )
 }
 
 fn resolve_event_trigger_function(

@@ -91,35 +91,17 @@ struct SequenceCacheBlock {
 }
 
 impl SequenceRuntime {
-    pub(crate) fn load(
-        base_dir: Option<&Path>,
-        catalog: &CatalogStore,
-    ) -> Result<Self, CatalogError> {
-        let data_dir = base_dir.map(Path::to_path_buf);
-        let mut data = HashMap::new();
-        for (_, entry) in catalog
-            .catalog_snapshot()?
-            .entries()
-            // PostgreSQL treats temp relation state as backend-local. Stale
-            // temp sequence catalog rows are cleaned when the temp namespace is
-            // reused, not loaded as durable sequence state during database open.
-            .filter(|(_, entry)| entry.relkind == 'S' && entry.relpersistence != 't')
-        {
-            let payload = load_sequence_file(data_dir.as_deref(), entry.relation_oid)?;
-            data.insert(entry.relation_oid, payload);
-        }
-        Ok(Self {
-            data_dir,
-            data: RwLock::new(data),
-            currvals: RwLock::new(HashMap::new()),
-            lastvals: RwLock::new(HashMap::new()),
-            caches: RwLock::new(HashMap::new()),
-        })
+    pub(crate) fn new_durable(base_dir: &Path) -> Self {
+        Self::new(Some(base_dir.to_path_buf()))
     }
 
     pub(crate) fn new_ephemeral() -> Self {
+        Self::new(None)
+    }
+
+    fn new(data_dir: Option<PathBuf>) -> Self {
         Self {
-            data_dir: None,
+            data_dir,
             data: RwLock::new(HashMap::new()),
             currvals: RwLock::new(HashMap::new()),
             lastvals: RwLock::new(HashMap::new()),
@@ -146,16 +128,28 @@ impl SequenceRuntime {
         }
     }
 
-    pub(crate) fn sequence_data(&self, relation_oid: u32) -> Option<SequenceData> {
-        self.data.read().get(&relation_oid).cloned()
+    fn ensure_loaded(&self, relation_oid: u32, persistent: bool) -> Result<(), ExecError> {
+        if self.data.read().contains_key(&relation_oid) {
+            return Ok(());
+        }
+        if !persistent {
+            return Ok(());
+        }
+        let Some(data_dir) = self.data_dir.as_deref() else {
+            return Ok(());
+        };
+        let payload = load_sequence_file(data_dir, relation_oid).map_err(sequence_io_error)?;
+        self.data.write().entry(relation_oid).or_insert(payload);
+        Ok(())
     }
 
-    pub(crate) fn all_sequences(&self) -> Vec<(u32, SequenceData)> {
-        self.data
-            .read()
-            .iter()
-            .map(|(oid, data)| (*oid, data.clone()))
-            .collect()
+    pub(crate) fn sequence_data(
+        &self,
+        relation_oid: u32,
+        persistent: bool,
+    ) -> Result<Option<SequenceData>, ExecError> {
+        self.ensure_loaded(relation_oid, persistent)?;
+        Ok(self.data.read().get(&relation_oid).cloned())
     }
 
     pub(crate) fn apply_upsert(
@@ -258,13 +252,21 @@ impl SequenceRuntime {
         self.clear_currvals_for_client(client_id);
     }
 
-    pub(crate) fn current_row(&self, relation_oid: u32) -> Option<Vec<Value>> {
-        let state = self.data.read().get(&relation_oid)?.state;
-        Some(vec![
+    pub(crate) fn current_row(
+        &self,
+        relation_oid: u32,
+        persistent: bool,
+    ) -> Result<Option<Vec<Value>>, ExecError> {
+        self.ensure_loaded(relation_oid, persistent)?;
+        let state = match self.data.read().get(&relation_oid) {
+            Some(data) => data.state,
+            None => return Ok(None),
+        };
+        Ok(Some(vec![
             Value::Int64(state.last_value),
             Value::Int64(state.log_cnt),
             Value::Bool(state.is_called),
-        ])
+        ]))
     }
 
     pub(crate) fn next_value(
@@ -322,6 +324,7 @@ impl SequenceRuntime {
         relation_oid: u32,
         persistent: bool,
     ) -> Result<(i64, Option<SequenceCacheBlock>), ExecError> {
+        self.ensure_loaded(relation_oid, persistent)?;
         let mut data = self.data.write();
         let entry = data
             .get_mut(&relation_oid)
@@ -341,6 +344,7 @@ impl SequenceRuntime {
         relation_oid: u32,
         persistent: bool,
     ) -> Result<i64, ExecError> {
+        self.ensure_loaded(relation_oid, persistent)?;
         let mut data = self.data.write();
         let entry = data
             .get_mut(&relation_oid)
@@ -395,6 +399,7 @@ impl SequenceRuntime {
         is_called: bool,
         persistent: bool,
     ) -> Result<i64, ExecError> {
+        self.ensure_loaded(relation_oid, persistent)?;
         {
             let mut data = self.data.write();
             let entry = data
@@ -960,14 +965,16 @@ fn sequence_file_path(base_dir: Option<&Path>, relation_oid: u32) -> Option<Path
     sequence_dir(base_dir).map(|dir| dir.join(format!("{relation_oid}.json")))
 }
 
-fn load_sequence_file(
-    base_dir: Option<&Path>,
-    relation_oid: u32,
-) -> Result<SequenceData, CatalogError> {
-    let path = sequence_file_path(base_dir, relation_oid)
-        .ok_or_else(|| CatalogError::Corrupt("durable sequence requires data directory"))?;
-    let text = fs::read_to_string(&path).map_err(|e| CatalogError::Io(e.to_string()))?;
-    serde_json::from_str(&text).map_err(|_| CatalogError::Corrupt("invalid sequence state file"))
+fn load_sequence_file(base_dir: &Path, relation_oid: u32) -> Result<SequenceData, std::io::Error> {
+    let path = sequence_file_path(Some(base_dir), relation_oid)
+        .ok_or_else(|| std::io::Error::other("durable sequence requires data directory"))?;
+    let text = fs::read_to_string(&path)?;
+    serde_json::from_str(&text).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid sequence state file",
+        )
+    })
 }
 
 fn write_sequence_file(

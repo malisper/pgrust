@@ -1,0 +1,15 @@
+[package]
+name = "pgrust_catalog_data"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pgrust_catalog_ids = { path = "../pgrust_catalog_ids" }
+pgrust_core = { path = "../pgrust_core" }
+pgrust_nodes = { path = "../pgrust_nodes" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }

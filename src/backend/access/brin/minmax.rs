@@ -1,215 +1,43 @@
-use std::cmp::Ordering;
+// :HACK: root compatibility shim while BRIN minmax runtime moves into `pgrust_access`.
+use pgrust_access::brin::minmax as access_minmax;
+use pgrust_access::{AccessError, AccessResult};
 
+use crate::backend::access::RootAccessServices;
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::compare_order_values;
 use crate::include::access::brin_internal::BrinValues;
-use crate::include::catalog::{
-    BRIN_MINMAX_ADD_VALUE_PROC_OID, BRIN_MINMAX_CONSISTENT_PROC_OID, BRIN_MINMAX_OPCINFO_PROC_OID,
-    BRIN_MINMAX_UNION_PROC_OID,
-};
 use crate::include::nodes::datum::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BrinMinmaxStrategy {
-    Less = 1,
-    LessEqual = 2,
-    Equal = 3,
-    GreaterEqual = 4,
-    Greater = 5,
-}
+pub(crate) use access_minmax::BrinMinmaxStrategy;
 
-impl TryFrom<i16> for BrinMinmaxStrategy {
-    type Error = CatalogError;
-
-    fn try_from(value: i16) -> Result<Self, Self::Error> {
-        match value {
-            1 => Ok(Self::Less),
-            2 => Ok(Self::LessEqual),
-            3 => Ok(Self::Equal),
-            4 => Ok(Self::GreaterEqual),
-            5 => Ok(Self::Greater),
-            _ => Err(CatalogError::Io(format!(
-                "unsupported BRIN minmax strategy {value}"
-            ))),
+fn catalog_error(error: AccessError) -> CatalogError {
+    match error {
+        AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        AccessError::Interrupted(reason) => CatalogError::Interrupted(reason),
+        AccessError::Io(message) => CatalogError::Io(message),
+        AccessError::UniqueViolation(message) => CatalogError::UniqueViolation(message),
+        AccessError::Scalar(message) | AccessError::Unsupported(message) => {
+            CatalogError::Io(message)
         }
     }
 }
 
-fn ensure_support_proc(actual: u32, expected: u32, label: &str) -> Result<(), CatalogError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(CatalogError::Io(format!(
-            "unsupported BRIN minmax {label} proc {actual}"
-        )))
-    }
+fn catalog_result<T>(result: AccessResult<T>) -> Result<T, CatalogError> {
+    result.map_err(catalog_error)
 }
 
-fn ensure_summary_shape(column: &BrinValues) -> Result<(), CatalogError> {
-    if column.values.len() == 2 {
-        Ok(())
-    } else {
-        Err(CatalogError::Corrupt(
-            "BRIN minmax summary columns must store exactly two values",
-        ))
-    }
+pub(crate) fn minmax_strategy_from_i16(value: i16) -> Result<BrinMinmaxStrategy, CatalogError> {
+    BrinMinmaxStrategy::try_from(value).map_err(catalog_error)
 }
 
-pub(crate) fn compare_minmax_values(left: &Value, right: &Value) -> Result<Ordering, CatalogError> {
-    match (left, right) {
-        (Value::Int16(a), Value::Int16(b)) => Ok(a.cmp(b)),
-        (Value::InternalChar(a), Value::InternalChar(b)) => Ok(a.cmp(b)),
-        (Value::Null, _) | (_, Value::Null) => Err(CatalogError::Corrupt(
-            "BRIN minmax comparisons cannot use NULL values",
-        )),
-        _ => compare_order_values(left, right, None, Some(false), false)
-            .map_err(|err| CatalogError::Io(format!("BRIN minmax comparison failed: {err:?}"))),
-    }
-}
-
-fn interval_contains_value(
-    lower: &Value,
-    upper: &Value,
-    value: &Value,
-) -> Result<bool, CatalogError> {
-    Ok(compare_minmax_values(lower, value)? != Ordering::Greater
-        && compare_minmax_values(upper, value)? != Ordering::Less)
-}
-
-fn normalize_interval(lower: Value, upper: Value) -> Result<(Value, Value), CatalogError> {
-    if compare_minmax_values(&lower, &upper)? == Ordering::Greater {
-        Ok((upper, lower))
-    } else {
-        Ok((lower, upper))
-    }
-}
-
-fn minmax_multi_intervals(column: &BrinValues) -> Result<Vec<(Value, Value)>, CatalogError> {
-    if column.values.len() < 2 {
-        return Err(CatalogError::Corrupt(
-            "BRIN minmax-multi summary columns must store at least two values",
-        ));
-    }
-    let mut intervals = Vec::new();
-    for pair in column.values.chunks(2) {
-        let [lower, upper] = pair else {
-            continue;
-        };
-        if matches!(lower, Value::Null) || matches!(upper, Value::Null) {
-            continue;
-        }
-        let interval = normalize_interval(lower.clone(), upper.clone())?;
-        if !intervals
-            .iter()
-            .any(|existing: &(Value, Value)| existing.0 == interval.0 && existing.1 == interval.1)
-        {
-            intervals.push(interval);
-        }
-    }
-    intervals.sort_by(|left, right| {
-        compare_minmax_values(&left.0, &right.0)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| compare_minmax_values(&left.1, &right.1).unwrap_or(Ordering::Equal))
-    });
-    Ok(intervals)
-}
-
-fn merge_interval_at(
-    intervals: &mut Vec<(Value, Value)>,
-    index: usize,
-) -> Result<(), CatalogError> {
-    let right = intervals.remove(index + 1);
-    let left = &mut intervals[index];
-    if compare_minmax_values(&right.1, &left.1)? == Ordering::Greater {
-        left.1 = right.1;
-    }
-    Ok(())
-}
-
-fn minmax_multi_distance_key(value: &Value) -> Option<i128> {
-    match value {
-        Value::Int16(value) => Some(i128::from(*value)),
-        Value::Int32(value) => Some(i128::from(*value)),
-        Value::EnumOid(value) => Some(i128::from(*value)),
-        Value::Int64(value) | Value::Money(value) => Some(i128::from(*value)),
-        Value::Date(value) => Some(i128::from(value.0)),
-        Value::Time(value) => Some(i128::from(value.0)),
-        Value::Timestamp(value) => Some(i128::from(value.0)),
-        Value::TimestampTz(value) => Some(i128::from(value.0)),
-        Value::Interval(value) => Some(value.cmp_key()),
-        Value::PgLsn(value) => Some(i128::from(*value)),
-        Value::Tid(value) => Some(
-            i128::from(value.block_number) * i128::from(u16::MAX) + i128::from(value.offset_number),
-        ),
-        Value::Uuid(bytes) => Some(u128::from_be_bytes(*bytes).min(i128::MAX as u128) as i128),
-        _ => None,
-    }
-}
-
-fn minmax_multi_gap(left: &(Value, Value), right: &(Value, Value)) -> Option<i128> {
-    let upper = minmax_multi_distance_key(&left.1)?;
-    let lower = minmax_multi_distance_key(&right.0)?;
-    Some(lower.saturating_sub(upper).max(0))
-}
-
-fn closest_interval_pair(intervals: &[(Value, Value)]) -> usize {
-    intervals
-        .windows(2)
-        .enumerate()
-        .filter_map(|(index, pair)| minmax_multi_gap(&pair[0], &pair[1]).map(|gap| (index, gap)))
-        .min_by_key(|(_, gap)| *gap)
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
-fn compact_intervals(
-    intervals: &mut Vec<(Value, Value)>,
-    capacity: usize,
-) -> Result<(), CatalogError> {
-    intervals.sort_by(|left, right| {
-        compare_minmax_values(&left.0, &right.0)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| compare_minmax_values(&left.1, &right.1).unwrap_or(Ordering::Equal))
-    });
-    let mut index = 0;
-    while index + 1 < intervals.len() {
-        if compare_minmax_values(&intervals[index + 1].0, &intervals[index].1)? != Ordering::Greater
-        {
-            merge_interval_at(intervals, index)?;
-        } else {
-            index += 1;
-        }
-    }
-    while intervals.len() > capacity {
-        let index = closest_interval_pair(intervals);
-        merge_interval_at(intervals, index)?;
-    }
-    Ok(())
-}
-
-fn store_minmax_multi_intervals(column: &mut BrinValues, intervals: &[(Value, Value)]) {
-    if intervals.is_empty() {
-        column.all_nulls = true;
-        column.values.fill(Value::Null);
-        return;
-    }
-    let mut stored = Vec::with_capacity(column.values.len());
-    for (lower, upper) in intervals {
-        if stored.len() + 1 >= column.values.len() {
-            break;
-        }
-        stored.push(lower.clone());
-        stored.push(upper.clone());
-    }
-    while stored.len() < column.values.len() {
-        let (lower, upper) = intervals.last().expect("intervals is not empty");
-        stored.push(lower.clone());
-        if stored.len() < column.values.len() {
-            stored.push(upper.clone());
-        }
-    }
-    column.values = stored;
-    column.all_nulls = false;
+pub(crate) fn compare_minmax_values(
+    left: &Value,
+    right: &Value,
+) -> Result<std::cmp::Ordering, CatalogError> {
+    catalog_result(access_minmax::compare_minmax_values(
+        left,
+        right,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn minmax_multi_add_value(
@@ -217,27 +45,12 @@ pub(crate) fn minmax_multi_add_value(
     new_value: &Value,
     is_null: bool,
 ) -> Result<bool, CatalogError> {
-    if is_null || matches!(new_value, Value::Null) {
-        return Err(CatalogError::Corrupt(
-            "BRIN minmax-multi add_value received NULL input",
-        ));
-    }
-    let capacity = (column.values.len() / 2).max(1);
-    if column.all_nulls {
-        store_minmax_multi_intervals(column, &[(new_value.clone(), new_value.clone())]);
-        return Ok(true);
-    }
-
-    let mut intervals = minmax_multi_intervals(column)?;
-    for (lower, upper) in &intervals {
-        if interval_contains_value(lower, upper, new_value)? {
-            return Ok(false);
-        }
-    }
-    intervals.push((new_value.clone(), new_value.clone()));
-    compact_intervals(&mut intervals, capacity)?;
-    store_minmax_multi_intervals(column, &intervals);
-    Ok(true)
+    catalog_result(access_minmax::minmax_multi_add_value(
+        column,
+        new_value,
+        is_null,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn minmax_multi_consistent(
@@ -245,56 +58,27 @@ pub(crate) fn minmax_multi_consistent(
     strategy: BrinMinmaxStrategy,
     scan_value: &Value,
 ) -> Result<bool, CatalogError> {
-    if column.all_nulls {
-        return Ok(false);
-    }
-    for (lower, upper) in minmax_multi_intervals(column)? {
-        let matches = match strategy {
-            BrinMinmaxStrategy::Less => {
-                compare_minmax_values(&lower, scan_value)? == Ordering::Less
-            }
-            BrinMinmaxStrategy::LessEqual => {
-                compare_minmax_values(&lower, scan_value)? != Ordering::Greater
-            }
-            BrinMinmaxStrategy::Equal => interval_contains_value(&lower, &upper, scan_value)?,
-            BrinMinmaxStrategy::GreaterEqual => {
-                compare_minmax_values(&upper, scan_value)? != Ordering::Less
-            }
-            BrinMinmaxStrategy::Greater => {
-                compare_minmax_values(&upper, scan_value)? == Ordering::Greater
-            }
-        };
-        if matches {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    catalog_result(access_minmax::minmax_multi_consistent(
+        column,
+        strategy,
+        scan_value,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn minmax_multi_union(
     left: &mut BrinValues,
     right: &BrinValues,
 ) -> Result<(), CatalogError> {
-    left.has_nulls |= right.has_nulls;
-    if right.all_nulls {
-        return Ok(());
-    }
-    if left.all_nulls {
-        left.values = right.values.clone();
-        left.all_nulls = false;
-        return Ok(());
-    }
-    let capacity = (left.values.len() / 2).max(1);
-    let mut intervals = minmax_multi_intervals(left)?;
-    intervals.extend(minmax_multi_intervals(right)?);
-    compact_intervals(&mut intervals, capacity)?;
-    store_minmax_multi_intervals(left, &intervals);
-    Ok(())
+    catalog_result(access_minmax::minmax_multi_union(
+        left,
+        right,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn minmax_opcinfo(proc_oid: u32) -> Result<(usize, bool), CatalogError> {
-    ensure_support_proc(proc_oid, BRIN_MINMAX_OPCINFO_PROC_OID, "opcinfo")?;
-    Ok((2, true))
+    catalog_result(access_minmax::minmax_opcinfo(proc_oid))
 }
 
 pub(crate) fn minmax_add_value(
@@ -303,31 +87,13 @@ pub(crate) fn minmax_add_value(
     new_value: &Value,
     is_null: bool,
 ) -> Result<bool, CatalogError> {
-    ensure_support_proc(proc_oid, BRIN_MINMAX_ADD_VALUE_PROC_OID, "add_value")?;
-    ensure_summary_shape(column)?;
-    if is_null || matches!(new_value, Value::Null) {
-        return Err(CatalogError::Corrupt(
-            "BRIN minmax add_value received NULL input",
-        ));
-    }
-
-    if column.all_nulls {
-        column.values[0] = new_value.clone();
-        column.values[1] = new_value.clone();
-        column.all_nulls = false;
-        return Ok(true);
-    }
-
-    let mut updated = false;
-    if compare_minmax_values(new_value, &column.values[0])? == Ordering::Less {
-        column.values[0] = new_value.clone();
-        updated = true;
-    }
-    if compare_minmax_values(new_value, &column.values[1])? == Ordering::Greater {
-        column.values[1] = new_value.clone();
-        updated = true;
-    }
-    Ok(updated)
+    catalog_result(access_minmax::minmax_add_value(
+        proc_oid,
+        column,
+        new_value,
+        is_null,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn minmax_consistent(
@@ -336,33 +102,13 @@ pub(crate) fn minmax_consistent(
     strategy: BrinMinmaxStrategy,
     scan_value: &Value,
 ) -> Result<bool, CatalogError> {
-    ensure_support_proc(proc_oid, BRIN_MINMAX_CONSISTENT_PROC_OID, "consistent")?;
-    ensure_summary_shape(column)?;
-    if column.all_nulls {
-        return Ok(false);
-    }
-
-    match strategy {
-        BrinMinmaxStrategy::Less => {
-            Ok(compare_minmax_values(&column.values[0], scan_value)? == Ordering::Less)
-        }
-        BrinMinmaxStrategy::LessEqual => {
-            Ok(compare_minmax_values(&column.values[0], scan_value)? != Ordering::Greater)
-        }
-        BrinMinmaxStrategy::Equal => {
-            let min_matches =
-                compare_minmax_values(&column.values[0], scan_value)? != Ordering::Greater;
-            let max_matches =
-                compare_minmax_values(&column.values[1], scan_value)? != Ordering::Less;
-            Ok(min_matches && max_matches)
-        }
-        BrinMinmaxStrategy::GreaterEqual => {
-            Ok(compare_minmax_values(&column.values[1], scan_value)? != Ordering::Less)
-        }
-        BrinMinmaxStrategy::Greater => {
-            Ok(compare_minmax_values(&column.values[1], scan_value)? == Ordering::Greater)
-        }
-    }
+    catalog_result(access_minmax::minmax_consistent(
+        proc_oid,
+        column,
+        strategy,
+        scan_value,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn minmax_union(
@@ -370,32 +116,21 @@ pub(crate) fn minmax_union(
     left: &mut BrinValues,
     right: &BrinValues,
 ) -> Result<(), CatalogError> {
-    ensure_support_proc(proc_oid, BRIN_MINMAX_UNION_PROC_OID, "union")?;
-    ensure_summary_shape(left)?;
-    ensure_summary_shape(right)?;
-
-    left.has_nulls |= right.has_nulls;
-    if right.all_nulls {
-        return Ok(());
-    }
-    if left.all_nulls {
-        left.values = right.values.clone();
-        left.all_nulls = false;
-        return Ok(());
-    }
-
-    if compare_minmax_values(&right.values[0], &left.values[0])? == Ordering::Less {
-        left.values[0] = right.values[0].clone();
-    }
-    if compare_minmax_values(&right.values[1], &left.values[1])? == Ordering::Greater {
-        left.values[1] = right.values[1].clone();
-    }
-    Ok(())
+    catalog_result(access_minmax::minmax_union(
+        proc_oid,
+        left,
+        right,
+        &RootAccessServices,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::include::catalog::{
+        BRIN_MINMAX_ADD_VALUE_PROC_OID, BRIN_MINMAX_CONSISTENT_PROC_OID,
+        BRIN_MINMAX_OPCINFO_PROC_OID, BRIN_MINMAX_UNION_PROC_OID,
+    };
 
     fn summary() -> BrinValues {
         BrinValues {

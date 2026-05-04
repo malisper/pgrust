@@ -14,7 +14,6 @@ use crate::backend::access::transam::xact::{
     CommandId, INVALID_TRANSACTION_ID, Snapshot, TransactionId,
 };
 use crate::backend::catalog::store::CatalogMutationEffect;
-use crate::backend::commands::copyfrom::parse_text_array_literal_with_catalog;
 use crate::backend::commands::copyto::{
     CopyToDmlEvent, CopyToSink, IoCopyToSink, begin_copy_to, begin_copy_to_dml_capture,
     finish_copy_to, finish_copy_to_dml_capture, write_copy_to, write_copy_to_row,
@@ -31,9 +30,8 @@ use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredConstraintSnapshot, DeferredForeignKeyTracker, ExecError, ExecutorContext,
-    ExecutorTransactionState, Expr, MaterializedCteTable, MaterializedRow, RelationDesc,
-    SessionReplicationRole, StatementResult, TupleSlot, Value, cast_value,
-    cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
+    ExecutorTransactionState, Expr, MaterializedCteTable, MaterializedRow, RelationDesc, TupleSlot,
+    Value, cast_value, cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
     execute_readonly_statement_with_config, parse_bytea_text, render_sql_literal,
     substitute_named_arg, substitute_positional_args,
 };
@@ -125,6 +123,186 @@ use crate::pl::plpgsql::{
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
+use pgrust_nodes::{SessionReplicationRole, StatementResult};
+use pgrust_protocol::fastpath::LargeObjectFastpathCall;
+
+struct CopyFromExprCatalogAdapter<'a>(&'a dyn CatalogLookup);
+
+impl pgrust_expr::ExprCatalogLookup for CopyFromExprCatalogAdapter<'_> {
+    fn lookup_any_relation(&self, name: &str) -> Option<pgrust_expr::BoundRelation> {
+        self.0
+            .lookup_any_relation(name)
+            .map(|relation| copyfrom_expr_bound_relation(self.0, relation))
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<pgrust_expr::BoundRelation> {
+        self.0
+            .lookup_relation_by_oid(relation_oid)
+            .map(|relation| copyfrom_expr_bound_relation(self.0, relation))
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<pgrust_expr::BoundRelation> {
+        self.0
+            .relation_by_oid(relation_oid)
+            .map(|relation| copyfrom_expr_bound_relation(self.0, relation))
+    }
+
+    fn namespace_rows(&self) -> Vec<pgrust_catalog_data::PgNamespaceRow> {
+        self.0.namespace_rows()
+    }
+
+    fn namespace_row_by_oid(&self, oid: u32) -> Option<pgrust_catalog_data::PgNamespaceRow> {
+        self.0.namespace_row_by_oid(oid)
+    }
+
+    fn proc_rows_by_name(&self, name: &str) -> Vec<pgrust_catalog_data::PgProcRow> {
+        self.0.proc_rows_by_name(name)
+    }
+
+    fn proc_row_by_oid(&self, oid: u32) -> Option<pgrust_catalog_data::PgProcRow> {
+        self.0.proc_row_by_oid(oid)
+    }
+
+    fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<pgrust_catalog_data::PgOperatorRow> {
+        self.0
+            .operator_by_name_left_right(name, left_type_oid, right_type_oid)
+    }
+
+    fn operator_by_oid(&self, oid: u32) -> Option<pgrust_catalog_data::PgOperatorRow> {
+        self.0.operator_by_oid(oid)
+    }
+
+    fn operator_rows(&self) -> Vec<pgrust_catalog_data::PgOperatorRow> {
+        self.0.operator_rows()
+    }
+
+    fn authid_rows(&self) -> Vec<pgrust_catalog_data::PgAuthIdRow> {
+        self.0.authid_rows()
+    }
+
+    fn collation_rows(&self) -> Vec<pgrust_catalog_data::PgCollationRow> {
+        self.0.collation_rows()
+    }
+
+    fn ts_config_rows(&self) -> Vec<pgrust_catalog_data::PgTsConfigRow> {
+        self.0.ts_config_rows()
+    }
+
+    fn ts_dict_rows(&self) -> Vec<pgrust_catalog_data::PgTsDictRow> {
+        self.0.ts_dict_rows()
+    }
+
+    fn ts_config_map_rows(&self) -> Vec<pgrust_catalog_data::PgTsConfigMapRow> {
+        self.0.ts_config_map_rows()
+    }
+
+    fn type_rows(&self) -> Vec<pgrust_catalog_data::PgTypeRow> {
+        self.0.type_rows()
+    }
+
+    fn type_by_oid(&self, oid: u32) -> Option<pgrust_catalog_data::PgTypeRow> {
+        self.0.type_by_oid(oid)
+    }
+
+    fn type_by_name(&self, name: &str) -> Option<pgrust_catalog_data::PgTypeRow> {
+        self.0.type_by_name(name)
+    }
+
+    fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        self.0.type_oid_for_sql_type(sql_type)
+    }
+
+    fn domain_by_type_oid(&self, domain_oid: u32) -> Option<pgrust_expr::DomainLookup> {
+        self.0
+            .domain_by_type_oid(domain_oid)
+            .map(|domain| pgrust_expr::DomainLookup {
+                name: domain.name,
+                sql_type: domain.sql_type,
+                not_null: domain.not_null,
+                check: domain.check,
+                constraints: domain
+                    .constraints
+                    .into_iter()
+                    .map(|constraint| pgrust_expr::DomainConstraintLookup {
+                        name: constraint.name,
+                        kind: match constraint.kind {
+                            crate::backend::parser::DomainConstraintLookupKind::Check => {
+                                pgrust_expr::DomainConstraintLookupKind::Check
+                            }
+                            crate::backend::parser::DomainConstraintLookupKind::NotNull => {
+                                pgrust_expr::DomainConstraintLookupKind::NotNull
+                            }
+                        },
+                        expr: constraint.expr,
+                        enforced: constraint.enforced,
+                    })
+                    .collect(),
+            })
+    }
+
+    fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        self.0.enum_label_oid(type_oid, label)
+    }
+
+    fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        self.0.enum_label(type_oid, label_oid)
+    }
+
+    fn enum_label_by_oid(&self, label_oid: u32) -> Option<String> {
+        self.0.enum_label_by_oid(label_oid)
+    }
+
+    fn enum_label_is_committed(&self, type_oid: u32, label_oid: u32) -> bool {
+        self.0.enum_label_is_committed(type_oid, label_oid)
+    }
+
+    fn domain_allowed_enum_label_oids(&self, domain_oid: u32) -> Option<Vec<u32>> {
+        self.0.domain_allowed_enum_label_oids(domain_oid)
+    }
+
+    fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
+        self.0.domain_check_name(domain_oid)
+    }
+
+    fn class_row_by_oid(&self, relation_oid: u32) -> Option<pgrust_catalog_data::PgClassRow> {
+        self.0.class_row_by_oid(relation_oid)
+    }
+}
+
+fn copyfrom_expr_bound_relation(
+    catalog: &dyn CatalogLookup,
+    relation: crate::backend::parser::BoundRelation,
+) -> pgrust_expr::BoundRelation {
+    let name = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    pgrust_expr::BoundRelation {
+        relation_oid: relation.relation_oid,
+        oid: Some(relation.relation_oid),
+        name,
+        relkind: relation.relkind,
+        desc: relation.desc,
+    }
+}
+
+fn parse_copy_text_array_literal_with_catalog(
+    raw: &str,
+    element_type: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    let adapter = catalog.map(CopyFromExprCatalogAdapter);
+    let catalog = adapter
+        .as_ref()
+        .map(|adapter| adapter as &dyn pgrust_expr::ExprCatalogLookup);
+    pgrust_commands::copyfrom::parse_text_array_literal_with_catalog(raw, element_type, catalog)
+        .map_err(Into::into)
+}
 
 fn validate_alter_table_add_constraint_temporal_fk_actions(
     stmt: &crate::backend::parser::AlterTableAddConstraintStatement,
@@ -2187,97 +2365,9 @@ pub struct Session {
     protocol_prepared_statements: Vec<SessionPreparedStatementViewRow>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ByteaOutputFormat {
-    Hex,
-    Escape,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum LargeObjectFastpathCall {
-    Create {
-        oid: u32,
-    },
-    Import {
-        path: String,
-        oid: Option<u32>,
-    },
-    Export {
-        oid: u32,
-        path: String,
-    },
-    Open {
-        oid: u32,
-        mode: i32,
-    },
-    Close {
-        fd: i32,
-    },
-    Read {
-        fd: i32,
-        len: i32,
-    },
-    Write {
-        fd: i32,
-        data: Vec<u8>,
-    },
-    Lseek {
-        fd: i32,
-        offset: i64,
-        whence: i32,
-        result_i64: bool,
-    },
-    Creat {
-        mode: i32,
-    },
-    Tell {
-        fd: i32,
-        result_i64: bool,
-    },
-    Unlink {
-        oid: u32,
-    },
-    Truncate {
-        fd: i32,
-        len: i64,
-    },
-    FromBytea {
-        oid: u32,
-        data: Vec<u8>,
-    },
-    Get {
-        oid: u32,
-        offset: Option<i64>,
-        len: Option<i32>,
-    },
-    Put {
-        oid: u32,
-        offset: i64,
-        data: Vec<u8>,
-    },
-}
-
-impl LargeObjectFastpathCall {
-    fn requires_xid(&self) -> bool {
-        match self {
-            Self::Create { .. }
-            | Self::Import { .. }
-            | Self::Creat { .. }
-            | Self::Unlink { .. }
-            | Self::Write { .. }
-            | Self::Truncate { .. }
-            | Self::FromBytea { .. }
-            | Self::Put { .. } => true,
-            Self::Open { mode, .. } => *mode & crate::pgrust::database::INV_WRITE != 0,
-            Self::Export { .. }
-            | Self::Close { .. }
-            | Self::Read { .. }
-            | Self::Lseek { .. }
-            | Self::Tell { .. }
-            | Self::Get { .. } => false,
-        }
-    }
-}
+// :HACK: Preserve the old session path while bytea scalar formatting config
+// lives in pgrust_expr.
+pub use pgrust_expr::compat::pgrust::session::ByteaOutputFormat;
 
 #[derive(Debug, Clone)]
 struct ResolvedCallProcedure {
@@ -7574,7 +7664,7 @@ impl Session {
             txn.next_command_id = txn.next_command_id.saturating_add(1);
             cid
         };
-        let xid = if call.requires_xid() {
+        let xid = if call.requires_xid(crate::pgrust::database::INV_WRITE) {
             self.ensure_top_xid(db)
         } else {
             self.active_txn
@@ -20977,7 +21067,7 @@ impl Session {
                                 }
                                 ScalarType::Bool => Value::Bool(parse_pg_bool_text(field_text)?),
                                 ScalarType::Array(_) => {
-                                    parse_text_array_literal_with_catalog(
+                                    parse_copy_text_array_literal_with_catalog(
                                         field_text,
                                         column.sql_type.element_type(),
                                         Some(&catalog),

@@ -1,5 +1,2 @@
-use crate::include::catalog::PgAuthIdRow;
-
-pub fn sort_pg_authid_rows(rows: &mut [PgAuthIdRow]) {
-    rows.sort_by_key(|row| (row.oid, row.rolname.clone()));
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_authid::*;

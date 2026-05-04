@@ -18,14 +18,11 @@ use super::sqlfunc::{
 use super::{ExecError, ExecutorContext, TypedFunctionArg};
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BPCHAR_HASH_OPCLASS_OID, HYPOTHETICAL_RANK_FINAL_PROC_OID, INT8_TYPE_OID, MODE_FINAL_PROC_OID,
-    PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID, PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID,
-    PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID, PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID,
-    PERCENTILE_DISC_FINAL_PROC_OID, PERCENTILE_DISC_MULTI_FINAL_PROC_OID, PG_LANGUAGE_SQL_OID,
-    builtin_aggregate_function_for_proc_oid, builtin_hypothetical_aggregate_function_for_proc_oid,
-    builtin_ordered_set_aggregate_function_for_proc_oid, builtin_scalar_function_for_proc_oid,
+    BPCHAR_HASH_OPCLASS_OID, INT8_TYPE_OID, PG_LANGUAGE_SQL_OID,
+    builtin_scalar_function_for_proc_oid,
 };
 use crate::include::nodes::datum::{ArrayValue, NumericValue, Value};
+use crate::include::nodes::parsenodes::ParseError;
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, HashFunctionKind, HypotheticalAggFunc, OrderedSetAggFunc,
     expr_sql_type_hint,
@@ -34,6 +31,10 @@ use crate::pl::plpgsql::{
     execute_user_defined_scalar_function_values,
     execute_user_defined_scalar_function_values_with_arg_types,
 };
+use pgrust_executor::{
+    AggregateRuntimeSelection, AggregateSupportError, aggregate_runtime_selection,
+    concrete_custom_aggregate_transtype, normalize_variadic_scalar_function_args,
+};
 use std::cmp::Ordering;
 
 pub(crate) fn build_aggregate_runtime(
@@ -41,16 +42,22 @@ pub(crate) fn build_aggregate_runtime(
     ctx: &mut ExecutorContext,
 ) -> Result<AggregateRuntime, ExecError> {
     super::exec_expr::ensure_proc_execute_allowed(accum.aggfnoid, ctx)?;
-    if let Some(func) = builtin_aggregate_function_for_proc_oid(accum.aggfnoid) {
+    if let AggregateRuntimeSelection::Builtin(func) =
+        aggregate_runtime_selection(accum.aggfnoid, None, None)
+    {
         return Ok(AggregateRuntime::Builtin {
             func,
             transition: AccumState::transition_fn(func, accum.args.len(), accum.distinct),
         });
     }
-    if let Some(func) = builtin_hypothetical_aggregate_function_for_proc_oid(accum.aggfnoid) {
+    if let AggregateRuntimeSelection::Hypothetical(func) =
+        aggregate_runtime_selection(accum.aggfnoid, None, None)
+    {
         return Ok(AggregateRuntime::Hypothetical { func });
     }
-    if let Some(func) = builtin_ordered_set_aggregate_function_for_proc_oid(accum.aggfnoid) {
+    if let AggregateRuntimeSelection::OrderedSet(func) =
+        aggregate_runtime_selection(accum.aggfnoid, None, None)
+    {
         return Ok(AggregateRuntime::OrderedSet { func });
     }
 
@@ -64,23 +71,32 @@ pub(crate) fn build_aggregate_runtime(
             sqlstate: "0A000",
         })?;
     let aggregate = load_visible_aggregate_row(accum, catalog)?;
-    if aggregate.aggkind == 'o'
-        && let Some(func) = ordered_set_aggregate_function_for_final_proc_oid(aggregate.aggfinalfn)
-    {
-        return Ok(AggregateRuntime::OrderedSet { func });
-    }
-    if aggregate.aggkind == 'h'
-        && let Some(func) = hypothetical_aggregate_function_for_final_proc_oid(aggregate.aggfinalfn)
-    {
-        return Ok(AggregateRuntime::Hypothetical { func });
-    }
-    if aggregate.aggkind != 'n' {
-        return Err(ExecError::DetailedError {
-            message: "only plain aggregates are supported".into(),
-            detail: Some(format!("aggkind = {}", aggregate.aggkind)),
-            hint: None,
-            sqlstate: "0A000",
-        });
+    match aggregate_runtime_selection(
+        accum.aggfnoid,
+        Some(aggregate.aggkind),
+        Some(aggregate.aggfinalfn),
+    ) {
+        AggregateRuntimeSelection::Builtin(func) => {
+            return Ok(AggregateRuntime::Builtin {
+                func,
+                transition: AccumState::transition_fn(func, accum.args.len(), accum.distinct),
+            });
+        }
+        AggregateRuntimeSelection::Hypothetical(func) => {
+            return Ok(AggregateRuntime::Hypothetical { func });
+        }
+        AggregateRuntimeSelection::OrderedSet(func) => {
+            return Ok(AggregateRuntime::OrderedSet { func });
+        }
+        AggregateRuntimeSelection::PlainCustom => {}
+        AggregateRuntimeSelection::UnsupportedKind(kind) => {
+            return Err(ExecError::DetailedError {
+                message: "only plain aggregates are supported".into(),
+                detail: Some(format!("aggkind = {kind}")),
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
     }
     let transfn = catalog
         .proc_row_by_oid(aggregate.aggtransfn)
@@ -282,53 +298,6 @@ pub(crate) fn build_aggregate_runtime(
     }))
 }
 
-fn ordered_set_aggregate_function_for_final_proc_oid(proc_oid: u32) -> Option<OrderedSetAggFunc> {
-    match proc_oid {
-        PERCENTILE_DISC_FINAL_PROC_OID => Some(OrderedSetAggFunc::PercentileDisc),
-        PERCENTILE_DISC_MULTI_FINAL_PROC_OID => Some(OrderedSetAggFunc::PercentileDiscMulti),
-        PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID | PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID => {
-            Some(OrderedSetAggFunc::PercentileCont)
-        }
-        PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID
-        | PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID => {
-            Some(OrderedSetAggFunc::PercentileContMulti)
-        }
-        MODE_FINAL_PROC_OID => Some(OrderedSetAggFunc::Mode),
-        _ => None,
-    }
-}
-
-fn hypothetical_aggregate_function_for_final_proc_oid(
-    proc_oid: u32,
-) -> Option<HypotheticalAggFunc> {
-    match proc_oid {
-        HYPOTHETICAL_RANK_FINAL_PROC_OID => Some(HypotheticalAggFunc::Rank),
-        _ => None,
-    }
-}
-
-fn concrete_custom_aggregate_transtype(
-    declared_transtype: SqlType,
-    input_arg_types: &[SqlType],
-) -> SqlType {
-    match declared_transtype.kind {
-        SqlTypeKind::AnyArray | SqlTypeKind::AnyCompatibleArray => input_arg_types
-            .iter()
-            .copied()
-            .find(|ty| ty.is_array)
-            .or_else(|| input_arg_types.first().copied().map(SqlType::array_of))
-            .unwrap_or(declared_transtype),
-        SqlTypeKind::AnyElement | SqlTypeKind::AnyCompatible => input_arg_types
-            .iter()
-            .copied()
-            .find(|ty| ty.is_array)
-            .map(SqlType::element_type)
-            .or_else(|| input_arg_types.first().copied())
-            .unwrap_or(declared_transtype),
-        _ => declared_transtype,
-    }
-}
-
 fn load_visible_aggregate_row(
     accum: &AggAccum,
     catalog: &dyn CatalogLookup,
@@ -417,7 +386,9 @@ pub(crate) fn execute_scalar_function_value_call_with_arg_types(
         });
     }
     let normalized_variadic =
-        normalize_variadic_scalar_function_args(&row, arg_values, arg_types, catalog.as_ref())?;
+        normalize_variadic_scalar_function_args(&row, arg_values, arg_types, |ty| {
+            catalog.type_oid_for_sql_type(ty)
+        });
     let call_arg_values = normalized_variadic.values.as_deref().unwrap_or(arg_values);
     let call_arg_types = normalized_variadic.arg_types.as_deref().or(arg_types);
     match row.prolang {
@@ -446,74 +417,6 @@ pub(crate) fn execute_scalar_function_value_call_with_arg_types(
             None => execute_user_defined_scalar_function_values(proc_oid, call_arg_values, ctx),
         },
     }
-}
-
-#[derive(Default)]
-struct NormalizedVariadicArgs {
-    values: Option<Vec<Value>>,
-    arg_types: Option<Vec<SqlType>>,
-}
-
-fn normalize_variadic_scalar_function_args(
-    row: &crate::include::catalog::PgProcRow,
-    arg_values: &[Value],
-    arg_types: Option<&[SqlType]>,
-    catalog: &dyn CatalogLookup,
-) -> Result<NormalizedVariadicArgs, ExecError> {
-    if row.provariadic == 0 || row.pronargs <= 0 {
-        return Ok(NormalizedVariadicArgs::default());
-    }
-    let variadic_index = row.pronargs as usize - 1;
-    if arg_values.len() < row.pronargs as usize {
-        return Ok(NormalizedVariadicArgs::default());
-    }
-    let last_is_explicit_array = arg_values.len() == row.pronargs as usize
-        && (matches!(arg_values.get(variadic_index), Some(Value::PgArray(_)))
-            || arg_types
-                .and_then(|types| types.get(variadic_index))
-                .is_some_and(|ty| ty.is_array));
-    if last_is_explicit_array {
-        return Ok(NormalizedVariadicArgs::default());
-    }
-
-    let variadic_values = arg_values[variadic_index..]
-        .iter()
-        .map(Value::to_owned_value)
-        .collect::<Vec<_>>();
-    let element_type = arg_types
-        .and_then(|types| types.get(variadic_index).copied())
-        .or_else(|| {
-            arg_values[variadic_index..]
-                .iter()
-                .find_map(Value::sql_type_hint)
-        });
-    let mut variadic_array = ArrayValue::from_1d(variadic_values);
-    if let Some(element_oid) = element_type.and_then(|ty| catalog.type_oid_for_sql_type(ty)) {
-        variadic_array = variadic_array.with_element_type_oid(element_oid);
-    }
-
-    let mut values = Vec::with_capacity(row.pronargs as usize);
-    values.extend(
-        arg_values[..variadic_index]
-            .iter()
-            .map(Value::to_owned_value),
-    );
-    values.push(Value::PgArray(variadic_array));
-
-    let arg_types = arg_types.map(|types| {
-        let mut normalized = Vec::with_capacity(row.pronargs as usize);
-        normalized.extend(types[..variadic_index].iter().copied());
-        let array_type = element_type
-            .map(SqlType::array_of)
-            .unwrap_or_else(|| SqlType::new(SqlTypeKind::AnyArray));
-        normalized.push(array_type);
-        normalized
-    });
-
-    Ok(NormalizedVariadicArgs {
-        values: Some(values),
-        arg_types,
-    })
 }
 
 fn execute_stats_import_value_call(
@@ -771,28 +674,63 @@ fn hash_function_error(message: String, extended: bool) -> ExecError {
     }
 }
 
-fn aggregate_int8_pair(value: &Value, func: &'static str) -> Result<(i64, i64), ExecError> {
-    let elements = match value {
-        Value::PgArray(array) => &array.elements,
-        Value::Array(elements) => elements,
-        other => {
-            return Err(ExecError::TypeMismatch {
-                op: func,
-                left: other.clone(),
-                right: Value::PgArray(ArrayValue::from_1d(vec![Value::Int64(0), Value::Int64(0)])),
-            });
+pub(crate) fn aggregate_support_error(error: AggregateSupportError) -> ExecError {
+    match error {
+        AggregateSupportError::TypeMismatch { op, left, right } => {
+            ExecError::TypeMismatch { op, left, right }
         }
-    };
-    match elements.as_slice() {
-        [Value::Int64(count), Value::Int64(sum)] => Ok((*count, *sum)),
-        [Value::Int32(count), Value::Int32(sum)] => Ok((i64::from(*count), i64::from(*sum))),
-        _ => Err(ExecError::DetailedError {
+        AggregateSupportError::InvalidInt8PairState { func, state } => ExecError::DetailedError {
             message: format!("{func} expected a 2-element int8 array state"),
-            detail: Some(format!("state = {value:?}")),
+            detail: Some(format!("state = {state:?}")),
             hint: None,
             sqlstate: "22023",
+        },
+        AggregateSupportError::CannotAccumulateNullArrays => ExecError::DetailedError {
+            message: "cannot accumulate null arrays".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22004",
+        },
+        AggregateSupportError::CannotAccumulateEmptyArrays => ExecError::DetailedError {
+            message: "cannot accumulate empty arrays".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "2202E",
+        },
+        AggregateSupportError::ArrayDimensionalityMismatch => ExecError::DetailedError {
+            message: "cannot accumulate arrays of different dimensionality".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "2202E",
+        },
+        AggregateSupportError::InvalidFloat8TransitionCall {
+            expected,
+            actual_args,
+        } => ExecError::Parse(ParseError::UnexpectedToken {
+            expected,
+            actual: format!("{actual_args} args"),
         }),
+        AggregateSupportError::InvalidFloat8TransitionState { op, expected_len } => {
+            ExecError::DetailedError {
+                message: format!(
+                    "{op} requires a float8[] transition state of length {expected_len}"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            }
+        }
+        AggregateSupportError::Float8Overflow => ExecError::DetailedError {
+            message: "value out of range: overflow".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22003",
+        },
     }
+}
+
+fn aggregate_int8_pair(value: &Value, func: &'static str) -> Result<(i64, i64), ExecError> {
+    pgrust_executor::aggregate_int8_pair(value, func).map_err(aggregate_support_error)
 }
 
 fn malformed_aggregate_support_call(name: &'static str) -> Result<Value, ExecError> {

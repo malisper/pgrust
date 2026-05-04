@@ -1,97 +1,60 @@
+// :HACK: root compatibility shim while GiST tuple codecs live in `pgrust_access`.
+use pgrust_access::gist::tuple as access_tuple;
+use pgrust_access::{AccessError, AccessResult};
+
+use crate::backend::access::RootAccessServices;
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::value_io::{decode_value, encode_value};
-use crate::include::access::gist::{gist_make_downlink_tid, gist_make_leaf_tid};
-use crate::include::access::htup::TupleValue;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 
+fn catalog_error(error: AccessError) -> CatalogError {
+    match error {
+        AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        AccessError::Interrupted(reason) => CatalogError::Interrupted(reason),
+        AccessError::Io(message) => CatalogError::Io(message),
+        AccessError::UniqueViolation(message) => CatalogError::UniqueViolation(message),
+        AccessError::Scalar(message) | AccessError::Unsupported(message) => {
+            CatalogError::Io(message)
+        }
+    }
+}
+
+fn catalog_result<T>(result: AccessResult<T>) -> Result<T, CatalogError> {
+    result.map_err(catalog_error)
+}
+
 pub(crate) fn encode_key_payload(
     desc: &RelationDesc,
     values: &[Value],
 ) -> Result<Vec<u8>, CatalogError> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&(values.len() as u16).to_le_bytes());
-    for (column, value) in desc.columns.iter().zip(values.iter()) {
-        match value {
-            Value::Null => {
-                payload.push(1);
-                payload.extend_from_slice(&0u32.to_le_bytes());
-            }
-            _ => {
-                payload.push(0);
-                let bytes = match encode_value(column, value)
-                    .map_err(|err| CatalogError::Io(format!("gist encode key failed: {err:?}")))?
-                {
-                    TupleValue::Null => Vec::new(),
-                    TupleValue::Bytes(bytes) => bytes,
-                    TupleValue::EncodedVarlena(bytes) => bytes,
-                };
-                payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                payload.extend_from_slice(&bytes);
-            }
-        }
-    }
-    Ok(payload)
+    catalog_result(access_tuple::encode_key_payload(
+        desc,
+        values,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn decode_key_payload(
     desc: &RelationDesc,
     payload: &[u8],
 ) -> Result<Vec<Value>, CatalogError> {
-    if payload.len() < 2 {
-        return Err(CatalogError::Corrupt("gist tuple payload too short"));
-    }
-    let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-    let mut offset = 2usize;
-    let mut values = Vec::with_capacity(count);
-    for column in desc.columns.iter().take(count) {
-        if offset + 5 > payload.len() {
-            return Err(CatalogError::Corrupt("gist tuple payload truncated"));
-        }
-        let is_null = payload[offset] != 0;
-        offset += 1;
-        let len = u32::from_le_bytes(
-            payload[offset..offset + 4]
-                .try_into()
-                .map_err(|_| CatalogError::Corrupt("gist tuple payload length"))?,
-        ) as usize;
-        offset += 4;
-        if is_null {
-            values.push(Value::Null);
-            continue;
-        }
-        if offset + len > payload.len() {
-            return Err(CatalogError::Corrupt("gist tuple payload overflow"));
-        }
-        values.push(
-            decode_value(column, Some(&payload[offset..offset + len]))
-                .map_err(|err| CatalogError::Io(format!("gist decode key failed: {err:?}")))?,
-        );
-        offset += len;
-    }
-    Ok(values)
+    catalog_result(access_tuple::decode_key_payload(
+        desc,
+        payload,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn decode_tuple_values(
     desc: &RelationDesc,
     tuple: &IndexTupleData,
 ) -> Result<Vec<Value>, CatalogError> {
-    decode_key_payload(desc, &tuple.payload)
-}
-
-fn make_index_tuple(
-    desc: &RelationDesc,
-    values: &[Value],
-    tid: ItemPointerData,
-) -> Result<IndexTupleData, CatalogError> {
-    Ok(IndexTupleData::new_raw(
-        tid,
-        values.iter().any(|value| matches!(value, Value::Null)),
-        true,
-        false,
-        encode_key_payload(desc, values)?,
+    catalog_result(access_tuple::decode_tuple_values(
+        desc,
+        tuple,
+        &RootAccessServices,
     ))
 }
 
@@ -100,7 +63,12 @@ pub(crate) fn make_leaf_tuple(
     values: &[Value],
     heap_tid: ItemPointerData,
 ) -> Result<IndexTupleData, CatalogError> {
-    make_index_tuple(desc, values, gist_make_leaf_tid(heap_tid))
+    catalog_result(access_tuple::make_leaf_tuple(
+        desc,
+        values,
+        heap_tid,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn make_downlink_tuple(
@@ -108,12 +76,21 @@ pub(crate) fn make_downlink_tuple(
     values: &[Value],
     child_block: u32,
 ) -> Result<IndexTupleData, CatalogError> {
-    make_index_tuple(desc, values, gist_make_downlink_tid(child_block))
+    catalog_result(access_tuple::make_downlink_tuple(
+        desc,
+        values,
+        child_block,
+        &RootAccessServices,
+    ))
 }
 
 pub(crate) fn tuple_storage_size(
     desc: &RelationDesc,
     values: &[Value],
 ) -> Result<usize, CatalogError> {
-    Ok(8 + encode_key_payload(desc, values)?.len())
+    catalog_result(access_tuple::tuple_storage_size(
+        desc,
+        values,
+        &RootAccessServices,
+    ))
 }

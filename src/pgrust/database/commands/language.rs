@@ -5,9 +5,39 @@ use crate::backend::parser::{
 };
 use crate::include::catalog::PgLanguageRow;
 use crate::pgrust::database::ddl::ensure_can_set_role;
+use pgrust_commands::language::{
+    LanguageCommandError, create_language_row, find_language_by_name, language_duplicate_error,
+    language_missing_error, language_missing_role_error, language_owner_error,
+    normalize_language_name,
+};
 
-fn normalize_language_name(name: &str) -> String {
-    name.trim_matches('"').to_ascii_lowercase()
+fn language_error_to_exec(error: LanguageCommandError) -> ExecError {
+    match error {
+        LanguageCommandError::Owner { name } => ExecError::DetailedError {
+            message: format!("must be owner of language {name}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42501",
+        },
+        LanguageCommandError::Duplicate { name } => ExecError::DetailedError {
+            message: format!("language \"{name}\" already exists"),
+            detail: None,
+            hint: None,
+            sqlstate: "42710",
+        },
+        LanguageCommandError::Missing { name } => ExecError::DetailedError {
+            message: format!("language \"{name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        },
+        LanguageCommandError::MissingRole { name } => ExecError::DetailedError {
+            message: format!("role \"{name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        },
+    }
 }
 
 fn lookup_language(
@@ -16,31 +46,12 @@ fn lookup_language(
     txn_ctx: CatalogTxnContext,
     name: &str,
 ) -> Result<Option<PgLanguageRow>, ExecError> {
-    let normalized = normalize_language_name(name);
-    Ok(db
-        .backend_catcache(client_id, txn_ctx)
-        .map_err(map_catalog_error)?
-        .language_rows()
-        .into_iter()
-        .find(|row| row.lanname.eq_ignore_ascii_case(&normalized)))
-}
-
-fn language_owner_error(name: &str) -> ExecError {
-    ExecError::DetailedError {
-        message: format!("must be owner of language {name}"),
-        detail: None,
-        hint: None,
-        sqlstate: "42501",
-    }
-}
-
-fn language_duplicate_error(name: &str) -> ExecError {
-    ExecError::DetailedError {
-        message: format!("language \"{name}\" already exists"),
-        detail: None,
-        hint: None,
-        sqlstate: "42710",
-    }
+    Ok(find_language_by_name(
+        db.backend_catcache(client_id, txn_ctx)
+            .map_err(map_catalog_error)?
+            .language_rows(),
+        name,
+    ))
 }
 
 fn ensure_language_owner(
@@ -57,7 +68,7 @@ fn ensure_language_owner(
     if auth.can_set_role(row.lanowner, &auth_catalog) {
         return Ok(());
     }
-    Err(language_owner_error(name))
+    Err(language_error_to_exec(language_owner_error(name)))
 }
 
 fn commit_language_effect(
@@ -84,7 +95,9 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let language_name = normalize_language_name(&stmt.language_name);
         if lookup_language(self, client_id, None, &language_name)?.is_some() {
-            return Err(language_duplicate_error(&stmt.language_name));
+            return Err(language_error_to_exec(language_duplicate_error(
+                &stmt.language_name,
+            )));
         }
         let catalog = self.lazy_catalog_lookup(client_id, None, None);
         let handler_oid = catalog
@@ -93,16 +106,11 @@ impl Database {
             .find(|row| row.pronargs == 0)
             .map(|row| row.oid)
             .unwrap_or(0);
-        let row = PgLanguageRow {
-            oid: 0,
-            lanname: language_name,
-            lanowner: self.auth_state(client_id).current_user_oid(),
-            lanispl: true,
-            lanpltrusted: true,
-            lanplcallfoid: handler_oid,
-            laninline: 0,
-            lanvalidator: 0,
-        };
+        let row = create_language_row(
+            &language_name,
+            self.auth_state(client_id).current_user_oid(),
+            handler_oid,
+        );
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let ctx = CatalogWriteContext {
@@ -129,22 +137,15 @@ impl Database {
         client_id: ClientId,
         stmt: &AlterLanguageStatement,
     ) -> Result<StatementResult, ExecError> {
-        let existing =
-            lookup_language(self, client_id, None, &stmt.language_name)?.ok_or_else(|| {
-                ExecError::DetailedError {
-                    message: format!("language \"{}\" does not exist", stmt.language_name),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42704",
-                }
-            })?;
+        let existing = lookup_language(self, client_id, None, &stmt.language_name)?
+            .ok_or_else(|| language_error_to_exec(language_missing_error(&stmt.language_name)))?;
         ensure_language_owner(self, client_id, &existing, &stmt.language_name, None)?;
         let mut replacement = existing.clone();
         match &stmt.action {
             AlterLanguageAction::Rename { new_name } => {
                 let normalized = normalize_language_name(new_name);
                 if lookup_language(self, client_id, None, &normalized)?.is_some() {
-                    return Err(language_duplicate_error(new_name));
+                    return Err(language_error_to_exec(language_duplicate_error(new_name)));
                 }
                 replacement.lanname = normalized;
             }
@@ -155,11 +156,8 @@ impl Database {
                 let role = auth_catalog
                     .role_by_name(new_owner)
                     .cloned()
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("role \"{new_owner}\" does not exist"),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42704",
+                    .ok_or_else(|| {
+                        language_error_to_exec(language_missing_role_error(new_owner))
                     })?;
                 ensure_can_set_role(self, client_id, role.oid, &role.rolname)?;
                 replacement.lanowner = role.oid;
@@ -200,12 +198,9 @@ impl Database {
                 ));
                 return Ok(StatementResult::AffectedRows(0));
             }
-            return Err(ExecError::DetailedError {
-                message: format!("language \"{}\" does not exist", stmt.language_name),
-                detail: None,
-                hint: None,
-                sqlstate: "42704",
-            });
+            return Err(language_error_to_exec(language_missing_error(
+                &stmt.language_name,
+            )));
         };
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);

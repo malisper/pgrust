@@ -1,5 +1,2 @@
-use crate::include::catalog::PgInheritsRow;
-
-pub fn sort_pg_inherits_rows(rows: &mut [PgInheritsRow]) {
-    crate::include::catalog::sort_pg_inherits_rows(rows);
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_inherits::*;

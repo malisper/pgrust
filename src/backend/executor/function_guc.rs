@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::commands::rolecmds::role_management_error;
@@ -7,17 +7,7 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::utils::misc::guc::{normalize_function_guc_assignment, normalize_guc_name};
 use crate::include::catalog::PgProcRow;
 use crate::pgrust::auth::{AuthCatalog, AuthState};
-
-pub(crate) fn parsed_proconfig(config: Option<&[String]>) -> Vec<(String, String)> {
-    config
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let (name, value) = entry.split_once('=')?;
-            Some((name.to_string(), value.to_string()))
-        })
-        .collect()
-}
+pub(crate) use pgrust_executor::parsed_proconfig;
 
 pub(crate) fn apply_function_guc(
     ctx: &mut ExecutorContext,
@@ -93,17 +83,10 @@ fn apply_function_role_guc(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SavedFunctionIdentity {
-    current_user_oid: u32,
-    active_role_oid: Option<u32>,
-}
+pub(crate) type SavedFunctionIdentity = pgrust_executor::SavedFunctionIdentity;
 
 pub(crate) fn save_function_identity(ctx: &ExecutorContext) -> SavedFunctionIdentity {
-    SavedFunctionIdentity {
-        current_user_oid: ctx.current_user_oid,
-        active_role_oid: ctx.active_role_oid,
-    }
+    pgrust_executor::save_function_identity_state(ctx.current_user_oid, ctx.active_role_oid)
 }
 
 pub(crate) fn restore_function_identity(ctx: &mut ExecutorContext, saved: SavedFunctionIdentity) {
@@ -120,12 +103,34 @@ pub(crate) fn restore_function_gucs(
     saved_gucs: HashMap<String, String>,
     restore_names: impl IntoIterator<Item = String>,
 ) {
-    for name in restore_names {
-        if let Some(value) = saved_gucs.get(&name) {
-            ctx.gucs.insert(name, value.clone());
-        } else {
-            ctx.gucs.remove(&name);
-        }
+    pgrust_executor::restore_function_gucs(&mut ctx.gucs, &saved_gucs, restore_names);
+}
+
+impl pgrust_executor::FunctionGucContext for ExecutorContext {
+    type Error = ExecError;
+
+    fn save_identity(&self) -> SavedFunctionIdentity {
+        save_function_identity(self)
+    }
+
+    fn restore_identity(&mut self, saved: SavedFunctionIdentity) {
+        restore_function_identity(self, saved);
+    }
+
+    fn apply_security_definer_identity(&mut self, owner_oid: u32) {
+        apply_security_definer_identity(self, owner_oid);
+    }
+
+    fn gucs(&self) -> &HashMap<String, String> {
+        &self.gucs
+    }
+
+    fn gucs_mut(&mut self) -> &mut HashMap<String, String> {
+        &mut self.gucs
+    }
+
+    fn apply_function_guc(&mut self, name: &str, value: Option<&str>) -> Result<String, ExecError> {
+        apply_function_guc(self, name, value)
     }
 }
 
@@ -134,29 +139,5 @@ pub(crate) fn execute_with_sql_function_context<T>(
     ctx: &mut ExecutorContext,
     f: impl FnOnce(&mut ExecutorContext) -> Result<T, ExecError>,
 ) -> Result<T, ExecError> {
-    let entries = parsed_proconfig(row.proconfig.as_deref());
-    if entries.is_empty() && !row.prosecdef {
-        return f(ctx);
-    }
-    let saved_identity = save_function_identity(ctx);
-    if row.prosecdef {
-        apply_security_definer_identity(ctx, row.proowner);
-    }
-    let saved_gucs = ctx.gucs.clone();
-    let mut restore_names = HashSet::new();
-    for (name, value) in entries {
-        let normalized = match apply_function_guc(ctx, &name, Some(&value)) {
-            Ok(normalized) => normalized,
-            Err(err) => {
-                ctx.gucs = saved_gucs;
-                restore_function_identity(ctx, saved_identity);
-                return Err(err);
-            }
-        };
-        restore_names.insert(normalized);
-    }
-    let result = f(ctx);
-    restore_function_gucs(ctx, saved_gucs, restore_names);
-    restore_function_identity(ctx, saved_identity);
-    result
+    pgrust_executor::execute_with_sql_function_context(row, ctx, f)
 }

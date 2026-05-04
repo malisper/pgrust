@@ -15,6 +15,8 @@ mod tsvector_ops;
 
 use std::cmp::Ordering;
 
+use pgrust_access::AccessScalarServices;
+
 use crate::backend::catalog::CatalogError;
 use crate::include::catalog::{
     GIST_BOX_CONSISTENT_PROC_OID, GIST_BOX_DISTANCE_PROC_OID, GIST_BOX_PENALTY_PROC_OID,
@@ -40,27 +42,9 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct GistConsistentResult {
-    pub(crate) matches: bool,
-    pub(crate) recheck: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct GistDistanceResult {
-    pub(crate) value: Option<f64>,
-    pub(crate) recheck: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct GistColumnPickSplit {
-    pub(crate) left: Vec<usize>,
-    pub(crate) right: Vec<usize>,
-    pub(crate) left_union: Value,
-    pub(crate) right_union: Value,
-}
-
-pub(crate) type GistSortComparator = fn(&Value, &Value) -> Ordering;
+pub(crate) use pgrust_access::gist::support::{
+    GistColumnPickSplit, GistConsistentResult, GistDistanceResult, GistSortComparator,
+};
 
 fn has_multirange_value(values: &[Value]) -> bool {
     values
@@ -232,11 +216,27 @@ pub(crate) fn distance(
 
 pub(crate) fn sortsupport(proc_oid: u32) -> Option<GistSortComparator> {
     match proc_oid {
-        RANGE_SORTSUPPORT_PROC_OID => Some(range_ops::sort_compare),
-        GIST_POINT_SORTSUPPORT_PROC_OID => Some(point_ops::sort_compare),
-        MULTIRANGE_SORTSUPPORT_PROC_OID => Some(multirange_ops::sort_compare),
+        RANGE_SORTSUPPORT_PROC_OID => Some(range_sort_compare),
+        GIST_POINT_SORTSUPPORT_PROC_OID => Some(point_sort_compare),
+        MULTIRANGE_SORTSUPPORT_PROC_OID => Some(multirange_sort_compare),
         _ => None,
     }
+}
+
+fn range_sort_compare(left: &Value, right: &Value, _scalar: &dyn AccessScalarServices) -> Ordering {
+    range_ops::sort_compare(left, right)
+}
+
+fn point_sort_compare(left: &Value, right: &Value, _scalar: &dyn AccessScalarServices) -> Ordering {
+    point_ops::sort_compare(left, right)
+}
+
+fn multirange_sort_compare(
+    left: &Value,
+    right: &Value,
+    _scalar: &dyn AccessScalarServices,
+) -> Ordering {
+    multirange_ops::sort_compare(left, right)
 }
 
 pub(crate) fn translate_cmptype(proc_oid: u32, cmp: Ordering) -> Result<Ordering, CatalogError> {

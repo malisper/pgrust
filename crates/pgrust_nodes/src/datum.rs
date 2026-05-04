@@ -1,0 +1,2080 @@
+use crate::builtins::builtin_sql_type_for_oid;
+use crate::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY};
+use crate::parsenodes::{SqlType, SqlTypeKind};
+use crate::tsearch::{TsQuery, TsVector};
+use num_bigint::BigInt;
+use num_integer::Integer;
+use num_traits::{Signed, Zero};
+use pgrust_core::{CompactString, ItemPointerData, RangeCanonicalization};
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::net::{IpAddr, Ipv6Addr};
+use std::sync::{Arc, LazyLock, Mutex};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BitString {
+    pub bit_len: i32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayDimension {
+    pub lower_bound: i32,
+    pub length: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayValue {
+    pub element_type_oid: Option<u32>,
+    pub dimensions: Vec<ArrayDimension>,
+    pub elements: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordFieldDesc {
+    pub name: String,
+    pub sql_type: SqlType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordDescriptor {
+    pub type_oid: u32,
+    pub typrelid: u32,
+    pub typmod: i32,
+    pub fields: Vec<RecordFieldDesc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndirectVarlenaValue {
+    pub sql_type: SqlType,
+    pub bytes: Arc<[u8]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InetValue {
+    pub addr: IpAddr,
+    pub bits: u8,
+}
+
+impl InetValue {
+    pub fn max_bits(&self) -> u8 {
+        match self.addr {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        }
+    }
+
+    pub fn render_inet(&self) -> String {
+        if self.bits == self.max_bits() {
+            render_ip_addr(&self.addr)
+        } else {
+            format!("{}/{}", render_ip_addr(&self.addr), self.bits)
+        }
+    }
+
+    pub fn render_cidr(&self) -> String {
+        format!("{}/{}", render_ip_addr(&self.addr), self.bits)
+    }
+}
+
+fn render_ip_addr(addr: &IpAddr) -> String {
+    match addr {
+        IpAddr::V4(addr) => addr.to_string(),
+        IpAddr::V6(addr) => render_ipv6_addr(*addr),
+    }
+}
+
+fn render_ipv6_addr(addr: Ipv6Addr) -> String {
+    let segments = addr.segments();
+    if let Some((zero_base, zero_len)) = longest_ipv6_zero_run(&segments)
+        && zero_base == 0
+        && (zero_len == 6
+            || (zero_len == 7 && segments[7] != 1)
+            || (zero_len == 5 && segments[5] == 0xffff))
+    {
+        let octets = addr.octets();
+        if segments[5] == 0xffff {
+            return format!(
+                "::ffff:{}.{}.{}.{}",
+                octets[12], octets[13], octets[14], octets[15]
+            );
+        }
+        return format!(
+            "::{}.{}.{}.{}",
+            octets[12], octets[13], octets[14], octets[15]
+        );
+    }
+    if segments[..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
+        let octets = addr.octets();
+        return format!(
+            "::ffff:{}.{}.{}.{}",
+            octets[12], octets[13], octets[14], octets[15]
+        );
+    }
+    addr.to_string()
+}
+
+fn longest_ipv6_zero_run(segments: &[u16; 8]) -> Option<(usize, usize)> {
+    let mut best_base = None;
+    let mut best_len = 0usize;
+    let mut current_base = None;
+    let mut current_len = 0usize;
+    for (idx, segment) in segments.iter().enumerate() {
+        if *segment == 0 {
+            if current_base.is_none() {
+                current_base = Some(idx);
+                current_len = 0;
+            }
+            current_len += 1;
+        } else if let Some(base) = current_base.take() {
+            if current_len > best_len {
+                best_base = Some(base);
+                best_len = current_len;
+            }
+            current_len = 0;
+        }
+    }
+    if let Some(base) = current_base
+        && current_len > best_len
+    {
+        best_base = Some(base);
+        best_len = current_len;
+    }
+    (best_len >= 2).then(|| (best_base.expect("best zero run has a base"), best_len))
+}
+
+impl RecordDescriptor {
+    pub fn anonymous(fields: Vec<(String, SqlType)>, typmod: i32) -> Self {
+        Self {
+            type_oid: pgrust_core::RECORD_TYPE_OID,
+            typrelid: 0,
+            typmod,
+            fields: fields
+                .into_iter()
+                .map(|(name, sql_type)| RecordFieldDesc { name, sql_type })
+                .collect(),
+        }
+    }
+
+    pub fn named(
+        type_oid: u32,
+        typrelid: u32,
+        typmod: i32,
+        fields: Vec<(String, SqlType)>,
+    ) -> Self {
+        Self {
+            type_oid,
+            typrelid,
+            typmod,
+            fields: fields
+                .into_iter()
+                .map(|(name, sql_type)| RecordFieldDesc { name, sql_type })
+                .collect(),
+        }
+    }
+
+    pub fn sql_type(&self) -> SqlType {
+        let base = if self.typrelid != 0 {
+            SqlType::named_composite(self.type_oid, self.typrelid)
+        } else {
+            SqlType::record(self.type_oid.max(pgrust_core::RECORD_TYPE_OID))
+        };
+        SqlType {
+            typmod: self.typmod,
+            ..base
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordValue {
+    pub descriptor: RecordDescriptor,
+    pub fields: Vec<Value>,
+    pub raw_fields: Vec<Option<Arc<[u8]>>>,
+}
+
+impl RecordValue {
+    pub fn anonymous(fields: Vec<(String, Value)>) -> Self {
+        let descriptor = RecordDescriptor::anonymous(
+            fields
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        value
+                            .sql_type_hint()
+                            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    )
+                })
+                .collect(),
+            -1,
+        );
+        Self {
+            descriptor,
+            fields: fields.into_iter().map(|(_, value)| value).collect(),
+            raw_fields: Vec::new(),
+        }
+    }
+
+    pub fn named(type_oid: u32, typrelid: u32, typmod: i32, fields: Vec<(String, Value)>) -> Self {
+        let descriptor = RecordDescriptor::named(
+            type_oid,
+            typrelid,
+            typmod,
+            fields
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        value
+                            .sql_type_hint()
+                            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    )
+                })
+                .collect(),
+        );
+        Self {
+            descriptor,
+            fields: fields.into_iter().map(|(_, value)| value).collect(),
+            raw_fields: Vec::new(),
+        }
+    }
+
+    pub fn from_descriptor(descriptor: RecordDescriptor, fields: Vec<Value>) -> Self {
+        debug_assert_eq!(descriptor.fields.len(), fields.len());
+        Self {
+            descriptor,
+            fields,
+            raw_fields: Vec::new(),
+        }
+    }
+
+    pub fn from_descriptor_with_raw_fields(
+        descriptor: RecordDescriptor,
+        fields: Vec<Value>,
+        mut raw_fields: Vec<Option<Arc<[u8]>>>,
+    ) -> Self {
+        debug_assert_eq!(descriptor.fields.len(), fields.len());
+        raw_fields.resize_with(fields.len(), || None);
+        Self {
+            descriptor,
+            fields,
+            raw_fields,
+        }
+    }
+
+    pub fn raw_field(&self, index: usize) -> Option<&[u8]> {
+        self.raw_fields.get(index).and_then(|raw| raw.as_deref())
+    }
+
+    pub fn type_oid(&self) -> u32 {
+        self.descriptor.type_oid
+    }
+
+    pub fn typrelid(&self) -> u32 {
+        self.descriptor.typrelid
+    }
+
+    pub fn typmod(&self) -> i32 {
+        self.descriptor.typmod
+    }
+
+    pub fn sql_type(&self) -> SqlType {
+        self.descriptor.sql_type()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&RecordFieldDesc, &Value)> {
+        self.descriptor.fields.iter().zip(self.fields.iter())
+    }
+}
+
+impl PartialEq for RecordValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields == other.fields
+    }
+}
+
+impl Eq for RecordValue {}
+
+impl Hash for RecordValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.fields.len().hash(state);
+        for value in &self.fields {
+            value.hash(state);
+        }
+    }
+}
+
+impl ArrayValue {
+    pub fn empty() -> Self {
+        Self {
+            element_type_oid: None,
+            dimensions: Vec::new(),
+            elements: Vec::new(),
+        }
+    }
+
+    pub fn from_1d(elements: Vec<Value>) -> Self {
+        if elements.is_empty() {
+            Self::empty()
+        } else {
+            Self {
+                element_type_oid: None,
+                dimensions: vec![ArrayDimension {
+                    lower_bound: 1,
+                    length: elements.len(),
+                }],
+                elements,
+            }
+        }
+    }
+
+    pub fn from_dimensions(dimensions: Vec<ArrayDimension>, elements: Vec<Value>) -> Self {
+        Self {
+            element_type_oid: None,
+            dimensions,
+            elements,
+        }
+    }
+
+    pub fn with_element_type_oid(mut self, element_type_oid: u32) -> Self {
+        self.element_type_oid = Some(element_type_oid);
+        self
+    }
+
+    pub fn ndim(&self) -> usize {
+        self.dimensions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+
+    pub fn lower_bound(&self, dim: usize) -> Option<i32> {
+        self.dimensions.get(dim).map(|dim| dim.lower_bound)
+    }
+
+    pub fn upper_bound(&self, dim: usize) -> Option<i32> {
+        self.dimensions
+            .get(dim)
+            .map(|entry| entry.lower_bound + entry.length as i32 - 1)
+    }
+
+    pub fn axis_len(&self, dim: usize) -> Option<usize> {
+        self.dimensions.get(dim).map(|dim| dim.length)
+    }
+
+    pub fn shape(&self) -> Vec<usize> {
+        self.dimensions.iter().map(|dim| dim.length).collect()
+    }
+
+    pub fn to_owned_value(&self) -> Self {
+        Self {
+            element_type_oid: self.element_type_oid,
+            dimensions: self.dimensions.clone(),
+            elements: self.elements.iter().map(Value::to_owned_value).collect(),
+        }
+    }
+
+    pub fn from_nested_values(values: Vec<Value>, lower_bounds: Vec<i32>) -> Result<Self, String> {
+        let mut lengths = Vec::new();
+        let mut elements = Vec::new();
+        flatten_nested_values(values, 0, &mut lengths, &mut elements)?;
+        if lengths.is_empty() || elements.is_empty() {
+            return Ok(Self::empty());
+        }
+        let dimensions = lengths
+            .into_iter()
+            .enumerate()
+            .map(|(idx, length)| ArrayDimension {
+                lower_bound: lower_bounds.get(idx).copied().unwrap_or(1),
+                length,
+            })
+            .collect();
+        Ok(Self {
+            element_type_oid: None,
+            dimensions,
+            elements,
+        })
+    }
+
+    pub fn to_nested_values(&self) -> Vec<Value> {
+        if self.dimensions.is_empty() {
+            return Vec::new();
+        }
+        let mut offset = 0usize;
+        build_nested_values(self, 0, &mut offset)
+    }
+}
+
+pub fn array_value_from_value(value: &Value) -> Option<ArrayValue> {
+    match value {
+        Value::Array(items) => ArrayValue::from_nested_values(items.clone(), vec![1]).ok(),
+        Value::PgArray(array) => Some(array.clone()),
+        _ => None,
+    }
+}
+
+fn flatten_nested_values(
+    values: Vec<Value>,
+    depth: usize,
+    lengths: &mut Vec<usize>,
+    elements: &mut Vec<Value>,
+) -> Result<(), String> {
+    set_array_length(lengths, depth, values.len())?;
+    if values.is_empty() {
+        return Ok(());
+    }
+    let all_arrays = values
+        .iter()
+        .all(|value| matches!(value, Value::Array(_) | Value::PgArray(_)));
+    let any_arrays = values
+        .iter()
+        .any(|value| matches!(value, Value::Array(_) | Value::PgArray(_)));
+    if any_arrays && !all_arrays {
+        return Err("multidimensional arrays must have matching extents".into());
+    }
+    if all_arrays {
+        let mut expected_rank = None;
+        for value in &values {
+            let rank = nested_value_rank(value)?;
+            if let Some(expected) = expected_rank {
+                if expected != rank {
+                    return Err("multidimensional arrays must have matching extents".into());
+                }
+            } else {
+                expected_rank = Some(rank);
+            }
+        }
+        for value in values {
+            let nested = match value {
+                Value::Array(values) => values,
+                Value::PgArray(array) => array.to_nested_values(),
+                _ => unreachable!(),
+            };
+            flatten_nested_values(nested, depth + 1, lengths, elements)?;
+        }
+        return Ok(());
+    }
+    elements.extend(values);
+    Ok(())
+}
+
+fn nested_value_rank(value: &Value) -> Result<usize, String> {
+    match value {
+        Value::Array(values) => {
+            if values.is_empty() {
+                return Ok(1);
+            }
+            let mut expected = None;
+            for value in values {
+                let rank = nested_value_rank(value)?;
+                if let Some(existing) = expected {
+                    if existing != rank {
+                        return Err("multidimensional arrays must have matching extents".into());
+                    }
+                } else {
+                    expected = Some(rank);
+                }
+            }
+            Ok(expected.unwrap_or(0) + 1)
+        }
+        Value::PgArray(array) => Ok(array.dimensions.len().max(1)),
+        _ => Ok(0),
+    }
+}
+
+fn set_array_length(lengths: &mut Vec<usize>, depth: usize, length: usize) -> Result<(), String> {
+    if let Some(existing) = lengths.get(depth) {
+        if *existing != length {
+            return Err("multidimensional arrays must have matching extents".into());
+        }
+        return Ok(());
+    }
+    lengths.push(length);
+    Ok(())
+}
+
+fn build_nested_values(array: &ArrayValue, depth: usize, offset: &mut usize) -> Vec<Value> {
+    let len = array.dimensions[depth].length;
+    if depth + 1 == array.dimensions.len() {
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            out.push(array.elements[*offset].clone());
+            *offset += 1;
+        }
+        return out;
+    }
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        let nested = ArrayValue {
+            element_type_oid: None,
+            dimensions: array.dimensions[depth + 1..].to_vec(),
+            elements: {
+                let start = *offset;
+                let width = array.dimensions[depth + 1..]
+                    .iter()
+                    .fold(1usize, |acc, dim| acc.saturating_mul(dim.length));
+                *offset += width;
+                array.elements[start..start + width].to_vec()
+            },
+        };
+        out.push(Value::PgArray(nested));
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoLseg {
+    pub p: [GeoPoint; 2],
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoPath {
+    pub closed: bool,
+    pub points: Vec<GeoPoint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoLine {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoBox {
+    pub high: GeoPoint,
+    pub low: GeoPoint,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoPolygon {
+    pub bound_box: GeoBox,
+    pub points: Vec<GeoPoint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoCircle {
+    pub center: GeoPoint,
+    pub radius: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RangeTypeRef {
+    pub sql_type: SqlType,
+    pub subtype: SqlType,
+    pub multirange_type_oid: u32,
+    pub canonicalization: RangeCanonicalization,
+}
+
+impl RangeTypeRef {
+    pub const fn type_oid(self) -> u32 {
+        self.sql_type.type_oid
+    }
+
+    pub const fn subtype_oid(self) -> u32 {
+        self.subtype.type_oid
+    }
+
+    pub const fn is_discrete(self) -> bool {
+        matches!(self.canonicalization, RangeCanonicalization::Discrete)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MultirangeTypeRef {
+    pub sql_type: SqlType,
+    pub range_type: RangeTypeRef,
+}
+
+impl MultirangeTypeRef {
+    pub const fn type_oid(self) -> u32 {
+        self.sql_type.type_oid
+    }
+
+    pub const fn range_type_oid(self) -> u32 {
+        self.range_type.type_oid()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RangeBound {
+    pub value: Box<Value>,
+    pub inclusive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RangeValue {
+    pub range_type: RangeTypeRef,
+    pub empty: bool,
+    pub lower: Option<RangeBound>,
+    pub upper: Option<RangeBound>,
+}
+
+impl From<RangeValue> for Value {
+    fn from(value: RangeValue) -> Self {
+        Value::Range(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MultirangeValue {
+    pub multirange_type: MultirangeTypeRef,
+    pub ranges: Vec<RangeValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IntervalValue {
+    pub time_micros: i64,
+    pub days: i32,
+    pub months: i32,
+}
+
+impl IntervalValue {
+    pub const fn zero() -> Self {
+        Self {
+            time_micros: 0,
+            days: 0,
+            months: 0,
+        }
+    }
+
+    pub const fn neg_infinity() -> Self {
+        Self {
+            time_micros: i64::MIN,
+            days: i32::MIN,
+            months: i32::MIN,
+        }
+    }
+
+    pub const fn infinity() -> Self {
+        Self {
+            time_micros: i64::MAX,
+            days: i32::MAX,
+            months: i32::MAX,
+        }
+    }
+
+    pub const fn is_neg_infinity(self) -> bool {
+        self.time_micros == i64::MIN && self.days == i32::MIN && self.months == i32::MIN
+    }
+
+    pub const fn is_infinity(self) -> bool {
+        self.time_micros == i64::MAX && self.days == i32::MAX && self.months == i32::MAX
+    }
+
+    pub const fn is_finite(self) -> bool {
+        !self.is_neg_infinity() && !self.is_infinity()
+    }
+
+    pub fn cmp_key(self) -> i128 {
+        if self.is_neg_infinity() {
+            return i128::MIN;
+        }
+        if self.is_infinity() {
+            return i128::MAX;
+        }
+        ((self.months as i128 * 30) + self.days as i128) * USECS_PER_DAY as i128
+            + self.time_micros as i128
+    }
+
+    pub fn is_negative(self) -> bool {
+        self.cmp_key() < 0
+    }
+
+    pub fn negate(self) -> Self {
+        if self.is_neg_infinity() {
+            return Self::infinity();
+        }
+        if self.is_infinity() {
+            return Self::neg_infinity();
+        }
+        Self {
+            time_micros: self.time_micros.saturating_neg(),
+            days: self.days.saturating_neg(),
+            months: self.months.saturating_neg(),
+        }
+    }
+
+    pub fn checked_negate(self) -> Option<Self> {
+        if self.is_neg_infinity() {
+            return Some(Self::infinity());
+        }
+        if self.is_infinity() {
+            return Some(Self::neg_infinity());
+        }
+        let result = Self {
+            time_micros: self.time_micros.checked_neg()?,
+            days: self.days.checked_neg()?,
+            months: self.months.checked_neg()?,
+        };
+        result.is_finite().then_some(result)
+    }
+
+    pub fn abs_for_display(self) -> (Self, bool) {
+        if self.is_negative() {
+            (self.negate(), true)
+        } else {
+            (self, false)
+        }
+    }
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        if !self.is_finite() || !rhs.is_finite() {
+            return match (
+                self.is_infinity(),
+                self.is_neg_infinity(),
+                rhs.is_infinity(),
+                rhs.is_neg_infinity(),
+            ) {
+                (true, _, _, true) | (_, true, true, _) => None,
+                (true, _, _, _) | (_, _, true, _) => Some(Self::infinity()),
+                (_, true, _, _) | (_, _, _, true) => Some(Self::neg_infinity()),
+                _ => None,
+            };
+        }
+        let result = Self {
+            time_micros: self.time_micros.checked_add(rhs.time_micros)?,
+            days: self.days.checked_add(rhs.days)?,
+            months: self.months.checked_add(rhs.months)?,
+        };
+        result.is_finite().then_some(result)
+    }
+
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        if !self.is_finite() || !rhs.is_finite() {
+            return match (
+                self.is_infinity(),
+                self.is_neg_infinity(),
+                rhs.is_infinity(),
+                rhs.is_neg_infinity(),
+            ) {
+                (true, _, true, _) | (_, true, _, true) => None,
+                (true, _, _, _) | (_, _, _, true) => Some(Self::infinity()),
+                (_, true, _, _) | (_, _, true, _) => Some(Self::neg_infinity()),
+                _ => None,
+            };
+        }
+        let result = Self {
+            time_micros: self.time_micros.checked_sub(rhs.time_micros)?,
+            days: self.days.checked_sub(rhs.days)?,
+            months: self.months.checked_sub(rhs.months)?,
+        };
+        result.is_finite().then_some(result)
+    }
+}
+
+impl BitString {
+    pub fn new(bit_len: i32, mut bytes: Vec<u8>) -> Self {
+        let required = Self::byte_len(bit_len);
+        bytes.truncate(required);
+        if bytes.len() < required {
+            bytes.resize(required, 0);
+        }
+        if let Some(last) = bytes.last_mut() {
+            let used_bits = (bit_len as usize) % 8;
+            if used_bits != 0 {
+                *last &= 0xff << (8 - used_bits);
+            }
+        }
+        Self { bit_len, bytes }
+    }
+
+    pub fn byte_len(bit_len: i32) -> usize {
+        (bit_len.max(0) as usize).div_ceil(8)
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::with_capacity(self.bit_len.max(0) as usize);
+        for bit_idx in 0..self.bit_len.max(0) as usize {
+            let byte = self.bytes[bit_idx / 8];
+            let shift = 7 - (bit_idx % 8);
+            out.push(if ((byte >> shift) & 1) != 0 { '1' } else { '0' });
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Value {
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Xid8(u64),
+    Money(i64),
+    Date(DateADT),
+    Time(TimeADT),
+    TimeTz(TimeTzADT),
+    Timestamp(TimestampADT),
+    TimestampTz(TimestampTzADT),
+    Interval(IntervalValue),
+    Bit(BitString),
+    Bytea(Vec<u8>),
+    Uuid([u8; 16]),
+    Inet(InetValue),
+    Cidr(InetValue),
+    MacAddr([u8; 6]),
+    MacAddr8([u8; 8]),
+    Point(GeoPoint),
+    Lseg(GeoLseg),
+    Path(GeoPath),
+    Line(GeoLine),
+    Box(GeoBox),
+    Polygon(GeoPolygon),
+    Circle(GeoCircle),
+    Range(RangeValue),
+    Multirange(MultirangeValue),
+    Float64(f64),
+    Numeric(NumericValue),
+    Json(CompactString),
+    Jsonb(Vec<u8>),
+    JsonPath(CompactString),
+    Xml(CompactString),
+    TsVector(TsVector),
+    TsQuery(TsQuery),
+    PgLsn(u64),
+    Tid(ItemPointerData),
+    Text(CompactString),
+    EnumOid(u32),
+    /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned.
+    TextRef(*const u8, u32),
+    InternalChar(u8),
+    Bool(bool),
+    Array(Vec<Value>),
+    PgArray(ArrayValue),
+    Record(RecordValue),
+    IndirectVarlena(IndirectVarlenaValue),
+    DroppedColumn(usize),
+    WrongTypeColumn {
+        attnum: usize,
+        table_type: SqlType,
+        query_type: SqlType,
+    },
+    Null,
+}
+
+#[derive(Debug, Clone)]
+pub enum NumericValue {
+    Finite {
+        coeff: BigInt,
+        scale: u32,
+        dscale: u32,
+    },
+    PosInf,
+    NegInf,
+    NaN,
+}
+
+impl NumericValue {
+    pub fn zero() -> Self {
+        Self::Finite {
+            coeff: BigInt::zero(),
+            scale: 0,
+            dscale: 0,
+        }
+    }
+
+    pub fn from_i64(value: i64) -> Self {
+        Self::Finite {
+            coeff: BigInt::from(value),
+            scale: 0,
+            dscale: 0,
+        }
+    }
+
+    pub fn finite(coeff: BigInt, scale: u32) -> Self {
+        Self::Finite {
+            coeff,
+            scale,
+            dscale: scale,
+        }
+    }
+
+    pub fn with_dscale(self, dscale: u32) -> Self {
+        match self {
+            Self::Finite { coeff, scale, .. } => Self::Finite {
+                coeff,
+                scale,
+                dscale,
+            },
+            other => other,
+        }
+    }
+
+    pub fn dscale(&self) -> u32 {
+        match self {
+            Self::Finite { dscale, .. } => *dscale,
+            _ => 0,
+        }
+    }
+
+    pub fn normalize(self) -> Self {
+        match self {
+            Self::PosInf | Self::NegInf => self,
+            Self::NaN => Self::NaN,
+            Self::Finite {
+                mut coeff,
+                mut scale,
+                dscale,
+            } => {
+                if coeff.is_zero() {
+                    return Self::Finite {
+                        coeff,
+                        scale,
+                        dscale,
+                    };
+                }
+                let ten = BigInt::from(10u8);
+                while scale > 0 {
+                    let (q, r) = coeff.div_rem(&ten);
+                    if !r.is_zero() {
+                        break;
+                    }
+                    coeff = q;
+                    scale -= 1;
+                }
+                Self::Finite {
+                    coeff,
+                    scale,
+                    dscale,
+                }
+            }
+        }
+    }
+
+    pub fn normalize_display_scale(&self) -> Self {
+        match self.clone().normalize() {
+            Self::Finite { coeff, scale, .. } => Self::Finite {
+                coeff,
+                scale,
+                dscale: scale,
+            },
+            other => other,
+        }
+    }
+
+    fn canonical_eq(&self) -> Self {
+        match self {
+            Self::PosInf | Self::NegInf => self.clone(),
+            Self::NaN => Self::NaN,
+            Self::Finite { coeff, .. } if coeff.is_zero() => Self::zero(),
+            _ => self.clone().normalize(),
+        }
+    }
+
+    pub fn digit_count(&self) -> i32 {
+        match self {
+            Self::PosInf | Self::NegInf | Self::NaN => 0,
+            Self::Finite { coeff, .. } => coeff
+                .to_str_radix(10)
+                .trim_start_matches('-')
+                .trim_start_matches('0')
+                .len()
+                .max(1) as i32,
+        }
+    }
+
+    pub fn negate(&self) -> Self {
+        match self {
+            Self::PosInf => Self::NegInf,
+            Self::NegInf => Self::PosInf,
+            Self::NaN => Self::NaN,
+            Self::Finite {
+                coeff,
+                scale,
+                dscale,
+            } => Self::Finite {
+                coeff: -coeff.clone(),
+                scale: *scale,
+                dscale: *dscale,
+            },
+        }
+    }
+
+    pub fn abs(&self) -> Self {
+        match self {
+            Self::PosInf | Self::NegInf => Self::PosInf,
+            Self::NaN => Self::NaN,
+            Self::Finite {
+                coeff,
+                scale,
+                dscale,
+            } => Self::Finite {
+                coeff: coeff.abs(),
+                scale: *scale,
+                dscale: *dscale,
+            },
+        }
+    }
+
+    pub fn render(&self) -> String {
+        match self {
+            Self::PosInf => "Infinity".to_string(),
+            Self::NegInf => "-Infinity".to_string(),
+            Self::NaN => "NaN".to_string(),
+            Self::Finite {
+                coeff,
+                scale,
+                dscale,
+            } => {
+                let negative = coeff.is_negative();
+                let digits = coeff.abs().to_str_radix(10);
+                if *scale == 0 {
+                    let mut out = if negative {
+                        format!("-{digits}")
+                    } else {
+                        digits
+                    };
+                    if *dscale > 0 {
+                        out.push('.');
+                        for _ in 0..*dscale {
+                            out.push('0');
+                        }
+                    }
+                    out
+                } else {
+                    let scale = *scale as usize;
+                    let mut out = String::new();
+                    if negative {
+                        out.push('-');
+                    }
+                    if digits.len() <= scale {
+                        out.push('0');
+                        out.push('.');
+                        for _ in 0..(scale - digits.len()) {
+                            out.push('0');
+                        }
+                        out.push_str(&digits);
+                    } else {
+                        let split = digits.len() - scale;
+                        out.push_str(&digits[..split]);
+                        out.push('.');
+                        out.push_str(&digits[split..]);
+                    }
+                    if (*dscale as usize) > scale {
+                        for _ in 0..((*dscale as usize) - scale) {
+                            out.push('0');
+                        }
+                    }
+                    out
+                }
+            }
+        }
+    }
+}
+
+static POW10_CACHE: LazyLock<Mutex<HashMap<u32, BigInt>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+impl NumericValue {
+    pub fn round_to_scale(&self, target_scale: u32) -> Option<Self> {
+        match self {
+            Self::PosInf => Some(Self::PosInf),
+            Self::NegInf => Some(Self::NegInf),
+            Self::NaN => Some(Self::NaN),
+            Self::Finite { coeff, scale, .. } => {
+                if *scale <= target_scale {
+                    let factor = pow10_bigint(target_scale - *scale);
+                    return Some(
+                        Self::finite(coeff * factor, target_scale).with_dscale(target_scale),
+                    );
+                }
+                let diff = *scale - target_scale;
+                let factor = pow10_bigint(diff);
+                let (quotient, remainder) = coeff.div_rem(&factor);
+                let twice = remainder.abs() * 2u8;
+                let rounded = if twice >= factor.abs() {
+                    quotient + coeff.signum()
+                } else {
+                    quotient
+                };
+                Some(Self::finite(rounded, target_scale).with_dscale(target_scale))
+            }
+        }
+    }
+
+    pub fn add(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
+            (Self::PosInf, Self::NegInf) | (Self::NegInf, Self::PosInf) => Self::NaN,
+            (Self::PosInf, _) | (_, Self::PosInf) => Self::PosInf,
+            (Self::NegInf, _) | (_, Self::NegInf) => Self::NegInf,
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                    dscale: ldscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                    dscale: rdscale,
+                },
+            ) => {
+                let dscale = (*ldscale).max(*rdscale);
+                if lscale == rscale {
+                    return Self::finite(lcoeff + rcoeff, *lscale)
+                        .with_dscale(dscale)
+                        .normalize();
+                }
+                let scale = (*lscale).max(*rscale);
+                let left = align_coeff(lcoeff.clone(), *lscale, scale);
+                let right = align_coeff(rcoeff.clone(), *rscale, scale);
+                Self::finite(left + right, scale)
+                    .with_dscale(dscale)
+                    .normalize()
+            }
+        }
+    }
+
+    pub fn sub(&self, other: &Self) -> Self {
+        self.add(&other.negate())
+    }
+
+    pub fn mul(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
+            (Self::PosInf | Self::NegInf, Self::Finite { coeff, .. })
+            | (Self::Finite { coeff, .. }, Self::PosInf | Self::NegInf)
+                if coeff.is_zero() =>
+            {
+                Self::NaN
+            }
+            (Self::PosInf, Self::PosInf) | (Self::NegInf, Self::NegInf) => Self::PosInf,
+            (Self::PosInf, Self::NegInf) | (Self::NegInf, Self::PosInf) => Self::NegInf,
+            (Self::PosInf, Self::Finite { coeff, .. })
+            | (Self::Finite { coeff, .. }, Self::PosInf) => {
+                if coeff.is_negative() {
+                    Self::NegInf
+                } else {
+                    Self::PosInf
+                }
+            }
+            (Self::NegInf, Self::Finite { coeff, .. })
+            | (Self::Finite { coeff, .. }, Self::NegInf) => {
+                if coeff.is_negative() {
+                    Self::PosInf
+                } else {
+                    Self::NegInf
+                }
+            }
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                    ..
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                    ..
+                },
+            ) => Self::finite(lcoeff * rcoeff, lscale.saturating_add(*rscale)).normalize(),
+        }
+    }
+
+    pub fn rem(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
+            (Self::PosInf | Self::NegInf, _) => Some(Self::NaN),
+            (_, Self::PosInf | Self::NegInf) => Some(self.clone()),
+            (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                    dscale: ldscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                    dscale: rdscale,
+                },
+            ) => {
+                let scale = (*lscale).max(*rscale);
+                let dscale = (*ldscale).max(*rdscale);
+                let left = align_coeff(lcoeff.clone(), *lscale, scale);
+                let right = align_coeff(rcoeff.clone(), *rscale, scale);
+                Some(
+                    Self::finite(left % right, scale)
+                        .with_dscale(dscale)
+                        .normalize(),
+                )
+            }
+        }
+    }
+
+    pub fn div(&self, other: &Self, out_scale: u32) -> Option<Self> {
+        match (self, other) {
+            (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
+            (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
+            (Self::PosInf | Self::NegInf, Self::PosInf | Self::NegInf) => Some(Self::NaN),
+            (Self::PosInf, Self::Finite { coeff, .. }) => Some(if coeff.is_negative() {
+                Self::NegInf
+            } else {
+                Self::PosInf
+            }),
+            (Self::NegInf, Self::Finite { coeff, .. }) => Some(if coeff.is_negative() {
+                Self::PosInf
+            } else {
+                Self::NegInf
+            }),
+            (Self::Finite { .. }, Self::PosInf | Self::NegInf) => Some(Self::zero()),
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                    ..
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                    ..
+                },
+            ) => {
+                let exp = (out_scale as i64) + (*rscale as i64) - (*lscale as i64);
+                if let Some(divisor_exp) = power_of_ten_exponent(rcoeff) {
+                    let divisor_sign = rcoeff.signum();
+                    let rounded = rounded_divide_coeff_by_power_of_ten(
+                        lcoeff,
+                        divisor_exp as i64 - exp,
+                        divisor_sign,
+                    );
+                    return Some(
+                        Self::finite(rounded, out_scale)
+                            .with_dscale(out_scale)
+                            .normalize(),
+                    );
+                }
+                let num = if exp >= 0 {
+                    lcoeff * pow10_bigint(exp as u32)
+                } else {
+                    lcoeff / pow10_bigint((-exp) as u32)
+                };
+                let (quotient, remainder) = num.div_rem(rcoeff);
+                let twice = remainder.abs() * 2u8;
+                let rounded = if twice >= rcoeff.abs() {
+                    quotient + (num.signum() * rcoeff.signum())
+                } else {
+                    quotient
+                };
+                Some(
+                    Self::finite(rounded, out_scale)
+                        .with_dscale(out_scale)
+                        .normalize(),
+                )
+            }
+        }
+    }
+
+    pub fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::NaN, Self::NaN) => Ordering::Equal,
+            (Self::NaN, _) => Ordering::Greater,
+            (_, Self::NaN) => Ordering::Less,
+            (Self::PosInf, Self::PosInf) | (Self::NegInf, Self::NegInf) => Ordering::Equal,
+            (Self::PosInf, _) => Ordering::Greater,
+            (_, Self::PosInf) => Ordering::Less,
+            (Self::NegInf, _) => Ordering::Less,
+            (_, Self::NegInf) => Ordering::Greater,
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                    ..
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                    ..
+                },
+            ) => {
+                if lscale == rscale {
+                    return lcoeff.cmp(rcoeff);
+                }
+                let scale = (*lscale).max(*rscale);
+                let left = align_coeff(lcoeff.clone(), *lscale, scale);
+                let right = align_coeff(rcoeff.clone(), *rscale, scale);
+                left.cmp(&right)
+            }
+        }
+    }
+}
+
+fn align_coeff(coeff: BigInt, from_scale: u32, to_scale: u32) -> BigInt {
+    coeff * pow10_bigint(to_scale - from_scale)
+}
+
+fn pow10_bigint(exp: u32) -> BigInt {
+    if exp >= 1024 {
+        let mut cache = POW10_CACHE.lock().expect("pow10 cache lock poisoned");
+        if let Some(value) = cache.get(&exp) {
+            return value.clone();
+        }
+        let value = pow10_bigint_uncached(exp);
+        cache.insert(exp, value.clone());
+        return value;
+    }
+    pow10_bigint_uncached(exp)
+}
+
+fn pow10_bigint_uncached(exp: u32) -> BigInt {
+    let mut digits = String::with_capacity(exp as usize + 1);
+    digits.push('1');
+    digits.extend(std::iter::repeat_n('0', exp as usize));
+    BigInt::parse_bytes(digits.as_bytes(), 10).expect("power of ten digits are decimal")
+}
+
+fn power_of_ten_exponent(value: &BigInt) -> Option<u32> {
+    let digits = value.abs().to_str_radix(10);
+    if !digits.starts_with('1') || !digits.as_bytes()[1..].iter().all(|digit| *digit == b'0') {
+        return None;
+    }
+    Some((digits.len() - 1) as u32)
+}
+
+fn rounded_divide_coeff_by_power_of_ten(
+    coeff: &BigInt,
+    shift: i64,
+    divisor_sign: BigInt,
+) -> BigInt {
+    if coeff.is_zero() {
+        return BigInt::zero();
+    }
+
+    let negative = coeff.signum() != divisor_sign;
+    let digits = coeff.abs().to_str_radix(10);
+    let mut rounded = if shift <= 0 {
+        let zeros = (-shift) as usize;
+        let mut shifted = String::with_capacity(digits.len() + zeros);
+        shifted.push_str(&digits);
+        shifted.extend(std::iter::repeat_n('0', zeros));
+        BigInt::parse_bytes(shifted.as_bytes(), 10).expect("shifted coefficient digits are decimal")
+    } else {
+        let drop = shift as usize;
+        if drop > digits.len() {
+            BigInt::zero()
+        } else {
+            let keep_len = digits.len() - drop;
+            let mut quotient = if keep_len == 0 {
+                BigInt::zero()
+            } else {
+                BigInt::parse_bytes(digits[..keep_len].as_bytes(), 10)
+                    .expect("coefficient digits are decimal")
+            };
+            if drop > 0 && digits.as_bytes()[keep_len] >= b'5' {
+                quotient += 1u8;
+            }
+            quotient
+        }
+    };
+
+    if negative {
+        rounded = -rounded;
+    }
+    rounded
+}
+
+impl PartialEq for NumericValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.canonical_eq(), other.canonical_eq()) {
+            (Self::PosInf, Self::PosInf) | (Self::NegInf, Self::NegInf) => true,
+            (Self::NaN, Self::NaN) => true,
+            (
+                Self::Finite {
+                    coeff: left_coeff,
+                    scale: left_scale,
+                    ..
+                },
+                Self::Finite {
+                    coeff: right_coeff,
+                    scale: right_scale,
+                    ..
+                },
+            ) => left_coeff == right_coeff && left_scale == right_scale,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for NumericValue {}
+
+impl Hash for NumericValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self.canonical_eq() {
+            Self::NaN => {
+                0u8.hash(state);
+            }
+            Self::PosInf => {
+                1u8.hash(state);
+            }
+            Self::NegInf => {
+                2u8.hash(state);
+            }
+            Self::Finite { coeff, scale, .. } => {
+                3u8.hash(state);
+                coeff.hash(state);
+                scale.hash(state);
+            }
+        }
+    }
+}
+
+impl From<&str> for NumericValue {
+    fn from(value: &str) -> Self {
+        parse_numeric_literal(value).unwrap_or_else(NumericValue::zero)
+    }
+}
+
+impl From<String> for NumericValue {
+    fn from(value: String) -> Self {
+        NumericValue::from(value.as_str())
+    }
+}
+
+fn parse_numeric_literal(text: &str) -> Option<NumericValue> {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("nan") {
+        return Some(NumericValue::NaN);
+    }
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "inf" | "+inf" | "infinity" | "+infinity" => return Some(NumericValue::PosInf),
+        "-inf" | "-infinity" => return Some(NumericValue::NegInf),
+        _ => {}
+    }
+    let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
+        Some(index) => (&trimmed[..index], trimmed[index + 1..].parse::<i32>().ok()?),
+        None => (trimmed, 0),
+    };
+    let negative = mantissa.starts_with('-');
+    let unsigned = mantissa.strip_prefix(['+', '-']).unwrap_or(mantissa);
+    let parts: Vec<&str> = unsigned.split('.').collect();
+    if parts.len() > 2 {
+        return None;
+    }
+    let whole = parts[0];
+    let frac = parts.get(1).copied().unwrap_or("");
+    if (!whole.is_empty() && !whole.chars().all(|ch| ch.is_ascii_digit()))
+        || !frac.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut digits = format!("{whole}{frac}");
+    if digits.is_empty() {
+        digits.push('0');
+    }
+    let mut scale = frac.len() as i32 - exponent;
+    if scale < 0 {
+        digits.extend(std::iter::repeat_n('0', (-scale) as usize));
+        scale = 0;
+    }
+    let mut coeff = digits.parse::<BigInt>().ok()?;
+    if negative {
+        coeff = -coeff;
+    }
+    Some(NumericValue::finite(coeff, scale as u32).normalize())
+}
+
+impl Value {
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Value::JsonPath(s) => Some(s.as_str()),
+            Value::Text(s) => Some(s.as_str()),
+            Value::Xml(s) => Some(s.as_str()),
+            Value::TextRef(ptr, len) => Some(unsafe {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn to_owned_value(&self) -> Value {
+        match self {
+            Value::Int16(v) => Value::Int16(*v),
+            Value::Int32(v) => Value::Int32(*v),
+            Value::Int64(v) => Value::Int64(*v),
+            Value::Xid8(v) => Value::Xid8(*v),
+            Value::Money(v) => Value::Money(*v),
+            Value::Date(v) => Value::Date(*v),
+            Value::Time(v) => Value::Time(*v),
+            Value::TimeTz(v) => Value::TimeTz(*v),
+            Value::Timestamp(v) => Value::Timestamp(*v),
+            Value::TimestampTz(v) => Value::TimestampTz(*v),
+            Value::Interval(v) => Value::Interval(*v),
+            Value::Bit(v) => Value::Bit(v.clone()),
+            Value::Bytea(v) => Value::Bytea(v.clone()),
+            Value::Uuid(v) => Value::Uuid(*v),
+            Value::Inet(v) => Value::Inet(v.clone()),
+            Value::Cidr(v) => Value::Cidr(v.clone()),
+            Value::MacAddr(v) => Value::MacAddr(*v),
+            Value::MacAddr8(v) => Value::MacAddr8(*v),
+            Value::Point(v) => Value::Point(v.clone()),
+            Value::Lseg(v) => Value::Lseg(v.clone()),
+            Value::Path(v) => Value::Path(v.clone()),
+            Value::Line(v) => Value::Line(v.clone()),
+            Value::Box(v) => Value::Box(v.clone()),
+            Value::Polygon(v) => Value::Polygon(v.clone()),
+            Value::Circle(v) => Value::Circle(v.clone()),
+            Value::Range(v) => Value::Range(v.clone()),
+            Value::Multirange(v) => Value::Multirange(v.clone()),
+            Value::Float64(v) => Value::Float64(*v),
+            Value::Numeric(v) => Value::Numeric(v.clone()),
+            Value::Json(s) => Value::Json(s.clone()),
+            Value::Jsonb(bytes) => Value::Jsonb(bytes.clone()),
+            Value::JsonPath(s) => Value::JsonPath(s.clone()),
+            Value::Xml(s) => Value::Xml(s.clone()),
+            Value::TsVector(v) => Value::TsVector(v.clone()),
+            Value::TsQuery(q) => Value::TsQuery(q.clone()),
+            Value::PgLsn(v) => Value::PgLsn(*v),
+            Value::Tid(v) => Value::Tid(*v),
+            Value::TextRef(ptr, len) => {
+                let s = unsafe {
+                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
+                };
+                Value::Text(CompactString::new(s))
+            }
+            Value::Text(s) => Value::Text(s.clone()),
+            Value::EnumOid(v) => Value::EnumOid(*v),
+            Value::InternalChar(v) => Value::InternalChar(*v),
+            Value::Bool(v) => Value::Bool(*v),
+            Value::Array(values) => {
+                Value::Array(values.iter().map(Value::to_owned_value).collect())
+            }
+            Value::PgArray(array) => Value::PgArray(array.to_owned_value()),
+            Value::Record(record) => Value::Record(RecordValue {
+                descriptor: record.descriptor.clone(),
+                fields: record.fields.iter().map(Value::to_owned_value).collect(),
+                raw_fields: record.raw_fields.clone(),
+            }),
+            Value::IndirectVarlena(indirect) => Value::IndirectVarlena(indirect.clone()),
+            Value::DroppedColumn(attnum) => Value::DroppedColumn(*attnum),
+            Value::WrongTypeColumn {
+                attnum,
+                table_type,
+                query_type,
+            } => Value::WrongTypeColumn {
+                attnum: *attnum,
+                table_type: *table_type,
+                query_type: *query_type,
+            },
+            Value::Null => Value::Null,
+        }
+    }
+
+    pub fn materialize_all(values: &mut Vec<Value>) {
+        for v in values.iter_mut() {
+            if let Value::TextRef(ptr, len) = *v {
+                let s = unsafe {
+                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
+                };
+                *v = Value::Text(CompactString::new(s));
+            } else if let Value::Array(items) = v {
+                for item in items.iter_mut() {
+                    *item = item.to_owned_value();
+                }
+            } else if let Value::PgArray(array) = v {
+                for item in array.elements.iter_mut() {
+                    *item = item.to_owned_value();
+                }
+            } else if let Value::Record(record) = v {
+                for value in record.fields.iter_mut() {
+                    *value = value.to_owned_value();
+                }
+            } else if let Value::IndirectVarlena(indirect) = v {
+                *v = Value::IndirectVarlena(indirect.clone());
+            } else if let Value::Range(range) = v {
+                if let Some(lower) = &mut range.lower {
+                    lower.value = Box::new(lower.value.to_owned_value());
+                }
+                if let Some(upper) = &mut range.upper {
+                    upper.value = Box::new(upper.value.to_owned_value());
+                }
+            } else if let Value::Multirange(multirange) = v {
+                for range in &mut multirange.ranges {
+                    if let Some(lower) = &mut range.lower {
+                        lower.value = Box::new(lower.value.to_owned_value());
+                    }
+                    if let Some(upper) = &mut range.upper {
+                        upper.value = Box::new(upper.value.to_owned_value());
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn as_array_value(&self) -> Option<ArrayValue> {
+        array_value_from_value(self)
+    }
+
+    pub fn sql_type_hint(&self) -> Option<SqlType> {
+        match self {
+            Value::Int16(_) => Some(SqlType::new(SqlTypeKind::Int2)),
+            Value::Int32(_) => Some(SqlType::new(SqlTypeKind::Int4)),
+            Value::Int64(_) => Some(SqlType::new(SqlTypeKind::Int8)),
+            Value::Xid8(_) => {
+                Some(SqlType::new(SqlTypeKind::Int8).with_identity(pgrust_core::XID8_TYPE_OID, 0))
+            }
+            Value::Money(_) => Some(SqlType::new(SqlTypeKind::Money)),
+            Value::Date(_) => Some(SqlType::new(SqlTypeKind::Date)),
+            Value::Time(_) => Some(SqlType::new(SqlTypeKind::Time)),
+            Value::TimeTz(_) => Some(SqlType::new(SqlTypeKind::TimeTz)),
+            Value::Timestamp(_) => Some(SqlType::new(SqlTypeKind::Timestamp)),
+            Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
+            Value::Interval(_) => Some(SqlType::new(SqlTypeKind::Interval)),
+            Value::Bit(bits) => Some(SqlType::with_bit_len(SqlTypeKind::VarBit, bits.bit_len)),
+            Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
+            Value::Uuid(_) => Some(SqlType::new(SqlTypeKind::Uuid)),
+            Value::Inet(_) => Some(SqlType::new(SqlTypeKind::Inet)),
+            Value::Cidr(_) => Some(SqlType::new(SqlTypeKind::Cidr)),
+            Value::MacAddr(_) => Some(SqlType::new(SqlTypeKind::MacAddr)),
+            Value::MacAddr8(_) => Some(SqlType::new(SqlTypeKind::MacAddr8)),
+            Value::Point(_) => Some(SqlType::new(SqlTypeKind::Point)),
+            Value::Lseg(_) => Some(SqlType::new(SqlTypeKind::Lseg)),
+            Value::Path(_) => Some(SqlType::new(SqlTypeKind::Path)),
+            Value::Line(_) => Some(SqlType::new(SqlTypeKind::Line)),
+            Value::Box(_) => Some(SqlType::new(SqlTypeKind::Box)),
+            Value::Polygon(_) => Some(SqlType::new(SqlTypeKind::Polygon)),
+            Value::Circle(_) => Some(SqlType::new(SqlTypeKind::Circle)),
+            Value::Range(range) => Some(range.range_type.sql_type),
+            Value::Multirange(multirange) => Some(multirange.multirange_type.sql_type),
+            Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
+            Value::Numeric(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
+            Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
+            Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
+            Value::JsonPath(_) => Some(SqlType::new(SqlTypeKind::JsonPath)),
+            Value::Xml(_) => Some(SqlType::new(SqlTypeKind::Xml)),
+            Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
+            Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
+            Value::PgLsn(_) => Some(SqlType::new(SqlTypeKind::PgLsn)),
+            Value::Tid(_) => Some(SqlType::new(SqlTypeKind::Tid)),
+            Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
+            Value::EnumOid(_) => Some(SqlType::new(SqlTypeKind::Enum)),
+            Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
+            Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
+            Value::Array(items) => items
+                .iter()
+                .find_map(Value::sql_type_hint)
+                .map(SqlType::array_of)
+                .or_else(|| Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)))),
+            Value::PgArray(array) => {
+                let element_type = array
+                    .element_type_oid
+                    .and_then(builtin_sql_type_for_oid)
+                    .or_else(|| array.elements.iter().find_map(Value::sql_type_hint));
+                element_type.map(SqlType::array_of)
+            }
+            Value::Record(record) => Some(record.sql_type()),
+            Value::IndirectVarlena(indirect) => Some(indirect.sql_type),
+            Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => None,
+            Value::Null => None,
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Array(left), Value::Array(right)) => return left == right,
+            (Value::Array(left), Value::PgArray(right))
+            | (Value::PgArray(right), Value::Array(left)) => {
+                return right.to_nested_values() == *left;
+            }
+            (Value::PgArray(left), Value::PgArray(right)) => return left == right,
+            _ => {}
+        }
+        match (self, other) {
+            (Value::Int16(a), Value::Int16(b)) => a == b,
+            (Value::Int32(a), Value::Int32(b)) => a == b,
+            (Value::Int64(a), Value::Int64(b)) => a == b,
+            (Value::Xid8(a), Value::Xid8(b)) => a == b,
+            (Value::Money(a), Value::Money(b)) => a == b,
+            (Value::Date(a), Value::Date(b)) => a == b,
+            (Value::Time(a), Value::Time(b)) => a == b,
+            (Value::TimeTz(a), Value::TimeTz(b)) => a == b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+            (Value::TimestampTz(a), Value::TimestampTz(b)) => a == b,
+            (Value::Interval(a), Value::Interval(b)) => a.cmp_key() == b.cmp_key(),
+            (Value::Bit(a), Value::Bit(b)) => a == b,
+            (Value::Bytea(a), Value::Bytea(b)) => a == b,
+            (Value::Uuid(a), Value::Uuid(b)) => a == b,
+            (Value::Inet(a), Value::Inet(b)) => a == b,
+            (Value::Cidr(a), Value::Cidr(b)) => a == b,
+            (Value::MacAddr(a), Value::MacAddr(b)) => a == b,
+            (Value::MacAddr8(a), Value::MacAddr8(b)) => a == b,
+            (Value::Point(a), Value::Point(b)) => {
+                a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()
+            }
+            (Value::Lseg(a), Value::Lseg(b)) => {
+                a.p[0].x.to_bits() == b.p[0].x.to_bits()
+                    && a.p[0].y.to_bits() == b.p[0].y.to_bits()
+                    && a.p[1].x.to_bits() == b.p[1].x.to_bits()
+                    && a.p[1].y.to_bits() == b.p[1].y.to_bits()
+            }
+            (Value::Path(a), Value::Path(b)) => {
+                a.closed == b.closed
+                    && a.points.len() == b.points.len()
+                    && a.points.iter().zip(&b.points).all(|(left, right)| {
+                        left.x.to_bits() == right.x.to_bits()
+                            && left.y.to_bits() == right.y.to_bits()
+                    })
+            }
+            (Value::Line(a), Value::Line(b)) => {
+                a.a.to_bits() == b.a.to_bits()
+                    && a.b.to_bits() == b.b.to_bits()
+                    && a.c.to_bits() == b.c.to_bits()
+            }
+            (Value::Box(a), Value::Box(b)) => {
+                a.high.x.to_bits() == b.high.x.to_bits()
+                    && a.high.y.to_bits() == b.high.y.to_bits()
+                    && a.low.x.to_bits() == b.low.x.to_bits()
+                    && a.low.y.to_bits() == b.low.y.to_bits()
+            }
+            (Value::Polygon(a), Value::Polygon(b)) => {
+                a.bound_box.high.x.to_bits() == b.bound_box.high.x.to_bits()
+                    && a.bound_box.high.y.to_bits() == b.bound_box.high.y.to_bits()
+                    && a.bound_box.low.x.to_bits() == b.bound_box.low.x.to_bits()
+                    && a.bound_box.low.y.to_bits() == b.bound_box.low.y.to_bits()
+                    && a.points.len() == b.points.len()
+                    && a.points.iter().zip(&b.points).all(|(left, right)| {
+                        left.x.to_bits() == right.x.to_bits()
+                            && left.y.to_bits() == right.y.to_bits()
+                    })
+            }
+            (Value::Circle(a), Value::Circle(b)) => {
+                a.center.x.to_bits() == b.center.x.to_bits()
+                    && a.center.y.to_bits() == b.center.y.to_bits()
+                    && a.radius.to_bits() == b.radius.to_bits()
+            }
+            (Value::Range(a), Value::Range(b)) => a == b,
+            (Value::Multirange(a), Value::Multirange(b)) => a == b,
+            (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
+            (Value::Numeric(a), Value::Numeric(b)) => a == b,
+            (Value::Json(a), Value::Json(b)) => a == b,
+            (Value::Jsonb(a), Value::Jsonb(b)) => a == b,
+            (Value::JsonPath(a), Value::JsonPath(b)) => a == b,
+            (Value::Xml(a), Value::Xml(b)) => a == b,
+            (Value::TsVector(a), Value::TsVector(b)) => a == b,
+            (Value::TsQuery(a), Value::TsQuery(b)) => a == b,
+            (Value::PgLsn(a), Value::PgLsn(b)) => a == b,
+            (Value::Tid(a), Value::Tid(b)) => a == b,
+            (Value::EnumOid(a), Value::EnumOid(b)) => a == b,
+            (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Record(a), Value::Record(b)) => a == b,
+            (Value::IndirectVarlena(a), Value::IndirectVarlena(b)) => a == b,
+            (Value::DroppedColumn(a), Value::DroppedColumn(b)) => a == b,
+            (
+                Value::WrongTypeColumn {
+                    attnum: left_attnum,
+                    table_type: left_table_type,
+                    query_type: left_query_type,
+                },
+                Value::WrongTypeColumn {
+                    attnum: right_attnum,
+                    table_type: right_table_type,
+                    query_type: right_query_type,
+                },
+            ) => {
+                left_attnum == right_attnum
+                    && left_table_type == right_table_type
+                    && left_query_type == right_query_type
+            }
+            (Value::Null, Value::Null) => true,
+            (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
+                a.as_text().unwrap() == b.as_text().unwrap()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        if let Some(array) = self.as_array_value() {
+            7u8.hash(state);
+            array.hash(state);
+            return;
+        }
+        match self {
+            Value::Int16(v) => {
+                0u8.hash(state);
+                v.hash(state);
+            }
+            Value::Int32(v) => {
+                1u8.hash(state);
+                v.hash(state);
+            }
+            Value::Int64(v) => {
+                2u8.hash(state);
+                v.hash(state);
+            }
+            Value::Xid8(v) => {
+                39u8.hash(state);
+                v.hash(state);
+            }
+            Value::Money(v) => {
+                22u8.hash(state);
+                v.hash(state);
+            }
+            Value::Date(v) => {
+                15u8.hash(state);
+                v.hash(state);
+            }
+            Value::Time(v) => {
+                16u8.hash(state);
+                v.hash(state);
+            }
+            Value::TimeTz(v) => {
+                17u8.hash(state);
+                v.hash(state);
+            }
+            Value::Timestamp(v) => {
+                18u8.hash(state);
+                v.hash(state);
+            }
+            Value::TimestampTz(v) => {
+                19u8.hash(state);
+                v.hash(state);
+            }
+            Value::Interval(v) => {
+                28u8.hash(state);
+                v.cmp_key().hash(state);
+            }
+            Value::Bit(v) => {
+                14u8.hash(state);
+                v.hash(state);
+            }
+            Value::Bytea(v) => {
+                13u8.hash(state);
+                v.hash(state);
+            }
+            Value::Uuid(v) => {
+                38u8.hash(state);
+                v.hash(state);
+            }
+            Value::Inet(v) => {
+                26u8.hash(state);
+                v.hash(state);
+            }
+            Value::Cidr(v) => {
+                27u8.hash(state);
+                v.hash(state);
+            }
+            Value::MacAddr(v) => {
+                29u8.hash(state);
+                v.hash(state);
+            }
+            Value::MacAddr8(v) => {
+                30u8.hash(state);
+                v.hash(state);
+            }
+            Value::Point(v) => {
+                15u8.hash(state);
+                v.x.to_bits().hash(state);
+                v.y.to_bits().hash(state);
+            }
+            Value::Lseg(v) => {
+                16u8.hash(state);
+                v.p[0].x.to_bits().hash(state);
+                v.p[0].y.to_bits().hash(state);
+                v.p[1].x.to_bits().hash(state);
+                v.p[1].y.to_bits().hash(state);
+            }
+            Value::Path(v) => {
+                17u8.hash(state);
+                v.closed.hash(state);
+                for point in &v.points {
+                    point.x.to_bits().hash(state);
+                    point.y.to_bits().hash(state);
+                }
+            }
+            Value::Line(v) => {
+                18u8.hash(state);
+                v.a.to_bits().hash(state);
+                v.b.to_bits().hash(state);
+                v.c.to_bits().hash(state);
+            }
+            Value::Box(v) => {
+                19u8.hash(state);
+                v.high.x.to_bits().hash(state);
+                v.high.y.to_bits().hash(state);
+                v.low.x.to_bits().hash(state);
+                v.low.y.to_bits().hash(state);
+            }
+            Value::Polygon(v) => {
+                20u8.hash(state);
+                v.bound_box.high.x.to_bits().hash(state);
+                v.bound_box.high.y.to_bits().hash(state);
+                v.bound_box.low.x.to_bits().hash(state);
+                v.bound_box.low.y.to_bits().hash(state);
+                for point in &v.points {
+                    point.x.to_bits().hash(state);
+                    point.y.to_bits().hash(state);
+                }
+            }
+            Value::Circle(v) => {
+                21u8.hash(state);
+                v.center.x.to_bits().hash(state);
+                v.center.y.to_bits().hash(state);
+                v.radius.to_bits().hash(state);
+            }
+            Value::Range(v) => {
+                23u8.hash(state);
+                v.hash(state);
+            }
+            Value::Multirange(v) => {
+                24u8.hash(state);
+                v.hash(state);
+            }
+            Value::Float64(v) => {
+                3u8.hash(state);
+                v.to_bits().hash(state);
+            }
+            Value::Numeric(v) => {
+                4u8.hash(state);
+                v.hash(state);
+            }
+            Value::Json(s) => {
+                9u8.hash(state);
+                s.as_str().hash(state);
+            }
+            Value::Jsonb(bytes) => {
+                10u8.hash(state);
+                bytes.hash(state);
+            }
+            Value::JsonPath(s) => {
+                11u8.hash(state);
+                s.as_str().hash(state);
+            }
+            Value::Xml(s) => {
+                24u8.hash(state);
+                s.as_str().hash(state);
+            }
+            Value::TsVector(v) => {
+                15u8.hash(state);
+                v.hash(state);
+            }
+            Value::TsQuery(q) => {
+                16u8.hash(state);
+                q.hash(state);
+            }
+            Value::PgLsn(v) => {
+                29u8.hash(state);
+                v.hash(state);
+            }
+            Value::Tid(v) => {
+                39u8.hash(state);
+                v.hash(state);
+            }
+            Value::Text(s) => {
+                5u8.hash(state);
+                s.as_str().hash(state);
+            }
+            Value::TextRef(ptr, len) => {
+                5u8.hash(state);
+                let s = unsafe {
+                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
+                };
+                s.hash(state);
+            }
+            Value::EnumOid(v) => {
+                29u8.hash(state);
+                v.hash(state);
+            }
+            Value::InternalChar(v) => {
+                12u8.hash(state);
+                v.hash(state);
+            }
+            Value::Bool(v) => {
+                6u8.hash(state);
+                v.hash(state);
+            }
+            Value::Record(v) => {
+                25u8.hash(state);
+                v.hash(state);
+            }
+            Value::IndirectVarlena(v) => {
+                42u8.hash(state);
+                v.hash(state);
+            }
+            Value::DroppedColumn(attnum) => {
+                40u8.hash(state);
+                attnum.hash(state);
+            }
+            Value::WrongTypeColumn {
+                attnum,
+                table_type,
+                query_type,
+            } => {
+                41u8.hash(state);
+                attnum.hash(state);
+                table_type.hash(state);
+                query_type.hash(state);
+            }
+            Value::Array(_) | Value::PgArray(_) => unreachable!("array values hashed above"),
+            Value::Null => {
+                8u8.hash(state);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NumericValue, RecordValue, Value};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn numeric_zero_preserves_display_scale() {
+        assert_eq!(NumericValue::from("0.0").render(), "0.0");
+        assert_eq!(NumericValue::from("0.00").render(), "0.00");
+    }
+
+    #[test]
+    fn numeric_zero_equality_ignores_scale() {
+        assert_eq!(NumericValue::from("0"), NumericValue::from("0.0"));
+        assert_eq!(NumericValue::from("0.0"), NumericValue::from("0.00"));
+    }
+
+    #[test]
+    fn record_equality_ignores_field_names_and_identity() {
+        let anonymous = RecordValue::anonymous(vec![
+            ("f1".into(), Value::Int32(1)),
+            ("f2".into(), Value::Text("x".into())),
+        ]);
+        let named = RecordValue::named(
+            12345,
+            67890,
+            42,
+            vec![
+                ("left".into(), Value::Int32(1)),
+                ("right".into(), Value::Text("x".into())),
+            ],
+        );
+
+        assert_eq!(anonymous, named);
+
+        let mut left_hasher = DefaultHasher::new();
+        anonymous.hash(&mut left_hasher);
+        let mut right_hasher = DefaultHasher::new();
+        named.hash(&mut right_hasher);
+        assert_eq!(left_hasher.finish(), right_hasher.finish());
+    }
+}
+
+unsafe impl Send for Value {}
+unsafe impl Sync for Value {}

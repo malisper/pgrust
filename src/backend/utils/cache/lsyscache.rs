@@ -15,39 +15,44 @@ use crate::backend::rewrite::{
 };
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
-use crate::backend::utils::cache::relcache::RelCacheEntry;
+use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
     RelationIdGetRelation, SearchSysCache1, SearchSysCache2, SearchSysCacheList1,
     SearchSysCacheList2, SearchSysCacheList3, SysCacheId, SysCacheTuple, backend_catcache,
-    ensure_am_rows, ensure_amop_rows, ensure_amproc_rows, ensure_attribute_rows, ensure_class_rows,
-    ensure_collation_rows, ensure_constraint_rows, ensure_index_rows, ensure_inherit_rows,
-    ensure_namespace_rows, ensure_opclass_rows, ensure_proc_rows, ensure_rewrite_rows,
-    ensure_statistic_rows, ensure_type_rows, scan_class_rows_without_catcache,
-    with_backend_catcache,
+    ensure_am_rows, ensure_amop_rows, ensure_amproc_rows, ensure_attribute_rows, ensure_cast_rows,
+    ensure_class_rows, ensure_collation_rows, ensure_constraint_rows, ensure_depend_rows,
+    ensure_event_trigger_rows, ensure_index_rows, ensure_inherit_rows, ensure_language_rows,
+    ensure_namespace_rows, ensure_opclass_rows, ensure_operator_rows, ensure_opfamily_rows,
+    ensure_policy_rows, ensure_proc_rows, ensure_publication_namespace_rows,
+    ensure_publication_rel_rows, ensure_publication_rows, ensure_rewrite_rows,
+    ensure_statistic_ext_data_rows, ensure_statistic_ext_rows, ensure_statistic_rows,
+    ensure_trigger_rows, ensure_type_rows, scan_class_rows_without_catcache,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows_with_definition_formatter, build_pg_stat_all_tables_rows,
-    build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows, build_pg_stat_checkpointer_rows,
-    build_pg_stat_database_rows, build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows,
-    build_pg_stat_slru_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_stat_wal_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
-    build_pg_tables_rows, build_pg_views_rows_with_definition_formatter,
+    build_pg_publication_tables_rows, build_pg_rules_rows_with_definition_formatter,
+    build_pg_stat_all_tables_rows, build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows,
+    build_pg_stat_checkpointer_rows, build_pg_stat_database_rows, build_pg_stat_io_rows,
+    build_pg_stat_recovery_prefetch_rows, build_pg_stat_slru_rows,
+    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows, build_pg_stat_wal_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
+    build_pg_user_mappings_rows, build_pg_views_rows_with_definition_formatter,
 };
+use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, CONSTRAINT_FOREIGN,
     CONSTRAINT_NOTNULL, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow,
-    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
-    PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow,
-    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_catalog_kinds, bootstrap_pg_class_rows, bootstrap_relation_desc,
+    PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgConversionRow, PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgIndexRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_class_rows, bootstrap_relation_desc,
     system_catalog_index_by_oid, system_catalog_index_is_primary, system_catalog_indexes,
     system_catalog_indexes_for_heap,
 };
@@ -988,14 +993,6 @@ fn visible_type_oid_for_sql_type(
         .map(|row| row.oid)
 }
 
-fn visible_catcache(
-    db: &Database,
-    client_id: ClientId,
-    txn_ctx: Option<(TransactionId, CommandId)>,
-) -> Option<crate::backend::utils::cache::catcache::CatCache> {
-    backend_catcache(db, client_id, txn_ctx).ok()
-}
-
 fn proc_row_by_oid(
     db: &Database,
     client_id: ClientId,
@@ -1022,15 +1019,54 @@ fn proc_rows_by_name(
         .rsplit_once('.')
         .map(|(_, name)| name)
         .unwrap_or(normalized);
-    let mut rows = with_backend_catcache(db, client_id, txn_ctx, |catcache| {
-        catcache
-            .proc_rows_by_name(base_name)
+    let mut rows = SearchSysCacheList1(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PROCNAMEARGSNSP,
+        catalog_name_key(base_name),
+    )
+    .map(|tuples| {
+        tuples
             .into_iter()
-            .cloned()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Proc(row) => Some(row),
+                _ => None,
+            })
+            .filter(|row| row.proname.eq_ignore_ascii_case(base_name))
             .collect::<Vec<_>>()
     })
     .unwrap_or_default();
     crate::backend::catalog::pg_proc::sort_pg_proc_rows(&mut rows);
+    rows
+}
+
+fn operator_rows_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+) -> Vec<PgOperatorRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    let mut rows = SearchSysCacheList1(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::OPERNAMENSP,
+        catalog_name_key(normalized),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Operator(row) => Some(row),
+                _ => None,
+            })
+            .filter(|row| row.oprname.eq_ignore_ascii_case(normalized))
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    crate::backend::catalog::pg_operator::sort_pg_operator_rows(&mut rows);
     rows
 }
 
@@ -1238,9 +1274,7 @@ fn language_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgLanguageRow> {
-    visible_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.language_rows())
-        .unwrap_or_default()
+    ensure_language_rows(db, client_id, txn_ctx)
 }
 
 fn language_row_by_name(
@@ -1317,6 +1351,18 @@ pub struct LazyCatalogLookup {
     pub client_id: ClientId,
     pub txn_ctx: Option<(TransactionId, CommandId)>,
     pub search_path: Vec<String>,
+}
+
+impl LazyCatalogLookup {
+    pub fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
+        let catcache = backend_catcache(&self.db, self.client_id, self.txn_ctx).ok()?;
+        let relcache = RelCache::from_catcache(&catcache).ok()?;
+        Some(VisibleCatalog::with_search_path(
+            relcache,
+            Some(catcache),
+            self.search_path.clone(),
+        ))
+    }
 }
 
 fn owned_temp_namespace(db: &Database, client_id: ClientId) -> Option<TempNamespace> {
@@ -2009,6 +2055,16 @@ fn append_missing_derived_not_null_constraints(
 }
 
 impl CatalogLookup for LazyCatalogLookup {
+    fn stored_view_query_for_rule(
+        &self,
+        rewrite_oid: u32,
+    ) -> Option<crate::include::nodes::parsenodes::Query> {
+        self.db
+            .catalog
+            .read()
+            .stored_view_query_for_rule(rewrite_oid)
+    }
+
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         lookup_any_relation(
             &self.db,
@@ -2080,9 +2136,11 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn operator_rows(&self) -> Vec<PgOperatorRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|cache| cache.operator_rows())
-            .unwrap_or_default()
+        ensure_operator_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn operator_rows_by_name(&self, name: &str) -> Vec<PgOperatorRow> {
+        operator_rows_by_name(&self.db, self.client_id, self.txn_ctx, name)
     }
 
     fn cast_by_source_target(
@@ -2107,9 +2165,7 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn cast_rows(&self) -> Vec<PgCastRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|cache| cache.cast_rows())
-            .unwrap_or_default()
+        ensure_cast_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn conversion_rows(&self) -> Vec<PgConversionRow> {
@@ -2151,9 +2207,7 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn depend_rows(&self) -> Vec<PgDependRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|catcache| catcache.depend_rows())
-            .unwrap_or_default()
+        ensure_depend_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn sequence_rows(&self) -> Vec<PgSequenceRow> {
@@ -2327,9 +2381,7 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|cache| cache.opfamily_rows())
-            .unwrap_or_default()
+        ensure_opfamily_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn amproc_rows(&self) -> Vec<PgAmprocRow> {
@@ -2511,15 +2563,11 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn trigger_rows(&self) -> Vec<PgTriggerRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|catcache| catcache.trigger_rows())
-            .unwrap_or_default()
+        ensure_trigger_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn event_trigger_rows(&self) -> Vec<PgEventTriggerRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|catcache| catcache.event_trigger_rows())
-            .unwrap_or_default()
+        ensure_event_trigger_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn policy_rows_for_relation(
@@ -2568,24 +2616,15 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn publication_rows(&self) -> Vec<PgPublicationRow> {
-        with_backend_catcache(&self.db, self.client_id, self.txn_ctx, |catcache| {
-            catcache.publication_rows()
-        })
-        .unwrap_or_default()
+        ensure_publication_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn publication_rel_rows(&self) -> Vec<PgPublicationRelRow> {
-        with_backend_catcache(&self.db, self.client_id, self.txn_ctx, |catcache| {
-            catcache.publication_rel_rows()
-        })
-        .unwrap_or_default()
+        ensure_publication_rel_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn publication_namespace_rows(&self) -> Vec<PgPublicationNamespaceRow> {
-        with_backend_catcache(&self.db, self.client_id, self.txn_ctx, |catcache| {
-            catcache.publication_namespace_rows()
-        })
-        .unwrap_or_default()
+        ensure_publication_namespace_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
@@ -2615,15 +2654,11 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|catcache| catcache.statistic_ext_rows())
-            .unwrap_or_default()
+        ensure_statistic_ext_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn statistic_ext_data_rows(&self) -> Vec<PgStatisticExtDataRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|catcache| catcache.statistic_ext_data_rows())
-            .unwrap_or_default()
+        ensure_statistic_ext_data_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn statistic_ext_data_row(
@@ -2656,6 +2691,142 @@ impl CatalogLookup for LazyCatalogLookup {
         backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.user_mapping_rows())
             .unwrap_or_default()
+    }
+
+    fn information_schema_foreign_data_wrappers_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<crate::include::catalog::PgForeignDataWrapperRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrappers_rows(
+            authids,
+            auth_members,
+            wrappers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_data_wrapper_options_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<crate::include::catalog::PgForeignDataWrapperRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrapper_options_rows(
+            authids,
+            auth_members,
+            wrappers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_servers_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<crate::include::catalog::PgForeignDataWrapperRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_servers_rows(
+            authids,
+            auth_members,
+            wrappers,
+            servers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_server_options_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_server_options_rows(
+            authids,
+            auth_members,
+            servers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_user_mappings_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        mappings: Vec<crate::include::catalog::PgUserMappingRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_user_mappings_rows(
+            authids,
+            auth_members,
+            servers,
+            mappings,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_user_mapping_options_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        mappings: Vec<crate::include::catalog::PgUserMappingRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_user_mapping_options_rows(
+            authids,
+            auth_members,
+            servers,
+            mappings,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_usage_privileges_rows(
+        &self,
+        authids: Vec<PgAuthIdRow>,
+        auth_members: Vec<PgAuthMembersRow>,
+        wrappers: Vec<crate::include::catalog::PgForeignDataWrapperRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        current_user_oid: u32,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_usage_privileges_rows(
+            authids,
+            auth_members,
+            wrappers,
+            servers,
+            current_user_oid,
+        )
+    }
+
+    fn information_schema_foreign_tables_rows(
+        &self,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+        servers: Vec<crate::include::catalog::PgForeignServerRow>,
+        tables: Vec<crate::include::catalog::PgForeignTableRow>,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_tables_rows(
+            namespaces, classes, servers, tables,
+        )
+    }
+
+    fn information_schema_foreign_table_options_rows(
+        &self,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+        tables: Vec<crate::include::catalog::PgForeignTableRow>,
+    ) -> Vec<Vec<Value>> {
+        crate::backend::utils::cache::system_views::build_information_schema_foreign_table_options_rows(
+            namespaces, classes, tables,
+        )
     }
 
     fn pg_tables_rows(&self) -> Vec<Vec<Value>> {
@@ -2723,14 +2894,53 @@ impl CatalogLookup for LazyCatalogLookup {
             .auth_catalog(self.client_id, self.txn_ctx)
             .map(|catalog| catalog.roles().to_vec())
             .unwrap_or_default();
-        let policy_rows = visible_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|catcache| catcache.policy_rows())
-            .unwrap_or_default();
+        let policy_rows = ensure_policy_rows(&self.db, self.client_id, self.txn_ctx);
         build_pg_policies_rows(
             ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
             authids,
             ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
             policy_rows,
+        )
+    }
+
+    fn pg_user_mappings_rows(&self) -> Vec<Vec<Value>> {
+        let authids = self
+            .db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.roles().to_vec())
+            .unwrap_or_default();
+        let auth_members = self
+            .db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.memberships().to_vec())
+            .unwrap_or_default();
+        build_pg_user_mappings_rows(
+            authids,
+            auth_members,
+            self.foreign_server_rows(),
+            self.user_mapping_rows(),
+            self.current_user_oid(),
+        )
+    }
+
+    fn pg_publication_tables_rows(
+        &self,
+        publications: Vec<PgPublicationRow>,
+        publication_rels: Vec<PgPublicationRelRow>,
+        publication_namespaces: Vec<PgPublicationNamespaceRow>,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+        attributes: Vec<PgAttributeRow>,
+        inherits: Vec<PgInheritsRow>,
+    ) -> Vec<Vec<Value>> {
+        build_pg_publication_tables_rows(
+            publications,
+            publication_rels,
+            publication_namespaces,
+            namespaces,
+            classes,
+            attributes,
+            inherits,
         )
     }
 

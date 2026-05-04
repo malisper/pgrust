@@ -1,8 +1,2 @@
-use crate::include::nodes::datum::Value;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScanKeyData {
-    pub attribute_number: i16,
-    pub strategy: u16,
-    pub argument: Value,
-}
+// :HACK: root compatibility shim while access formats live in `pgrust_access`.
+pub use pgrust_access::access::scankey::*;

@@ -16,33 +16,61 @@ use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_ne
 use crate::backend::access::index::buildkeys::materialize_heap_row_values;
 use crate::backend::commands::partition::{partition_ancestor_oids, partition_tree_entries};
 use crate::backend::parser::{CatalogLookup, SqlTypeKind};
-use crate::backend::statistics::types::decode_pg_mcv_list_payload;
 use crate::backend::utils::cache::system_views::{
     build_pg_get_publication_tables_rows, build_pg_stat_io_rows, current_pg_stat_progress_copy_rows,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::backend::utils::time::datetime::{
-    current_timezone_name, days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
-};
+use crate::backend::utils::time::datetime::current_timezone_name;
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, DEPENDENCY_INTERNAL, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID,
-    PG_CLASS_RELATION_OID, REGTYPE_TYPE_OID, SYSTEM_CATALOG_FOREIGN_KEYS, TEXT_TYPE_OID,
-    VOID_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_scalar_function_for_proc_row,
+    DEPENDENCY_INTERNAL, INT4_TYPE_OID, PG_CLASS_RELATION_OID, VOID_TYPE_OID,
+    builtin_scalar_function_for_proc_oid, builtin_scalar_function_for_proc_row,
 };
-use crate::include::nodes::datetime::{
-    TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
-};
-use crate::include::nodes::datum::{ArrayValue, IntervalValue, NumericValue, RecordValue};
+use crate::include::nodes::datetime::{TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampTzADT};
+use crate::include::nodes::datum::{IntervalValue, NumericValue, RecordValue};
 use crate::include::nodes::primnodes::{
-    QueryColumn, RowsFromItem, RowsFromSource, TextSearchTableFunction, expr_sql_type_hint,
-    set_returning_call_exprs,
+    QueryColumn, RowsFromItem, RowsFromSource, expr_sql_type_hint,
 };
 use crate::include::nodes::tsearch::TsWeight;
 use crate::pl::plpgsql::{
     current_event_trigger_ddl_commands, current_event_trigger_dropped_objects,
     execute_user_defined_set_returning_function,
 };
+use pgrust_executor::{GenerateSeriesState, SrfValueError, UnnestRows};
+
+impl From<SrfValueError> for ExecError {
+    fn from(err: SrfValueError) -> Self {
+        match err {
+            SrfValueError::TypeMismatch { op, left, right } => {
+                ExecError::TypeMismatch { op, left, right }
+            }
+            SrfValueError::UnsupportedTsStatQuery => ExecError::DetailedError {
+                message: "ts_stat query is not supported".into(),
+                detail: Some("expected SELECT column FROM table".into()),
+                hint: None,
+                sqlstate: "0A000",
+            },
+            SrfValueError::DirectoryOpen {
+                display_name,
+                message,
+            } => ExecError::DetailedError {
+                message: format!("could not open directory \"{display_name}\": {message}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58P01",
+            },
+            SrfValueError::DirectoryRead {
+                display_name,
+                message,
+            } => ExecError::DetailedError {
+                message: format!("could not read directory \"{display_name}\": {message}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58P01",
+            },
+        }
+    }
+}
 
 const MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS: usize = 10_000;
 
@@ -182,29 +210,19 @@ fn single_row_function_scan_slots(
     value: Value,
     output_columns: &[QueryColumn],
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    let values = match value {
-        Value::Record(record) if output_columns.len() == record.fields.len() => record.fields,
-        Value::Null if output_columns.len() != 1 => {
-            std::iter::repeat_n(Value::Null, output_columns.len()).collect()
-        }
-        other if output_columns.len() == 1 => vec![other],
-        other => vec![other],
-    };
-    Ok(vec![TupleSlot::virtual_row(values)])
+    Ok(
+        pgrust_executor::single_row_function_scan_values(value, output_columns.len())
+            .into_iter()
+            .map(TupleSlot::virtual_row)
+            .collect(),
+    )
 }
 
 fn function_output_columns(
     output_columns: &[QueryColumn],
     with_ordinality: bool,
 ) -> &[QueryColumn] {
-    if with_ordinality {
-        output_columns
-            .split_last()
-            .map(|(_, base)| base)
-            .unwrap_or(output_columns)
-    } else {
-        output_columns
-    }
+    pgrust_executor::function_output_columns(output_columns, with_ordinality)
 }
 
 fn eval_rows_from(
@@ -213,27 +231,24 @@ fn eval_rows_from(
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
     let mut function_rows = Vec::with_capacity(items.len());
-    let mut max_rows = 0;
     for (item_index, item) in items.iter().enumerate() {
         let rows = eval_rows_from_item_cached(item_index, item, slot, ctx)?;
-        max_rows = max_rows.max(rows.len());
-        function_rows.push(rows);
-    }
-
-    let mut output = Vec::with_capacity(max_rows);
-    for row_index in 0..max_rows {
-        let mut values = Vec::new();
-        for (item, rows) in items.iter().zip(function_rows.iter_mut()) {
-            let width = item.output_columns().len();
-            if let Some(row) = rows.get_mut(row_index) {
-                values.extend(row.values()?.iter().cloned());
-            } else {
-                values.extend(std::iter::repeat_n(Value::Null, width));
-            }
+        let mut row_values = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            row_values.push(row.values()?.to_vec());
         }
-        output.push(TupleSlot::virtual_row(values));
+        function_rows.push(row_values);
     }
-    Ok(output)
+    let item_widths = items
+        .iter()
+        .map(|item| item.output_columns().len())
+        .collect::<Vec<_>>();
+    Ok(
+        pgrust_executor::combine_rows_from_item_values(&item_widths, function_rows)
+            .into_iter()
+            .map(TupleSlot::virtual_row)
+            .collect(),
+    )
 }
 
 fn eval_rows_from_item_cached(
@@ -242,15 +257,14 @@ fn eval_rows_from_item_cached(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    if rows_from_item_uses_outer_columns(item) {
+    let Some(cache_key) = pgrust_executor::rows_from_cache_key(item_index, item) else {
         return eval_rows_from_item(item, slot, ctx);
-    }
+    };
 
     // :HACK: Executor SRF expressions do not currently carry a stable plan-node
     // id, and lateral rescans rebuild the inner plan state. Use the item index
     // plus the planned source shape so uncorrelated ROWS FROM items can keep
     // PostgreSQL's tuplestore-like rescan behavior across those rebuilds.
-    let cache_key = format!("rows_from_item:{item_index}:{:?}", item.source);
     if let Some(rows) = ctx.srf_rows_cache.get(&cache_key) {
         return Ok(rows.clone());
     }
@@ -277,130 +291,6 @@ fn eval_rows_from_item(
                 .map(|expr| eval_expr(expr, slot, ctx))
                 .collect::<Result<Vec<_>, _>>()?,
         )]),
-    }
-}
-
-fn rows_from_item_uses_outer_columns(item: &RowsFromItem) -> bool {
-    match &item.source {
-        RowsFromSource::Function(call) => set_returning_call_exprs(call)
-            .into_iter()
-            .any(expr_uses_outer_columns),
-        RowsFromSource::Project { output_exprs, .. } => {
-            output_exprs.iter().any(expr_uses_outer_columns)
-        }
-    }
-}
-
-fn expr_uses_outer_columns(expr: &Expr) -> bool {
-    match expr {
-        Expr::Var(var) => var.varlevelsup > 0,
-        Expr::Param(_) => true,
-        Expr::Aggref(aggref) => {
-            aggref.args.iter().any(expr_uses_outer_columns)
-                || aggref
-                    .aggfilter
-                    .as_ref()
-                    .is_some_and(expr_uses_outer_columns)
-        }
-        Expr::GroupingKey(grouping_key) => expr_uses_outer_columns(&grouping_key.expr),
-        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_uses_outer_columns),
-        Expr::WindowFunc(window_func) => {
-            window_func.args.iter().any(expr_uses_outer_columns)
-                || match &window_func.kind {
-                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => aggref
-                        .aggfilter
-                        .as_ref()
-                        .is_some_and(expr_uses_outer_columns),
-                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
-                }
-        }
-        Expr::Op(op) => op.args.iter().any(expr_uses_outer_columns),
-        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_outer_columns),
-        Expr::Case(case_expr) => {
-            case_expr
-                .arg
-                .as_deref()
-                .is_some_and(expr_uses_outer_columns)
-                || case_expr.args.iter().any(|arm| {
-                    expr_uses_outer_columns(&arm.expr) || expr_uses_outer_columns(&arm.result)
-                })
-                || expr_uses_outer_columns(&case_expr.defresult)
-        }
-        Expr::CaseTest(_) => false,
-        Expr::Func(func) => func.args.iter().any(expr_uses_outer_columns),
-        Expr::SqlJsonQueryFunction(func) => {
-            func.child_exprs().into_iter().any(expr_uses_outer_columns)
-        }
-        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
-            .into_iter()
-            .any(expr_uses_outer_columns),
-        Expr::SubLink(sublink) => sublink
-            .testexpr
-            .as_deref()
-            .is_some_and(expr_uses_outer_columns),
-        Expr::SubPlan(subplan) => subplan
-            .testexpr
-            .as_deref()
-            .is_some_and(expr_uses_outer_columns),
-        Expr::ScalarArrayOp(saop) => {
-            expr_uses_outer_columns(&saop.left) || expr_uses_outer_columns(&saop.right)
-        }
-        Expr::Cast(inner, _)
-        | Expr::Collate { expr: inner, .. }
-        | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => expr_uses_outer_columns(inner),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            expr_uses_outer_columns(expr)
-                || expr_uses_outer_columns(pattern)
-                || escape.as_deref().is_some_and(expr_uses_outer_columns)
-        }
-        Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right)
-        | Expr::Coalesce(left, right) => {
-            expr_uses_outer_columns(left) || expr_uses_outer_columns(right)
-        }
-        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_uses_outer_columns),
-        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_uses_outer_columns(expr)),
-        Expr::FieldSelect { expr, .. } => expr_uses_outer_columns(expr),
-        Expr::ArraySubscript { array, subscripts } => {
-            expr_uses_outer_columns(array)
-                || subscripts.iter().any(|subscript| {
-                    subscript
-                        .lower
-                        .as_ref()
-                        .is_some_and(expr_uses_outer_columns)
-                        || subscript
-                            .upper
-                            .as_ref()
-                            .is_some_and(expr_uses_outer_columns)
-                })
-        }
-        Expr::Xml(xml) => xml.child_exprs().any(expr_uses_outer_columns),
-        Expr::Const(_)
-        | Expr::Random
-        | Expr::CurrentDate
-        | Expr::CurrentCatalog
-        | Expr::CurrentSchema
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::User
-        | Expr::SystemUser
-        | Expr::CurrentRole
-        | Expr::CurrentTime { .. }
-        | Expr::CurrentTimestamp { .. }
-        | Expr::LocalTime { .. }
-        | Expr::LocalTimestamp { .. } => false,
     }
 }
 
@@ -484,7 +374,8 @@ fn execute_user_defined_set_returning_function_by_language(
     }
     if row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
         execute_user_defined_sql_set_returning_function(&row, args, output_columns, slot, ctx)
-    } else if let Some(kind) = text_search_table_function_for_proc_src(&row.prosrc) {
+    } else if let Some(kind) = pgrust_executor::text_search_table_function_for_proc_src(&row.prosrc)
+    {
         eval_text_search_table_function(kind, args, slot, ctx)
     } else if row.prosrc == "pg_options_to_table" {
         eval_pg_options_to_table(args, slot, ctx)
@@ -595,32 +486,9 @@ fn execute_native_set_returning_function(
 }
 
 fn eval_pg_get_catalog_foreign_keys() -> Vec<TupleSlot> {
-    SYSTEM_CATALOG_FOREIGN_KEYS
-        .iter()
-        .map(|row| {
-            let fk_columns = row
-                .fk_columns
-                .iter()
-                .map(|column| Value::Text((*column).into()))
-                .collect();
-            let pk_columns = row
-                .pk_columns
-                .iter()
-                .map(|column| Value::Text((*column).into()))
-                .collect();
-            TupleSlot::virtual_row(vec![
-                Value::Int32(row.fk_table_oid as i32),
-                Value::PgArray(
-                    ArrayValue::from_1d(fk_columns).with_element_type_oid(TEXT_TYPE_OID),
-                ),
-                Value::Int32(row.pk_table_oid as i32),
-                Value::PgArray(
-                    ArrayValue::from_1d(pk_columns).with_element_type_oid(TEXT_TYPE_OID),
-                ),
-                Value::Bool(row.is_array),
-                Value::Bool(row.is_opt),
-            ])
-        })
+    pgrust_executor::pg_get_catalog_foreign_key_rows()
+        .into_iter()
+        .map(TupleSlot::virtual_row)
         .collect()
 }
 
@@ -648,102 +516,28 @@ fn eval_pg_stat_get_backend_io(values: &[Value], ctx: &ExecutorContext) -> Vec<T
 }
 
 fn eval_pg_event_trigger_dropped_objects() -> Vec<TupleSlot> {
-    current_event_trigger_dropped_objects()
+    pgrust_executor::event_trigger_dropped_object_rows(current_event_trigger_dropped_objects())
         .into_iter()
-        .map(|row| {
-            TupleSlot::virtual_row(vec![
-                Value::Int64(i64::from(row.classid)),
-                Value::Int64(i64::from(row.objid)),
-                Value::Int32(row.objsubid),
-                Value::Bool(row.original),
-                Value::Bool(row.normal),
-                Value::Bool(row.is_temporary),
-                Value::Text(row.object_type.into()),
-                row.schema_name
-                    .map(|schema| Value::Text(schema.into()))
-                    .unwrap_or(Value::Null),
-                row.object_name
-                    .map(|name| Value::Text(name.into()))
-                    .unwrap_or(Value::Null),
-                Value::Text(row.object_identity.into()),
-                Value::Array(
-                    row.address_names
-                        .into_iter()
-                        .map(|name| Value::Text(name.into()))
-                        .collect(),
-                ),
-                Value::Array(
-                    row.address_args
-                        .into_iter()
-                        .map(|arg| Value::Text(arg.into()))
-                        .collect(),
-                ),
-            ])
-        })
+        .map(TupleSlot::virtual_row)
         .collect()
 }
 
 fn eval_pg_event_trigger_ddl_commands() -> Vec<TupleSlot> {
-    current_event_trigger_ddl_commands()
+    pgrust_executor::event_trigger_ddl_command_rows(current_event_trigger_ddl_commands())
         .into_iter()
-        .map(|row| {
-            TupleSlot::virtual_row(vec![
-                Value::Int64(0),
-                Value::Int64(0),
-                Value::Int32(0),
-                Value::Text(row.command_tag.into()),
-                Value::Text(row.object_type.into()),
-                row.schema_name
-                    .map(|schema| Value::Text(schema.into()))
-                    .unwrap_or(Value::Null),
-                Value::Text(row.object_identity.into()),
-                Value::Bool(false),
-                Value::Null,
-            ])
-        })
+        .map(TupleSlot::virtual_row)
         .collect()
 }
 
 fn eval_pg_mcv_list_items(values: &[Value]) -> Result<Vec<TupleSlot>, ExecError> {
-    let [Value::Bytea(bytes)] = values else {
-        return Ok(Vec::new());
-    };
-    let payload =
-        decode_pg_mcv_list_payload(bytes).map_err(|message| ExecError::DetailedError {
+    pgrust_executor::pg_mcv_list_item_rows(values)
+        .map_err(|message| ExecError::DetailedError {
             message: "could not decode pg_mcv_list".into(),
             detail: Some(message),
             hint: None,
             sqlstate: "XX000",
-        })?;
-    Ok(payload
-        .items
-        .into_iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let values = item
-                .values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_ref()
-                        .map(|value| Value::Text(value.clone().into()))
-                        .unwrap_or(Value::Null)
-                })
-                .collect::<Vec<_>>();
-            let nulls = item
-                .values
-                .iter()
-                .map(|value| Value::Bool(value.is_none()))
-                .collect::<Vec<_>>();
-            TupleSlot::virtual_row(vec![
-                Value::Int32(index as i32),
-                Value::PgArray(ArrayValue::from_1d(values).with_element_type_oid(TEXT_TYPE_OID)),
-                Value::PgArray(ArrayValue::from_1d(nulls).with_element_type_oid(BOOL_TYPE_OID)),
-                Value::Float64(item.frequency),
-                Value::Float64(item.base_frequency),
-            ])
         })
-        .collect())
+        .map(|rows| rows.into_iter().map(TupleSlot::virtual_row).collect())
 }
 
 fn eval_pg_get_publication_tables(
@@ -758,7 +552,7 @@ fn eval_pg_get_publication_tables(
             sqlstate: "0A000",
         });
     };
-    let publication_names = publication_names_from_values(values)?;
+    let publication_names = pgrust_executor::publication_names_from_values(values)?;
     let publications = catalog.publication_rows();
     for name in &publication_names {
         if !publications
@@ -787,51 +581,6 @@ fn eval_pg_get_publication_tables(
     .collect())
 }
 
-fn publication_names_from_values(values: &[Value]) -> Result<Vec<String>, ExecError> {
-    if values.len() == 1 {
-        return publication_names_from_single_value(&values[0]);
-    }
-    values
-        .iter()
-        .filter(|value| !matches!(value, Value::Null))
-        .map(publication_name_from_value)
-        .collect()
-}
-
-fn publication_names_from_single_value(value: &Value) -> Result<Vec<String>, ExecError> {
-    match value {
-        Value::Null => Ok(Vec::new()),
-        Value::Array(values) => publication_names_from_array_values(values),
-        Value::PgArray(array) => publication_names_from_array_values(&array.elements),
-        other => {
-            if let Some(array) = normalize_array_value(other) {
-                publication_names_from_array_values(&array.elements)
-            } else {
-                Ok(vec![publication_name_from_value(other)?])
-            }
-        }
-    }
-}
-
-fn publication_names_from_array_values(values: &[Value]) -> Result<Vec<String>, ExecError> {
-    values
-        .iter()
-        .filter(|value| !matches!(value, Value::Null))
-        .map(publication_name_from_value)
-        .collect()
-}
-
-fn publication_name_from_value(value: &Value) -> Result<String, ExecError> {
-    value
-        .as_text()
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| ExecError::TypeMismatch {
-            op: "pg_get_publication_tables",
-            left: value.clone(),
-            right: Value::Text(String::new().into()),
-        })
-}
-
 fn srf_data_dir_path(ctx: &ExecutorContext) -> Result<std::path::PathBuf, ExecError> {
     ctx.data_dir
         .clone()
@@ -842,32 +591,6 @@ fn srf_data_dir_path(ctx: &ExecutorContext) -> Result<std::path::PathBuf, ExecEr
             hint: None,
             sqlstate: "0A000",
         })
-}
-
-fn srf_file_timestamp_value(time: std::io::Result<std::time::SystemTime>) -> Value {
-    const UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS: i64 = 10_957;
-    match time
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-    {
-        Some(duration) => {
-            let usecs =
-                duration.as_secs() as i64 * USECS_PER_SEC + i64::from(duration.subsec_micros());
-            Value::TimestampTz(TimestampTzADT(
-                usecs
-                    - UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS
-                        * crate::include::nodes::datetime::USECS_PER_DAY,
-            ))
-        }
-        None => Value::Null,
-    }
-}
-
-fn srf_io_error_message(err: &std::io::Error) -> String {
-    match err.kind() {
-        std::io::ErrorKind::NotFound => "No such file or directory".into(),
-        _ => err.to_string(),
-    }
 }
 
 fn eval_pg_ls_dir(
@@ -895,33 +618,10 @@ fn eval_pg_ls_dir(
             srf_data_dir_path(ctx)?.join(path)
         }
     };
-    let mut rows = directory_entry_rows(&path, dirname, missing_ok, false)?;
-    if dirname == "."
-        && !rows
-            .iter()
-            .any(|row| row.tts_values.first().and_then(Value::as_text) == Some("base"))
-    {
-        // :HACK: pgrust's storage layout is not PostgreSQL's base/ tree yet,
-        // but data-directory inspection functions expose that top-level name.
-        rows.push(TupleSlot::virtual_row(vec![Value::Text("base".into())]));
-    }
-    if include_dot_dirs {
-        rows.push(TupleSlot::virtual_row(vec![Value::Text(".".into())]));
-        rows.push(TupleSlot::virtual_row(vec![Value::Text("..".into())]));
-    }
-    rows.sort_by(|left, right| {
-        let left = left
-            .tts_values
-            .first()
-            .and_then(Value::as_text)
-            .unwrap_or("");
-        let right = right
-            .tts_values
-            .first()
-            .and_then(Value::as_text)
-            .unwrap_or("");
-        left.cmp(right)
-    });
+    let rows = pgrust_executor::pg_ls_dir_rows(&path, dirname, missing_ok, include_dot_dirs)?
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect::<Vec<_>>();
     Ok(rows)
 }
 
@@ -934,648 +634,147 @@ fn eval_pg_ls_named_dir(
     for component in components {
         path.push(component);
     }
-    let mut rows = directory_entry_rows(&path, &components.join("/"), true, true)?;
-    if rows.is_empty() && synthesize_wal_segment {
-        rows.push(TupleSlot::virtual_row(vec![
-            Value::Text("000000010000000000000000".into()),
-            Value::Int64(i64::from(
-                crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES,
-            )),
-            Value::TimestampTz(TimestampTzADT(ctx.statement_timestamp_usecs)),
-        ]));
-    }
-    Ok(rows)
-}
-
-fn directory_entry_rows(
-    path: &std::path::Path,
-    display_name: &str,
-    missing_ok: bool,
-    include_metadata: bool,
-) -> Result<Vec<TupleSlot>, ExecError> {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(err) if missing_ok && err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Vec::new());
-        }
-        Err(err) => {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "could not open directory \"{display_name}\": {}",
-                    srf_io_error_message(&err)
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "58P01",
-            });
-        }
-    };
-    let mut rows = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|err| ExecError::DetailedError {
-            message: format!("could not read directory \"{display_name}\": {err}"),
-            detail: None,
-            hint: None,
-            sqlstate: "58P01",
-        })?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if include_metadata {
-            let metadata = entry.metadata().ok();
-            rows.push(TupleSlot::virtual_row(vec![
-                Value::Text(name.into()),
-                Value::Int64(metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0)),
-                metadata
-                    .map(|m| srf_file_timestamp_value(m.modified()))
-                    .unwrap_or(Value::Null),
-            ]));
-        } else {
-            rows.push(TupleSlot::virtual_row(vec![Value::Text(name.into())]));
-        }
-    }
-    rows.sort_by(|left, right| {
-        let left = left
-            .tts_values
-            .first()
-            .and_then(Value::as_text)
-            .unwrap_or("");
-        let right = right
-            .tts_values
-            .first()
-            .and_then(Value::as_text)
-            .unwrap_or("");
-        left.cmp(right)
-    });
+    let rows = pgrust_executor::pg_ls_named_dir_rows(
+        &path,
+        &components.join("/"),
+        synthesize_wal_segment,
+        i64::from(crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES),
+        ctx.statement_timestamp_usecs,
+    )?
+    .into_iter()
+    .map(TupleSlot::virtual_row)
+    .collect::<Vec<_>>();
     Ok(rows)
 }
 
 fn eval_pg_tablespace_databases(values: &[Value]) -> Vec<TupleSlot> {
-    if matches!(values.first(), Some(Value::Null) | None) {
-        return Vec::new();
-    }
-    vec![TupleSlot::virtual_row(vec![Value::Int64(i64::from(
-        crate::include::catalog::CURRENT_DATABASE_OID,
-    ))])]
+    pgrust_executor::pg_tablespace_databases_rows(values)
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect()
 }
 
 fn eval_pg_backend_memory_contexts() -> Vec<TupleSlot> {
-    [
-        memory_context_row(
-            "TopMemoryContext",
-            None,
-            "AllocSet",
-            1,
-            &[1],
-            8192,
-            1,
-            1024,
-            4,
-        ),
-        memory_context_row(
-            "CacheMemoryContext",
-            None,
-            "AllocSet",
-            2,
-            &[1, 1],
-            16384,
-            2,
-            2048,
-            8,
-        ),
-        memory_context_row(
-            "CatalogCache",
-            Some("pg_class"),
-            "AllocSet",
-            3,
-            &[1, 1, 1],
-            8192,
-            1,
-            1024,
-            3,
-        ),
-        memory_context_row(
-            "Type information cache",
-            None,
-            "AllocSet",
-            3,
-            &[1, 1, 2],
-            8192,
-            1,
-            1024,
-            3,
-        ),
-        memory_context_row("Caller tuples", None, "Bump", 2, &[1, 2], 8192, 2, 1024, 0),
-    ]
-    .into_iter()
-    .collect()
-}
-
-fn memory_context_row(
-    name: &str,
-    ident: Option<&str>,
-    typ: &str,
-    level: i32,
-    path: &[i32],
-    total_bytes: i64,
-    total_nblocks: i64,
-    free_bytes: i64,
-    free_chunks: i64,
-) -> TupleSlot {
-    TupleSlot::virtual_row(vec![
-        Value::Text(name.into()),
-        ident
-            .map(|ident| Value::Text(ident.into()))
-            .unwrap_or(Value::Null),
-        Value::Text(typ.into()),
-        Value::Int32(level),
-        int4_array(path.iter().copied()),
-        Value::Int64(total_bytes),
-        Value::Int64(total_nblocks),
-        Value::Int64(free_bytes),
-        Value::Int64(free_chunks),
-        Value::Int64(total_bytes.saturating_sub(free_bytes)),
-    ])
+    pgrust_executor::pg_backend_memory_context_rows()
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect()
 }
 
 fn eval_pg_config() -> Vec<TupleSlot> {
-    if let Some(rows) = local_pg_config_rows().filter(|rows| rows.len() > 20) {
-        return rows;
+    if let Some(rows) = pgrust_executor::local_pg_config_rows().filter(|rows| rows.len() > 20) {
+        return rows.into_iter().map(TupleSlot::virtual_row).collect();
     }
-    [
-        ("BINDIR", "/usr/local/pgsql/bin"),
-        ("DOCDIR", "/usr/local/pgsql/share/doc"),
-        ("HTMLDIR", "/usr/local/pgsql/share/doc/html"),
-        ("INCLUDEDIR", "/usr/local/pgsql/include"),
-        ("PKGINCLUDEDIR", "/usr/local/pgsql/include/postgresql"),
-        ("INCLUDEDIR-SERVER", "/usr/local/pgsql/include/server"),
-        ("LIBDIR", "/usr/local/pgsql/lib"),
-        ("PKGLIBDIR", "/usr/local/pgsql/lib/postgresql"),
-        ("LOCALEDIR", "/usr/local/pgsql/share/locale"),
-        ("MANDIR", "/usr/local/pgsql/share/man"),
-        ("SHAREDIR", "/usr/local/pgsql/share/postgresql"),
-        ("SYSCONFDIR", "/usr/local/pgsql/etc"),
-        (
-            "PGXS",
-            "/usr/local/pgsql/lib/postgresql/pgxs/src/makefiles/pgxs.mk",
-        ),
-        ("CONFIGURE", ""),
-        ("CC", "cc"),
-        ("CPPFLAGS", ""),
-        ("CFLAGS", "-O2"),
-        ("CFLAGS_SL", ""),
-        ("LDFLAGS", ""),
-        ("LDFLAGS_EX", ""),
-        ("LDFLAGS_SL", ""),
-        ("LIBS", ""),
-        ("VERSION", "PostgreSQL 18"),
-    ]
-    .into_iter()
-    .map(|(name, setting)| {
-        TupleSlot::virtual_row(vec![Value::Text(name.into()), Value::Text(setting.into())])
-    })
-    .collect()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn local_pg_config_rows() -> Option<Vec<TupleSlot>> {
-    let output = std::process::Command::new("pg_config").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let rows = stdout
-        .lines()
-        .filter_map(|line| line.split_once(" = "))
-        .map(|(name, setting)| {
-            TupleSlot::virtual_row(vec![
-                Value::Text(name.to_string().into()),
-                Value::Text(setting.to_string().into()),
-            ])
-        })
-        .collect::<Vec<_>>();
-    Some(rows)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn local_pg_config_rows() -> Option<Vec<TupleSlot>> {
-    None
+    pgrust_executor::pg_config_fallback_rows()
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect()
 }
 
 fn eval_pg_hba_file_rules() -> Vec<TupleSlot> {
-    vec![TupleSlot::virtual_row(vec![
-        Value::Int32(1),
-        Value::Text("pg_hba.conf".into()),
-        Value::Int32(1),
-        Value::Text("local".into()),
-        text_array(["all"]),
-        text_array(["all"]),
-        Value::Null,
-        Value::Null,
-        Value::Text("trust".into()),
-        text_array(std::iter::empty::<&str>()),
-        Value::Null,
-    ])]
+    pgrust_executor::pg_hba_file_rule_rows()
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect()
 }
 
 fn eval_pg_cursor(ctx: &ExecutorContext) -> Vec<TupleSlot> {
-    ctx.database
+    let rows = ctx
+        .database
         .as_ref()
         .map(|db| db.session_view_state(ctx.client_id))
         .unwrap_or_default()
         .cursors
         .into_iter()
-        .map(|row| {
-            TupleSlot::virtual_row(vec![
-                Value::Text(row.name.into()),
-                Value::Text(row.statement.into()),
-                Value::Bool(row.is_holdable),
-                Value::Bool(row.is_binary),
-                Value::Bool(row.is_scrollable),
-                Value::TimestampTz(TimestampTzADT(row.creation_time)),
-            ])
+        .map(|row| pgrust_executor::CursorViewRow {
+            name: row.name,
+            statement: row.statement,
+            is_holdable: row.is_holdable,
+            is_binary: row.is_binary,
+            is_scrollable: row.is_scrollable,
+            creation_time: row.creation_time,
         })
+        .collect::<Vec<_>>();
+    pgrust_executor::pg_cursor_rows(rows)
+        .into_iter()
+        .map(TupleSlot::virtual_row)
         .collect()
 }
 
 fn eval_pg_prepared_statement(ctx: &ExecutorContext) -> Vec<TupleSlot> {
-    ctx.database
+    let rows = ctx
+        .database
         .as_ref()
         .map(|db| db.session_view_state(ctx.client_id))
         .unwrap_or_default()
         .prepared_statements
         .into_iter()
-        .map(|row| {
-            TupleSlot::virtual_row(vec![
-                Value::Text(row.name.into()),
-                Value::Text(row.statement.into()),
-                Value::TimestampTz(TimestampTzADT(row.prepare_time)),
-                regtype_array(row.parameter_type_oids),
-                row.result_type_oids
-                    .map(regtype_array)
-                    .unwrap_or(Value::Null),
-                Value::Bool(row.from_sql),
-                Value::Int64(row.generic_plans),
-                Value::Int64(row.custom_plans),
-            ])
+        .map(|row| pgrust_executor::PreparedStatementViewRow {
+            name: row.name,
+            statement: row.statement,
+            prepare_time: row.prepare_time,
+            parameter_type_oids: row.parameter_type_oids,
+            result_type_oids: row.result_type_oids,
+            from_sql: row.from_sql,
+            generic_plans: row.generic_plans,
+            custom_plans: row.custom_plans,
         })
+        .collect::<Vec<_>>();
+    pgrust_executor::pg_prepared_statement_rows(rows)
+        .into_iter()
+        .map(TupleSlot::virtual_row)
         .collect()
 }
 
 fn eval_pg_prepared_xact(ctx: &ExecutorContext) -> Vec<TupleSlot> {
-    ctx.database
+    let rows = ctx
+        .database
         .as_ref()
         .map(|db| db.prepared_xacts.rows())
         .unwrap_or_default()
         .into_iter()
-        .map(|row| {
-            TupleSlot::virtual_row(vec![
-                Value::Int64(i64::from(row.transaction)),
-                Value::Text(row.gid.into()),
-                Value::TimestampTz(TimestampTzADT(row.prepared_at)),
-                Value::Text(row.owner_name.into()),
-                Value::Text(row.database_name.into()),
-            ])
+        .map(|row| pgrust_executor::PreparedXactViewRow {
+            transaction: row.transaction,
+            gid: row.gid,
+            prepared_at: row.prepared_at,
+            owner_name: row.owner_name,
+            database_name: row.database_name,
         })
+        .collect::<Vec<_>>();
+    pgrust_executor::pg_prepared_xact_rows(rows)
+        .into_iter()
+        .map(TupleSlot::virtual_row)
         .collect()
 }
 
 fn eval_pg_wait_events() -> Vec<TupleSlot> {
-    [
-        (
-            "Activity",
-            "AutoVacuumMain",
-            "autovacuum launcher is waiting",
-        ),
-        (
-            "BufferPin",
-            "BufferPin",
-            "waiting to acquire a pin on a buffer",
-        ),
-        (
-            "Client",
-            "ClientRead",
-            "waiting to read data from the client",
-        ),
-        ("Extension", "Extension", "waiting in an extension"),
-        ("IO", "DataFileRead", "waiting for a data file read"),
-        (
-            "IPC",
-            "BgWorkerShutdown",
-            "waiting for background worker shutdown",
-        ),
-        ("LWLock", "BufferContent", "waiting for a lightweight lock"),
-        ("Lock", "Relation", "waiting for a relation lock"),
-        ("Timeout", "PgSleep", "waiting due to pg_sleep"),
-    ]
-    .into_iter()
-    .map(|(typ, name, description)| {
-        TupleSlot::virtual_row(vec![
-            Value::Text(typ.into()),
-            Value::Text(name.into()),
-            Value::Text(description.into()),
-        ])
-    })
-    .collect()
+    pgrust_executor::pg_wait_event_rows()
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect()
 }
 
 fn eval_pg_timezone_names() -> Vec<TupleSlot> {
-    (-12i32..=14)
-        .map(|offset_hours| {
-            let sign = if offset_hours < 0 { "minus" } else { "plus" };
-            TupleSlot::virtual_row(vec![
-                Value::Text(format!("Etc/GMT/{sign}/{}", offset_hours.abs()).into()),
-                Value::Text(format!("GMT{offset_hours:+03}").into()),
-                interval_seconds(offset_hours * 60 * 60),
-                Value::Bool(false),
-            ])
-        })
+    pgrust_executor::pg_timezone_name_rows()
+        .into_iter()
+        .map(TupleSlot::virtual_row)
         .collect()
 }
 
 fn eval_pg_timezone_abbrevs() -> Vec<TupleSlot> {
-    let mut rows = (-12i32..=14)
-        .map(|offset_hours| {
-            TupleSlot::virtual_row(vec![
-                Value::Text(format!("TZA{offset_hours:+03}").into()),
-                interval_seconds(offset_hours * 60 * 60),
-                Value::Bool(false),
-            ])
-        })
-        .collect::<Vec<_>>();
-    rows.push(TupleSlot::virtual_row(vec![
-        Value::Text("LMT".into()),
-        interval_seconds(-(7 * 60 * 60 + 52 * 60 + 58)),
-        Value::Bool(false),
-    ]));
-    rows
-}
-
-fn interval_seconds(seconds: i32) -> Value {
-    Value::Interval(IntervalValue {
-        time_micros: i64::from(seconds) * USECS_PER_SEC,
-        days: 0,
-        months: 0,
-    })
-}
-
-fn text_array<'a>(values: impl IntoIterator<Item = &'a str>) -> Value {
-    Value::PgArray(
-        ArrayValue::from_1d(
-            values
-                .into_iter()
-                .map(|value| Value::Text(value.to_string().into()))
-                .collect(),
-        )
-        .with_element_type_oid(TEXT_TYPE_OID),
-    )
-}
-
-fn int4_array(values: impl IntoIterator<Item = i32>) -> Value {
-    Value::PgArray(
-        ArrayValue::from_1d(values.into_iter().map(Value::Int32).collect())
-            .with_element_type_oid(INT4_TYPE_OID),
-    )
-}
-
-fn regtype_array(values: impl IntoIterator<Item = u32>) -> Value {
-    Value::PgArray(
-        ArrayValue::from_1d(
-            values
-                .into_iter()
-                .map(|oid| Value::Int64(i64::from(oid)))
-                .collect(),
-        )
-        .with_element_type_oid(REGTYPE_TYPE_OID),
-    )
-}
-
-fn text_search_table_function_for_proc_src(prosrc: &str) -> Option<TextSearchTableFunction> {
-    match prosrc {
-        "ts_token_type_byid" | "ts_token_type_byname" => Some(TextSearchTableFunction::TokenType),
-        "ts_parse_byid" | "ts_parse_byname" => Some(TextSearchTableFunction::Parse),
-        "ts_debug" => Some(TextSearchTableFunction::Debug),
-        "ts_stat1" | "ts_stat2" => Some(TextSearchTableFunction::Stat),
-        _ => None,
-    }
+    pgrust_executor::pg_timezone_abbrev_rows()
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect()
 }
 
 fn eval_pg_show_all_settings(
     output_columns: &[crate::include::nodes::primnodes::QueryColumn],
 ) -> Vec<TupleSlot> {
     let wal_segment_size = crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES.to_string();
-    let mut settings = vec![(
-        "wal_segment_size",
-        wal_segment_size.as_str(),
-        "Write-Ahead Log / Settings",
-        "Sets the size of WAL files held for WAL records.",
-        "integer",
-    )];
-    const ENABLE_SETTINGS: &[(&str, &str, &str, &str, &str)] = &[
-        (
-            "default_statistics_target",
-            "100",
-            "Query Tuning / Other Planner Options",
-            "Sets the default statistics target.",
-            "integer",
-        ),
-        (
-            "enable_async_append",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_bitmapscan",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_distinct_reordering",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_gathermerge",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_group_by_reordering",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_hashagg",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_hashjoin",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_incremental_sort",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_indexonlyscan",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_indexscan",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_material",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_memoize",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_mergejoin",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_nestloop",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_parallel_append",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_parallel_hash",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_partition_pruning",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_partitionwise_aggregate",
-            "off",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_partitionwise_join",
-            "off",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_presorted_aggregate",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_self_join_elimination",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_seqscan",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_sort",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-        (
-            "enable_tidscan",
-            "on",
-            "Query Tuning / Planner Method Configuration",
-            "Enables a planner method.",
-            "bool",
-        ),
-    ];
-    settings.extend(ENABLE_SETTINGS.iter().copied());
-    settings
-        .iter()
-        .map(|(name, setting, category, description, vartype)| {
-            TupleSlot::virtual_row(
-                output_columns
-                    .iter()
-                    .map(|column| match column.name.as_str() {
-                        "name" => Value::Text((*name).into()),
-                        "setting" => Value::Text((*setting).into()),
-                        "unit" => Value::Null,
-                        "category" => Value::Text((*category).into()),
-                        "short_desc" => Value::Text((*description).into()),
-                        "extra_desc" => Value::Null,
-                        "context" => Value::Text("user".into()),
-                        "vartype" => Value::Text((*vartype).into()),
-                        "source" => Value::Text("default".into()),
-                        "min_val" => Value::Null,
-                        "max_val" => Value::Null,
-                        "enumvals" => Value::Null,
-                        "boot_val" => Value::Text((*setting).into()),
-                        "reset_val" => Value::Text((*setting).into()),
-                        "sourcefile" => Value::Null,
-                        "sourceline" => Value::Null,
-                        "pending_restart" => Value::Bool(false),
-                        _ => Value::Null,
-                    })
-                    .collect(),
-            )
-        })
+    pgrust_executor::pg_show_all_settings_rows(&wal_segment_size, output_columns)
+        .into_iter()
+        .map(TupleSlot::virtual_row)
         .collect()
 }
 
@@ -1614,68 +813,7 @@ pub(crate) fn eval_project_set_returning_call(
 }
 
 pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &str {
-    match call {
-        SetReturningCall::RowsFrom { .. } => "rows from",
-        SetReturningCall::GenerateSeries { .. } => "generate_series",
-        SetReturningCall::GenerateSubscripts { .. } => "generate_subscripts",
-        SetReturningCall::Unnest { .. } => "unnest",
-        SetReturningCall::JsonTableFunction { kind, .. } => match kind {
-            crate::include::nodes::primnodes::JsonTableFunction::ObjectKeys => "json_object_keys",
-            crate::include::nodes::primnodes::JsonTableFunction::Each => "json_each",
-            crate::include::nodes::primnodes::JsonTableFunction::EachText => "json_each_text",
-            crate::include::nodes::primnodes::JsonTableFunction::ArrayElements => {
-                "json_array_elements"
-            }
-            crate::include::nodes::primnodes::JsonTableFunction::ArrayElementsText => {
-                "json_array_elements_text"
-            }
-            crate::include::nodes::primnodes::JsonTableFunction::JsonbPathQuery => {
-                "jsonb_path_query"
-            }
-            crate::include::nodes::primnodes::JsonTableFunction::JsonbPathQueryTz => {
-                "jsonb_path_query_tz"
-            }
-            crate::include::nodes::primnodes::JsonTableFunction::JsonbObjectKeys => {
-                "jsonb_object_keys"
-            }
-            crate::include::nodes::primnodes::JsonTableFunction::JsonbEach => "jsonb_each",
-            crate::include::nodes::primnodes::JsonTableFunction::JsonbEachText => "jsonb_each_text",
-            crate::include::nodes::primnodes::JsonTableFunction::JsonbArrayElements => {
-                "jsonb_array_elements"
-            }
-            crate::include::nodes::primnodes::JsonTableFunction::JsonbArrayElementsText => {
-                "jsonb_array_elements_text"
-            }
-        },
-        SetReturningCall::JsonRecordFunction { kind, .. } => kind.name(),
-        SetReturningCall::SqlJsonTable(_) => "json_table",
-        SetReturningCall::SqlXmlTable(_) => "xmltable",
-        SetReturningCall::RegexTableFunction { kind, .. } => match kind {
-            crate::include::nodes::primnodes::RegexTableFunction::Matches => "regexp_matches",
-            crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {
-                "regexp_split_to_table"
-            }
-        },
-        SetReturningCall::StringTableFunction { kind, .. } => match kind {
-            crate::include::nodes::primnodes::StringTableFunction::StringToTable => {
-                "string_to_table"
-            }
-        },
-        SetReturningCall::PartitionTree { .. } => "pg_partition_tree",
-        SetReturningCall::PartitionAncestors { .. } => "pg_partition_ancestors",
-        SetReturningCall::PgLockStatus { .. } => "pg_lock_status",
-        SetReturningCall::PgStatProgressCopy { .. } => "pg_stat_progress_copy",
-        SetReturningCall::PgSequences { .. } => "pg_sequences",
-        SetReturningCall::InformationSchemaSequences { .. } => "information_schema.sequences",
-        SetReturningCall::TxidSnapshotXip { .. } => "txid_snapshot_xip",
-        SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
-            crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
-            crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
-            crate::include::nodes::primnodes::TextSearchTableFunction::Debug => "ts_debug",
-            crate::include::nodes::primnodes::TextSearchTableFunction::Stat => "ts_stat",
-        },
-        SetReturningCall::UserDefined { function_name, .. } => function_name.as_str(),
-    }
+    pgrust_executor::set_returning_call_label(call)
 }
 
 fn eval_generate_subscripts(
@@ -1726,28 +864,12 @@ fn eval_generate_subscripts(
             });
         }
     };
-    if dimension < 1 {
-        return Ok(Vec::new());
-    }
-    let Some(dim) = array.dimensions.get((dimension - 1) as usize) else {
-        return Ok(Vec::new());
-    };
-    if dim.length == 0 {
-        return Ok(Vec::new());
-    }
-    let lower = dim.lower_bound;
-    let upper = lower
-        .checked_add(dim.length as i32)
-        .and_then(|value| value.checked_sub(1))
-        .ok_or(ExecError::Int4OutOfRange)?;
-    let range: Box<dyn Iterator<Item = i32>> = if reverse {
-        Box::new((lower..=upper).rev())
-    } else {
-        Box::new(lower..=upper)
-    };
-    Ok(range
-        .map(|subscript| TupleSlot::virtual_row(vec![Value::Int32(subscript)]))
-        .collect())
+    Ok(
+        pgrust_executor::generate_subscripts_values(&array, dimension, reverse)?
+            .into_iter()
+            .map(|value| TupleSlot::virtual_row(vec![value]))
+            .collect(),
+    )
 }
 
 fn eval_text_search_table_function(
@@ -1805,9 +927,9 @@ fn eval_ts_stat_rows(
     let weights = values
         .get(1)
         .and_then(Value::as_text)
-        .map(parse_ts_stat_weights)
+        .map(pgrust_executor::parse_ts_stat_weights)
         .unwrap_or_default();
-    let (column_name, table_name) = parse_ts_stat_select(query)?;
+    let (column_name, table_name) = pgrust_executor::parse_ts_stat_select(query)?;
     let catalog = ctx
         .catalog
         .as_deref()
@@ -1914,49 +1036,6 @@ fn eval_ts_stat_rows(
             ])
         })
         .collect())
-}
-
-fn parse_ts_stat_weights(value: &str) -> Vec<TsWeight> {
-    value.chars().filter_map(TsWeight::from_char).collect()
-}
-
-fn parse_ts_stat_select(query: &str) -> Result<(&str, &str), ExecError> {
-    let trimmed = query.trim().trim_end_matches(';').trim();
-    let lower = trimmed.to_ascii_lowercase();
-    let Some(rest) = lower.strip_prefix("select ") else {
-        return Err(ExecError::DetailedError {
-            message: "ts_stat query is not supported".into(),
-            detail: Some("expected SELECT column FROM table".into()),
-            hint: None,
-            sqlstate: "0A000",
-        });
-    };
-    let Some(from_pos) = rest.find(" from ") else {
-        return Err(ExecError::DetailedError {
-            message: "ts_stat query is not supported".into(),
-            detail: Some("expected SELECT column FROM table".into()),
-            hint: None,
-            sqlstate: "0A000",
-        });
-    };
-    let column_start = "select ".len();
-    let column_end = column_start + from_pos;
-    let table_start = column_end + " from ".len();
-    let column = trimmed[column_start..column_end].trim();
-    let table = trimmed[table_start..]
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim();
-    if column.is_empty() || table.is_empty() || column.contains(',') {
-        return Err(ExecError::DetailedError {
-            message: "ts_stat query is not supported".into(),
-            detail: Some("expected SELECT column FROM table".into()),
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    Ok((column.trim_matches('"'), table.trim_matches('"')))
 }
 
 fn eval_ts_debug_rows(
@@ -2147,31 +1226,9 @@ fn sequence_catalog(ctx: &ExecutorContext) -> Result<&dyn CatalogLookup, ExecErr
         })
 }
 
-fn sequence_type_display(type_oid: u32) -> (&'static str, i32) {
-    match type_oid {
-        INT2_TYPE_OID => ("smallint", 16),
-        INT4_TYPE_OID => ("integer", 32),
-        INT8_TYPE_OID => ("bigint", 64),
-        _ => ("bigint", 64),
-    }
-}
-
-struct SequenceViewRow {
-    oid: u32,
-    schema: String,
-    name: String,
-    owner: String,
-    type_oid: u32,
-    start: i64,
-    minvalue: i64,
-    maxvalue: i64,
-    increment: i64,
-    cycle: bool,
-    cache: i64,
-    last_value: Option<i64>,
-}
-
-fn sequence_rows(ctx: &ExecutorContext) -> Result<Vec<SequenceViewRow>, ExecError> {
+fn sequence_rows(
+    ctx: &ExecutorContext,
+) -> Result<Vec<pgrust_executor::SequenceViewRow>, ExecError> {
     let catalog = sequence_catalog(ctx)?;
     let sequences = ctx
         .sequences
@@ -2189,7 +1246,7 @@ fn sequence_rows(ctx: &ExecutorContext) -> Result<Vec<SequenceViewRow>, ExecErro
         .into_iter()
         .filter(|class| class.relkind == 'S')
     {
-        let Some(data) = sequences.sequence_data(class.oid) else {
+        let Some(data) = sequences.sequence_data(class.oid, class.relpersistence != 't')? else {
             continue;
         };
         let schema = catalog
@@ -2201,7 +1258,7 @@ fn sequence_rows(ctx: &ExecutorContext) -> Result<Vec<SequenceViewRow>, ExecErro
             .find(|role| role.oid == class.relowner)
             .map(|role| role.rolname.clone())
             .unwrap_or_else(|| class.relowner.to_string());
-        rows.push(SequenceViewRow {
+        rows.push(pgrust_executor::SequenceViewRow {
             oid: class.oid,
             schema,
             name: class.relname,
@@ -2236,7 +1293,7 @@ fn is_identity_owned_sequence(catalog: &dyn CatalogLookup, sequence_oid: u32) ->
 }
 
 fn eval_pg_sequences(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError> {
-    Ok(sequence_rows(ctx)?
+    let rows = sequence_rows(ctx)?
         .into_iter()
         .filter(|row| {
             let Ok(catalog) = sequence_catalog(ctx) else {
@@ -2248,23 +1305,10 @@ fn eval_pg_sequences(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError>
                 .find(|class| class.relkind == 'S' && class.relname == row.name)
                 .is_none_or(|class| !is_identity_owned_sequence(catalog, class.oid))
         })
-        .map(|row| {
-            let (type_name, _) = sequence_type_display(row.type_oid);
-            let last_value = row.last_value.map(Value::Int64).unwrap_or(Value::Null);
-            TupleSlot::virtual_row(vec![
-                Value::Text(row.schema.into()),
-                Value::Text(row.name.into()),
-                Value::Text(row.owner.into()),
-                Value::Text(type_name.into()),
-                Value::Int64(row.start),
-                Value::Int64(row.minvalue),
-                Value::Int64(row.maxvalue),
-                Value::Int64(row.increment),
-                Value::Bool(row.cycle),
-                Value::Int64(row.cache),
-                last_value,
-            ])
-        })
+        .collect::<Vec<_>>();
+    Ok(pgrust_executor::pg_sequences_rows(rows)
+        .into_iter()
+        .map(TupleSlot::virtual_row)
         .collect())
 }
 
@@ -2275,27 +1319,16 @@ fn eval_information_schema_sequences(ctx: &ExecutorContext) -> Result<Vec<TupleS
         ctx.current_database_name.clone()
     };
     let catalog = sequence_catalog(ctx)?;
-    Ok(sequence_rows(ctx)?
+    let rows = sequence_rows(ctx)?
         .into_iter()
         .filter(|row| !is_identity_owned_sequence(catalog, row.oid))
-        .map(|row| {
-            let (type_name, precision) = sequence_type_display(row.type_oid);
-            TupleSlot::virtual_row(vec![
-                Value::Text(sequence_catalog_name.clone().into()),
-                Value::Text(row.schema.into()),
-                Value::Text(row.name.into()),
-                Value::Text(type_name.into()),
-                Value::Int32(precision),
-                Value::Int32(2),
-                Value::Int32(0),
-                Value::Text(row.start.to_string().into()),
-                Value::Text(row.minvalue.to_string().into()),
-                Value::Text(row.maxvalue.to_string().into()),
-                Value::Text(row.increment.to_string().into()),
-                Value::Text(if row.cycle { "YES" } else { "NO" }.into()),
-            ])
-        })
-        .collect())
+        .collect::<Vec<_>>();
+    Ok(
+        pgrust_executor::information_schema_sequence_rows(&sequence_catalog_name, rows)
+            .into_iter()
+            .map(TupleSlot::virtual_row)
+            .collect(),
+    )
 }
 
 fn eval_txid_snapshot_xip(
@@ -2366,43 +1399,29 @@ fn partition_catalog(ctx: &ExecutorContext) -> Result<&dyn CatalogLookup, ExecEr
         })
 }
 
-fn partition_lookup_oid(value: Value, op: &'static str) -> Result<Option<u32>, ExecError> {
-    match value {
-        Value::Null => Ok(None),
-        Value::Int32(v) if v >= 0 => Ok(Some(v as u32)),
-        Value::Int64(v) if v >= 0 && v <= i64::from(u32::MAX) => Ok(Some(v as u32)),
-        other => Err(ExecError::TypeMismatch {
-            op,
-            left: other,
-            right: Value::Int64(i64::from(crate::include::catalog::REGCLASS_TYPE_OID)),
-        }),
-    }
-}
-
 fn eval_partition_tree(
     relid: &Expr,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
     let Some(relation_oid) =
-        partition_lookup_oid(eval_expr(relid, slot, ctx)?, "pg_partition_tree")?
+        pgrust_executor::partition_lookup_oid(eval_expr(relid, slot, ctx)?, "pg_partition_tree")?
     else {
         return Ok(Vec::new());
     };
     let catalog = partition_catalog(ctx)?;
-    Ok(partition_tree_entries(catalog, relation_oid)?
+    let rows = partition_tree_entries(catalog, relation_oid)?
         .into_iter()
-        .map(|entry| {
-            TupleSlot::virtual_row(vec![
-                Value::Int32(entry.relid as i32),
-                entry
-                    .parentrelid
-                    .map(|oid| Value::Int32(oid as i32))
-                    .unwrap_or(Value::Null),
-                Value::Bool(entry.isleaf),
-                Value::Int32(entry.level),
-            ])
+        .map(|entry| pgrust_executor::PartitionTreeViewRow {
+            relid: entry.relid,
+            parentrelid: entry.parentrelid,
+            isleaf: entry.isleaf,
+            level: entry.level,
         })
+        .collect::<Vec<_>>();
+    Ok(pgrust_executor::pg_partition_tree_rows(rows)
+        .into_iter()
+        .map(TupleSlot::virtual_row)
         .collect())
 }
 
@@ -2411,16 +1430,23 @@ fn eval_partition_ancestors(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    let Some(relation_oid) =
-        partition_lookup_oid(eval_expr(relid, slot, ctx)?, "pg_partition_ancestors")?
+    let Some(relation_oid) = pgrust_executor::partition_lookup_oid(
+        eval_expr(relid, slot, ctx)?,
+        "pg_partition_ancestors",
+    )?
     else {
         return Ok(Vec::new());
     };
     let catalog = partition_catalog(ctx)?;
-    Ok(partition_ancestor_oids(catalog, relation_oid)?
+    Ok(
+        pgrust_executor::pg_partition_ancestor_rows(partition_ancestor_oids(
+            catalog,
+            relation_oid,
+        )?)
         .into_iter()
-        .map(|oid| TupleSlot::virtual_row(vec![Value::Int32(oid as i32)]))
-        .collect())
+        .map(TupleSlot::virtual_row)
+        .collect(),
+    )
 }
 
 fn eval_generate_series(
@@ -2475,190 +1501,29 @@ fn eval_generate_series_values(
     }
 
     if matches!(output_kind, SqlTypeKind::Numeric) {
-        let mut state = GenerateSeriesState::numeric(start_val, stop_val, step_val)?;
-        return collect_value_per_call_values(ctx, |ctx| state.next_value(ctx));
+        let mut state =
+            GenerateSeriesState::numeric(start_val, stop_val, step_val).map_err(ExecError::from)?;
+        return collect_value_per_call_values(ctx, || Ok(state.next_value()));
     }
 
-    let mut state = GenerateSeriesState::integral(start_val, stop_val, step_val, output_kind)?;
-    collect_value_per_call_values(ctx, |ctx| state.next_value(ctx))
+    let mut state = GenerateSeriesState::integral(start_val, stop_val, step_val, output_kind)
+        .map_err(ExecError::from)?;
+    collect_value_per_call_values(ctx, || Ok(state.next_value()))
 }
 
 fn collect_value_per_call_values(
     ctx: &mut ExecutorContext,
-    mut next: impl FnMut(&mut ExecutorContext) -> Result<Option<Value>, ExecError>,
+    mut next: impl FnMut() -> Result<Option<Value>, ExecError>,
 ) -> Result<Vec<Value>, ExecError> {
     let mut rows = Vec::new();
-    while let Some(value) = next(ctx)? {
+    loop {
+        ctx.check_for_interrupts()?;
+        let Some(value) = next()? else {
+            break;
+        };
         rows.push(value);
     }
     Ok(rows)
-}
-
-enum GenerateSeriesState {
-    Numeric {
-        current: NumericValue,
-        stop: NumericValue,
-        step: NumericValue,
-        step_cmp: std::cmp::Ordering,
-        dscale: u32,
-    },
-    Integral {
-        current: i64,
-        stop: i64,
-        step: i64,
-        output_kind: SqlTypeKind,
-    },
-}
-
-impl GenerateSeriesState {
-    fn numeric(start: Value, stop: Value, step: Value) -> Result<Self, ExecError> {
-        let start = generate_series_numeric_arg(start, "generate_series start")?;
-        let stop = generate_series_numeric_arg(stop, "generate_series stop")?;
-        let step = generate_series_numeric_arg(step, "generate_series step")?;
-        validate_generate_series_numeric_arg(&start, "start")?;
-        validate_generate_series_numeric_arg(&stop, "stop")?;
-        validate_generate_series_numeric_arg(&step, "step size")?;
-        let dscale = [start.dscale(), stop.dscale(), step.dscale()]
-            .into_iter()
-            .max()
-            .unwrap_or(0);
-        let step_cmp = step.cmp(&NumericValue::zero());
-        if step_cmp == std::cmp::Ordering::Equal {
-            return Err(ExecError::GenerateSeriesZeroStep);
-        }
-        Ok(GenerateSeriesState::Numeric {
-            current: start,
-            stop,
-            step,
-            step_cmp,
-            dscale,
-        })
-    }
-
-    fn integral(
-        start: Value,
-        stop: Value,
-        step: Value,
-        output_kind: SqlTypeKind,
-    ) -> Result<Self, ExecError> {
-        let current = generate_series_i64_arg(start, "generate_series start")?;
-        let stop = generate_series_i64_arg(stop, "generate_series stop")?;
-        let step = generate_series_i64_arg(step, "generate_series step")?;
-        if step == 0 {
-            return Err(ExecError::GenerateSeriesZeroStep);
-        }
-        Ok(GenerateSeriesState::Integral {
-            current,
-            stop,
-            step,
-            output_kind,
-        })
-    }
-
-    fn next_value(&mut self, ctx: &mut ExecutorContext) -> Result<Option<Value>, ExecError> {
-        ctx.check_for_interrupts()?;
-        match self {
-            GenerateSeriesState::Numeric {
-                current,
-                stop,
-                step,
-                step_cmp,
-                dscale,
-            } => {
-                let done = match step_cmp {
-                    std::cmp::Ordering::Greater => current.cmp(stop) == std::cmp::Ordering::Greater,
-                    std::cmp::Ordering::Less => current.cmp(stop) == std::cmp::Ordering::Less,
-                    std::cmp::Ordering::Equal => unreachable!(),
-                };
-                if done {
-                    return Ok(None);
-                }
-                let value = current.clone().with_dscale(*dscale);
-                *current = current.add(step).with_dscale(*dscale);
-                Ok(Some(Value::Numeric(value)))
-            }
-            GenerateSeriesState::Integral {
-                current,
-                stop,
-                step,
-                output_kind,
-            } => {
-                let done = if *step > 0 {
-                    *current > *stop
-                } else {
-                    *current < *stop
-                };
-                if done {
-                    return Ok(None);
-                }
-                let value = *current;
-                *current += *step;
-                Ok(Some(match output_kind {
-                    SqlTypeKind::Int8 => Value::Int64(value),
-                    _ => Value::Int32(value as i32),
-                }))
-            }
-        }
-    }
-}
-
-fn generate_series_numeric_arg(
-    value: Value,
-    label: &'static str,
-) -> Result<NumericValue, ExecError> {
-    match value {
-        Value::Numeric(n) => Ok(n),
-        Value::Int32(i) => Ok(NumericValue::from_i64(i64::from(i))),
-        Value::Int64(i) => Ok(NumericValue::from_i64(i)),
-        other => Err(ExecError::TypeMismatch {
-            op: label,
-            left: other,
-            right: Value::Null,
-        }),
-    }
-}
-
-fn validate_generate_series_numeric_arg(
-    value: &NumericValue,
-    arg: &'static str,
-) -> Result<(), ExecError> {
-    match value {
-        NumericValue::NaN => Err(ExecError::GenerateSeriesInvalidArg(arg, "NaN")),
-        NumericValue::PosInf | NumericValue::NegInf => {
-            Err(ExecError::GenerateSeriesInvalidArg(arg, "infinity"))
-        }
-        NumericValue::Finite { .. } => Ok(()),
-    }
-}
-
-fn generate_series_i64_arg(value: Value, label: &'static str) -> Result<i64, ExecError> {
-    match value {
-        Value::Int32(v) => Ok(i64::from(v)),
-        Value::Int64(v) => Ok(v),
-        other => Err(ExecError::TypeMismatch {
-            op: label,
-            left: other,
-            right: Value::Null,
-        }),
-    }
-}
-
-fn timestamp_add_interval(base: i64, step: IntervalValue) -> Option<i64> {
-    if !step.is_finite() || base == i64::MIN || base == i64::MAX {
-        return None;
-    }
-    let (days, time) = timestamp_parts_from_usecs(base);
-    let (year, month, day) = ymd_from_days(days);
-    let month_index = i64::from(year) * 12 + i64::from(month - 1) + i64::from(step.months);
-    let new_year = month_index.div_euclid(12) as i32;
-    let new_month = month_index.rem_euclid(12) as u32 + 1;
-    let new_day = day.min(days_in_month(new_year, new_month));
-    let new_days = days_from_ymd(new_year, new_month, new_day)?;
-    i64::from(new_days)
-        .checked_mul(USECS_PER_DAY)?
-        .checked_add(time)?
-        .checked_add(i64::from(step.days).checked_mul(USECS_PER_DAY)?)?
-        .checked_add(step.time_micros)
 }
 
 fn interval_sign(step: IntervalValue) -> i32 {
@@ -2787,70 +1652,18 @@ fn eval_timestamp_generate_series(
     output_kind: SqlTypeKind,
     ctx: &ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    let (mut current, end) = match (start_val, stop_val, output_kind) {
-        (Value::Timestamp(start), Value::Timestamp(stop), SqlTypeKind::Timestamp) => {
-            (start.0, stop.0)
-        }
-        (Value::TimestampTz(start), Value::TimestampTz(stop), SqlTypeKind::TimestampTz) => {
-            (start.0, stop.0)
-        }
-        (start, stop, _) => {
-            return Err(ExecError::TypeMismatch {
-                op: "generate_series",
-                left: start,
-                right: stop,
-            });
-        }
-    };
-    let Value::Interval(step) = step_val else {
-        return Err(ExecError::TypeMismatch {
-            op: "generate_series step",
-            left: step_val,
-            right: Value::Interval(IntervalValue::zero()),
-        });
-    };
-    if !step.is_finite() {
-        return Err(ExecError::DetailedError {
-            message: "step size cannot be infinite".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "22023",
-        });
-    }
-    let sign = interval_sign(step);
-    if sign == 0 {
-        return Err(ExecError::GenerateSeriesZeroStep);
-    }
+    let mut state = pgrust_executor::TimestampGenerateSeriesState::new(
+        start_val,
+        stop_val,
+        step_val,
+        output_kind,
+    )?;
     let mut rows = Vec::new();
-    loop {
+    while let Some(value) = {
         ctx.check_for_interrupts()?;
-        let done = if sign > 0 {
-            current > end
-        } else {
-            current < end
-        };
-        if done {
-            break;
-        }
-        rows.push(TupleSlot::virtual_row(vec![match output_kind {
-            SqlTypeKind::TimestampTz => Value::TimestampTz(TimestampTzADT(current)),
-            _ => Value::Timestamp(TimestampADT(current)),
-        }]));
-        // :HACK: ProjectSet currently materializes SRF output before an outer LIMIT can stop it.
-        // Bound infinite timestamp series so SELECT-list generate_series(..., 'infinity', ...)
-        // can still be consumed by LIMIT while the executor lacks streaming SRF state.
-        if matches!(end, TIMESTAMP_NOEND | TIMESTAMP_NOBEGIN)
-            && rows.len() >= MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS
-        {
-            break;
-        }
-        let Some(next) = timestamp_add_interval(current, step) else {
-            break;
-        };
-        if next == current {
-            return Err(ExecError::GenerateSeriesZeroStep);
-        }
-        current = next;
+        state.next_value()?
+    } {
+        rows.push(TupleSlot::virtual_row(vec![value]));
     }
     Ok(rows)
 }
@@ -2862,7 +1675,6 @@ fn eval_unnest(
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
     let mut arrays = Vec::with_capacity(args.len());
-    let mut max_len = 0usize;
     for arg in args {
         let arg_value = eval_expr(arg, slot, ctx)?;
         match arg_value {
@@ -2882,22 +1694,18 @@ fn eval_unnest(
                     .into_iter()
                     .map(Value::Range)
                     .collect::<Vec<_>>();
-                max_len = max_len.max(values.len());
                 arrays.push(Some(values));
             }
             Value::Array(values) => {
-                max_len = max_len.max(values.len());
                 arrays.push(Some(values));
             }
             Value::PgArray(array) => {
-                let values = unnest_array_values(array);
-                max_len = max_len.max(values.len());
+                let values = pgrust_executor::unnest_array_values(array);
                 arrays.push(Some(values));
             }
             other => {
                 if let Some(array) = normalize_array_value(&other) {
-                    let values = unnest_array_values(array);
-                    max_len = max_len.max(values.len());
+                    let values = pgrust_executor::unnest_array_values(array);
                     arrays.push(Some(values));
                     continue;
                 }
@@ -2906,8 +1714,7 @@ fn eval_unnest(
                         && matches!(ty.kind, SqlTypeKind::Int2Vector | SqlTypeKind::OidVector)
                 }) && let Some(array) = normalize_array_value(&other)
                 {
-                    let values = unnest_array_values(array);
-                    max_len = max_len.max(values.len());
+                    let values = pgrust_executor::unnest_array_values(array);
                     arrays.push(Some(values));
                     continue;
                 }
@@ -2920,71 +1727,15 @@ fn eval_unnest(
         }
     }
 
-    let expand_single_composite = unnest_expands_single_composite_arg(args, output_columns);
-    let mut rows = Vec::with_capacity(max_len);
-    for idx in 0..max_len {
+    let mut unnest_rows = UnnestRows::with_args_and_columns(arrays, args, output_columns);
+    let mut rows = Vec::new();
+    while let Some(row) = {
         ctx.check_for_interrupts()?;
-        if expand_single_composite {
-            let value = arrays
-                .first()
-                .and_then(|array| array.as_ref())
-                .and_then(|values| values.get(idx))
-                .cloned()
-                .unwrap_or(Value::Null);
-            let mut fields = match value {
-                Value::Record(record) => record.fields,
-                Value::Null => vec![Value::Null; output_columns.len()],
-                other => {
-                    return Err(ExecError::TypeMismatch {
-                        op: "unnest",
-                        left: other,
-                        right: Value::Null,
-                    });
-                }
-            };
-            fields.resize(output_columns.len(), Value::Null);
-            fields.truncate(output_columns.len());
-            rows.push(TupleSlot::virtual_row(fields));
-            continue;
-        }
-        let mut row = Vec::with_capacity(arrays.len());
-        for array in &arrays {
-            match array {
-                Some(values) => row.push(values.get(idx).cloned().unwrap_or(Value::Null)),
-                None => row.push(Value::Null),
-            }
-        }
+        unnest_rows.next_row().map_err(ExecError::from)?
+    } {
         rows.push(TupleSlot::virtual_row(row));
     }
     Ok(rows)
-}
-
-fn unnest_array_values(array: ArrayValue) -> Vec<Value> {
-    array.elements
-}
-
-fn unnest_expands_single_composite_arg(args: &[Expr], output_columns: &[QueryColumn]) -> bool {
-    if args.len() != 1 {
-        return false;
-    }
-    if let Some(arg_type) = expr_sql_type_hint(&args[0]) {
-        let element_type = if arg_type.is_array {
-            arg_type.element_type()
-        } else {
-            arg_type
-        };
-        return matches!(
-            element_type.kind,
-            SqlTypeKind::Composite | SqlTypeKind::Record
-        ) && (output_columns.len() != 1
-            || output_columns
-                .first()
-                .is_some_and(|column| !column.name.eq_ignore_ascii_case("unnest")));
-    }
-    output_columns.len() > 1
-        && output_columns
-            .first()
-            .is_some_and(|column| !column.name.eq_ignore_ascii_case("unnest"))
 }
 
 fn eval_pg_options_to_table(
@@ -3019,27 +1770,13 @@ fn eval_pg_options_to_table(
         }
     };
 
-    let mut rows = Vec::with_capacity(values.len());
-    for value in values {
+    let mut option_rows = pgrust_executor::PgOptionsToTableRows::new(values);
+    let mut rows = Vec::new();
+    while let Some(row) = {
         ctx.check_for_interrupts()?;
-        if matches!(value, Value::Null) {
-            continue;
-        }
-        let Some(option) = value.as_text() else {
-            return Err(ExecError::TypeMismatch {
-                op: "pg_options_to_table",
-                left: value,
-                right: Value::Null,
-            });
-        };
-        let (name, option_value) = option
-            .split_once('=')
-            .map(|(name, value)| (name, Value::Text(value.into())))
-            .unwrap_or((option, Value::Null));
-        rows.push(TupleSlot::virtual_row(vec![
-            Value::Text(name.into()),
-            option_value,
-        ]));
+        option_rows.next_row().map_err(ExecError::from)?
+    } {
+        rows.push(TupleSlot::virtual_row(row));
     }
     Ok(rows)
 }

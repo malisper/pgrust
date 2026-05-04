@@ -1,7 +1,5 @@
 use super::*;
 use crate::backend::catalog::loader::load_physical_catalog_rows_visible_scoped;
-use crate::backend::catalog::persistence::sync_catalog_rows_subset;
-use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{
@@ -132,6 +130,23 @@ fn temp_dir(label: &str) -> PathBuf {
 fn scratch_temp_dir(label: &str) -> PathBuf {
     let _ = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
     crate::pgrust::test_support::scratch_temp_dir("database", label)
+}
+
+fn reset_broad_catalog_load_counters(db: &Database) {
+    db.reset_broad_catalog_load_counters_for_tests();
+}
+
+fn assert_no_broad_catalog_loads(db: &Database, label: &str) {
+    let counts = db.broad_catalog_load_counts_for_tests();
+    assert_eq!(
+        counts.total(),
+        0,
+        "{label} should use keyed syscache/relcache instead of broad CatCache materialization \
+         (backend_catcache={}, local_store_catcache={}, shared_store_catcache={})",
+        counts.backend_catcache,
+        counts.local_store_catcache,
+        counts.shared_store_catcache
+    );
 }
 
 fn role_oid(db: &Database, role_name: &str) -> u32 {
@@ -3612,6 +3627,23 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+fn return_rule_oid_for_relation(db: &Database, relname: &str) -> u32 {
+    let catalog = db.catalog.read();
+    let catcache = catalog.catcache().unwrap();
+    let relation_oid = catcache
+        .class_rows()
+        .into_iter()
+        .find(|row| row.relname == relname)
+        .map(|row| row.oid)
+        .unwrap_or_else(|| panic!("missing relation {relname}"));
+    catcache
+        .rewrite_rows()
+        .into_iter()
+        .find(|row| row.ev_class == relation_oid && row.rulename == "_RETURN")
+        .map(|row| row.oid)
+        .unwrap_or_else(|| panic!("missing _RETURN rule for {relname}"))
 }
 
 #[test]
@@ -18943,6 +18975,63 @@ fn drop_table_cascade_notice_uses_visible_search_path_name() {
 }
 
 #[test]
+fn stored_view_query_cache_is_owned_by_database_instance() {
+    let db1 = Database::open_ephemeral(32).expect("open first ephemeral database");
+    let db2 = Database::open_ephemeral(32).expect("open second ephemeral database");
+
+    db1.execute(1, "create table cache_base(a int, filler text)")
+        .unwrap();
+    db1.execute(1, "insert into cache_base values (11, 'unused')")
+        .unwrap();
+    db1.execute(1, "create view cache_view as select a from cache_base")
+        .unwrap();
+
+    db2.execute(1, "create table cache_base(b text, c text)")
+        .unwrap();
+    db2.execute(1, "insert into cache_base values ('x', 'y')")
+        .unwrap();
+    db2.execute(1, "create view cache_view as select b, c from cache_base")
+        .unwrap();
+
+    let db1_rule_oid = return_rule_oid_for_relation(&db1, "cache_view");
+    let db2_rule_oid = return_rule_oid_for_relation(&db2, "cache_view");
+    assert_eq!(
+        db1_rule_oid, db2_rule_oid,
+        "test requires overlapping rewrite OIDs"
+    );
+
+    let db1_cached_targets = db1
+        .catalog
+        .read()
+        .stored_view_query_for_rule(db1_rule_oid)
+        .unwrap()
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .count();
+    let db2_cached_targets = db2
+        .catalog
+        .read()
+        .stored_view_query_for_rule(db2_rule_oid)
+        .unwrap()
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .count();
+    assert_eq!(db1_cached_targets, 1);
+    assert_eq!(db2_cached_targets, 2);
+
+    assert_eq!(
+        query_rows(&db1, 1, "select * from cache_view"),
+        vec![vec![Value::Int32(11)]]
+    );
+    assert_eq!(
+        query_rows(&db2, 1, "select * from cache_view"),
+        vec![vec![Value::Text("x".into()), Value::Text("y".into())]]
+    );
+}
+
+#[test]
 fn create_view_supports_check_option_and_or_replace() {
     let dir = temp_dir("create_view_check_option_replace");
     let db = Database::open(&dir, 128).unwrap();
@@ -20081,19 +20170,59 @@ fn lookup_any_relation_uses_targeted_relation_cache_without_catcache() {
     db.execute(1, "create table targeted_lookup (id int4 not null)")
         .unwrap();
     db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
 
     let catalog = db.lazy_catalog_lookup(1, None, None);
     let unqualified = catalog.lookup_any_relation("targeted_lookup").unwrap();
     let qualified = catalog
         .lookup_any_relation("public.targeted_lookup")
         .unwrap();
+    let by_oid = catalog.relation_by_oid(unqualified.relation_oid).unwrap();
 
     assert_eq!(unqualified.relation_oid, qualified.relation_oid);
+    assert_eq!(unqualified.relation_oid, by_oid.relation_oid);
+    assert_no_broad_catalog_loads(&db, "relation lookup by name/OID");
     let states = db.backend_cache_states.read();
     let state = states.get(&1).unwrap();
     assert!(state.catcache.is_none());
     assert_eq!(state.relation_cache.len(), 1);
     assert!(state.relation_cache.contains_key(&unqualified.relation_oid));
+}
+
+#[test]
+fn simple_select_uses_keyed_catalog_without_broad_catcache() {
+    let base = temp_dir("simple_select_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table keyed_select (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into keyed_select values (1, 'alpha')")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
+
+    assert_eq!(
+        query_rows(&db, 1, "select name from keyed_select where id = 1"),
+        vec![vec![Value::Text("alpha".into())]]
+    );
+    assert_no_broad_catalog_loads(&db, "simple SELECT parse/plan/execute");
+}
+
+#[test]
+fn broad_catalog_load_counters_are_database_scoped() {
+    let left = Database::open(temp_dir("broad_counter_left"), 16).unwrap();
+    let right = Database::open(temp_dir("broad_counter_right"), 16).unwrap();
+
+    reset_broad_catalog_load_counters(&left);
+    reset_broad_catalog_load_counters(&right);
+
+    left.catalog.read().catcache().unwrap();
+
+    let left_counts = left.broad_catalog_load_counts_for_tests();
+    assert_eq!(left_counts.backend_catcache, 0);
+    assert_eq!(left_counts.local_store_catcache, 1);
+    assert_eq!(left_counts.shared_store_catcache, 0);
+    assert_eq!(right.broad_catalog_load_count_for_tests(), 0);
 }
 
 #[test]
@@ -22002,65 +22131,6 @@ fn create_aggregate_supports_plain_custom_aggregate_execution() {
             Value::Int64(124),
         ]]
     );
-}
-
-#[test]
-fn reopen_backfills_missing_pg_aggregate_bootstrap_rows() {
-    let base = temp_dir("aggregate_backfill_reopen");
-    let db = Database::open(&base, 16).unwrap();
-    let db_oid = db.database_oid;
-    drop(db);
-
-    sync_catalog_rows_subset(
-        &base,
-        &PhysicalCatalogRows::default(),
-        db_oid,
-        &[BootstrapCatalogKind::PgAggregate],
-    )
-    .unwrap();
-
-    let reopened = Database::open(&base, 16).unwrap();
-    assert!(
-        reopened
-            .backend_catcache(1, None)
-            .unwrap()
-            .aggregate_by_fnoid(6219)
-            .is_some()
-    );
-    assert_eq!(
-        query_rows(
-            &reopened,
-            1,
-            "select count(*) from pg_aggregate where aggfnoid = 6219"
-        ),
-        vec![vec![Value::Int64(1)]]
-    );
-}
-
-#[test]
-fn reopen_missing_pg_aggregate_custom_rows_is_corrupt() {
-    let base = temp_dir("aggregate_backfill_custom_corrupt");
-    let db = Database::open(&base, 16).unwrap();
-    let db_oid = db.database_oid;
-
-    create_plain_test_aggregates(&db);
-    drop(db);
-
-    sync_catalog_rows_subset(
-        &base,
-        &PhysicalCatalogRows::default(),
-        db_oid,
-        &[BootstrapCatalogKind::PgAggregate],
-    )
-    .unwrap();
-
-    match Database::open(&base, 16) {
-        Err(DatabaseError::Catalog(crate::backend::catalog::CatalogError::Corrupt(
-            "missing pg_aggregate row for custom aggregate",
-        ))) => {}
-        Err(err) => panic!("unexpected reopen error: {err:?}"),
-        Ok(_) => panic!("expected reopen to fail"),
-    }
 }
 
 #[test]
@@ -46056,6 +46126,66 @@ fn concurrent_indexed_updates_and_deletes_keep_index_results_correct() {
         1,
         "select note from items where id = 74",
         "items_id_idx",
+    );
+}
+
+#[test]
+fn concurrent_btree_splits_complete_once() {
+    #[cfg(debug_assertions)]
+    pgrust_access::nbtree::set_btree_split_pause_for_tests(5);
+    struct ResetBtreeSplitPause;
+    impl Drop for ResetBtreeSplitPause {
+        fn drop(&mut self) {
+            #[cfg(debug_assertions)]
+            pgrust_access::nbtree::set_btree_split_pause_for_tests(0);
+        }
+    }
+    let _reset_pause = ResetBtreeSplitPause;
+
+    let base = temp_dir("concurrent_btree_splits_complete_once");
+    let db = Database::open(&base, 128).unwrap();
+    db.execute(
+        1,
+        "create table split_items (id int4 not null, note text not null)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index split_items_idx on split_items (id, note) with (fillfactor = 10)",
+    )
+    .unwrap();
+
+    let workers: Vec<_> = (0..4)
+        .map(|worker| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for i in 0..60 {
+                    let id = worker * 1000 + i;
+                    let note = format!("worker{worker}-{i}-{}", "x".repeat(1400));
+                    db.execute(
+                        (worker + 700) as ClientId,
+                        &format!("insert into split_items values ({id}, '{note}')"),
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+    join_all_with_timeout(workers, HEAVY_CONTENTION_TEST_TIMEOUT);
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from split_items"),
+        vec![vec![Value::Int64(240)]]
+    );
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from split_items where id = 1005",
+        "split_items_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from split_items where id >= 0"),
+        vec![vec![Value::Int64(240)]]
     );
 }
 

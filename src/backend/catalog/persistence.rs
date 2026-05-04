@@ -9,6 +9,7 @@ use crate::backend::access::heap::heapam::{
     heap_delete_with_waiter, heap_flush, heap_insert, heap_insert_mvcc_with_cid, heap_scan_begin,
     heap_scan_next, heap_update_with_waiter,
 };
+use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::CatalogError;
@@ -280,7 +281,7 @@ fn catalog_tuples_delete_matching(
             if remaining.is_empty() {
                 break;
             }
-            if !snapshot.tuple_visible(&txns, &tuple) {
+            if !snapshot.tuple_visible(&*txns, &tuple) {
                 continue;
             }
             let decoded = decode_catalog_tuple_values(desc, &tuple)?;
@@ -338,7 +339,7 @@ fn find_catalog_tuple_tid(
         if !catalog_row_identity_matches(kind, &decoded, values) {
             continue;
         }
-        if snapshot.tuple_visible(&txns, &tuple) {
+        if snapshot.tuple_visible(&*txns, &tuple) {
             return Ok(Some(tid));
         }
     }

@@ -1,5 +1,2 @@
-use crate::include::catalog::PgCollationRow;
-
-pub fn sort_pg_collation_rows(rows: &mut [PgCollationRow]) {
-    rows.sort_by_key(|row| (row.oid, row.collname.clone()));
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_collation::*;

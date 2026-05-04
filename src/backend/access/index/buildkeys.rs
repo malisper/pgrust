@@ -1,7 +1,5 @@
 use crate::backend::catalog::CatalogError;
-use crate::backend::commands::tablecmds::{
-    coerce_index_key_to_opckeytype, index_key_values_for_row,
-};
+use crate::backend::commands::tablecmds::index_key_values_for_row;
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::{ExecError, ExecutorContext, cast_value};
 use crate::backend::parser::{
@@ -19,6 +17,37 @@ pub(crate) struct IndexBuildKeyProjector {
     bound_index: Option<BoundIndexRelation>,
     compiled_predicate: Option<crate::backend::executor::exec_expr::CompiledPredicate>,
     exec_ctx: Option<ExecutorContext>,
+}
+
+// :HACK: service wrapper used while root still owns expression-index and
+// partial-index expression evaluation.
+#[allow(dead_code)]
+pub(crate) struct RootIndexBuildServices<'a> {
+    ctx: &'a IndexBuildContext,
+    projector: &'a mut IndexBuildKeyProjector,
+}
+
+#[allow(dead_code)]
+impl<'a> RootIndexBuildServices<'a> {
+    pub(crate) fn new(
+        ctx: &'a IndexBuildContext,
+        projector: &'a mut IndexBuildKeyProjector,
+    ) -> Self {
+        Self { ctx, projector }
+    }
+}
+
+impl pgrust_access::AccessIndexServices for RootIndexBuildServices<'_> {
+    fn project_index_row(
+        &mut self,
+        _index_meta: &pgrust_nodes::relcache::IndexRelCacheEntry,
+        row_values: &[Value],
+        heap_tid: ItemPointerData,
+    ) -> pgrust_access::AccessResult<Option<Vec<Value>>> {
+        self.projector
+            .project(self.ctx, row_values, heap_tid)
+            .map_err(map_catalog_error_to_access)
+    }
 }
 
 pub(crate) fn materialize_heap_row_values(
@@ -57,38 +86,47 @@ pub(crate) fn project_index_key_values(
     row_values: &[Value],
     expr_values: &[Value],
 ) -> Result<Vec<Value>, CatalogError> {
-    project_index_key_values_with_opckeytypes(index_desc, indkey, 0, &[], row_values, expr_values)
+    pgrust_access::index::buildkeys::project_index_key_values(
+        index_desc,
+        indkey,
+        row_values,
+        expr_values,
+    )
+    .map_err(|err| match err {
+        pgrust_access::AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        pgrust_access::AccessError::Interrupted(reason) => CatalogError::Interrupted(reason),
+        pgrust_access::AccessError::Io(message) => CatalogError::Io(message),
+        pgrust_access::AccessError::UniqueViolation(message) => {
+            CatalogError::UniqueViolation(message)
+        }
+        pgrust_access::AccessError::Scalar(message)
+        | pgrust_access::AccessError::Unsupported(message) => CatalogError::Io(message),
+    })
 }
 
-fn project_index_key_values_with_opckeytypes(
-    index_desc: &RelationDesc,
-    indkey: &[i16],
-    am_oid: u32,
-    opckeytype_oids: &[u32],
-    row_values: &[Value],
-    expr_values: &[Value],
-) -> Result<Vec<Value>, CatalogError> {
-    let mut keys = Vec::with_capacity(index_desc.columns.len());
-    let mut expr_iter = expr_values.iter();
-    for (key_pos, attnum) in indkey.iter().enumerate() {
-        let value = if *attnum > 0 {
-            let idx = attnum.saturating_sub(1) as usize;
-            row_values
-                .get(idx)
-                .cloned()
-                .ok_or(CatalogError::Corrupt("index key attnum out of range"))?
-        } else {
-            expr_iter.next().cloned().ok_or(CatalogError::Corrupt(
-                "missing projected index expression value",
-            ))?
-        };
-        keys.push(coerce_index_key_to_opckeytype(
-            value,
-            am_oid,
-            opckeytype_oids.get(key_pos).copied(),
-        ));
+pub(crate) fn map_access_error(err: pgrust_access::AccessError) -> CatalogError {
+    match err {
+        pgrust_access::AccessError::Corrupt(message) => CatalogError::Corrupt(message),
+        pgrust_access::AccessError::Interrupted(reason) => CatalogError::Interrupted(reason),
+        pgrust_access::AccessError::Io(message) => CatalogError::Io(message),
+        pgrust_access::AccessError::UniqueViolation(message) => {
+            CatalogError::UniqueViolation(message)
+        }
+        pgrust_access::AccessError::Scalar(message)
+        | pgrust_access::AccessError::Unsupported(message) => CatalogError::Io(message),
     }
-    Ok(keys)
+}
+
+pub(crate) fn map_catalog_error_to_access(err: CatalogError) -> pgrust_access::AccessError {
+    match err {
+        CatalogError::Corrupt(message) => pgrust_access::AccessError::Corrupt(message),
+        CatalogError::Interrupted(reason) => pgrust_access::AccessError::Interrupted(reason),
+        CatalogError::Io(message) => pgrust_access::AccessError::Io(message),
+        CatalogError::UniqueViolation(message) => {
+            pgrust_access::AccessError::UniqueViolation(message)
+        }
+        other => pgrust_access::AccessError::Scalar(format!("{other:?}")),
+    }
 }
 
 impl IndexBuildKeyProjector {
@@ -229,7 +267,7 @@ impl IndexBuildKeyProjector {
                 .map(Some)
                 .map_err(map_build_exec_error)
         } else {
-            project_index_key_values_with_opckeytypes(
+            pgrust_access::index::buildkeys::project_index_key_values_with_opckeytypes(
                 &ctx.index_desc,
                 &ctx.index_meta.indkey,
                 ctx.index_meta.am_oid,
@@ -237,6 +275,7 @@ impl IndexBuildKeyProjector {
                 row_values,
                 &[],
             )
+            .map_err(map_access_error)
             .map(Some)
         }
     }

@@ -1,5 +1,2 @@
-use crate::include::catalog::PgAmopRow;
-
-pub fn sort_pg_amop_rows(rows: &mut [PgAmopRow]) {
-    rows.sort_by_key(|row| (row.amopfamily, row.amopstrategy, row.amopopr));
-}
+// :HACK: compatibility shim; portable catalog internals live in pgrust_catalog_store.
+pub use pgrust_catalog_store::pg_amop::*;

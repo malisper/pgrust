@@ -9,44 +9,95 @@ use super::{
     pg_plan_values_query,
 };
 use crate::backend::parser::{
-    CatalogLookup, CommonTableExpr, CreateStatisticsStatement, CteBody, FromItem, InsertSource,
-    SelectStatement, UnsupportedStatement, pg_plan_query_with_config,
+    CatalogLookup, CreateStatisticsStatement, SelectStatement, pg_plan_query_with_config,
     pg_plan_values_query_with_config, plan_merge,
 };
+use crate::backend::utils::cache::{
+    catcache::CatCache, relcache::RelCache, visible_catalog::VisibleCatalog,
+};
 use crate::include::nodes::pathnodes::PlannerConfig;
-use crate::pgrust::database::queue_pending_notification;
 use crate::pl::plpgsql::execute_do_with_context;
+use pgrust_executor::{
+    ReadonlyCreateStatisticsError, RestrictedRelationInfo, RestrictedViewCatalog,
+    RestrictedViewError, UnsupportedStatementExecError, queue_pending_notification,
+    reject_restricted_views_in_planned_stmt as reject_restricted_views_in_planned_stmt_impl,
+    reject_restricted_views_in_select as reject_restricted_views_in_select_impl,
+    restrict_nonsystem_view_enabled as restrict_nonsystem_view_guc_enabled,
+    unsupported_statement_error as unsupported_statement_error_impl,
+    validate_readonly_create_statistics as validate_readonly_create_statistics_impl,
+};
 
-fn unsupported_statement_error(stmt: &UnsupportedStatement) -> ExecError {
-    if stmt.feature == "SECURITY LABEL" {
-        return ExecError::Parse(crate::backend::parser::security_label_provider_error(
-            &stmt.sql,
-        ));
-    }
-    if stmt.feature == "ALTER TABLE form" {
-        let lower = stmt.sql.to_ascii_lowercase();
-        if lower.contains(" set with oids") {
-            return ExecError::Parse(ParseError::UnexpectedToken {
+fn unsupported_statement_error(stmt: &pgrust_nodes::parsenodes::UnsupportedStatement) -> ExecError {
+    match unsupported_statement_error_impl(stmt) {
+        UnsupportedStatementExecError::SecurityLabel { sql } => {
+            ExecError::Parse(crate::backend::parser::security_label_provider_error(&sql))
+        }
+        UnsupportedStatementExecError::AlterTableWithOids => {
+            ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "valid ALTER TABLE form",
                 actual: "syntax error at or near \"WITH\"".into(),
-            });
+            })
+        }
+        UnsupportedStatementExecError::FeatureNotSupported { feature, sql } => {
+            ExecError::Parse(ParseError::FeatureNotSupported(format!("{feature}: {sql}")))
         }
     }
-    ExecError::Parse(ParseError::FeatureNotSupported(format!(
-        "{}: {}",
-        stmt.feature, stmt.sql
-    )))
 }
 
 fn restrict_nonsystem_view_enabled(ctx: &ExecutorContext) -> bool {
-    ctx.gucs
-        .get("restrict_nonsystem_relation_kind")
-        .map(|value| {
-            value
-                .split(',')
-                .any(|part| part.trim().trim_matches('\'').eq_ignore_ascii_case("view"))
+    restrict_nonsystem_view_guc_enabled(
+        ctx.gucs
+            .get("restrict_nonsystem_relation_kind")
+            .map(String::as_str),
+    )
+}
+
+fn visible_catalog_for_planning(catalog: &Catalog) -> VisibleCatalog {
+    VisibleCatalog::new(
+        RelCache::from_catalog(catalog),
+        Some(CatCache::from_catalog(catalog)),
+    )
+}
+
+struct RestrictedViewCatalogAdapter<'a>(&'a dyn CatalogLookup);
+
+impl RestrictedViewCatalog for RestrictedViewCatalogAdapter<'_> {
+    fn lookup_relation_by_name(&self, name: &str) -> Option<RestrictedRelationInfo> {
+        let entry = self.0.lookup_any_relation(name)?;
+        let relation_name = self
+            .0
+            .class_row_by_oid(entry.relation_oid)
+            .map(|row| row.relname)
+            .unwrap_or_default();
+        Some(RestrictedRelationInfo {
+            relation_oid: entry.relation_oid,
+            relation_name,
+            namespace_oid: entry.namespace_oid,
+            relkind: entry.relkind,
         })
-        .unwrap_or(false)
+    }
+
+    fn relation_info_by_oid(&self, relation_oid: u32) -> Option<RestrictedRelationInfo> {
+        let row = self.0.class_row_by_oid(relation_oid)?;
+        Some(RestrictedRelationInfo {
+            relation_oid,
+            relation_name: row.relname,
+            namespace_oid: row.relnamespace,
+            relkind: row.relkind,
+        })
+    }
+}
+
+fn restricted_view_error(err: RestrictedViewError) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "access to non-system view \"{}\" is restricted",
+            err.relation_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    }
 }
 
 fn reject_restricted_views_in_planned_stmt(
@@ -57,250 +108,19 @@ fn reject_restricted_views_in_planned_stmt(
     if !restrict_nonsystem_view_enabled(ctx) {
         return Ok(());
     }
-    for requirement in &planned_stmt.relation_privileges {
-        if requirement.relkind != 'v' {
-            continue;
-        }
-        let Some(row) = catalog.class_row_by_oid(requirement.relation_oid) else {
-            continue;
-        };
-        if row.relnamespace != crate::include::catalog::PG_CATALOG_NAMESPACE_OID {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "access to non-system view \"{}\" is restricted",
-                    row.relname
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "55000",
-            });
-        }
-    }
-    reject_restricted_views_in_plan(&planned_stmt.plan_tree, catalog)?;
-    for subplan in &planned_stmt.subplans {
-        reject_restricted_views_in_plan(subplan, catalog)?;
-    }
-    Ok(())
-}
-
-fn reject_restricted_view_oid(
-    relation_oid: u32,
-    catalog: &dyn CatalogLookup,
-) -> Result<(), ExecError> {
-    let Some(row) = catalog.class_row_by_oid(relation_oid) else {
-        return Ok(());
-    };
-    if row.relkind == 'v' && row.relnamespace != crate::include::catalog::PG_CATALOG_NAMESPACE_OID {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "access to non-system view \"{}\" is restricted",
-                row.relname
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "55000",
-        });
-    }
-    Ok(())
-}
-
-fn reject_restricted_views_in_plan(
-    plan: &crate::include::nodes::plannodes::Plan,
-    catalog: &dyn CatalogLookup,
-) -> Result<(), ExecError> {
-    use crate::include::nodes::plannodes::Plan;
-    match plan {
-        Plan::Result { .. } | Plan::WorkTableScan { .. } | Plan::FunctionScan { .. } => Ok(()),
-        Plan::SeqScan { relation_oid, .. }
-        | Plan::TidScan { relation_oid, .. }
-        | Plan::IndexOnlyScan { relation_oid, .. }
-        | Plan::IndexScan { relation_oid, .. }
-        | Plan::BitmapIndexScan { relation_oid, .. } => {
-            reject_restricted_view_oid(*relation_oid, catalog)
-        }
-        Plan::BitmapHeapScan {
-            relation_oid,
-            bitmapqual,
-            ..
-        } => {
-            reject_restricted_view_oid(*relation_oid, catalog)?;
-            reject_restricted_views_in_plan(bitmapqual, catalog)
-        }
-        Plan::Append { children, .. }
-        | Plan::MergeAppend { children, .. }
-        | Plan::BitmapOr { children, .. }
-        | Plan::BitmapAnd { children, .. }
-        | Plan::SetOp { children, .. } => {
-            for child in children {
-                reject_restricted_views_in_plan(child, catalog)?;
-            }
-            Ok(())
-        }
-        Plan::Unique { input, .. }
-        | Plan::Hash { input, .. }
-        | Plan::Materialize { input, .. }
-        | Plan::Memoize { input, .. }
-        | Plan::Gather { input, .. }
-        | Plan::GatherMerge { input, .. }
-        | Plan::Filter { input, .. }
-        | Plan::OrderBy { input, .. }
-        | Plan::IncrementalSort { input, .. }
-        | Plan::Limit { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::Projection { input, .. }
-        | Plan::Aggregate { input, .. }
-        | Plan::WindowAgg { input, .. }
-        | Plan::SubqueryScan { input, .. }
-        | Plan::ProjectSet { input, .. } => reject_restricted_views_in_plan(input, catalog),
-        Plan::NestedLoopJoin { left, right, .. }
-        | Plan::HashJoin { left, right, .. }
-        | Plan::MergeJoin { left, right, .. } => {
-            reject_restricted_views_in_plan(left, catalog)?;
-            reject_restricted_views_in_plan(right, catalog)
-        }
-        Plan::CteScan { cte_plan, .. } => reject_restricted_views_in_plan(cte_plan, catalog),
-        Plan::RecursiveUnion {
-            anchor, recursive, ..
-        } => {
-            reject_restricted_views_in_plan(anchor, catalog)?;
-            reject_restricted_views_in_plan(recursive, catalog)
-        }
-        Plan::Values { .. } => Ok(()),
-    }
-}
-
-fn reject_restricted_view_access(name: &str, catalog: &dyn CatalogLookup) -> Result<(), ExecError> {
-    let Some(entry) = catalog.lookup_any_relation(name) else {
-        return Ok(());
-    };
-    if entry.relkind == 'v'
-        && entry.namespace_oid != crate::include::catalog::PG_CATALOG_NAMESPACE_OID
-    {
-        let relname = catalog
-            .class_row_by_oid(entry.relation_oid)
-            .map(|row| row.relname)
-            .unwrap_or_else(|| {
-                name.rsplit_once('.')
-                    .map(|(_, relname)| relname)
-                    .unwrap_or(name)
-                    .trim_matches('"')
-                    .to_string()
-            });
-        return Err(ExecError::DetailedError {
-            message: format!("access to non-system view \"{relname}\" is restricted"),
-            detail: None,
-            hint: None,
-            sqlstate: "55000",
-        });
-    }
-    Ok(())
-}
-
-fn relation_name_matches_cte(name: &str, visible_ctes: &[String]) -> bool {
-    let relname = name
-        .rsplit_once('.')
-        .map(|(_, relname)| relname)
-        .unwrap_or(name)
-        .trim_matches('"')
-        .to_ascii_lowercase();
-    visible_ctes.iter().any(|cte| cte == &relname)
+    reject_restricted_views_in_planned_stmt_impl(
+        planned_stmt,
+        &RestrictedViewCatalogAdapter(catalog),
+    )
+    .map_err(restricted_view_error)
 }
 
 fn reject_restricted_views_in_select(
     select: &SelectStatement,
     catalog: &dyn CatalogLookup,
-    visible_ctes: &mut Vec<String>,
 ) -> Result<(), ExecError> {
-    let outer_cte_count = visible_ctes.len();
-    for cte in &select.with {
-        reject_restricted_views_in_cte_body(cte, catalog, visible_ctes)?;
-        visible_ctes.push(cte.name.to_ascii_lowercase());
-    }
-    if let Some(from) = &select.from {
-        reject_restricted_views_in_from_item(from, catalog, visible_ctes)?;
-    }
-    if let Some(set_op) = &select.set_operation {
-        for input in &set_op.inputs {
-            reject_restricted_views_in_select(input, catalog, visible_ctes)?;
-        }
-    }
-    visible_ctes.truncate(outer_cte_count);
-    Ok(())
-}
-
-fn reject_restricted_views_in_cte_body(
-    cte: &CommonTableExpr,
-    catalog: &dyn CatalogLookup,
-    visible_ctes: &mut Vec<String>,
-) -> Result<(), ExecError> {
-    match &cte.body {
-        CteBody::Select(select) => reject_restricted_views_in_select(select, catalog, visible_ctes),
-        CteBody::Values(_) => Ok(()),
-        CteBody::Insert(insert) => {
-            if let InsertSource::Select(select) = &insert.source {
-                reject_restricted_views_in_select(select, catalog, visible_ctes)?;
-            }
-            Ok(())
-        }
-        CteBody::Update(update) => {
-            if let Some(from) = &update.from {
-                reject_restricted_views_in_from_item(from, catalog, visible_ctes)?;
-            }
-            Ok(())
-        }
-        CteBody::Delete(delete) => {
-            if let Some(using) = &delete.using {
-                reject_restricted_views_in_from_item(using, catalog, visible_ctes)?;
-            }
-            Ok(())
-        }
-        CteBody::Merge(merge) => {
-            reject_restricted_views_in_from_item(&merge.source, catalog, visible_ctes)
-        }
-        CteBody::RecursiveUnion {
-            anchor, recursive, ..
-        } => {
-            match anchor.as_ref() {
-                CteBody::Select(select) => {
-                    reject_restricted_views_in_select(select, catalog, visible_ctes)?
-                }
-                CteBody::Values(_) => {}
-                _ => {}
-            }
-            reject_restricted_views_in_select(recursive, catalog, visible_ctes)
-        }
-    }
-}
-
-fn reject_restricted_views_in_from_item(
-    item: &FromItem,
-    catalog: &dyn CatalogLookup,
-    visible_ctes: &[String],
-) -> Result<(), ExecError> {
-    match item {
-        FromItem::Table { name, .. } if !relation_name_matches_cte(name, visible_ctes) => {
-            reject_restricted_view_access(name, catalog)
-        }
-        FromItem::Table { .. } => Ok(()),
-        FromItem::DerivedTable(select) => {
-            reject_restricted_views_in_select(select, catalog, &mut visible_ctes.to_vec())
-        }
-        FromItem::Join { left, right, .. } => {
-            reject_restricted_views_in_from_item(left, catalog, visible_ctes)?;
-            reject_restricted_views_in_from_item(right, catalog, visible_ctes)
-        }
-        FromItem::Alias { source, .. }
-        | FromItem::Lateral(source)
-        | FromItem::TableSample { source, .. } => {
-            reject_restricted_views_in_from_item(source, catalog, visible_ctes)
-        }
-        FromItem::Values { .. }
-        | FromItem::Expression { .. }
-        | FromItem::FunctionCall { .. }
-        | FromItem::RowsFrom { .. }
-        | FromItem::JsonTable(_)
-        | FromItem::XmlTable(_) => Ok(()),
-    }
+    reject_restricted_views_in_select_impl(select, &RestrictedViewCatalogAdapter(catalog))
+        .map_err(restricted_view_error)
 }
 
 pub fn execute_planned_stmt(
@@ -436,17 +256,18 @@ fn execute_statement_with_source(
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx, PlannerConfig::default()),
         Statement::Select(stmt) => {
             let requires_update = stmt.locking_clause.is_some();
+            let planning_catalog = visible_catalog_for_planning(catalog);
             if restrict_nonsystem_view_enabled(ctx) {
-                reject_restricted_views_in_select(&stmt, catalog, &mut Vec::new())?;
+                reject_restricted_views_in_select(&stmt, &planning_catalog)?;
             }
             let planned = crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
                 restrict_nonsystem_view_enabled(ctx),
-                || pg_plan_query(&stmt, catalog),
+                || pg_plan_query(&stmt, &planning_catalog),
             )?;
             if requires_update {
                 check_planned_stmt_select_for_update_privileges(&planned, ctx)?;
             } else {
-                reject_restricted_views_in_planned_stmt(&planned, catalog, ctx)?;
+                reject_restricted_views_in_planned_stmt(&planned, &planning_catalog, ctx)?;
                 check_planned_stmt_select_privileges(&planned, ctx)?;
             }
             execute_query_desc(
@@ -1092,7 +913,7 @@ pub fn execute_readonly_statement_with_config(
                 });
             }
             if restrict_nonsystem_view_enabled(ctx) {
-                reject_restricted_views_in_select(&stmt, catalog, &mut Vec::new())?;
+                reject_restricted_views_in_select(&stmt, catalog)?;
             }
             let planned = crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
                 restrict_nonsystem_view_enabled(ctx),
@@ -1472,33 +1293,27 @@ fn validate_readonly_create_statistics(
     stmt: &CreateStatisticsStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<StatementResult, ExecError> {
-    let relation_name = normalize_readonly_statistics_from_clause(&stmt.from_clause)?;
-    match catalog.lookup_any_relation(&relation_name) {
-        Some(relation) if matches!(relation.relkind, 'r' | 'm' | 'p' | 'f') => {
-            Ok(StatementResult::AffectedRows(0))
-        }
-        Some(relation) => Err(unsupported_readonly_statistics_relation_error(
-            &relation_name,
-            relation.relkind,
-        )),
-        None => Err(ExecError::Parse(ParseError::UnknownTable(relation_name))),
-    }
-}
-
-fn normalize_readonly_statistics_from_clause(from_clause: &str) -> Result<String, ExecError> {
-    let input = from_clause.trim();
-    if input.is_empty() {
-        return Err(ExecError::Parse(ParseError::UnexpectedEof));
-    }
-    if input.contains(char::is_whitespace) || input.contains('(') {
-        return Err(ExecError::DetailedError {
+    validate_readonly_create_statistics_impl(
+        &stmt.from_clause,
+        &RestrictedViewCatalogAdapter(catalog),
+    )
+    .map(|()| StatementResult::AffectedRows(0))
+    .map_err(|err| match err {
+        ReadonlyCreateStatisticsError::UnexpectedEof => ExecError::Parse(ParseError::UnexpectedEof),
+        ReadonlyCreateStatisticsError::UnsupportedFromClause => ExecError::DetailedError {
             message: "CREATE STATISTICS only supports relation names in the FROM clause".into(),
             detail: None,
             hint: None,
             sqlstate: "0A000",
-        });
-    }
-    Ok(input.trim_matches('"').to_ascii_lowercase())
+        },
+        ReadonlyCreateStatisticsError::UnknownTable(relation_name) => {
+            ExecError::Parse(ParseError::UnknownTable(relation_name))
+        }
+        ReadonlyCreateStatisticsError::UnsupportedRelation {
+            relation_name,
+            relkind,
+        } => unsupported_readonly_statistics_relation_error(&relation_name, relkind),
+    })
 }
 
 fn unsupported_readonly_statistics_relation_error(relation_name: &str, relkind: char) -> ExecError {

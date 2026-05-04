@@ -6,8 +6,11 @@ use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{DEFAULT_TABLESPACE_OID, GLOBAL_TABLESPACE_OID, PgTablespaceRow};
 use crate::include::nodes::parsenodes::{
     AlterMoveAllTablespaceStatement, AlterTablespaceAction, AlterTablespaceStatement,
-    CreateTablespaceStatement, DropTablespaceStatement, MoveAllTablespaceObjectKind, RelOption,
-    RoleSpec,
+    CreateTablespaceStatement, DropTablespaceStatement, MoveAllTablespaceObjectKind, RoleSpec,
+};
+use pgrust_commands::tablespace::{
+    merge_tablespace_options, normalize_tablespace_location, normalize_tablespace_options,
+    reset_tablespace_options,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -21,6 +24,22 @@ use std::os::windows::fs::symlink_dir as symlink;
 const TABLESPACE_VERSION_DIRECTORY: &str = "PG_18_202406281";
 const TABLESPACE_CREATE_PRIVILEGE: char = 'C';
 const TABLESPACE_ALL_PRIVILEGES: &str = "C";
+
+fn tablespace_error_to_exec(error: pgrust_commands::tablespace::TablespaceError) -> ExecError {
+    match error {
+        pgrust_commands::tablespace::TablespaceError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+    }
+}
 
 impl Database {
     pub(crate) fn execute_create_tablespace_stmt(
@@ -55,8 +74,10 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let normalized_location =
-            normalize_tablespace_location(&stmt.location, allow_in_place_tablespaces)?;
-        let spcoptions = normalize_tablespace_options(&stmt.options)?;
+            normalize_tablespace_location(&stmt.location, allow_in_place_tablespaces)
+                .map_err(tablespace_error_to_exec)?;
+        let spcoptions =
+            normalize_tablespace_options(&stmt.options).map_err(tablespace_error_to_exec)?;
         let catcache = self
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
@@ -249,13 +270,15 @@ impl Database {
         };
         let effect = match &stmt.action {
             AlterTablespaceAction::SetOptions(options) => {
-                let updated = merge_tablespace_options(row.spcoptions.clone(), options)?;
+                let updated = merge_tablespace_options(row.spcoptions.clone(), options)
+                    .map_err(tablespace_error_to_exec)?;
                 self.catalog
                     .write()
                     .alter_tablespace_options_mvcc(row.oid, updated, &ctx)
             }
             AlterTablespaceAction::ResetOptions(names) => {
-                let updated = reset_tablespace_options(row.spcoptions.clone(), names)?;
+                let updated = reset_tablespace_options(row.spcoptions.clone(), names)
+                    .map_err(tablespace_error_to_exec)?;
                 self.catalog
                     .write()
                     .alter_tablespace_options_mvcc(row.oid, updated, &ctx)
@@ -569,78 +592,6 @@ fn ensure_tablespace_owner(
     })
 }
 
-fn normalize_tablespace_options(options: &[RelOption]) -> Result<Option<Vec<String>>, ExecError> {
-    if options.is_empty() {
-        return Ok(None);
-    }
-    let mut normalized = Vec::with_capacity(options.len());
-    for option in options {
-        ensure_supported_tablespace_option(&option.name)?;
-        normalized.push(format!("{}={}", option.name, option.value));
-    }
-    Ok(Some(normalized))
-}
-
-fn merge_tablespace_options(
-    existing: Option<Vec<String>>,
-    options: &[RelOption],
-) -> Result<Option<Vec<String>>, ExecError> {
-    let mut map = existing_tablespace_option_map(existing);
-    for option in options {
-        ensure_supported_tablespace_option(&option.name)?;
-        map.insert(option.name.clone(), option.value.clone());
-    }
-    Ok(option_map_to_vec(map))
-}
-
-fn reset_tablespace_options(
-    existing: Option<Vec<String>>,
-    names: &[String],
-) -> Result<Option<Vec<String>>, ExecError> {
-    let mut map = existing_tablespace_option_map(existing);
-    for name in names {
-        ensure_supported_tablespace_option(name)?;
-        map.remove(name);
-    }
-    Ok(option_map_to_vec(map))
-}
-
-fn existing_tablespace_option_map(
-    existing: Option<Vec<String>>,
-) -> std::collections::BTreeMap<String, String> {
-    existing
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|item| {
-            let (name, value) = item.split_once('=')?;
-            Some((name.to_string(), value.to_string()))
-        })
-        .collect()
-}
-
-fn option_map_to_vec(map: std::collections::BTreeMap<String, String>) -> Option<Vec<String>> {
-    let options = map
-        .into_iter()
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect::<Vec<_>>();
-    (!options.is_empty()).then_some(options)
-}
-
-fn ensure_supported_tablespace_option(name: &str) -> Result<(), ExecError> {
-    if matches!(
-        name.to_ascii_lowercase().as_str(),
-        "random_page_cost" | "seq_page_cost" | "effective_io_concurrency"
-    ) {
-        return Ok(());
-    }
-    Err(ExecError::DetailedError {
-        message: format!("unrecognized parameter \"{name}\""),
-        detail: None,
-        hint: None,
-        sqlstate: "22023",
-    })
-}
-
 fn dependent_partitioned_relation_in_tablespace(
     catalog: &dyn crate::backend::parser::CatalogLookup,
     tablespace_oid: u32,
@@ -667,46 +618,6 @@ fn relation_exists_in_tablespace(
         .class_rows()
         .into_iter()
         .any(|row| row.reltablespace == tablespace_oid)
-}
-
-fn normalize_tablespace_location(
-    location: &str,
-    allow_in_place_tablespaces: bool,
-) -> Result<String, ExecError> {
-    let trimmed = location.trim();
-    if trimmed.contains('\'') {
-        return Err(ExecError::DetailedError {
-            message: "tablespace location cannot contain single quotes".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42602",
-        });
-    }
-    if trimmed.is_empty() {
-        if allow_in_place_tablespaces {
-            return Ok(String::new());
-        }
-        return Err(ExecError::DetailedError {
-            message: "tablespace location must be an absolute path".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42P17",
-        });
-    }
-
-    let mut normalized = trimmed.to_string();
-    while normalized.len() > 1 && normalized.ends_with(std::path::MAIN_SEPARATOR) {
-        normalized.pop();
-    }
-    if !Path::new(&normalized).is_absolute() {
-        return Err(ExecError::DetailedError {
-            message: "tablespace location must be an absolute path".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42P17",
-        });
-    }
-    Ok(normalized)
 }
 
 fn create_tablespace_directories(
