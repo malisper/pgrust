@@ -748,10 +748,17 @@ pub fn heap_fetch_visible_with_txns(
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
     let snapshot = relation_snapshot(snapshot, rel);
+    if visible_fetch_tid_out_of_range(pool, rel, tid)? {
+        return Ok(None);
+    }
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let buffer_id = pin.buffer_id();
     let guard = pool.lock_buffer_shared(buffer_id)?;
-    let tuple = heap_page_get_tuple(&guard, tid.offset_number)?;
+    let tuple = match heap_page_get_tuple(&guard, tid.offset_number) {
+        Ok(tuple) => tuple,
+        Err(err) if visible_fetch_missing_tuple(&err) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
     drop(guard);
     drop(pin);
     let txns_guard = txns;
@@ -766,15 +773,41 @@ fn heap_fetch_visible_impl(
     tid: ItemPointerData,
     is_visible: impl FnOnce(&HeapTuple) -> bool,
 ) -> Result<Option<HeapTuple>, HeapError> {
+    if visible_fetch_tid_out_of_range(pool, rel, tid)? {
+        return Ok(None);
+    }
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let buffer_id = pin.buffer_id();
     let guard = pool.lock_buffer_shared(buffer_id)?;
-    let tuple = heap_page_get_tuple(&guard, tid.offset_number)?;
+    let tuple = match heap_page_get_tuple(&guard, tid.offset_number) {
+        Ok(tuple) => tuple,
+        Err(err) if visible_fetch_missing_tuple(&err) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
     let visible = is_visible(&tuple);
     drop(guard);
     drop(pin);
 
     if visible { Ok(Some(tuple)) } else { Ok(None) }
+}
+
+fn visible_fetch_tid_out_of_range(
+    pool: &BufferPool<SmgrStorageBackend>,
+    rel: RelFileLocator,
+    tid: ItemPointerData,
+) -> Result<bool, HeapError> {
+    if tid.offset_number == 0 {
+        return Ok(true);
+    }
+    let nblocks = pool.with_storage_mut(|s| s.smgr.nblocks(rel, ForkNumber::Main))?;
+    Ok(tid.block_number >= nblocks)
+}
+
+fn visible_fetch_missing_tuple(err: &TupleError) -> bool {
+    matches!(
+        err,
+        TupleError::Page(PageError::InvalidItemId | PageError::InvalidOffsetNumber(_))
+    )
 }
 
 pub fn heap_delete(

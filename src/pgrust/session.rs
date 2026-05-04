@@ -5603,6 +5603,7 @@ impl Session {
             | Statement::CreateTableAs(_)
             | Statement::RefreshMaterializedView(_)
             | Statement::CopyFrom(_)
+            | Statement::Cluster(_)
             | Statement::TruncateTable(_) => true,
             Statement::Select(select) => {
                 select.locking_clause.is_some() || Self::select_has_writable_ctes(select)
@@ -19204,6 +19205,7 @@ impl Session {
                         cluster_stmt,
                         xid,
                         cid,
+                        write_cid,
                         search_path.as_deref(),
                         &mut txn.catalog_effects,
                         &mut txn.temp_effects,

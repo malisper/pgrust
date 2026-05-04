@@ -195,3 +195,44 @@ pub fn toast_tuple_values_for_write_with_store(
 
     Ok(stored)
 }
+
+pub fn toast_tuple_values_for_write_external_only_with_store(
+    desc: &RelationDesc,
+    values: &mut [TupleValue],
+    toast_relation_oid: u32,
+    store_external_value: &mut dyn FnMut(ExternalToastValueInput) -> AccessResult<StoredToastValue>,
+) -> AccessResult<Vec<StoredToastValue>> {
+    let mut stored = Vec::new();
+    let mut tuple = build_tuple(desc, values)?;
+    let target = toast_tuple_target(toast_relation_oid);
+
+    while tuple.serialized_len() > target {
+        let Some(toasted) = externalize_largest_column(
+            desc,
+            values,
+            &[AttributeStorage::Extended, AttributeStorage::External],
+            store_external_value,
+        )?
+        else {
+            break;
+        };
+        stored.push(toasted);
+        tuple = build_tuple(desc, values)?;
+    }
+
+    while tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE {
+        let Some(toasted) = externalize_largest_column(
+            desc,
+            values,
+            &[AttributeStorage::Main],
+            store_external_value,
+        )?
+        else {
+            break;
+        };
+        stored.push(toasted);
+        tuple = build_tuple(desc, values)?;
+    }
+
+    Ok(stored)
+}

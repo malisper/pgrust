@@ -10,7 +10,7 @@ use crate::BufferPool;
 use crate::backend::access::heap::heapam::{heap_scan_begin, heap_scan_next};
 use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
-use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
+use crate::backend::catalog::bootstrap::{bootstrap_catalog_rel, bootstrap_catalog_toast_rel};
 use crate::backend::catalog::catalog::{Catalog, CatalogError};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
@@ -37,8 +37,8 @@ use crate::backend::catalog::rowcodec::{
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
-use crate::backend::executor::value_io::decode_value;
 use crate::backend::executor::value_io::missing_column_value;
+use crate::backend::executor::value_io::{decode_value, decode_value_with_external_toast};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{
     BLCKSZ, ForkNumber, MdStorageManager, RelFileLocator, StorageManager,
@@ -57,6 +57,7 @@ use crate::include::catalog::{
     bootstrap_pg_tablespace_rows, bootstrap_relation_desc,
 };
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::primnodes::{ColumnDesc, ToastRelationRef};
 
 pub(crate) fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> {
     let rows = load_physical_catalog_rows(base_dir)?;
@@ -2581,6 +2582,7 @@ fn scan_catalog_relation(
     desc: &RelationDesc,
 ) -> Result<Vec<Vec<Value>>, CatalogError> {
     let rel_context = catalog_scan_context(rel, desc);
+    let toast = catalog_toast_relation_for_rel(rel);
     let mut scan = heap_scan_begin(pool, rel)
         .map_err(|e| CatalogError::Io(format!("{rel_context}: heap scan begin failed: {e:?}")))?;
     let attr_descs = desc.attribute_descs();
@@ -2591,23 +2593,20 @@ fn scan_catalog_relation(
         let raw = tuple
             .deform(&attr_descs)
             .map_err(|e| CatalogError::Io(format!("{rel_context}: heap deform failed: {e:?}")))?;
-        let row = desc
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| {
-                if let Some(datum) = raw.get(index) {
-                    decode_value(column, *datum).map_err(|e| {
-                        CatalogError::Io(format!(
-                            "{rel_context}: decode column {} failed: {e:?}",
-                            column.name
-                        ))
-                    })
-                } else {
-                    Ok(missing_column_value(column))
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let row = match decode_catalog_raw_row(
+            pool,
+            None,
+            None,
+            INVALID_TRANSACTION_ID,
+            toast,
+            desc,
+            &raw,
+            &rel_context,
+        ) {
+            Ok(row) => row,
+            Err(err) if catalog_missing_toast_chunks(&err) => continue,
+            Err(err) => return Err(err),
+        };
         rows.push(row);
     }
     Ok(rows)
@@ -2622,6 +2621,7 @@ fn scan_catalog_relation_visible(
     desc: &RelationDesc,
 ) -> Result<Vec<Vec<Value>>, CatalogError> {
     let rel_context = catalog_scan_context(rel, desc);
+    let toast = catalog_toast_relation_for_rel(rel);
     let mut scan = heap_scan_begin(pool, rel)
         .map_err(|e| CatalogError::Io(format!("{rel_context}: heap scan begin failed: {e:?}")))?;
     let attr_descs = desc.attribute_descs();
@@ -2635,26 +2635,176 @@ fn scan_catalog_relation_visible(
         let raw = tuple
             .deform(&attr_descs)
             .map_err(|e| CatalogError::Io(format!("{rel_context}: heap deform failed: {e:?}")))?;
-        let row = desc
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| {
-                if let Some(datum) = raw.get(index) {
-                    decode_value(column, *datum).map_err(|e| {
+        let row = match decode_catalog_raw_row(
+            pool,
+            Some(txns),
+            Some(snapshot),
+            client_id,
+            toast,
+            desc,
+            &raw,
+            &rel_context,
+        ) {
+            Ok(row) => row,
+            Err(err) if catalog_missing_toast_chunks(&err) => continue,
+            Err(err) => return Err(err),
+        };
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn decode_catalog_raw_row(
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: Option<&TransactionManager>,
+    snapshot: Option<&Snapshot>,
+    client_id: crate::ClientId,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    raw: &[Option<&[u8]>],
+    rel_context: &str,
+) -> Result<Vec<Value>, CatalogError> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            if let Some(datum) = raw.get(index) {
+                decode_catalog_value(pool, txns, snapshot, client_id, toast, column, *datum)
+                    .map_err(|e| {
                         CatalogError::Io(format!(
                             "{rel_context}: decode column {} failed: {e:?}",
                             column.name
                         ))
                     })
-                } else {
-                    Ok(missing_column_value(column))
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.push(row);
+            } else {
+                Ok(missing_column_value(column))
+            }
+        })
+        .collect()
+}
+
+fn catalog_missing_toast_chunks(err: &CatalogError) -> bool {
+    // :HACK: Raw catalog loads can encounter stale pg_statistic rows whose
+    // parent tuple survived but whose catalog TOAST chunks are no longer
+    // present. Visible catalog loads recover the live row; raw startup loads
+    // should ignore the stale row instead of failing the database open.
+    matches!(err, CatalogError::Io(message) if message.contains("reconstructed to 0 bytes"))
+}
+
+fn decode_catalog_value(
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: Option<&TransactionManager>,
+    snapshot: Option<&Snapshot>,
+    client_id: crate::ClientId,
+    toast: Option<ToastRelationRef>,
+    column: &ColumnDesc,
+    raw: Option<&[u8]>,
+) -> Result<Value, CatalogError> {
+    let Some(toast) = toast else {
+        return decode_value(column, raw)
+            .map_err(|e| CatalogError::Io(format!("catalog decode failed: {e:?}")));
+    };
+    let mut fetch_external =
+        |bytes: &[u8]| detoast_catalog_value_bytes(pool, txns, snapshot, client_id, toast, bytes);
+    decode_value_with_external_toast(column, raw, Some(&mut fetch_external))
+        .map_err(|e| CatalogError::Io(format!("catalog decode failed: {e:?}")))
+}
+
+fn detoast_catalog_value_bytes(
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: Option<&TransactionManager>,
+    snapshot: Option<&Snapshot>,
+    client_id: crate::ClientId,
+    toast: ToastRelationRef,
+    bytes: &[u8],
+) -> Result<Vec<u8>, crate::backend::executor::ExecError> {
+    pgrust_access::common::detoast::detoast_value_bytes_with_fetch(bytes, |pointer| {
+        fetch_catalog_toast_chunks(pool, txns, snapshot, client_id, toast, pointer)
+    })
+    .map_err(|e| crate::backend::executor::ExecError::DetailedError {
+        message: e.to_string(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })
+}
+
+fn fetch_catalog_toast_chunks(
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: Option<&TransactionManager>,
+    snapshot: Option<&Snapshot>,
+    client_id: crate::ClientId,
+    toast: ToastRelationRef,
+    pointer: pgrust_access::varatt::VarattExternal,
+) -> pgrust_access::AccessResult<Vec<pgrust_access::access::heaptoast::ToastChunk>> {
+    let pointer_toastrelid = pointer.va_toastrelid;
+    let pointer_valueid = pointer.va_valueid;
+    if pointer_toastrelid != toast.relation_oid {
+        return Err(pgrust_access::AccessError::Scalar(format!(
+            "toast pointer relid {} does not match relation {}",
+            pointer_toastrelid, toast.relation_oid
+        )));
     }
-    Ok(rows)
+
+    let desc = pgrust_access::access::heaptoast::toast_relation_desc();
+    let attr_descs = desc.attribute_descs();
+    pool.with_storage_mut(|storage| storage.smgr.open(toast.rel))
+        .map_err(|e| pgrust_access::AccessError::Io(format!("{e:?}")))?;
+    let mut scan = heap_scan_begin(pool, toast.rel)
+        .map_err(|e| pgrust_access::AccessError::Io(format!("{e:?}")))?;
+    let mut chunks = Vec::new();
+    while let Some((_tid, tuple)) = heap_scan_next(pool, client_id, &mut scan)
+        .map_err(|e| pgrust_access::AccessError::Io(format!("{e:?}")))?
+    {
+        if let (Some(txns), Some(snapshot)) = (txns, snapshot)
+            && !snapshot.tuple_visible(txns, &tuple)
+        {
+            continue;
+        }
+        let values = tuple
+            .deform(&attr_descs)
+            .map_err(|e| pgrust_access::AccessError::Scalar(format!("{e:?}")))?;
+        let Some(chunk) = pgrust_access::access::heaptoast::toast_chunk_from_values(&values)?
+        else {
+            continue;
+        };
+        if chunk.id == pointer_valueid {
+            chunks.push(chunk);
+        }
+    }
+    if chunks.is_empty() && txns.is_some() && snapshot.is_some() {
+        // :HACK: Some catalog bootstrap/rewrite paths can leave catalog toast
+        // chunks with visibility metadata that is harder to interpret during
+        // startup than the parent catalog row. The parent row is already the
+        // authoritative reference, so fall back to a raw toast scan.
+        let mut scan = heap_scan_begin(pool, toast.rel)
+            .map_err(|e| pgrust_access::AccessError::Io(format!("{e:?}")))?;
+        while let Some((_tid, tuple)) = heap_scan_next(pool, client_id, &mut scan)
+            .map_err(|e| pgrust_access::AccessError::Io(format!("{e:?}")))?
+        {
+            let values = tuple
+                .deform(&attr_descs)
+                .map_err(|e| pgrust_access::AccessError::Scalar(format!("{e:?}")))?;
+            let Some(chunk) = pgrust_access::access::heaptoast::toast_chunk_from_values(&values)?
+            else {
+                continue;
+            };
+            if chunk.id == pointer_valueid {
+                chunks.push(chunk);
+            }
+        }
+    }
+    Ok(chunks)
+}
+
+fn catalog_toast_relation_for_rel(rel: RelFileLocator) -> Option<ToastRelationRef> {
+    let kind = bootstrap_catalog_kinds()
+        .into_iter()
+        .find(|kind| kind.relation_oid() == rel.rel_number)?;
+    bootstrap_catalog_toast_rel(kind, rel.db_oid).map(|toast_rel| ToastRelationRef {
+        rel: toast_rel,
+        relation_oid: kind.toast_relation_oid(),
+    })
 }
 
 fn catalog_scan_context(rel: RelFileLocator, desc: &RelationDesc) -> String {

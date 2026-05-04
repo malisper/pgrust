@@ -15,7 +15,7 @@ use crate::include::catalog::{
     INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, NUMERIC_ARRAY_TYPE_OID,
     PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID,
     PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, POINT_ARRAY_TYPE_OID,
-    PgAggregateRow, TEXT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
+    PgAggregateRow, PgStatisticRow, TEXT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
 };
 use crate::include::nodes::datum::{
     ArrayValue, BitString, IntervalValue, NumericValue, RecordValue,
@@ -3779,6 +3779,48 @@ fn cluster_table_using_btree_index_rewrites_heap_order() {
             "select indisclustered from pg_index where indexrelid = 'cluster_items_id_idx'::regclass"
         ),
         vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn cluster_rebuilds_index_over_external_toast_columns() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    db.execute(
+        1,
+        "create table cluster_toast_items (id int4, payload text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table cluster_toast_items alter column payload set storage external",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into cluster_toast_items
+         select i, repeat('cluster-toast-', 12000)
+         from generate_series(1, 4) i",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index cluster_toast_items_id_idx on cluster_toast_items(id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "cluster cluster_toast_items using cluster_toast_items_id_idx",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from cluster_toast_items"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(4)]
+        ]
     );
 }
 
@@ -9294,6 +9336,99 @@ fn analyze_populates_pg_statistic_and_pg_class_stats() {
     assert!(float_value(&column_stats[0][1]) > 0.0);
     assert!(int_value(&column_stats[0][2]) > 0);
     assert!(float_value(&column_stats[0][3]).abs() > 0.0);
+}
+
+#[test]
+fn catalog_statistics_rows_can_toast_and_reload() {
+    let dir = temp_dir("catalog_statistics_rows_can_toast_and_reload");
+    let relation_oid;
+
+    {
+        let db = Database::open(&dir, 128).unwrap();
+        db.execute(1, "create table catalog_stats_toast_src (a int4)")
+            .unwrap();
+        relation_oid = db
+            .lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation("catalog_stats_toast_src")
+            .unwrap()
+            .relation_oid;
+
+        let mut stavalues: [Option<ArrayValue>; 5] = Default::default();
+        stavalues[0] = Some(
+            ArrayValue::from_1d(
+                (0..80)
+                    .map(|index| Value::Text(format!("{index:03}-{}", "x".repeat(700)).into()))
+                    .collect(),
+            )
+            .with_element_type_oid(TEXT_TYPE_OID),
+        );
+        let row = PgStatisticRow {
+            starelid: relation_oid,
+            staattnum: 1,
+            stainherit: false,
+            stanullfrac: 0.0,
+            stawidth: 700,
+            stadistinct: -1.0,
+            stakind: [1, 0, 0, 0, 0],
+            staop: [0, 0, 0, 0, 0],
+            stacoll: [0, 0, 0, 0, 0],
+            stanumbers: Default::default(),
+            stavalues,
+        };
+
+        let xid = db.txns.write().begin();
+        let ctx = crate::backend::catalog::store::CatalogWriteContext {
+            pool: db.pool.clone(),
+            txns: db.txns.clone(),
+            xid,
+            cid: 0,
+            client_id: 1,
+            waiter: Some(db.txn_waiter.clone()),
+            interrupts: db.interrupt_state(1),
+        };
+        let effect = db
+            .catalog
+            .write()
+            .replace_relation_statistics_mvcc(relation_oid, vec![row], &ctx)
+            .unwrap();
+        db.apply_catalog_mutation_effect_immediate(&effect).unwrap();
+        db.txns.write().commit(xid).unwrap();
+        db.txns.write().flush_clog().unwrap();
+        db.pool.checkpoint_flush_all(true).unwrap();
+
+        assert_eq!(
+            query_rows(
+                &db,
+                1,
+                &format!("select count(*) from pg_statistic where starelid = {relation_oid}"),
+            ),
+            vec![vec![Value::Int64(1)]]
+        );
+
+        let snapshot = db
+            .txns
+            .read()
+            .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
+            .unwrap();
+        let txns = db.txns.read();
+        let visible_rows = load_physical_catalog_rows_visible_scoped(
+            &db.cluster.base_dir,
+            &db.pool,
+            &txns,
+            &snapshot,
+            1,
+            db.database_oid,
+            &[BootstrapCatalogKind::PgStatistic],
+        )
+        .unwrap();
+        assert!(
+            visible_rows
+                .statistics
+                .iter()
+                .any(|row| row.starelid == relation_oid),
+            "visible pg_statistic reload should include relation {relation_oid}"
+        );
+    }
 }
 
 #[test]
@@ -29265,6 +29400,44 @@ fn create_brin_index_explain_uses_bitmap_scan_and_recheck() {
         (200..210)
             .map(|value| vec![Value::Int32(value)])
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn create_brin_index_detoasts_external_heap_columns() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table brin_toast_items (a int4 not null, payload text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table brin_toast_items alter column payload set storage external",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into brin_toast_items
+         select i, repeat('brin-toast-', 12000)
+         from generate_series(1, 8) i",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index brin_toast_items_a_idx
+         on brin_toast_items using brin (a) with (pages_per_range = 1)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from brin_toast_items where a between 2 and 5",
+        ),
+        vec![vec![Value::Int64(4)]]
     );
 }
 
@@ -58386,7 +58559,7 @@ fn policy_expressions_can_reference_ctid() {
     session
         .execute(
             &db,
-            "create policy p1 on ctid_policy_items using (ctid in ('(0,1)'::tid))",
+            "create policy p1 on ctid_policy_items using (ctid in ('(0,1)'::tid, '(0,3)'::tid, '(4294967295,0)'::tid))",
         )
         .unwrap();
     session
@@ -58415,6 +58588,29 @@ fn policy_expressions_can_reference_ctid() {
             }),
             Value::Int32(10),
         ]]
+    );
+}
+
+#[test]
+fn tid_scan_ignores_invalid_visible_fetch_candidates() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table tid_items (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into tid_items values (10)")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select a from tid_items
+             where ctid in ('(0,1)'::tid, '(0,2)'::tid, '(4294967295,0)'::tid)"
+        ),
+        vec![vec![Value::Int32(10)]]
     );
 }
 

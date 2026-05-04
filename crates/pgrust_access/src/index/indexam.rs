@@ -2,7 +2,7 @@ use pgrust_catalog_data::{
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, SPGIST_AM_OID,
 };
 use pgrust_nodes::datum::Value;
-use pgrust_nodes::primnodes::{ColumnDesc, RelationDesc};
+use pgrust_nodes::primnodes::ColumnDesc;
 
 use crate::access::amapi::{
     IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext, IndexBuildResult,
@@ -30,14 +30,25 @@ fn unknown_index_am() -> AccessError {
 }
 
 fn materialize_heap_row_values(
-    heap_desc: &RelationDesc,
+    ctx: &IndexBuildContext,
+    heap: &dyn AccessHeapServices,
     datums: &[Option<&[u8]>],
     scalar: &dyn AccessScalarServices,
 ) -> AccessResult<Vec<Value>> {
-    let mut row_values = Vec::with_capacity(heap_desc.columns.len());
-    for (index, column) in heap_desc.columns.iter().enumerate() {
+    let mut row_values = Vec::with_capacity(ctx.heap_desc.columns.len());
+    for (index, column) in ctx.heap_desc.columns.iter().enumerate() {
         row_values.push(if let Some(datum) = datums.get(index) {
-            scalar.decode_value(column, *datum)?
+            if let Some(toast) = ctx.heap_toast {
+                let mut fetch_external =
+                    |raw: &[u8]| heap.fetch_toast_value_bytes(toast, &ctx.snapshot, raw);
+                scalar.decode_value_with_external_toast(
+                    column,
+                    *datum,
+                    Some(&mut fetch_external),
+                )?
+            } else {
+                scalar.decode_value_with_external_toast(column, *datum, None)?
+            }
         } else {
             missing_column_value(column)
         });
@@ -67,7 +78,7 @@ fn collect_projected_rows(
             let datums = tuple
                 .deform(&attr_descs)
                 .map_err(|err| AccessError::Scalar(format!("heap deform failed: {err:?}")))?;
-            let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums, scalar)?;
+            let row_values = materialize_heap_row_values(ctx, heap, &datums, scalar)?;
             if let Some(key_values) = index.project_index_row(&ctx.index_meta, &row_values, tid)? {
                 projected.push((tid, key_values));
             }
@@ -98,7 +109,7 @@ impl GistBuildRowSource for ProjectedBuildSource<'_> {
                     .deform(&attr_descs)
                     .map_err(|err| AccessError::Scalar(format!("heap deform failed: {err:?}")))?;
                 let row_values =
-                    materialize_heap_row_values(&self.ctx.heap_desc, &datums, self.scalar)?;
+                    materialize_heap_row_values(self.ctx, self.heap, &datums, self.scalar)?;
                 if let Some(key_values) =
                     self.index
                         .project_index_row(&self.ctx.index_meta, &row_values, tid)?

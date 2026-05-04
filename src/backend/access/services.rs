@@ -18,7 +18,7 @@ use pgrust_nodes::datum::{
     ArrayValue, GeoBox, GeoPoint, GeoPolygon, InetValue, MultirangeValue, RangeBound, RangeValue,
     Value,
 };
-use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc};
+use pgrust_nodes::primnodes::{BuiltinScalarFunction, ColumnDesc, ToastRelationRef};
 use pgrust_nodes::tsearch::{TsQuery, TsVector};
 
 pub(crate) struct RootAccessServices;
@@ -242,6 +242,30 @@ impl AccessHeapServices for RootAccessRuntime<'_> {
         crate::backend::access::heap::heapam::heap_fetch(pool, self.client_id, rel, tid)
             .map_err(|err| AccessError::Scalar(format!("heap fetch failed: {err:?}")))
     }
+
+    fn fetch_toast_value_bytes(
+        &self,
+        toast: ToastRelationRef,
+        snapshot: &Snapshot,
+        raw: &[u8],
+    ) -> AccessResult<Vec<u8>> {
+        let pool = self.pool.ok_or_else(|| {
+            AccessError::Unsupported("access toast fetch missing buffer pool".into())
+        })?;
+        let txns = self.txns.ok_or_else(|| {
+            AccessError::Unsupported("access toast fetch missing transaction manager".into())
+        })?;
+        let txns = txns.read();
+        crate::backend::access::common::detoast::detoast_value_bytes_from_parts(
+            pool,
+            &txns,
+            snapshot,
+            self.client_id,
+            toast,
+            raw,
+        )
+        .map_err(|err| AccessError::Scalar(format!("{err:?}")))
+    }
 }
 
 impl AccessWalServices for RootAccessWal<'_> {
@@ -317,6 +341,35 @@ impl AccessScalarServices for RootAccessServices {
     fn decode_value(&self, column: &ColumnDesc, raw: Option<&[u8]>) -> AccessResult<Value> {
         crate::backend::executor::value_io::decode_value(column, raw)
             .map_err(|err| AccessError::Scalar(format!("{err:?}")))
+    }
+
+    fn decode_value_with_external_toast(
+        &self,
+        column: &ColumnDesc,
+        raw: Option<&[u8]>,
+        fetch_external: Option<&mut dyn FnMut(&[u8]) -> AccessResult<Vec<u8>>>,
+    ) -> AccessResult<Value> {
+        if let Some(fetch_external) = fetch_external {
+            let mut fetch_exec = |raw: &[u8]| {
+                fetch_external(raw).map_err(|err| {
+                    crate::backend::executor::ExecError::DetailedError {
+                        message: err.to_string(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "XX000",
+                    }
+                })
+            };
+            crate::backend::executor::value_io::decode_value_with_external_toast(
+                column,
+                raw,
+                Some(&mut fetch_exec),
+            )
+            .map_err(|err| AccessError::Scalar(format!("{err:?}")))
+        } else {
+            crate::backend::executor::value_io::decode_value_with_external_toast(column, raw, None)
+                .map_err(|err| AccessError::Scalar(format!("{err:?}")))
+        }
     }
 
     fn format_unique_key_detail(&self, columns: &[ColumnDesc], values: &[Value]) -> String {
