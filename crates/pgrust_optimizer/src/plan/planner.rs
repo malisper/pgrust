@@ -2933,9 +2933,12 @@ fn target_list_needs_project_set_after_grouping(
     target_list: &[TargetEntry],
 ) -> bool {
     let group_by = &root.aggregate_layout.group_by;
-    target_list
-        .iter()
-        .any(|target| expr_contains_set_returning(&target.expr) && !group_by.contains(&target.expr))
+    target_list.iter().any(|target| {
+        expr_contains_set_returning(&target.expr)
+            && !group_by
+                .iter()
+                .any(|group_expr| grouping_exprs_equal(&target.expr, group_expr))
+    })
 }
 
 fn make_ordered_rel(

@@ -6,7 +6,9 @@ use pgrust_nodes::primnodes::expr_sql_type_hint;
 use pgrust_nodes::primnodes::{
     AttrNumber, GroupingFuncExpr, OpExprKind, WindowFuncKind, set_returning_call_exprs,
 };
-use pgrust_nodes::record::assign_anonymous_record_descriptor;
+use pgrust_nodes::record::{
+    assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
+};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 
@@ -2359,6 +2361,22 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     agg_list,
                     n_keys,
                 )
+            } else if name.eq_ignore_ascii_case("unnest") {
+                reject_function_null_treatment(name, *null_treatment)?;
+                bind_grouped_unnest_srf(
+                    name,
+                    args.args(),
+                    *func_variadic,
+                    &clause,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
             } else if let Some(kind) = resolve_json_table_function(name) {
                 reject_function_null_treatment(name, *null_treatment)?;
                 bind_grouped_json_table_srf(
@@ -4537,6 +4555,154 @@ fn bind_grouped_generate_series_srf(
         call,
         common,
         1,
+    ))
+}
+
+fn grouped_unnest_element_type(arg_type: SqlType) -> Option<SqlType> {
+    if arg_type.is_array {
+        return Some(arg_type.element_type());
+    }
+    if arg_type.is_multirange() {
+        return Some(
+            pgrust_catalog_data::range_type_ref_for_multirange_sql_type(arg_type)
+                .map(|range_type| range_type.sql_type)
+                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        );
+    }
+    match arg_type.kind {
+        SqlTypeKind::Int2Vector => Some(SqlType::new(SqlTypeKind::Int2)),
+        SqlTypeKind::OidVector => Some(SqlType::new(SqlTypeKind::Oid)),
+        _ => None,
+    }
+}
+
+fn grouped_unnest_composite_output_columns(
+    element_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Vec<QueryColumn>>, ParseError> {
+    let fields =
+        if matches!(element_type.kind, SqlTypeKind::Composite) && element_type.typrelid != 0 {
+            let relation = catalog
+                .lookup_relation_by_oid(element_type.typrelid)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "named composite type",
+                    actual: format!("type relation {} not found", element_type.typrelid),
+                })?;
+            relation
+                .desc
+                .columns
+                .into_iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name, column.sql_type))
+                .collect::<Vec<_>>()
+        } else if matches!(element_type.kind, SqlTypeKind::Record)
+            && element_type.typmod > 0
+            && let Some(descriptor) = lookup_anonymous_record_descriptor(element_type.typmod)
+        {
+            descriptor
+                .fields
+                .into_iter()
+                .map(|field| (field.name, field.sql_type))
+                .collect::<Vec<_>>()
+        } else {
+            return Ok(None);
+        };
+
+    Ok(Some(
+        fields
+            .into_iter()
+            .map(|(name, sql_type)| QueryColumn {
+                name,
+                sql_type,
+                wire_type_oid: None,
+            })
+            .collect(),
+    ))
+}
+
+fn bind_grouped_unnest_srf(
+    name: &str,
+    args: &[SqlFunctionArg],
+    func_variadic: bool,
+    clause: &UngroupedColumnClause,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[CollectedAggregate],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    if args.is_empty() || args.len() > 1 || args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "single-argument unnest(array_expr) in select list",
+            actual: format!("unnest with {} arguments", args.len()),
+        });
+    }
+    let arg = &args[0].value;
+    let arg_type =
+        grouped_infer_sql_expr_type(arg, input_scope, catalog, outer_scopes, grouped_outer);
+    let Some(element_type) = grouped_unnest_element_type(arg_type) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "array or multirange argument to unnest",
+            actual: format!("{arg:?}"),
+        });
+    };
+    let bound_arg = bind_agg_output_expr_in_clause(
+        arg,
+        clause.clone(),
+        group_by_exprs,
+        group_key_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )?;
+    let output_columns = grouped_unnest_composite_output_columns(element_type, catalog)?
+        .unwrap_or_else(|| {
+            vec![QueryColumn {
+                name: "unnest".into(),
+                sql_type: element_type,
+                wire_type_oid: None,
+            }]
+        });
+    let (sql_type, column_index) = if output_columns.len() == 1 {
+        (output_columns[0].sql_type, 1)
+    } else {
+        let descriptor = assign_anonymous_record_descriptor(
+            output_columns
+                .iter()
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        );
+        (descriptor.sql_type(), 0)
+    };
+    let actual_types = [grouped_infer_sql_expr_function_arg_type(
+        arg,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+    )];
+    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic).ok();
+    let call = SetReturningCall::Unnest {
+        func_oid: resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0),
+        func_variadic: resolved
+            .as_ref()
+            .map(|call| call.func_variadic)
+            .unwrap_or(func_variadic),
+        args: vec![bound_arg],
+        output_columns,
+        with_ordinality: false,
+    };
+    Ok(Expr::set_returning(
+        name.to_ascii_lowercase(),
+        call,
+        sql_type,
+        column_index,
     ))
 }
 
