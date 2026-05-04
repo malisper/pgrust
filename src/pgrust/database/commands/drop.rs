@@ -4,7 +4,7 @@ use super::create::{
 };
 use super::dependency_drop::{CatalogDependencyGraph, DropBehavior, ObjectAddress};
 use crate::backend::executor::expr_reg::{format_regprocedure_oid_optional, format_type_text};
-use crate::backend::parser::{SqlType, parse_type_name, resolve_raw_type_name};
+use crate::backend::parser::{SqlType, parse_expr, parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::syscache::{
     SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
@@ -20,7 +20,7 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, DropAggregateStatement, DropFunctionStatement,
-    DropIndexStatement, DropProcedureStatement, DropSchemaStatement, RawTypeName,
+    DropIndexStatement, DropProcedureStatement, DropSchemaStatement, RawTypeName, SqlExpr,
 };
 use crate::pgrust::auth::AuthCatalog;
 use crate::pgrust::database::ddl::format_sql_type_name;
@@ -2635,6 +2635,29 @@ impl Database {
                 }
             }
         }
+        for class_row in catcache
+            .class_rows()
+            .into_iter()
+            .filter(|row| matches!(row.relkind, 'r' | 'p'))
+        {
+            let Some(relation) = catalog.relation_by_oid(class_row.oid) else {
+                continue;
+            };
+            for column in relation.desc.columns.iter().filter(|column| {
+                !column.dropped
+                    && column.generated.is_some()
+                    && column.default_expr.as_deref().is_some_and(|expr_sql| {
+                        parse_expr(expr_sql).ok().is_some_and(|expr| {
+                            Self::raw_expr_calls_function_name(&expr, &proc_row.proname)
+                        })
+                    })
+            }) {
+                details.push(format!(
+                    "column {} of table {} depends on {object_kind} {signature}",
+                    column.name, class_row.relname
+                ));
+            }
+        }
         details.dedup();
         if details.is_empty() {
             return Ok(None);
@@ -2647,6 +2670,64 @@ impl Database {
             hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
             sqlstate: "2BP01",
         }))
+    }
+
+    fn raw_expr_calls_function_name(expr: &SqlExpr, function_name: &str) -> bool {
+        use crate::include::nodes::parsenodes::function_arg_values;
+        match expr {
+            SqlExpr::FuncCall {
+                name,
+                args,
+                order_by,
+                within_group,
+                filter,
+                ..
+            } => {
+                name.rsplit('.')
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(function_name))
+                    || function_arg_values(args)
+                        .any(|arg| Self::raw_expr_calls_function_name(arg, function_name))
+                    || order_by
+                        .iter()
+                        .any(|item| Self::raw_expr_calls_function_name(&item.expr, function_name))
+                    || within_group.as_ref().is_some_and(|items| {
+                        items.iter().any(|item| {
+                            Self::raw_expr_calls_function_name(&item.expr, function_name)
+                        })
+                    })
+                    || filter
+                        .as_deref()
+                        .is_some_and(|expr| Self::raw_expr_calls_function_name(expr, function_name))
+            }
+            SqlExpr::Add(left, right)
+            | SqlExpr::Sub(left, right)
+            | SqlExpr::Mul(left, right)
+            | SqlExpr::Div(left, right)
+            | SqlExpr::Mod(left, right)
+            | SqlExpr::Eq(left, right)
+            | SqlExpr::NotEq(left, right)
+            | SqlExpr::Lt(left, right)
+            | SqlExpr::LtEq(left, right)
+            | SqlExpr::Gt(left, right)
+            | SqlExpr::GtEq(left, right)
+            | SqlExpr::And(left, right)
+            | SqlExpr::Or(left, right)
+            | SqlExpr::IsDistinctFrom(left, right)
+            | SqlExpr::IsNotDistinctFrom(left, right) => {
+                Self::raw_expr_calls_function_name(left, function_name)
+                    || Self::raw_expr_calls_function_name(right, function_name)
+            }
+            SqlExpr::Cast(expr, _)
+            | SqlExpr::Negate(expr)
+            | SqlExpr::Not(expr)
+            | SqlExpr::IsNull(expr)
+            | SqlExpr::IsNotNull(expr) => Self::raw_expr_calls_function_name(expr, function_name),
+            SqlExpr::ArrayLiteral(exprs) | SqlExpr::Row(exprs) => exprs
+                .iter()
+                .any(|expr| Self::raw_expr_calls_function_name(expr, function_name)),
+            _ => false,
+        }
     }
 
     fn drop_schema_owned_objects_in_transaction(

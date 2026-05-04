@@ -2415,9 +2415,14 @@ impl Database {
             if let Some(column_specs) = table_column_privilege_specs(&stmt.privilege, &stmt.columns)
             {
                 let mut column_acls = BTreeMap::<i16, Vec<String>>::new();
+                let mut relation_privilege_chars_acc = String::new();
                 for (column_privilege, columns) in column_specs {
                     let privilege_chars = table_privilege_chars(&column_privilege)
                         .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+                    if columns.is_empty() {
+                        relation_privilege_chars_acc.push_str(privilege_chars);
+                        continue;
+                    }
                     for column_name in columns {
                         let Some((column_index, column)) = relation
                             .desc
@@ -2483,29 +2488,108 @@ impl Database {
                         }
                     }
                 }
-                let ctx = CatalogWriteContext {
-                    pool: self.pool.clone(),
-                    txns: self.txns.clone(),
-                    xid,
-                    cid: current_cid,
-                    client_id,
-                    waiter: None,
-                    interrupts: self.interrupt_state(client_id),
-                };
-                let effect = self
-                    .catalog
-                    .write()
-                    .alter_attribute_acls_mvcc(
-                        relation.relation_oid,
-                        column_acls
-                            .into_iter()
-                            .map(|(attnum, acl)| (attnum, (!acl.is_empty()).then_some(acl)))
-                            .collect(),
-                        &ctx,
-                    )
-                    .map_err(map_catalog_error)?;
-                catalog_effects.push(effect);
-                current_cid = current_cid.saturating_add(1);
+                let relation_privilege_chars_acc = canonicalize_acl_privileges(
+                    &relation_privilege_chars_acc,
+                    TABLE_ALL_PRIVILEGE_CHARS,
+                );
+                if !relation_privilege_chars_acc.is_empty() {
+                    let allowed_privilege_chars =
+                        allowed_relation_privilege_chars(relation.relkind);
+                    let mut acl = catcache
+                        .class_by_oid(relation.relation_oid)
+                        .and_then(|row| row.relacl.clone())
+                        .unwrap_or_else(|| {
+                            table_owner_default_acl(&owner_name, relation.relkind)
+                                .into_iter()
+                                .collect()
+                        });
+                    let effective_privilege_chars;
+                    let grant_privilege_chars = if current_user_can_grant_as_owner {
+                        relation_privilege_chars_acc.as_str()
+                    } else {
+                        effective_privilege_chars = grantable_acl_privilege_chars(
+                            &acl,
+                            effective_names.as_ref().expect("effective names"),
+                            &relation_privilege_chars_acc,
+                        );
+                        warn_grant_privileges(
+                            object_name,
+                            &relation_privilege_chars_acc,
+                            &effective_privilege_chars,
+                        );
+                        effective_privilege_chars.as_str()
+                    };
+                    if !grant_privilege_chars.is_empty() {
+                        for grantee_name in &stmt.grantee_names {
+                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                                String::new()
+                            } else {
+                                auth_catalog
+                                    .role_by_name(grantee_name)
+                                    .map(|row| row.rolname.clone())
+                                    .ok_or_else(|| {
+                                        ExecError::Parse(role_management_error(format!(
+                                            "role \"{}\" does not exist",
+                                            grantee_name
+                                        )))
+                                    })?
+                            };
+                            grant_table_acl_entry(
+                                &mut acl,
+                                &grantee_acl_name,
+                                &grantor_name,
+                                grant_privilege_chars,
+                                allowed_privilege_chars,
+                                stmt.with_grant_option,
+                            );
+                        }
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid: current_cid,
+                            client_id,
+                            waiter: None,
+                            interrupts: self.interrupt_state(client_id),
+                        };
+                        let effect = self
+                            .catalog
+                            .write()
+                            .alter_relation_acl_mvcc(
+                                relation.relation_oid,
+                                collapse_relation_acl_defaults(acl, &owner_name, relation.relkind),
+                                &ctx,
+                            )
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(effect);
+                        current_cid = current_cid.saturating_add(1);
+                    }
+                }
+                if !column_acls.is_empty() {
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: current_cid,
+                        client_id,
+                        waiter: None,
+                        interrupts: self.interrupt_state(client_id),
+                    };
+                    let effect = self
+                        .catalog
+                        .write()
+                        .alter_attribute_acls_mvcc(
+                            relation.relation_oid,
+                            column_acls
+                                .into_iter()
+                                .map(|(attnum, acl)| (attnum, (!acl.is_empty()).then_some(acl)))
+                                .collect(),
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    catalog_effects.push(effect);
+                    current_cid = current_cid.saturating_add(1);
+                }
                 continue;
             }
 

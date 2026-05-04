@@ -41,9 +41,10 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     AlterTableAddColumnsStatement, AlterTableAddConstraintStatement, ColumnConstraint,
-    CommentOnAggregateStatement, CommentOnColumnStatement, CommentOnFunctionStatement,
-    CommentOnIndexStatement, CommentOnOperatorStatement, CommentOnSequenceStatement,
-    CommentOnViewStatement, MaintenanceTarget, TableConstraint, VacuumStatement,
+    ColumnGeneratedKind, CommentOnAggregateStatement, CommentOnColumnStatement,
+    CommentOnFunctionStatement, CommentOnIndexStatement, CommentOnOperatorStatement,
+    CommentOnSequenceStatement, CommentOnViewStatement, MaintenanceTarget, TableConstraint,
+    VacuumStatement,
 };
 use crate::include::nodes::primnodes::{
     BuiltinScalarFunction, Expr, ScalarFunctionImpl, user_attrno,
@@ -915,8 +916,18 @@ fn rewrite_heap_rows_for_added_default_column(
                 column,
             ));
         }
-        let value = evaluate_added_column_default_value(new_desc, column_index, ctx)?;
-        values.push(value);
+        values.push(Value::Null);
+        if new_desc.columns[column_index].generated == Some(ColumnGeneratedKind::Stored) {
+            crate::backend::commands::tablecmds::materialize_generated_columns_with_tableoid(
+                new_desc,
+                &mut values,
+                Some(relation.relation_oid),
+                ctx,
+            )?;
+        } else {
+            let value = evaluate_added_column_default_value(new_desc, column_index, ctx)?;
+            values[column_index] = value;
+        }
         let replacement = tuple_from_values(new_desc, &values)?;
         let new_tid = heap_update_with_waiter(
             &*ctx.pool,
@@ -4130,7 +4141,8 @@ impl Database {
             if target.relation.relkind == 'f'
                 || !target.append_column
                 || target.column.default_sequence_oid.is_some()
-                || added_column_default_sql(&target.column, &catalog).is_none()
+                || (target.column.generated != Some(ColumnGeneratedKind::Stored)
+                    && added_column_default_sql(&target.column, &catalog).is_none())
             {
                 continue;
             }
@@ -4149,7 +4161,9 @@ impl Database {
                     default_ctx.insert(ctx)
                 }
             };
-            if added_column_default_is_volatile(&target.column, &catalog)? {
+            if target.column.generated == Some(ColumnGeneratedKind::Stored)
+                || added_column_default_is_volatile(&target.column, &catalog)?
+            {
                 self.fire_table_rewrite_event_in_executor_context(
                     ctx,
                     "ALTER TABLE",

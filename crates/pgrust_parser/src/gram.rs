@@ -10257,16 +10257,20 @@ fn parse_table_privilege_spec(
     if table_items.is_empty() && column_items.is_empty() {
         return Ok(None);
     }
-    if !table_items.is_empty() && !column_items.is_empty() {
-        return Err(ParseError::FeatureNotSupported(
-            "mixed relation and column privilege lists".into(),
-        ));
-    }
     if column_items.is_empty() {
         return Ok(Some((
             table_privilege_from_chars(canonicalize_table_privilege_chars(&chars)),
             Vec::new(),
         )));
+    }
+    if !table_items.is_empty() {
+        column_items.insert(
+            0,
+            GrantTableColumnPrivilege {
+                privilege: table_privilege_from_chars(canonicalize_table_privilege_chars(&chars)),
+                columns: Vec::new(),
+            },
+        );
     }
     if column_items.len() == 1 {
         let spec = column_items.remove(0);

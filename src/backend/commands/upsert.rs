@@ -16,11 +16,11 @@ use crate::pl::plpgsql::TriggerOperation;
 use super::tablecmds::{
     ReturningTuple, WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
     exclusion_arbiter_conflicts_with_existing_row, index_key_values_for_row,
-    insert_index_entry_for_row, materialize_generated_columns, project_returning_row_with_old_new,
-    project_returning_row_with_old_new_metadata, rollback_inserted_row,
-    row_matches_index_predicate, slot_toast_context, temporal_arbiter_conflicts_with_existing_row,
-    validate_pending_no_action_checks, validate_pending_outbound_foreign_key_checks,
-    write_insert_heap_row, write_updated_row,
+    insert_index_entry_for_row, materialize_generated_columns_with_tableoid,
+    project_returning_row_with_old_new, project_returning_row_with_old_new_metadata,
+    rollback_inserted_row, row_matches_index_predicate, slot_toast_context,
+    temporal_arbiter_conflicts_with_existing_row, validate_pending_no_action_checks,
+    validate_pending_outbound_foreign_key_checks, write_insert_heap_row, write_updated_row,
 };
 use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
 
@@ -279,7 +279,12 @@ fn run_conflict_update(
         };
         new_values = trigger_values;
     }
-    materialize_generated_columns(&stmt.desc, &mut new_values, ctx)?;
+    materialize_generated_columns_with_tableoid(
+        &stmt.desc,
+        &mut new_values,
+        Some(stmt.relation_oid),
+        ctx,
+    )?;
 
     let write_result = write_updated_row(
         &stmt.relation_name,
@@ -597,7 +602,12 @@ pub(crate) fn execute_insert_on_conflict_rows(
         let mut rows_with_generated = Vec::with_capacity(rows.len());
         for row in rows {
             let mut row = row.clone();
-            materialize_generated_columns(&stmt.desc, &mut row, ctx)?;
+            materialize_generated_columns_with_tableoid(
+                &stmt.desc,
+                &mut row,
+                Some(stmt.relation_oid),
+                ctx,
+            )?;
             rows_with_generated.push(row);
         }
         preflight_on_conflict_updates(
@@ -621,7 +631,12 @@ pub(crate) fn execute_insert_on_conflict_rows(
         }) else {
             continue;
         };
-        materialize_generated_columns(&stmt.desc, &mut values, ctx)?;
+        materialize_generated_columns_with_tableoid(
+            &stmt.desc,
+            &mut values,
+            Some(stmt.relation_oid),
+            ctx,
+        )?;
         loop {
             ctx.check_for_interrupts()?;
             if matches!(on_conflict.action, BoundOnConflictAction::Nothing)

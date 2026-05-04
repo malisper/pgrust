@@ -17,7 +17,7 @@ use super::{
     CatalogLookup, CheckConstraintAction, CreateTableStatement, ForeignKeyConstraintAction,
     IndexBackedConstraintAction, LoweredPartitionSpec, NotNullConstraintAction, ParseError,
     PartitionBoundSpec, bind_relation_expr, normalize_create_table_constraints, raw_type_name_hint,
-    resolve_collation_oid, resolve_raw_type_name, validate_generated_columns,
+    resolve_collation_oid, resolve_raw_type_name, validate_generated_columns_for_relation,
 };
 use crate::runtime::render_relation_expr_sql;
 use crate::sql_type_name;
@@ -311,7 +311,7 @@ pub fn lower_create_table(
         })
         .collect();
 
-    validate_generated_columns(&relation_desc, catalog)?;
+    validate_generated_columns_for_relation(&relation_desc, Some(relation_name), catalog)?;
 
     Ok(LoweredCreateTable {
         of_type_oid,
