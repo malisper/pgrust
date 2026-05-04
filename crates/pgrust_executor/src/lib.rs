@@ -34,10 +34,13 @@ pub use aggregate::{
     AggregateRuntimeSelection, AggregateSupportError, CustomAggregateRuntime, NumericAccum,
     NumericSumAccum, accumulate_sum_value, accumulate_value, aggregate_float_value,
     aggregate_int8_pair, aggregate_numeric_value, aggregate_runtime_selection, clamp_corr,
-    clamp_regr_r2, concrete_custom_aggregate_transtype, finalize_array_agg, finalize_regr_stats,
-    floor_div_i32, format_numeric_result, normalize_array_value as normalize_aggregate_array_value,
-    numeric_accum_to_value, numeric_div_display_scale, numeric_quotient_decimal_weight,
-    numeric_sqrt, numeric_visible_scale, regr_value_or_null, stable_regr_semidefinite_sum,
+    clamp_regr_r2, concrete_custom_aggregate_transtype, eval_float8_accum_function,
+    eval_float8_combine_function, eval_float8_regr_accum_function,
+    eval_float8_regr_combine_function, expect_float8_arg, finalize_array_agg, finalize_regr_stats,
+    float8_regr_accum_state, floor_div_i32, format_numeric_result,
+    normalize_array_value as normalize_aggregate_array_value, numeric_accum_to_value,
+    numeric_div_display_scale, numeric_quotient_decimal_weight, numeric_sqrt,
+    numeric_visible_scale, regr_value_or_null, stable_regr_semidefinite_sum,
     string_agg_input_bytes, validate_array_agg_array_input,
 };
 pub use async_notify::{

@@ -4,10 +4,10 @@ use super::{
     render_datetime_value_text, render_interval_text, render_macaddr_text, render_macaddr8_text,
 };
 use crate::backend::executor::ExecError;
-use crate::backend::executor::exec_expr::{
-    cast_record_value_for_target, expect_float8_arg, float8_regr_accum_state,
+use crate::backend::executor::exec_expr::cast_record_value_for_target;
+use crate::backend::executor::expr_agg_support::{
+    aggregate_support_error, execute_scalar_function_value_call_with_arg_types,
 };
-use crate::backend::executor::expr_agg_support::execute_scalar_function_value_call_with_arg_types;
 use crate::backend::executor::expr_ops::{
     bitwise_and_values, bitwise_or_values, bitwise_xor_values, compare_order_by_keys,
     interval_div_float,
@@ -583,8 +583,10 @@ impl AccumState {
                     if matches!(y, Value::Null) || matches!(x, Value::Null) {
                         return Ok(());
                     }
-                    let y = expect_float8_arg("regr aggregate", y)?;
-                    let x = expect_float8_arg("regr aggregate", x)?;
+                    let y = pgrust_executor::expect_float8_arg("regr aggregate", y)
+                        .map_err(aggregate_support_error)?;
+                    let x = pgrust_executor::expect_float8_arg("regr aggregate", x)
+                        .map_err(aggregate_support_error)?;
                     if *count == 0.0 {
                         *first_x = x;
                         *all_x_equal = !x.is_nan();
@@ -595,9 +597,10 @@ impl AccumState {
                         *all_y_equal &= float8_regr_constant_value_eq(y, *first_y);
                     }
                     [*count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy] =
-                        float8_regr_accum_state(
+                        pgrust_executor::float8_regr_accum_state(
                             *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy, y, x,
-                        )?;
+                        )
+                        .map_err(aggregate_support_error)?;
                 }
                 Ok(())
             },
@@ -1691,7 +1694,8 @@ fn checked_percentile_value(op: &'static str, value: &Value) -> Result<Option<f6
     if matches!(value, Value::Null) {
         return Ok(None);
     }
-    let percentile = expect_float8_arg(op, value)?;
+    let percentile =
+        pgrust_executor::expect_float8_arg(op, value).map_err(aggregate_support_error)?;
     if !(0.0..=1.0).contains(&percentile) || percentile.is_nan() {
         return Err(ExecError::DetailedError {
             message: format!("percentile value {percentile} is not between 0 and 1"),
@@ -1821,8 +1825,10 @@ fn percentile_cont_value(percentile: f64, values: &[&Value]) -> Result<Value, Ex
             ))
         }
         _ => {
-            let lower = expect_float8_arg("percentile_cont", lower)?;
-            let upper = expect_float8_arg("percentile_cont", upper)?;
+            let lower = pgrust_executor::expect_float8_arg("percentile_cont", lower)
+                .map_err(aggregate_support_error)?;
+            let upper = pgrust_executor::expect_float8_arg("percentile_cont", upper)
+                .map_err(aggregate_support_error)?;
             Ok(Value::Float64(lower + (upper - lower) * fraction))
         }
     }

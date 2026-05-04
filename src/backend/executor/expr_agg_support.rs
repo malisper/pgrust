@@ -22,6 +22,7 @@ use crate::include::catalog::{
     builtin_scalar_function_for_proc_oid,
 };
 use crate::include::nodes::datum::{ArrayValue, NumericValue, Value};
+use crate::include::nodes::parsenodes::ParseError;
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, HashFunctionKind, HypotheticalAggFunc, OrderedSetAggFunc,
     expr_sql_type_hint,
@@ -701,6 +702,29 @@ pub(crate) fn aggregate_support_error(error: AggregateSupportError) -> ExecError
             detail: None,
             hint: None,
             sqlstate: "2202E",
+        },
+        AggregateSupportError::InvalidFloat8TransitionCall {
+            expected,
+            actual_args,
+        } => ExecError::Parse(ParseError::UnexpectedToken {
+            expected,
+            actual: format!("{actual_args} args"),
+        }),
+        AggregateSupportError::InvalidFloat8TransitionState { op, expected_len } => {
+            ExecError::DetailedError {
+                message: format!(
+                    "{op} requires a float8[] transition state of length {expected_len}"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            }
+        }
+        AggregateSupportError::Float8Overflow => ExecError::DetailedError {
+            message: "value out of range: overflow".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22003",
         },
     }
 }

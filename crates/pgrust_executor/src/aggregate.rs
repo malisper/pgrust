@@ -1,11 +1,11 @@
 use num_bigint::BigInt;
-use num_traits::{Signed, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 use pgrust_catalog_data::{
-    HYPOTHETICAL_RANK_FINAL_PROC_OID, MODE_FINAL_PROC_OID, PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID,
-    PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID, PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID,
-    PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID, PERCENTILE_DISC_FINAL_PROC_OID,
-    PERCENTILE_DISC_MULTI_FINAL_PROC_OID, builtin_aggregate_function_for_proc_oid,
-    builtin_hypothetical_aggregate_function_for_proc_oid,
+    FLOAT8_TYPE_OID, HYPOTHETICAL_RANK_FINAL_PROC_OID, MODE_FINAL_PROC_OID,
+    PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID, PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID,
+    PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID, PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID,
+    PERCENTILE_DISC_FINAL_PROC_OID, PERCENTILE_DISC_MULTI_FINAL_PROC_OID,
+    builtin_aggregate_function_for_proc_oid, builtin_hypothetical_aggregate_function_for_proc_oid,
     builtin_ordered_set_aggregate_function_for_proc_oid,
 };
 use pgrust_expr::parse_numeric_text;
@@ -30,6 +30,15 @@ pub enum AggregateSupportError {
     CannotAccumulateNullArrays,
     CannotAccumulateEmptyArrays,
     ArrayDimensionalityMismatch,
+    InvalidFloat8TransitionCall {
+        expected: &'static str,
+        actual_args: usize,
+    },
+    InvalidFloat8TransitionState {
+        op: &'static str,
+        expected_len: usize,
+    },
+    Float8Overflow,
 }
 
 #[derive(Debug, Clone)]
@@ -600,6 +609,285 @@ pub fn aggregate_float_value(value: &Value) -> Option<f64> {
         Value::Float64(v) => Some(*v),
         _ => None,
     }
+}
+
+pub fn eval_float8_accum_function(values: &[Value]) -> Result<Value, AggregateSupportError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [state, newval] => {
+            let state = expect_float8_transition_state("float8_accum", state, 3)?;
+            let newval = expect_float8_arg("float8_accum", newval)?;
+            let [count, sum, sum_sq] = float8_accum_state(state[0], state[1], state[2], newval)?;
+            Ok(encode_float8_transition_state([count, sum, sum_sq]))
+        }
+        _ => Err(AggregateSupportError::InvalidFloat8TransitionCall {
+            expected: "float8_accum(state, value)",
+            actual_args: values.len(),
+        }),
+    }
+}
+
+pub fn eval_float8_combine_function(values: &[Value]) -> Result<Value, AggregateSupportError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => {
+            let left = expect_float8_transition_state("float8_combine", left, 3)?;
+            let right = expect_float8_transition_state("float8_combine", right, 3)?;
+            let [count, sum, sum_sq] =
+                float8_combine_state(left[0], left[1], left[2], right[0], right[1], right[2])?;
+            Ok(encode_float8_transition_state([count, sum, sum_sq]))
+        }
+        _ => Err(AggregateSupportError::InvalidFloat8TransitionCall {
+            expected: "float8_combine(state1, state2)",
+            actual_args: values.len(),
+        }),
+    }
+}
+
+pub fn eval_float8_regr_accum_function(values: &[Value]) -> Result<Value, AggregateSupportError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [state, y, x] => {
+            let state = expect_float8_transition_state("float8_regr_accum", state, 6)?;
+            let y = expect_float8_arg("float8_regr_accum", y)?;
+            let x = expect_float8_arg("float8_regr_accum", x)?;
+            let [count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy] = float8_regr_accum_state(
+                state[0], state[1], state[2], state[3], state[4], state[5], y, x,
+            )?;
+            Ok(encode_float8_transition_state([
+                count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy,
+            ]))
+        }
+        _ => Err(AggregateSupportError::InvalidFloat8TransitionCall {
+            expected: "float8_regr_accum(state, y, x)",
+            actual_args: values.len(),
+        }),
+    }
+}
+
+pub fn eval_float8_regr_combine_function(values: &[Value]) -> Result<Value, AggregateSupportError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => {
+            let left = expect_float8_transition_state("float8_regr_combine", left, 6)?;
+            let right = expect_float8_transition_state("float8_regr_combine", right, 6)?;
+            let [count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy] = float8_regr_combine_state(
+                [left[0], left[1], left[2], left[3], left[4], left[5]],
+                [right[0], right[1], right[2], right[3], right[4], right[5]],
+            )?;
+            Ok(encode_float8_transition_state([
+                count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy,
+            ]))
+        }
+        _ => Err(AggregateSupportError::InvalidFloat8TransitionCall {
+            expected: "float8_regr_combine(state1, state2)",
+            actual_args: values.len(),
+        }),
+    }
+}
+
+fn expect_float8_transition_state(
+    op: &'static str,
+    value: &Value,
+    expected_len: usize,
+) -> Result<Vec<f64>, AggregateSupportError> {
+    let array = value
+        .as_array_value()
+        .ok_or_else(|| AggregateSupportError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::PgArray(ArrayValue::empty().with_element_type_oid(FLOAT8_TYPE_OID)),
+        })?;
+    if array.dimensions.len() != 1 || array.dimensions[0].length != expected_len {
+        return Err(AggregateSupportError::InvalidFloat8TransitionState { op, expected_len });
+    }
+    array
+        .elements
+        .iter()
+        .map(|element| expect_float8_arg(op, element))
+        .collect()
+}
+
+pub fn expect_float8_arg(op: &'static str, value: &Value) -> Result<f64, AggregateSupportError> {
+    match value {
+        Value::Int16(v) => Ok(f64::from(*v)),
+        Value::Int32(v) => Ok(f64::from(*v)),
+        Value::Int64(v) => Ok(*v as f64),
+        Value::Float64(v) => Ok(*v),
+        Value::Numeric(numeric) => match numeric {
+            NumericValue::PosInf => Ok(f64::INFINITY),
+            NumericValue::NegInf => Ok(f64::NEG_INFINITY),
+            NumericValue::NaN => Ok(f64::NAN),
+            NumericValue::Finite { coeff, scale, .. } => {
+                let coeff = coeff
+                    .to_f64()
+                    .ok_or_else(|| AggregateSupportError::TypeMismatch {
+                        op,
+                        left: value.clone(),
+                        right: Value::Float64(0.0),
+                    })?;
+                Ok(coeff / 10f64.powi(*scale as i32))
+            }
+        },
+        _ => Err(AggregateSupportError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Float64(0.0),
+        }),
+    }
+}
+
+fn encode_float8_transition_state<const N: usize>(values: [f64; N]) -> Value {
+    Value::PgArray(
+        ArrayValue::from_1d(values.into_iter().map(Value::Float64).collect())
+            .with_element_type_oid(FLOAT8_TYPE_OID),
+    )
+}
+
+fn float8_accum_state(
+    prev_count: f64,
+    prev_sum: f64,
+    mut prev_sum_sq: f64,
+    newval: f64,
+) -> Result<[f64; 3], AggregateSupportError> {
+    let count = prev_count + 1.0;
+    let sum = prev_sum + newval;
+    if prev_count > 0.0 {
+        let tmp = newval * count - sum;
+        prev_sum_sq += tmp * tmp / (count * prev_count);
+        if sum.is_infinite() || prev_sum_sq.is_infinite() {
+            if !prev_sum.is_infinite() && !newval.is_infinite() {
+                return Err(AggregateSupportError::Float8Overflow);
+            }
+            prev_sum_sq = f64::NAN;
+        }
+    } else if newval.is_nan() || newval.is_infinite() {
+        prev_sum_sq = f64::NAN;
+    }
+    Ok([count, sum, prev_sum_sq])
+}
+
+fn float8_combine_state(
+    count1: f64,
+    sum1: f64,
+    sum_sq1: f64,
+    count2: f64,
+    sum2: f64,
+    sum_sq2: f64,
+) -> Result<[f64; 3], AggregateSupportError> {
+    if count1 == 0.0 {
+        return Ok([count2, sum2, sum_sq2]);
+    }
+    if count2 == 0.0 {
+        return Ok([count1, sum1, sum_sq1]);
+    }
+    let count = count1 + count2;
+    let sum = sum1 + sum2;
+    let tmp = sum1 / count1 - sum2 / count2;
+    let sum_sq = sum_sq1 + sum_sq2 + count1 * count2 * tmp * tmp / count;
+    if sum_sq.is_infinite() && !sum_sq1.is_infinite() && !sum_sq2.is_infinite() {
+        return Err(AggregateSupportError::Float8Overflow);
+    }
+    Ok([count, sum, sum_sq])
+}
+
+pub fn float8_regr_accum_state(
+    prev_count: f64,
+    prev_sum_x: f64,
+    mut prev_sum_sq_x: f64,
+    prev_sum_y: f64,
+    mut prev_sum_sq_y: f64,
+    mut prev_sum_xy: f64,
+    new_y: f64,
+    new_x: f64,
+) -> Result<[f64; 6], AggregateSupportError> {
+    let count = prev_count + 1.0;
+    let sum_x = prev_sum_x + new_x;
+    let sum_y = prev_sum_y + new_y;
+    if prev_count > 0.0 {
+        let tmp_x = new_x * count - sum_x;
+        let tmp_y = new_y * count - sum_y;
+        let scale = 1.0 / (count * prev_count);
+        prev_sum_sq_x += tmp_x * tmp_x * scale;
+        prev_sum_sq_y += tmp_y * tmp_y * scale;
+        prev_sum_xy += tmp_x * tmp_y * scale;
+        if sum_x.is_infinite()
+            || prev_sum_sq_x.is_infinite()
+            || sum_y.is_infinite()
+            || prev_sum_sq_y.is_infinite()
+            || prev_sum_xy.is_infinite()
+        {
+            if ((sum_x.is_infinite() || prev_sum_sq_x.is_infinite())
+                && !prev_sum_x.is_infinite()
+                && !new_x.is_infinite())
+                || ((sum_y.is_infinite() || prev_sum_sq_y.is_infinite())
+                    && !prev_sum_y.is_infinite()
+                    && !new_y.is_infinite())
+                || (prev_sum_xy.is_infinite()
+                    && !prev_sum_x.is_infinite()
+                    && !new_x.is_infinite()
+                    && !prev_sum_y.is_infinite()
+                    && !new_y.is_infinite())
+            {
+                return Err(AggregateSupportError::Float8Overflow);
+            }
+            if prev_sum_sq_x.is_infinite() {
+                prev_sum_sq_x = f64::NAN;
+            }
+            if prev_sum_sq_y.is_infinite() {
+                prev_sum_sq_y = f64::NAN;
+            }
+            if prev_sum_xy.is_infinite() {
+                prev_sum_xy = f64::NAN;
+            }
+        }
+    } else {
+        if new_x.is_nan() || new_x.is_infinite() {
+            prev_sum_sq_x = f64::NAN;
+            prev_sum_xy = f64::NAN;
+        }
+        if new_y.is_nan() || new_y.is_infinite() {
+            prev_sum_sq_y = f64::NAN;
+            prev_sum_xy = f64::NAN;
+        }
+    }
+    Ok([
+        count,
+        sum_x,
+        prev_sum_sq_x,
+        sum_y,
+        prev_sum_sq_y,
+        prev_sum_xy,
+    ])
+}
+
+fn float8_regr_combine_state(
+    left: [f64; 6],
+    right: [f64; 6],
+) -> Result<[f64; 6], AggregateSupportError> {
+    let [count1, sum_x1, sum_sq_x1, sum_y1, sum_sq_y1, sum_xy1] = left;
+    let [count2, sum_x2, sum_sq_x2, sum_y2, sum_sq_y2, sum_xy2] = right;
+    if count1 == 0.0 {
+        return Ok(right);
+    }
+    if count2 == 0.0 {
+        return Ok(left);
+    }
+    let count = count1 + count2;
+    let sum_x = sum_x1 + sum_x2;
+    let sum_y = sum_y1 + sum_y2;
+    let tmp_x = sum_x1 / count1 - sum_x2 / count2;
+    let tmp_y = sum_y1 / count1 - sum_y2 / count2;
+    let sum_sq_x = sum_sq_x1 + sum_sq_x2 + count1 * count2 * tmp_x * tmp_x / count;
+    let sum_sq_y = sum_sq_y1 + sum_sq_y2 + count1 * count2 * tmp_y * tmp_y / count;
+    let sum_xy = sum_xy1 + sum_xy2 + count1 * count2 * tmp_x * tmp_y / count;
+    if (sum_sq_x.is_infinite() && !sum_sq_x1.is_infinite() && !sum_sq_x2.is_infinite())
+        || (sum_sq_y.is_infinite() && !sum_sq_y1.is_infinite() && !sum_sq_y2.is_infinite())
+        || (sum_xy.is_infinite() && !sum_xy1.is_infinite() && !sum_xy2.is_infinite())
+    {
+        return Err(AggregateSupportError::Float8Overflow);
+    }
+    Ok([count, sum_x, sum_sq_x, sum_y, sum_sq_y, sum_xy])
 }
 
 pub fn numeric_sqrt(value: &NumericValue, scale: u32) -> NumericValue {

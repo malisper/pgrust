@@ -118,6 +118,7 @@ Key decisions:
 - Made generic PL/pgSQL cache `len()` available outside `cfg(test)` so root test builds can inspect the cache through the dependency crate.
 - Moved role settings storage into `pgrust_catalog_store::role_settings`; root `commands::rolecmds` keeps wrappers.
 - Moved trigger transition capture row buffers into `pgrust_nodes`; root trigger/PLpgSQL paths re-export the type.
+- Moved float8 aggregate transition-state builtins, float8 argument coercion, and regression transition math into `pgrust_executor::aggregate`; root aggregate/exec_expr now adapt crate errors through the existing aggregate support mapper.
 - Moved CREATE SCHEMA element normalization into `pgrust_commands::schemacmds`; root keeps auth/permission resolution.
 - Moved row-description construction, result-format resolution, and wire type metadata into `pgrust_protocol`; root keeps value encoding and delegates pure protocol metadata.
 - Moved portable role-command spec construction, SCRAM password normalization, self-grant parsing, drop-role name normalization, and membership-row construction into `pgrust_commands::rolecmds`; root keeps notice emission and authorization adapters.
@@ -747,9 +748,12 @@ Tests run:
 - `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after encoding helper extraction (107 tests)
 - `scripts/cargo_isolated.sh check --lib --quiet` after encoding helper extraction
 - `bash scripts/check_crate_boundaries.sh` after encoding helper extraction
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet` after float8 aggregate transition extraction (107 tests)
+- `scripts/cargo_isolated.sh check --lib --quiet` after float8 aggregate transition extraction
+- `bash scripts/check_crate_boundaries.sh` after float8 aggregate transition extraction
 
 Remaining:
-- Continue executor service boundaries for PL/pgSQL callbacks, command callbacks, catalog role helpers, tsearch, and notices. Transaction state, row locks, serializable predicate locks, mutation sinks, aggregate helper clusters, stats value shaping, misc builtin/control value shaping, current-schema/search-path policy, num-null/extreme-value helpers, simple value-call helpers, and encoding helpers have initial traits/crate-local homes.
+- Continue executor service boundaries for PL/pgSQL callbacks, command callbacks, catalog role helpers, tsearch, and notices. Transaction state, row locks, serializable predicate locks, mutation sinks, aggregate helper clusters, stats value shaping, misc builtin/control value shaping, current-schema/search-path policy, num-null/extreme-value helpers, simple value-call helpers, encoding helpers, and float8 aggregate transition helpers have initial traits/crate-local homes.
 - Extract `pgrust_executor` after the remaining boundary is in place.
 - Expand `pgrust_commands` beyond helper modules into larger utility command bodies.
 - Move PL/pgSQL compile/runtime into the PL/pgSQL crate or a runtime crate.
