@@ -783,6 +783,11 @@ Tests run:
 - `scripts/cargo_isolated.sh test -p pgrust_expr --quiet` after root expr_casts shim conversion (241 tests)
 - `scripts/cargo_isolated.sh test --lib --quiet expr_casts` after root expr_casts shim conversion (0 matched, test build passed)
 - `bash scripts/check_crate_boundaries.sh` after root expr_casts shim conversion
+- `cargo fmt` after root expr_ops shim conversion
+- `scripts/cargo_isolated.sh check --lib --quiet` after root expr_ops shim conversion
+- `scripts/cargo_isolated.sh test -p pgrust_expr --quiet` after root expr_ops shim conversion (241 tests)
+- `scripts/cargo_isolated.sh test --lib --quiet expr_ops` after root expr_ops shim conversion (0 matched, test build passed)
+- `bash scripts/check_crate_boundaries.sh` after root expr_ops shim conversion
 
 Remaining:
 - Continue executor service boundaries for PL/pgSQL callbacks, command callbacks, catalog role helpers, tsearch, and notices. Transaction state, row locks, serializable predicate locks, mutation sinks, aggregate helper clusters, stats value shaping, misc builtin/control value shaping, current-schema/search-path policy, num-null/extreme-value helpers, simple value-call helpers, encoding helpers, float8 aggregate transition helpers, UUID builtins, enum support, and catalog visibility helpers have initial traits/crate-local homes.
