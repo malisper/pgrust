@@ -123,6 +123,7 @@ fn builtin_aggregate_accepts_call(func: AggFunc, args: &SqlCallArgs) -> bool {
         | AggFunc::Min
         | AggFunc::Max
         | AggFunc::ArrayAgg
+        | AggFunc::ArrayAggArray
         | AggFunc::JsonAgg
         | AggFunc::JsonbAgg
         | AggFunc::RangeAgg
@@ -840,7 +841,7 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
         AggFunc::BitAnd | AggFunc::BitOr | AggFunc::BitXor => {
             arg_type.unwrap_or(SqlType::new(Int4))
         }
-        AggFunc::ArrayAgg => arg_type
+        AggFunc::ArrayAgg | AggFunc::ArrayAggArray => arg_type
             .map(|ty| {
                 if ty.is_array {
                     ty

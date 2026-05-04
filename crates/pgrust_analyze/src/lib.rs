@@ -636,6 +636,14 @@ fn resolve_builtin_aggregate_call(
         })
 }
 
+fn specialize_builtin_aggregate(func: AggFunc, arg_types: &[SqlType]) -> AggFunc {
+    if func == AggFunc::ArrayAgg && arg_types.first().is_some_and(|ty| ty.is_array) {
+        AggFunc::ArrayAggArray
+    } else {
+        func
+    }
+}
+
 fn resolve_aggregate_call(
     catalog: &dyn CatalogLookup,
     name: &str,
@@ -643,6 +651,7 @@ fn resolve_aggregate_call(
     func_variadic: bool,
 ) -> Option<ResolvedAggregateCall> {
     if let Some(func) = resolve_builtin_aggregate(name) {
+        let func = specialize_builtin_aggregate(func, arg_types);
         let resolved = resolve_builtin_aggregate_call(catalog, func, arg_types, func_variadic);
         return Some(ResolvedAggregateCall {
             proc_oid: resolved
@@ -737,7 +746,7 @@ fn preserve_array_agg_array_arg_type(
                 .first()
                 .and_then(|arg| explicit_array_cast_type(arg, catalog))
         });
-    if func == Some(AggFunc::ArrayAgg)
+    if matches!(func, Some(AggFunc::ArrayAgg | AggFunc::ArrayAggArray))
         && let (Some(arg_type), Some(first_arg)) = (array_arg_type, args.first_mut())
         && !expr_sql_type_hint(first_arg).is_some_and(|ty| ty.is_array)
     {
