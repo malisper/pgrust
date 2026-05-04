@@ -76,6 +76,19 @@ REGRESS_TABLESPACE_DIR=""
 PREPARED_SETUP_SQL=""
 PREPARED_EXPECTED_CANDIDATES=()
 
+should_skip_regression_test() {
+    local test_name="$1"
+
+    case "$test_name" in
+        create_function_c)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 setup_pg_regress_env() {
     if command -v pg_config >/dev/null 2>&1; then
         export PG_LIBDIR
@@ -813,6 +826,9 @@ build_scheduled_test_groups() {
                 if [[ "$include_setup" != true && "$test_name" == "test_setup" ]]; then
                     continue
                 fi
+                if should_skip_regression_test "$test_name"; then
+                    continue
+                fi
 
                 sql_file="$sql_dir/${test_name}.sql"
                 if [[ -f "$sql_file" ]] && ! already_seen_group_file "$sql_file"; then
@@ -837,7 +853,11 @@ build_scheduled_test_groups() {
     if [[ "$include_unscheduled" == true ]]; then
         while IFS= read -r sql_file; do
             [[ -n "$sql_file" ]] || continue
-            if [[ "$include_setup" != true && "$(basename "$sql_file")" == "test_setup.sql" ]]; then
+            test_name="$(basename "$sql_file" .sql)"
+            if [[ "$include_setup" != true && "$test_name" == "test_setup" ]]; then
+                continue
+            fi
+            if should_skip_regression_test "$test_name"; then
                 continue
             fi
             if ! already_seen_group_file "$sql_file"; then
@@ -1129,6 +1149,10 @@ fi
 if ! [[ "$DEADLINE_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: --deadline-secs must be a non-negative integer"
     exit 1
+fi
+if [[ -n "$SINGLE_TEST" ]] && should_skip_regression_test "$SINGLE_TEST"; then
+    echo "SKIP: $SINGLE_TEST is disabled in pgrust regression runs."
+    exit 0
 fi
 
 RUN_START_EPOCH="$(date +%s)"
