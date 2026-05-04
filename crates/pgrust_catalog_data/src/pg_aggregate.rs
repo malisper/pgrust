@@ -3,7 +3,7 @@ use crate::{
     BOOL_TYPE_OID, INTERNAL_TYPE_OID, MODE_FINAL_PROC_OID, ORDERED_SET_TRANSITION_PROC_OID,
     PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID, PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID,
     PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID, PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID,
-    PERCENTILE_DISC_FINAL_PROC_OID, PERCENTILE_DISC_MULTI_FINAL_PROC_OID, TEXT_TYPE_OID,
+    PERCENTILE_DISC_FINAL_PROC_OID, PERCENTILE_DISC_MULTI_FINAL_PROC_OID, PgProcRow, TEXT_TYPE_OID,
     aggregate_transition_proc_oid, bootstrap_pg_proc_rows,
     builtin_hypothetical_aggregate_function_for_proc_oid,
     builtin_ordered_set_aggregate_function_for_proc_oid,
@@ -78,65 +78,65 @@ pub fn bootstrap_pg_aggregate_rows() -> Vec<PgAggregateRow> {
     bootstrap_pg_proc_rows()
         .into_iter()
         .filter(|row| row.prokind == 'a')
-        .map(|row| {
-            let aggsortop = aggregate_sort_operator_oid(&row.proname, &row.proargtypes);
-            let hypothetical =
-                builtin_hypothetical_aggregate_function_for_proc_oid(row.oid).is_some();
-            let ordered_set =
-                builtin_ordered_set_aggregate_function_for_proc_oid(row.oid).is_some();
-            PgAggregateRow {
-                aggfnoid: row.oid,
-                aggkind: if ordered_set {
-                    'o'
-                } else if hypothetical {
-                    'h'
-                } else {
-                    'n'
-                },
-                aggnumdirectargs: if ordered_set {
-                    ordered_set_direct_arg_count(row.oid)
-                } else if hypothetical {
-                    1
-                } else {
-                    0
-                },
-                // Builtin aggregates still execute through the existing fast path.
-                // Use catalog-only transition functions so opr_sanity can validate
-                // PostgreSQL-shaped aggregate metadata without changing execution.
-                aggtransfn: if ordered_set {
-                    ORDERED_SET_TRANSITION_PROC_OID
-                } else {
-                    aggregate_transition_proc_oid(row.oid)
-                },
-                aggfinalfn: if ordered_set {
-                    ordered_set_final_proc_oid(row.oid)
-                } else {
-                    0
-                },
-                aggcombinefn: 0,
-                aggserialfn: 0,
-                aggdeserialfn: 0,
-                aggmtransfn: 0,
-                aggminvtransfn: 0,
-                aggmfinalfn: 0,
-                aggfinalextra: ordered_set,
-                aggmfinalextra: false,
-                aggfinalmodify: if ordered_set { 's' } else { 'r' },
-                aggmfinalmodify: 'r',
-                aggsortop,
-                aggtranstype: if ordered_set {
-                    INTERNAL_TYPE_OID
-                } else {
-                    row.prorettype
-                },
-                aggtransspace: 0,
-                aggmtranstype: 0,
-                aggmtransspace: 0,
-                agginitval: None,
-                aggminitval: None,
-            }
-        })
+        .map(|row| pg_aggregate_row_for_proc_row(&row))
         .collect()
+}
+
+pub(crate) fn pg_aggregate_row_for_proc_row(row: &PgProcRow) -> PgAggregateRow {
+    let aggsortop = aggregate_sort_operator_oid(&row.proname, &row.proargtypes);
+    let hypothetical = builtin_hypothetical_aggregate_function_for_proc_oid(row.oid).is_some();
+    let ordered_set = builtin_ordered_set_aggregate_function_for_proc_oid(row.oid).is_some();
+    PgAggregateRow {
+        aggfnoid: row.oid,
+        aggkind: if ordered_set {
+            'o'
+        } else if hypothetical {
+            'h'
+        } else {
+            'n'
+        },
+        aggnumdirectargs: if ordered_set {
+            ordered_set_direct_arg_count(row.oid)
+        } else if hypothetical {
+            1
+        } else {
+            0
+        },
+        // Builtin aggregates still execute through the existing fast path.
+        // Use catalog-only transition functions so opr_sanity can validate
+        // PostgreSQL-shaped aggregate metadata without changing execution.
+        aggtransfn: if ordered_set {
+            ORDERED_SET_TRANSITION_PROC_OID
+        } else {
+            aggregate_transition_proc_oid(row.oid)
+        },
+        aggfinalfn: if ordered_set {
+            ordered_set_final_proc_oid(row.oid)
+        } else {
+            0
+        },
+        aggcombinefn: 0,
+        aggserialfn: 0,
+        aggdeserialfn: 0,
+        aggmtransfn: 0,
+        aggminvtransfn: 0,
+        aggmfinalfn: 0,
+        aggfinalextra: ordered_set,
+        aggmfinalextra: false,
+        aggfinalmodify: if ordered_set { 's' } else { 'r' },
+        aggmfinalmodify: 'r',
+        aggsortop,
+        aggtranstype: if ordered_set {
+            INTERNAL_TYPE_OID
+        } else {
+            row.prorettype
+        },
+        aggtransspace: 0,
+        aggmtranstype: 0,
+        aggmtransspace: 0,
+        agginitval: None,
+        aggminitval: None,
+    }
 }
 
 fn ordered_set_direct_arg_count(proc_oid: u32) -> i16 {

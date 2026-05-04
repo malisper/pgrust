@@ -808,6 +808,12 @@ fn range_proc_type_rows(db: &Database, search_path: &[String]) -> Vec<PgTypeRow>
     rows
 }
 
+fn range_proc_range_rows(db: &Database) -> Vec<crate::include::catalog::PgRangeRow> {
+    let mut rows = crate::include::catalog::builtin_range_rows();
+    rows.extend(db.range_rows());
+    rows
+}
+
 fn is_visible_range_proc_name(
     db: &Database,
     client_id: ClientId,
@@ -1237,6 +1243,7 @@ fn aggregate_row_by_fnoid(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
     aggfnoid: u32,
 ) -> Option<PgAggregateRow> {
     SearchSysCache1(
@@ -1251,6 +1258,13 @@ fn aggregate_row_by_fnoid(
     .find_map(|tuple| match tuple {
         SysCacheTuple::Aggregate(row) => Some(row),
         _ => None,
+    })
+    .or_else(|| {
+        crate::include::catalog::synthetic_range_aggregate_row_by_fnoid(
+            aggfnoid,
+            &range_proc_type_rows(db, search_path),
+            &range_proc_range_rows(db),
+        )
     })
 }
 
@@ -2427,7 +2441,13 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
-        aggregate_row_by_fnoid(&self.db, self.client_id, self.txn_ctx, aggfnoid)
+        aggregate_row_by_fnoid(
+            &self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            aggfnoid,
+        )
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {

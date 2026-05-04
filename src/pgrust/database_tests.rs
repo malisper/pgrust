@@ -65433,6 +65433,53 @@ fn create_range_type_survives_database_reopen() {
 }
 
 #[test]
+fn dynamic_range_aggregates_work_for_custom_range_and_multirange() {
+    let dir = temp_dir("dynamic_range_aggregates");
+    let db = Database::open(&dir, 64).unwrap();
+    db.execute(
+        1,
+        "create type textrange_agg as range \
+            (subtype = text, multirange_type_name = multitextrange_agg, collation = \"C\")",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select range_agg(r)::text \
+             from (values \
+                (textrange_agg('a', 'c')), \
+                (textrange_agg('c', 'f')), \
+                (textrange_agg('g', 'h'))) t(r)",
+        ),
+        vec![vec![Value::Text("{[a,f),[g,h)}".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select range_agg(m)::text \
+             from (values \
+                (multitextrange_agg(textrange_agg('a', 'c'))), \
+                (multitextrange_agg(textrange_agg('c', 'f')))) t(m)",
+        ),
+        vec![vec![Value::Text("{[a,f)}".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select range_intersect_agg(m)::text \
+             from (values \
+                (multitextrange_agg(textrange_agg('a', 'f'))), \
+                (multitextrange_agg(textrange_agg('c', 'h')))) t(m)",
+        ),
+        vec![vec![Value::Text("{[c,f)}".into())]]
+    );
+}
+
+#[test]
 fn dynamic_domain_and_range_creation_after_user_range_table() {
     let dir = temp_dir("domain_range_after_user_range_table");
     let db = Database::open(&dir, 64).unwrap();

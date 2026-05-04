@@ -59,8 +59,8 @@ use pgrust_catalog_data::{
     bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
     builtin_type_rows, is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
     proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
-    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
-    synthetic_range_proc_rows_by_name,
+    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_aggregate_row_by_fnoid,
+    synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
 use pgrust_core::RelFileLocator;
 use pgrust_nodes::datum::Value;
@@ -1488,6 +1488,13 @@ pub trait CatalogLookup: Send + Sync {
         bootstrap_pg_aggregate_rows()
             .into_iter()
             .find(|row| row.aggfnoid == aggfnoid)
+            .or_else(|| {
+                synthetic_range_aggregate_row_by_fnoid(
+                    aggfnoid,
+                    &self.type_rows(),
+                    &self.range_rows(),
+                )
+            })
     }
 
     fn operator_by_name_left_right(

@@ -30,7 +30,7 @@ use crate::include::catalog::{
     bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name, bootstrap_pg_ts_config_map_rows,
     bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows,
     bootstrap_pg_ts_template_rows, builtin_range_rows, builtin_type_rows,
-    synthetic_range_proc_rows_by_name,
+    synthetic_range_aggregate_row_by_fnoid, synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -559,6 +559,13 @@ impl CatalogLookup for VisibleCatalog {
                 bootstrap_pg_aggregate_rows()
                     .into_iter()
                     .find(|row| row.aggfnoid == aggfnoid)
+            })
+            .or_else(|| {
+                synthetic_range_aggregate_row_by_fnoid(
+                    aggfnoid,
+                    &self.type_rows(),
+                    &self.range_rows(),
+                )
             })
     }
 

@@ -1,3 +1,4 @@
+use crate::pg_aggregate::pg_aggregate_row_for_proc_row;
 use crate::{
     ARRAYMULTIRANGE_TYPE_OID, ARRAYRANGE_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
     DATE_TYPE_OID, DATEMULTIRANGE_TYPE_OID, DATERANGE_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
@@ -7,7 +8,7 @@ use crate::{
     TIMESTAMPTZ_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID,
     TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, VARBITMULTIRANGE_TYPE_OID, VARBITRANGE_TYPE_OID,
 };
-use crate::{PgProcRow, PgRangeRow, PgTypeRow};
+use crate::{PgAggregateRow, PgProcRow, PgRangeRow, PgTypeRow};
 pub use pgrust_core::RangeCanonicalization;
 use pgrust_nodes::datum::{MultirangeTypeRef, RangeTypeRef};
 use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -800,6 +801,29 @@ pub fn synthetic_range_proc_row_by_oid(
         .find(|row| row.oid == oid)
 }
 
+pub fn synthetic_range_aggregate_rows(
+    type_rows: &[PgTypeRow],
+    range_rows: &[PgRangeRow],
+) -> Vec<PgAggregateRow> {
+    synthetic_range_proc_rows(type_rows, range_rows)
+        .into_iter()
+        .filter_map(|row| {
+            (row.prokind == 'a' && aggregate_func_for_dynamic_range_proc_oid(row.oid).is_some())
+                .then(|| pg_aggregate_row_for_proc_row(&row))
+        })
+        .collect()
+}
+
+pub fn synthetic_range_aggregate_row_by_fnoid(
+    aggfnoid: u32,
+    type_rows: &[PgTypeRow],
+    range_rows: &[PgRangeRow],
+) -> Option<PgAggregateRow> {
+    aggregate_func_for_dynamic_range_proc_oid(aggfnoid)?;
+    let row = synthetic_range_proc_row_by_oid(aggfnoid, type_rows, range_rows)?;
+    (row.prokind == 'a').then(|| pg_aggregate_row_for_proc_row(&row))
+}
+
 pub fn aggregate_func_for_dynamic_range_proc_oid(oid: u32) -> Option<AggFunc> {
     let slot = dynamic_range_proc_slot(oid)?;
     match slot {
@@ -931,4 +955,57 @@ fn oid_argtypes(arg_oids: &[u32]) -> String {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{aggregate_transition_proc_oid, builtin_range_rows, builtin_type_rows};
+
+    #[test]
+    fn synthetic_range_aggregate_rows_cover_dynamic_aggregate_proc_oids() {
+        let type_rows = builtin_type_rows();
+        let range_rows = builtin_range_rows();
+        let rows = synthetic_range_aggregate_rows(&type_rows, &range_rows);
+
+        let range_agg_proc =
+            synthetic_range_proc_rows_by_name("range_agg", &type_rows, &range_rows)
+                .into_iter()
+                .find(|row| {
+                    aggregate_func_for_dynamic_range_proc_oid(row.oid) == Some(AggFunc::RangeAgg)
+                })
+                .expect("dynamic range_agg proc");
+        let range_agg_row =
+            synthetic_range_aggregate_row_by_fnoid(range_agg_proc.oid, &type_rows, &range_rows)
+                .expect("dynamic range_agg aggregate row");
+        assert!(rows.iter().any(|row| row.aggfnoid == range_agg_proc.oid));
+        assert_eq!(range_agg_row.aggkind, 'n');
+        assert_eq!(range_agg_row.aggnumdirectargs, 0);
+        assert_eq!(
+            range_agg_row.aggtransfn,
+            aggregate_transition_proc_oid(range_agg_proc.oid)
+        );
+
+        let intersect_proc =
+            synthetic_range_proc_rows_by_name("range_intersect_agg", &type_rows, &range_rows)
+                .into_iter()
+                .find(|row| {
+                    aggregate_func_for_dynamic_range_proc_oid(row.oid)
+                        == Some(AggFunc::RangeIntersectAgg)
+                })
+                .expect("dynamic range_intersect_agg proc");
+        assert!(
+            synthetic_range_aggregate_row_by_fnoid(intersect_proc.oid, &type_rows, &range_rows)
+                .is_some()
+        );
+
+        let lower_proc = synthetic_range_proc_rows_by_name("lower", &type_rows, &range_rows)
+            .into_iter()
+            .next()
+            .expect("dynamic lower proc");
+        assert!(
+            synthetic_range_aggregate_row_by_fnoid(lower_proc.oid, &type_rows, &range_rows)
+                .is_none()
+        );
+    }
 }
