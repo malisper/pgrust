@@ -27,7 +27,6 @@ use crate::include::nodes::primnodes::{
     SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumnKind, SubPlan,
     TABLE_OID_ATTR_NO, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind, XMAX_ATTR_NO,
     XMIN_ATTR_NO, attrno_index, expr_sql_type_hint, is_system_attr, set_returning_call_exprs,
-    user_attrno,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 use pgrust_commands::explain::apply_remaining_verbose_explain_text_compat as apply_remaining_verbose_explain_text_compat_impl;
@@ -475,179 +474,7 @@ fn modify_subplan_arg_names(
     outer_names: &[String],
     inner_names: &[String],
 ) -> Vec<String> {
-    let vars = expr_varnos(expr);
-    let uses_outer = vars.contains(&OUTER_VAR) || vars.contains(&1);
-    let uses_inner = vars.contains(&INNER_VAR) || vars.contains(&2);
-    match (uses_outer, uses_inner) {
-        (false, true) => inner_names.to_vec(),
-        (true, false) => outer_names.to_vec(),
-        _ => {
-            let mut names = outer_names.to_vec();
-            names.extend_from_slice(inner_names);
-            names
-        }
-    }
-}
-
-fn expr_varnos(expr: &Expr) -> BTreeSet<usize> {
-    let mut out = BTreeSet::new();
-    collect_expr_varnos(expr, &mut out);
-    out
-}
-
-fn collect_expr_varnos(expr: &Expr, out: &mut BTreeSet<usize>) {
-    match expr {
-        Expr::Var(var) => {
-            out.insert(var.varno);
-        }
-        Expr::Param(_) | Expr::Const(_) | Expr::CaseTest(_) => {}
-        Expr::Aggref(aggref) => {
-            for arg in &aggref.args {
-                collect_expr_varnos(arg, out);
-            }
-            if let Some(filter) = &aggref.aggfilter {
-                collect_expr_varnos(filter, out);
-            }
-        }
-        Expr::GroupingKey(grouping_key) => {
-            collect_expr_varnos(&grouping_key.expr, out);
-        }
-        Expr::GroupingFunc(grouping_func) => {
-            for arg in &grouping_func.args {
-                collect_expr_varnos(arg, out);
-            }
-        }
-        Expr::WindowFunc(window_func) => {
-            for arg in &window_func.args {
-                collect_expr_varnos(arg, out);
-            }
-            if let WindowFuncKind::Aggregate(aggref) = &window_func.kind
-                && let Some(filter) = &aggref.aggfilter
-            {
-                collect_expr_varnos(filter, out);
-            }
-        }
-        Expr::Op(op) => {
-            for arg in &op.args {
-                collect_expr_varnos(arg, out);
-            }
-        }
-        Expr::Bool(bool_expr) => {
-            for arg in &bool_expr.args {
-                collect_expr_varnos(arg, out);
-            }
-        }
-        Expr::Case(case_expr) => {
-            if let Some(arg) = &case_expr.arg {
-                collect_expr_varnos(arg, out);
-            }
-            for arm in &case_expr.args {
-                collect_expr_varnos(&arm.expr, out);
-                collect_expr_varnos(&arm.result, out);
-            }
-            collect_expr_varnos(&case_expr.defresult, out);
-        }
-        Expr::Func(func) => {
-            for arg in &func.args {
-                collect_expr_varnos(arg, out);
-            }
-        }
-        Expr::SqlJsonQueryFunction(func) => {
-            for arg in func.child_exprs() {
-                collect_expr_varnos(arg, out);
-            }
-        }
-        Expr::SetReturning(srf) => {
-            for arg in set_returning_call_exprs(&srf.call) {
-                collect_expr_varnos(arg, out);
-            }
-        }
-        Expr::SubLink(sublink) => {
-            if let Some(testexpr) = &sublink.testexpr {
-                collect_expr_varnos(testexpr, out);
-            }
-        }
-        Expr::SubPlan(subplan) => {
-            if let Some(testexpr) = &subplan.testexpr {
-                collect_expr_varnos(testexpr, out);
-            }
-            for arg in &subplan.args {
-                collect_expr_varnos(arg, out);
-            }
-        }
-        Expr::ScalarArrayOp(saop) => {
-            collect_expr_varnos(&saop.left, out);
-            collect_expr_varnos(&saop.right, out);
-        }
-        Expr::Cast(inner, _)
-        | Expr::Collate { expr: inner, .. }
-        | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => collect_expr_varnos(inner, out),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            collect_expr_varnos(expr, out);
-            collect_expr_varnos(pattern, out);
-            if let Some(escape) = escape {
-                collect_expr_varnos(escape, out);
-            }
-        }
-        Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right)
-        | Expr::Coalesce(left, right) => {
-            collect_expr_varnos(left, out);
-            collect_expr_varnos(right, out);
-        }
-        Expr::ArrayLiteral { elements, .. } => {
-            for element in elements {
-                collect_expr_varnos(element, out);
-            }
-        }
-        Expr::Row { fields, .. } => {
-            for (_, field) in fields {
-                collect_expr_varnos(field, out);
-            }
-        }
-        Expr::FieldSelect { expr, .. } => collect_expr_varnos(expr, out),
-        Expr::ArraySubscript { array, subscripts } => {
-            collect_expr_varnos(array, out);
-            for subscript in subscripts {
-                if let Some(lower) = &subscript.lower {
-                    collect_expr_varnos(lower, out);
-                }
-                if let Some(upper) = &subscript.upper {
-                    collect_expr_varnos(upper, out);
-                }
-            }
-        }
-        Expr::Xml(xml) => {
-            for child in xml.child_exprs() {
-                collect_expr_varnos(child, out);
-            }
-        }
-        Expr::Random
-        | Expr::CurrentDate
-        | Expr::CurrentCatalog
-        | Expr::CurrentSchema
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::User
-        | Expr::SystemUser
-        | Expr::CurrentRole
-        | Expr::CurrentTime { .. }
-        | Expr::CurrentTimestamp { .. }
-        | Expr::LocalTime { .. }
-        | Expr::LocalTimestamp { .. } => {}
-    }
+    pgrust_commands::explain::modify_subplan_arg_names(expr, outer_names, inner_names)
 }
 
 pub(crate) fn format_explain_plan_with_subplans(
@@ -703,114 +530,7 @@ pub(crate) fn apply_remaining_verbose_explain_text_compat(
 }
 
 fn apply_tenk1_window_explain_compat(lines: &mut Vec<String>, start: usize) {
-    let mut index = start;
-    while index < lines.len() {
-        if lines[index].trim() == "Window: w1 AS (ORDER BY t1.unique1)"
-            && lines
-                .get(index + 1)
-                .is_some_and(|line| line.trim() == "->  Merge Join")
-        {
-            lines.splice(
-                index + 1..(index + 9).min(lines.len()),
-                [
-                    "        ->  Nested Loop".to_string(),
-                    "              ->  Index Only Scan using tenk1_unique1 on tenk1 t1".to_string(),
-                    "              ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2"
-                        .to_string(),
-                    "                    Index Cond: (tenthous = t1.unique1)".to_string(),
-                ],
-            );
-            if let Some(row_line) = lines.get_mut(index + 5) {
-                *row_line = "(7 rows)".to_string();
-            }
-            index += 6;
-            continue;
-        }
-        if lines[index].trim() == "Window: w1 AS ()"
-            && lines
-                .get(index + 3)
-                .is_some_and(|line| line.trim() == "->  Seq Scan on tenk1 t1")
-        {
-            lines[index + 3] =
-                "              ->  Index Only Scan using tenk1_unique1 on tenk1 t1".to_string();
-            for offset in 1..=8 {
-                if let Some(filter) = lines.get_mut(index + offset)
-                    && filter.trim() == "Filter: (t2.two = 1)"
-                {
-                    *filter = "                          Filter: (two = 1)".to_string();
-                    break;
-                }
-            }
-            index += 8;
-            continue;
-        }
-        if lines[index]
-            .trim()
-            .starts_with("Window: w1 AS (ORDER BY t1.unique1 ROWS BETWEEN UNBOUNDED PRECEDING")
-            && lines
-                .get(index + 1)
-                .is_some_and(|line| line.trim() == "->  Merge Join")
-            && lines
-                .get(index + 3)
-                .is_some_and(|line| line.trim() == "->  Sort")
-            && lines
-                .get(index + 5)
-                .is_some_and(|line| line.trim() == "->  Seq Scan on tenk1 t1")
-            && lines
-                .get(index + 6)
-                .is_some_and(|line| line.trim() == "->  Sort")
-            && lines
-                .get(index + 8)
-                .is_some_and(|line| line.trim() == "->  Seq Scan on tenk1 t2")
-        {
-            lines.splice(
-                index + 3..(index + 9).min(lines.len()),
-                [
-                    "              ->  Index Only Scan using tenk1_unique1 on tenk1 t1"
-                        .to_string(),
-                    "              ->  Sort".to_string(),
-                    "                    Sort Key: t2.tenthous".to_string(),
-                    "                    ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2"
-                        .to_string(),
-                ],
-            );
-            if let Some(row_line) = lines.get_mut(index + 7) {
-                *row_line = "(9 rows)".to_string();
-            }
-            index += 8;
-            continue;
-        }
-        if lines[index]
-            .trim()
-            .starts_with("Window: w1 AS (ORDER BY t1.unique1 ROWS BETWEEN UNBOUNDED PRECEDING")
-            && lines
-                .get(index + 1)
-                .is_some_and(|line| line.trim() == "->  Sort")
-            && lines
-                .get(index + 3)
-                .is_some_and(|line| line.trim() == "->  Hash Join")
-        {
-            lines.splice(
-                index + 1..(index + 8).min(lines.len()),
-                [
-                    "        ->  Merge Join".to_string(),
-                    "              Merge Cond: (t1.unique1 = t2.tenthous)".to_string(),
-                    "              ->  Index Only Scan using tenk1_unique1 on tenk1 t1"
-                        .to_string(),
-                    "              ->  Sort".to_string(),
-                    "                    Sort Key: t2.tenthous".to_string(),
-                    "                    ->  Index Only Scan using tenk1_thous_tenthous on tenk1 t2"
-                        .to_string(),
-                ],
-            );
-            if let Some(row_line) = lines.get_mut(index + 7) {
-                *row_line = "(9 rows)".to_string();
-            }
-            index += 8;
-            continue;
-        }
-        index += 1;
-    }
+    pgrust_commands::explain::apply_tenk1_window_explain_compat(lines, start);
 }
 
 pub(crate) fn format_explain_child_plan_with_subplans(
@@ -1540,20 +1260,17 @@ fn push_direct_plan_subplans(
     ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
-    for subplan in direct_plan_subplans(plan) {
-        let prefix = "  ".repeat(indent + 1);
-        let label = if subplan.renders_as_initplan() {
-            format!("{prefix}InitPlan {}", subplan.plan_id + 1)
-        } else {
-            format!("{prefix}SubPlan {}", subplan.plan_id + 1)
-        };
-        lines.push(label);
-        if let Some(child) = subplans.get(subplan.plan_id) {
-            let child_ctx = subplan_explain_context(plan, subplan, ctx);
+    pgrust_commands::explain::push_direct_plan_subplans(
+        plan,
+        subplans,
+        indent,
+        lines,
+        |parent, subplan, child, child_indent, lines| {
+            let child_ctx = subplan_explain_context(parent, subplan, ctx);
             format_explain_plan_with_subplans_inner(
                 child,
                 subplans,
-                indent + 2,
+                child_indent,
                 show_costs,
                 verbose,
                 true,
@@ -1561,8 +1278,8 @@ fn push_direct_plan_subplans(
                 &child_ctx,
                 lines,
             );
-        }
-    }
+        },
+    );
 }
 
 fn subplan_explain_context(
@@ -1591,251 +1308,22 @@ fn subplan_explain_context(
 }
 
 fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
-    match plan {
-        Plan::Limit {
-            input,
-            limit: None,
-            offset: None,
-            ..
-        } => Some(input.as_ref()),
-        Plan::Projection { input, targets, .. } => {
-            projection_targets_are_explain_passthrough(input, targets).then_some(input.as_ref())
-        }
-        Plan::SubqueryScan {
-            input,
-            scan_name,
-            filter: None,
-            ..
-        } if scan_name
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case("bpchar_view")) =>
-        {
-            Some(input.as_ref())
-        }
-        Plan::Filter { input, .. }
-            if matches!(
-                input.as_ref(),
-                Plan::Append { .. } | Plan::MergeAppend { .. }
-            ) =>
-        {
-            Some(input.as_ref())
-        }
-        Plan::Append {
-            children,
-            partition_prune,
-            ..
-        } if children.len() == 1
-            && partition_prune
-                .as_ref()
-                .is_none_or(|info| info.subplans_removed == 0) =>
-        {
-            children.first()
-        }
-        // :HACK: PostgreSQL pulls up this simple view in the expressions
-        // regression. Keep the EXPLAIN compatibility shim scoped to the known
-        // bpchar coercion case until view pullup handles it before planning.
-        Plan::SubqueryScan {
-            input,
-            scan_name: Some(scan_name),
-            filter: None,
-            ..
-        } if scan_name == "bpchar_view" => Some(input.as_ref()),
-        _ => None,
-    }
+    pgrust_commands::explain::explain_passthrough_plan_child(plan)
 }
 
 fn filter_as_join_filter_plan(plan: &Plan) -> Option<Plan> {
-    let Plan::Filter {
-        input, predicate, ..
-    } = plan
-    else {
-        return None;
-    };
-    let mut join_plan = input.as_ref().clone();
-    match &mut join_plan {
-        Plan::NestedLoopJoin {
-            kind, left, qual, ..
-        }
-        | Plan::HashJoin {
-            kind, left, qual, ..
-        }
-        | Plan::MergeJoin {
-            kind, left, qual, ..
-        } if matches!(kind, JoinType::Left | JoinType::Full) => {
-            qual.push(filter_predicate_to_join_qual(
-                predicate.clone(),
-                left.columns().len(),
-            ));
-            Some(join_plan)
-        }
-        _ => None,
-    }
-}
-
-fn filter_predicate_to_join_qual(expr: Expr, left_width: usize) -> Expr {
-    match expr {
-        Expr::Var(mut var)
-            if var.varno == OUTER_VAR
-                && attrno_index(var.varattno).is_some_and(|index| index >= left_width) =>
-        {
-            let index = attrno_index(var.varattno).expect("checked above");
-            var.varno = INNER_VAR;
-            var.varattno = user_attrno(index - left_width);
-            Expr::Var(var)
-        }
-        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
-            args: op
-                .args
-                .into_iter()
-                .map(|arg| filter_predicate_to_join_qual(arg, left_width))
-                .collect(),
-            ..*op
-        })),
-        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
-            args: bool_expr
-                .args
-                .into_iter()
-                .map(|arg| filter_predicate_to_join_qual(arg, left_width))
-                .collect(),
-            ..*bool_expr
-        })),
-        Expr::Cast(inner, ty) => Expr::Cast(
-            Box::new(filter_predicate_to_join_qual(*inner, left_width)),
-            ty,
-        ),
-        Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(filter_predicate_to_join_qual(*inner, left_width)))
-        }
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(filter_predicate_to_join_qual(*inner, left_width)))
-        }
-        Expr::Coalesce(left, right) => Expr::Coalesce(
-            Box::new(filter_predicate_to_join_qual(*left, left_width)),
-            Box::new(filter_predicate_to_join_qual(*right, left_width)),
-        ),
-        other => other,
-    }
+    pgrust_commands::explain::filter_as_join_filter_plan(plan)
 }
 
 fn swapped_partition_hash_join_display_plan(plan: &Plan) -> Option<Plan> {
-    let Plan::HashJoin {
-        plan_info,
-        left,
-        right,
-        kind,
-        hash_clauses,
-        hash_keys,
-        join_qual,
-        qual,
-    } = plan
-    else {
-        return None;
-    };
-    if !join_qual.is_empty() || !qual.is_empty() {
-        return None;
-    }
-    let Plan::Hash {
-        plan_info: hash_plan_info,
-        input: hash_input,
-        hash_keys: inner_hash_keys,
-    } = right.as_ref()
-    else {
-        return None;
-    };
-    let display_kind = match kind {
-        JoinType::Inner => JoinType::Inner,
-        JoinType::Left => JoinType::Right,
-        JoinType::Right => JoinType::Left,
-        JoinType::Full => JoinType::Full,
-        JoinType::Semi | JoinType::Anti | JoinType::Cross => return None,
-    };
-    if !partition_hash_join_display_prefers_swapped(left, hash_input) {
-        return None;
-    }
-
-    Some(Plan::HashJoin {
-        plan_info: *plan_info,
-        left: hash_input.clone(),
-        right: Box::new(Plan::Hash {
-            plan_info: *hash_plan_info,
-            input: left.clone(),
-            hash_keys: hash_keys.clone(),
-        }),
-        kind: display_kind,
-        hash_clauses: hash_clauses.clone(),
-        hash_keys: inner_hash_keys.clone(),
-        join_qual: Vec::new(),
-        qual: Vec::new(),
-    })
+    pgrust_commands::explain::swapped_partition_hash_join_display_plan(plan)
 }
 
 fn dummy_empty_group_aggregate_display_plan(plan: &Plan) -> Option<Plan> {
-    let Plan::OrderBy {
-        input,
-        items,
-        display_items,
-        ..
-    } = plan
-    else {
-        return None;
-    };
-    let Plan::Aggregate {
-        plan_info,
-        strategy,
-        phase,
-        disabled,
-        input: aggregate_input,
-        group_by,
-        passthrough_exprs,
-        accumulators,
-        semantic_accumulators,
-        having,
-        output_columns,
-        ..
-    } = input.as_ref()
-    else {
-        return None;
-    };
-    if *strategy != AggregateStrategy::Sorted
-        || group_by.len() < 2
-        || items.len() != group_by.len()
-        || const_false_filter_result_plan(aggregate_input).is_none()
-    {
-        return None;
-    }
-
-    // :HACK: PostgreSQL removes the contradictory join key from this empty
-    // preserved-side aggregate before sorting. The runtime result is empty
-    // either way, so keep this as an EXPLAIN-only compatibility shim until
-    // equivalence-class driven const pruning exists in the planner.
-    let keep_from = group_by.len() - 1;
-    let display_items = if display_items.len() == items.len() {
-        display_items[keep_from..].to_vec()
-    } else {
-        Vec::new()
-    };
-    let semantic_output_names = (!display_items.is_empty()).then(|| display_items.clone());
-    Some(Plan::Aggregate {
-        plan_info: *plan_info,
-        strategy: *strategy,
-        phase: *phase,
-        disabled: *disabled,
-        input: Box::new(Plan::OrderBy {
-            plan_info: aggregate_input.plan_info(),
-            input: aggregate_input.clone(),
-            items: items[keep_from..].to_vec(),
-            display_items,
-        }),
-        group_by: group_by[keep_from..].to_vec(),
-        group_by_refs: (1..=group_by.len().saturating_sub(keep_from)).collect(),
-        grouping_sets: Vec::new(),
-        passthrough_exprs: passthrough_exprs.clone(),
-        accumulators: accumulators.clone(),
-        semantic_accumulators: semantic_accumulators.clone(),
-        semantic_output_names,
-        having: having.clone(),
-        output_columns: output_columns.clone(),
-    })
+    pgrust_commands::explain::dummy_empty_group_aggregate_display_plan(
+        plan,
+        const_false_filter_result_plan,
+    )
 }
 
 fn push_tsearch_to_tsquery_join_plan(
@@ -2017,28 +1505,11 @@ fn push_tidscan_ctid_join_display_plan(
 }
 
 fn tidscan_join_left_scan(plan: &Plan) -> Option<(&Plan, Option<&Expr>)> {
-    match plan {
-        Plan::OrderBy { input, .. } | Plan::IncrementalSort { input, .. } => {
-            tidscan_join_left_scan(input)
-        }
-        Plan::Filter {
-            input, predicate, ..
-        } if matches!(input.as_ref(), Plan::SeqScan { .. }) => {
-            Some((input.as_ref(), Some(predicate)))
-        }
-        Plan::SeqScan { .. } => Some((plan, None)),
-        _ => None,
-    }
+    pgrust_commands::explain::tidscan_join_left_scan(plan)
 }
 
 fn tidscan_join_right_scan(plan: &Plan) -> Option<&Plan> {
-    match plan {
-        Plan::OrderBy { input, .. } | Plan::IncrementalSort { input, .. } => {
-            tidscan_join_right_scan(input)
-        }
-        Plan::SeqScan { .. } => Some(plan),
-        _ => None,
-    }
+    pgrust_commands::explain::tidscan_join_right_scan(plan)
 }
 
 fn is_ctid_join_clause(expr: &Expr) -> bool {
@@ -2055,34 +1526,11 @@ fn is_ctid_join_clause(expr: &Expr) -> bool {
 }
 
 fn materialize_input(plan: &Plan) -> &Plan {
-    match plan {
-        Plan::Materialize { input, .. } => input.as_ref(),
-        _ => plan,
-    }
+    pgrust_commands::explain::materialize_input(plan)
 }
 
 fn folded_tsearch_scan_label(plan: &Plan) -> Option<String> {
-    match plan {
-        Plan::SeqScan {
-            relation_name,
-            tablesample,
-            parallel_aware,
-            ..
-        } => {
-            let scan_name = if tablesample.is_some() {
-                "Sample Scan"
-            } else if *parallel_aware {
-                "Parallel Seq Scan"
-            } else {
-                "Seq Scan"
-            };
-            Some(format!(
-                "{scan_name} on {}",
-                relation_name_without_alias(relation_name)
-            ))
-        }
-        _ => None,
-    }
+    pgrust_commands::explain::folded_tsearch_scan_label(plan)
 }
 
 fn const_to_tsquery_scan_value(
@@ -2135,93 +1583,27 @@ fn render_tsquery_const_for_explain(query: &crate::include::nodes::tsearch::TsQu
 }
 
 fn first_sql_quoted_literal(rendered: &str) -> Option<String> {
-    sql_quoted_literals(rendered).into_iter().next()
+    pgrust_commands::explain::first_sql_quoted_literal(rendered)
 }
 
 fn sql_quoted_literals(rendered: &str) -> Vec<String> {
-    let mut literals = Vec::new();
-    let mut offset = 0usize;
-    while let Some((rel_start, _)) = rendered[offset..]
-        .char_indices()
-        .find(|(_, ch)| *ch == '\'')
-    {
-        let start = offset + rel_start + 1;
-        let mut out = String::new();
-        let mut literal_len = 0usize;
-        let mut iter = rendered[start..].chars().peekable();
-        let mut closed = false;
-        while let Some(ch) = iter.next() {
-            literal_len += ch.len_utf8();
-            if ch == '\'' {
-                if iter.peek() == Some(&'\'') {
-                    iter.next();
-                    literal_len += 1;
-                    out.push('\'');
-                    continue;
-                }
-                literals.push(out);
-                closed = true;
-                break;
-            }
-            out.push(ch);
-        }
-        offset = start + literal_len;
-        if !closed {
-            break;
-        }
-    }
-    literals
+    pgrust_commands::explain::sql_quoted_literals(rendered)
 }
 
 fn const_text_expr(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Const(value) => value.as_text().map(ToOwned::to_owned),
-        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => const_text_expr(inner),
-        _ => None,
-    }
+    pgrust_commands::explain::const_text_expr(expr)
 }
 
 fn partition_hash_join_display_prefers_swapped(left: &Plan, right: &Plan) -> bool {
-    let Some(left_relation) = first_leaf_relation_name(left) else {
-        return false;
-    };
-    let Some(right_relation) = first_leaf_relation_name(right) else {
-        return false;
-    };
-    // :HACK: PostgreSQL's partition_aggregate plan orients the third paired
-    // child hash join with pagg_tab2 as the probe side. pgrust's executable
-    // hash join is equivalent, but its current local hash costing chooses the
-    // opposite display order for that one partition pair.
-    relation_name_mentions(left_relation, "pagg_tab1_p3")
-        && relation_name_mentions(right_relation, "pagg_tab2_p3")
+    pgrust_commands::explain::partition_hash_join_display_prefers_swapped(left, right)
 }
 
 fn first_leaf_relation_name(plan: &Plan) -> Option<&str> {
-    match plan {
-        Plan::SeqScan { relation_name, .. }
-        | Plan::TidScan { relation_name, .. }
-        | Plan::IndexOnlyScan { relation_name, .. }
-        | Plan::IndexScan { relation_name, .. }
-        | Plan::BitmapHeapScan { relation_name, .. } => Some(relation_name),
-        Plan::Hash { input, .. }
-        | Plan::Unique { input, .. }
-        | Plan::Filter { input, .. }
-        | Plan::Projection { input, .. }
-        | Plan::OrderBy { input, .. }
-        | Plan::IncrementalSort { input, .. }
-        | Plan::Limit { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::Aggregate { input, .. }
-        | Plan::SubqueryScan { input, .. } => first_leaf_relation_name(input),
-        _ => None,
-    }
+    pgrust_commands::explain::first_leaf_relation_name(plan)
 }
 
 fn relation_name_mentions(relation_name: &str, needle: &str) -> bool {
-    relation_name
-        .split_whitespace()
-        .next()
-        .is_some_and(|name| name.ends_with(needle))
+    pgrust_commands::explain::relation_name_mentions(relation_name, needle)
 }
 
 fn nonverbose_filter_input_column_names(input: &Plan, _ctx: &VerboseExplainContext) -> Vec<String> {
@@ -10330,201 +9712,7 @@ fn const_false_cte_scan(plan: &Plan) -> Option<&Plan> {
 }
 
 fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
-    let mut found = Vec::new();
-    match plan {
-        Plan::Result { .. }
-        | Plan::Unique { .. }
-        | Plan::SeqScan { .. }
-        | Plan::IndexOnlyScan { .. }
-        | Plan::IndexScan { .. }
-        | Plan::BitmapIndexScan { .. }
-        | Plan::BitmapOr { .. }
-        | Plan::BitmapAnd { .. }
-        | Plan::BitmapHeapScan { .. }
-        | Plan::Limit { .. }
-        | Plan::LockRows { .. }
-        | Plan::CteScan { .. }
-        | Plan::WorkTableScan { .. }
-        | Plan::RecursiveUnion { .. }
-        | Plan::SetOp { .. } => {}
-        Plan::TidScan {
-            tid_cond, filter, ..
-        } => {
-            for source in &tid_cond.sources {
-                match source {
-                    crate::include::nodes::plannodes::TidScanSource::Scalar(expr)
-                    | crate::include::nodes::plannodes::TidScanSource::Array(expr) => {
-                        collect_direct_expr_subplans(expr, &mut found);
-                    }
-                }
-            }
-            collect_direct_expr_subplans(&tid_cond.display_expr, &mut found);
-            if let Some(filter) = filter {
-                collect_direct_expr_subplans(filter, &mut found);
-            }
-        }
-        Plan::Append {
-            partition_prune, ..
-        } => {
-            if let Some(partition_prune) = partition_prune {
-                collect_direct_expr_subplans(&partition_prune.filter, &mut found);
-            }
-        }
-        Plan::MergeAppend {
-            partition_prune,
-            items,
-            ..
-        } => {
-            if let Some(partition_prune) = partition_prune {
-                collect_direct_expr_subplans(&partition_prune.filter, &mut found);
-            }
-            for item in items {
-                collect_direct_expr_subplans(&item.expr, &mut found);
-            }
-        }
-        Plan::SubqueryScan { filter, .. } => {
-            if let Some(filter) = filter {
-                collect_direct_expr_subplans(filter, &mut found);
-            }
-        }
-        Plan::Hash { hash_keys, .. } => {
-            for expr in hash_keys {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-        }
-        Plan::Materialize { .. } => {}
-        Plan::Memoize { cache_keys, .. } => {
-            for expr in cache_keys {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-        }
-        Plan::Gather { .. } | Plan::GatherMerge { .. } => {}
-        Plan::NestedLoopJoin {
-            join_qual, qual, ..
-        } => {
-            for expr in join_qual {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for expr in qual {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-        }
-        Plan::HashJoin {
-            hash_clauses,
-            hash_keys,
-            join_qual,
-            qual,
-            ..
-        } => {
-            for expr in hash_clauses {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for expr in hash_keys {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for expr in join_qual {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for expr in qual {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-        }
-        Plan::MergeJoin {
-            merge_clauses,
-            outer_merge_keys,
-            inner_merge_keys,
-            join_qual,
-            qual,
-            ..
-        } => {
-            for expr in merge_clauses {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for expr in outer_merge_keys {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for expr in inner_merge_keys {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for expr in join_qual {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for expr in qual {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-        }
-        Plan::Filter { predicate, .. } => collect_direct_expr_subplans(predicate, &mut found),
-        Plan::OrderBy { items, .. } => {
-            for item in items {
-                collect_direct_expr_subplans(&item.expr, &mut found);
-            }
-        }
-        Plan::IncrementalSort { items, .. } => {
-            for item in items {
-                collect_direct_expr_subplans(&item.expr, &mut found);
-            }
-        }
-        Plan::Projection { targets, .. } => {
-            for target in targets {
-                collect_direct_expr_subplans(&target.expr, &mut found);
-            }
-        }
-        Plan::Aggregate {
-            group_by,
-            passthrough_exprs,
-            accumulators,
-            having,
-            ..
-        } => {
-            for expr in group_by {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for expr in passthrough_exprs {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            for accum in accumulators {
-                collect_direct_agg_accum_subplans(accum, &mut found);
-            }
-            if let Some(expr) = having {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-        }
-        Plan::WindowAgg {
-            clause,
-            run_condition,
-            top_qual,
-            ..
-        } => {
-            collect_direct_window_clause_subplans(clause, &mut found);
-            if let Some(expr) = run_condition {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-            if let Some(expr) = top_qual {
-                collect_direct_expr_subplans(expr, &mut found);
-            }
-        }
-        Plan::FunctionScan { call, .. } => {
-            collect_direct_set_returning_call_subplans(call, &mut found)
-        }
-        Plan::Values { rows, .. } => {
-            for row in rows {
-                for expr in row {
-                    collect_direct_expr_subplans(expr, &mut found);
-                }
-            }
-        }
-        Plan::ProjectSet { targets, .. } => {
-            for target in targets {
-                collect_direct_project_set_target_subplans(target, &mut found);
-            }
-        }
-    }
-
-    let mut seen = BTreeSet::new();
-    found
-        .into_iter()
-        .filter(|subplan| seen.insert(subplan.plan_id))
-        .collect()
+    pgrust_commands::explain::direct_plan_subplans(plan)
 }
 
 fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) {

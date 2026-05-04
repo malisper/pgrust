@@ -158,6 +158,7 @@ Key decisions:
 - Added `pgrust_protocol::psql` for pure psql describe-query pattern extraction, query classification, relkind display names, regex matching, OID/literal extraction, and `col_description` argument parsing; root `tcop` keeps compatibility wrappers for existing psql display assembly.
 - Moved psql partition-bound display formatting (`FOR VALUES ...`, default-bound checks, range datum/value rendering, and describe SQL literal quoting) into `pgrust_commands::partition`; root `tcop` delegates through compatibility wrappers.
 - Expanded `pgrust_commands::partition` with partition tree metadata helpers: direct partition children, declarative parent lookup, ancestor/root OID resolution, tree-entry construction, relation-name lookup, generated-column kind names, and relkind participation checks. Root partition keeps tuple routing, bound validation, and constraint checks.
+- Moved pure EXPLAIN plan display/helper shims into `pgrust_commands::explain`: subplan arg varno selection, tenk1 window text rewrite, direct plan subplan discovery/labeling, passthrough child selection, filter-as-join-qual plan shaping, partition hash-join display swapping, dummy empty grouped aggregate display shaping, TID-scan/tsearch scan helpers, SQL quoted literal extraction, const-text extraction, and first-leaf relation-name matching. Root `commands::explain` keeps thin adapters where helpers need `VerboseExplainContext`, `const_false_filter_result_plan`, root expression renderers, `PlanNode`, or executor/catalog runtime.
 - Added `pgrust_commands::psql` and moved psql ACL, column-privilege, policy-column, policy-command, and describe-policy query row/column display formatting there; root `tcop` supplies the remaining policy-expression formatter callback and catalog fetch.
 - Expanded psql helper extraction with single-quoted describe literal parsing in `pgrust_protocol::psql` and statistics expression display normalization in `pgrust_commands::psql`; root statistics shortcuts still own catalog lookup/display assembly.
 - Moved the `pg_statistic_ext` shortcut row/column assembly for statistics-object data and namespace/owner probes into `pgrust_commands::psql`; root `tcop` now only obtains the session catalog and handles wire output.
@@ -370,6 +371,9 @@ Files touched:
 - `scripts/check_crate_boundaries.sh`
 
 Tests run:
+- `cargo fmt`
+- `scripts/cargo_isolated.sh check -p pgrust_commands --quiet` (passed; existing dead-code warnings from dependent crates)
+- `scripts/cargo_isolated.sh check --lib --quiet` (passed; existing dead-code/unreachable-pattern warnings)
 - `cargo fmt`
 - `scripts/cargo_isolated.sh check --lib --quiet`
 - `scripts/cargo_isolated.sh test -p pgrust_executor --quiet`
