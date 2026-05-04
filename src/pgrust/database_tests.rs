@@ -50488,6 +50488,106 @@ fn create_function_uses_search_path_for_unqualified_creation() {
 }
 
 #[test]
+fn alter_function_uses_search_path_for_unqualified_resolution() {
+    let base = temp_dir("search_path_function_alter");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema fn_first").unwrap();
+    session.execute(&db, "create schema fn_second").unwrap();
+    session
+        .execute(&db, "set search_path = fn_first, fn_second, public")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function pick_me(x int4) returns int4 language sql as $$ select x + 1 $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function fn_second.pick_me(x int4) returns int4 language sql as $$ select x + 2 $$",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "alter function pick_me(int4) rename to picked_first")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select n.nspname, p.proname \
+             from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
+             where n.nspname in ('fn_first', 'fn_second') \
+             order by n.nspname, p.proname",
+        ),
+        vec![
+            vec![
+                Value::Text("fn_first".into()),
+                Value::Text("picked_first".into())
+            ],
+            vec![
+                Value::Text("fn_second".into()),
+                Value::Text("pick_me".into())
+            ],
+        ]
+    );
+}
+
+#[test]
+fn alter_aggregate_uses_search_path_for_unqualified_resolution() {
+    let base = temp_dir("search_path_aggregate_alter");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema agg_first").unwrap();
+    session.execute(&db, "create schema agg_second").unwrap();
+    session
+        .execute(&db, "set search_path = agg_first, agg_second, public")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create aggregate pick_agg (sfunc1 = int4pl, basetype = int4, stype1 = int4, initcond = 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create aggregate agg_second.pick_agg (sfunc1 = int4mi, basetype = int4, stype1 = int4, initcond = 0)",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "alter aggregate pick_agg(int4) rename to picked_agg")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select n.nspname, p.proname \
+             from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
+             where n.nspname in ('agg_first', 'agg_second') and p.prokind = 'a' \
+             order by n.nspname, p.proname",
+        ),
+        vec![
+            vec![
+                Value::Text("agg_first".into()),
+                Value::Text("picked_agg".into())
+            ],
+            vec![
+                Value::Text("agg_second".into()),
+                Value::Text("pick_agg".into())
+            ],
+        ]
+    );
+}
+
+#[test]
 fn pg_temp_function_and_function_style_domain_cast_require_qualification() {
     let base = temp_dir("pg_temp_function_domain_lookup");
     let db = Database::open(&base, 16).unwrap();
