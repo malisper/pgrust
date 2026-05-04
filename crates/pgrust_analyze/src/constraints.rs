@@ -2944,6 +2944,17 @@ fn resolve_referenced_key(
             if let Some(row) =
                 exact_referenced_constraint_for_attnums(catalog, relation.relation_oid, &attnums)
             {
+                let index = crate::foreign_keys::find_referenced_foreign_key_index(
+                    catalog,
+                    relation.relation_oid,
+                    &attnums,
+                    if row.conperiod {
+                        crate::foreign_keys::ReferencedForeignKeyIndexKind::Temporal
+                    } else {
+                        crate::foreign_keys::ReferencedForeignKeyIndexKind::Normal
+                    },
+                )
+                .ok_or_else(|| foreign_key_no_unique_constraint_error(referenced_table))?;
                 let resolved_period = if row.conperiod {
                     Some(
                         referenced_period
@@ -2957,7 +2968,7 @@ fn resolve_referenced_key(
                 (
                     columns,
                     attnums,
-                    row.conindid,
+                    index.relation_oid,
                     resolved_period,
                     row.conperiod,
                     row.contype == pgrust_catalog_data::CONSTRAINT_PRIMARY,
@@ -2967,10 +2978,11 @@ fn resolve_referenced_key(
             } else if period.is_none() && referenced_period.is_some() {
                 return Err(foreign_key_period_on_parent_only_error());
             } else {
-                let index = find_compatible_unique_index_for_attnums(
+                let index = crate::foreign_keys::find_referenced_foreign_key_index(
                     catalog,
                     relation.relation_oid,
                     &attnums,
+                    crate::foreign_keys::ReferencedForeignKeyIndexKind::Normal,
                 )
                 .ok_or_else(|| foreign_key_no_unique_constraint_error(referenced_table))?;
                 (columns, attnums, index.relation_oid, None, false, false)
@@ -2997,10 +3009,21 @@ fn resolve_referenced_key(
             let row = &primary[0];
             let attnums = constraint_attnums(row, "PRIMARY KEY")?;
             let columns = attnums_to_column_names(&relation.desc, &attnums)?;
+            let index = crate::foreign_keys::find_referenced_foreign_key_index(
+                catalog,
+                relation.relation_oid,
+                &attnums,
+                if row.conperiod {
+                    crate::foreign_keys::ReferencedForeignKeyIndexKind::Temporal
+                } else {
+                    crate::foreign_keys::ReferencedForeignKeyIndexKind::Normal
+                },
+            )
+            .ok_or_else(|| foreign_key_no_unique_constraint_error(referenced_table))?;
             (
                 columns.clone(),
                 attnums,
-                row.conindid,
+                index.relation_oid,
                 row.conperiod.then(|| columns.last().cloned()).flatten(),
                 row.conperiod,
                 true,
@@ -3078,10 +3101,9 @@ fn exact_referenced_constraint_for_attnums(
                 row.contype,
                 pgrust_catalog_data::CONSTRAINT_PRIMARY | pgrust_catalog_data::CONSTRAINT_UNIQUE
             ) && row.conindid != 0
-                && row
-                    .conkey
-                    .as_deref()
-                    .is_some_and(|conkey| attnum_key_columns_match_as_set(conkey, attnums))
+                && row.conkey.as_deref().is_some_and(|conkey| {
+                    crate::foreign_keys::attnum_key_columns_match_as_set(conkey, attnums)
+                })
         })
 }
 
@@ -3107,13 +3129,28 @@ fn bind_outbound_foreign_key_constraint(
     let referenced_index = catalog
         .index_relations_for_heap(referenced_relation.relation_oid)
         .into_iter()
-        .find(|index| index.relation_oid == row.conindid)
+        .find(|index| {
+            index.relation_oid == row.conindid
+                && crate::foreign_keys::referenced_foreign_key_index_matches(
+                    index,
+                    &referenced_attnums,
+                    if row.conperiod {
+                        crate::foreign_keys::ReferencedForeignKeyIndexKind::Temporal
+                    } else {
+                        crate::foreign_keys::ReferencedForeignKeyIndexKind::Normal
+                    },
+                )
+        })
         .or_else(|| {
-            find_exact_index_for_attnums(
+            crate::foreign_keys::find_referenced_foreign_key_index(
                 catalog,
                 referenced_relation.relation_oid,
                 &referenced_attnums,
-                true,
+                if row.conperiod {
+                    crate::foreign_keys::ReferencedForeignKeyIndexKind::Temporal
+                } else {
+                    crate::foreign_keys::ReferencedForeignKeyIndexKind::Normal
+                },
             )
         })
         .ok_or_else(|| ParseError::UnexpectedToken {
@@ -3282,7 +3319,7 @@ fn inbound_foreign_key_display_names(
             .relation_by_oid(root_row.conrelid)
             .map(|relation| relation_display_name(catalog, relation.relation_oid, "<child>"))
             .unwrap_or(default_child_name);
-        return (root_row.conname, display_child_name);
+        return (row.conname.clone(), display_child_name);
     }
     let Some(parent_row) = (row.conparentid != 0)
         .then(|| catalog.constraint_row_by_oid(row.conparentid))
@@ -3971,51 +4008,6 @@ fn find_exact_index_for_attnums(
         })
 }
 
-fn find_compatible_unique_index_for_attnums(
-    catalog: &dyn super::CatalogLookup,
-    relation_oid: u32,
-    attnums: &[i16],
-) -> Option<super::BoundIndexRelation> {
-    catalog
-        .index_relations_for_heap(relation_oid)
-        .into_iter()
-        .find(|index| {
-            index.index_meta.indisunique
-                && index.index_meta.indisvalid
-                && index.index_meta.indisready
-                && index.index_meta.am_oid == pgrust_catalog_data::BTREE_AM_OID
-                && index_key_attnums(index).is_some_and(|key_attnums| {
-                    attnum_key_columns_match_as_set(&key_attnums, attnums)
-                })
-                && !index
-                    .index_meta
-                    .indpred
-                    .as_deref()
-                    .is_some_and(|pred| !pred.is_empty())
-                && !index
-                    .index_meta
-                    .indexprs
-                    .as_deref()
-                    .is_some_and(|exprs| !exprs.is_empty())
-        })
-}
-
-fn index_key_attnums(index: &super::BoundIndexRelation) -> Option<Vec<i16>> {
-    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).ok()?;
-    if key_count > index.index_meta.indkey.len() {
-        return None;
-    }
-    Some(
-        index
-            .index_meta
-            .indkey
-            .iter()
-            .take(key_count)
-            .copied()
-            .collect(),
-    )
-}
-
 fn string_key_columns_match_as_set(left: &[String], right: &[String]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -4028,15 +4020,6 @@ fn string_key_columns_match_as_set(left: &[String], right: &[String]) -> bool {
         .iter()
         .map(|column| column.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
-    left.len() == right.len() && left == right
-}
-
-fn attnum_key_columns_match_as_set(left: &[i16], right: &[i16]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let left = left.iter().copied().collect::<BTreeSet<_>>();
-    let right = right.iter().copied().collect::<BTreeSet<_>>();
     left.len() == right.len() && left == right
 }
 

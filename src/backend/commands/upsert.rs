@@ -305,6 +305,7 @@ fn run_conflict_update(
         conflict_tid,
         &current_old_values,
         &new_values,
+        &[],
         ctx,
         xid,
         cid,

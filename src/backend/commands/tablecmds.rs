@@ -111,7 +111,7 @@ use crate::include::catalog::{
     PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID,
     PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
-    PG_USER_MAPPING_RELATION_OID, PG_WRITE_ALL_DATA_OID, PgAmRow, SPGIST_AM_OID,
+    PG_USER_MAPPING_RELATION_OID, PG_WRITE_ALL_DATA_OID, PgAmRow, PgConstraintRow, SPGIST_AM_OID,
 };
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue, Value};
 use crate::include::nodes::execnodes::TupleSlot;
@@ -5317,6 +5317,12 @@ fn reject_root_update_with_direct_nonroot_fk_reference(
         if constraint.referenced_relation_oid == root_oid {
             continue;
         }
+        if let Some(row) = catalog.constraint_row_by_oid(constraint.constraint_oid)
+            && pgrust_commands::foreign_keys::is_referenced_side_foreign_key_clone(&row, catalog)
+            && root_foreign_key_constraint_confrelid(catalog, row) == Some(root_oid)
+        {
+            continue;
+        }
         let Some(referenced_relation) = catalog.relation_by_oid(constraint.referenced_relation_oid)
         else {
             continue;
@@ -5328,6 +5334,9 @@ fn reject_root_update_with_direct_nonroot_fk_reference(
                 source_relation_oid,
             )
         {
+            continue;
+        }
+        if partition_tree_contains_relation(catalog, constraint.referenced_relation_oid, root_oid) {
             continue;
         }
         let ancestor_name = catalog
@@ -5352,6 +5361,16 @@ fn reject_root_update_with_direct_nonroot_fk_reference(
         });
     }
     Ok(())
+}
+
+fn root_foreign_key_constraint_confrelid(
+    catalog: &dyn CatalogLookup,
+    mut row: PgConstraintRow,
+) -> Option<u32> {
+    while row.conparentid != 0 {
+        row = catalog.constraint_row_by_oid(row.conparentid)?;
+    }
+    Some(row.confrelid)
 }
 
 fn enforce_direct_partition_update_constraint(
@@ -5422,6 +5441,7 @@ fn move_updated_row_to_partition(
     current_tid: ItemPointerData,
     current_old_values: &[Value],
     current_values: &[Value],
+    _same_statement_updated_tids: &[ItemPointerData],
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -5680,6 +5700,8 @@ fn move_updated_row_to_partition(
     let pending_no_action_checks = collect_no_action_checks_on_update(
         relation_name,
         referenced_by_foreign_keys,
+        relation_oid,
+        current_tid,
         current_old_values,
         &source_layout_new_values,
         ctx,
@@ -5718,6 +5740,7 @@ pub(crate) fn write_updated_row(
     current_tid: ItemPointerData,
     current_old_values: &[Value],
     current_values: &[Value],
+    same_statement_updated_tids: &[ItemPointerData],
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -5734,6 +5757,15 @@ pub(crate) fn write_updated_row(
         Some(relation_oid),
         ctx,
     )?;
+    let refreshed_referenced_by_foreign_keys;
+    let referenced_by_foreign_keys = if let Some(catalog) = ctx.catalog.as_deref() {
+        refreshed_referenced_by_foreign_keys =
+            bind_referenced_by_foreign_keys(relation_oid, desc, catalog)
+                .map_err(ExecError::Parse)?;
+        refreshed_referenced_by_foreign_keys.as_slice()
+    } else {
+        referenced_by_foreign_keys
+    };
     if let Some(catalog) = ctx.catalog.as_deref() {
         let namespace_oid = catalog
             .class_row_by_oid(relation_oid)
@@ -5798,6 +5830,7 @@ pub(crate) fn write_updated_row(
             current_tid,
             current_old_values,
             &current_values,
+            same_statement_updated_tids,
             ctx,
             xid,
             cid,
@@ -5845,7 +5878,7 @@ pub(crate) fn write_updated_row(
             ctx,
         ));
     }
-    enforce_temporal_constraints_for_write(
+    enforce_temporal_constraints_for_write_excluding_tids(
         relation_name,
         rel,
         toast,
@@ -5853,9 +5886,10 @@ pub(crate) fn write_updated_row(
         relation_constraints,
         &current_values,
         Some(current_tid),
+        same_statement_updated_tids,
         ctx,
     )?;
-    enforce_exclusion_constraints_for_write(
+    enforce_exclusion_constraints_for_write_excluding_tids(
         relation_name,
         rel,
         toast,
@@ -5863,6 +5897,7 @@ pub(crate) fn write_updated_row(
         relation_constraints,
         &current_values,
         Some(current_tid),
+        same_statement_updated_tids,
         ctx,
     )?;
     let (pending_outbound_foreign_keys, immediate_outbound_foreign_keys): (Vec<_>, Vec<_>) =
@@ -5938,6 +5973,8 @@ pub(crate) fn write_updated_row(
             let pending_no_action_checks = collect_no_action_checks_on_update(
                 relation_name,
                 referenced_by_foreign_keys,
+                relation_oid,
+                current_tid,
                 current_old_values,
                 &current_values,
                 ctx,
@@ -6170,6 +6207,30 @@ pub(crate) fn enforce_temporal_constraints_for_write(
     excluded_tid: Option<ItemPointerData>,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    enforce_temporal_constraints_for_write_excluding_tids(
+        relation_name,
+        rel,
+        toast,
+        desc,
+        constraints,
+        values,
+        excluded_tid,
+        &[],
+        ctx,
+    )
+}
+
+pub(crate) fn enforce_temporal_constraints_for_write_excluding_tids(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    constraints: &BoundRelationConstraints,
+    values: &[Value],
+    excluded_tid: Option<ItemPointerData>,
+    excluded_tids: &[ItemPointerData],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
     for constraint in &constraints.temporal {
         if !constraint.enforced {
             continue;
@@ -6180,7 +6241,7 @@ pub(crate) fn enforce_temporal_constraints_for_write(
         }
         let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
         for (tid, existing) in rows {
-            if excluded_tid.is_some_and(|excluded| excluded == tid) {
+            if tuple_tid_is_excluded(tid, excluded_tid, excluded_tids) {
                 continue;
             }
             if temporal_rows_conflict(constraint, values, &existing)? {
@@ -6208,6 +6269,30 @@ pub(crate) fn enforce_exclusion_constraints_for_write(
     excluded_tid: Option<ItemPointerData>,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    enforce_exclusion_constraints_for_write_excluding_tids(
+        relation_name,
+        rel,
+        toast,
+        desc,
+        constraints,
+        values,
+        excluded_tid,
+        &[],
+        ctx,
+    )
+}
+
+pub(crate) fn enforce_exclusion_constraints_for_write_excluding_tids(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    constraints: &BoundRelationConstraints,
+    values: &[Value],
+    excluded_tid: Option<ItemPointerData>,
+    excluded_tids: &[ItemPointerData],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
     for constraint in &constraints.exclusions {
         if exclusion_constraint_is_deferred(constraint, ctx) {
             if let Some(tracker) = ctx.deferred_foreign_keys.as_ref() {
@@ -6225,7 +6310,7 @@ pub(crate) fn enforce_exclusion_constraints_for_write(
         };
         let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
         for (tid, existing) in rows {
-            if excluded_tid.is_some_and(|excluded| excluded == tid) {
+            if tuple_tid_is_excluded(tid, excluded_tid, excluded_tids) {
                 continue;
             }
             if !exclusion_row_matches_predicate(constraint, &existing, Some(tid), ctx)? {
@@ -6248,6 +6333,14 @@ pub(crate) fn enforce_exclusion_constraints_for_write(
         }
     }
     Ok(())
+}
+
+fn tuple_tid_is_excluded(
+    tid: ItemPointerData,
+    excluded_tid: Option<ItemPointerData>,
+    excluded_tids: &[ItemPointerData],
+) -> bool {
+    excluded_tid.is_some_and(|excluded| excluded == tid) || excluded_tids.contains(&tid)
 }
 
 fn exclusion_constraint_is_deferred(
@@ -6997,6 +7090,7 @@ fn collect_referencing_rows(
     }
     let original_snapshot = ctx.snapshot.clone();
     ctx.snapshot.current_cid = CommandId::MAX;
+    ctx.snapshot.heap_current_cid = None;
     let child_relation = catalog
         .relation_by_oid(constraint.child_relation_oid)
         .ok_or_else(|| ExecError::DetailedError {
@@ -7293,6 +7387,8 @@ pub(crate) struct PendingNoActionForeignKeyCheck {
     old_key_values: Vec<Value>,
     old_parent_values: Option<Vec<Value>>,
     replacement_parent_values: Option<Vec<Value>>,
+    excluded_parent_relation_oid: Option<u32>,
+    excluded_parent_tid: Option<ItemPointerData>,
 }
 
 #[derive(Debug, Clone)]
@@ -7357,11 +7453,15 @@ pub(crate) fn validate_pending_no_action_checks(
             )?;
             continue;
         }
-        if referenced_row_exists_for_no_action(
-            &recheck.inbound_constraint,
-            &recheck.old_key_values,
-            ctx,
-        )? {
+        if let Some(excluded_parent_tid) = recheck.excluded_parent_tid
+            && referenced_row_exists_for_no_action(
+                &recheck.inbound_constraint,
+                &recheck.old_key_values,
+                recheck.excluded_parent_relation_oid,
+                excluded_parent_tid,
+                ctx,
+            )?
+        {
             continue;
         }
         crate::backend::executor::enforce_inbound_foreign_key_reference(
@@ -7372,6 +7472,68 @@ pub(crate) fn validate_pending_no_action_checks(
         )?;
     }
     Ok(())
+}
+
+fn referenced_row_exists_for_no_action(
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+    excluded_relation_oid: Option<u32>,
+    excluded_tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    if key_values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(true);
+    }
+    let original_snapshot = ctx.snapshot.clone();
+    ctx.snapshot.current_cid = CommandId::MAX;
+    ctx.snapshot.heap_current_cid = None;
+    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
+        catalog
+            .relation_by_oid(constraint.referenced_relation_oid)
+            .is_some_and(|relation| relation.relkind == 'p')
+            .then(|| catalog.clone())
+    });
+    let result = if let Some(catalog) = partitioned_catalog {
+        let mut exists = false;
+        for leaf in partition_leaf_relations(catalog.as_ref(), constraint.referenced_relation_oid)?
+        {
+            let leaf_key_indexes = map_column_indexes_by_name(
+                &constraint.referenced_desc,
+                &leaf.desc,
+                &constraint.referenced_column_indexes,
+            )?;
+            if collect_matching_rows_heap(leaf.rel, &leaf.desc, leaf.toast, None, ctx)?
+                .into_iter()
+                .filter(|(tid, _)| {
+                    excluded_relation_oid != Some(leaf.relation_oid) || *tid != excluded_tid
+                })
+                .any(|(_, values)| row_matches_key(&values, &leaf_key_indexes, key_values))
+            {
+                exists = true;
+                break;
+            }
+        }
+        Ok(exists)
+    } else {
+        let rows = collect_matching_rows_heap(
+            constraint.referenced_rel,
+            &constraint.referenced_desc,
+            constraint.referenced_toast,
+            None,
+            ctx,
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter(|(tid, _)| {
+                excluded_relation_oid != Some(constraint.referenced_relation_oid)
+                    || *tid != excluded_tid
+            })
+            .any(|(_, values)| {
+                row_matches_key(&values, &constraint.referenced_column_indexes, key_values)
+            }))
+    };
+    ctx.snapshot = original_snapshot;
+    result
 }
 
 fn validate_pending_updated_exclusion_checks(
@@ -7423,56 +7585,6 @@ pub(crate) fn validate_pending_outbound_foreign_key_checks(
     Ok(())
 }
 
-fn referenced_row_exists_for_no_action(
-    constraint: &BoundReferencedByForeignKey,
-    key_values: &[Value],
-    ctx: &mut ExecutorContext,
-) -> Result<bool, ExecError> {
-    if key_values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(true);
-    }
-    let original_snapshot = ctx.snapshot.clone();
-    ctx.snapshot.current_cid = CommandId::MAX;
-    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
-        catalog
-            .relation_by_oid(constraint.referenced_relation_oid)
-            .is_some_and(|relation| relation.relkind == 'p')
-            .then(|| catalog.clone())
-    });
-    let result = if let Some(catalog) = partitioned_catalog {
-        let mut exists = false;
-        for leaf in partition_leaf_relations(catalog.as_ref(), constraint.referenced_relation_oid)?
-        {
-            let leaf_key_indexes = map_column_indexes_by_name(
-                &constraint.referenced_desc,
-                &leaf.desc,
-                &constraint.referenced_column_indexes,
-            )?;
-            if collect_matching_rows_heap(leaf.rel, &leaf.desc, leaf.toast, None, ctx)?
-                .into_iter()
-                .any(|(_, values)| row_matches_key(&values, &leaf_key_indexes, key_values))
-            {
-                exists = true;
-                break;
-            }
-        }
-        Ok(exists)
-    } else {
-        let rows = collect_matching_rows_heap(
-            constraint.referenced_rel,
-            &constraint.referenced_desc,
-            constraint.referenced_toast,
-            None,
-            ctx,
-        )?;
-        Ok(rows.into_iter().any(|(_, values)| {
-            row_matches_key(&values, &constraint.referenced_column_indexes, key_values)
-        }))
-    };
-    ctx.snapshot = original_snapshot;
-    result
-}
-
 fn foreign_key_key_values(values: &[Value], indexes: &[usize]) -> Vec<Value> {
     pgrust_commands::tablecmds::foreign_key_key_values(values, indexes)
 }
@@ -7517,6 +7629,8 @@ fn foreign_key_constraint_ancestor_oids(
 fn collect_no_action_checks_on_update(
     relation_name: &str,
     constraints: &[BoundReferencedByForeignKey],
+    relation_oid: u32,
+    current_tid: ItemPointerData,
     previous_values: &[Value],
     values: &[Value],
     ctx: &mut ExecutorContext,
@@ -7562,6 +7676,8 @@ fn collect_no_action_checks_on_update(
                 replacement_parent_values: Some(
                     values.iter().map(Value::to_owned_value).collect::<Vec<_>>(),
                 ),
+                excluded_parent_relation_oid: None,
+                excluded_parent_tid: None,
             });
             continue;
         }
@@ -7574,6 +7690,8 @@ fn collect_no_action_checks_on_update(
             ),
             old_parent_values: None,
             replacement_parent_values: None,
+            excluded_parent_relation_oid: Some(relation_oid),
+            excluded_parent_tid: Some(current_tid),
         });
     }
     Ok(pending)
@@ -7610,6 +7728,8 @@ fn collect_no_action_checks_on_delete(
                     values.iter().map(Value::to_owned_value).collect::<Vec<_>>(),
                 ),
                 replacement_parent_values: None,
+                excluded_parent_relation_oid: None,
+                excluded_parent_tid: None,
             });
             continue;
         }
@@ -7619,6 +7739,8 @@ fn collect_no_action_checks_on_delete(
             old_key_values: foreign_key_key_values(values, &constraint.referenced_column_indexes),
             old_parent_values: None,
             replacement_parent_values: None,
+            excluded_parent_relation_oid: None,
+            excluded_parent_tid: None,
         });
     }
     Ok(pending)
@@ -7718,6 +7840,13 @@ fn apply_referential_action_to_rows(
                             .cloned()
                             .collect::<Vec<_>>()
                     });
+                let partition_update_root_oid =
+                    partition_root_oid(catalog.as_ref(), row.relation.relation_oid)?.or_else(
+                        || {
+                            (row.relation.relation_oid != constraint.child_relation_oid)
+                                .then_some(constraint.child_relation_oid)
+                        },
+                    );
                 let current_values = row.values.clone();
                 let mut updated_values = current_values.clone();
                 match action {
@@ -7780,12 +7909,29 @@ fn apply_referential_action_to_rows(
                         ctx,
                     )?;
                 }
+                if matches!(action, ForeignKeyAction::SetDefault)
+                    && row.relation.relation_oid != constraint.child_relation_oid
+                    && let Some(outbound_constraint) = outbound_constraint.as_ref()
+                {
+                    let outbound_values = remap_partition_row_to_parent_layout(
+                        &updated_values,
+                        &row.relation.desc,
+                        &constraint.child_desc,
+                    )?;
+                    crate::backend::executor::enforce_outbound_foreign_keys(
+                        &outbound_constraint.relation_name,
+                        std::slice::from_ref(outbound_constraint),
+                        None,
+                        &outbound_values,
+                        ctx,
+                    )?;
+                }
                 let write_result = write_updated_row(
                     &relation_name,
                     row.relation.rel,
                     row.relation.relation_oid,
-                    Some(constraint.child_relation_oid),
-                    true,
+                    partition_update_root_oid,
+                    partition_update_root_oid.is_some(),
                     row.relation.toast,
                     toast_index.as_ref(),
                     &row.relation.desc,
@@ -7799,6 +7945,7 @@ fn apply_referential_action_to_rows(
                     row.tid,
                     &current_values,
                     &updated_values,
+                    &[],
                     ctx,
                     xid,
                     cid,
@@ -11135,6 +11282,7 @@ fn execute_merge_update_row(
         target_tid,
         &write_old_values,
         &write_values,
+        &[],
         ctx,
         xid,
         cid,
@@ -11305,6 +11453,7 @@ fn execute_merge_update_child_row(
         target_tid,
         &child_old_values,
         &child_updated_values,
+        &[],
         ctx,
         xid,
         cid,
@@ -13309,6 +13458,8 @@ pub fn execute_update_with_waiter(
             let mut pending_no_action_checks = Vec::new();
             let mut pending_outbound_checks = Vec::new();
             let mut pending_updated_exclusion_checks = Vec::new();
+            let same_statement_updated_tids =
+                target_rows.iter().map(|(tid, _)| *tid).collect::<Vec<_>>();
 
             for (tid, original_values) in target_rows {
                 ctx.check_for_interrupts()?;
@@ -13373,6 +13524,7 @@ pub fn execute_update_with_waiter(
                         current_tid,
                         &current_old_values,
                         &triggered_values,
+                        &same_statement_updated_tids,
                         ctx,
                         xid,
                         cid,
@@ -13853,6 +14005,7 @@ fn execute_update_from_joined_input(
                     current_tid,
                     &current_old_values,
                     &triggered_values,
+                    &[],
                     ctx,
                     xid,
                     cid,
@@ -14927,6 +15080,8 @@ pub(crate) fn apply_base_update_row(
                 let pending_no_action_checks = collect_no_action_checks_on_update(
                     &target.relation_name,
                     &target.referenced_by_foreign_keys,
+                    target.relation_oid,
+                    current_tid,
                     &current_old_values,
                     &current_values,
                     ctx,
