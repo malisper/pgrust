@@ -6521,12 +6521,10 @@ fn exclusion_rows_conflict(
 
 fn eval_exclusion_operator(proc_oid: u32, left: &Value, right: &Value) -> Result<Value, ExecError> {
     if let Some(func) = crate::include::catalog::builtin_scalar_function_for_proc_oid(proc_oid)
-        && let Some(result) = crate::backend::executor::expr_geometry::eval_geometry_function(
-            func,
-            &[left.clone(), right.clone()],
-        )
+        && let Some(result) =
+            pgrust_expr::eval_geometry_function(func, &[left.clone(), right.clone()])
     {
-        return result;
+        return result.map_err(Into::into);
     }
     if let Some(func) = crate::include::catalog::builtin_scalar_function_for_proc_oid(proc_oid)
         && let Some(result) = crate::backend::executor::expr_range::eval_range_function(

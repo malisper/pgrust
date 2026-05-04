@@ -16,7 +16,6 @@ use crate::backend::executor::exec_expr::{
     pg_hash_two_u32,
 };
 use crate::backend::executor::expr_casts::cast_value;
-use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::expr_ops::compare_order_values;
 use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb};
 use crate::backend::executor::pg_regex::explain_similar_pattern;
@@ -106,6 +105,7 @@ pub(crate) use pgrust_commands::explain_expr::{
     render_explain_typed_literal, render_verbose_range_support_expr,
     text_pattern_operator_suppresses_explain_collation,
 };
+use pgrust_expr::render_geometry_text;
 
 fn set_active_grouping_refs(ctx: &mut ExecutorContext, refs: &[usize]) {
     ctx.active_grouping_refs.clear();

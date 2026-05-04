@@ -1241,7 +1241,7 @@ fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalar
         // as unsupported internal functions.
         if matches!(
             row.prosrc.to_ascii_lowercase().as_str(),
-            "test_canonicalize_path" | "test_relpath"
+            "interpt_pp" | "test_canonicalize_path" | "test_relpath"
         ) {
             return builtin_by_src;
         }
@@ -4076,6 +4076,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustTestFdwHandler,
         ),
         ("interpt_pp", BuiltinScalarFunction::GeoIntersection),
+        ("path_inter", BuiltinScalarFunction::GeoIntersects),
+        ("lseg_intersect", BuiltinScalarFunction::GeoIntersects),
+        ("line_intersect", BuiltinScalarFunction::GeoIntersects),
+        ("inter_sl", BuiltinScalarFunction::GeoIntersects),
+        ("inter_lb", BuiltinScalarFunction::GeoIntersects),
+        ("inter_sb", BuiltinScalarFunction::GeoIntersects),
         (
             "pg_rust_test_enc_setup",
             BuiltinScalarFunction::PgRustTestEncSetup,

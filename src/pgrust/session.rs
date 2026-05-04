@@ -24804,7 +24804,7 @@ fn copy_value_to_field(
         | Value::Line(_)
         | Value::Box(_)
         | Value::Polygon(_)
-        | Value::Circle(_) => crate::backend::executor::render_geometry_text(
+        | Value::Circle(_) => pgrust_expr::render_geometry_text(
             value,
             crate::backend::libpq::pqformat::FloatFormatOptions::default(),
         )

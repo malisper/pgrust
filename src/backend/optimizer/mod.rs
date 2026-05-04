@@ -315,8 +315,8 @@ impl OptimizerServices for RootOptimizerServices {
         func: BuiltinScalarFunction,
         values: &[Value],
     ) -> Option<Result<Value, OptimizerEvalError>> {
-        crate::backend::executor::expr_geometry::eval_geometry_function(func, values)
-            .map(|result| result.map_err(optimizer_error_from_exec))
+        pgrust_expr::eval_geometry_function(func, values)
+            .map(|result| result.map_err(|err| optimizer_error_from_exec(err.into())))
     }
 
     fn eval_power_function(&self, values: &[Value]) -> Result<Value, OptimizerEvalError> {

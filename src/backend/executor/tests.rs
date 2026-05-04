@@ -5491,6 +5491,23 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
 }
 
 #[test]
+fn path_intersects_operator_resolves_and_executes() {
+    let mut harness = SeededSqlHarness::new("path_intersects_operator", catalog());
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select path '[(0,0),(2,2)]' ?# path '[(0,2),(2,0)]'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn explain_sort_key_renders_box_coordinate_subscripts() {
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::include::nodes::primnodes::{BuiltinScalarFunction, ScalarFunctionImpl};

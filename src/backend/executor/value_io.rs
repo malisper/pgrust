@@ -9,10 +9,6 @@ use super::expr_casts::{
     render_internal_char_text, render_interval_text_with_config, render_pg_lsn_text,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
-use super::expr_geometry::{
-    decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
-    render_geometry_text,
-};
 use super::expr_mac::{
     parse_macaddr_bytes, parse_macaddr8_bytes, render_macaddr_text, render_macaddr8_text,
 };
@@ -36,6 +32,10 @@ use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::primnodes::ColumnDesc;
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
+use pgrust_expr::expr_geometry::{
+    decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
+    render_geometry_text,
+};
 
 mod array;
 
