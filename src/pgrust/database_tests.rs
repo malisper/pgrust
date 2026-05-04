@@ -44107,6 +44107,25 @@ fn truncate_all_foreign_key_relations_together() {
 }
 
 #[test]
+fn truncate_temp_table_replaces_visible_storage() {
+    let base = temp_dir("truncate_temp_table_replaces_visible_storage");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create temp table truncate_temp_rows (test text)")
+        .unwrap();
+    db.execute(1, "insert into truncate_temp_rows values ('old')")
+        .unwrap();
+    db.execute(1, "truncate truncate_temp_rows").unwrap();
+    db.execute(1, "insert into truncate_temp_rows values ('new')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select test from truncate_temp_rows"),
+        vec![vec![Value::Text("new".into())]]
+    );
+}
+
+#[test]
 fn foreign_key_locking_blocks_parent_delete_until_child_insert_finishes() {
     use std::sync::mpsc;
 
