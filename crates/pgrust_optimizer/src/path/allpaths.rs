@@ -1064,7 +1064,7 @@ fn append_partition_prune_plan(
     child_bounds: &[Option<PartitionBoundSpec>],
 ) -> Option<PartitionPrunePlan> {
     let spec = spec?;
-    let filter = filter?.clone();
+    let filter = partition_prune_filter(filter?)?;
     if child_bounds.is_empty() {
         return None;
     }
@@ -1085,6 +1085,16 @@ fn append_partition_prune_plan(
         child_bounds: child_bounds.to_vec(),
         subplans_removed: 0,
     })
+}
+
+fn partition_prune_filter(filter: &Expr) -> Option<Expr> {
+    // PostgreSQL builds partition pruning steps from usable partition clauses
+    // and ignores unsupported clauses; the full filter still runs on the scan.
+    let clauses = flatten_and_conjuncts(filter)
+        .into_iter()
+        .filter(|clause| !expr_contains_subplan(clause))
+        .collect();
+    and_exprs(clauses)
 }
 
 fn serialized_partition_value_cmp(
@@ -1584,9 +1594,30 @@ fn bool_args(expr: &Expr, op: BoolExprType) -> Option<&[Expr]> {
 fn expr_contains_subplan(expr: &Expr) -> bool {
     match expr {
         Expr::SubPlan(_) | Expr::SubLink(_) => true,
+        Expr::GroupingKey(grouping_key) => expr_contains_subplan(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_contains_subplan),
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_contains_subplan)
+                || aggref.aggfilter.as_ref().is_some_and(expr_contains_subplan)
+        }
+        Expr::WindowFunc(window_func) => {
+            window_func.args.iter().any(expr_contains_subplan)
+                || match &window_func.kind {
+                    WindowFuncKind::Aggregate(aggref) => {
+                        aggref.aggfilter.as_ref().is_some_and(expr_contains_subplan)
+                    }
+                    WindowFuncKind::Builtin(_) => false,
+                }
+        }
         Expr::Op(op) => op.args.iter().any(expr_contains_subplan),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_subplan),
         Expr::Func(func) => func.args.iter().any(expr_contains_subplan),
+        Expr::SqlJsonQueryFunction(func) => {
+            func.child_exprs().into_iter().any(expr_contains_subplan)
+        }
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_subplan),
         Expr::Case(case_expr) => {
             case_expr.arg.as_deref().is_some_and(expr_contains_subplan)
                 || case_expr.args.iter().any(|arm| {
@@ -1616,9 +1647,23 @@ fn expr_contains_subplan(expr: &Expr) -> bool {
         | Expr::Coalesce(left, right) => {
             expr_contains_subplan(left) || expr_contains_subplan(right)
         }
-        Expr::Like { expr, pattern, .. } => {
-            expr_contains_subplan(expr) || expr_contains_subplan(pattern)
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
         }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_subplan(expr)
+                || expr_contains_subplan(pattern)
+                || escape.as_deref().is_some_and(expr_contains_subplan)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_subplan),
         _ => false,
     }
 }
