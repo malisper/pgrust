@@ -7,18 +7,16 @@
 -- helpers below.
 --
 
--- directory paths are passed to us in environment variables
+-- directory path is passed to us in an environment variable
 \getenv abs_srcdir PG_ABS_SRCDIR
-\getenv regress_tblspace_dir PGRUST_REGRESS_TABLESPACE_DIR
 
 SET synchronous_commit = on;
 
 GRANT ALL ON SCHEMA public TO public;
 
--- :HACK: The upstream bootstrap uses in-place tablespaces, but this branch
--- can leak tablespace state across regression runs. Use a per-run absolute
--- directory supplied by the harness so bootstrap state stays isolated.
-CREATE TABLESPACE regress_tblspace LOCATION :'regress_tblspace_dir';
+SET allow_in_place_tablespaces = true;
+CREATE TABLESPACE regress_tblspace LOCATION '';
+RESET allow_in_place_tablespaces;
 
 CREATE TABLE CHAR_TBL(f1 char(4));
 INSERT INTO CHAR_TBL (f1) VALUES
