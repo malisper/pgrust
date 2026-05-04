@@ -1648,6 +1648,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         ctx: &mut ExecutorContext,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
         sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::commands::tablecmds::{
@@ -1709,7 +1710,13 @@ impl Database {
                 .catalog
                 .write()
                 .rewrite_relation_storage_mvcc(&rewrite_oids, &write_ctx)?;
+            let rewrites = rewrite_oids
+                .iter()
+                .copied()
+                .zip(effect.created_rels.iter().copied())
+                .collect::<Vec<_>>();
             self.apply_catalog_mutation_effect_immediate(&effect)?;
+            self.record_truncate_temp_rewrites(client_id, &rewrites, temp_effects)?;
             {
                 let stats_state = self.session_stats_state(client_id);
                 let mut stats_state = stats_state.write();
@@ -1765,6 +1772,24 @@ impl Database {
         ));
         fire_after_truncate_triggers(&triggers, ctx)?;
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn record_truncate_temp_rewrites(
+        &self,
+        client_id: ClientId,
+        rewrites: &[(u32, crate::backend::storage::smgr::RelFileLocator)],
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<(), ExecError> {
+        for (relation_oid, new_rel) in rewrites {
+            if let Ok(old_rel) = self.replace_temp_entry_rel(client_id, *relation_oid, *new_rel) {
+                temp_effects.push(TempMutationEffect::ReplaceRel {
+                    relation_oid: *relation_oid,
+                    old_rel,
+                    new_rel: *new_rel,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub fn execute(&self, client_id: ClientId, sql: &str) -> Result<StatementResult, ExecError> {
@@ -4869,6 +4894,7 @@ impl Database {
                     trigger_depth: 0,
                 };
                 let mut catalog_effects = Vec::new();
+                let mut temp_effects = Vec::new();
                 let mut sequence_effects = Vec::new();
                 let result = self.execute_truncate_table_in_transaction_with_search_path(
                     client_id,
@@ -4878,13 +4904,14 @@ impl Database {
                     configured_search_path,
                     &mut ctx,
                     &mut catalog_effects,
+                    &mut temp_effects,
                     &mut sequence_effects,
                 );
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 catalog_effects.append(&mut std::mem::take(&mut ctx.catalog_effects));
                 catalog_effects.extend(std::mem::take(&mut ctx.pending_catalog_effects));
-                let temp_effects = std::mem::take(&mut ctx.temp_effects);
+                temp_effects.append(&mut std::mem::take(&mut ctx.temp_effects));
                 let result = self.finish_txn_with_async_notifications(
                     client_id,
                     xid,

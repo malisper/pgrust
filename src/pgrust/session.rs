@@ -19417,6 +19417,7 @@ impl Session {
                             search_path.as_deref(),
                             &mut ctx,
                             &mut txn.catalog_effects,
+                            &mut txn.temp_effects,
                             &mut txn.sequence_effects,
                         )
                     };
