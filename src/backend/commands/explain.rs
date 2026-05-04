@@ -1213,6 +1213,14 @@ fn format_explain_plan_with_subplans_inner_impl(
     }
 
     if verbose
+        && push_verbose_projection_over_limit_plan(
+            plan, subplans, indent, show_costs, is_child, ctx, lines,
+        )
+    {
+        return;
+    }
+
+    if verbose
         && push_verbose_rowtypes_indirect_cte_filter_plan(
             plan, subplans, indent, show_costs, is_child, ctx, lines,
         )
@@ -1306,6 +1314,75 @@ fn format_explain_plan_with_subplans_inner_impl(
     push_direct_plan_subplans(plan, subplans, indent, show_costs, verbose, ctx, lines);
 
     explain_plan_children_with_context(plan, subplans, indent, show_costs, verbose, ctx, lines);
+}
+
+fn push_verbose_projection_over_limit_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::Projection { input, targets, .. } = plan else {
+        return false;
+    };
+    let Plan::Limit {
+        input: limit_input, ..
+    } = input.as_ref()
+    else {
+        return false;
+    };
+    if targets.iter().any(|target| {
+        target.resjunk
+            || target.input_resno.is_none()
+            || !matches!(target.expr, Expr::Var(_))
+            || targets_have_direct_subplans(std::slice::from_ref(target))
+    }) {
+        return false;
+    }
+
+    let input_names = plan_join_output_exprs(input, ctx, true);
+    let output = targets
+        .iter()
+        .map(|target| {
+            let rendered = render_verbose_target_expr(target, &input_names, ctx);
+            strip_qualified_identifiers(rendered)
+        })
+        .collect::<Vec<_>>();
+    let state = executor_start((**input).clone());
+    push_explain_plan_line(
+        input,
+        state.as_ref(),
+        indent,
+        is_child,
+        show_costs,
+        ctx,
+        lines,
+    );
+    if !output.is_empty() {
+        lines.push(format!(
+            "{}Output: {}",
+            explain_detail_prefix(indent),
+            output.join(", ")
+        ));
+    }
+    push_direct_plan_subplans(input, subplans, indent, show_costs, true, ctx, lines);
+    let mut child_ctx = ctx.clone();
+    child_ctx.scan_output_override = Some(output);
+    format_explain_plan_with_subplans_inner(
+        limit_input,
+        subplans,
+        indent + 1,
+        show_costs,
+        true,
+        true,
+        false,
+        &child_ctx,
+        lines,
+    );
+    true
 }
 
 fn push_direct_plan_subplans(
