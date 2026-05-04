@@ -2,6 +2,7 @@ pub mod advisory_locks;
 pub mod aggregate;
 pub mod async_notify;
 pub mod bindings;
+pub mod catalog_builtins;
 pub mod constraints;
 pub mod domain;
 pub mod driver;
@@ -53,6 +54,13 @@ pub use async_notify::{
 };
 pub use bindings::{
     ExprEvalBindings, merge_system_bindings, set_inner_expr_bindings, set_outer_expr_bindings,
+};
+pub use catalog_builtins::{
+    CatalogBuiltinError, eval_enum_function as eval_enum_catalog_function,
+    eval_pg_collation_is_visible, eval_pg_conversion_is_visible, eval_pg_opclass_is_visible,
+    eval_pg_operator_is_visible, eval_pg_opfamily_is_visible, eval_pg_ts_config_is_visible,
+    eval_pg_ts_dict_is_visible, eval_pg_ts_parser_is_visible, eval_pg_ts_template_is_visible,
+    eval_pg_type_is_visible,
 };
 pub use constraints::{
     BooleanConstraintResult, CheckConstraintFailure, DeferredConstraintSnapshot,
@@ -115,9 +123,9 @@ pub use misc_builtins::{
     eval_get_database_encoding, eval_gist_translate_cmptype_common, eval_greatest, eval_least,
     eval_num_nulls, eval_pg_char_to_encoding, eval_pg_column_toast_chunk_id_values,
     eval_pg_current_logfile, eval_pg_encoding_to_char, eval_pg_log_backend_memory_contexts,
-    eval_pg_sleep_function, eval_test_canonicalize_path, int4_array_from_client_ids, int32_arg,
-    int64_arg, isolation_session_is_blocked, time_precision_overflow_warning,
-    validate_backend_signal_args,
+    eval_pg_sleep_function, eval_test_canonicalize_path, eval_uuid_function,
+    int4_array_from_client_ids, int32_arg, int64_arg, isolation_session_is_blocked,
+    time_precision_overflow_warning, validate_backend_signal_args,
 };
 pub use parallel::{ParallelRuntime, WorkerTuple};
 pub use partition::{

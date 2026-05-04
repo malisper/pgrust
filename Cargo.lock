@@ -615,12 +615,14 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "pgrust_access",
+ "pgrust_analyze",
  "pgrust_catalog_data",
  "pgrust_catalog_store",
  "pgrust_core",
  "pgrust_expr",
  "pgrust_nodes",
  "pgrust_storage",
+ "rand",
 ]
 
 [[package]]

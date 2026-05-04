@@ -14,8 +14,6 @@ use crate::include::nodes::datetime::{
     MAX_TIME_PRECISION, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-use rand::RngCore;
-use std::sync::Mutex;
 
 use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
 use super::expr_agg_support::{
@@ -172,7 +170,6 @@ use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::backend::utils::misc::guc::{
     normalize_guc_name, pg_settings_flags, plpgsql_guc_default_value,
 };
-use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::htup::AttributeStorage;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::toast_compression::ToastCompressionId;
@@ -2232,378 +2229,87 @@ fn statistics_visible_in_search_path(
     false
 }
 
-fn catalog_is_temp_schema_name(schema_name: &str) -> bool {
-    schema_name.eq_ignore_ascii_case("pg_temp")
-        || schema_name.to_ascii_lowercase().starts_with("pg_temp_")
-}
-
-fn catalog_visibility_search_path(catalog: &dyn CatalogLookup) -> Vec<String> {
-    let configured = catalog.search_path();
-    let mut search_path = Vec::new();
-    if !configured
-        .iter()
-        .any(|schema| schema.eq_ignore_ascii_case("pg_catalog"))
-    {
-        search_path.push("pg_catalog".into());
-    }
-    search_path.extend(configured);
-    search_path
-}
-
-fn catalog_object_visible_in_search_path(
-    catalog: &dyn CatalogLookup,
-    target_oid: u32,
-    target_namespace_oid: u32,
-    target_name: &str,
-    mut same_name_oid_in_namespace: impl FnMut(u32, &str) -> Option<u32>,
-) -> bool {
-    if catalog
-        .namespace_row_by_oid(target_namespace_oid)
-        .is_some_and(|namespace| catalog_is_temp_schema_name(&namespace.nspname))
-    {
-        return false;
-    }
-    for schema_name in catalog_visibility_search_path(catalog) {
-        if catalog_is_temp_schema_name(&schema_name) {
-            continue;
-        }
-        let Some(namespace) = catalog
-            .namespace_rows()
-            .into_iter()
-            .find(|row| row.nspname.eq_ignore_ascii_case(&schema_name))
-        else {
-            continue;
-        };
-        if let Some(candidate_oid) = same_name_oid_in_namespace(namespace.oid, target_name) {
-            return candidate_oid == target_oid;
-        }
-    }
-    false
-}
-
-fn eval_catalog_visibility_result(
-    values: &[Value],
+fn catalog_visibility_catalog<'a>(
+    ctx: &'a ExecutorContext,
     function_name: &'static str,
-    mut is_visible: impl FnMut(u32) -> Result<Option<bool>, ExecError>,
-) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null] => Ok(Value::Null),
-        [value] => {
-            let oid = oid_arg_to_u32(value, function_name)?;
-            Ok(is_visible(oid)?.map(Value::Bool).unwrap_or(Value::Null))
-        }
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: function_name,
-            actual: format!("{function_name}({} args)", values.len()),
-        })),
-    }
+) -> Result<&'a dyn CatalogLookup, ExecError> {
+    executor_catalog(ctx).map_err(|_| ExecError::DetailedError {
+        message: format!("{function_name} requires catalog context"),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })
 }
 
 fn eval_pg_type_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_type_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog.type_by_oid(oid) else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.typnamespace,
-            &row.typname,
-            |namespace_oid, typname| {
-                catalog
-                    .type_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTypeRow| {
-                        candidate.typnamespace == namespace_oid
-                            && candidate.typname.eq_ignore_ascii_case(typname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_type_is_visible")?;
+    pgrust_executor::eval_pg_type_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_operator_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_operator_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog.operator_by_oid(oid) else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.oprnamespace,
-            &row.oprname,
-            |namespace_oid, oprname| {
-                catalog
-                    .operator_rows()
-                    .into_iter()
-                    .find(|candidate: &PgOperatorRow| {
-                        candidate.oprnamespace == namespace_oid
-                            && candidate.oprname.eq_ignore_ascii_case(oprname)
-                            && candidate.oprleft == row.oprleft
-                            && candidate.oprright == row.oprright
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_operator_is_visible")?;
+    pgrust_executor::eval_pg_operator_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_opclass_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_opclass_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .opclass_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.opcnamespace,
-            &row.opcname,
-            |namespace_oid, opcname| {
-                catalog
-                    .opclass_rows()
-                    .into_iter()
-                    .find(|candidate: &PgOpclassRow| {
-                        candidate.opcnamespace == namespace_oid
-                            && candidate.opcmethod == row.opcmethod
-                            && candidate.opcname.eq_ignore_ascii_case(opcname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_opclass_is_visible")?;
+    pgrust_executor::eval_pg_opclass_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_opfamily_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_opfamily_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .opfamily_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.opfnamespace,
-            &row.opfname,
-            |namespace_oid, opfname| {
-                catalog
-                    .opfamily_rows()
-                    .into_iter()
-                    .find(|candidate: &PgOpfamilyRow| {
-                        candidate.opfnamespace == namespace_oid
-                            && candidate.opfmethod == row.opfmethod
-                            && candidate.opfname.eq_ignore_ascii_case(opfname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_opfamily_is_visible")?;
+    pgrust_executor::eval_pg_opfamily_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_conversion_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_conversion_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .conversion_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.connamespace,
-            &row.conname,
-            |namespace_oid, conname| {
-                catalog
-                    .conversion_rows()
-                    .into_iter()
-                    .find(|candidate: &PgConversionRow| {
-                        candidate.connamespace == namespace_oid
-                            && candidate.conname.eq_ignore_ascii_case(conname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_conversion_is_visible")?;
+    pgrust_executor::eval_pg_conversion_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_collation_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_collation_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .collation_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.collnamespace,
-            &row.collname,
-            |namespace_oid, collname| {
-                catalog
-                    .collation_rows()
-                    .into_iter()
-                    .find(|candidate: &PgCollationRow| {
-                        candidate.collnamespace == namespace_oid
-                            && candidate.collname.eq_ignore_ascii_case(collname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_collation_is_visible")?;
+    pgrust_executor::eval_pg_collation_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_ts_parser_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_ts_parser_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .ts_parser_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.prsnamespace,
-            &row.prsname,
-            |namespace_oid, prsname| {
-                catalog
-                    .ts_parser_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTsParserRow| {
-                        candidate.prsnamespace == namespace_oid
-                            && candidate.prsname.eq_ignore_ascii_case(prsname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_ts_parser_is_visible")?;
+    pgrust_executor::eval_pg_ts_parser_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_ts_dict_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_ts_dict_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .ts_dict_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.dictnamespace,
-            &row.dictname,
-            |namespace_oid, dictname| {
-                catalog
-                    .ts_dict_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTsDictRow| {
-                        candidate.dictnamespace == namespace_oid
-                            && candidate.dictname.eq_ignore_ascii_case(dictname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_ts_dict_is_visible")?;
+    pgrust_executor::eval_pg_ts_dict_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_ts_template_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_ts_template_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .ts_template_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.tmplnamespace,
-            &row.tmplname,
-            |namespace_oid, tmplname| {
-                catalog
-                    .ts_template_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTsTemplateRow| {
-                        candidate.tmplnamespace == namespace_oid
-                            && candidate.tmplname.eq_ignore_ascii_case(tmplname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_ts_template_is_visible")?;
+    pgrust_executor::eval_pg_ts_template_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_ts_config_is_visible(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    eval_catalog_visibility_result(values, "pg_ts_config_is_visible", |oid| {
-        let catalog = executor_catalog(ctx)?;
-        let Some(row) = catalog
-            .ts_config_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(catalog_object_visible_in_search_path(
-            catalog,
-            row.oid,
-            row.cfgnamespace,
-            &row.cfgname,
-            |namespace_oid, cfgname| {
-                catalog
-                    .ts_config_rows()
-                    .into_iter()
-                    .find(|candidate: &PgTsConfigRow| {
-                        candidate.cfgnamespace == namespace_oid
-                            && candidate.cfgname.eq_ignore_ascii_case(cfgname)
-                    })
-                    .map(|candidate| candidate.oid)
-            },
-        )))
-    })
+    let catalog = catalog_visibility_catalog(ctx, "pg_ts_config_is_visible")?;
+    pgrust_executor::eval_pg_ts_config_is_visible(values, catalog).map_err(catalog_builtin_error)
 }
 
 fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, ExecError> {
@@ -13757,6 +13463,29 @@ fn misc_builtin_error(error: pgrust_executor::MiscBuiltinError) -> ExecError {
     }
 }
 
+fn catalog_builtin_error(error: pgrust_executor::CatalogBuiltinError) -> ExecError {
+    match error {
+        pgrust_executor::CatalogBuiltinError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+        pgrust_executor::CatalogBuiltinError::UnexpectedToken { expected, actual } => {
+            ExecError::Parse(ParseError::UnexpectedToken { expected, actual })
+        }
+        pgrust_executor::CatalogBuiltinError::TypeMismatch { op, left, right } => {
+            ExecError::TypeMismatch { op, left, right }
+        }
+        pgrust_executor::CatalogBuiltinError::Parse(error) => ExecError::Parse(error),
+    }
+}
+
 fn int4_array_from_client_ids(pids: Vec<crate::ClientId>) -> Value {
     pgrust_executor::int4_array_from_client_ids(pids)
 }
@@ -14200,7 +13929,9 @@ pub(crate) fn eval_builtin_function(
         | BuiltinScalarFunction::GenRandomUuid
         | BuiltinScalarFunction::UuidV7
         | BuiltinScalarFunction::UuidExtractVersion
-        | BuiltinScalarFunction::UuidExtractTimestamp => eval_uuid_function(func, &values),
+        | BuiltinScalarFunction::UuidExtractTimestamp => {
+            pgrust_executor::eval_uuid_function(func, &values).map_err(misc_builtin_error)
+        }
         BuiltinScalarFunction::Xid8Cmp => match values.as_slice() {
             [Value::Xid8(left), Value::Xid8(right)] => Ok(Value::Int32(match left.cmp(right) {
                 std::cmp::Ordering::Less => -1,
@@ -15262,124 +14993,26 @@ fn eval_enum_function(
     result_type: Option<SqlType>,
     ctx: &ExecutorContext,
 ) -> Option<Result<Value, ExecError>> {
-    if !matches!(
-        func,
-        BuiltinScalarFunction::EnumFirst
-            | BuiltinScalarFunction::EnumLast
-            | BuiltinScalarFunction::EnumRange
-    ) {
-        return None;
-    }
-    Some(eval_enum_function_inner(func, values, result_type, ctx))
-}
-
-fn eval_enum_function_inner(
-    func: BuiltinScalarFunction,
-    values: &[Value],
-    result_type: Option<SqlType>,
-    ctx: &ExecutorContext,
-) -> Result<Value, ExecError> {
-    let enum_type = result_type
-        .map(|ty| if ty.is_array { ty.element_type() } else { ty })
-        .filter(|ty| matches!(ty.kind, SqlTypeKind::Enum) && ty.type_oid != 0)
-        .ok_or_else(|| ExecError::DetailedError {
-            message: "enum support function requires a concrete enum type".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42804",
-        })?;
-    let catalog = executor_catalog(ctx)?;
-    let enum_type_oid = if enum_type.typrelid != 0 {
-        enum_type.typrelid
-    } else {
-        enum_type.type_oid
-    };
-    let mut labels = catalog
-        .enum_rows()
-        .into_iter()
-        .filter(|row| row.enumtypid == enum_type_oid)
-        .collect::<Vec<_>>();
-    labels.sort_by(|left, right| {
-        left.enumsortorder
-            .partial_cmp(&right.enumsortorder)
-            .unwrap_or(Ordering::Equal)
-    });
-    match func {
-        BuiltinScalarFunction::EnumFirst => labels
-            .first()
-            .map(|row| {
-                ensure_enum_function_label_safe(catalog, enum_type_oid, row.oid)?;
-                Ok(Value::EnumOid(row.oid))
-            })
-            .unwrap_or(Ok(Value::Null)),
-        BuiltinScalarFunction::EnumLast => labels
-            .last()
-            .map(|row| {
-                ensure_enum_function_label_safe(catalog, enum_type_oid, row.oid)?;
-                Ok(Value::EnumOid(row.oid))
-            })
-            .unwrap_or(Ok(Value::Null)),
-        BuiltinScalarFunction::EnumRange => {
-            let lower = values.first().and_then(|value| match value {
-                Value::EnumOid(oid) => labels.iter().position(|row| row.oid == *oid),
-                Value::Null => Some(0),
-                _ => None,
-            });
-            let upper = values.get(1).and_then(|value| match value {
-                Value::EnumOid(oid) => labels.iter().position(|row| row.oid == *oid),
-                Value::Null => labels.len().checked_sub(1),
-                _ => None,
-            });
-            let (start, end) = match values.len() {
-                1 => (0, labels.len().saturating_sub(1)),
-                2 => (lower.unwrap_or(labels.len()), upper.unwrap_or(0)),
-                _ => {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "enum_range(anyenum [, anyenum])",
-                        actual: format!("enum_range({} args)", values.len()),
-                    }));
-                }
-            };
-            let items = if labels.is_empty() || start > end {
-                Vec::new()
-            } else {
-                let mut items = Vec::new();
-                for row in &labels[start..=end] {
-                    ensure_enum_function_label_safe(catalog, enum_type_oid, row.oid)?;
-                    items.push(Value::EnumOid(row.oid));
-                }
-                items
-            };
-            Ok(Value::PgArray(
-                ArrayValue::from_1d(items).with_element_type_oid(enum_type_oid),
-            ))
+    let catalog = match ctx.catalog.as_deref() {
+        Some(catalog) => catalog,
+        None if matches!(
+            func,
+            BuiltinScalarFunction::EnumFirst
+                | BuiltinScalarFunction::EnumLast
+                | BuiltinScalarFunction::EnumRange
+        ) =>
+        {
+            return Some(Err(ExecError::DetailedError {
+                message: "enum support function requires catalog context".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            }));
         }
-        _ => unreachable!(),
-    }
-}
-
-fn ensure_enum_function_label_safe(
-    catalog: &dyn CatalogLookup,
-    enum_type_oid: u32,
-    label_oid: u32,
-) -> Result<(), ExecError> {
-    if catalog.enum_label_is_committed(enum_type_oid, label_oid) {
-        return Ok(());
-    }
-    let label = catalog
-        .enum_label(enum_type_oid, label_oid)
-        .or_else(|| catalog.enum_label_by_oid(label_oid))
-        .unwrap_or_else(|| label_oid.to_string());
-    let type_name = catalog
-        .type_by_oid(enum_type_oid)
-        .map(|row| row.typname)
-        .unwrap_or_else(|| enum_type_oid.to_string());
-    Err(ExecError::DetailedError {
-        message: format!("unsafe use of new value \"{label}\" of enum type {type_name}"),
-        detail: None,
-        hint: Some("New enum values must be committed before they can be used.".into()),
-        sqlstate: "55P04",
-    })
+        None => return None,
+    };
+    pgrust_executor::eval_enum_catalog_function(func, values, result_type, catalog)
+        .map(|result| result.map_err(catalog_builtin_error))
 }
 
 fn eval_jsonb_contains(left: Value, right: Value) -> Result<Value, ExecError> {
@@ -15529,236 +15162,6 @@ fn eval_random_function(values: &[Value], ctx: &mut ExecutorContext) -> Result<V
             actual: format!("Random({} args)", values.len()),
         })),
     }
-}
-
-fn eval_uuid_function(func: BuiltinScalarFunction, values: &[Value]) -> Result<Value, ExecError> {
-    match func {
-        BuiltinScalarFunction::UuidIn => match values {
-            [Value::Text(text)] => Ok(Value::Uuid(super::expr_casts::parse_uuid_text(text)?)),
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_in",
-                left: value.clone(),
-                right: Value::Text("".into()),
-            }),
-            _ => Err(malformed_expr_error("uuid_in")),
-        },
-        BuiltinScalarFunction::UuidOut => match values {
-            [Value::Uuid(value)] => {
-                Ok(Value::Text(super::value_io::render_uuid_text(value).into()))
-            }
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_out",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_out")),
-        },
-        BuiltinScalarFunction::UuidRecv => match values {
-            [Value::Bytea(bytes)] if bytes.len() == 16 => {
-                Ok(Value::Uuid(bytes.as_slice().try_into().unwrap()))
-            }
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_recv",
-                left: value.clone(),
-                right: Value::Bytea(vec![0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_recv")),
-        },
-        BuiltinScalarFunction::UuidSend => match values {
-            [Value::Uuid(value)] => Ok(Value::Bytea(value.to_vec())),
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_send",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_send")),
-        },
-        BuiltinScalarFunction::UuidEq
-        | BuiltinScalarFunction::UuidNe
-        | BuiltinScalarFunction::UuidLt
-        | BuiltinScalarFunction::UuidLe
-        | BuiltinScalarFunction::UuidGt
-        | BuiltinScalarFunction::UuidGe
-        | BuiltinScalarFunction::UuidCmp => match values {
-            [Value::Uuid(left), Value::Uuid(right)] => Ok(match func {
-                BuiltinScalarFunction::UuidEq => Value::Bool(left == right),
-                BuiltinScalarFunction::UuidNe => Value::Bool(left != right),
-                BuiltinScalarFunction::UuidLt => Value::Bool(left < right),
-                BuiltinScalarFunction::UuidLe => Value::Bool(left <= right),
-                BuiltinScalarFunction::UuidGt => Value::Bool(left > right),
-                BuiltinScalarFunction::UuidGe => Value::Bool(left >= right),
-                BuiltinScalarFunction::UuidCmp => Value::Int32(match left.cmp(right) {
-                    std::cmp::Ordering::Less => -1,
-                    std::cmp::Ordering::Equal => 0,
-                    std::cmp::Ordering::Greater => 1,
-                }),
-                _ => unreachable!(),
-            }),
-            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
-            [left, right] => Err(ExecError::TypeMismatch {
-                op: "uuid",
-                left: left.clone(),
-                right: right.clone(),
-            }),
-            _ => Err(malformed_expr_error("uuid")),
-        },
-        BuiltinScalarFunction::UuidHash => match values {
-            [Value::Uuid(value)] => Ok(Value::Int32(uuid_hash(value) as i32)),
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_hash",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_hash")),
-        },
-        BuiltinScalarFunction::UuidHashExtended => match values {
-            [Value::Uuid(value), Value::Int64(seed)] => {
-                Ok(Value::Int64(uuid_hash_extended(value, *seed as u64) as i64))
-            }
-            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
-            [left, right] => Err(ExecError::TypeMismatch {
-                op: "uuid_hash_extended",
-                left: left.clone(),
-                right: right.clone(),
-            }),
-            _ => Err(malformed_expr_error("uuid_hash_extended")),
-        },
-        BuiltinScalarFunction::GenRandomUuid => match values {
-            [] => Ok(Value::Uuid(generate_uuid_v4())),
-            _ => Err(malformed_expr_error("gen_random_uuid")),
-        },
-        BuiltinScalarFunction::UuidV7 => match values {
-            [] => Ok(Value::Uuid(generate_uuid_v7(0))),
-            [Value::Interval(interval)] => {
-                let shift_millis = interval.time_micros / 1_000
-                    + i64::from(interval.days) * 86_400_000
-                    + i64::from(interval.months) * 30 * 86_400_000;
-                Ok(Value::Uuid(generate_uuid_v7(shift_millis)))
-            }
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuidv7",
-                left: value.clone(),
-                right: Value::Interval(crate::include::nodes::datum::IntervalValue::zero()),
-            }),
-            _ => Err(malformed_expr_error("uuidv7")),
-        },
-        BuiltinScalarFunction::UuidExtractVersion => match values {
-            [Value::Uuid(value)] => {
-                Ok(uuid_version(value).map(Value::Int16).unwrap_or(Value::Null))
-            }
-            [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_extract_version",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_extract_version")),
-        },
-        BuiltinScalarFunction::UuidExtractTimestamp => match values {
-            [Value::Uuid(value)] if uuid_version(value) == Some(1) => uuid_v1_timestamp(value)
-                .map_or(Ok(Value::Null), |postgres_usecs| {
-                    Ok(Value::TimestampTz(
-                        crate::include::nodes::datetime::TimestampTzADT(postgres_usecs),
-                    ))
-                }),
-            [Value::Uuid(value)] if uuid_version(value) == Some(7) => Ok(Value::TimestampTz(
-                crate::include::nodes::datetime::TimestampTzADT(uuid_v7_timestamp(value)),
-            )),
-            [Value::Uuid(_)] | [Value::Null] => Ok(Value::Null),
-            [value] => Err(ExecError::TypeMismatch {
-                op: "uuid_extract_timestamp",
-                left: value.clone(),
-                right: Value::Uuid([0; 16]),
-            }),
-            _ => Err(malformed_expr_error("uuid_extract_timestamp")),
-        },
-        _ => unreachable!("uuid dispatcher called for non-uuid builtin"),
-    }
-}
-
-fn generate_uuid_v4() -> [u8; 16] {
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    bytes
-}
-
-static UUID_V7_STATE: Mutex<(u64, u64)> = Mutex::new((0, 0));
-
-fn generate_uuid_v7(shift_millis: i64) -> [u8; 16] {
-    let millis = current_postgres_timestamp_usecs()
-        .saturating_div(1_000)
-        .saturating_add(10_957 * 86_400_000)
-        .saturating_add(shift_millis)
-        .max(0) as u64;
-    let mut bytes = [0u8; 16];
-    bytes[0] = (millis >> 40) as u8;
-    bytes[1] = (millis >> 32) as u8;
-    bytes[2] = (millis >> 24) as u8;
-    bytes[3] = (millis >> 16) as u8;
-    bytes[4] = (millis >> 8) as u8;
-    bytes[5] = millis as u8;
-    rand::thread_rng().fill_bytes(&mut bytes[6..]);
-    let sequence = {
-        let mut state = UUID_V7_STATE.lock().expect("uuidv7 state mutex poisoned");
-        if state.0 == millis {
-            state.1 = state.1.wrapping_add(1) & ((1u64 << 42) - 1);
-        } else {
-            state.0 = millis;
-            state.1 = 0;
-        }
-        state.1
-    };
-    bytes[6] = 0x70 | (((sequence >> 38) as u8) & 0x0f);
-    bytes[7] = (sequence >> 30) as u8;
-    bytes[8] = 0x80 | (((sequence >> 24) as u8) & 0x3f);
-    bytes[9] = (sequence >> 16) as u8;
-    bytes[10] = (sequence >> 8) as u8;
-    bytes[11] = sequence as u8;
-    bytes
-}
-
-fn uuid_version(value: &[u8; 16]) -> Option<i16> {
-    ((value[8] & 0xc0) == 0x80).then_some(i16::from(value[6] >> 4))
-}
-
-fn uuid_v1_timestamp(value: &[u8; 16]) -> Option<i64> {
-    let timestamp_100ns = ((u64::from(value[6] & 0x0f)) << 56)
-        | (u64::from(value[7]) << 48)
-        | (u64::from(value[4]) << 40)
-        | (u64::from(value[5]) << 32)
-        | (u64::from(value[0]) << 24)
-        | (u64::from(value[1]) << 16)
-        | (u64::from(value[2]) << 8)
-        | u64::from(value[3]);
-    let unix_100ns = timestamp_100ns.checked_sub(122_192_928_000_000_000)?;
-    let unix_usecs = i64::try_from(unix_100ns / 10).ok()?;
-    Some(unix_usecs - 10_957 * 86_400_000_000)
-}
-
-fn uuid_v7_timestamp(value: &[u8; 16]) -> i64 {
-    let millis = ((value[0] as i64) << 40)
-        | ((value[1] as i64) << 32)
-        | ((value[2] as i64) << 24)
-        | ((value[3] as i64) << 16)
-        | ((value[4] as i64) << 8)
-        | value[5] as i64;
-    millis * 1_000 - 10_957 * 86_400_000_000
-}
-
-fn uuid_hash(value: &[u8; 16]) -> u32 {
-    crate::backend::access::hash::support::hash_bytes_extended(value, 0) as u32
-}
-
-fn uuid_hash_extended(value: &[u8; 16], seed: u64) -> u64 {
-    crate::backend::access::hash::support::hash_bytes_extended(value, seed)
 }
 
 fn eval_random_normal_function(
