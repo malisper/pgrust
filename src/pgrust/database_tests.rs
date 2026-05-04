@@ -38738,7 +38738,7 @@ fn detached_self_referencing_partition_still_blocks_root_delete() {
             detail,
             ..
         }) => {
-            assert_eq!(constraint, "parted_self_fk_id_abc_fkey");
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey_3");
             assert!(message.contains("on table \"part2_self_fk\""));
             assert!(
                 detail
