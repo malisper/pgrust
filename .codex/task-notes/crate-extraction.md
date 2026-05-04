@@ -118,6 +118,8 @@ Key decisions:
 - Made generic PL/pgSQL cache `len()` available outside `cfg(test)` so root test builds can inspect the cache through the dependency crate.
 - Moved role settings storage into `pgrust_catalog_store::role_settings`; root `commands::rolecmds` keeps wrappers.
 - Moved trigger transition capture row buffers into `pgrust_nodes`; root trigger/PLpgSQL paths re-export the type.
+- Moved PL/pgSQL FOREACH target validation and array slice iteration shaping into `pgrust_plpgsql::runtime`; root exec now only maps crate runtime errors into `ExecError` and keeps executor casting/assignment.
+- Moved ACL privilege parsing, role membership checks, relation/schema/function/type ACL policy, and proc execute denial detail shaping into `pgrust_executor::permissions`; root `exec_expr` keeps value decoding, catalog object resolution, database-backed large-object checks, and compatibility error mapping.
 - Moved float8 aggregate transition-state builtins, float8 argument coercion, and regression transition math into `pgrust_executor::aggregate`; root aggregate/exec_expr now adapt crate errors through the existing aggregate support mapper.
 - Moved UUID builtin evaluation, enum support functions, and catalog visibility builtins into `pgrust_executor`; root `exec_expr` now keeps catalog-context adapters and error mapping.
 - Moved CREATE SCHEMA element normalization into `pgrust_commands::schemacmds`; root keeps auth/permission resolution.
@@ -365,6 +367,11 @@ Files touched:
 - `scripts/check_crate_boundaries.sh`
 
 Tests run:
+- `cargo fmt`
+- `scripts/cargo_isolated.sh check --lib --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_executor --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet`
+- `bash scripts/check_crate_boundaries.sh`
 - `scripts/cargo_isolated.sh check -p pgrust_catalog_store --quiet`
 - `scripts/cargo_isolated.sh check -p pgrust_executor --quiet`
 - `scripts/cargo_isolated.sh check -p pgrust_nodes --quiet`

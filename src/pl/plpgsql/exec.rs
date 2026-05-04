@@ -59,12 +59,13 @@ use pgrust_plpgsql::{
     TriggerReturnedRow, catalog_foreign_key_column_array, catalog_foreign_key_is_array,
     catalog_foreign_key_is_optional, current_event_trigger_table_rewrite_relation_name_for_oid,
     current_plpgsql_context, diagnostic_text, exception_condition_name_sqlstate,
-    is_catalog_foreign_key_check_sql, is_catalog_foreign_key_query_sql, parse_proc_argtype_oids,
-    plpgsql_extra_check_level, plpgsql_query_column, push_context_frame,
+    foreach_iteration_values, is_catalog_foreign_key_check_sql, is_catalog_foreign_key_query_sql,
+    parse_proc_argtype_oids, plpgsql_extra_check_level, plpgsql_query_column, push_context_frame,
     push_event_trigger_ddl_commands, push_event_trigger_dropped_objects,
     push_event_trigger_table_rewrite, push_plpgsql_notice, queue_plpgsql_warning, quote_identifier,
     quote_sql_string, resolve_raise_sqlstate, runtime_sql_param_id, transition_table_visible_rows,
-    trigger_return_bindings, validate_plpgsql_function_row as validate_plpgsql_function_row_impl,
+    trigger_return_bindings, validate_foreach_target,
+    validate_plpgsql_function_row as validate_plpgsql_function_row_impl,
     validate_plpgsql_procedure_row as validate_plpgsql_procedure_row_impl,
     validate_scalar_call_return_contract,
 };
@@ -2821,8 +2822,8 @@ fn exec_function_foreach(
         state.values[compiled.found_slot] = Value::Bool(false);
         return Ok(FunctionControl::Continue);
     };
-    validate_foreach_target(target, slice)?;
-    let values = foreach_iteration_values(&array, slice)?;
+    validate_foreach_target(target, slice).map_err(plpgsql_foreach_runtime_error)?;
+    let values = foreach_iteration_values(&array, slice).map_err(plpgsql_foreach_runtime_error)?;
     if values.is_empty() {
         state.values[compiled.found_slot] = Value::Bool(false);
         return Ok(FunctionControl::Continue);
@@ -2837,65 +2838,6 @@ fn exec_function_foreach(
     }
     state.values[compiled.found_slot] = Value::Bool(true);
     Ok(FunctionControl::Continue)
-}
-
-fn validate_foreach_target(target: &CompiledForQueryTarget, slice: usize) -> Result<(), ExecError> {
-    if slice == 0 {
-        return Ok(());
-    }
-    if target
-        .targets
-        .iter()
-        .any(|target| !target.ty.is_array && target.ty.kind != SqlTypeKind::Record)
-    {
-        return Err(function_runtime_error(
-            "FOREACH ... SLICE loop variable must be of an array type",
-            None,
-            "42804",
-        ));
-    }
-    Ok(())
-}
-
-fn foreach_iteration_values(array: &ArrayValue, slice: usize) -> Result<Vec<Value>, ExecError> {
-    if array.is_empty() {
-        return Ok(Vec::new());
-    }
-    if slice == 0 {
-        return Ok(array.elements.clone());
-    }
-    let ndim = array.ndim();
-    if slice > ndim {
-        return Err(function_runtime_error(
-            &format!(
-                "slice dimension ({slice}) is out of the valid range 0..{}",
-                ndim
-            ),
-            None,
-            "2202E",
-        ));
-    }
-    let slice_dims = array.dimensions[ndim - slice..].to_vec();
-    let slice_len = slice_dims
-        .iter()
-        .try_fold(1usize, |acc, dim| acc.checked_mul(dim.length))
-        .ok_or_else(|| {
-            function_runtime_error("array size exceeds the maximum allowed", None, "54000")
-        })?;
-    if slice_len == 0 {
-        return Ok(Vec::new());
-    }
-    Ok(array
-        .elements
-        .chunks(slice_len)
-        .map(|chunk| {
-            Value::PgArray(ArrayValue {
-                element_type_oid: array.element_type_oid,
-                dimensions: slice_dims.clone(),
-                elements: chunk.to_vec(),
-            })
-        })
-        .collect())
 }
 
 fn assign_foreach_value_to_targets(
@@ -2932,6 +2874,10 @@ fn assign_foreach_value_to_targets(
         state.values[target.slot] = cast_value_with_config(value, target.ty, &ctx.datetime_config)?;
     }
     Ok(())
+}
+
+fn plpgsql_foreach_runtime_error(error: pgrust_plpgsql::PlpgsqlForeachRuntimeError) -> ExecError {
+    function_runtime_error(&error.message(), None, error.sqlstate())
 }
 
 fn exec_function_insert(

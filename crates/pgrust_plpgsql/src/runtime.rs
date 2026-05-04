@@ -13,9 +13,9 @@ use pgrust_nodes::{
 };
 
 use crate::{
-    CompiledEventTriggerBindings, CompiledTriggerBindings, CompiledTriggerRelation,
-    DeclaredCursorParam, FunctionReturnContract, TriggerReturnedRow, dollar_quote_tag_at,
-    is_identifier_char, is_identifier_start,
+    CompiledEventTriggerBindings, CompiledForQueryTarget, CompiledTriggerBindings,
+    CompiledTriggerRelation, DeclaredCursorParam, FunctionReturnContract, TriggerReturnedRow,
+    dollar_quote_tag_at, is_identifier_char, is_identifier_start,
 };
 use crate::{CursorDirection, PlpgsqlNotice, RaiseLevel};
 
@@ -550,6 +550,89 @@ pub fn plpgsql_extra_check_enabled(value: Option<&String>, check: &str) -> bool 
 
 pub fn function_query_row_values(rows: &[FunctionQueryRow]) -> Vec<Vec<Value>> {
     rows.iter().map(|row| row.values.clone()).collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlpgsqlForeachRuntimeError {
+    SliceTargetMustBeArray,
+    SliceDimensionOutOfRange { slice: usize, ndim: usize },
+    ArraySizeLimitExceeded,
+}
+
+impl PlpgsqlForeachRuntimeError {
+    pub fn message(&self) -> String {
+        match self {
+            PlpgsqlForeachRuntimeError::SliceTargetMustBeArray => {
+                "FOREACH ... SLICE loop variable must be of an array type".into()
+            }
+            PlpgsqlForeachRuntimeError::SliceDimensionOutOfRange { slice, ndim } => {
+                format!("slice dimension ({slice}) is out of the valid range 0..{ndim}")
+            }
+            PlpgsqlForeachRuntimeError::ArraySizeLimitExceeded => {
+                "array size exceeds the maximum allowed".into()
+            }
+        }
+    }
+
+    pub fn sqlstate(&self) -> &'static str {
+        match self {
+            PlpgsqlForeachRuntimeError::SliceTargetMustBeArray => "42804",
+            PlpgsqlForeachRuntimeError::SliceDimensionOutOfRange { .. } => "2202E",
+            PlpgsqlForeachRuntimeError::ArraySizeLimitExceeded => "54000",
+        }
+    }
+}
+
+pub fn validate_foreach_target(
+    target: &CompiledForQueryTarget,
+    slice: usize,
+) -> Result<(), PlpgsqlForeachRuntimeError> {
+    if slice == 0 {
+        return Ok(());
+    }
+    if target
+        .targets
+        .iter()
+        .any(|target| !target.ty.is_array && target.ty.kind != SqlTypeKind::Record)
+    {
+        return Err(PlpgsqlForeachRuntimeError::SliceTargetMustBeArray);
+    }
+    Ok(())
+}
+
+pub fn foreach_iteration_values(
+    array: &ArrayValue,
+    slice: usize,
+) -> Result<Vec<Value>, PlpgsqlForeachRuntimeError> {
+    if array.is_empty() {
+        return Ok(Vec::new());
+    }
+    if slice == 0 {
+        return Ok(array.elements.clone());
+    }
+    let ndim = array.ndim();
+    if slice > ndim {
+        return Err(PlpgsqlForeachRuntimeError::SliceDimensionOutOfRange { slice, ndim });
+    }
+    let slice_dims = array.dimensions[ndim - slice..].to_vec();
+    let slice_len = slice_dims
+        .iter()
+        .try_fold(1usize, |acc, dim| acc.checked_mul(dim.length))
+        .ok_or(PlpgsqlForeachRuntimeError::ArraySizeLimitExceeded)?;
+    if slice_len == 0 {
+        return Ok(Vec::new());
+    }
+    Ok(array
+        .elements
+        .chunks(slice_len)
+        .map(|chunk| {
+            Value::PgArray(ArrayValue {
+                element_type_oid: array.element_type_oid,
+                dimensions: slice_dims.clone(),
+                elements: chunk.to_vec(),
+            })
+        })
+        .collect())
 }
 
 pub fn statement_result_to_query_result(result: StatementResult) -> Option<FunctionQueryResult> {

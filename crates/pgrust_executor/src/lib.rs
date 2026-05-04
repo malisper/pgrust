@@ -137,7 +137,17 @@ pub use partition::{
     pg_partition_tree_rows, unsupported_hash_partition_key_error,
     validate_hash_partition_modulus_remainder,
 };
-pub use permissions::{PermissionCatalog, relation_values_visible_for_error_detail};
+pub use permissions::{
+    COLUMN_PRIVILEGES, FUNCTION_PRIVILEGES, LARGE_OBJECT_PRIVILEGES, PermissionCatalog,
+    PermissionError, PrivilegeRelationKind, PrivilegeSpec, RolePrivilegeSpec, SCHEMA_PRIVILEGES,
+    SEQUENCE_PRIVILEGES, TABLE_PRIVILEGES, TYPE_PRIVILEGES, acl_grants_privilege_to_names,
+    acl_privileges_contain, current_database_owner_oid, effective_pg_has_role_target,
+    effective_role_names_for_oid, membership_path_with, parse_privilege_specs_text,
+    parse_role_privilege_specs_text, proc_execute_acl_allows_role,
+    proc_execute_permission_denied_detail, relation_acl_allows_role,
+    relation_values_visible_for_error_detail, role_has_effective_membership, role_is_superuser,
+    role_privilege_allowed, schema_acl_allows_role, type_acl_allows_role, type_privilege_acl_row,
+};
 pub use predicate::{
     CompiledPredicate as FastCompiledPredicate, PredicateContext, PredicateEvalError,
     PredicateSlot, compile_fast_predicate, compile_fast_predicate_with_decoder,

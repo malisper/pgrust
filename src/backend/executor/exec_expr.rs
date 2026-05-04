@@ -173,7 +173,7 @@ use crate::backend::utils::misc::guc::{
 use crate::include::access::htup::AttributeStorage;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::toast_compression::ToastCompressionId;
-use crate::include::catalog::pg_proc::{bootstrap_pg_proc_row_by_oid, bootstrap_proc_acl_override};
+use crate::include::catalog::pg_proc::bootstrap_pg_proc_row_by_oid;
 use crate::include::catalog::{
     ANYOID, ARRAY_BTREE_OPCLASS_OID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID,
     BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
@@ -6546,31 +6546,9 @@ fn eval_pg_current_logfile(values: &[Value]) -> Result<Value, ExecError> {
     pgrust_executor::eval_pg_current_logfile(values).map_err(misc_builtin_error)
 }
 
-fn acl_item_parts(item: &str) -> Option<(&str, &str, &str)> {
-    let (grantee, rest) = item.split_once('=')?;
-    let (privileges, grantor) = rest.split_once('/')?;
-    Some((grantee, privileges, grantor))
-}
-
-#[derive(Clone, Copy)]
-struct PrivilegeSpec {
-    acl_char: char,
-    grant_option: bool,
-}
-
-#[derive(Clone, Copy)]
-enum RolePrivilegeSpec {
-    Usage,
-    Member,
-    Set,
-    Admin,
-}
-
-#[derive(Clone, Copy)]
-enum PrivilegeRelationKind {
-    Table,
-    Sequence,
-}
+type PrivilegeSpec = pgrust_executor::PrivilegeSpec;
+type RolePrivilegeSpec = pgrust_executor::RolePrivilegeSpec;
+type PrivilegeRelationKind = pgrust_executor::PrivilegeRelationKind;
 
 #[derive(Clone, Copy)]
 enum ColumnLookup {
@@ -6613,19 +6591,11 @@ fn parse_privilege_specs(
             right: Value::Text("".into()),
         });
     };
-    privilege_text
-        .split(',')
-        .map(str::trim)
-        .map(|chunk| {
-            map.iter()
-                .find(|(name, _, _)| chunk.eq_ignore_ascii_case(name))
-                .map(|(_, acl_char, grant_option)| PrivilegeSpec {
-                    acl_char: *acl_char,
-                    grant_option: *grant_option,
-                })
-                .ok_or_else(|| invalid_privilege_type_error(chunk))
-        })
-        .collect()
+    pgrust_executor::parse_privilege_specs_text(privilege_text, map).map_err(|err| match err {
+        pgrust_executor::PermissionError::InvalidPrivilegeType(privilege) => {
+            invalid_privilege_type_error(&privilege)
+        }
+    })
 }
 
 fn parse_role_privilege_specs(value: &Value) -> Result<Vec<RolePrivilegeSpec>, ExecError> {
@@ -6636,39 +6606,11 @@ fn parse_role_privilege_specs(value: &Value) -> Result<Vec<RolePrivilegeSpec>, E
             right: Value::Text("".into()),
         });
     };
-    privilege_text
-        .split(',')
-        .map(str::trim)
-        .map(|chunk| {
-            if chunk.eq_ignore_ascii_case("USAGE") {
-                Ok(RolePrivilegeSpec::Usage)
-            } else if chunk.eq_ignore_ascii_case("MEMBER") {
-                Ok(RolePrivilegeSpec::Member)
-            } else if chunk.eq_ignore_ascii_case("SET") {
-                Ok(RolePrivilegeSpec::Set)
-            } else if chunk.eq_ignore_ascii_case("USAGE WITH GRANT OPTION")
-                || chunk.eq_ignore_ascii_case("USAGE WITH ADMIN OPTION")
-                || chunk.eq_ignore_ascii_case("MEMBER WITH GRANT OPTION")
-                || chunk.eq_ignore_ascii_case("MEMBER WITH ADMIN OPTION")
-                || chunk.eq_ignore_ascii_case("SET WITH GRANT OPTION")
-                || chunk.eq_ignore_ascii_case("SET WITH ADMIN OPTION")
-            {
-                Ok(RolePrivilegeSpec::Admin)
-            } else {
-                Err(invalid_privilege_type_error(chunk))
-            }
-        })
-        .collect()
-}
-
-fn acl_privileges_contain(privileges: &str, spec: PrivilegeSpec) -> bool {
-    let mut chars = privileges.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == spec.acl_char {
-            return !spec.grant_option || matches!(chars.peek(), Some('*'));
+    pgrust_executor::parse_role_privilege_specs_text(privilege_text).map_err(|err| match err {
+        pgrust_executor::PermissionError::InvalidPrivilegeType(privilege) => {
+            invalid_privilege_type_error(&privilege)
         }
-    }
-    false
+    })
 }
 
 fn acl_grants_privilege_to_names(
@@ -6676,43 +6618,18 @@ fn acl_grants_privilege_to_names(
     effective_names: &std::collections::BTreeSet<String>,
     spec: PrivilegeSpec,
 ) -> bool {
-    acl.iter().any(|item| {
-        acl_item_parts(item).is_some_and(|(grantee, privileges, _)| {
-            effective_names.contains(grantee) && acl_privileges_contain(privileges, spec)
-        })
-    })
-}
-
-fn role_row_by_oid(authid_rows: &[PgAuthIdRow], role_oid: u32) -> Option<&PgAuthIdRow> {
-    authid_rows.iter().find(|role| role.oid == role_oid)
+    pgrust_executor::acl_grants_privilege_to_names(acl, effective_names, spec)
 }
 
 fn role_is_superuser(authid_rows: &[PgAuthIdRow], role_oid: u32) -> bool {
-    role_oid == crate::include::catalog::BOOTSTRAP_SUPERUSER_OID
-        || role_row_by_oid(authid_rows, role_oid).is_some_and(|role| role.rolsuper)
+    pgrust_executor::role_is_superuser(authid_rows, role_oid)
 }
 
 fn effective_role_names_for_oid(
     catalog: &dyn CatalogLookup,
     role_oid: u32,
 ) -> std::collections::BTreeSet<String> {
-    let roles = catalog.authid_rows();
-    let memberships = catalog.auth_members_rows();
-    let mut names = std::collections::BTreeSet::from([String::new()]);
-    if role_oid == 0 {
-        return names;
-    }
-    for role in &roles {
-        if crate::backend::catalog::role_memberships::has_effective_membership(
-            role_oid,
-            role.oid,
-            &roles,
-            &memberships,
-        ) {
-            names.insert(role.rolname.clone());
-        }
-    }
-    names
+    pgrust_executor::effective_role_names_for_oid(catalog, role_oid)
 }
 
 fn numeric_role_oid_from_value(value: &Value) -> Option<u32> {
@@ -6810,31 +6727,13 @@ fn relation_name_for_error(class_row: &PgClassRow) -> String {
     class_row.relname.clone()
 }
 
-fn is_protected_system_class(class_row: &PgClassRow) -> bool {
-    matches!(
-        class_row.relnamespace,
-        PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
-    ) && class_row.relkind != 'v'
-}
-
-fn system_catalog_public_select(class_row: &PgClassRow) -> bool {
-    class_row.relnamespace == PG_CATALOG_NAMESPACE_OID
-        && !matches!(
-            class_row.oid,
-            PG_AUTHID_RELATION_OID | PG_LARGEOBJECT_RELATION_OID
-        )
-}
-
 fn role_has_effective_membership(
     role_oid: u32,
     target_oid: u32,
     authid_rows: &[PgAuthIdRow],
     auth_members_rows: &[PgAuthMembersRow],
 ) -> bool {
-    if role_oid == 0 {
-        return false;
-    }
-    crate::backend::catalog::role_memberships::has_effective_membership(
+    pgrust_executor::role_has_effective_membership(
         role_oid,
         target_oid,
         authid_rows,
@@ -6848,61 +6747,7 @@ fn relation_acl_allows_role(
     class_row: &PgClassRow,
     spec: PrivilegeSpec,
 ) -> bool {
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if !role_is_superuser(&authid_rows, role_oid)
-        && is_protected_system_class(class_row)
-        && matches!(spec.acl_char, 'a' | 'w' | 'd' | 'D' | 'm' | 'U')
-    {
-        return false;
-    }
-    if role_is_superuser(&authid_rows, role_oid) {
-        return true;
-    }
-    if role_has_effective_membership(
-        role_oid,
-        class_row.relowner,
-        &authid_rows,
-        &auth_members_rows,
-    ) {
-        return true;
-    }
-    if spec.acl_char == 'r' && system_catalog_public_select(class_row) && !spec.grant_option {
-        return true;
-    }
-    if spec.acl_char == 'r'
-        && role_has_effective_membership(
-            role_oid,
-            PG_READ_ALL_DATA_OID,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    if matches!(spec.acl_char, 'a' | 'w' | 'd')
-        && role_has_effective_membership(
-            role_oid,
-            PG_WRITE_ALL_DATA_OID,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    if spec.acl_char == 'm'
-        && role_has_effective_membership(
-            role_oid,
-            PG_MAINTAIN_OID,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    class_row.relacl.as_deref().is_some_and(|acl| {
-        acl_grants_privilege_to_names(acl, &effective_role_names_for_oid(catalog, role_oid), spec)
-    })
+    pgrust_executor::relation_acl_allows_role(catalog, role_oid, class_row, spec)
 }
 
 fn namespace_row_from_value(
@@ -6927,54 +6772,13 @@ fn namespace_row_from_value(
     Ok((catalog.namespace_row_by_oid(oid), true))
 }
 
-fn schema_owner_default_acl(owner_name: &str) -> Vec<String> {
-    vec![format!("{owner_name}=UC/{owner_name}")]
-}
-
 fn schema_acl_allows_role(
     catalog: &dyn CatalogLookup,
     role_oid: u32,
     namespace: &PgNamespaceRow,
     spec: PrivilegeSpec,
 ) -> bool {
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if role_is_superuser(&authid_rows, role_oid)
-        || role_has_effective_membership(
-            role_oid,
-            namespace.nspowner,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    if spec.acl_char == 'U'
-        && !spec.grant_option
-        && (role_has_effective_membership(
-            role_oid,
-            PG_READ_ALL_DATA_OID,
-            &authid_rows,
-            &auth_members_rows,
-        ) || role_has_effective_membership(
-            role_oid,
-            PG_WRITE_ALL_DATA_OID,
-            &authid_rows,
-            &auth_members_rows,
-        ))
-    {
-        return true;
-    }
-    let owner_name = authid_rows
-        .iter()
-        .find(|row| row.oid == namespace.nspowner)
-        .map(|row| row.rolname.clone())
-        .unwrap_or_else(|| "postgres".into());
-    let acl = namespace
-        .nspacl
-        .clone()
-        .unwrap_or_else(|| schema_owner_default_acl(&owner_name));
-    acl_grants_privilege_to_names(&acl, &effective_role_names_for_oid(catalog, role_oid), spec)
+    pgrust_executor::schema_acl_allows_role(catalog, role_oid, namespace, spec)
 }
 
 fn eval_has_schema_privilege(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -7324,51 +7128,6 @@ fn eval_has_largeobject_privilege(
     }
 }
 
-fn membership_path_with(
-    start_member: u32,
-    target_role: u32,
-    rows: &[PgAuthMembersRow],
-    edge_allows: impl Fn(&PgAuthMembersRow) -> bool,
-) -> bool {
-    let mut pending = std::collections::VecDeque::from([start_member]);
-    let mut visited = std::collections::BTreeSet::new();
-    while let Some(member) = pending.pop_front() {
-        if !visited.insert(member) {
-            continue;
-        }
-        for edge in rows
-            .iter()
-            .filter(|row| row.member == member && edge_allows(row))
-        {
-            if edge.roleid == target_role {
-                return true;
-            }
-            pending.push_back(edge.roleid);
-        }
-    }
-    false
-}
-
-fn current_database_owner_oid(catalog: &dyn CatalogLookup, ctx: &ExecutorContext) -> Option<u32> {
-    catalog
-        .database_rows()
-        .into_iter()
-        .find(|row| row.datname.eq_ignore_ascii_case(&ctx.current_database_name))
-        .map(|row| row.datdba)
-}
-
-fn effective_pg_has_role_target(
-    target_oid: u32,
-    catalog: &dyn CatalogLookup,
-    ctx: &ExecutorContext,
-) -> Option<u32> {
-    if target_oid == PG_DATABASE_OWNER_OID {
-        current_database_owner_oid(catalog, ctx)
-    } else {
-        Some(target_oid)
-    }
-}
-
 fn role_privilege_allowed(
     role_oid: u32,
     target_oid: u32,
@@ -7376,46 +7135,13 @@ fn role_privilege_allowed(
     catalog: &dyn CatalogLookup,
     ctx: &ExecutorContext,
 ) -> bool {
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if role_is_superuser(&authid_rows, role_oid) {
-        return true;
-    }
-    let Some(effective_target_oid) = effective_pg_has_role_target(target_oid, catalog, ctx) else {
-        return false;
-    };
-    match spec {
-        RolePrivilegeSpec::Usage => role_has_effective_membership(
-            role_oid,
-            effective_target_oid,
-            &authid_rows,
-            &auth_members_rows,
-        ),
-        RolePrivilegeSpec::Member => {
-            role_oid == effective_target_oid
-                || membership_path_with(role_oid, effective_target_oid, &auth_members_rows, |_| {
-                    true
-                })
-        }
-        RolePrivilegeSpec::Set => {
-            role_oid == effective_target_oid
-                || membership_path_with(
-                    role_oid,
-                    effective_target_oid,
-                    &auth_members_rows,
-                    |edge| edge.set_option,
-                )
-        }
-        RolePrivilegeSpec::Admin => {
-            target_oid != PG_DATABASE_OWNER_OID
-                && membership_path_with(
-                    role_oid,
-                    effective_target_oid,
-                    &auth_members_rows,
-                    |edge| edge.admin_option,
-                )
-        }
-    }
+    pgrust_executor::role_privilege_allowed(
+        role_oid,
+        target_oid,
+        spec,
+        catalog,
+        &ctx.current_database_name,
+    )
 }
 
 fn eval_pg_has_role(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -7536,50 +7262,15 @@ pub(crate) fn proc_execute_acl_allows_role(
     row: &crate::include::catalog::PgProcRow,
     grant_option: bool,
 ) -> bool {
-    let explicit_acl = bootstrap_proc_acl_override(row.oid).or_else(|| row.proacl.clone());
-    if !grant_option && explicit_acl.is_none() {
-        return true;
-    }
-
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if role_is_superuser(&authid_rows, role_oid)
-        || role_has_effective_membership(role_oid, row.proowner, &authid_rows, &auth_members_rows)
-    {
-        return true;
-    }
-    let owner_name = authid_rows
-        .iter()
-        .find(|role| role.oid == row.proowner)
-        .map(|role| role.rolname.clone())
-        .unwrap_or_else(|| "postgres".into());
-    let acl = explicit_acl.unwrap_or_else(|| {
-        vec![
-            format!("{owner_name}=X/{owner_name}"),
-            format!("=X/{owner_name}"),
-        ]
-    });
-    let effective_names = effective_role_names_for_oid(catalog, role_oid);
-    acl_grants_privilege_to_names(
-        &acl,
-        &effective_names,
-        PrivilegeSpec {
-            acl_char: 'X',
-            grant_option,
-        },
-    )
+    pgrust_executor::proc_execute_acl_allows_role(catalog, role_oid, row, grant_option)
 }
 
 pub(crate) fn proc_execute_permission_denied(
     row: &crate::include::catalog::PgProcRow,
 ) -> ExecError {
-    let object_kind = match row.prokind {
-        'a' => "aggregate",
-        'p' => "procedure",
-        _ => "function",
-    };
+    let (object_kind, name) = pgrust_executor::proc_execute_permission_denied_detail(row);
     ExecError::DetailedError {
-        message: format!("permission denied for {object_kind} {}", row.proname),
+        message: format!("permission denied for {object_kind} {name}"),
         detail: None,
         hint: None,
         sqlstate: "42501",
@@ -7694,21 +7385,7 @@ fn type_row_for_privilege_value(
 }
 
 fn type_privilege_acl_row(catalog: &dyn CatalogLookup, row: PgTypeRow) -> PgTypeRow {
-    if row.typelem != 0 && row.typtype == 'b' {
-        if let Some(element) = catalog.type_by_oid(row.typelem) {
-            return type_privilege_acl_row(catalog, element);
-        }
-    }
-    if row.typtype == 'm'
-        && let Some(range_row) = catalog
-            .range_rows()
-            .into_iter()
-            .find(|range| range.rngmultitypid == row.oid)
-            .and_then(|range| catalog.type_by_oid(range.rngtypid))
-    {
-        return range_row;
-    }
-    row
+    pgrust_executor::type_privilege_acl_row(catalog, row)
 }
 
 fn type_acl_allows_role(
@@ -7717,30 +7394,7 @@ fn type_acl_allows_role(
     type_row: &PgTypeRow,
     spec: PrivilegeSpec,
 ) -> bool {
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    if role_is_superuser(&authid_rows, role_oid)
-        || role_has_effective_membership(
-            role_oid,
-            type_row.typowner,
-            &authid_rows,
-            &auth_members_rows,
-        )
-    {
-        return true;
-    }
-    let owner_name = authid_rows
-        .iter()
-        .find(|row| row.oid == type_row.typowner)
-        .map(|row| row.rolname.clone())
-        .unwrap_or_else(|| "postgres".into());
-    let acl = type_row.typacl.clone().unwrap_or_else(|| {
-        vec![
-            format!("{owner_name}=U/{owner_name}"),
-            format!("=U/{owner_name}"),
-        ]
-    });
-    acl_grants_privilege_to_names(&acl, &effective_role_names_for_oid(catalog, role_oid), spec)
+    pgrust_executor::type_acl_allows_role(catalog, role_oid, type_row, spec)
 }
 
 fn eval_has_type_privilege(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
