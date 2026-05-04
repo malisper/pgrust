@@ -6578,22 +6578,8 @@ pub fn fuzz_startup_packet(bytes: &[u8]) {
     let payload = &bytes[4..declared_len];
     let code = i32::from_be_bytes(payload[0..4].try_into().unwrap());
     if code == PROTOCOL_VERSION_3_0 {
-        let _ = parse_startup_parameters(&payload[4..]);
+        let _ = pgrust_protocol::pqcomm::parse_startup_parameters(&payload[4..]);
     }
-}
-
-fn parse_startup_parameters(payload: &[u8]) -> io::Result<HashMap<String, String>> {
-    let mut params = HashMap::new();
-    let mut offset = 0usize;
-    while offset < payload.len() {
-        let key = read_cstr(payload, &mut offset)?;
-        if key.is_empty() {
-            break;
-        }
-        let value = read_cstr(payload, &mut offset)?;
-        params.insert(key, value);
-    }
-    Ok(params)
 }
 
 fn handle_query(
