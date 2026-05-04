@@ -6,10 +6,10 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows_with_definition_formatter, build_pg_stat_activity_rows,
-    build_pg_stat_all_tables_rows, build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows,
-    build_pg_stat_checkpointer_rows, build_pg_stat_database_rows, build_pg_stat_io_rows,
-    build_pg_stat_recovery_prefetch_rows, build_pg_stat_slru_rows,
+    build_pg_publication_tables_rows, build_pg_rules_rows_with_definition_formatter,
+    build_pg_stat_activity_rows, build_pg_stat_all_tables_rows, build_pg_stat_archiver_rows,
+    build_pg_stat_bgwriter_rows, build_pg_stat_checkpointer_rows, build_pg_stat_database_rows,
+    build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows, build_pg_stat_slru_rows,
     build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows, build_pg_stat_wal_rows,
     build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
     build_pg_user_mappings_rows, build_pg_views_rows_with_definition_formatter,
@@ -1176,6 +1176,27 @@ impl CatalogLookup for VisibleCatalog {
             catcache.foreign_server_rows(),
             catcache.user_mapping_rows(),
             self.current_user_oid(),
+        )
+    }
+
+    fn pg_publication_tables_rows(
+        &self,
+        publications: Vec<PgPublicationRow>,
+        publication_rels: Vec<PgPublicationRelRow>,
+        publication_namespaces: Vec<PgPublicationNamespaceRow>,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+        attributes: Vec<crate::include::catalog::PgAttributeRow>,
+        inherits: Vec<PgInheritsRow>,
+    ) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_publication_tables_rows(
+            publications,
+            publication_rels,
+            publication_namespaces,
+            namespaces,
+            classes,
+            attributes,
+            inherits,
         )
     }
 

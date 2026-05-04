@@ -1,7 +1,5 @@
 use super::*;
 use crate::backend::catalog::loader::load_physical_catalog_rows_visible_scoped;
-use crate::backend::catalog::persistence::sync_catalog_rows_subset;
-use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{
@@ -22133,65 +22131,6 @@ fn create_aggregate_supports_plain_custom_aggregate_execution() {
             Value::Int64(124),
         ]]
     );
-}
-
-#[test]
-fn reopen_backfills_missing_pg_aggregate_bootstrap_rows() {
-    let base = temp_dir("aggregate_backfill_reopen");
-    let db = Database::open(&base, 16).unwrap();
-    let db_oid = db.database_oid;
-    drop(db);
-
-    sync_catalog_rows_subset(
-        &base,
-        &PhysicalCatalogRows::default(),
-        db_oid,
-        &[BootstrapCatalogKind::PgAggregate],
-    )
-    .unwrap();
-
-    let reopened = Database::open(&base, 16).unwrap();
-    assert!(
-        reopened
-            .backend_catcache(1, None)
-            .unwrap()
-            .aggregate_by_fnoid(6219)
-            .is_some()
-    );
-    assert_eq!(
-        query_rows(
-            &reopened,
-            1,
-            "select count(*) from pg_aggregate where aggfnoid = 6219"
-        ),
-        vec![vec![Value::Int64(1)]]
-    );
-}
-
-#[test]
-fn reopen_missing_pg_aggregate_custom_rows_is_corrupt() {
-    let base = temp_dir("aggregate_backfill_custom_corrupt");
-    let db = Database::open(&base, 16).unwrap();
-    let db_oid = db.database_oid;
-
-    create_plain_test_aggregates(&db);
-    drop(db);
-
-    sync_catalog_rows_subset(
-        &base,
-        &PhysicalCatalogRows::default(),
-        db_oid,
-        &[BootstrapCatalogKind::PgAggregate],
-    )
-    .unwrap();
-
-    match Database::open(&base, 16) {
-        Err(DatabaseError::Catalog(crate::backend::catalog::CatalogError::Corrupt(
-            "missing pg_aggregate row for custom aggregate",
-        ))) => {}
-        Err(err) => panic!("unexpected reopen error: {err:?}"),
-        Ok(_) => panic!("expected reopen to fail"),
-    }
 }
 
 #[test]

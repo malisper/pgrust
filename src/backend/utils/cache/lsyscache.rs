@@ -30,12 +30,13 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows_with_definition_formatter, build_pg_stat_all_tables_rows,
-    build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows, build_pg_stat_checkpointer_rows,
-    build_pg_stat_database_rows, build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows,
-    build_pg_stat_slru_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_stat_wal_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
-    build_pg_tables_rows, build_pg_views_rows_with_definition_formatter,
+    build_pg_publication_tables_rows, build_pg_rules_rows_with_definition_formatter,
+    build_pg_stat_all_tables_rows, build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows,
+    build_pg_stat_checkpointer_rows, build_pg_stat_database_rows, build_pg_stat_io_rows,
+    build_pg_stat_recovery_prefetch_rows, build_pg_stat_slru_rows,
+    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows, build_pg_stat_wal_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
+    build_pg_user_mappings_rows, build_pg_views_rows_with_definition_formatter,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::access::brin_page::{
@@ -44,14 +45,14 @@ use crate::include::access::brin_page::{
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, CONSTRAINT_FOREIGN,
     CONSTRAINT_NOTNULL, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow,
-    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
-    PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow,
-    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_catalog_kinds, bootstrap_pg_class_rows, bootstrap_relation_desc,
+    PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgConversionRow, PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgIndexRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_class_rows, bootstrap_relation_desc,
     system_catalog_index_by_oid, system_catalog_index_is_primary, system_catalog_indexes,
     system_catalog_indexes_for_heap,
 };
@@ -2899,6 +2900,47 @@ impl CatalogLookup for LazyCatalogLookup {
             authids,
             ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
             policy_rows,
+        )
+    }
+
+    fn pg_user_mappings_rows(&self) -> Vec<Vec<Value>> {
+        let authids = self
+            .db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.roles().to_vec())
+            .unwrap_or_default();
+        let auth_members = self
+            .db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.memberships().to_vec())
+            .unwrap_or_default();
+        build_pg_user_mappings_rows(
+            authids,
+            auth_members,
+            self.foreign_server_rows(),
+            self.user_mapping_rows(),
+            self.current_user_oid(),
+        )
+    }
+
+    fn pg_publication_tables_rows(
+        &self,
+        publications: Vec<PgPublicationRow>,
+        publication_rels: Vec<PgPublicationRelRow>,
+        publication_namespaces: Vec<PgPublicationNamespaceRow>,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+        attributes: Vec<PgAttributeRow>,
+        inherits: Vec<PgInheritsRow>,
+    ) -> Vec<Vec<Value>> {
+        build_pg_publication_tables_rows(
+            publications,
+            publication_rels,
+            publication_namespaces,
+            namespaces,
+            classes,
+            attributes,
+            inherits,
         )
     }
 

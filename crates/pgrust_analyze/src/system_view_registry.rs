@@ -1110,7 +1110,9 @@ const PG_STAT_PROGRESS_COPY_COLUMNS: &[SyntheticSystemViewColumn] = &[
 ];
 
 const INFORMATION_SCHEMA_TABLES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("table_schema"),
     SyntheticSystemViewColumn::text("table_name"),
+    SyntheticSystemViewColumn::text("table_type"),
     SyntheticSystemViewColumn::text("is_insertable_into"),
 ];
 

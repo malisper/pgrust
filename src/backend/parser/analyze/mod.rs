@@ -82,6 +82,33 @@ pub fn bind_scalar_expr_in_named_slot_scope(
     })
 }
 
+pub fn rewrite_bound_insert_auto_view_target(
+    stmt: pgrust_analyze::BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<pgrust_analyze::BoundInsertStatement, pgrust_analyze::ViewDmlRewriteError> {
+    with_root_analyze_services_and_notices(|| {
+        pgrust_analyze::rewrite_bound_insert_auto_view_target(stmt, catalog)
+    })
+}
+
+pub fn rewrite_bound_update_auto_view_target(
+    stmt: pgrust_analyze::BoundUpdateStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<pgrust_analyze::BoundUpdateStatement, pgrust_analyze::ViewDmlRewriteError> {
+    with_root_analyze_services_and_notices(|| {
+        pgrust_analyze::rewrite_bound_update_auto_view_target(stmt, catalog)
+    })
+}
+
+pub fn rewrite_bound_delete_auto_view_target(
+    stmt: pgrust_analyze::BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<pgrust_analyze::BoundDeleteStatement, pgrust_analyze::ViewDmlRewriteError> {
+    with_root_analyze_services_and_notices(|| {
+        pgrust_analyze::rewrite_bound_delete_auto_view_target(stmt, catalog)
+    })
+}
+
 fn catalog_error_to_parse_error(err: CatalogError) -> ParseError {
     match err {
         CatalogError::TableAlreadyExists(name) => ParseError::TableAlreadyExists(name),

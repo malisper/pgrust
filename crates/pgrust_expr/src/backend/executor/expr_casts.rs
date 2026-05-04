@@ -5257,10 +5257,16 @@ pub fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Ok(Value::Int32(if v { 1 } else { 0 })),
             SqlType {
+                kind: SqlTypeKind::Int2,
+                ..
+            } => Ok(Value::Int16(if v { 1 } else { 0 })),
+            SqlType {
+                kind: SqlTypeKind::Int8,
+                ..
+            } => Ok(Value::Int64(if v { 1 } else { 0 })),
+            SqlType {
                 kind:
-                    SqlTypeKind::Int2
-                    | SqlTypeKind::Int8
-                    | SqlTypeKind::Oid
+                    SqlTypeKind::Oid
                     | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType

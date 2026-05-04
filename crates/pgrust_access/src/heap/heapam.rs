@@ -48,6 +48,13 @@ pub enum HeapModifyResult {
     Updated { new_ctid: ItemPointerData },
 }
 
+fn heap_error_from_access_wait(err: crate::AccessError) -> HeapError {
+    match err {
+        crate::AccessError::Interrupted(reason) => HeapError::Interrupted(reason),
+        other => HeapError::Mvcc(MvccError::Io(other.to_string())),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeapScan {
     rel: RelFileLocator,
@@ -913,7 +920,7 @@ pub fn heap_delete_with_waiter_with_wal_policy(
                 if let Some(waiter) = waiter {
                     waiter
                         .wait_for_transaction(xmax)
-                        .map_err(|err| HeapError::Mvcc(MvccError::Io(err.to_string())))?;
+                        .map_err(heap_error_from_access_wait)?;
                     continue;
                 }
                 return Err(HeapError::TupleAlreadyModified(tid));
@@ -1214,7 +1221,7 @@ pub fn heap_update_with_waiter_with_snapshot(
                 if let Some(waiter) = waiter {
                     waiter
                         .wait_for_transaction(xwait)
-                        .map_err(|err| HeapError::Mvcc(MvccError::Io(err.to_string())))?;
+                        .map_err(heap_error_from_access_wait)?;
                     continue;
                 }
                 return Err(HeapError::TupleAlreadyModified(tid));
