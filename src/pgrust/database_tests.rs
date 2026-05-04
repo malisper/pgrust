@@ -26108,6 +26108,49 @@ fn create_type_base_completes_shell_and_applies_type_default() {
 }
 
 #[test]
+fn drop_base_type_cascade_drops_support_functions_without_catalog_error() {
+    let base = temp_dir("base_type_drop_cascade");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type base_type").unwrap();
+    db.execute(
+        1,
+        "create function base_fn_in(cstring) returns base_type as 'boolin' language internal immutable strict",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function base_fn_out(base_type) returns cstring as 'boolout' language internal immutable strict",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create type base_type(input = base_fn_in, output = base_fn_out)",
+    )
+    .unwrap();
+
+    clear_backend_notices();
+    match db.execute(1, "drop type base_type cascade") {
+        Ok(StatementResult::AffectedRows(1)) => {}
+        other => panic!("expected base type cascade success, got {other:?}"),
+    }
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message, "drop cascades to 2 other objects");
+    assert_eq!(
+        notices[0].detail.as_deref(),
+        Some(
+            "drop cascades to function base_fn_in(cstring)\ndrop cascades to function base_fn_out(base_type)"
+        )
+    );
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    assert!(catalog.type_by_name("base_type").is_none());
+    assert!(catalog.proc_rows_by_name("base_fn_in").is_empty());
+    assert!(catalog.proc_rows_by_name("base_fn_out").is_empty());
+}
+
+#[test]
 fn pg_describe_object_formats_operator_dependencies() {
     let base = temp_dir("pg_describe_object_operator_deps");
     let db = Database::open(&base, 16).unwrap();
