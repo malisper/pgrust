@@ -10966,6 +10966,9 @@ fn btree_index_scan_key_for_qual(
         super::super::IndexStrategyLookup::RegexPrefix { exact: true } => {
             Some(qual.index_expr.clone())
         }
+        _ if matches!(strip_casts(&qual.index_expr), Expr::ScalarArrayOp(_)) => {
+            Some(qual.index_expr.clone())
+        }
         _ if scalar_array_null_display_expr(&qual.expr) => Some(qual.expr.clone()),
         _ => row_prefix_index_expr(index, &qual.index_expr, strategy),
     };
@@ -10996,38 +10999,37 @@ fn row_prefix_scan_key(
     if left_fields.len() != right_fields.len() {
         return None;
     }
-    let mut descriptor = right_desc.clone();
-    let mut values = Vec::with_capacity(right_fields.len());
-    let mut prefix_len = 0usize;
-    for (idx, ((_, left_expr), (_, right_expr))) in
-        left_fields.iter().zip(right_fields.iter()).enumerate()
-    {
-        let column = expr_column_index(left_expr)?;
-        if simple_index_column(index, idx) != Some(column) {
-            break;
-        }
-        let value = const_argument(right_expr)?;
-        if let Some(field) = descriptor.fields.get_mut(idx) {
-            field.name = format!("i{idx}");
-        }
-        values.push(value);
-        prefix_len += 1;
-        if prefix_len >= index_key_count(index) {
-            break;
-        }
-    }
+    let matched = row_index_field_matches(index, &left_fields, &right_fields)?;
+    let prefix_len = matched.len();
     if prefix_len == 0 {
         return None;
+    }
+    let mut descriptor = right_desc.clone();
+    descriptor.fields = matched
+        .iter()
+        .filter_map(|(field_idx, index_pos)| {
+            let mut field = right_desc.fields.get(*field_idx)?.clone();
+            field.name = format!("i{index_pos}");
+            Some(field)
+        })
+        .collect();
+    let mut values = Vec::with_capacity(prefix_len);
+    for (field_idx, _) in &matched {
+        let value = const_argument(&right_fields[*field_idx].1)?;
+        values.push(value);
     }
     let strategy = row_prefix_effective_strategy(strategy, prefix_len, left_fields.len())?;
     if prefix_len == 1 {
         let value = values.into_iter().next()?;
         return Some(
-            IndexScanKey::new(1, strategy, IndexScanKeyArgument::Const(value))
-                .with_display_expr(row_prefix_index_expr(index, expr, strategy)),
+            IndexScanKey::new(
+                (matched[0].1 + 1) as i16,
+                strategy,
+                IndexScanKeyArgument::Const(value),
+            )
+            .with_display_expr(row_prefix_index_expr(index, expr, strategy)),
         );
     }
-    descriptor.fields.truncate(prefix_len);
     Some(
         IndexScanKey::new(
             0,
@@ -11049,19 +11051,8 @@ fn row_prefix_index_expr(index: &BoundIndexRelation, expr: &Expr, strategy: u16)
     };
     let (left_desc, left_fields) = row_expr_parts_for_index(left)?;
     let (right_desc, right_fields) = row_expr_parts_for_index(right)?;
-    let mut prefix_len = 0usize;
-    for (idx, ((_, left_expr), (_, right_expr))) in
-        left_fields.iter().zip(&right_fields).enumerate()
-    {
-        let column = expr_column_index(left_expr)?;
-        if simple_index_column(index, idx) != Some(column) || const_argument(right_expr).is_none() {
-            break;
-        }
-        prefix_len += 1;
-        if prefix_len >= index_key_count(index) {
-            break;
-        }
-    }
+    let matched = row_index_field_matches(index, &left_fields, &right_fields)?;
+    let prefix_len = matched.len();
     if prefix_len == 0 {
         return None;
     }
@@ -11069,27 +11060,43 @@ fn row_prefix_index_expr(index: &BoundIndexRelation, expr: &Expr, strategy: u16)
         row_prefix_effective_strategy(strategy, prefix_len, left_fields.len())?;
     let effective_kind = btree_strategy_expr_kind(effective_strategy)?;
     if prefix_len == 1 {
+        let field_idx = matched[0].0;
         return Some(Expr::op(
             effective_kind,
             SqlType::new(SqlTypeKind::Bool),
-            vec![left_fields[0].1.clone(), right_fields[0].1.clone()],
+            vec![
+                left_fields[field_idx].1.clone(),
+                right_fields[field_idx].1.clone(),
+            ],
         ));
     }
     let mut left_desc = left_desc;
     let mut right_desc = right_desc;
-    left_desc.fields.truncate(prefix_len);
-    right_desc.fields.truncate(prefix_len);
+    left_desc.fields = matched
+        .iter()
+        .filter_map(|(field_idx, _)| left_desc.fields.get(*field_idx).cloned())
+        .collect();
+    right_desc.fields = matched
+        .iter()
+        .filter_map(|(field_idx, _)| right_desc.fields.get(*field_idx).cloned())
+        .collect();
     Some(Expr::op(
         effective_kind,
         SqlType::new(SqlTypeKind::Bool),
         vec![
             Expr::Row {
                 descriptor: left_desc,
-                fields: left_fields.into_iter().take(prefix_len).collect(),
+                fields: matched
+                    .iter()
+                    .map(|(field_idx, _)| left_fields[*field_idx].clone())
+                    .collect(),
             },
             Expr::Row {
                 descriptor: right_desc,
-                fields: right_fields.into_iter().take(prefix_len).collect(),
+                fields: matched
+                    .iter()
+                    .map(|(field_idx, _)| right_fields[*field_idx].clone())
+                    .collect(),
             },
         ],
     ))
@@ -11111,18 +11118,42 @@ fn row_prefix_qual_is_fully_covered(index: &BoundIndexRelation, expr: &Expr) -> 
     if left_fields.is_empty() || left_fields.len() != right_fields.len() {
         return false;
     }
-    for (idx, ((_, left_expr), (_, right_expr))) in
-        left_fields.iter().zip(&right_fields).enumerate()
+    row_index_field_matches(index, &left_fields, &right_fields)
+        .is_some_and(|matched| matched.len() == left_fields.len())
+}
+
+fn row_index_field_matches(
+    index: &BoundIndexRelation,
+    left_fields: &[(String, Expr)],
+    right_fields: &[(String, Expr)],
+) -> Option<Vec<(usize, usize)>> {
+    if left_fields.is_empty() || left_fields.len() != right_fields.len() {
+        return None;
+    }
+    let mut used_index_positions = Vec::new();
+    let mut matched = Vec::new();
+    for (field_idx, ((_, left_expr), (_, right_expr))) in
+        left_fields.iter().zip(right_fields).enumerate()
     {
-        if idx >= index_key_count(index)
-            || expr_column_index(left_expr)
-                .is_none_or(|column| simple_index_column(index, idx) != Some(column))
-            || const_argument(right_expr).is_none()
-        {
-            return false;
+        if const_argument(right_expr).is_none() {
+            break;
+        }
+        let Some(column) = expr_column_index(left_expr) else {
+            break;
+        };
+        let Some(index_pos) = (0..index_key_count(index)).find(|index_pos| {
+            !used_index_positions.contains(index_pos)
+                && simple_index_column(index, *index_pos) == Some(column)
+        }) else {
+            break;
+        };
+        used_index_positions.push(index_pos);
+        matched.push((field_idx, index_pos));
+        if matched.len() >= index_key_count(index) {
+            break;
         }
     }
-    true
+    (!matched.is_empty()).then_some(matched)
 }
 
 fn row_expr_parts_for_index(expr: &Expr) -> Option<(RecordDescriptor, Vec<(String, Expr)>)> {

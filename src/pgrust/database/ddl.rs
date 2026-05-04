@@ -234,7 +234,7 @@ pub(super) fn lookup_analyzable_relation_for_ddl(
     }
 }
 
-fn auth_catalog_for_ddl(
+pub(super) fn auth_catalog_for_ddl(
     db: &Database,
     client_id: ClientId,
 ) -> Result<crate::pgrust::auth::AuthCatalog, ExecError> {
@@ -291,7 +291,7 @@ fn membership_rows_for_member_for_ddl(
     .collect())
 }
 
-fn has_effective_membership_for_ddl(
+pub(super) fn has_effective_membership_for_ddl(
     db: &Database,
     client_id: ClientId,
     target_oid: u32,
@@ -352,6 +352,23 @@ pub(super) fn ensure_relation_owner(
     };
     Err(ExecError::DetailedError {
         message: format!("must be owner of {} {}", owner_object_kind, display_name),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
+pub(super) fn ensure_type_owner(
+    db: &Database,
+    client_id: ClientId,
+    owner_oid: u32,
+    display_name: &str,
+) -> Result<(), ExecError> {
+    if has_effective_membership_for_ddl(db, client_id, owner_oid)? {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be owner of type {display_name}"),
         detail: None,
         hint: None,
         sqlstate: "42501",

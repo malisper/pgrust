@@ -1,11 +1,20 @@
 use pgrust_catalog_data::{
-    BRIN_AM_OID, BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID, BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID,
-    BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID, BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID,
-    BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID, BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
-    BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID, BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID,
-    BRIN_OID_MINMAX_MULTI_FAMILY_OID, BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID,
-    BRIN_TID_MINMAX_MULTI_FAMILY_OID, BRIN_TIME_MINMAX_MULTI_FAMILY_OID,
-    BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID, BRIN_UUID_MINMAX_MULTI_FAMILY_OID, PgOpclassRow,
+    BRIN_AM_OID, BRIN_BPCHAR_BLOOM_FAMILY_OID, BRIN_BYTEA_BLOOM_FAMILY_OID,
+    BRIN_CHAR_BLOOM_FAMILY_OID, BRIN_DATETIME_BLOOM_FAMILY_OID,
+    BRIN_DATETIME_MINMAX_MULTI_FAMILY_OID, BRIN_FLOAT_BLOOM_FAMILY_OID,
+    BRIN_FLOAT_MINMAX_MULTI_FAMILY_OID, BRIN_INTEGER_BLOOM_FAMILY_OID,
+    BRIN_INTEGER_MINMAX_MULTI_FAMILY_OID, BRIN_INTERVAL_BLOOM_FAMILY_OID,
+    BRIN_INTERVAL_MINMAX_MULTI_FAMILY_OID, BRIN_MACADDR_BLOOM_FAMILY_OID,
+    BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID, BRIN_MACADDR8_BLOOM_FAMILY_OID,
+    BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID, BRIN_NAME_BLOOM_FAMILY_OID,
+    BRIN_NETWORK_BLOOM_FAMILY_OID, BRIN_NETWORK_MINMAX_MULTI_FAMILY_OID,
+    BRIN_NUMERIC_BLOOM_FAMILY_OID, BRIN_NUMERIC_MINMAX_MULTI_FAMILY_OID, BRIN_OID_BLOOM_FAMILY_OID,
+    BRIN_OID_MINMAX_MULTI_FAMILY_OID, BRIN_PG_LSN_BLOOM_FAMILY_OID,
+    BRIN_PG_LSN_MINMAX_MULTI_FAMILY_OID, BRIN_TEXT_BLOOM_FAMILY_OID, BRIN_TID_BLOOM_FAMILY_OID,
+    BRIN_TID_MINMAX_MULTI_FAMILY_OID, BRIN_TIME_BLOOM_FAMILY_OID,
+    BRIN_TIME_MINMAX_MULTI_FAMILY_OID, BRIN_TIMETZ_BLOOM_FAMILY_OID,
+    BRIN_TIMETZ_MINMAX_MULTI_FAMILY_OID, BRIN_UUID_BLOOM_FAMILY_OID,
+    BRIN_UUID_MINMAX_MULTI_FAMILY_OID, PgOpclassRow,
 };
 use pgrust_nodes::access::{
     BrinOptions, BtreeOptions, GinOptions, GistBufferingMode, GistOptions, HashOptions,
@@ -226,6 +235,107 @@ pub fn validate_brin_minmax_multi_opclass_options(
     Ok(resolved)
 }
 
+pub fn is_brin_bloom_opclass(opclass: &PgOpclassRow) -> bool {
+    matches!(
+        opclass.opcfamily,
+        BRIN_BYTEA_BLOOM_FAMILY_OID
+            | BRIN_CHAR_BLOOM_FAMILY_OID
+            | BRIN_NAME_BLOOM_FAMILY_OID
+            | BRIN_INTEGER_BLOOM_FAMILY_OID
+            | BRIN_TEXT_BLOOM_FAMILY_OID
+            | BRIN_OID_BLOOM_FAMILY_OID
+            | BRIN_TID_BLOOM_FAMILY_OID
+            | BRIN_FLOAT_BLOOM_FAMILY_OID
+            | BRIN_MACADDR_BLOOM_FAMILY_OID
+            | BRIN_MACADDR8_BLOOM_FAMILY_OID
+            | BRIN_NETWORK_BLOOM_FAMILY_OID
+            | BRIN_BPCHAR_BLOOM_FAMILY_OID
+            | BRIN_TIME_BLOOM_FAMILY_OID
+            | BRIN_DATETIME_BLOOM_FAMILY_OID
+            | BRIN_INTERVAL_BLOOM_FAMILY_OID
+            | BRIN_TIMETZ_BLOOM_FAMILY_OID
+            | BRIN_NUMERIC_BLOOM_FAMILY_OID
+            | BRIN_UUID_BLOOM_FAMILY_OID
+            | BRIN_PG_LSN_BLOOM_FAMILY_OID
+    )
+}
+
+pub fn validate_brin_bloom_opclass_options(
+    options: &[RelOption],
+) -> Result<Vec<(String, String)>, RelOptionError> {
+    let mut seen_n_distinct_per_range = false;
+    let mut seen_false_positive_rate = false;
+    let mut resolved = Vec::with_capacity(options.len());
+    for option in options {
+        if option.name.eq_ignore_ascii_case("n_distinct_per_range") {
+            if seen_n_distinct_per_range {
+                return Err(detailed_reloption_error(
+                    "parameter \"n_distinct_per_range\" specified more than once",
+                    None,
+                    "22023",
+                ));
+            }
+            seen_n_distinct_per_range = true;
+            let value = option.value.parse::<f64>().map_err(|_| {
+                detailed_reloption_error(
+                    format!(
+                        "invalid value for option \"n_distinct_per_range\": \"{}\"",
+                        option.value
+                    ),
+                    None,
+                    "22023",
+                )
+            })?;
+            if !(-1.0..=2_147_483_647.0).contains(&value) {
+                return Err(reloption_bounds_error(
+                    "n_distinct_per_range",
+                    &option.value,
+                    "-1.000000",
+                    "2147483647.000000",
+                ));
+            }
+            resolved.push((option.name.clone(), option.value.clone()));
+            continue;
+        }
+        if option.name.eq_ignore_ascii_case("false_positive_rate") {
+            if seen_false_positive_rate {
+                return Err(detailed_reloption_error(
+                    "parameter \"false_positive_rate\" specified more than once",
+                    None,
+                    "22023",
+                ));
+            }
+            seen_false_positive_rate = true;
+            let value = option.value.parse::<f64>().map_err(|_| {
+                detailed_reloption_error(
+                    format!(
+                        "invalid value for option \"false_positive_rate\": \"{}\"",
+                        option.value
+                    ),
+                    None,
+                    "22023",
+                )
+            })?;
+            if !(0.0001..=0.25).contains(&value) {
+                return Err(reloption_bounds_error(
+                    "false_positive_rate",
+                    &option.value,
+                    "0.000100",
+                    "0.250000",
+                ));
+            }
+            resolved.push((option.name.clone(), option.value.clone()));
+            continue;
+        }
+        return Err(detailed_reloption_error(
+            format!("unrecognized parameter \"{}\"", option.name),
+            None,
+            "22023",
+        ));
+    }
+    Ok(resolved)
+}
+
 pub fn resolve_index_opclass_options(
     access_method_oid: u32,
     opclass: &PgOpclassRow,
@@ -236,6 +346,9 @@ pub fn resolve_index_opclass_options(
     }
     if access_method_oid == BRIN_AM_OID && is_brin_minmax_multi_opclass(opclass) {
         return validate_brin_minmax_multi_opclass_options(&column.opclass_options);
+    }
+    if access_method_oid == BRIN_AM_OID && is_brin_bloom_opclass(opclass) {
+        return validate_brin_bloom_opclass_options(&column.opclass_options);
     }
     Ok(Vec::new())
 }

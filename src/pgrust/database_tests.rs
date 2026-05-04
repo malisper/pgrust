@@ -23298,6 +23298,42 @@ fn comment_on_missing_constraint_reports_table_name() {
 }
 
 #[test]
+fn comment_on_domain_constraint_requires_type_owner() {
+    let base = temp_dir("comment_on_domain_constraint_owner");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create role domain_constraint_owner")
+        .unwrap();
+    db.execute(1, "create role domain_constraint_noaccess")
+        .unwrap();
+    db.execute(1, "set session authorization domain_constraint_owner")
+        .unwrap();
+    db.execute(
+        1,
+        "create domain domain_constraint_dom as int4 constraint the_constraint check (value > 0)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "comment on constraint the_constraint on domain domain_constraint_dom is 'owned'",
+    )
+    .unwrap();
+
+    db.execute(1, "reset session authorization").unwrap();
+    db.execute(1, "set session authorization domain_constraint_noaccess")
+        .unwrap();
+    match db.execute(
+        1,
+        "comment on constraint the_constraint on domain domain_constraint_dom is 'nope'",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "must be owner of type domain_constraint_dom" && sqlstate == "42501" => {}
+        other => panic!("expected domain constraint owner error, got {other:?}"),
+    }
+}
+
+#[test]
 fn comment_on_trigger_upserts_and_clears_pg_description() {
     let base = temp_dir("comment_on_trigger");
     let db = Database::open(&base, 16).unwrap();
@@ -25869,6 +25905,24 @@ fn regoperator_literal_cast_resolves_operator_signature() {
 }
 
 #[test]
+fn regoperator_type_constructor_reports_original_signature_on_missing_operator() {
+    let base = temp_dir("regoperator_missing_signature");
+    let db = Database::open(&base, 16).unwrap();
+
+    let err = db
+        .execute(1, "select regoperator('++(int4,int4)')")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            ref message,
+            sqlstate: "42883",
+            ..
+        } if message == "operator does not exist: ++(int4,int4)"
+    ));
+}
+
+#[test]
 fn case_and_nullif_preserve_array_domain_function_results() {
     let base = temp_dir("case_array_domain_function_result");
     let db = Database::open(&base, 16).unwrap();
@@ -26910,6 +26964,32 @@ fn alter_table_add_column_reads_old_rows_with_null_or_default() {
             "select d is not null from random_defaults where id = 3"
         ),
         vec![vec![Value::Bool(true)]]
+    );
+
+    db.execute(1, "create table invalid_nn_rewrite (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "insert into invalid_nn_rewrite values (null, 1), (2, 2)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table invalid_nn_rewrite add constraint nn not null a not valid",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table invalid_nn_rewrite add column d float8 default random()",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a is null, d is not null from invalid_nn_rewrite order by b"
+        ),
+        vec![
+            vec![Value::Bool(true), Value::Bool(true)],
+            vec![Value::Bool(false), Value::Bool(true)],
+        ]
     );
 }
 
@@ -44103,6 +44183,25 @@ fn truncate_all_foreign_key_relations_together() {
     assert_eq!(
         session_query_rows(&mut session, &db, "select count(*) from children")[0][0],
         Value::Int64(0)
+    );
+}
+
+#[test]
+fn truncate_temp_table_replaces_visible_storage() {
+    let base = temp_dir("truncate_temp_table_replaces_visible_storage");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create temp table truncate_temp_rows (test text)")
+        .unwrap();
+    db.execute(1, "insert into truncate_temp_rows values ('old')")
+        .unwrap();
+    db.execute(1, "truncate truncate_temp_rows").unwrap();
+    db.execute(1, "insert into truncate_temp_rows values ('new')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select test from truncate_temp_rows"),
+        vec![vec![Value::Text("new".into())]]
     );
 }
 

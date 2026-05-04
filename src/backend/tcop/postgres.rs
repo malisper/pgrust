@@ -18922,6 +18922,20 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
     }
 
     #[test]
+    fn exec_error_response_preserves_regoperator_input_signature_aliases() {
+        let sql = "SELECT regoperator('++(int4,int4)');";
+        let err = ExecError::DetailedError {
+            message: "operator does not exist: ++(int4,int4)".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        };
+
+        let response = exec_error_response(sql, &err);
+        assert_eq!(response.message, "operator does not exist: ++(int4,int4)");
+    }
+
+    #[test]
     fn exec_error_position_omits_create_type_missing_subtype_diff_function() {
         let sql = "create type bogus_float8range as range (subtype=float8, subtype_diff=float4mi);";
         let err = ExecError::DetailedError {

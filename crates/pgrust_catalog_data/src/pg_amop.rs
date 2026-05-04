@@ -693,10 +693,31 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         push_brin_minmax_multi_amop_rows(&mut rows, &mut oid, &operators, family, type_oids);
     }
     // :HACK: Generic BRIN bloom runtime support is not implemented yet; these
-    // rows expose PostgreSQL-compatible catalogs for MAC address types.
+    // rows expose PostgreSQL-compatible catalogs while BRIN scans stay lossy.
     for (family, type_oid) in [
+        (BRIN_BYTEA_BLOOM_FAMILY_OID, BYTEA_TYPE_OID),
+        (BRIN_CHAR_BLOOM_FAMILY_OID, INTERNAL_CHAR_TYPE_OID),
+        (BRIN_NAME_BLOOM_FAMILY_OID, NAME_TYPE_OID),
+        (BRIN_INTEGER_BLOOM_FAMILY_OID, INT2_TYPE_OID),
+        (BRIN_INTEGER_BLOOM_FAMILY_OID, INT4_TYPE_OID),
+        (BRIN_INTEGER_BLOOM_FAMILY_OID, INT8_TYPE_OID),
+        (BRIN_NUMERIC_BLOOM_FAMILY_OID, NUMERIC_TYPE_OID),
+        (BRIN_OID_BLOOM_FAMILY_OID, OID_TYPE_OID),
+        (BRIN_TID_BLOOM_FAMILY_OID, TID_TYPE_OID),
+        (BRIN_FLOAT_BLOOM_FAMILY_OID, FLOAT4_TYPE_OID),
+        (BRIN_FLOAT_BLOOM_FAMILY_OID, FLOAT8_TYPE_OID),
         (BRIN_MACADDR_BLOOM_FAMILY_OID, MACADDR_TYPE_OID),
         (BRIN_MACADDR8_BLOOM_FAMILY_OID, MACADDR8_TYPE_OID),
+        (BRIN_NETWORK_BLOOM_FAMILY_OID, INET_TYPE_OID),
+        (BRIN_BPCHAR_BLOOM_FAMILY_OID, BPCHAR_TYPE_OID),
+        (BRIN_TIME_BLOOM_FAMILY_OID, TIME_TYPE_OID),
+        (BRIN_DATETIME_BLOOM_FAMILY_OID, DATE_TYPE_OID),
+        (BRIN_DATETIME_BLOOM_FAMILY_OID, TIMESTAMP_TYPE_OID),
+        (BRIN_DATETIME_BLOOM_FAMILY_OID, TIMESTAMPTZ_TYPE_OID),
+        (BRIN_INTERVAL_BLOOM_FAMILY_OID, INTERVAL_TYPE_OID),
+        (BRIN_TIMETZ_BLOOM_FAMILY_OID, TIMETZ_TYPE_OID),
+        (BRIN_UUID_BLOOM_FAMILY_OID, UUID_TYPE_OID),
+        (BRIN_PG_LSN_BLOOM_FAMILY_OID, PG_LSN_TYPE_OID),
     ] {
         rows.push(PgAmopRow {
             oid,

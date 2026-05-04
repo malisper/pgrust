@@ -320,6 +320,18 @@ fn warn_grant_privileges(object_name: &str, requested_privileges: &str, granted_
     }
 }
 
+fn warn_revoke_privileges(object_name: &str, requested_privileges: &str, revoked_privileges: &str) {
+    if revoked_privileges.is_empty() {
+        push_warning(format!(
+            "no privileges could be revoked for \"{object_name}\""
+        ));
+    } else if revoked_privileges.chars().count() < requested_privileges.chars().count() {
+        push_warning(format!(
+            "not all privileges could be revoked for \"{object_name}\""
+        ));
+    }
+}
+
 fn grant_table_acl_entry(
     acl: &mut Vec<String>,
     grantee: &str,
@@ -3292,11 +3304,10 @@ impl Database {
                 .unwrap_or_else(|| type_owner_default_acl(&owner_name));
             let effective_names = (!current_user_can_grant_as_owner)
                 .then(|| effective_acl_grantee_names(&auth, &auth_catalog));
-            let effective_privilege_chars;
             let grant_privilege_chars = if current_user_can_grant_as_owner || revoke {
-                privilege_chars
+                privilege_chars.to_string()
             } else {
-                effective_privilege_chars = grantable_acl_privilege_chars(
+                let effective_privilege_chars = grantable_acl_privilege_chars(
                     &acl,
                     effective_names.as_ref().expect("effective names"),
                     privilege_chars,
@@ -3305,7 +3316,21 @@ impl Database {
                 if effective_privilege_chars.is_empty() {
                     continue;
                 }
-                effective_privilege_chars.as_str()
+                effective_privilege_chars
+            };
+            let revoke_privilege_chars = if !revoke || current_user_can_grant_as_owner {
+                privilege_chars.to_string()
+            } else {
+                let effective_privilege_chars = grantable_acl_privilege_chars(
+                    &acl,
+                    effective_names.as_ref().expect("effective names"),
+                    privilege_chars,
+                );
+                warn_revoke_privileges(object_name, privilege_chars, &effective_privilege_chars);
+                if effective_privilege_chars.is_empty() {
+                    continue;
+                }
+                effective_privilege_chars
             };
             if revoke
                 && !current_user_can_grant_as_owner
@@ -3337,35 +3362,28 @@ impl Database {
                         })?
                 };
                 if revoke {
-                    let changed = if current_user_can_grant_as_owner {
-                        let before = acl.clone();
+                    if current_user_can_grant_as_owner {
                         revoke_acl_entry(
                             &mut acl,
                             &grantee_acl_name,
-                            privilege_chars,
+                            &revoke_privilege_chars,
                             TYPE_USAGE_PRIVILEGE_CHARS,
                         );
-                        acl != before
                     } else {
                         revoke_acl_entry_by_grantor(
                             &mut acl,
                             &grantee_acl_name,
                             &grantor_name,
-                            privilege_chars,
+                            &revoke_privilege_chars,
                             TYPE_USAGE_PRIVILEGE_CHARS,
-                        )
-                    };
-                    if !changed {
-                        push_warning(format!(
-                            "no privileges could be revoked for \"{object_name}\""
-                        ));
+                        );
                     }
                 } else {
                     grant_table_acl_entry(
                         &mut acl,
                         &grantee_acl_name,
                         &grantor_name,
-                        grant_privilege_chars,
+                        &grant_privilege_chars,
                         TYPE_USAGE_PRIVILEGE_CHARS,
                         with_grant_option,
                     );
@@ -6004,6 +6022,38 @@ mod tests {
         session
             .execute(&db, "create table type_acl_allowed (c type_acl_composite)")
             .unwrap();
+    }
+
+    #[test]
+    fn owner_revoke_type_usage_from_ungranted_role_does_not_warn() {
+        let base = temp_dir("type_revoke_missing_role_acl");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role type_acl_user").unwrap();
+        session
+            .execute(&db, "create type type_acl_composite as (a int)")
+            .unwrap();
+
+        crate::backend::utils::misc::notices::clear_notices();
+        session
+            .execute(
+                &db,
+                "revoke usage on type type_acl_composite from type_acl_user",
+            )
+            .unwrap();
+        assert!(crate::backend::utils::misc::notices::take_notices().is_empty());
+
+        session
+            .execute(&db, "revoke usage on type type_acl_composite from public")
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select has_type_privilege('type_acl_user', 'type_acl_composite', 'USAGE')"
+            ),
+            vec![vec![Value::Bool(false)]]
+        );
     }
 
     #[test]

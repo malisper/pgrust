@@ -33,6 +33,7 @@ use crate::backend::parser::{
 };
 use crate::backend::storage::smgr::{ForkNumber, segment_path};
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
+use crate::include::access::htup::HeapTuple;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL,
     PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID, relkind_has_storage,
@@ -52,7 +53,7 @@ use crate::include::nodes::primnodes::{
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::{AutovacuumRelationInput, relation_needs_vacanalyze};
 use crate::pgrust::database::ddl::{
-    dependent_view_rewrites_for_relation, lookup_analyzable_relation_for_ddl,
+    dependent_view_rewrites_for_relation, ensure_type_owner, lookup_analyzable_relation_for_ddl,
     lookup_table_or_partitioned_table_for_alter_table,
 };
 use crate::{ClientId, RelFileLocator};
@@ -681,7 +682,7 @@ fn rewrite_heap_rows_for_added_serial_column(
             &Value::Int64(next),
             new_column.sql_type,
         )?);
-        let replacement = tuple_from_values(new_desc, &values)?;
+        let replacement = rewrite_tuple_from_values(new_desc, &values)?;
         let new_tid = heap_update_with_waiter(
             &*ctx.pool,
             ctx.client_id,
@@ -897,6 +898,22 @@ fn evaluate_added_column_default_value(
     coerce_assignment_value(&value, desc.columns[column_index].sql_type)
 }
 
+fn rewrite_tuple_from_values(
+    desc: &RelationDesc,
+    values: &[Value],
+) -> Result<HeapTuple, ExecError> {
+    let mut rewrite_desc = desc.clone();
+    for column in &mut rewrite_desc.columns {
+        if column
+            .not_null_constraint_oid
+            .is_some_and(|_| !column.not_null_constraint_validated)
+        {
+            column.storage.nullable = true;
+        }
+    }
+    tuple_from_values(&rewrite_desc, values)
+}
+
 fn rewrite_heap_rows_for_added_default_column(
     relation: &crate::backend::parser::BoundRelation,
     new_desc: &RelationDesc,
@@ -928,7 +945,7 @@ fn rewrite_heap_rows_for_added_default_column(
             let value = evaluate_added_column_default_value(new_desc, column_index, ctx)?;
             values[column_index] = value;
         }
-        let replacement = tuple_from_values(new_desc, &values)?;
+        let replacement = rewrite_tuple_from_values(new_desc, &values)?;
         let new_tid = heap_update_with_waiter(
             &*ctx.pool,
             ctx.client_id,
@@ -3709,6 +3726,7 @@ impl Database {
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::UnsupportedType(domain_name.clone()))
                 })?;
+            ensure_type_owner(self, client_id, domain.owner_oid, &domain.name)?;
             let constraint_oid = domain
                 .constraints
                 .iter()

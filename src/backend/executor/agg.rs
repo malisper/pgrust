@@ -315,9 +315,9 @@ impl AccumState {
                 values: Vec::new(),
                 jsonb: false,
             },
-            (AggFunc::ArrayAgg, _) => AccumState::ArrayAgg {
+            (AggFunc::ArrayAgg | AggFunc::ArrayAggArray, _) => AccumState::ArrayAgg {
                 values: Vec::new(),
-                input_is_array: false,
+                input_is_array: matches!(func, AggFunc::ArrayAggArray),
                 inner_dims: None,
             },
             (AggFunc::JsonbAgg, _) => AccumState::JsonAgg {
@@ -611,7 +611,7 @@ impl AccumState {
                 }
                 Ok(())
             },
-            (AggFunc::ArrayAgg, _, _) => |state, arg_values| {
+            (AggFunc::ArrayAgg | AggFunc::ArrayAggArray, _, _) => |state, arg_values| {
                 if let AccumState::ArrayAgg {
                     values,
                     input_is_array,
@@ -1064,10 +1064,10 @@ impl AggregateRuntime {
         match self {
             AggregateRuntime::Builtin { func, .. } => {
                 let mut state = AccumState::new(*func, accum.distinct, accum.sql_type);
-                if matches!(func, AggFunc::ArrayAgg)
+                if matches!(func, AggFunc::ArrayAgg | AggFunc::ArrayAggArray)
                     && let AccumState::ArrayAgg { input_is_array, .. } = &mut state
                 {
-                    *input_is_array = accum
+                    *input_is_array |= accum
                         .args
                         .first()
                         .and_then(expr_sql_type_hint)
