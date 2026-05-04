@@ -51014,6 +51014,19 @@ fn pg_temp_function_drop_and_operator_create_reject_prepare() {
         ExecError::DetailedError { message, .. }
             if message == "cannot PREPARE a transaction that has operated on temporary objects"
     ));
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "create type pg_temp.twophase_type as (a int4)")
+        .unwrap();
+    let err = session
+        .execute(&db, "prepare transaction 'twophase_type'")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "cannot PREPARE a transaction that has operated on temporary objects"
+    ));
 }
 
 #[test]
@@ -51981,6 +51994,38 @@ fn temp_table_on_commit_actions_apply_at_commit() {
         .execute(&db, "select count(*) from drop_rows")
         .unwrap_err();
     assert!(matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "drop_rows"));
+}
+
+#[test]
+fn temp_on_commit_delete_rejects_foreign_key_with_different_action() {
+    let base = temp_dir("temp_on_commit_delete_fk");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temptest3(col int4 primary key) on commit delete rows",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temptest4(col int4 references temptest3)",
+        )
+        .unwrap();
+    let err = session.execute(&db, "commit").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate: "0A000",
+            ..
+        } if message == "unsupported ON COMMIT and foreign key combination"
+            && detail == "Table \"temptest4\" references \"temptest3\", but they do not have the same ON COMMIT setting."
+    ));
 }
 
 #[test]

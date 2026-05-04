@@ -94,6 +94,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_create_type_stmt_in_transaction_with_search_path(
             client_id,
             create_stmt,
@@ -101,8 +102,9 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
         result
     }
@@ -115,7 +117,14 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let mut cid = cid;
+        if create_type_stmt_schema_name(create_stmt)
+            .is_some_and(|schema| schema.eq_ignore_ascii_case("pg_temp"))
+        {
+            self.ensure_temp_namespace(client_id, xid, &mut cid, catalog_effects, temp_effects)?;
+        }
         match create_stmt {
             CreateTypeStatement::Shell(stmt) => self.execute_create_shell_type_stmt(
                 client_id,
@@ -124,6 +133,7 @@ impl Database {
                 cid,
                 configured_search_path,
                 catalog_effects,
+                temp_effects,
             ),
             CreateTypeStatement::Base(stmt) => self.execute_create_base_type_stmt(
                 client_id,
@@ -132,6 +142,7 @@ impl Database {
                 cid,
                 configured_search_path,
                 catalog_effects,
+                temp_effects,
             ),
             CreateTypeStatement::Composite(stmt) => {
                 let interrupts = self.interrupt_state(client_id);
@@ -151,6 +162,7 @@ impl Database {
                     configured_search_path,
                     &desc,
                 )?;
+                self.record_temp_namespace_touch(client_id, namespace_oid, temp_effects);
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -164,6 +176,14 @@ impl Database {
                     type_name,
                     desc,
                     namespace_oid,
+                    if self
+                        .owned_temp_namespace(client_id)
+                        .is_some_and(|namespace| namespace.oid == namespace_oid)
+                    {
+                        't'
+                    } else {
+                        'p'
+                    },
                     self.auth_state(client_id).current_user_oid(),
                     &ctx,
                 ) {
@@ -197,6 +217,7 @@ impl Database {
                 xid,
                 cid,
                 configured_search_path,
+                temp_effects,
             ),
             CreateTypeStatement::Range(stmt) => self.execute_create_range_type_stmt(
                 client_id,
@@ -204,6 +225,7 @@ impl Database {
                 xid,
                 cid,
                 configured_search_path,
+                temp_effects,
             ),
         }
     }
@@ -2708,6 +2730,16 @@ fn base_type_output_missing_error() -> ExecError {
     }
 }
 
+fn create_type_stmt_schema_name(stmt: &CreateTypeStatement) -> Option<&str> {
+    match stmt {
+        CreateTypeStatement::Shell(stmt) => stmt.schema_name.as_deref(),
+        CreateTypeStatement::Base(stmt) => stmt.schema_name.as_deref(),
+        CreateTypeStatement::Composite(stmt) => stmt.schema_name.as_deref(),
+        CreateTypeStatement::Enum(stmt) => stmt.schema_name.as_deref(),
+        CreateTypeStatement::Range(stmt) => stmt.schema_name.as_deref(),
+    }
+}
+
 impl Database {
     pub(crate) fn create_shell_type_for_name_in_transaction(
         &self,
@@ -2783,12 +2815,13 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let type_name = match &stmt.schema_name {
             Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
             None => stmt.type_name.clone(),
         };
-        self.create_shell_type_for_name_in_transaction(
+        let (type_oid, _) = self.create_shell_type_for_name_in_transaction(
             client_id,
             &type_name,
             xid,
@@ -2796,6 +2829,10 @@ impl Database {
             configured_search_path,
             catalog_effects,
         )?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        if let Some(row) = catalog.type_by_oid(type_oid) {
+            self.record_temp_namespace_touch(client_id, row.typnamespace, temp_effects);
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -2807,6 +2844,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let lookup_name = match &stmt.schema_name {
             Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
@@ -2827,6 +2865,7 @@ impl Database {
         if !matches!(shell_row.sql_type.kind, SqlTypeKind::Shell) {
             return Err(type_already_exists_error(&base_type_display_name(stmt)));
         }
+        self.record_temp_namespace_touch(client_id, shell_row.typnamespace, temp_effects);
 
         let spec = resolve_base_type_spec(stmt, shell_row.oid, &catalog)?;
         let ctx = CatalogWriteContext {
@@ -2880,6 +2919,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         if stmt.labels.is_empty() {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -2893,6 +2933,7 @@ impl Database {
             stmt,
             configured_search_path,
         )?;
+        self.record_temp_namespace_touch(client_id, namespace_oid, temp_effects);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         if catalog.type_rows().into_iter().any(|row| {
             row.typelem == 0
@@ -3219,6 +3260,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let (normalized, object_name, namespace_oid) = self.normalize_range_type_name_for_create(
             client_id,
@@ -3226,6 +3268,7 @@ impl Database {
             stmt,
             configured_search_path,
         )?;
+        self.record_temp_namespace_touch(client_id, namespace_oid, temp_effects);
         let search_path = self.effective_search_path(client_id, configured_search_path);
         let base_type_rows = self
             .backend_catcache(client_id, Some((xid, cid)))

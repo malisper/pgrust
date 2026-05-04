@@ -314,10 +314,16 @@ impl Database {
                 )));
             }
             if is_temp_schema_name(&normalized_schema) {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "permanent type",
-                    actual: "temporary type".into(),
-                });
+                let Some(namespace) = temp_namespace.as_ref() else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "active temporary namespace",
+                        actual: "temporary type".into(),
+                    });
+                };
+                return Ok((
+                    format!("{}.{}", namespace.name, lowered_name),
+                    namespace.oid,
+                ));
             }
             let namespace = self
                 .visible_namespace_by_name(client_id, txn_ctx, &normalized_schema)

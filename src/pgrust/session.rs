@@ -6933,6 +6933,16 @@ impl Session {
         }
     }
 
+    fn validate_temp_on_commit_for_active_txn(&self, db: &Database) -> Result<(), ExecError> {
+        let Some(txn) = self.active_txn.as_ref() else {
+            return Ok(());
+        };
+        db.validate_temp_on_commit(
+            self.client_id,
+            txn.xid.map(|xid| (xid, txn.next_command_id)),
+        )
+    }
+
     fn reject_drop_constraint_with_pending_trigger_events(
         &self,
         db: &Database,
@@ -10576,6 +10586,7 @@ impl Session {
                 }
                 let result = self
                     .validate_constraints_for_active_txn(db, false)
+                    .and_then(|_| self.validate_temp_on_commit_for_active_txn(db))
                     .map(|_| StatementResult::AffectedRows(0));
                 let txn = self.active_txn.take().unwrap();
                 let chained_options = options.chain.then(|| txn.chained_options());
@@ -18935,6 +18946,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
                     )
                 }
                 Statement::AlterType(ref alter_stmt) => {
