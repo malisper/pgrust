@@ -19,6 +19,7 @@ pub mod rolecmds;
 pub mod row_security;
 pub mod schemacmds;
 pub mod tablecmds;
+pub mod tablecmds_assignment;
 pub mod tablespace;
 pub mod trigger;
 pub mod truncate;

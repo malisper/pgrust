@@ -61,6 +61,9 @@ use crate::pl::plpgsql::TriggerOperation;
 use pgrust_commands::explain::{
     explain_lines_are_single_json_value, format_structured_explain_output,
 };
+use pgrust_commands::tablecmds_assignment::{
+    AssignmentError, AssignmentRuntime, ResolvedAssignmentIndirection, ResolvedAssignmentSubscript,
+};
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
@@ -109,11 +112,8 @@ use crate::include::catalog::{
     PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID,
     PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
     PG_USER_MAPPING_RELATION_OID, PG_WRITE_ALL_DATA_OID, PgAmRow, SPGIST_AM_OID,
-    builtin_range_name_for_sql_type,
 };
-use crate::include::nodes::datum::{
-    ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
-};
+use crate::include::nodes::datum::{RecordDescriptor, RecordValue, Value};
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::parsenodes::{
@@ -12329,115 +12329,7 @@ fn rewrite_subscripted_assignment_error(
 }
 
 fn sql_type_display_name(ty: SqlType) -> String {
-    if ty.is_range() {
-        let base = builtin_range_name_for_sql_type(ty).unwrap_or("range");
-        return if ty.is_array {
-            format!("{base}[]")
-        } else {
-            base.to_string()
-        };
-    }
-    if ty.is_multirange() {
-        let base = crate::include::catalog::builtin_multirange_name_for_sql_type(ty)
-            .unwrap_or("multirange");
-        return if ty.is_array {
-            format!("{base}[]")
-        } else {
-            base.to_string()
-        };
-    }
-    let base = match ty.kind {
-        SqlTypeKind::AnyElement => "anyelement",
-        SqlTypeKind::AnyArray => "anyarray",
-        SqlTypeKind::AnyRange => "anyrange",
-        SqlTypeKind::AnyMultirange => "anymultirange",
-        SqlTypeKind::AnyCompatible => "anycompatible",
-        SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
-        SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
-        SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
-        SqlTypeKind::AnyEnum => "anyenum",
-        SqlTypeKind::Enum => return ty.type_oid.to_string(),
-        SqlTypeKind::Record | SqlTypeKind::Composite => "record",
-        SqlTypeKind::Shell => "shell",
-        SqlTypeKind::Internal => "internal",
-        SqlTypeKind::Cstring => "cstring",
-        SqlTypeKind::Void => "void",
-        SqlTypeKind::Trigger => "trigger",
-        SqlTypeKind::EventTrigger => "event_trigger",
-        SqlTypeKind::FdwHandler => "fdw_handler",
-        SqlTypeKind::Int2 => "smallint",
-        SqlTypeKind::Int2Vector => "int2vector",
-        SqlTypeKind::Int4 => "integer",
-        SqlTypeKind::Int8 => "bigint",
-        SqlTypeKind::Name => "name",
-        SqlTypeKind::Oid => "oid",
-        SqlTypeKind::RegProc => "regproc",
-        SqlTypeKind::RegClass => "regclass",
-        SqlTypeKind::RegType => "regtype",
-        SqlTypeKind::RegRole => "regrole",
-        SqlTypeKind::RegNamespace => "regnamespace",
-        SqlTypeKind::RegOper => "regoper",
-        SqlTypeKind::RegOperator => "regoperator",
-        SqlTypeKind::RegProcedure => "regprocedure",
-        SqlTypeKind::RegCollation => "regcollation",
-        SqlTypeKind::Tid => "tid",
-        SqlTypeKind::Xid => "xid",
-        SqlTypeKind::OidVector => "oidvector",
-        SqlTypeKind::Bit => "bit",
-        SqlTypeKind::VarBit => "bit varying",
-        SqlTypeKind::Bytea => "bytea",
-        SqlTypeKind::Uuid => "uuid",
-        SqlTypeKind::Inet => "inet",
-        SqlTypeKind::Cidr => "cidr",
-        SqlTypeKind::MacAddr => "macaddr",
-        SqlTypeKind::MacAddr8 => "macaddr8",
-        SqlTypeKind::Float4 => "real",
-        SqlTypeKind::Float8 => "double precision",
-        SqlTypeKind::Money => "money",
-        SqlTypeKind::PgLsn => "pg_lsn",
-        SqlTypeKind::Numeric => "numeric",
-        SqlTypeKind::Json => "json",
-        SqlTypeKind::Jsonb => "jsonb",
-        SqlTypeKind::JsonPath => "jsonpath",
-        SqlTypeKind::Xml => "xml",
-        SqlTypeKind::Date => "date",
-        SqlTypeKind::Time => "time without time zone",
-        SqlTypeKind::TimeTz => "time with time zone",
-        SqlTypeKind::Interval => "interval",
-        SqlTypeKind::TsVector => "tsvector",
-        SqlTypeKind::TsQuery => "tsquery",
-        SqlTypeKind::RegConfig => "regconfig",
-        SqlTypeKind::RegDictionary => "regdictionary",
-        SqlTypeKind::Text => "text",
-        SqlTypeKind::Bool => "boolean",
-        SqlTypeKind::Point => "point",
-        SqlTypeKind::Lseg => "lseg",
-        SqlTypeKind::Path => "path",
-        SqlTypeKind::Box => "box",
-        SqlTypeKind::Polygon => "polygon",
-        SqlTypeKind::Line => "line",
-        SqlTypeKind::Circle => "circle",
-        SqlTypeKind::Timestamp => "timestamp without time zone",
-        SqlTypeKind::TimestampTz => "timestamp with time zone",
-        SqlTypeKind::PgNodeTree => "pg_node_tree",
-        SqlTypeKind::InternalChar => "\"char\"",
-        SqlTypeKind::Char => "character",
-        SqlTypeKind::Varchar => "character varying",
-        SqlTypeKind::Range
-        | SqlTypeKind::Int4Range
-        | SqlTypeKind::Int8Range
-        | SqlTypeKind::NumericRange
-        | SqlTypeKind::DateRange
-        | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
-        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
-    };
-
-    if ty.is_array {
-        format!("{base}[]")
-    } else {
-        base.to_string()
-    }
+    pgrust_commands::tablecmds_assignment::sql_type_display_name(ty)
 }
 
 fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarget) -> SqlType {
@@ -12474,37 +12366,31 @@ fn assignment_navigation_sql_type(sql_type: SqlType, ctx: &ExecutorContext) -> S
     sql_type
 }
 
-#[derive(Clone)]
-struct ResolvedAssignmentSubscript {
-    is_slice: bool,
-    lower: Option<Value>,
-    upper: Option<Value>,
+struct RootAssignmentRuntime<'a> {
+    ctx: &'a mut ExecutorContext,
 }
 
-#[derive(Clone)]
-enum ResolvedAssignmentIndirection {
-    Subscript(ResolvedAssignmentSubscript),
-    Field(String),
-}
+impl AssignmentRuntime for RootAssignmentRuntime<'_> {
+    fn assignment_navigation_sql_type(&self, sql_type: SqlType) -> SqlType {
+        assignment_navigation_sql_type(sql_type, self.ctx)
+    }
 
-fn leading_assignment_subscripts(
-    indirection: &[ResolvedAssignmentIndirection],
-) -> (
-    Vec<ResolvedAssignmentSubscript>,
-    &[ResolvedAssignmentIndirection],
-) {
-    let split = indirection
-        .iter()
-        .position(|step| matches!(step, ResolvedAssignmentIndirection::Field(_)))
-        .unwrap_or(indirection.len());
-    let subscripts = indirection[..split]
-        .iter()
-        .filter_map(|step| match step {
-            ResolvedAssignmentIndirection::Subscript(subscript) => Some(subscript.clone()),
-            ResolvedAssignmentIndirection::Field(_) => None,
-        })
-        .collect();
-    (subscripts, &indirection[split..])
+    fn assignment_record_descriptor(
+        &self,
+        sql_type: SqlType,
+    ) -> Result<RecordDescriptor, AssignmentError> {
+        assignment_record_descriptor(sql_type, self.ctx).map_err(assignment_error_from_exec)
+    }
+
+    fn apply_jsonb_subscript_assignment(
+        &mut self,
+        current: &Value,
+        path: &[Value],
+        replacement: &Value,
+    ) -> Result<Value, AssignmentError> {
+        apply_jsonb_subscript_assignment(current, path, replacement)
+            .map_err(assignment_error_from_exec)
+    }
 }
 
 fn resolve_assignment_indirection(
@@ -12537,59 +12423,6 @@ fn resolve_assignment_indirection(
         .collect()
 }
 
-fn assign_point_value(
-    current: Value,
-    subscripts: &[ResolvedAssignmentSubscript],
-    replacement: Value,
-) -> Result<Value, ExecError> {
-    if subscripts.len() != 1 {
-        return Err(array_assignment_error("wrong number of array subscripts"));
-    }
-    let subscript = &subscripts[0];
-    if subscript.is_slice {
-        return Err(ExecError::DetailedError {
-            message: "slices of fixed-length arrays not implemented".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
-        return Err(assignment_null_subscript_error());
-    };
-    if !(0..=1).contains(&index) {
-        return Err(array_assignment_error("array subscript out of range"));
-    }
-    let Value::Point(mut point) = current else {
-        return if matches!(current, Value::Null) {
-            Ok(Value::Null)
-        } else {
-            Err(ExecError::TypeMismatch {
-                op: "array assignment",
-                left: current,
-                right: Value::Null,
-            })
-        };
-    };
-    let coordinate = match replacement {
-        Value::Null => return Ok(Value::Point(point)),
-        Value::Float64(value) => value,
-        other => {
-            return Err(ExecError::TypeMismatch {
-                op: "array assignment",
-                left: Value::Point(point),
-                right: other,
-            });
-        }
-    };
-    if index == 0 {
-        point.x = coordinate;
-    } else {
-        point.y = coordinate;
-    }
-    Ok(Value::Point(point))
-}
-
 fn assign_typed_value_ordered(
     current: Value,
     sql_type: SqlType,
@@ -12597,195 +12430,57 @@ fn assign_typed_value_ordered(
     replacement: Value,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let Some((first, rest)) = indirection.split_first() else {
-        return Ok(replacement);
-    };
-    let sql_type = assignment_navigation_sql_type(sql_type, ctx);
-    match first {
-        ResolvedAssignmentIndirection::Field(field) => {
-            assign_record_field_ordered(current, sql_type, field, rest, replacement, ctx)
-        }
-        ResolvedAssignmentIndirection::Subscript(subscript) => {
-            let (leading_subscripts, after_subscripts) = leading_assignment_subscripts(indirection);
-            if sql_type.kind == SqlTypeKind::Point && !sql_type.is_array {
-                if !after_subscripts.is_empty() || leading_subscripts.len() != 1 {
-                    return Err(ExecError::DetailedError {
-                        message: "cannot assign through a subscripted point value".into(),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42804",
-                    });
-                }
-                return assign_point_value(current, &leading_subscripts, replacement);
-            }
-            if sql_type.kind == SqlTypeKind::Jsonb && !sql_type.is_array {
-                if !after_subscripts.is_empty() {
-                    return Err(ExecError::DetailedError {
-                        message: "cannot assign through a subscripted jsonb value".into(),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42804",
-                    });
-                }
-                return assign_jsonb_value(current, &leading_subscripts, replacement);
-            }
-            if after_subscripts.is_empty() {
-                return assign_array_value(current, &leading_subscripts, replacement);
-            }
-            assign_array_value_ordered(current, sql_type, subscript, rest, replacement, ctx)
-        }
-    }
-}
-
-fn assign_record_field_ordered(
-    current: Value,
-    sql_type: SqlType,
-    field: &str,
-    rest: &[ResolvedAssignmentIndirection],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    let mut record = assignment_record_value(current, sql_type, ctx)?;
-    let (field_index, field_type) = record
-        .descriptor
-        .fields
-        .iter()
-        .enumerate()
-        .find(|(_, candidate)| candidate.name.eq_ignore_ascii_case(field))
-        .map(|(index, candidate)| (index, candidate.sql_type))
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("record has no field \"{field}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "42703",
-        })?;
-    record.fields[field_index] = assign_typed_value_ordered(
-        record.fields[field_index].clone(),
-        field_type,
-        rest,
+    let mut runtime = RootAssignmentRuntime { ctx };
+    pgrust_commands::tablecmds_assignment::assign_typed_value_ordered(
+        current,
+        sql_type,
+        indirection,
         replacement,
-        ctx,
-    )?;
-    Ok(Value::Record(record))
+        &mut runtime,
+    )
+    .map_err(assignment_error_to_exec)
 }
 
-fn assign_array_value_ordered(
-    current: Value,
-    array_type: SqlType,
-    subscript: &ResolvedAssignmentSubscript,
-    rest: &[ResolvedAssignmentIndirection],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    if !array_type.is_array {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "cannot subscript type {} because it does not support subscripting",
-                sql_type_display_name(array_type)
-            ),
+fn assignment_error_from_exec(err: ExecError) -> AssignmentError {
+    match err {
+        ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => AssignmentError::TableCmds(pgrust_commands::tablecmds::TableCmdsError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }),
+        ExecError::InvalidStorageValue { column, details } => {
+            AssignmentError::InvalidStorageValue { column, details }
+        }
+        ExecError::Int4OutOfRange => AssignmentError::Int4OutOfRange,
+        ExecError::TypeMismatch { op, left, right } => {
+            AssignmentError::TypeMismatch { op, left, right }
+        }
+        other => AssignmentError::TableCmds(pgrust_commands::tablecmds::TableCmdsError::Detailed {
+            message: format!("{other:?}"),
             detail: None,
             hint: None,
-            sqlstate: "42804",
-        });
+            sqlstate: "XX000",
+        }),
     }
-    if rest.is_empty() {
-        return assign_array_value(current, std::slice::from_ref(subscript), replacement);
-    }
-    if subscript.is_slice {
-        return Err(ExecError::DetailedError {
-            message: "sliced assignment into nested fields is not supported".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    let (mut lower_bound, mut items) = assignment_top_level(current)?;
-    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
-        return Err(ExecError::InvalidStorageValue {
-            column: "<array>".into(),
-            details: "array subscript in assignment must not be null".into(),
-        });
-    };
-    if items.is_empty() {
-        lower_bound = index;
-    }
-    extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
-    let item_index = usize::try_from(i64::from(index) - i64::from(lower_bound))
-        .map_err(|_| array_assignment_limit_error())?;
-    items[item_index] = assign_typed_value_ordered(
-        items[item_index].clone(),
-        array_type.element_type(),
-        rest,
-        replacement,
-        ctx,
-    )?;
-    build_assignment_array_value(lower_bound, items)
 }
 
-fn assign_typed_value(
-    current: Value,
-    sql_type: SqlType,
-    subscripts: &[ResolvedAssignmentSubscript],
-    field_path: &[String],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    if subscripts.is_empty() {
-        if field_path.is_empty() {
-            return Ok(replacement);
+fn assignment_error_to_exec(err: AssignmentError) -> ExecError {
+    match err {
+        AssignmentError::TableCmds(err) => tablecmds_error_to_exec(err),
+        AssignmentError::TypeMismatch { op, left, right } => {
+            ExecError::TypeMismatch { op, left, right }
         }
-        return assign_record_field_path(current, sql_type, field_path, replacement, ctx);
-    }
-
-    if sql_type.kind == SqlTypeKind::Point && !sql_type.is_array {
-        if !field_path.is_empty() {
-            return Err(ExecError::DetailedError {
-                message: "cannot assign to a named field of type point".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
+        AssignmentError::InvalidStorageValue { column, details } => {
+            ExecError::InvalidStorageValue { column, details }
         }
-        return assign_point_value(current, subscripts, replacement);
+        AssignmentError::Int4OutOfRange => ExecError::Int4OutOfRange,
     }
-
-    if sql_type.kind == SqlTypeKind::Jsonb && !sql_type.is_array {
-        if !field_path.is_empty() {
-            return Err(ExecError::DetailedError {
-                message: "cannot assign to a named field of type jsonb".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
-        }
-        return assign_jsonb_value(current, subscripts, replacement);
-    }
-
-    if field_path.is_empty() {
-        return assign_array_value(current, subscripts, replacement);
-    }
-
-    assign_array_value_with_fields(current, sql_type, subscripts, field_path, replacement, ctx)
-}
-
-fn assign_jsonb_value(
-    current: Value,
-    subscripts: &[ResolvedAssignmentSubscript],
-    replacement: Value,
-) -> Result<Value, ExecError> {
-    let mut path = Vec::with_capacity(subscripts.len());
-    for subscript in subscripts {
-        if subscript.is_slice {
-            return Err(ExecError::DetailedError {
-                message: "jsonb subscript does not support slices".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "0A000",
-            });
-        }
-        path.push(subscript.lower.clone().unwrap_or(Value::Int64(1)));
-    }
-    apply_jsonb_subscript_assignment(&current, &path, &replacement)
 }
 
 fn assignment_record_descriptor(
@@ -12841,544 +12536,6 @@ fn assignment_record_descriptor(
         detail: None,
         hint: None,
         sqlstate: "42804",
-    })
-}
-
-fn assignment_record_value(
-    current: Value,
-    sql_type: SqlType,
-    ctx: &ExecutorContext,
-) -> Result<RecordValue, ExecError> {
-    match current {
-        Value::Record(record) => normalize_assignment_record_value(record, sql_type, ctx),
-        Value::Null => {
-            let descriptor = assignment_record_descriptor(sql_type, ctx)?;
-            Ok(RecordValue::from_descriptor(
-                descriptor.clone(),
-                vec![Value::Null; descriptor.fields.len()],
-            ))
-        }
-        other => Err(ExecError::TypeMismatch {
-            op: "record assignment",
-            left: other,
-            right: Value::Null,
-        }),
-    }
-}
-
-fn normalize_assignment_record_value(
-    record: RecordValue,
-    sql_type: SqlType,
-    ctx: &ExecutorContext,
-) -> Result<RecordValue, ExecError> {
-    let descriptor = assignment_record_descriptor(sql_type, ctx)?;
-    if descriptor.fields == record.descriptor.fields {
-        return Ok(record);
-    }
-    let fields = descriptor
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(index, target_field)| {
-            record
-                .descriptor
-                .fields
-                .iter()
-                .position(|source_field| source_field.name.eq_ignore_ascii_case(&target_field.name))
-                .and_then(|source_index| record.fields.get(source_index).cloned())
-                .or_else(|| record.fields.get(index).cloned())
-                .unwrap_or(Value::Null)
-        })
-        .collect();
-    Ok(RecordValue::from_descriptor(descriptor, fields))
-}
-
-fn assign_record_field_path(
-    current: Value,
-    sql_type: SqlType,
-    field_path: &[String],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    let mut record = assignment_record_value(current, sql_type, ctx)?;
-    let field = field_path.first().ok_or_else(|| ExecError::DetailedError {
-        message: "empty record field assignment path".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "XX000",
-    })?;
-    let (field_index, field_type) = record
-        .descriptor
-        .fields
-        .iter()
-        .enumerate()
-        .find(|(_, candidate)| candidate.name.eq_ignore_ascii_case(field))
-        .map(|(index, candidate)| (index, candidate.sql_type))
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("record has no field \"{field}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "42703",
-        })?;
-
-    record.fields[field_index] = if field_path.len() == 1 {
-        replacement
-    } else {
-        assign_record_field_path(
-            record.fields[field_index].clone(),
-            field_type,
-            &field_path[1..],
-            replacement,
-            ctx,
-        )?
-    };
-    Ok(Value::Record(record))
-}
-
-fn assign_array_value_with_fields(
-    current: Value,
-    array_type: SqlType,
-    subscripts: &[ResolvedAssignmentSubscript],
-    field_path: &[String],
-    replacement: Value,
-    ctx: &mut ExecutorContext,
-) -> Result<Value, ExecError> {
-    if subscripts.is_empty() {
-        return assign_record_field_path(current, array_type, field_path, replacement, ctx);
-    }
-    if subscripts.iter().any(|subscript| subscript.is_slice) {
-        return Err(ExecError::DetailedError {
-            message: "sliced assignment into composite fields is not supported".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-
-    let subscript = &subscripts[0];
-    let (mut lower_bound, mut items) = assignment_top_level(current)?;
-    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
-        return Err(ExecError::InvalidStorageValue {
-            column: "<array>".into(),
-            details: "array subscript in assignment must not be null".into(),
-        });
-    };
-    if items.is_empty() {
-        lower_bound = index;
-    }
-    extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
-    let index = usize::try_from(i64::from(index) - i64::from(lower_bound))
-        .map_err(|_| array_assignment_limit_error())?;
-    items[index] = assign_typed_value(
-        items[index].clone(),
-        array_type.element_type(),
-        &subscripts[1..],
-        field_path,
-        replacement,
-        ctx,
-    )?;
-    build_assignment_array_value(lower_bound, items)
-}
-
-fn assign_array_value(
-    current: Value,
-    subscripts: &[ResolvedAssignmentSubscript],
-    replacement: Value,
-) -> Result<Value, ExecError> {
-    if subscripts.is_empty() {
-        return Ok(replacement);
-    }
-    if subscripts.iter().any(|subscript| subscript.is_slice) {
-        return assign_array_slice_value(current, subscripts, replacement);
-    }
-    let subscript = &subscripts[0];
-    let (mut lower_bound, mut items) = assignment_top_level(current)?;
-    if subscript.is_slice {
-        let Some(start) = assignment_subscript_index(subscript.lower.as_ref())? else {
-            return Err(ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "array subscript in assignment must not be null".into(),
-            });
-        };
-        let Some(end) = assignment_subscript_index(subscript.upper.as_ref())? else {
-            return Err(ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "array subscript in assignment must not be null".into(),
-            });
-        };
-        let replacement_items = assignment_replacement_items(replacement.clone())?;
-        if items.is_empty() {
-            lower_bound = start;
-        }
-        extend_assignment_items(&mut lower_bound, &mut items, start, end)?;
-        let start_idx = usize::try_from(i64::from(start) - i64::from(lower_bound))
-            .map_err(|_| array_assignment_limit_error())?;
-        let end_idx = usize::try_from(i64::from(end) - i64::from(lower_bound))
-            .map_err(|_| array_assignment_limit_error())?;
-        let span = end_idx - start_idx + 1;
-        if replacement_items.len() != span {
-            return Err(ExecError::TypeMismatch {
-                op: "array slice assignment",
-                left: build_assignment_array_value(lower_bound, items.clone())?,
-                right: replacement,
-            });
-        }
-        for (idx, item) in replacement_items.into_iter().enumerate() {
-            items[start_idx + idx] = if subscripts.len() == 1 {
-                item
-            } else {
-                assign_array_value(items[start_idx + idx].clone(), &subscripts[1..], item)?
-            };
-        }
-        build_assignment_array_value(lower_bound, items)
-    } else {
-        let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
-            return Err(ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "array subscript in assignment must not be null".into(),
-            });
-        };
-        if items.is_empty() {
-            lower_bound = index;
-        }
-        extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
-        let index = usize::try_from(i64::from(index) - i64::from(lower_bound))
-            .map_err(|_| array_assignment_limit_error())?;
-        items[index] = if subscripts.len() == 1 {
-            replacement
-        } else {
-            assign_array_value(items[index].clone(), &subscripts[1..], replacement)?
-        };
-        build_assignment_array_value(lower_bound, items)
-    }
-}
-
-fn assign_array_slice_value(
-    current: Value,
-    subscripts: &[ResolvedAssignmentSubscript],
-    replacement: Value,
-) -> Result<Value, ExecError> {
-    if matches!(replacement, Value::Null) {
-        return Ok(current);
-    }
-
-    let current_array = assignment_current_array(current)?;
-    let source_array = assignment_source_array(replacement)?;
-
-    if subscripts.len() > 6 {
-        return Err(array_assignment_error("wrong number of array subscripts"));
-    }
-
-    if current_array.ndim() == 0 {
-        return assign_array_slice_into_empty(subscripts, source_array);
-    }
-
-    let ndim = current_array.ndim();
-    if ndim < subscripts.len() || ndim > 6 {
-        return Err(array_assignment_error("wrong number of array subscripts"));
-    }
-
-    let mut dimensions = current_array.dimensions.clone();
-    let mut lower_bounds = Vec::with_capacity(ndim);
-    let mut upper_bounds = Vec::with_capacity(ndim);
-
-    for (dim_idx, subscript) in subscripts.iter().enumerate() {
-        let dim = &dimensions[dim_idx];
-        let lower = resolve_assignment_slice_bound(
-            subscript.lower.as_ref(),
-            dim.lower_bound,
-            subscript.is_slice,
-        )?;
-        let upper = resolve_assignment_slice_bound(
-            if subscript.is_slice {
-                subscript.upper.as_ref()
-            } else {
-                subscript.lower.as_ref()
-            },
-            checked_array_upper_bound(dim.lower_bound, dim.length)?,
-            subscript.is_slice,
-        )?;
-        if lower > upper {
-            return Err(array_assignment_error(
-                "upper bound cannot be less than lower bound",
-            ));
-        }
-
-        if ndim == 1 {
-            if lower < dimensions[0].lower_bound {
-                let extension =
-                    usize::try_from(i64::from(dimensions[0].lower_bound) - i64::from(lower))
-                        .map_err(|_| array_assignment_limit_error())?;
-                dimensions[0].lower_bound = lower;
-                dimensions[0].length = dimensions[0]
-                    .length
-                    .checked_add(extension)
-                    .ok_or_else(array_assignment_limit_error)?;
-                dimensions[0].length = checked_array_item_count(dimensions[0].length)?;
-            }
-            let current_upper =
-                checked_array_upper_bound(dimensions[0].lower_bound, dimensions[0].length)?;
-            if upper > current_upper {
-                let extension = usize::try_from(i64::from(upper) - i64::from(current_upper))
-                    .map_err(|_| array_assignment_limit_error())?;
-                dimensions[0].length = dimensions[0]
-                    .length
-                    .checked_add(extension)
-                    .ok_or_else(array_assignment_limit_error)?;
-                dimensions[0].length = checked_array_item_count(dimensions[0].length)?;
-            }
-        } else if lower < dim.lower_bound
-            || upper > checked_array_upper_bound(dim.lower_bound, dim.length)?
-        {
-            return Err(array_assignment_error("array subscript out of range"));
-        }
-
-        lower_bounds.push(lower);
-        upper_bounds.push(upper);
-    }
-
-    for dim in dimensions.iter().skip(subscripts.len()) {
-        lower_bounds.push(dim.lower_bound);
-        upper_bounds.push(checked_array_upper_bound(dim.lower_bound, dim.length)?);
-    }
-
-    let span_lengths = lower_bounds
-        .iter()
-        .zip(upper_bounds.iter())
-        .map(|(lower, upper)| checked_array_span_length(*lower, *upper))
-        .collect::<Result<Vec<_>, _>>()?;
-    let target_items = span_lengths
-        .iter()
-        .try_fold(1usize, |count, span| count.checked_mul(*span))
-        .ok_or_else(|| array_assignment_limit_error())
-        .and_then(checked_array_item_count)?;
-    if source_array.elements.len() < target_items {
-        return Err(array_assignment_error("source array too small"));
-    }
-
-    let element_type_oid = current_array
-        .element_type_oid
-        .or(source_array.element_type_oid);
-    if ndim == 1 {
-        let mut elements = vec![Value::Null; dimensions[0].length];
-        let original_lower = current_array.lower_bound(0).unwrap_or(1);
-        for (idx, value) in current_array.elements.iter().enumerate() {
-            let target_idx = usize::try_from(
-                i64::from(original_lower)
-                    + i64::try_from(idx).map_err(|_| array_assignment_limit_error())?
-                    - i64::from(dimensions[0].lower_bound),
-            )
-            .map_err(|_| array_assignment_limit_error())?;
-            elements[target_idx] = value.clone();
-        }
-        let start_idx =
-            usize::try_from(i64::from(lower_bounds[0]) - i64::from(dimensions[0].lower_bound))
-                .map_err(|_| array_assignment_limit_error())?;
-        for (offset, value) in source_array
-            .elements
-            .into_iter()
-            .take(target_items)
-            .enumerate()
-        {
-            elements[start_idx + offset] = value;
-        }
-        return Ok(Value::PgArray(array_with_element_type(
-            ArrayValue::from_dimensions(dimensions, elements),
-            element_type_oid,
-        )));
-    }
-
-    let mut elements = current_array.elements.clone();
-    for (offset, value) in source_array
-        .elements
-        .into_iter()
-        .take(target_items)
-        .enumerate()
-    {
-        let coords = linear_index_to_assignment_coords(offset, &lower_bounds, &span_lengths);
-        let target_idx = assignment_coords_to_linear_index(&coords, &dimensions);
-        elements[target_idx] = value;
-    }
-    Ok(Value::PgArray(array_with_element_type(
-        ArrayValue::from_dimensions(dimensions, elements),
-        element_type_oid,
-    )))
-}
-
-fn assign_array_slice_into_empty(
-    subscripts: &[ResolvedAssignmentSubscript],
-    source_array: ArrayValue,
-) -> Result<Value, ExecError> {
-    let mut dimensions = Vec::with_capacity(subscripts.len());
-    for subscript in subscripts {
-        let Some(lower_value) = subscript.lower.as_ref() else {
-            return Err(ExecError::DetailedError {
-                message: "array slice subscript must provide both boundaries".into(),
-                detail: Some(
-                    "When assigning to a slice of an empty array value, slice boundaries must be fully specified."
-                        .into(),
-                ),
-                hint: None,
-                sqlstate: "2202E",
-            });
-        };
-        let Some(upper_value) = (if subscript.is_slice {
-            subscript.upper.as_ref()
-        } else {
-            subscript.lower.as_ref()
-        }) else {
-            return Err(ExecError::DetailedError {
-                message: "array slice subscript must provide both boundaries".into(),
-                detail: Some(
-                    "When assigning to a slice of an empty array value, slice boundaries must be fully specified."
-                        .into(),
-                ),
-                hint: None,
-                sqlstate: "2202E",
-            });
-        };
-        let lower = assignment_subscript_index(Some(lower_value))?
-            .ok_or_else(|| assignment_null_subscript_error())?;
-        let upper = assignment_subscript_index(Some(upper_value))?
-            .ok_or_else(|| assignment_null_subscript_error())?;
-        if lower > upper {
-            return Err(array_assignment_error(
-                "upper bound cannot be less than lower bound",
-            ));
-        }
-        dimensions.push(ArrayDimension {
-            lower_bound: lower,
-            length: checked_array_span_length(lower, upper)?,
-        });
-    }
-
-    let target_items = dimensions
-        .iter()
-        .try_fold(1usize, |count, dim| count.checked_mul(dim.length))
-        .ok_or_else(|| array_assignment_limit_error())
-        .and_then(checked_array_item_count)?;
-    if source_array.elements.len() < target_items {
-        return Err(array_assignment_error("source array too small"));
-    }
-
-    Ok(Value::PgArray(array_with_element_type(
-        ArrayValue::from_dimensions(
-            dimensions,
-            source_array
-                .elements
-                .into_iter()
-                .take(target_items)
-                .collect(),
-        ),
-        source_array.element_type_oid,
-    )))
-}
-
-fn assignment_current_array(current: Value) -> Result<ArrayValue, ExecError> {
-    pgrust_commands::tablecmds::assignment_current_array(current).map_err(tablecmds_error_to_exec)
-}
-
-fn assignment_source_array(replacement: Value) -> Result<ArrayValue, ExecError> {
-    pgrust_commands::tablecmds::assignment_source_array(replacement)
-        .map_err(tablecmds_error_to_exec)
-}
-
-fn resolve_assignment_slice_bound(
-    value: Option<&Value>,
-    default: i32,
-    is_slice: bool,
-) -> Result<i32, ExecError> {
-    match value {
-        None if is_slice => Ok(default),
-        None => assignment_subscript_index(None)?.ok_or_else(assignment_null_subscript_error),
-        Some(_) => assignment_subscript_index(value)?.ok_or_else(assignment_null_subscript_error),
-    }
-}
-
-fn assignment_null_subscript_error() -> ExecError {
-    ExecError::InvalidStorageValue {
-        column: "<array>".into(),
-        details: "array subscript in assignment must not be null".into(),
-    }
-}
-
-fn checked_array_item_count(count: usize) -> Result<usize, ExecError> {
-    pgrust_commands::tablecmds::checked_array_item_count(count).map_err(tablecmds_error_to_exec)
-}
-
-fn checked_array_upper_bound(lower_bound: i32, length: usize) -> Result<i32, ExecError> {
-    pgrust_commands::tablecmds::checked_array_upper_bound(lower_bound, length)
-        .map_err(tablecmds_error_to_exec)
-}
-
-fn checked_array_span_length(lower: i32, upper: i32) -> Result<usize, ExecError> {
-    pgrust_commands::tablecmds::checked_array_span_length(lower, upper)
-        .map_err(tablecmds_error_to_exec)
-}
-
-fn array_assignment_error(message: &str) -> ExecError {
-    ExecError::DetailedError {
-        message: message.into(),
-        detail: None,
-        hint: None,
-        sqlstate: "2202E",
-    }
-}
-
-fn array_assignment_limit_error() -> ExecError {
-    tablecmds_error_to_exec(pgrust_commands::tablecmds::array_assignment_limit_error())
-}
-
-fn array_with_element_type(array: ArrayValue, element_type_oid: Option<u32>) -> ArrayValue {
-    pgrust_commands::tablecmds::array_with_element_type(array, element_type_oid)
-}
-
-fn linear_index_to_assignment_coords(
-    offset: usize,
-    lower_bounds: &[i32],
-    lengths: &[usize],
-) -> Vec<i32> {
-    pgrust_commands::tablecmds::linear_index_to_assignment_coords(offset, lower_bounds, lengths)
-}
-
-fn assignment_coords_to_linear_index(coords: &[i32], dimensions: &[ArrayDimension]) -> usize {
-    pgrust_commands::tablecmds::assignment_coords_to_linear_index(coords, dimensions)
-}
-
-fn assignment_top_level(current: Value) -> Result<(i32, Vec<Value>), ExecError> {
-    pgrust_commands::tablecmds::assignment_top_level(current).map_err(tablecmds_error_to_exec)
-}
-
-fn assignment_top_level_items(array: &ArrayValue) -> Vec<Value> {
-    pgrust_commands::tablecmds::assignment_top_level_items(array)
-}
-
-fn assignment_replacement_items(replacement: Value) -> Result<Vec<Value>, ExecError> {
-    pgrust_commands::tablecmds::assignment_replacement_items(replacement)
-        .map_err(tablecmds_error_to_exec)
-}
-
-fn extend_assignment_items(
-    lower_bound: &mut i32,
-    items: &mut Vec<Value>,
-    start: i32,
-    end: i32,
-) -> Result<(), ExecError> {
-    pgrust_commands::tablecmds::extend_assignment_items(lower_bound, items, start, end)
-        .map_err(tablecmds_error_to_exec)
-}
-
-fn build_assignment_array_value(lower_bound: i32, items: Vec<Value>) -> Result<Value, ExecError> {
-    pgrust_commands::tablecmds::build_assignment_array_value(lower_bound, items)
-        .map_err(tablecmds_error_to_exec)
-}
-
-fn assignment_subscript_index(value: Option<&Value>) -> Result<Option<i32>, ExecError> {
-    pgrust_commands::tablecmds::assignment_subscript_index(value).map_err(|err| match err {
-        pgrust_commands::tablecmds::TableCmdsError::Detailed {
-            sqlstate: "22003", ..
-        } => ExecError::Int4OutOfRange,
-        other => tablecmds_error_to_exec(other),
     })
 }
 
