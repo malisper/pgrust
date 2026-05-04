@@ -9,8 +9,8 @@ use pgrust_analyze::{
     bind_referenced_by_foreign_keys, is_system_column_name, sql_type_name,
 };
 use pgrust_catalog_data::desc::column_desc;
-use pgrust_core::{AttributeCompression, AttributeStorage};
-use pgrust_nodes::datum::Value;
+use pgrust_core::{AttributeCompression, AttributeStorage, ItemPointerData};
+use pgrust_nodes::datum::{ArrayDimension, ArrayValue, Value, array_value_from_value};
 use pgrust_nodes::parsenodes::ParseError;
 use pgrust_nodes::plannodes::{Plan, PlannedStmt};
 use pgrust_nodes::primnodes::{BoolExprType, Expr, OpExprKind, SELF_ITEM_POINTER_ATTR_NO};
@@ -811,6 +811,326 @@ pub fn relation_write_state_for_relation(
         indexes: catalog.index_relations_for_heap(relation.relation_oid),
         toast_index: first_toast_index(catalog, relation.toast),
     })
+}
+
+pub fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, TableCmdsError> {
+    let text = match value {
+        Value::Null => return Ok(None),
+        Value::Tid(tid) => return Ok(Some(*tid)),
+        Value::Text(text) => text.as_str(),
+        Value::TextRef(_, _) => {
+            return Err(internal_marker_error(
+                "row ctid marker must be materialized".into(),
+            ));
+        }
+        other => {
+            return Err(internal_marker_error(format!(
+                "row ctid marker has unexpected value {:?}",
+                other
+            )));
+        }
+    };
+    let inner = text
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .ok_or_else(|| invalid_row_ctid_marker(text))?;
+    let (block, offset) = inner
+        .split_once(',')
+        .ok_or_else(|| invalid_row_ctid_marker(text))?;
+    Ok(Some(ItemPointerData {
+        block_number: block.parse().map_err(|_| invalid_row_ctid_marker(text))?,
+        offset_number: offset.parse().map_err(|_| invalid_row_ctid_marker(text))?,
+    }))
+}
+
+pub fn parse_update_tableoid(value: &Value) -> Result<u32, TableCmdsError> {
+    match value {
+        Value::Int32(value) => u32::try_from(*value)
+            .map_err(|_| internal_marker_error(format!("invalid update tableoid marker: {value}"))),
+        Value::Int64(value) => u32::try_from(*value)
+            .map_err(|_| internal_marker_error(format!("invalid update tableoid marker: {value}"))),
+        Value::Null => Err(internal_marker_error(
+            "update input row is missing target tableoid marker".into(),
+        )),
+        other => Err(internal_marker_error(format!(
+            "update tableoid marker has unexpected value {:?}",
+            other
+        ))),
+    }
+}
+
+pub fn merge_source_present(value: &Value) -> Result<bool, TableCmdsError> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        Value::Null => Ok(false),
+        other => Err(internal_marker_error(format!(
+            "merge source marker has unexpected value {:?}",
+            other
+        ))),
+    }
+}
+
+fn invalid_row_ctid_marker(text: &str) -> TableCmdsError {
+    internal_marker_error(format!("invalid row ctid marker: {text}"))
+}
+
+fn internal_marker_error(message: String) -> TableCmdsError {
+    TableCmdsError::Detailed {
+        message,
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    }
+}
+
+pub fn assignment_current_array(current: Value) -> Result<ArrayValue, TableCmdsError> {
+    match current {
+        Value::Null => Ok(ArrayValue::empty()),
+        other => array_value_from_value(&other).ok_or_else(|| TableCmdsError::Detailed {
+            message: "array assignment requires array value".into(),
+            detail: Some(format!("received value {:?}", other)),
+            hint: None,
+            sqlstate: "42804",
+        }),
+    }
+}
+
+pub fn assignment_source_array(replacement: Value) -> Result<ArrayValue, TableCmdsError> {
+    array_value_from_value(&replacement).ok_or_else(|| TableCmdsError::Detailed {
+        message: "array slice assignment requires array value".into(),
+        detail: Some(format!("received value {:?}", replacement)),
+        hint: None,
+        sqlstate: "42804",
+    })
+}
+
+pub fn checked_array_item_count(count: usize) -> Result<usize, TableCmdsError> {
+    i32::try_from(count)
+        .map(|_| count)
+        .map_err(|_| array_assignment_limit_error())
+}
+
+pub fn checked_array_upper_bound(lower_bound: i32, length: usize) -> Result<i32, TableCmdsError> {
+    let length = i32::try_from(length).map_err(|_| array_assignment_limit_error())?;
+    lower_bound
+        .checked_add(length)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or_else(array_assignment_limit_error)
+}
+
+pub fn checked_array_span_length(lower: i32, upper: i32) -> Result<usize, TableCmdsError> {
+    if upper < lower {
+        return Ok(0);
+    }
+    let span = i64::from(upper) - i64::from(lower) + 1;
+    usize::try_from(span).map_err(|_| array_assignment_limit_error())
+}
+
+pub fn array_with_element_type(mut array: ArrayValue, element_type_oid: Option<u32>) -> ArrayValue {
+    array.element_type_oid = element_type_oid;
+    array
+}
+
+pub fn linear_index_to_assignment_coords(
+    mut offset: usize,
+    lower_bounds: &[i32],
+    lengths: &[usize],
+) -> Vec<i32> {
+    let mut coords = vec![0; lengths.len()];
+    for dim_idx in 0..lengths.len() {
+        let stride = lengths[dim_idx + 1..]
+            .iter()
+            .fold(1usize, |product, length| product.saturating_mul(*length));
+        let axis_offset = if stride == 0 { 0 } else { offset / stride };
+        if stride != 0 {
+            offset %= stride;
+        }
+        coords[dim_idx] = lower_bounds[dim_idx] + axis_offset as i32;
+    }
+    coords
+}
+
+pub fn assignment_coords_to_linear_index(coords: &[i32], dimensions: &[ArrayDimension]) -> usize {
+    let mut offset = 0usize;
+    for (dim_idx, coord) in coords.iter().enumerate() {
+        let stride = dimensions[dim_idx + 1..]
+            .iter()
+            .fold(1usize, |product, dim| product.saturating_mul(dim.length));
+        offset += (*coord - dimensions[dim_idx].lower_bound) as usize * stride;
+    }
+    offset
+}
+
+pub fn assignment_top_level(current: Value) -> Result<(i32, Vec<Value>), TableCmdsError> {
+    match current {
+        Value::Null => Ok((1, Vec::new())),
+        Value::Array(items) => Ok((1, items)),
+        Value::PgArray(array) => Ok((
+            array.lower_bound(0).unwrap_or(1),
+            assignment_top_level_items(&array),
+        )),
+        other => Err(TableCmdsError::Detailed {
+            message: "array assignment requires array value".into(),
+            detail: Some(format!("received value {:?}", other)),
+            hint: None,
+            sqlstate: "42804",
+        }),
+    }
+}
+
+pub fn assignment_top_level_items(array: &ArrayValue) -> Vec<Value> {
+    if array.dimensions.len() <= 1 {
+        return array.elements.clone();
+    }
+    let child_dims = array.dimensions[1..].to_vec();
+    let child_width = child_dims
+        .iter()
+        .fold(1usize, |acc, dim| acc.saturating_mul(dim.length));
+    let mut out = Vec::with_capacity(array.dimensions[0].length);
+    for idx in 0..array.dimensions[0].length {
+        let start = idx * child_width;
+        out.push(Value::PgArray(ArrayValue::from_dimensions(
+            child_dims.clone(),
+            array.elements[start..start + child_width].to_vec(),
+        )));
+    }
+    out
+}
+
+pub fn assignment_replacement_items(replacement: Value) -> Result<Vec<Value>, TableCmdsError> {
+    match replacement {
+        Value::Array(items) => Ok(items),
+        Value::PgArray(array) => Ok(assignment_top_level_items(&array)),
+        other => Err(TableCmdsError::Detailed {
+            message: "array slice assignment requires array value".into(),
+            detail: Some(format!("received value {:?}", other)),
+            hint: None,
+            sqlstate: "42804",
+        }),
+    }
+}
+
+pub fn extend_assignment_items(
+    lower_bound: &mut i32,
+    items: &mut Vec<Value>,
+    start: i32,
+    end: i32,
+) -> Result<(), TableCmdsError> {
+    if items.is_empty() {
+        *lower_bound = start;
+    }
+    if start < *lower_bound {
+        let prepend = i64::from(*lower_bound)
+            .checked_sub(i64::from(start))
+            .and_then(|delta| usize::try_from(delta).ok())
+            .ok_or_else(array_assignment_limit_error)?;
+        items.splice(0..0, std::iter::repeat_n(Value::Null, prepend));
+        *lower_bound = start;
+    }
+    let upper_bound = i64::from(*lower_bound)
+        .checked_add(i64::try_from(items.len()).map_err(|_| array_assignment_limit_error())?)
+        .and_then(|bound| bound.checked_sub(1))
+        .ok_or_else(array_assignment_limit_error)?;
+    if i64::from(end) > upper_bound {
+        let append = i64::from(end)
+            .checked_sub(upper_bound)
+            .and_then(|delta| usize::try_from(delta).ok())
+            .ok_or_else(array_assignment_limit_error)?;
+        let new_len = items
+            .len()
+            .checked_add(append)
+            .ok_or_else(array_assignment_limit_error)?;
+        items.resize(checked_array_item_count(new_len)?, Value::Null);
+    }
+    Ok(())
+}
+
+pub fn build_assignment_array_value(
+    lower_bound: i32,
+    items: Vec<Value>,
+) -> Result<Value, TableCmdsError> {
+    if items.is_empty() {
+        return Ok(Value::PgArray(ArrayValue::empty()));
+    }
+    let child_arrays = items
+        .iter()
+        .filter_map(|item| match item {
+            Value::PgArray(array) => Some(Some(array.clone())),
+            Value::Array(values) => {
+                Some(ArrayValue::from_nested_values(values.clone(), vec![1]).ok())
+            }
+            Value::Null => Some(None),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if child_arrays.len() != items.len() {
+        return Ok(Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound,
+                length: items.len(),
+            }],
+            items,
+        )));
+    }
+    let Some(template) = child_arrays.iter().find_map(|entry| entry.clone()) else {
+        return Ok(Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound,
+                length: items.len(),
+            }],
+            items,
+        )));
+    };
+    let child_width = template.elements.len();
+    let mut elements = Vec::with_capacity(items.len() * child_width);
+    for entry in child_arrays {
+        match entry {
+            Some(array) => elements.extend(array.elements),
+            None => elements.extend(std::iter::repeat_n(Value::Null, child_width)),
+        }
+    }
+    let mut dimensions = vec![ArrayDimension {
+        lower_bound,
+        length: items.len(),
+    }];
+    dimensions.extend(template.dimensions);
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        dimensions, elements,
+    )))
+}
+
+pub fn assignment_subscript_index(value: Option<&Value>) -> Result<Option<i32>, TableCmdsError> {
+    match value {
+        None => Ok(Some(1)),
+        Some(Value::Null) => Ok(None),
+        Some(Value::Int16(v)) => Ok(Some(*v as i32)),
+        Some(Value::Int32(v)) => Ok(Some(*v)),
+        Some(Value::Int64(v)) => {
+            i32::try_from(*v)
+                .map(Some)
+                .map_err(|_| TableCmdsError::Detailed {
+                    message: "integer out of range".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22003",
+                })
+        }
+        Some(other) => Err(TableCmdsError::Detailed {
+            message: "array assignment requires integer subscript".into(),
+            detail: Some(format!("received value {:?}", other)),
+            hint: None,
+            sqlstate: "42804",
+        }),
+    }
+}
+
+pub fn array_assignment_limit_error() -> TableCmdsError {
+    TableCmdsError::Detailed {
+        message: "array size exceeds the maximum allowed".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "54000",
+    }
 }
 
 #[cfg(test)]

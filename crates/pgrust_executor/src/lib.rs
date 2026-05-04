@@ -1,5 +1,6 @@
 pub mod advisory_locks;
 pub mod aggregate;
+pub mod array_expr;
 pub mod async_notify;
 pub mod bindings;
 pub mod catalog_builtins;
@@ -43,6 +44,18 @@ pub use aggregate::{
     numeric_div_display_scale, numeric_quotient_decimal_weight, numeric_sqrt,
     numeric_visible_scale, regr_value_or_null, stable_regr_semidefinite_sum,
     string_agg_input_bytes, validate_array_agg_array_input,
+};
+pub use array_expr::{
+    ResolvedArraySubscript, append_array_value, apply_array_subscripts, concatenate_arrays,
+    eval_array_append_function, eval_array_cat_function, eval_array_contained, eval_array_contains,
+    eval_array_dims_function, eval_array_fill_function, eval_array_length_function,
+    eval_array_lower_function, eval_array_ndims_function, eval_array_overlap,
+    eval_array_position_function, eval_array_positions_function, eval_array_prepend_function,
+    eval_array_remove_function, eval_array_replace_function, eval_array_reverse_function,
+    eval_array_sample_function, eval_array_shuffle_function, eval_array_sort_function,
+    eval_array_to_string_function, eval_array_upper_function, eval_cardinality_function,
+    eval_quantified_array, eval_string_to_array_function, eval_string_to_table_rows,
+    eval_trim_array_function, eval_width_bucket_thresholds, normalize_array_value,
 };
 pub use async_notify::{
     ASYNC_NOTIFY_CHANNEL_MAX_LEN, ASYNC_NOTIFY_PAYLOAD_MAX_LEN, ASYNC_NOTIFY_QUEUE_CAPACITY_BYTES,

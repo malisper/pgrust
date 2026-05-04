@@ -118,6 +118,8 @@ Key decisions:
 - Made generic PL/pgSQL cache `len()` available outside `cfg(test)` so root test builds can inspect the cache through the dependency crate.
 - Moved role settings storage into `pgrust_catalog_store::role_settings`; root `commands::rolecmds` keeps wrappers.
 - Moved trigger transition capture row buffers into `pgrust_nodes`; root trigger/PLpgSQL paths re-export the type.
+- Expanded `pgrust_commands::tablecmds` with command-facing row marker parsing and array-assignment value-shaping helpers; root `commands::tablecmds` keeps `ExecError` adapters for those paths.
+- Added `pgrust_executor::array_expr` and moved array scalar builtins, array subscript application, array concatenation/append/remove/sort/sample logic, string-to-array/table helpers, width-bucket threshold handling, and quantified-array comparison into it; root `exec_expr::arrays` now adapts expression evaluation for subscripts and re-exports the array builtin surface.
 - Moved PL/pgSQL FOREACH target validation and array slice iteration shaping into `pgrust_plpgsql::runtime`; root exec now only maps crate runtime errors into `ExecError` and keeps executor casting/assignment.
 - Moved ACL privilege parsing, role membership checks, relation/schema/function/type ACL policy, and proc execute denial detail shaping into `pgrust_executor::permissions`; root `exec_expr` keeps value decoding, catalog object resolution, database-backed large-object checks, and compatibility error mapping.
 - Moved float8 aggregate transition-state builtins, float8 argument coercion, and regression transition math into `pgrust_executor::aggregate`; root aggregate/exec_expr now adapt crate errors through the existing aggregate support mapper.
@@ -371,6 +373,7 @@ Tests run:
 - `scripts/cargo_isolated.sh check --lib --quiet`
 - `scripts/cargo_isolated.sh test -p pgrust_executor --quiet`
 - `scripts/cargo_isolated.sh test -p pgrust_plpgsql --quiet`
+- `scripts/cargo_isolated.sh test -p pgrust_commands --quiet`
 - `bash scripts/check_crate_boundaries.sh`
 - `scripts/cargo_isolated.sh check -p pgrust_catalog_store --quiet`
 - `scripts/cargo_isolated.sh check -p pgrust_executor --quiet`

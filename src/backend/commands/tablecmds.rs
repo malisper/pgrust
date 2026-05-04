@@ -112,7 +112,7 @@ use crate::include::catalog::{
     builtin_range_name_for_sql_type,
 };
 use crate::include::nodes::datum::{
-    ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
+    ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
@@ -9651,98 +9651,15 @@ fn remap_routed_insert_error_detail(
 }
 
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
-    let text = match value {
-        Value::Null => return Ok(None),
-        Value::Tid(tid) => return Ok(Some(*tid)),
-        Value::Text(text) => text.as_str(),
-        Value::TextRef(_, _) => {
-            return Err(ExecError::DetailedError {
-                message: "row ctid marker must be materialized".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            });
-        }
-        other => {
-            return Err(ExecError::DetailedError {
-                message: format!("row ctid marker has unexpected value {:?}", other),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            });
-        }
-    };
-    let inner = text
-        .strip_prefix('(')
-        .and_then(|rest| rest.strip_suffix(')'))
-        .ok_or(ExecError::DetailedError {
-            message: format!("invalid row ctid marker: {text}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })?;
-    let (block, offset) = inner.split_once(',').ok_or(ExecError::DetailedError {
-        message: format!("invalid row ctid marker: {text}"),
-        detail: None,
-        hint: None,
-        sqlstate: "XX000",
-    })?;
-    Ok(Some(ItemPointerData {
-        block_number: block.parse().map_err(|_| ExecError::DetailedError {
-            message: format!("invalid row ctid marker: {text}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })?,
-        offset_number: offset.parse().map_err(|_| ExecError::DetailedError {
-            message: format!("invalid row ctid marker: {text}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })?,
-    }))
+    pgrust_commands::tablecmds::parse_tid_text(value).map_err(tablecmds_error_to_exec)
 }
 
 fn parse_update_tableoid(value: &Value) -> Result<u32, ExecError> {
-    match value {
-        Value::Int32(value) => u32::try_from(*value).map_err(|_| ExecError::DetailedError {
-            message: format!("invalid update tableoid marker: {value}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-        Value::Int64(value) => u32::try_from(*value).map_err(|_| ExecError::DetailedError {
-            message: format!("invalid update tableoid marker: {value}"),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-        Value::Null => Err(ExecError::DetailedError {
-            message: "update input row is missing target tableoid marker".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-        other => Err(ExecError::DetailedError {
-            message: format!("update tableoid marker has unexpected value {:?}", other),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-    }
+    pgrust_commands::tablecmds::parse_update_tableoid(value).map_err(tablecmds_error_to_exec)
 }
 
 fn merge_source_present(value: &Value) -> Result<bool, ExecError> {
-    match value {
-        Value::Bool(value) => Ok(*value),
-        Value::Null => Ok(false),
-        other => Err(ExecError::DetailedError {
-            message: format!("merge source marker has unexpected value {:?}", other),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        }),
-    }
+    pgrust_commands::tablecmds::merge_source_present(value).map_err(tablecmds_error_to_exec)
 }
 
 fn merge_condition_matches(
@@ -13358,22 +13275,12 @@ fn assign_array_slice_into_empty(
 }
 
 fn assignment_current_array(current: Value) -> Result<ArrayValue, ExecError> {
-    match current {
-        Value::Null => Ok(ArrayValue::empty()),
-        other => array_value_from_value(&other).ok_or(ExecError::TypeMismatch {
-            op: "array assignment",
-            left: other,
-            right: Value::Null,
-        }),
-    }
+    pgrust_commands::tablecmds::assignment_current_array(current).map_err(tablecmds_error_to_exec)
 }
 
 fn assignment_source_array(replacement: Value) -> Result<ArrayValue, ExecError> {
-    array_value_from_value(&replacement).ok_or(ExecError::TypeMismatch {
-        op: "array slice assignment",
-        left: Value::Null,
-        right: replacement,
-    })
+    pgrust_commands::tablecmds::assignment_source_array(replacement)
+        .map_err(tablecmds_error_to_exec)
 }
 
 fn resolve_assignment_slice_bound(
@@ -13395,37 +13302,18 @@ fn assignment_null_subscript_error() -> ExecError {
     }
 }
 
-const MAX_ASSIGNMENT_ARRAY_ITEMS: usize = i32::MAX as usize;
-
 fn checked_array_item_count(count: usize) -> Result<usize, ExecError> {
-    if count > MAX_ASSIGNMENT_ARRAY_ITEMS {
-        Err(array_assignment_limit_error())
-    } else {
-        Ok(count)
-    }
+    pgrust_commands::tablecmds::checked_array_item_count(count).map_err(tablecmds_error_to_exec)
 }
 
 fn checked_array_upper_bound(lower_bound: i32, length: usize) -> Result<i32, ExecError> {
-    let length = i64::try_from(checked_array_item_count(length)?)
-        .map_err(|_| array_assignment_limit_error())?;
-    i32::try_from(
-        i64::from(lower_bound)
-            .checked_add(length)
-            .and_then(|bound| bound.checked_sub(1))
-            .ok_or_else(array_assignment_limit_error)?,
-    )
-    .map_err(|_| array_assignment_limit_error())
+    pgrust_commands::tablecmds::checked_array_upper_bound(lower_bound, length)
+        .map_err(tablecmds_error_to_exec)
 }
 
 fn checked_array_span_length(lower: i32, upper: i32) -> Result<usize, ExecError> {
-    let span = usize::try_from(
-        i64::from(upper)
-            .checked_sub(i64::from(lower))
-            .and_then(|span| span.checked_add(1))
-            .ok_or_else(array_assignment_limit_error)?,
-    )
-    .map_err(|_| array_assignment_limit_error())?;
-    checked_array_item_count(span)
+    pgrust_commands::tablecmds::checked_array_span_length(lower, upper)
+        .map_err(tablecmds_error_to_exec)
 }
 
 fn array_assignment_error(message: &str) -> ExecError {
@@ -13438,94 +13326,36 @@ fn array_assignment_error(message: &str) -> ExecError {
 }
 
 fn array_assignment_limit_error() -> ExecError {
-    ExecError::DetailedError {
-        message: "array size exceeds the maximum allowed".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "54000",
-    }
+    tablecmds_error_to_exec(pgrust_commands::tablecmds::array_assignment_limit_error())
 }
 
-fn array_with_element_type(mut array: ArrayValue, element_type_oid: Option<u32>) -> ArrayValue {
-    array.element_type_oid = element_type_oid;
-    array
+fn array_with_element_type(array: ArrayValue, element_type_oid: Option<u32>) -> ArrayValue {
+    pgrust_commands::tablecmds::array_with_element_type(array, element_type_oid)
 }
 
 fn linear_index_to_assignment_coords(
-    mut offset: usize,
+    offset: usize,
     lower_bounds: &[i32],
     lengths: &[usize],
 ) -> Vec<i32> {
-    let mut coords = vec![0; lengths.len()];
-    for dim_idx in 0..lengths.len() {
-        let stride = lengths[dim_idx + 1..]
-            .iter()
-            .fold(1usize, |product, length| product.saturating_mul(*length));
-        let axis_offset = if stride == 0 { 0 } else { offset / stride };
-        if stride != 0 {
-            offset %= stride;
-        }
-        coords[dim_idx] = lower_bounds[dim_idx] + axis_offset as i32;
-    }
-    coords
+    pgrust_commands::tablecmds::linear_index_to_assignment_coords(offset, lower_bounds, lengths)
 }
 
 fn assignment_coords_to_linear_index(coords: &[i32], dimensions: &[ArrayDimension]) -> usize {
-    let mut offset = 0usize;
-    for (dim_idx, coord) in coords.iter().enumerate() {
-        let stride = dimensions[dim_idx + 1..]
-            .iter()
-            .fold(1usize, |product, dim| product.saturating_mul(dim.length));
-        offset += (*coord - dimensions[dim_idx].lower_bound) as usize * stride;
-    }
-    offset
+    pgrust_commands::tablecmds::assignment_coords_to_linear_index(coords, dimensions)
 }
 
 fn assignment_top_level(current: Value) -> Result<(i32, Vec<Value>), ExecError> {
-    match current {
-        Value::Null => Ok((1, Vec::new())),
-        Value::Array(items) => Ok((1, items)),
-        Value::PgArray(array) => Ok((
-            array.lower_bound(0).unwrap_or(1),
-            assignment_top_level_items(&array),
-        )),
-        other => Err(ExecError::TypeMismatch {
-            op: "array assignment",
-            left: other,
-            right: Value::Null,
-        }),
-    }
+    pgrust_commands::tablecmds::assignment_top_level(current).map_err(tablecmds_error_to_exec)
 }
 
 fn assignment_top_level_items(array: &ArrayValue) -> Vec<Value> {
-    if array.dimensions.len() <= 1 {
-        return array.elements.clone();
-    }
-    let child_dims = array.dimensions[1..].to_vec();
-    let child_width = child_dims
-        .iter()
-        .fold(1usize, |acc, dim| acc.saturating_mul(dim.length));
-    let mut out = Vec::with_capacity(array.dimensions[0].length);
-    for idx in 0..array.dimensions[0].length {
-        let start = idx * child_width;
-        out.push(Value::PgArray(ArrayValue::from_dimensions(
-            child_dims.clone(),
-            array.elements[start..start + child_width].to_vec(),
-        )));
-    }
-    out
+    pgrust_commands::tablecmds::assignment_top_level_items(array)
 }
 
 fn assignment_replacement_items(replacement: Value) -> Result<Vec<Value>, ExecError> {
-    match replacement {
-        Value::Array(items) => Ok(items),
-        Value::PgArray(array) => Ok(assignment_top_level_items(&array)),
-        other => Err(ExecError::TypeMismatch {
-            op: "array slice assignment",
-            left: Value::Null,
-            right: other,
-        }),
-    }
+    pgrust_commands::tablecmds::assignment_replacement_items(replacement)
+        .map_err(tablecmds_error_to_exec)
 }
 
 fn extend_assignment_items(
@@ -13534,101 +13364,22 @@ fn extend_assignment_items(
     start: i32,
     end: i32,
 ) -> Result<(), ExecError> {
-    if items.is_empty() {
-        *lower_bound = start;
-    }
-    if start < *lower_bound {
-        let prepend = i64::from(*lower_bound)
-            .checked_sub(i64::from(start))
-            .and_then(|delta| usize::try_from(delta).ok())
-            .ok_or_else(array_assignment_limit_error)?;
-        items.splice(0..0, std::iter::repeat_n(Value::Null, prepend));
-        *lower_bound = start;
-    }
-    let upper_bound = i64::from(*lower_bound)
-        .checked_add(i64::try_from(items.len()).map_err(|_| array_assignment_limit_error())?)
-        .and_then(|bound| bound.checked_sub(1))
-        .ok_or_else(array_assignment_limit_error)?;
-    if i64::from(end) > upper_bound {
-        let append = i64::from(end)
-            .checked_sub(upper_bound)
-            .and_then(|delta| usize::try_from(delta).ok())
-            .ok_or_else(array_assignment_limit_error)?;
-        let new_len = items
-            .len()
-            .checked_add(append)
-            .ok_or_else(array_assignment_limit_error)?;
-        items.resize(checked_array_item_count(new_len)?, Value::Null);
-    }
-    Ok(())
+    pgrust_commands::tablecmds::extend_assignment_items(lower_bound, items, start, end)
+        .map_err(tablecmds_error_to_exec)
 }
 
 fn build_assignment_array_value(lower_bound: i32, items: Vec<Value>) -> Result<Value, ExecError> {
-    if items.is_empty() {
-        return Ok(Value::PgArray(ArrayValue::empty()));
-    }
-    let child_arrays = items
-        .iter()
-        .filter_map(|item| match item {
-            Value::PgArray(array) => Some(Some(array.clone())),
-            Value::Array(values) => {
-                Some(ArrayValue::from_nested_values(values.clone(), vec![1]).ok())
-            }
-            Value::Null => Some(None),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if child_arrays.len() != items.len() {
-        return Ok(Value::PgArray(ArrayValue::from_dimensions(
-            vec![ArrayDimension {
-                lower_bound,
-                length: items.len(),
-            }],
-            items,
-        )));
-    }
-    let Some(template) = child_arrays.iter().find_map(|entry| entry.clone()) else {
-        return Ok(Value::PgArray(ArrayValue::from_dimensions(
-            vec![ArrayDimension {
-                lower_bound,
-                length: items.len(),
-            }],
-            items,
-        )));
-    };
-    let child_width = template.elements.len();
-    let mut elements = Vec::with_capacity(items.len() * child_width);
-    for entry in child_arrays {
-        match entry {
-            Some(array) => elements.extend(array.elements),
-            None => elements.extend(std::iter::repeat_n(Value::Null, child_width)),
-        }
-    }
-    let mut dimensions = vec![ArrayDimension {
-        lower_bound,
-        length: items.len(),
-    }];
-    dimensions.extend(template.dimensions);
-    Ok(Value::PgArray(ArrayValue::from_dimensions(
-        dimensions, elements,
-    )))
+    pgrust_commands::tablecmds::build_assignment_array_value(lower_bound, items)
+        .map_err(tablecmds_error_to_exec)
 }
 
 fn assignment_subscript_index(value: Option<&Value>) -> Result<Option<i32>, ExecError> {
-    match value {
-        None => Ok(Some(1)),
-        Some(Value::Null) => Ok(None),
-        Some(Value::Int16(v)) => Ok(Some(*v as i32)),
-        Some(Value::Int32(v)) => Ok(Some(*v)),
-        Some(Value::Int64(v)) => i32::try_from(*v)
-            .map(Some)
-            .map_err(|_| ExecError::Int4OutOfRange),
-        Some(other) => Err(ExecError::TypeMismatch {
-            op: "array assignment",
-            left: other.clone(),
-            right: Value::Null,
-        }),
-    }
+    pgrust_commands::tablecmds::assignment_subscript_index(value).map_err(|err| match err {
+        pgrust_commands::tablecmds::TableCmdsError::Detailed {
+            sqlstate: "22003", ..
+        } => ExecError::Int4OutOfRange,
+        other => tablecmds_error_to_exec(other),
+    })
 }
 
 fn modified_attnums_for_update(assignments: &[BoundAssignment]) -> Vec<i16> {
