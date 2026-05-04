@@ -199,6 +199,7 @@ Key decisions:
 - Expanded `pgrust_executor::sqlfunc` with `pg_proc.proargtypes` parsing, effective call-argument type overlay, and array-append SQL transition classification. Root SQL-function execution now maps crate-owned function metadata errors into the existing SQL-function runtime error.
 - Expanded `pgrust_executor::sqlfunc` with SQL identifier/string quoting and polymorphic SQL type/OID detection. Root SQL-function literal rendering now delegates these pure SQL text/type classification rules while keeping catalog-specific type-name lookup.
 - Added `pgrust_commands::tablecmds_assignment` for ordered UPDATE assignment navigation, point/jsonb/array/subscript assignment, and SQL type display names behind a root assignment runtime adapter.
+- Root `executor::expr_xml` now delegates XPath evaluation and XML indentation formatting to `pgrust_expr`; root keeps XML expression/XMLTABLE execution because those still call `eval_expr`.
 - Expanded `pgrust_executor::sqlfunc` with polymorphic runtime subtype merge/match and compatible numeric widening policy. Root SQL-function polymorphic validation now delegates these pure type-comparison rules while keeping SQL-visible undefined-function error construction.
 - Expanded `pgrust_executor::foreign_keys` with foreign-key key-value rendering behind a crate-owned render context trait for enum labels, indirect varlena decoding, and datetime configuration. Root foreign-key enforcement now only adapts those callbacks for violation detail formatting.
 - Expanded `pgrust_executor::sqlfunc` with SQL-function statement execution policy helpers: utility-statement detection, RETURN-to-SELECT normalization, inline SELECT-candidate detection, and row-security-off SET_CONFIG detection. Root SQL-function execution now delegates those string policy decisions.
@@ -793,6 +794,11 @@ Tests run:
 - `scripts/cargo_isolated.sh check -p pgrust_commands` after tablecmds assignment extraction
 - `scripts/cargo_isolated.sh check --lib` after tablecmds assignment extraction
 - `bash scripts/check_crate_boundaries.sh` after tablecmds assignment extraction
+- `cargo fmt` after XML XPath/indent shim conversion
+- `scripts/cargo_isolated.sh check -p pgrust_expr --quiet` after XML XPath/indent shim conversion
+- `scripts/cargo_isolated.sh check --lib --quiet` after XML XPath/indent shim conversion
+- `scripts/cargo_isolated.sh test -p pgrust_expr --quiet expr_xml` after XML XPath/indent shim conversion (21 tests)
+- `bash scripts/check_crate_boundaries.sh` after XML XPath/indent shim conversion
 
 Remaining:
 - Continue executor service boundaries for PL/pgSQL callbacks, command callbacks, catalog role helpers, tsearch, and notices. Transaction state, row locks, serializable predicate locks, mutation sinks, aggregate helper clusters, stats value shaping, misc builtin/control value shaping, current-schema/search-path policy, num-null/extreme-value helpers, simple value-call helpers, encoding helpers, float8 aggregate transition helpers, UUID builtins, enum support, and catalog visibility helpers have initial traits/crate-local homes.

@@ -1440,7 +1440,7 @@ fn has_top_level_doctype(nodes: &[XmlNode]) -> bool {
     nodes.iter().any(|node| matches!(node, XmlNode::Doctype(_)))
 }
 
-fn format_xml_indent(text: &str, option: XmlOptionSetting) -> Result<String, ExecError> {
+pub fn format_xml_indent(text: &str, option: XmlOptionSetting) -> Result<String, ExecError> {
     let (_, nodes) = parse_xml_nodes(text)?;
     let mut out = String::new();
     if matches!(option, XmlOptionSetting::Document)
