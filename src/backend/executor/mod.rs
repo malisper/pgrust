@@ -15,7 +15,6 @@ mod expr_compile;
 mod expr_date;
 mod expr_datetime;
 mod expr_format;
-pub(crate) mod expr_geometry;
 mod expr_json;
 mod expr_locks;
 mod expr_mac;
@@ -97,9 +96,6 @@ pub(crate) use expr_casts::{
 };
 pub(crate) use expr_datetime::current_timestamp_value;
 pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
-pub(crate) use expr_geometry::eval_geometry_function;
-pub(crate) use expr_geometry::geometry_input_error_message;
-pub(crate) use expr_geometry::render_geometry_text;
 pub(crate) use expr_json::apply_jsonb_subscript_assignment;
 pub(crate) use expr_mac::{
     eval_macaddr_function, macaddr_to_macaddr8, macaddr8_to_macaddr, parse_macaddr_bytes,

@@ -7,7 +7,7 @@ use crate::backend::executor::execute_readonly_statement;
 use crate::backend::executor::function_guc::execute_with_sql_function_context;
 use crate::backend::executor::{
     ExecError, ExecutorContext, QueryColumn, StatementResult, TupleSlot, Value,
-    render_datetime_value_text_with_config, render_geometry_text, render_interval_text_with_config,
+    render_datetime_value_text_with_config, render_interval_text_with_config,
     render_multirange_text_with_config, render_range_text_with_config,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
@@ -1837,7 +1837,8 @@ fn render_sql_literal_with_catalog(
                 sql_function_runtime_error("cannot infer SQL function argument type", None, "42804")
             })?;
             let type_name = sql_type_literal_name(catalog, ty)?;
-            let text = render_geometry_text(value, Default::default()).unwrap_or_default();
+            let text =
+                pgrust_expr::render_geometry_text(value, Default::default()).unwrap_or_default();
             format!("{}::{type_name}", quote_sql_string(&text))
         }
         Value::Range(_) => {

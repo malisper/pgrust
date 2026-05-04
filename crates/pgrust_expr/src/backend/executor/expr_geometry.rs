@@ -1290,6 +1290,9 @@ fn eval_geo_intersects(values: &[Value]) -> Result<Value, ExecError> {
         (Value::Lseg(left), Value::Lseg(right)) => {
             Ok(Value::Bool(lseg_intersection(left, right).is_some()))
         }
+        (Value::Path(left), Value::Path(right)) => {
+            Ok(Value::Bool(path_intersects_path(left, right)))
+        }
         _ => Err(ExecError::TypeMismatch {
             op: "?#",
             left: left.clone(),
@@ -2719,6 +2722,24 @@ fn line_intersects_box(line: &GeoLine, geo_box: &GeoBox) -> bool {
         .any(|edge| lseg_intersects_line(edge, line))
 }
 
+fn path_intersects_path(left: &GeoPath, right: &GeoPath) -> bool {
+    let (Some(left_box), Some(right_box)) = (path_bound_box(left), path_bound_box(right)) else {
+        return false;
+    };
+    if !box_overlap(&left_box, &right_box) {
+        return false;
+    }
+
+    for left_segment in path_segments(left) {
+        for right_segment in path_segments(right) {
+            if lseg_intersection(&left_segment, &right_segment).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn lseg_intersects_line(lseg: &GeoLseg, line: &GeoLine) -> bool {
     lseg_intersection_line(lseg, line).is_some()
 }
@@ -2810,6 +2831,19 @@ fn path_segments(path: &GeoPath) -> Vec<GeoLseg> {
         });
     }
     segments
+}
+
+fn path_bound_box(path: &GeoPath) -> Option<GeoBox> {
+    let first = path.points.first()?;
+    let mut high = first.clone();
+    let mut low = first.clone();
+    for point in path.points.iter().skip(1) {
+        high.x = pg_float8_max(point.x, high.x);
+        high.y = pg_float8_max(point.y, high.y);
+        low.x = pg_float8_min(point.x, low.x);
+        low.y = pg_float8_min(point.y, low.y);
+    }
+    Some(GeoBox { high, low })
 }
 
 fn closed_segments(points: &[GeoPoint]) -> Vec<GeoLseg> {
@@ -3273,7 +3307,8 @@ mod tests {
     use super::{
         circle_to_polygon, eval_geo_closest_point, eval_geo_diagonal, eval_geo_distance,
         eval_geo_intersection, eval_geo_intersects, eval_geo_ne, make_polygon, parse_lseg_text,
-        point_path_distance, point_polygon_distance, polygon_contains_polygon,
+        path_intersects_path, point_path_distance, point_polygon_distance,
+        polygon_contains_polygon,
     };
     use crate::compat::include::nodes::datum::{
         GeoBox, GeoCircle, GeoLine, GeoLseg, GeoPath, GeoPoint, Value,
@@ -3350,6 +3385,66 @@ mod tests {
         assert_eq!(
             eval_geo_closest_point(&[lseg.clone(), lseg]).unwrap(),
             Value::Null
+        );
+    }
+
+    #[test]
+    fn path_intersects_path_matches_open_and_closed_path_semantics() {
+        let crossing_left = GeoPath {
+            closed: false,
+            points: vec![GeoPoint { x: 0.0, y: 0.0 }, GeoPoint { x: 2.0, y: 2.0 }],
+        };
+        let crossing_right = GeoPath {
+            closed: false,
+            points: vec![GeoPoint { x: 0.0, y: 2.0 }, GeoPoint { x: 2.0, y: 0.0 }],
+        };
+        assert!(path_intersects_path(&crossing_left, &crossing_right));
+
+        let separated_left = GeoPath {
+            closed: false,
+            points: vec![GeoPoint { x: 0.0, y: 0.0 }, GeoPoint { x: 3.0, y: 0.0 }],
+        };
+        let separated_right = GeoPath {
+            closed: false,
+            points: vec![GeoPoint { x: 1.0, y: 1.0 }, GeoPoint { x: 2.0, y: 1.0 }],
+        };
+        assert!(!path_intersects_path(&separated_left, &separated_right));
+
+        let closed = GeoPath {
+            closed: true,
+            points: vec![
+                GeoPoint { x: 0.0, y: 0.0 },
+                GeoPoint { x: 2.0, y: 0.0 },
+                GeoPoint { x: 2.0, y: 2.0 },
+            ],
+        };
+        let closure_crossing = GeoPath {
+            closed: false,
+            points: vec![GeoPoint { x: 0.0, y: 1.5 }, GeoPoint { x: 2.0, y: 1.5 }],
+        };
+        assert!(path_intersects_path(&closed, &closure_crossing));
+
+        let disjoint = GeoPath {
+            closed: false,
+            points: vec![GeoPoint { x: 10.0, y: 10.0 }, GeoPoint { x: 11.0, y: 11.0 }],
+        };
+        assert!(!path_intersects_path(&crossing_left, &disjoint));
+    }
+
+    #[test]
+    fn path_intersects_operator_uses_geo_intersects_builtin() {
+        let left = Value::Path(GeoPath {
+            closed: false,
+            points: vec![GeoPoint { x: 0.0, y: 0.0 }, GeoPoint { x: 2.0, y: 2.0 }],
+        });
+        let right = Value::Path(GeoPath {
+            closed: false,
+            points: vec![GeoPoint { x: 0.0, y: 2.0 }, GeoPoint { x: 2.0, y: 0.0 }],
+        });
+
+        assert_eq!(
+            eval_geo_intersects(&[left, right]).unwrap(),
+            Value::Bool(true)
         );
     }
 

@@ -14,6 +14,7 @@ use crate::include::nodes::datetime::{
     MAX_TIME_PRECISION, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
+use pgrust_expr::eval_geometry_function;
 
 use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
 use super::expr_agg_support::{
@@ -51,7 +52,6 @@ use super::expr_datetime::{
     current_timestamp_value_from_timestamp_with_config, current_timestamp_value_with_config,
     render_datetime_value_text_with_config,
 };
-use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
     eval_jsonpath_operator, eval_sql_json_query_function_expr, json_to_tsvector_value,
@@ -7509,7 +7509,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         | Value::Line(_)
         | Value::Box(_)
         | Value::Polygon(_)
-        | Value::Circle(_) => crate::backend::executor::render_geometry_text(
+        | Value::Circle(_) => pgrust_expr::render_geometry_text(
             value,
             crate::backend::libpq::pqformat::FloatFormatOptions::default(),
         )
@@ -11503,7 +11503,7 @@ fn eval_plpgsql_builtin_function(
         .map(|arg| eval_plpgsql_expr(arg, slot))
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(result) = eval_geometry_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if let Some(result) = eval_macaddr_function(func, &values) {
         return result;
@@ -13451,7 +13451,7 @@ pub(crate) fn eval_builtin_function(
         return eval_domain_check_upper_less_than(&values);
     }
     if let Some(result) = eval_geometry_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if let Some(result) = eval_macaddr_function(func, &values) {
         return result;

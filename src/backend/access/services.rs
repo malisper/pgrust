@@ -529,51 +529,51 @@ impl AccessScalarServices for RootAccessServices {
     }
 
     fn bound_box(&self, left: &GeoBox, right: &GeoBox) -> GeoBox {
-        crate::backend::executor::expr_geometry::bound_box(left, right)
+        pgrust_expr::expr_geometry::bound_box(left, right)
     }
 
     fn box_area(&self, geo_box: &GeoBox) -> f64 {
-        crate::backend::executor::expr_geometry::box_area(geo_box)
+        pgrust_expr::expr_geometry::box_area(geo_box)
     }
 
     fn box_overlap(&self, left: &GeoBox, right: &GeoBox) -> bool {
-        crate::backend::executor::expr_geometry::box_overlap(left, right)
+        pgrust_expr::expr_geometry::box_overlap(left, right)
     }
 
     fn box_contains_box(&self, outer: &GeoBox, inner: &GeoBox) -> bool {
-        crate::backend::executor::expr_geometry::box_contains_box(outer, inner)
+        pgrust_expr::expr_geometry::box_contains_box(outer, inner)
     }
 
     fn box_contains_point(&self, geo_box: &GeoBox, point: &GeoPoint) -> bool {
-        crate::backend::executor::expr_geometry::box_contains_point(geo_box, point)
+        pgrust_expr::expr_geometry::box_contains_point(geo_box, point)
     }
 
     fn box_same(&self, left: &GeoBox, right: &GeoBox) -> bool {
-        crate::backend::executor::expr_geometry::box_same(left, right)
+        pgrust_expr::expr_geometry::box_same(left, right)
     }
 
     fn box_box_distance(&self, left: &GeoBox, right: &GeoBox) -> f64 {
-        crate::backend::executor::expr_geometry::box_box_distance(left, right)
+        pgrust_expr::expr_geometry::box_box_distance(left, right)
     }
 
     fn polygon_overlap(&self, left: &GeoPolygon, right: &GeoPolygon) -> bool {
-        crate::backend::executor::expr_geometry::polygon_overlap(left, right)
+        pgrust_expr::expr_geometry::polygon_overlap(left, right)
     }
 
     fn polygon_same(&self, left: &GeoPolygon, right: &GeoPolygon) -> bool {
-        crate::backend::executor::expr_geometry::polygon_same(left, right)
+        pgrust_expr::expr_geometry::polygon_same(left, right)
     }
 
     fn polygon_contains_polygon(&self, outer: &GeoPolygon, inner: &GeoPolygon) -> bool {
-        crate::backend::executor::expr_geometry::polygon_contains_polygon(outer, inner)
+        pgrust_expr::expr_geometry::polygon_contains_polygon(outer, inner)
     }
 
     fn point_in_polygon(&self, point: &GeoPoint, poly: &GeoPolygon) -> i32 {
-        crate::backend::executor::expr_geometry::point_in_polygon(point, poly)
+        pgrust_expr::expr_geometry::point_in_polygon(point, poly)
     }
 
     fn point_polygon_distance(&self, point: &GeoPoint, poly: &GeoPolygon) -> f64 {
-        crate::backend::executor::expr_geometry::point_polygon_distance(point, poly)
+        pgrust_expr::expr_geometry::point_polygon_distance(point, poly)
     }
 }
 

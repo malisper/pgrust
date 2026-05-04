@@ -4,10 +4,10 @@ use std::io::{self, Write};
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::executor::{
-    ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
-    render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
-    render_interval_text_with_config, render_macaddr_text, render_macaddr8_text,
-    render_multirange_text_with_config, render_pg_lsn_text, render_range_text_with_config,
+    ArrayValue, ExecError, QueryColumn, Value, render_datetime_value_text_with_config,
+    render_internal_char_text, render_interval_text_with_config, render_macaddr_text,
+    render_macaddr8_text, render_multirange_text_with_config, render_pg_lsn_text,
+    render_range_text_with_config,
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::statistics::{
@@ -91,8 +91,10 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::InvalidByteaHexOddDigits { .. } => {
             "invalid hexadecimal data: odd number of digits".to_string()
         }
-        ExecError::InvalidGeometryInput { ty, value } => geometry_input_error_message(ty, value)
-            .unwrap_or_else(|| format!("invalid input syntax for type {ty}: \"{value}\"")),
+        ExecError::InvalidGeometryInput { ty, value } => {
+            pgrust_expr::geometry_input_error_message(ty, value)
+                .unwrap_or_else(|| format!("invalid input syntax for type {ty}: \"{value}\""))
+        }
         ExecError::InvalidBitInput { digit, is_hex } => {
             if *is_hex {
                 format!("\"{digit}\" is not a valid hexadecimal digit")
@@ -933,7 +935,8 @@ pub(crate) fn send_typed_data_row(
             | Value::Box(_)
             | Value::Polygon(_)
             | Value::Circle(_) => {
-                let rendered = render_geometry_text(val, float_format.clone()).unwrap_or_default();
+                let rendered = pgrust_expr::render_geometry_text(val, float_format.clone())
+                    .unwrap_or_default();
                 pgrust_protocol::pqformat::append_data_row_text_field(buf, &rendered);
             }
             Value::Array(items) => {

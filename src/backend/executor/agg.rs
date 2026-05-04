@@ -2058,8 +2058,7 @@ fn json_object_agg_key(key: &Value) -> String {
         | Value::Box(_)
         | Value::Polygon(_)
         | Value::Circle(_) => {
-            crate::backend::executor::render_geometry_text(key, Default::default())
-                .unwrap_or_default()
+            pgrust_expr::render_geometry_text(key, Default::default()).unwrap_or_default()
         }
         Value::Range(_) => render_range_text(key).unwrap_or_default(),
         Value::Multirange(_) => {
@@ -2138,8 +2137,7 @@ fn value_to_json_text(value: &Value) -> String {
         | Value::Box(_)
         | Value::Polygon(_)
         | Value::Circle(_) => serde_json::to_string(
-            &crate::backend::executor::render_geometry_text(value, Default::default())
-                .unwrap_or_default(),
+            &pgrust_expr::render_geometry_text(value, Default::default()).unwrap_or_default(),
         )
         .unwrap(),
         Value::Range(_) => {

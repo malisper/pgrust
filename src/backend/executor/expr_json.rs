@@ -2840,8 +2840,7 @@ fn json_object_text_value(value: &Value, op: &'static str) -> Result<Option<Stri
         | Value::Box(_)
         | Value::Polygon(_)
         | Value::Circle(_) => Ok(Some(
-            crate::backend::executor::render_geometry_text(value, Default::default())
-                .unwrap_or_default(),
+            pgrust_expr::render_geometry_text(value, Default::default()).unwrap_or_default(),
         )),
         Value::Range(_) => Ok(Some(render_range_text(value).unwrap_or_default())),
         Value::Multirange(_) => Ok(Some(
@@ -3930,8 +3929,7 @@ fn value_to_json_serde_with_config(
         | Value::Box(_)
         | Value::Polygon(_)
         | Value::Circle(_) => SerdeJsonValue::String(
-            crate::backend::executor::render_geometry_text(value, Default::default())
-                .unwrap_or_default(),
+            pgrust_expr::render_geometry_text(value, Default::default()).unwrap_or_default(),
         ),
         Value::Range(_) => SerdeJsonValue::String(render_range_text(value).unwrap_or_default()),
         Value::Multirange(_) => SerdeJsonValue::String(
@@ -4076,8 +4074,7 @@ fn render_json_value_text_with_config(
         | Value::Box(_)
         | Value::Polygon(_)
         | Value::Circle(_) => serde_json::to_string(
-            &crate::backend::executor::render_geometry_text(value, Default::default())
-                .unwrap_or_default(),
+            &pgrust_expr::render_geometry_text(value, Default::default()).unwrap_or_default(),
         )
         .unwrap(),
         Value::Range(_) => {

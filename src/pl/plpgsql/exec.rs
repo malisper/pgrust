@@ -5687,8 +5687,7 @@ fn render_dynamic_query_param_base_sql(
         | Value::Box(_)
         | Value::Polygon(_)
         | Value::Circle(_) => quote_sql_string(
-            &crate::backend::executor::render_geometry_text(value, Default::default())
-                .unwrap_or_default(),
+            &pgrust_expr::render_geometry_text(value, Default::default()).unwrap_or_default(),
         ),
         Value::Range(_) => quote_sql_string(
             &crate::backend::executor::render_range_text(value).unwrap_or_default(),
@@ -6568,8 +6567,7 @@ fn render_raise_value(value: &Value) -> String {
         | Value::Box(_)
         | Value::Polygon(_)
         | Value::Circle(_) => {
-            crate::backend::executor::render_geometry_text(value, Default::default())
-                .unwrap_or_default()
+            pgrust_expr::render_geometry_text(value, Default::default()).unwrap_or_default()
         }
         Value::Range(_) => crate::backend::executor::render_range_text(value).unwrap_or_default(),
         Value::Multirange(_) => {
