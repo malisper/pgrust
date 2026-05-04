@@ -848,3 +848,25 @@ Tests run:
 
 Remaining:
 `pgrust_commands::explain_expr` still exposes a small helper surface for root index/order-by EXPLAIN formatting.
+
+## EXPLAIN Verbose Renderer Extraction
+
+Goal:
+Move the large verbose EXPLAIN plan rendering helper block from root `commands::explain` into `pgrust_commands`.
+
+Key decisions:
+Added `crates/pgrust_commands/src/explain_verbose.rs` for verbose plan labels, output-name derivation, condition rendering, child traversal helpers, and dynamic type-name rendering. Root keeps callback adapters for executor-derived plan labels/costs, const-false result detection, index condition formatting, and recursive plan formatting.
+
+Files touched:
+`crates/pgrust_commands/src/explain_verbose.rs`
+`crates/pgrust_commands/src/lib.rs`
+`src/backend/commands/explain.rs`
+
+Tests run:
+`cargo fmt`
+`scripts/cargo_isolated.sh check -p pgrust_commands --quiet`
+`scripts/cargo_isolated.sh check --lib --quiet`
+`bash scripts/check_crate_boundaries.sh`
+
+Remaining:
+Root `commands::explain` still owns executor-state formatting and root catalog/runtime callbacks. A later pass can narrow these callback shims once executor plan-state construction is crate-owned.
