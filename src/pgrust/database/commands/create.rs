@@ -6596,10 +6596,8 @@ impl Database {
                 None,
             )?
         } else if let Some(parent_oid) = lowered.partition_parent_oid {
-            let parent_tablespace_oid = self
-                .backend_catcache(client_id, Some((xid, table_cid)))
-                .map_err(map_catalog_error)?
-                .class_by_oid(parent_oid)
+            let parent_tablespace_oid = catalog
+                .class_row_by_oid(parent_oid)
                 .map(|row| row.reltablespace)
                 .or_else(|| {
                     catalog

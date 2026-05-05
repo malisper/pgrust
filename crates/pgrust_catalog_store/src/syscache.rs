@@ -13,6 +13,7 @@ use crate::rowcodec::{
     pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
     pg_statistic_row_from_values, pg_trigger_row_from_values, pg_type_row_from_values,
 };
+use crate::rows::PhysicalCatalogRows;
 use pgrust_catalog_data::{
     BootstrapCatalogKind, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
@@ -91,7 +92,9 @@ pub const PG_EVENT_TRIGGER_OID_INDEX_OID: u32 = 3468;
 pub const PG_TYPE_OID_INDEX_OID: u32 = 2703;
 pub const PG_TYPE_TYPNAME_NSP_INDEX_OID: u32 = 2704;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum SysCacheId {
     // PostgreSQL syscache name: AGGFNOID.
     AggFnoid,
@@ -219,6 +222,73 @@ pub enum SysCacheId {
     TypeOid,
     // PostgreSQL syscache name: TYPENAMENSP.
     TypeNameNsp,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum SysCacheKeyPart {
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Text(String),
+    InternalChar(u8),
+    Bool(bool),
+    Array(Vec<SysCacheKeyPart>),
+    Null,
+}
+
+impl SysCacheKeyPart {
+    pub fn from_value(value: &Value) -> Option<Self> {
+        match value.to_owned_value() {
+            Value::Int16(value) => Some(Self::Int16(value)),
+            Value::Int32(value) => Some(Self::Int32(value)),
+            Value::Int64(value) => Some(Self::Int64(value)),
+            Value::Text(value) => Some(Self::Text(value.to_string())),
+            Value::InternalChar(value) => Some(Self::InternalChar(value)),
+            Value::Bool(value) => Some(Self::Bool(value)),
+            Value::Array(values) => values
+                .iter()
+                .map(Self::from_value)
+                .collect::<Option<Vec<_>>>()
+                .map(Self::Array),
+            Value::PgArray(array) => array
+                .elements
+                .iter()
+                .map(Self::from_value)
+                .collect::<Option<Vec<_>>>()
+                .map(Self::Array),
+            Value::Null => Some(Self::Null),
+            _ => None,
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct SysCacheInvalidationKey {
+    pub cache_id: SysCacheId,
+    pub keys: Vec<SysCacheKeyPart>,
+}
+
+impl SysCacheInvalidationKey {
+    pub fn new(cache_id: SysCacheId, keys: Vec<SysCacheKeyPart>) -> Self {
+        Self { cache_id, keys }
+    }
+
+    pub fn from_values(cache_id: SysCacheId, keys: &[Value]) -> Option<Self> {
+        keys.iter()
+            .map(SysCacheKeyPart::from_value)
+            .collect::<Option<Vec<_>>>()
+            .map(|keys| Self { cache_id, keys })
+    }
+
+    pub fn matches_prefix(&self, prefix: &Self) -> bool {
+        self.cache_id == prefix.cache_id
+            && prefix.keys.len() <= self.keys.len()
+            && self.keys[..prefix.keys.len()] == prefix.keys
+    }
 }
 
 impl SysCacheId {
@@ -500,6 +570,583 @@ impl SysCacheTuple {
             Self::Type(row) => Some(row.oid),
         }
     }
+}
+
+fn oid_part(oid: u32) -> SysCacheKeyPart {
+    SysCacheKeyPart::Int64(i64::from(oid))
+}
+
+fn int16_part(value: i16) -> SysCacheKeyPart {
+    SysCacheKeyPart::Int16(value)
+}
+
+fn int32_part(value: i32) -> SysCacheKeyPart {
+    SysCacheKeyPart::Int32(value)
+}
+
+fn bool_part(value: bool) -> SysCacheKeyPart {
+    SysCacheKeyPart::Bool(value)
+}
+
+fn name_part(value: &str) -> SysCacheKeyPart {
+    SysCacheKeyPart::Text(value.to_string())
+}
+
+fn oid_vector_part(value: &str) -> SysCacheKeyPart {
+    SysCacheKeyPart::Array(
+        value
+            .split_ascii_whitespace()
+            .filter_map(|part| part.parse::<i32>().ok())
+            .map(SysCacheKeyPart::Int32)
+            .collect(),
+    )
+}
+
+fn key(cache_id: SysCacheId, keys: Vec<SysCacheKeyPart>) -> SysCacheInvalidationKey {
+    SysCacheInvalidationKey::new(cache_id, keys)
+}
+
+pub fn syscache_invalidation_keys_for_tuple(tuple: &SysCacheTuple) -> Vec<SysCacheInvalidationKey> {
+    match tuple {
+        SysCacheTuple::Aggregate(row) => {
+            vec![key(SysCacheId::AggFnoid, vec![oid_part(row.aggfnoid)])]
+        }
+        SysCacheTuple::Am(row) => vec![
+            key(SysCacheId::AmName, vec![name_part(&row.amname)]),
+            key(SysCacheId::AmOid, vec![oid_part(row.oid)]),
+        ],
+        SysCacheTuple::Amop(row) => vec![key(
+            SysCacheId::AmopStrategy,
+            vec![
+                oid_part(row.amopfamily),
+                oid_part(row.amoplefttype),
+                oid_part(row.amoprighttype),
+                int16_part(row.amopstrategy),
+                SysCacheKeyPart::InternalChar(row.amoppurpose as u8),
+            ],
+        )],
+        SysCacheTuple::Amproc(row) => vec![key(
+            SysCacheId::AmprocNum,
+            vec![
+                oid_part(row.amprocfamily),
+                oid_part(row.amproclefttype),
+                oid_part(row.amprocrighttype),
+                int16_part(row.amprocnum),
+            ],
+        )],
+        SysCacheTuple::Attrdef(row) => vec![
+            key(
+                SysCacheId::AttrDefault,
+                vec![oid_part(row.adrelid), int16_part(row.adnum)],
+            ),
+            key(SysCacheId::AttrDefaultOid, vec![oid_part(row.oid)]),
+        ],
+        SysCacheTuple::Attribute(row) => vec![
+            key(
+                SysCacheId::AttrName,
+                vec![oid_part(row.attrelid), name_part(&row.attname)],
+            ),
+            key(
+                SysCacheId::AttrNum,
+                vec![oid_part(row.attrelid), int16_part(row.attnum)],
+            ),
+        ],
+        SysCacheTuple::AuthId(row) => vec![
+            key(SysCacheId::AuthIdRolname, vec![name_part(&row.rolname)]),
+            key(SysCacheId::AuthIdOid, vec![oid_part(row.oid)]),
+        ],
+        SysCacheTuple::AuthMembers(row) => vec![
+            key(SysCacheId::AuthMembersOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::AuthMembersRoleMember,
+                vec![
+                    oid_part(row.roleid),
+                    oid_part(row.member),
+                    oid_part(row.grantor),
+                ],
+            ),
+            key(
+                SysCacheId::AuthMembersMemberRole,
+                vec![
+                    oid_part(row.member),
+                    oid_part(row.roleid),
+                    oid_part(row.grantor),
+                ],
+            ),
+            key(SysCacheId::AuthMembersGrantor, vec![oid_part(row.grantor)]),
+        ],
+        SysCacheTuple::Cast(row) => vec![
+            key(SysCacheId::CastOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::CastSourceTarget,
+                vec![oid_part(row.castsource), oid_part(row.casttarget)],
+            ),
+        ],
+        SysCacheTuple::Class(row) => vec![
+            key(SysCacheId::RelOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::RelNameNsp,
+                vec![name_part(&row.relname), oid_part(row.relnamespace)],
+            ),
+        ],
+        SysCacheTuple::Collation(row) => vec![key(SysCacheId::CollOid, vec![oid_part(row.oid)])],
+        SysCacheTuple::Constraint(row) => vec![
+            key(SysCacheId::ConstraintOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::ConstraintRelId,
+                vec![
+                    oid_part(row.conrelid),
+                    oid_part(row.contypid),
+                    name_part(&row.conname),
+                ],
+            ),
+        ],
+        SysCacheTuple::Depend(row) => vec![
+            key(
+                SysCacheId::DependDepender,
+                vec![
+                    oid_part(row.classid),
+                    oid_part(row.objid),
+                    int32_part(row.objsubid),
+                ],
+            ),
+            key(
+                SysCacheId::DependReference,
+                vec![
+                    oid_part(row.refclassid),
+                    oid_part(row.refobjid),
+                    int32_part(row.refobjsubid),
+                ],
+            ),
+        ],
+        SysCacheTuple::Description(row) => vec![key(
+            SysCacheId::DescriptionObj,
+            vec![
+                oid_part(row.objoid),
+                oid_part(row.classoid),
+                int32_part(row.objsubid),
+            ],
+        )],
+        SysCacheTuple::Index(row) => vec![
+            key(SysCacheId::IndexRelId, vec![oid_part(row.indexrelid)]),
+            key(SysCacheId::IndexIndRelId, vec![oid_part(row.indrelid)]),
+        ],
+        SysCacheTuple::Inherits(row) => vec![
+            key(
+                SysCacheId::InheritsRelIdSeqNo,
+                vec![oid_part(row.inhrelid), int32_part(row.inhseqno)],
+            ),
+            key(SysCacheId::InheritsParent, vec![oid_part(row.inhparent)]),
+        ],
+        SysCacheTuple::Language(row) => vec![
+            key(SysCacheId::LangName, vec![name_part(&row.lanname)]),
+            key(SysCacheId::LangOid, vec![oid_part(row.oid)]),
+        ],
+        SysCacheTuple::Namespace(row) => vec![
+            key(SysCacheId::NamespaceName, vec![name_part(&row.nspname)]),
+            key(SysCacheId::NamespaceOid, vec![oid_part(row.oid)]),
+        ],
+        SysCacheTuple::Opclass(row) => vec![
+            key(SysCacheId::OpclassOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::ClaAmNameNsp,
+                vec![
+                    oid_part(row.opcmethod),
+                    name_part(&row.opcname),
+                    oid_part(row.opcnamespace),
+                ],
+            ),
+        ],
+        SysCacheTuple::Opfamily(row) => vec![key(SysCacheId::OpfamilyOid, vec![oid_part(row.oid)])],
+        SysCacheTuple::Operator(row) => vec![
+            key(SysCacheId::OperOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::OperNameNsp,
+                vec![
+                    name_part(&row.oprname),
+                    oid_part(row.oprleft),
+                    oid_part(row.oprright),
+                    oid_part(row.oprnamespace),
+                ],
+            ),
+        ],
+        SysCacheTuple::PartitionedTable(row) => {
+            vec![key(SysCacheId::PartRelId, vec![oid_part(row.partrelid)])]
+        }
+        SysCacheTuple::Policy(row) => vec![
+            key(SysCacheId::PolicyOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::PolicyPolrelidPolname,
+                vec![oid_part(row.polrelid), name_part(&row.polname)],
+            ),
+        ],
+        SysCacheTuple::Proc(row) => vec![
+            key(SysCacheId::ProcOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::ProcNameArgsNsp,
+                vec![
+                    name_part(&row.proname),
+                    oid_vector_part(&row.proargtypes),
+                    oid_part(row.pronamespace),
+                ],
+            ),
+        ],
+        SysCacheTuple::Publication(row) => vec![
+            key(SysCacheId::PublicationOid, vec![oid_part(row.oid)]),
+            key(SysCacheId::PublicationName, vec![name_part(&row.pubname)]),
+        ],
+        SysCacheTuple::PublicationRel(row) => vec![
+            key(SysCacheId::PublicationRel, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::PublicationRelMap,
+                vec![oid_part(row.prrelid), oid_part(row.prpubid)],
+            ),
+            key(
+                SysCacheId::PublicationRelPrpubid,
+                vec![oid_part(row.prpubid)],
+            ),
+        ],
+        SysCacheTuple::PublicationNamespace(row) => vec![
+            key(SysCacheId::PublicationNamespace, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::PublicationNamespaceMap,
+                vec![oid_part(row.pnnspid), oid_part(row.pnpubid)],
+            ),
+        ],
+        SysCacheTuple::Rewrite(row) => vec![
+            key(SysCacheId::RewriteOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::RuleRelName,
+                vec![oid_part(row.ev_class), name_part(&row.rulename)],
+            ),
+        ],
+        SysCacheTuple::Statistic(row) => vec![key(
+            SysCacheId::StatRelAttInh,
+            vec![
+                oid_part(row.starelid),
+                int16_part(row.staattnum),
+                bool_part(row.stainherit),
+            ],
+        )],
+        SysCacheTuple::StatisticExt(row) => vec![
+            key(SysCacheId::StatExtOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::StatExtNameNsp,
+                vec![name_part(&row.stxname), oid_part(row.stxnamespace)],
+            ),
+            key(SysCacheId::StatisticExtRelId, vec![oid_part(row.stxrelid)]),
+        ],
+        SysCacheTuple::StatisticExtData(row) => vec![key(
+            SysCacheId::StatisticExtDataStxoidInh,
+            vec![oid_part(row.stxoid), bool_part(row.stxdinherit)],
+        )],
+        SysCacheTuple::Trigger(row) => vec![
+            key(
+                SysCacheId::TriggerRelidName,
+                vec![oid_part(row.tgrelid), name_part(&row.tgname)],
+            ),
+            key(SysCacheId::TriggerOid, vec![oid_part(row.oid)]),
+        ],
+        SysCacheTuple::EventTrigger(row) => vec![
+            key(SysCacheId::EventTriggerName, vec![name_part(&row.evtname)]),
+            key(SysCacheId::EventTriggerOid, vec![oid_part(row.oid)]),
+        ],
+        SysCacheTuple::Type(row) => vec![
+            key(SysCacheId::TypeOid, vec![oid_part(row.oid)]),
+            key(
+                SysCacheId::TypeNameNsp,
+                vec![name_part(&row.typname), oid_part(row.typnamespace)],
+            ),
+        ],
+    }
+}
+
+pub fn relcache_oids_for_tuple(tuple: &SysCacheTuple) -> Vec<u32> {
+    match tuple {
+        SysCacheTuple::Class(row) => vec![row.oid],
+        SysCacheTuple::Attribute(row) => vec![row.attrelid],
+        SysCacheTuple::Attrdef(row) => vec![row.adrelid],
+        SysCacheTuple::Index(row) => vec![row.indexrelid, row.indrelid],
+        SysCacheTuple::Inherits(row) => vec![row.inhrelid, row.inhparent],
+        SysCacheTuple::Constraint(row) => [row.conrelid, row.confrelid, row.conindid]
+            .into_iter()
+            .filter(|oid| *oid != 0)
+            .collect(),
+        SysCacheTuple::PartitionedTable(row) => vec![row.partrelid],
+        SysCacheTuple::Rewrite(row) => vec![row.ev_class],
+        SysCacheTuple::Trigger(row) => [row.tgrelid, row.tgconstrrelid, row.tgconstrindid]
+            .into_iter()
+            .filter(|oid| *oid != 0)
+            .collect(),
+        SysCacheTuple::Policy(row) => vec![row.polrelid],
+        SysCacheTuple::Statistic(row) => vec![row.starelid],
+        SysCacheTuple::StatisticExt(row) => vec![row.stxrelid],
+        SysCacheTuple::PublicationRel(row) => vec![row.prrelid],
+        _ => Vec::new(),
+    }
+}
+
+fn extend_tuple_invalidations(
+    tuple: SysCacheTuple,
+    keys: &mut Vec<SysCacheInvalidationKey>,
+    relcache_oids: &mut Vec<u32>,
+) {
+    for key in syscache_invalidation_keys_for_tuple(&tuple) {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    for oid in relcache_oids_for_tuple(&tuple) {
+        if !relcache_oids.contains(&oid) {
+            relcache_oids.push(oid);
+        }
+    }
+}
+
+pub fn catalog_row_invalidations_for_rows(
+    rows: &PhysicalCatalogRows,
+) -> (Vec<SysCacheInvalidationKey>, Vec<u32>) {
+    let mut keys = Vec::new();
+    let mut relcache_oids = Vec::new();
+    for row in &rows.aggregates {
+        extend_tuple_invalidations(
+            SysCacheTuple::Aggregate(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.ams {
+        extend_tuple_invalidations(
+            SysCacheTuple::Am(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.amops {
+        extend_tuple_invalidations(
+            SysCacheTuple::Amop(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.amprocs {
+        extend_tuple_invalidations(
+            SysCacheTuple::Amproc(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.attrdefs {
+        extend_tuple_invalidations(
+            SysCacheTuple::Attrdef(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.attributes {
+        extend_tuple_invalidations(
+            SysCacheTuple::Attribute(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.authids {
+        extend_tuple_invalidations(
+            SysCacheTuple::AuthId(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.auth_members {
+        extend_tuple_invalidations(
+            SysCacheTuple::AuthMembers(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.casts {
+        extend_tuple_invalidations(
+            SysCacheTuple::Cast(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.classes {
+        extend_tuple_invalidations(
+            SysCacheTuple::Class(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.collations {
+        extend_tuple_invalidations(
+            SysCacheTuple::Collation(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.constraints {
+        extend_tuple_invalidations(
+            SysCacheTuple::Constraint(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.depends {
+        extend_tuple_invalidations(
+            SysCacheTuple::Depend(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.descriptions {
+        extend_tuple_invalidations(
+            SysCacheTuple::Description(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.indexes {
+        extend_tuple_invalidations(
+            SysCacheTuple::Index(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.inherits {
+        extend_tuple_invalidations(
+            SysCacheTuple::Inherits(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.languages {
+        extend_tuple_invalidations(
+            SysCacheTuple::Language(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.namespaces {
+        extend_tuple_invalidations(
+            SysCacheTuple::Namespace(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.opclasses {
+        extend_tuple_invalidations(
+            SysCacheTuple::Opclass(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.opfamilies {
+        extend_tuple_invalidations(
+            SysCacheTuple::Opfamily(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.operators {
+        extend_tuple_invalidations(
+            SysCacheTuple::Operator(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.partitioned_tables {
+        extend_tuple_invalidations(
+            SysCacheTuple::PartitionedTable(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.policies {
+        extend_tuple_invalidations(
+            SysCacheTuple::Policy(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.procs {
+        extend_tuple_invalidations(
+            SysCacheTuple::Proc(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.publications {
+        extend_tuple_invalidations(
+            SysCacheTuple::Publication(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.publication_rels {
+        extend_tuple_invalidations(
+            SysCacheTuple::PublicationRel(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.publication_namespaces {
+        extend_tuple_invalidations(
+            SysCacheTuple::PublicationNamespace(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.rewrites {
+        extend_tuple_invalidations(
+            SysCacheTuple::Rewrite(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.statistics {
+        extend_tuple_invalidations(
+            SysCacheTuple::Statistic(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.statistics_ext {
+        extend_tuple_invalidations(
+            SysCacheTuple::StatisticExt(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.statistics_ext_data {
+        extend_tuple_invalidations(
+            SysCacheTuple::StatisticExtData(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.triggers {
+        extend_tuple_invalidations(
+            SysCacheTuple::Trigger(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.event_triggers {
+        extend_tuple_invalidations(
+            SysCacheTuple::EventTrigger(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.types {
+        extend_tuple_invalidations(
+            SysCacheTuple::Type(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    (keys, relcache_oids)
 }
 
 pub fn oid_key(oid: u32) -> Value {

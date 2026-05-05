@@ -20386,6 +20386,32 @@ fn simple_select_uses_keyed_catalog_without_broad_catcache() {
 }
 
 #[test]
+fn partition_ddl_uses_keyed_catalog_without_broad_catcache() {
+    let base = temp_dir("partition_ddl_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table keyed_part (id int4 not null) partition by range (id)",
+    )
+    .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
+
+    db.execute(
+        1,
+        "create table keyed_part_0 partition of keyed_part for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(1, "create index keyed_part_0_id_idx on keyed_part_0 (id)")
+        .unwrap();
+    db.execute(1, "explain select * from keyed_part where id = 1")
+        .unwrap();
+
+    assert_no_broad_catalog_loads(&db, "partition DDL and EXPLAIN");
+}
+
+#[test]
 fn broad_catalog_load_counters_are_database_scoped() {
     let left = Database::open(temp_dir("broad_counter_left"), 16).unwrap();
     let right = Database::open(temp_dir("broad_counter_right"), 16).unwrap();

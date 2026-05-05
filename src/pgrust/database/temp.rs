@@ -2,6 +2,7 @@ use super::*;
 use crate::backend::catalog::persistence::delete_catalog_rows_subset_mvcc;
 use crate::backend::catalog::rows::{PhysicalCatalogRows, drop_relation_delete_kinds};
 use crate::backend::utils::cache::catcache::CatCache;
+use crate::backend::utils::cache::syscache::catalog_row_invalidations_for_rows;
 use crate::include::catalog::{
     BootstrapCatalogKind, CONSTRAINT_FOREIGN, PG_ATTRDEF_RELATION_OID, PG_CAST_RELATION_OID,
     PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_OPERATOR_RELATION_OID,
@@ -320,6 +321,13 @@ fn temp_namespace_catalog_rows(
         touched_catalogs: temp_namespace_delete_kinds(),
         ..CatalogMutationEffect::default()
     };
+    let (syscache_keys, relcache_oids) = catalog_row_invalidations_for_rows(&rows);
+    for key in syscache_keys {
+        push_unique(&mut effect.syscache_keys, key);
+    }
+    for oid in relcache_oids {
+        push_oid(&mut effect.relation_oids, oid);
+    }
     for row in &rows.classes {
         push_oid(&mut effect.relation_oids, row.oid);
         push_oid(&mut effect.namespace_oids, row.relnamespace);

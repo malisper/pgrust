@@ -256,44 +256,6 @@ fn shared_catcache_context(cache_ctx: BackendCacheContext) -> BackendCacheContex
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum SysCacheKeyPart {
-    Int16(i16),
-    Int32(i32),
-    Int64(i64),
-    Text(String),
-    InternalChar(u8),
-    Bool(bool),
-    Array(Vec<SysCacheKeyPart>),
-    Null,
-}
-
-impl SysCacheKeyPart {
-    fn from_value(value: &Value) -> Option<Self> {
-        match value.to_owned_value() {
-            Value::Int16(value) => Some(Self::Int16(value)),
-            Value::Int32(value) => Some(Self::Int32(value)),
-            Value::Int64(value) => Some(Self::Int64(value)),
-            Value::Text(value) => Some(Self::Text(value.to_string())),
-            Value::InternalChar(value) => Some(Self::InternalChar(value)),
-            Value::Bool(value) => Some(Self::Bool(value)),
-            Value::Array(values) => values
-                .iter()
-                .map(Self::from_value)
-                .collect::<Option<Vec<_>>>()
-                .map(Self::Array),
-            Value::PgArray(array) => array
-                .elements
-                .iter()
-                .map(Self::from_value)
-                .collect::<Option<Vec<_>>>()
-                .map(Self::Array),
-            Value::Null => Some(Self::Null),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SysCacheQueryKey {
     cache_id: SysCacheId,
     keys: Vec<SysCacheKeyPart>,
@@ -307,16 +269,24 @@ impl SysCacheQueryKey {
             .map(|keys| Self { cache_id, keys })
     }
 
-    fn invalidated_by(&self, invalidation: &CatalogInvalidation) -> bool {
+    fn as_invalidation_key(&self) -> SysCacheInvalidationKey {
+        SysCacheInvalidationKey::new(self.cache_id, self.keys.clone())
+    }
+
+    fn invalidated_by(&self, invalidation: &CatalogInvalidation, mode: SysCacheLookupMode) -> bool {
         if invalidation.full_reset {
             return true;
         }
-        if invalidation.touched_catalogs.is_empty() {
-            return !invalidation.is_empty();
+        let query_key = self.as_invalidation_key();
+        if invalidation.syscache_keys.iter().any(|key| match mode {
+            SysCacheLookupMode::Exact => key == &query_key,
+            SysCacheLookupMode::List => key.matches_prefix(&query_key),
+        }) {
+            return true;
         }
         self.cache_id
             .catalog_kind()
-            .is_none_or(|kind| invalidation.touched_catalogs.contains(&kind))
+            .is_some_and(|kind| invalidation.syscache_flush_catalogs.contains(&kind))
     }
 }
 
@@ -355,8 +325,9 @@ impl BackendSysCacheMaps {
 
     fn invalidate(&mut self, invalidation: &CatalogInvalidation) {
         self.exact
-            .retain(|key, _| !key.invalidated_by(invalidation));
-        self.list.retain(|key, _| !key.invalidated_by(invalidation));
+            .retain(|key, _| !key.invalidated_by(invalidation, SysCacheLookupMode::Exact));
+        self.list
+            .retain(|key, _| !key.invalidated_by(invalidation, SysCacheLookupMode::List));
     }
 
     fn clear(&mut self) {
@@ -2455,7 +2426,7 @@ mod tests {
 
         let mut invalidation = CatalogInvalidation::default();
         invalidation
-            .touched_catalogs
+            .syscache_flush_catalogs
             .insert(BootstrapCatalogKind::PgClass);
         cache.invalidate(&invalidation);
 
@@ -2472,6 +2443,108 @@ mod tests {
                 BackendCacheContext::Autocommit,
                 SysCacheLookupMode::Exact,
                 &type_key
+            ),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn backend_syscache_invalidates_exact_negative_entry_by_key() {
+        let mut cache = BackendSysCache::default();
+        let rel_key = SysCacheQueryKey::new(
+            SysCacheId::RELNAMENSP,
+            &[
+                Value::Text("created_later".into()),
+                oid_key(PUBLIC_NAMESPACE_OID),
+            ],
+        )
+        .unwrap();
+        let other_key = SysCacheQueryKey::new(
+            SysCacheId::RELNAMENSP,
+            &[
+                Value::Text("unrelated".into()),
+                oid_key(PUBLIC_NAMESPACE_OID),
+            ],
+        )
+        .unwrap();
+
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::Exact,
+            rel_key.clone(),
+            Vec::new(),
+        );
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::Exact,
+            other_key.clone(),
+            Vec::new(),
+        );
+
+        let mut invalidation = CatalogInvalidation::default();
+        invalidation
+            .syscache_keys
+            .insert(rel_key.as_invalidation_key());
+        cache.invalidate(&invalidation);
+
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &rel_key
+            ),
+            None
+        );
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &other_key
+            ),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn backend_syscache_invalidates_list_prefix_by_full_key() {
+        let mut cache = BackendSysCache::default();
+        let rel42_attrs = SysCacheQueryKey::new(SysCacheId::ATTNUM, &[oid_key(42)]).unwrap();
+        let rel43_attrs = SysCacheQueryKey::new(SysCacheId::ATTNUM, &[oid_key(43)]).unwrap();
+        let full_attnum =
+            SysCacheQueryKey::new(SysCacheId::ATTNUM, &[oid_key(42), Value::Int16(1)]).unwrap();
+
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::List,
+            rel42_attrs.clone(),
+            Vec::new(),
+        );
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::List,
+            rel43_attrs.clone(),
+            Vec::new(),
+        );
+
+        let mut invalidation = CatalogInvalidation::default();
+        invalidation
+            .syscache_keys
+            .insert(full_attnum.as_invalidation_key());
+        cache.invalidate(&invalidation);
+
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::List,
+                &rel42_attrs
+            ),
+            None
+        );
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::List,
+                &rel43_attrs
             ),
             Some(Vec::new())
         );
@@ -2600,6 +2673,87 @@ mod tests {
         );
         assert!(state.catcache.is_none());
         assert!(state.relation_cache.is_empty());
+    }
+
+    #[test]
+    fn create_table_invalidates_negative_relname_syscache_entry() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "create_rel");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 79;
+        let name = Value::Text("created_later".into());
+
+        assert!(
+            SearchSysCache2(
+                &db,
+                client_id,
+                None,
+                SysCacheId::RELNAMENSP,
+                name.clone(),
+                oid_key(PUBLIC_NAMESPACE_OID),
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        db.execute(client_id, "create table created_later (id int4)")
+            .unwrap();
+
+        assert!(
+            SearchSysCache2(
+                &db,
+                client_id,
+                None,
+                SysCacheId::RELNAMENSP,
+                name,
+                oid_key(PUBLIC_NAMESPACE_OID),
+            )
+            .unwrap()
+            .into_iter()
+            .any(
+                |tuple| matches!(tuple, SysCacheTuple::Class(row) if row.relname == "created_later")
+            )
+        );
+    }
+
+    #[test]
+    fn create_index_invalidates_heap_relcache_entry() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "index_relcache");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 80;
+
+        db.execute(client_id, "create table relcache_indexed (id int4)")
+            .unwrap();
+        let relation_oid = SearchSysCache2(
+            &db,
+            client_id,
+            None,
+            SysCacheId::RELNAMENSP,
+            Value::Text("relcache_indexed".into()),
+            oid_key(PUBLIC_NAMESPACE_OID),
+        )
+        .unwrap()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Class(row) => Some(row.oid),
+            _ => None,
+        })
+        .unwrap();
+
+        let before = RelationIdGetRelation(&db, client_id, None, relation_oid)
+            .unwrap()
+            .unwrap();
+        assert!(!before.relhasindex);
+
+        db.execute(
+            client_id,
+            "create index relcache_indexed_id_idx on relcache_indexed (id)",
+        )
+        .unwrap();
+
+        let after = RelationIdGetRelation(&db, client_id, None, relation_oid)
+            .unwrap()
+            .unwrap();
+        assert!(after.relhasindex);
     }
 
     fn class_row_for_cache_test(

@@ -4,13 +4,17 @@ use crate::ClientId;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::storage::smgr::StorageManager;
-use crate::backend::utils::cache::syscache::{BackendCacheState, drain_pending_invalidations};
+use crate::backend::utils::cache::syscache::{
+    BackendCacheState, SysCacheInvalidationKey, drain_pending_invalidations,
+};
 use crate::include::catalog::BootstrapCatalogKind;
 use crate::pgrust::database::Database;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CatalogInvalidation {
     pub touched_catalogs: BTreeSet<BootstrapCatalogKind>,
+    pub syscache_keys: BTreeSet<SysCacheInvalidationKey>,
+    pub syscache_flush_catalogs: BTreeSet<BootstrapCatalogKind>,
     pub relation_oids: BTreeSet<u32>,
     pub namespace_oids: BTreeSet<u32>,
     pub type_oids: BTreeSet<u32>,
@@ -21,6 +25,8 @@ impl CatalogInvalidation {
     pub fn is_empty(&self) -> bool {
         !self.full_reset
             && self.touched_catalogs.is_empty()
+            && self.syscache_keys.is_empty()
+            && self.syscache_flush_catalogs.is_empty()
             && self.relation_oids.is_empty()
             && self.namespace_oids.is_empty()
             && self.type_oids.is_empty()
@@ -28,8 +34,20 @@ impl CatalogInvalidation {
 }
 
 pub fn catalog_invalidation_from_effect(effect: &CatalogMutationEffect) -> CatalogInvalidation {
+    let syscache_keys = effect
+        .syscache_keys
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let syscache_flush_catalogs = if syscache_keys.is_empty() {
+        effect.touched_catalogs.iter().copied().collect()
+    } else {
+        BTreeSet::new()
+    };
     CatalogInvalidation {
         touched_catalogs: effect.touched_catalogs.iter().copied().collect(),
+        syscache_keys,
+        syscache_flush_catalogs,
         relation_oids: effect.relation_oids.iter().copied().collect(),
         namespace_oids: effect.namespace_oids.iter().copied().collect(),
         type_oids: effect.type_oids.iter().copied().collect(),
@@ -81,16 +99,38 @@ pub fn apply_backend_cache_invalidation(
         state.shared_catcache = None;
         state.shared_catcache_ctx = None;
     }
-    if invalidation.relation_oids.is_empty() {
+    if invalidation.relation_oids.is_empty() && relation_cache_flush_required(invalidation) {
         state.relation_cache.clear();
         state.relation_cache_ctx = None;
-    } else {
+    } else if !invalidation.relation_oids.is_empty() {
         for relation_oid in &invalidation.relation_oids {
             state.relation_cache.remove(relation_oid);
         }
     }
     state.catalog_snapshot = None;
     state.catalog_snapshot_ctx = None;
+}
+
+fn relation_cache_flush_required(invalidation: &CatalogInvalidation) -> bool {
+    invalidation.syscache_flush_catalogs.iter().any(|kind| {
+        matches!(
+            kind,
+            BootstrapCatalogKind::PgClass
+                | BootstrapCatalogKind::PgAttribute
+                | BootstrapCatalogKind::PgAttrdef
+                | BootstrapCatalogKind::PgIndex
+                | BootstrapCatalogKind::PgInherits
+                | BootstrapCatalogKind::PgConstraint
+                | BootstrapCatalogKind::PgPartitionedTable
+                | BootstrapCatalogKind::PgRewrite
+                | BootstrapCatalogKind::PgTrigger
+                | BootstrapCatalogKind::PgPolicy
+                | BootstrapCatalogKind::PgStatistic
+                | BootstrapCatalogKind::PgStatisticExt
+                | BootstrapCatalogKind::PgStatisticExtData
+                | BootstrapCatalogKind::PgPublicationRel
+        )
+    })
 }
 
 #[allow(non_snake_case)]

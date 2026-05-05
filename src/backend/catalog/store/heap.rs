@@ -43,7 +43,9 @@ use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, s
 use crate::backend::utils::cache::relcache::{
     IndexRelCacheEntry, RelCache, RelCacheEntry, relation_locator_for_class_row,
 };
-use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple};
+use crate::backend::utils::cache::syscache::{
+    SysCacheId, SysCacheTuple, catalog_row_invalidations_for_rows,
+};
 use crate::include::access::gin::GinOptions;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::access::nbtree::BtreeOptions;
@@ -130,6 +132,7 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(&mut effect, &rows);
         effect_record_rel(&mut effect.created_rels, entry.rel);
         effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
@@ -1109,6 +1112,7 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(&mut effect, &rows);
         effect_record_rel(&mut effect.created_rels, entry.rel);
         effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
@@ -1150,6 +1154,7 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(&mut effect, &rows);
         effect_record_oid(&mut effect.namespace_oids, namespace_oid);
         Ok(effect)
     }
@@ -5346,6 +5351,8 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(&mut effect, &rows_to_delete);
+        effect_record_rows(&mut effect, &rows);
         effect_record_rel(&mut effect.created_rels, entry.rel);
         effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
@@ -5413,6 +5420,8 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(&mut effect, &rows_to_delete);
+        effect_record_rows(&mut effect, &rows);
         effect_record_rel(&mut effect.created_rels, entry.rel);
         effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
@@ -5480,6 +5489,8 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(&mut effect, &rows_to_delete);
+        effect_record_rows(&mut effect, &rows);
         effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
         effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
@@ -13679,6 +13690,18 @@ fn effect_record_catalog_kinds(effect: &mut CatalogMutationEffect, kinds: &[Boot
         if !effect.touched_catalogs.contains(&kind) {
             effect.touched_catalogs.push(kind);
         }
+    }
+}
+
+fn effect_record_rows(effect: &mut CatalogMutationEffect, rows: &PhysicalCatalogRows) {
+    let (keys, relation_oids) = catalog_row_invalidations_for_rows(rows);
+    for key in keys {
+        if !effect.syscache_keys.contains(&key) {
+            effect.syscache_keys.push(key);
+        }
+    }
+    for relation_oid in relation_oids {
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
     }
 }
 

@@ -1655,6 +1655,7 @@ fn merge_catalog_effects(
     right: CatalogMutationEffect,
 ) -> CatalogMutationEffect {
     left.touched_catalogs.extend(right.touched_catalogs);
+    left.syscache_keys.extend(right.syscache_keys);
     left.created_rels.extend(right.created_rels);
     left.dropped_rels.extend(right.dropped_rels);
     left.relation_oids.extend(right.relation_oids);

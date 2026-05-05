@@ -21,6 +21,9 @@ use crate::backend::parser::{
     lower_partition_bound_for_relation, serialize_partition_bound,
 };
 use crate::backend::storage::lmgr::{TableLockMode, lock_table_requests_interruptible};
+use crate::backend::utils::cache::syscache::{
+    SearchSysCacheList1, SysCacheId, SysCacheTuple, oid_key,
+};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
 use crate::include::catalog::{
     CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
@@ -194,12 +197,20 @@ fn reject_attach_foreign_partition_with_unique_parent_indexes(
     if child.relkind != 'f' {
         return Ok(());
     }
-    let has_unique_index = db
-        .backend_catcache(client_id, txn_ctx)
-        .map_err(map_catalog_error)?
-        .index_rows()
-        .into_iter()
-        .any(|row| row.indrelid == parent.relation_oid && (row.indisunique || row.indisprimary));
+    let has_unique_index = SearchSysCacheList1(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::INDEXINDRELID,
+        oid_key(parent.relation_oid),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::Index(row) => Some(row),
+        _ => None,
+    })
+    .any(|row| row.indisunique || row.indisprimary);
     if !has_unique_index {
         return Ok(());
     }
