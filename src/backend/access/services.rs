@@ -398,7 +398,7 @@ impl AccessScalarServices for RootAccessServices {
     }
 
     fn compare_scalar_values(&self, left: &Value, right: &Value) -> Ordering {
-        crate::backend::executor::expr_range::compare_scalar_values(left, right)
+        pgrust_expr::expr_range::compare_scalar_values(left, right)
     }
 
     fn compare_lower_bounds(
@@ -406,7 +406,7 @@ impl AccessScalarServices for RootAccessServices {
         left: Option<&RangeBound>,
         right: Option<&RangeBound>,
     ) -> Ordering {
-        crate::backend::executor::expr_range::compare_lower_bounds(left, right)
+        pgrust_expr::expr_range::compare_lower_bounds(left, right)
     }
 
     fn compare_upper_bounds(
@@ -414,44 +414,44 @@ impl AccessScalarServices for RootAccessServices {
         left: Option<&RangeBound>,
         right: Option<&RangeBound>,
     ) -> Ordering {
-        crate::backend::executor::expr_range::compare_upper_bounds(left, right)
+        pgrust_expr::expr_range::compare_upper_bounds(left, right)
     }
 
     fn range_adjacent(&self, left: &RangeValue, right: &RangeValue) -> bool {
-        crate::backend::executor::expr_range::range_adjacent(left, right)
+        pgrust_expr::expr_range::range_adjacent(left, right)
     }
 
     fn range_contains_element(&self, range: &RangeValue, value: &Value) -> AccessResult<bool> {
-        crate::backend::executor::expr_range::range_contains_element(range, value)
+        pgrust_expr::expr_range::range_contains_element(range, value)
             .map_err(|err| AccessError::Scalar(format!("{err:?}")))
     }
 
     fn range_contains_range(&self, outer: &RangeValue, inner: &RangeValue) -> bool {
-        crate::backend::executor::expr_range::range_contains_range(outer, inner)
+        pgrust_expr::expr_range::range_contains_range(outer, inner)
     }
 
     fn range_merge(&self, left: &RangeValue, right: &RangeValue) -> RangeValue {
-        crate::backend::executor::expr_range::range_merge(left, right)
+        pgrust_expr::expr_range::range_merge(left, right)
     }
 
     fn range_over_left_bounds(&self, left: &RangeValue, right: &RangeValue) -> bool {
-        crate::backend::executor::expr_range::range_over_left_bounds(left, right)
+        pgrust_expr::expr_range::range_over_left_bounds(left, right)
     }
 
     fn range_over_right_bounds(&self, left: &RangeValue, right: &RangeValue) -> bool {
-        crate::backend::executor::expr_range::range_over_right_bounds(left, right)
+        pgrust_expr::expr_range::range_over_right_bounds(left, right)
     }
 
     fn range_overlap(&self, left: &RangeValue, right: &RangeValue) -> bool {
-        crate::backend::executor::expr_range::range_overlap(left, right)
+        pgrust_expr::expr_range::range_overlap(left, right)
     }
 
     fn range_strict_left(&self, left: &RangeValue, right: &RangeValue) -> bool {
-        crate::backend::executor::expr_range::range_strict_left(left, right)
+        pgrust_expr::expr_range::range_strict_left(left, right)
     }
 
     fn range_strict_right(&self, left: &RangeValue, right: &RangeValue) -> bool {
-        crate::backend::executor::expr_range::range_strict_right(left, right)
+        pgrust_expr::expr_range::range_strict_right(left, right)
     }
 
     fn eval_multirange_bool(

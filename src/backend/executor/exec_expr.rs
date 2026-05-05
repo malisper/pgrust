@@ -32,7 +32,7 @@ use pgrust_expr::{
     expr_math,
     expr_money::{cash_words_text, money_larger, money_smaller},
     expr_multirange::eval_multirange_function,
-    expr_numeric,
+    expr_numeric, expr_range,
 };
 
 use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
@@ -68,7 +68,6 @@ use super::expr_ops::{
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_partition::eval_satisfies_hash_partition;
-use super::expr_range::eval_range_function;
 use super::expr_reg;
 use super::expr_string::{
     eval_ascii_function, eval_bit_count_bytes, eval_bit_length_function,
@@ -11620,7 +11619,7 @@ fn eval_plpgsql_builtin_function(
     {
         return result.map_err(Into::into);
     }
-    if let Some(result) = eval_range_function(
+    if let Some(result) = expr_range::eval_range_function(
         func,
         &values,
         result_type,
@@ -11628,7 +11627,7 @@ fn eval_plpgsql_builtin_function(
         None,
         &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
     ) {
-        return result;
+        return result.map_err(Into::into);
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
         return result.map_err(Into::into);
@@ -13594,15 +13593,17 @@ pub(crate) fn eval_builtin_function(
     {
         return result.map_err(Into::into);
     }
-    if let Some(result) = eval_range_function(
-        func,
-        &values,
-        result_type,
-        func_variadic,
-        ctx.catalog.as_deref(),
-        &ctx.datetime_config,
-    ) {
-        return result;
+    if let Some(result) = super::expr_ops::with_expr_catalog(ctx.catalog.as_deref(), |catalog| {
+        expr_range::eval_range_function(
+            func,
+            &values,
+            result_type,
+            func_variadic,
+            catalog,
+            &ctx.datetime_config,
+        )
+    }) {
+        return result.map_err(Into::into);
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
         return result.map_err(Into::into);

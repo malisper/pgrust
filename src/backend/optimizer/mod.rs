@@ -333,15 +333,17 @@ impl OptimizerServices for RootOptimizerServices {
         catalog: Option<&dyn CatalogLookup>,
         _datetime_config: &DateTimeConfig,
     ) -> Option<Result<Value, OptimizerEvalError>> {
-        crate::backend::executor::expr_range::eval_range_function(
-            func,
-            values,
-            result_type,
-            func_variadic,
-            catalog,
-            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        )
-        .map(|result| result.map_err(optimizer_error_from_exec))
+        crate::backend::executor::expr_ops::with_expr_catalog(catalog, |catalog| {
+            pgrust_expr::expr_range::eval_range_function(
+                func,
+                values,
+                result_type,
+                func_variadic,
+                catalog,
+                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            )
+        })
+        .map(|result| result.map_err(|err| optimizer_error_from_exec(err.into())))
     }
 
     fn parse_date_text(

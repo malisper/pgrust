@@ -62,9 +62,9 @@ pub fn compare_bt_keyspace_with_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::executor::expr_range::parse_range_text;
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
+    use pgrust_expr::expr_range::parse_range_text;
 
     #[test]
     fn bt_keyspace_uses_heap_tid_as_final_tiebreak() {

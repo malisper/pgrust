@@ -14,7 +14,6 @@ mod expr_json;
 mod expr_locks;
 pub(crate) mod expr_ops;
 mod expr_partition;
-pub(crate) mod expr_range;
 pub(crate) mod expr_reg;
 mod expr_string;
 mod expr_txid;
@@ -83,11 +82,6 @@ pub(crate) use expr_casts::{
     parse_text_array_literal_with_catalog_op_and_explicit,
 };
 pub(crate) use expr_json::apply_jsonb_subscript_assignment;
-pub(crate) use expr_range::{
-    compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,
-    parse_range_text,
-};
-pub use expr_range::{render_range_text, render_range_text_with_config};
 pub(crate) use expr_string::eval_to_char_function;
 pub(crate) use expr_txid::{
     cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
@@ -115,9 +109,13 @@ pub(crate) use pgrust_expr::{
     network_contains, network_merge, network_prefix, parse_cidr_bytes, parse_cidr_text,
     parse_inet_bytes, parse_inet_text, render_network_text,
 };
+pub(crate) use pgrust_expr::{
+    compare_range_values, decode_range_bytes, encode_range_bytes, parse_range_text,
+};
 pub use pgrust_expr::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub use pgrust_expr::{render_macaddr_text, render_macaddr8_text};
 pub use pgrust_expr::{render_multirange_text, render_multirange_text_with_config};
+pub use pgrust_expr::{render_range_text, render_range_text_with_config};
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
 pub(crate) use srf::set_returning_call_label;

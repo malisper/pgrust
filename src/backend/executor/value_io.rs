@@ -7,9 +7,6 @@ use super::expr_casts::{
     cast_value, cast_value_with_config, parse_text_array_literal_with_catalog_op_and_explicit,
     render_internal_char_text, render_interval_text_with_config, render_pg_lsn_text,
 };
-use super::expr_range::{
-    decode_range_bytes, encode_range_bytes, render_range_text, render_range_text_with_config,
-};
 use super::node_types::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
@@ -32,9 +29,10 @@ use pgrust_expr::expr_geometry::{
 };
 use pgrust_expr::expr_multirange::{render_multirange, render_multirange_text_with_config};
 use pgrust_expr::{
-    encode_network_bytes, parse_cidr_bytes, parse_inet_bytes, parse_macaddr_bytes,
-    parse_macaddr8_bytes, render_bit_text, render_datetime_value_text,
-    render_datetime_value_text_with_config, render_macaddr_text, render_macaddr8_text,
+    decode_range_bytes, encode_network_bytes, encode_range_bytes, parse_cidr_bytes,
+    parse_inet_bytes, parse_macaddr_bytes, parse_macaddr8_bytes, render_bit_text,
+    render_datetime_value_text, render_datetime_value_text_with_config, render_macaddr_text,
+    render_macaddr8_text, render_range_text, render_range_text_with_config,
 };
 
 mod array;
@@ -1516,7 +1514,7 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
             let sql_type = decode_sql_type_identity(rest, &mut offset)?;
             let text =
                 std::str::from_utf8(decode_internal_text(rest, &mut offset)?).unwrap_or_default();
-            crate::backend::executor::expr_range::parse_range_text(text, sql_type)?
+            pgrust_expr::expr_range::parse_range_text(text, sql_type)?
         }
         INTERNAL_VALUE_TAG_MULTIRANGE => {
             let mut offset = 0usize;
@@ -2829,13 +2827,13 @@ pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
 mod tests {
     use super::*;
     use crate::backend::catalog::catalog::column_desc;
-    use crate::backend::executor::expr_range::parse_range_text;
     use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
     use crate::backend::utils::time::timestamp::parse_timestamp_text;
     use crate::include::catalog::{INT4_TYPE_OID, INT4RANGE_TYPE_OID};
     use crate::include::nodes::datum::{
         ArrayDimension, IndirectVarlenaValue, NumericValue, RecordDescriptor, RecordValue,
     };
+    use pgrust_expr::parse_range_text;
     use std::sync::Arc;
 
     #[test]

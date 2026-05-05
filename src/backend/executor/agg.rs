@@ -28,7 +28,6 @@ use crate::pgrust::session::ByteaOutputFormat;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use super::expr_range::{range_intersection_agg_transition, render_range_text};
 use super::expr_xml::concat_xml_texts;
 use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
 use super::{multirange_intersection_agg_transition, range_agg_transition};
@@ -38,6 +37,8 @@ pub(crate) use pgrust_executor::{
     numeric_div_display_scale, numeric_quotient_decimal_weight, numeric_sqrt,
     numeric_visible_scale,
 };
+use pgrust_expr::expr_range::range_intersection_agg_transition;
+use pgrust_expr::render_range_text;
 
 pub(crate) type AggTransitionFn = fn(&mut AccumState, &[Value]) -> Result<(), ExecError>;
 
@@ -765,7 +766,8 @@ impl AccumState {
                 if let AccumState::RangeIntersect { current } = state {
                     let value = values.first().unwrap_or(&Value::Null);
                     *current = match value {
-                        Value::Range(_) => range_intersection_agg_transition(current.take(), value),
+                        Value::Range(_) => range_intersection_agg_transition(current.take(), value)
+                            .map_err(ExecError::from),
                         _ => multirange_intersection_agg_transition(current.take(), value)
                             .map_err(Into::into),
                     }

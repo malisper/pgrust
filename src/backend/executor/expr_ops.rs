@@ -180,7 +180,7 @@ impl pgrust_expr::ExprCatalogLookup for RootExprCatalog<'_> {
     }
 }
 
-fn with_expr_catalog<T>(
+pub(crate) fn with_expr_catalog<T>(
     catalog: Option<&dyn CatalogLookup>,
     f: impl FnOnce(Option<&dyn pgrust_expr::ExprCatalogLookup>) -> T,
 ) -> T {
