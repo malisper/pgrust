@@ -259,16 +259,41 @@ fn resolve_routine(
         None => None,
     };
     let normalized = normalize_ident(&signature.routine_name);
-    let all_signature_candidates = catalog
-        .proc_rows_by_name(&normalized)
-        .into_iter()
-        .filter(|row| {
-            schema_oid
-                .map(|schema_oid| row.pronamespace == schema_oid)
-                .unwrap_or(true)
-                && routine_signature_matches_any_kind(row, &arg_specs)
-        })
-        .collect::<Vec<_>>();
+    let proc_rows = catalog.proc_rows_by_name(&normalized);
+    let all_signature_candidates = if let Some(schema_oid) = schema_oid {
+        proc_rows
+            .into_iter()
+            .filter(|row| {
+                row.pronamespace == schema_oid
+                    && routine_signature_matches_any_kind(row, &arg_specs)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let mut visible_candidates = Vec::new();
+        for schema in db.effective_search_path(client_id, configured_search_path) {
+            match schema.as_str() {
+                "" | "$user" | "pg_temp" => continue,
+                schema if schema.starts_with("pg_temp_") => continue,
+                _ => {}
+            }
+            let Some(namespace_oid) = db.visible_namespace_oid_by_name(client_id, txn_ctx, &schema)
+            else {
+                continue;
+            };
+            visible_candidates = proc_rows
+                .iter()
+                .filter(|row| {
+                    row.pronamespace == namespace_oid
+                        && routine_signature_matches_any_kind(row, &arg_specs)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !visible_candidates.is_empty() {
+                break;
+            }
+        }
+        visible_candidates
+    };
     let candidates = all_signature_candidates
         .iter()
         .filter(|row| routine_signature_matches(row, &arg_specs, kind))

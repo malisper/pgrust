@@ -4539,12 +4539,16 @@ fn apply_privileges_regression_error_compat(sql: &str, response: &mut ExecErrorR
     // :HACK: Privilege regressions compare PostgreSQL's SQL-visible type
     // aliases in routine signatures. Normalize only final error text so the
     // routine/catalog behavior stays unchanged.
-    if response.message.starts_with("function ")
-        || response.message.starts_with("procedure ")
-        || response.message.starts_with("aggregate ")
-        || response.message.contains(" is not a function")
-        || response.message.contains(" is not a procedure")
-        || response.message.contains(" is not a routine")
+    if !response.message.starts_with("operator ")
+        && !response.message.contains("operator family")
+        && !response.message.starts_with("function number ")
+        && (response.message.starts_with("function ")
+            || response.message.starts_with("procedure ")
+            || response.message.starts_with("aggregate ")
+            || response.message.contains(" is not a function")
+            || response.message.contains(" is not a procedure")
+            || response.message.contains(" is not a routine")
+            || response.message.contains(" does not exist"))
     {
         response.message = normalize_routine_signature_type_aliases(&response.message);
     }

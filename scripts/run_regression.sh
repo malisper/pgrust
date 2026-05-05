@@ -504,7 +504,6 @@ sub statement_is_access_method {
     my ($stmt) = @_;
     my $text = join(" ", @{$stmt->{lines}});
     return 1 if $text =~ /^(?:CREATE|ALTER|DROP) ACCESS METHOD\b/i;
-    return 1 if $text =~ /^(?:CREATE|ALTER|DROP) OPERATOR (?:CLASS|FAMILY)\b/i;
     return 1 if $text =~ /^SET default_table_access_method\b/i;
     return 1 if $text =~ /^ALTER (?:TABLE|MATERIALIZED VIEW)\b.*\bSET ACCESS METHOD\b/i;
     return 0;
