@@ -13,6 +13,7 @@ use pgrust_expr::utils::time::timestamp::{
 };
 use pgrust_expr::{ByteaOutputFormat, parse_interval_text_value, render_interval_text_with_config};
 use pgrust_nodes::CommandType;
+use pgrust_nodes::builtins::proc_oid_for_builtin_scalar_function;
 use pgrust_nodes::datum::{IntervalValue, Value};
 use pgrust_nodes::parsenodes::{
     JoinTreeNode, ParseError, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
@@ -30,7 +31,10 @@ use pgrust_nodes::primnodes::{
     WindowClause, WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index,
     expr_sql_type_hint, set_returning_call_exprs, user_attrno,
 };
-use pgrust_parser::{parse_statement, wrap_values_as_select};
+use pgrust_parser::{
+    SQL_JSON_ARRAY_FUNC, SQL_JSON_FUNC, SQL_JSON_IS_JSON_FUNC, SQL_JSON_OBJECT_FUNC,
+    SQL_JSON_SCALAR_FUNC, SQL_JSON_SERIALIZE_FUNC, parse_statement, wrap_values_as_select,
+};
 use std::collections::{HashMap, HashSet};
 
 const RETURN_RULE_NAME: &str = "_RETURN";
@@ -4999,7 +5003,7 @@ fn render_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
         return rendered;
     }
     let name = match func.implementation {
-        ScalarFunctionImpl::Builtin(builtin) => render_builtin_function_name(builtin).into(),
+        ScalarFunctionImpl::Builtin(builtin) => render_builtin_function_name(builtin, func, ctx),
         ScalarFunctionImpl::UserDefined { proc_oid } => ctx
             .catalog
             .proc_row_by_oid(proc_oid)
@@ -5767,6 +5771,7 @@ fn render_literal(value: &Value) -> String {
             .map(|text| format!("'{}'::jsonb", text.replace('\'', "''")))
             .unwrap_or_else(|_| "'null'::jsonb".into()),
         Value::Bytea(bytes) => render_bytea_literal(bytes),
+        Value::Bit(bits) => format!("B'{}'", bits.render()),
         Value::Numeric(numeric) => numeric.render(),
         Value::Interval(interval) => {
             format!(
@@ -5810,7 +5815,6 @@ fn render_literal(value: &Value) -> String {
         | Value::TimeTz(_)
         | Value::Timestamp(_)
         | Value::TimestampTz(_)
-        | Value::Bit(_)
         | Value::Uuid(_)
         | Value::Inet(_)
         | Value::Cidr(_)
@@ -6214,52 +6218,74 @@ fn relation_sql_name(relation_oid: u32, catalog: &dyn CatalogLookup) -> Option<S
     })
 }
 
-fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
-    match func {
-        BuiltinScalarFunction::CurrentDatabase => "current_database",
-        BuiltinScalarFunction::XmlComment => "xmlcomment",
-        BuiltinScalarFunction::XmlText => "xmltext",
-        BuiltinScalarFunction::PgGetUserById => "pg_get_userbyid",
-        BuiltinScalarFunction::SatisfiesHashPartition => "satisfies_hash_partition",
-        BuiltinScalarFunction::PgGetExpr => "pg_get_expr",
-        BuiltinScalarFunction::PgGetViewDef => "pg_get_viewdef",
-        BuiltinScalarFunction::CurrentSetting => "current_setting",
-        BuiltinScalarFunction::Now => "now",
-        BuiltinScalarFunction::TransactionTimestamp => "transaction_timestamp",
-        BuiltinScalarFunction::StatementTimestamp => "statement_timestamp",
-        BuiltinScalarFunction::ClockTimestamp => "clock_timestamp",
-        BuiltinScalarFunction::Timezone => "timezone",
-        BuiltinScalarFunction::DatePart => "date_part",
-        BuiltinScalarFunction::Extract => "extract",
-        BuiltinScalarFunction::BTrim => "btrim",
-        BuiltinScalarFunction::LTrim => "ltrim",
-        BuiltinScalarFunction::RTrim => "rtrim",
-        BuiltinScalarFunction::Initcap => "initcap",
-        BuiltinScalarFunction::Concat => "concat",
-        BuiltinScalarFunction::ConcatWs => "concat_ws",
-        BuiltinScalarFunction::Left => "left",
-        BuiltinScalarFunction::Right => "right",
-        BuiltinScalarFunction::LPad => "lpad",
-        BuiltinScalarFunction::RPad => "rpad",
-        BuiltinScalarFunction::Repeat => "repeat",
-        BuiltinScalarFunction::Strpos => "strpos",
-        BuiltinScalarFunction::Length => "length",
-        BuiltinScalarFunction::OctetLength => "octet_length",
-        BuiltinScalarFunction::Lower => "lower",
-        BuiltinScalarFunction::Upper => "upper",
-        BuiltinScalarFunction::Replace => "replace",
-        BuiltinScalarFunction::SplitPart => "split_part",
-        BuiltinScalarFunction::Translate => "translate",
-        BuiltinScalarFunction::Substring => "substring",
-        BuiltinScalarFunction::Overlay => "overlay",
-        BuiltinScalarFunction::Reverse => "reverse",
-        BuiltinScalarFunction::NextVal => "nextval",
-        BuiltinScalarFunction::IdentityNextVal => "nextval",
-        BuiltinScalarFunction::CurrVal => "currval",
-        BuiltinScalarFunction::LastVal => "lastval",
-        BuiltinScalarFunction::SetVal => "setval",
-        BuiltinScalarFunction::Int4Smaller => "int4smaller",
-        _ => "function",
+fn render_builtin_function_name(
+    builtin: BuiltinScalarFunction,
+    func: &FuncExpr,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    if let Some(name) = func.funcname.clone() {
+        return name;
+    }
+    if builtin == BuiltinScalarFunction::RangeConstructor
+        && let Some(result_type) = func.funcresulttype
+    {
+        return render_sql_type_with_catalog(result_type, ctx.catalog);
+    }
+    if let Some(proc_oid) = proc_oid_for_builtin_scalar_function(builtin)
+        && let Some(row) = ctx.catalog.proc_row_by_oid(proc_oid)
+        && !row.proname.is_empty()
+    {
+        return row.proname;
+    }
+    match builtin {
+        BuiltinScalarFunction::CurrentDatabase => "current_database".into(),
+        BuiltinScalarFunction::CurrentSchemas => "current_schemas".into(),
+        BuiltinScalarFunction::CurrentSetting => "current_setting".into(),
+        BuiltinScalarFunction::NextVal => "nextval".into(),
+        BuiltinScalarFunction::IdentityNextVal => "nextval".into(),
+        BuiltinScalarFunction::CurrVal => "currval".into(),
+        BuiltinScalarFunction::LastVal => "lastval".into(),
+        BuiltinScalarFunction::SetVal => "setval".into(),
+        BuiltinScalarFunction::NumNulls => "num_nulls".into(),
+        BuiltinScalarFunction::NumNonNulls => "num_nonnulls".into(),
+        BuiltinScalarFunction::ArrayNdims => "array_ndims".into(),
+        BuiltinScalarFunction::ArrayDims => "array_dims".into(),
+        BuiltinScalarFunction::ArrayLower => "array_lower".into(),
+        BuiltinScalarFunction::ArrayUpper => "array_upper".into(),
+        BuiltinScalarFunction::ArrayLength => "array_length".into(),
+        BuiltinScalarFunction::Cardinality => "cardinality".into(),
+        BuiltinScalarFunction::ArrayAppend => "array_append".into(),
+        BuiltinScalarFunction::ArrayPrepend => "array_prepend".into(),
+        BuiltinScalarFunction::ArrayCat => "array_cat".into(),
+        BuiltinScalarFunction::ArrayPosition => "array_position".into(),
+        BuiltinScalarFunction::ArrayPositions => "array_positions".into(),
+        BuiltinScalarFunction::ArrayRemove => "array_remove".into(),
+        BuiltinScalarFunction::ArrayReplace => "array_replace".into(),
+        BuiltinScalarFunction::TrimArray => "trim_array".into(),
+        BuiltinScalarFunction::JsonBuildArray => "json_build_array".into(),
+        BuiltinScalarFunction::JsonBuildObject => "json_build_object".into(),
+        BuiltinScalarFunction::JsonbBuildArray => "jsonb_build_array".into(),
+        BuiltinScalarFunction::JsonbBuildObject => "jsonb_build_object".into(),
+        BuiltinScalarFunction::ToJson => "to_json".into(),
+        BuiltinScalarFunction::ToJsonb => "to_jsonb".into(),
+        BuiltinScalarFunction::RowToJson => "row_to_json".into(),
+        BuiltinScalarFunction::Random => "random".into(),
+        BuiltinScalarFunction::RandomNormal => "random_normal".into(),
+        BuiltinScalarFunction::Abs => "abs".into(),
+        BuiltinScalarFunction::Sqrt => "sqrt".into(),
+        BuiltinScalarFunction::Power => "power".into(),
+        BuiltinScalarFunction::Gcd => "gcd".into(),
+        BuiltinScalarFunction::Lcm => "lcm".into(),
+        BuiltinScalarFunction::Greatest => "greatest".into(),
+        BuiltinScalarFunction::Least => "least".into(),
+        BuiltinScalarFunction::IsFinite => "isfinite".into(),
+        BuiltinScalarFunction::SqlJsonConstructor => SQL_JSON_FUNC.into(),
+        BuiltinScalarFunction::SqlJsonScalar => SQL_JSON_SCALAR_FUNC.into(),
+        BuiltinScalarFunction::SqlJsonSerialize => SQL_JSON_SERIALIZE_FUNC.into(),
+        BuiltinScalarFunction::SqlJsonObject => SQL_JSON_OBJECT_FUNC.into(),
+        BuiltinScalarFunction::SqlJsonArray => SQL_JSON_ARRAY_FUNC.into(),
+        BuiltinScalarFunction::SqlJsonIsJson => SQL_JSON_IS_JSON_FUNC.into(),
+        _ => "function".into(),
     }
 }
 
