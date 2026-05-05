@@ -3999,6 +3999,37 @@ fn on_conflict_do_update_can_use_target_and_excluded_values() {
 }
 
 #[test]
+fn on_conflict_do_update_returning_xmax_reports_current_xid() {
+    let mut harness = SeededSqlHarness::new(
+        "upsert_do_update_returning_xmax",
+        catalog_with_people_primary_key(),
+    );
+
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        )
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+
+    let upsert_xid = harness.txns.begin();
+    assert_query_rows(
+        harness
+            .execute(
+                upsert_xid,
+                "insert into people (id, name, note) values (1, 'bob', 'beta') \
+                 on conflict (id) do update set name = excluded.name \
+                 returning xmax = pg_current_xact_id()::xid",
+            )
+            .unwrap(),
+        vec![vec![Value::Bool(true)]],
+    );
+    harness.txns.commit(upsert_xid).unwrap();
+}
+
+#[test]
 fn on_conflict_do_update_where_false_skips_row() {
     let mut harness = SeededSqlHarness::new(
         "upsert_do_update_where_false",
@@ -4366,6 +4397,35 @@ fn delete_using_deletes_rows_matching_join_source() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn delete_returning_xmax_reports_current_xid() {
+    let mut harness = SeededSqlHarness::new(
+        "delete_returning_xmax_current_xid",
+        catalog_with_people_primary_key(),
+    );
+
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        )
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+
+    let delete_xid = harness.txns.begin();
+    assert_query_rows(
+        harness
+            .execute(
+                delete_xid,
+                "delete from people returning xmax = pg_current_xact_id()::xid",
+            )
+            .unwrap(),
+        vec![vec![Value::Bool(true)]],
+    );
+    harness.txns.commit(delete_xid).unwrap();
 }
 
 #[test]

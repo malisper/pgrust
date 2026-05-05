@@ -29,6 +29,8 @@ pub(super) fn bind_arithmetic_expr(
         grouped_outer,
         ctes,
     )?;
+    reject_hidden_relation_operator_operand(left, scope, outer_scopes, grouped_outer)?;
+    reject_hidden_relation_operator_operand(right, scope, outer_scopes, grouped_outer)?;
     let raw_left_type =
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let raw_right_type =
@@ -1189,6 +1191,22 @@ fn bind_money_arithmetic_expr(
         left_type: sql_type_name(left_type),
         right_type: sql_type_name(right_type),
     })
+}
+
+fn reject_hidden_relation_operator_operand(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<(), ParseError> {
+    let SqlExpr::Column(name) = expr else {
+        return Ok(());
+    };
+    match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
+        Err(err @ ParseError::InvalidFromClauseReference(_))
+        | Err(err @ ParseError::MissingFromClauseEntry(_)) => Err(err),
+        _ => Ok(()),
+    }
 }
 
 pub fn supports_comparison_operator(

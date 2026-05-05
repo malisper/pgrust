@@ -13570,6 +13570,37 @@ fn bind_update_alias_hides_base_table_name() {
 }
 
 #[test]
+fn bind_simple_update_alias_hides_base_table_name_in_assignment() {
+    let mut catalog = catalog();
+    catalog.insert(
+        "update_test",
+        test_catalog_entry(
+            15003,
+            RelationDesc {
+                columns: vec![
+                    column_desc("a", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("b", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("c", SqlType::new(SqlTypeKind::Text), false),
+                ],
+            },
+        ),
+    );
+    let stmt =
+        match parse_statement("update update_test as t set b = update_test.b + 10 where t.a = 10")
+            .unwrap()
+        {
+            Statement::Update(stmt) => stmt,
+            other => panic!("expected update statement, got {other:?}"),
+        };
+    let err = bind_update(&stmt, &catalog).unwrap_err();
+    assert!(
+        matches!(&err, ParseError::InvalidFromClauseReference(name) if name == "update_test"),
+        "expected invalid reference to hidden update_test target, got {err:?}; expr was {:?}",
+        stmt.assignments[0].expr
+    );
+}
+
+#[test]
 fn bind_update_from_rejects_duplicate_target_alias_name() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());

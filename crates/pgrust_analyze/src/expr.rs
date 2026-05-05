@@ -6669,6 +6669,13 @@ fn bind_field_select_expr(
             let named_row_type = relation_row_type_identity(catalog, resolved.relation_oid);
             build_whole_row_expr(resolved.fields, named_row_type)
         }
+        SqlExpr::Column(name) => {
+            if let Some(err) = hidden_relation_reference_error_with_outer(scope, outer_scopes, name)
+            {
+                return Err(err);
+            }
+            bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
+        }
         _ => {
             bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
         }

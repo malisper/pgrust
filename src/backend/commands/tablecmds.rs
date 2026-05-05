@@ -13249,6 +13249,21 @@ pub(crate) fn project_returning_row_with_old_new_metadata(
     new_tuple: Option<ReturningTuple<'_>>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    project_returning_row_with_old_new_metadata_and_xmax(
+        targets, row, tid, table_oid, old_tuple, new_tuple, None, ctx,
+    )
+}
+
+pub(crate) fn project_returning_row_with_old_new_metadata_and_xmax(
+    targets: &[TargetEntry],
+    row: &[Value],
+    tid: Option<ItemPointerData>,
+    table_oid: Option<u32>,
+    old_tuple: Option<ReturningTuple<'_>>,
+    new_tuple: Option<ReturningTuple<'_>>,
+    xmax: Option<TransactionId>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
     let saved_bindings = ctx.expr_bindings.clone();
     let pseudo_width = old_tuple
         .map(|tuple| tuple.values.len())
@@ -13285,7 +13300,7 @@ pub(crate) fn project_returning_row_with_old_new_metadata(
             tid,
             xmin: xid,
             cmin: Some(cmin),
-            xmax: xid.map(|_| 0),
+            xmax: xmax.or_else(|| xid.map(|_| 0)),
         }];
     }
     let mut slot = TupleSlot::virtual_row_with_metadata(row.to_vec(), tid, table_oid);
@@ -15226,13 +15241,18 @@ pub fn execute_delete_with_waiter(
                                             ctx,
                                         )?
                                     };
-                                let row = project_returning_row_with_old_new(
+                                let row = project_returning_row_with_old_new_metadata_and_xmax(
                                     &stmt.returning,
                                     &returned_values,
                                     Some(current_tid),
                                     Some(target.relation_oid),
-                                    Some(&returned_values),
+                                    Some(ReturningTuple {
+                                        values: &returned_values,
+                                        tid: Some(current_tid),
+                                        table_oid: Some(target.relation_oid),
+                                    }),
                                     None,
+                                    Some(xid),
                                     ctx,
                                 )?;
                                 capture_copy_to_dml_returning_row(row.clone());

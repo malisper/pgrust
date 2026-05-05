@@ -799,6 +799,39 @@ pub(super) fn resolve_relation_row_expr_ref_with_outer(
     })
 }
 
+pub(super) fn hidden_relation_reference_error_with_outer(
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    name: &str,
+) -> Option<ParseError> {
+    hidden_relation_reference_error_in_scope(scope, name).or_else(|| {
+        outer_scopes
+            .iter()
+            .find_map(|outer_scope| hidden_relation_reference_error_in_scope(outer_scope, name))
+    })
+}
+
+fn hidden_relation_reference_error_in_scope(scope: &BoundScope, name: &str) -> Option<ParseError> {
+    let normalized = name.to_ascii_lowercase();
+    if scope.relations.iter().any(|entry| {
+        entry
+            .hidden_invalid_relation_names
+            .iter()
+            .any(|hidden| hidden.eq_ignore_ascii_case(name))
+    }) {
+        return Some(ParseError::InvalidFromClauseReference(normalized));
+    }
+    if scope.relations.iter().any(|entry| {
+        entry
+            .hidden_missing_relation_names
+            .iter()
+            .any(|hidden| hidden.eq_ignore_ascii_case(name))
+    }) {
+        return Some(ParseError::MissingFromClauseEntry(normalized));
+    }
+    None
+}
+
 fn resolve_rule_relation_row_expr_in_outer(
     outer_scopes: &[BoundScope],
     name: &str,
