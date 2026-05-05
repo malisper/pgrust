@@ -10,6 +10,7 @@ use pgrust_storage::page::bufpage::PageError;
 
 pub const HEAP_HASNULL: u16 = 0x0001;
 pub const HEAP_HASVARWIDTH: u16 = 0x0002;
+pub const HEAP_COMBOCID: u16 = 0x0020;
 pub const HEAP_NATTS_MASK: u16 = 0x07ff;
 pub const SIZEOF_HEAP_TUPLE_HEADER: usize = 23;
 

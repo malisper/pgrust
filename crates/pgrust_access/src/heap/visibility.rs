@@ -1,7 +1,7 @@
 use crate::AccessTransactionServices;
 use crate::access::htup::{
-    HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID, HeapTuple,
-    INFOMASK_OFFSET,
+    HEAP_COMBOCID, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID,
+    HeapTuple, INFOMASK_OFFSET,
 };
 use pgrust_core::{
     CommandId, FROZEN_TRANSACTION_ID, INVALID_TRANSACTION_ID, Snapshot, TransactionId,
@@ -24,6 +24,7 @@ pub trait SnapshotVisibility {
         xmin: TransactionId,
         xmax: TransactionId,
         cid: CommandId,
+        infomask: u16,
     ) -> bool;
 }
 
@@ -85,7 +86,7 @@ impl SnapshotVisibility for Snapshot {
 
         let xmax = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         let cid = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-        check_visibility(self, txns, xmin, xmax, cid)
+        check_visibility(self, txns, xmin, xmax, cid, infomask)
     }
 
     fn tuple_bytes_visible_with_hints(
@@ -120,7 +121,7 @@ impl SnapshotVisibility for Snapshot {
 
         let xmax = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         let cid = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-        let visible = check_visibility(self, txns, xmin, xmax, cid);
+        let visible = check_visibility(self, txns, xmin, xmax, cid, infomask);
 
         let mut hints: u16 = 0;
         let _xmin_settled = if infomask & (HEAP_XMIN_COMMITTED | HEAP_XMIN_INVALID) != 0 {
@@ -165,6 +166,7 @@ impl SnapshotVisibility for Snapshot {
             tuple.header.xmin,
             tuple.header.xmax,
             tuple.header.cid_or_xvac,
+            tuple.header.infomask,
         )
     }
 
@@ -174,8 +176,9 @@ impl SnapshotVisibility for Snapshot {
         xmin: TransactionId,
         xmax: TransactionId,
         cid: CommandId,
+        infomask: u16,
     ) -> bool {
-        check_visibility(self, txns, xmin, xmax, cid)
+        check_visibility(self, txns, xmin, xmax, cid, infomask)
     }
 }
 
@@ -185,6 +188,7 @@ fn check_visibility(
     xmin: TransactionId,
     xmax: TransactionId,
     cid: CommandId,
+    infomask: u16,
 ) -> bool {
     if xmin == INVALID_TRANSACTION_ID || xmin == FROZEN_TRANSACTION_ID {
         if xmax == INVALID_TRANSACTION_ID {
@@ -205,7 +209,7 @@ fn check_visibility(
         };
     }
     if snapshot.transaction_is_own(xmin) {
-        let (cmin, cmax) = own_tuple_command_ids(txns, xmin, cid);
+        let (cmin, cmax) = own_tuple_command_ids(txns, xmin, cid, infomask);
         if cmin >= snapshot.current_cid {
             return false;
         }
@@ -261,6 +265,11 @@ fn own_tuple_command_ids(
     txns: &dyn AccessTransactionServices,
     xmin: TransactionId,
     cid: CommandId,
+    infomask: u16,
 ) -> (CommandId, CommandId) {
-    txns.combo_command_pair(xmin, cid).unwrap_or((cid, cid))
+    if infomask & HEAP_COMBOCID != 0 {
+        txns.combo_command_pair(xmin, cid).unwrap_or((cid, cid))
+    } else {
+        (cid, cid)
+    }
 }

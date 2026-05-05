@@ -466,6 +466,34 @@ mod tests {
         assert!(!snapshot.tuple_visible(&txns, &tuple));
     }
 
+    #[test]
+    fn raw_command_id_zero_is_not_decoded_as_unrelated_combo_cid() {
+        use crate::access::htup::{HEAP_COMBOCID, HEAP_XMAX_INVALID};
+
+        let mut txns = TransactionManager::default();
+        let xid = txns.begin();
+        let combocid = txns.combo_command_id(xid, 2, 4);
+        assert_eq!(combocid, 0);
+
+        let snapshot = txns.snapshot_for_command(xid, 1).unwrap();
+        let mut tuple = HeapTuple::new_raw(1, b"row".to_vec());
+        tuple.header.xmin = xid;
+        tuple.header.xmax = 0;
+        tuple.header.cid_or_xvac = combocid;
+        tuple.header.infomask |= HEAP_XMAX_INVALID;
+
+        assert!(
+            snapshot.tuple_visible(&txns, &tuple),
+            "plain insert cid 0 must not be decoded through the combo-cid table"
+        );
+
+        tuple.header.infomask |= HEAP_COMBOCID;
+        assert!(
+            !snapshot.tuple_visible(&txns, &tuple),
+            "actual combo cid 0 decodes to cmin 2 and is invisible at cid 1"
+        );
+    }
+
     /// The in_progress Vec must stay in sync with statuses after a
     /// sequence of begin/commit/abort operations.
     #[test]
@@ -1365,7 +1393,7 @@ mod tests {
 
                 // Get the ground truth from check_visibility.
                 let cid = 0u32;
-                let expected = snapshot.check_visibility(&txns, *xmin, *xmax, cid);
+                let expected = snapshot.check_visibility(&txns, *xmin, *xmax, cid, *xmax_infomask);
 
                 // tuple_bytes_visible_with_hints should agree.
                 let (actual, hints) =
