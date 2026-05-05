@@ -1027,6 +1027,122 @@ fn postgres_order_create_view_schema_cascade_notices(tail_notices: &mut Vec<(u32
     );
 }
 
+fn order_drop_schema_relation_notices_like_postgres(
+    tail_notices: &mut [(u32, String)],
+    relation_report_order: &[u32],
+    ordered_relation_notice_oids: &BTreeSet<u32>,
+) {
+    let report_rank = relation_report_order
+        .iter()
+        .filter(|oid| ordered_relation_notice_oids.contains(oid))
+        .enumerate()
+        .map(|(rank, oid)| (*oid, rank))
+        .collect::<BTreeMap<_, _>>();
+    if report_rank.len() < 2 {
+        return;
+    }
+
+    let mut relation_notices = tail_notices
+        .iter()
+        .filter(|(oid, _)| ordered_relation_notice_oids.contains(oid))
+        .cloned()
+        .collect::<Vec<_>>();
+    relation_notices
+        .sort_by_key(|(oid, _)| (report_rank.get(oid).copied().unwrap_or(usize::MAX), *oid));
+
+    let mut relation_notices = relation_notices.into_iter();
+    for notice in tail_notices
+        .iter_mut()
+        .filter(|(oid, _)| ordered_relation_notice_oids.contains(oid))
+    {
+        if let Some(ordered) = relation_notices.next() {
+            *notice = ordered;
+        }
+    }
+}
+
+fn drop_schema_relation_notice_oids_with_relation_dependencies(
+    ctx: &DropTableDependencyContext<'_>,
+    relation_notice_oids: &BTreeSet<u32>,
+) -> BTreeSet<u32> {
+    let mut ordered_oids = BTreeSet::new();
+    for relation_oid in relation_notice_oids {
+        for dep in drop_table_direct_dependencies(ctx, *relation_oid) {
+            let DropTableDependency::Relation {
+                relation_oid: dependent_oid,
+                ..
+            } = dep
+            else {
+                continue;
+            };
+            if relation_notice_oids.contains(&dependent_oid) {
+                ordered_oids.insert(*relation_oid);
+                ordered_oids.insert(dependent_oid);
+            }
+        }
+    }
+    ordered_oids
+}
+
+fn drop_schema_relation_notice_report_order_like_postgres(
+    ctx: &DropTableDependencyContext<'_>,
+    ordered_relation_notice_oids: &BTreeSet<u32>,
+) -> Vec<u32> {
+    let mut roots = ordered_relation_notice_oids
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    roots.sort_by(|left, right| right.cmp(left));
+
+    let mut visited = BTreeSet::new();
+    let mut deletion_order = Vec::new();
+    for relation_oid in roots {
+        visit_drop_schema_relation_notice_like_postgres(
+            ctx,
+            relation_oid,
+            ordered_relation_notice_oids,
+            &mut visited,
+            &mut deletion_order,
+        );
+    }
+    deletion_order.into_iter().rev().collect()
+}
+
+fn visit_drop_schema_relation_notice_like_postgres(
+    ctx: &DropTableDependencyContext<'_>,
+    relation_oid: u32,
+    ordered_relation_notice_oids: &BTreeSet<u32>,
+    visited: &mut BTreeSet<u32>,
+    deletion_order: &mut Vec<u32>,
+) {
+    if !visited.insert(relation_oid) {
+        return;
+    }
+
+    let mut dependent_oids = drop_table_direct_dependencies(ctx, relation_oid)
+        .into_iter()
+        .filter_map(|dep| match dep {
+            DropTableDependency::Relation {
+                relation_oid: dependent_oid,
+                ..
+            } if ordered_relation_notice_oids.contains(&dependent_oid) => Some(dependent_oid),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    dependent_oids.sort_by(|left, right| right.cmp(left));
+
+    for dependent_oid in dependent_oids {
+        visit_drop_schema_relation_notice_like_postgres(
+            ctx,
+            dependent_oid,
+            ordered_relation_notice_oids,
+            visited,
+            deletion_order,
+        );
+    }
+    deletion_order.push(relation_oid);
+}
+
 fn move_notice_group_after(tail_notices: &mut Vec<(u32, String)>, anchor: &str, group: &[&str]) {
     let mut moved = Vec::new();
     for notice in group {
@@ -4252,6 +4368,20 @@ impl Database {
                     notices.append(&mut text_search_notices);
                 }
                 tail_notices.sort_by_key(|(oid, _)| *oid);
+                let ordered_relation_notice_oids =
+                    drop_schema_relation_notice_oids_with_relation_dependencies(
+                        &dependency_ctx,
+                        &relation_notice_oids,
+                    );
+                let relation_report_order = drop_schema_relation_notice_report_order_like_postgres(
+                    &dependency_ctx,
+                    &ordered_relation_notice_oids,
+                );
+                order_drop_schema_relation_notices_like_postgres(
+                    &mut tail_notices,
+                    &relation_report_order,
+                    &ordered_relation_notice_oids,
+                );
                 postgres_order_create_view_schema_cascade_notices(&mut tail_notices);
                 notices.extend(tail_notices.into_iter().map(|(_, notice)| notice));
                 if has_generic_object_notices {

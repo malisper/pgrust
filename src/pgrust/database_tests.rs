@@ -22553,6 +22553,56 @@ fn drop_schema_cascade_reports_schema_owned_relation_notices() {
 }
 
 #[test]
+fn drop_schema_cascade_reports_inheritance_dependencies_in_postgres_order() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create schema schema_drop_order")
+        .unwrap();
+    session
+        .execute(&db, "create table schema_drop_order.child (a int4, b int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view schema_drop_order.child_view
+             as select * from schema_drop_order.child",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table schema_drop_order.parent (a int4, b int4)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table schema_drop_order.child
+             inherit schema_drop_order.parent",
+        )
+        .unwrap();
+    clear_backend_notices();
+
+    session
+        .execute(&db, "drop schema schema_drop_order cascade")
+        .unwrap();
+
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message, "drop cascades to 3 other objects");
+    assert_eq!(
+        notices[0].detail.as_deref(),
+        Some(
+            "drop cascades to table schema_drop_order.parent\n\
+             drop cascades to table schema_drop_order.child\n\
+             drop cascades to view schema_drop_order.child_view"
+        )
+    );
+}
+
+#[test]
 fn create_schema_reports_duplicate_and_reserved_name_errors() {
     let db = Database::open_ephemeral(16).unwrap();
 
