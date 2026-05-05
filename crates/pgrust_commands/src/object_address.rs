@@ -497,7 +497,7 @@ pub fn get_object_address(
         "publication" => publication_address(catalog, names),
         "subscription" => subscription_address(state, names),
         "user mapping" => user_mapping_address(catalog, names, args),
-        "default acl" => default_acl_address(state, names, args),
+        "default acl" => default_acl_address(catalog, state, names, args),
         "transform" => transform_address(catalog, state, names, args),
         "policy" => relation_child_address(
             catalog,
@@ -1485,6 +1485,7 @@ fn user_mapping_address(
 }
 
 fn default_acl_address(
+    catalog: &dyn CatalogLookup,
     state: Option<&ObjectAddressState>,
     names: &[String],
     args: &[String],
@@ -1494,7 +1495,7 @@ fn default_acl_address(
         .chars()
         .next()
         .ok_or_else(|| invalid_parameter("unrecognized default ACL object type \"\""))?;
-    if objtype != 'r' {
+    if !matches!(objtype, 'r' | 'S' | 'f' | 'T' | 'n' | 'L') {
         return Err(invalid_parameter(format!(
             "unrecognized default ACL object type \"{objtype}\""
         )));
@@ -1504,6 +1505,30 @@ fn default_acl_address(
     }
     let role = &names[0];
     let namespace = names.get(1);
+    let namespace_oid = match namespace {
+        Some(namespace) => catalog
+            .namespace_row_by_name(namespace)
+            .map(|row| row.oid)
+            .unwrap_or(u32::MAX),
+        None => 0,
+    };
+    if let Some(role_oid) = catalog
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.rolname.eq_ignore_ascii_case(role))
+        .map(|row| row.oid)
+        && let Some(row) = catalog.default_acl_rows().into_iter().find(|row| {
+            row.defaclrole == role_oid
+                && row.defaclnamespace == namespace_oid
+                && row.defaclobjtype == objtype
+        })
+    {
+        return Ok(ObjectAddress {
+            classid: PG_DEFAULT_ACL_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+        });
+    }
     state
         .and_then(|state| {
             state.default_acls.iter().find(|row| {
@@ -1730,7 +1755,13 @@ fn fill_identity(
 ) {
     match address.classid {
         PG_DEFAULT_ACL_RELATION_OID => {
-            if let Some(row) = state.and_then(|state| {
+            if let Some(row) = catalog
+                .default_acl_rows()
+                .into_iter()
+                .find(|row| row.oid == address.objid)
+            {
+                identity.identity = default_acl_catalog_identity(catalog, &row);
+            } else if let Some(row) = state.and_then(|state| {
                 state
                     .default_acls
                     .iter()
@@ -2139,7 +2170,22 @@ fn fill_address_parts(
 ) {
     match address.classid {
         PG_DEFAULT_ACL_RELATION_OID => {
-            if let Some(row) = state.and_then(|state| {
+            if let Some(row) = catalog
+                .default_acl_rows()
+                .into_iter()
+                .find(|row| row.oid == address.objid)
+            {
+                if let Some(role_name) = catalog.role_name_by_oid(row.defaclrole) {
+                    let mut names = vec![role_name];
+                    if row.defaclnamespace != 0
+                        && let Some(namespace) = catalog.namespace_row_by_oid(row.defaclnamespace)
+                    {
+                        names.push(namespace.nspname);
+                    }
+                    parts.object_names = Some(names);
+                    parts.object_args = Some(vec![row.defaclobjtype.to_string()]);
+                }
+            } else if let Some(row) = state.and_then(|state| {
                 state
                     .default_acls
                     .iter()
@@ -2506,7 +2552,32 @@ fn set_one_name_part(name: Option<String>, parts: &mut ObjectAddressParts) {
 }
 
 fn default_acl_identity(row: &DefaultAclAddressEntry) -> String {
-    let kind = match row.objtype {
+    default_acl_identity_text(&row.role_name, row.namespace_name.as_deref(), row.objtype)
+}
+
+fn default_acl_catalog_identity(
+    catalog: &dyn CatalogLookup,
+    row: &PgDefaultAclRow,
+) -> Option<String> {
+    let role_name = catalog.role_name_by_oid(row.defaclrole)?;
+    let namespace_name = if row.defaclnamespace == 0 {
+        None
+    } else {
+        Some(catalog.namespace_row_by_oid(row.defaclnamespace)?.nspname)
+    };
+    Some(default_acl_identity_text(
+        &role_name,
+        namespace_name.as_deref(),
+        row.defaclobjtype,
+    ))
+}
+
+fn default_acl_identity_text(
+    role_name: &str,
+    namespace_name: Option<&str>,
+    objtype: char,
+) -> String {
+    let kind = match objtype {
         'r' => "tables",
         'S' => "sequences",
         'f' => "functions",
@@ -2514,10 +2585,10 @@ fn default_acl_identity(row: &DefaultAclAddressEntry) -> String {
         'n' => "schemas",
         _ => "objects",
     };
-    if let Some(namespace) = &row.namespace_name {
-        format!("for role {} in schema {namespace} on {kind}", row.role_name)
+    if let Some(namespace) = namespace_name {
+        format!("for role {role_name} in schema {namespace} on {kind}")
     } else {
-        format!("for role {} on {kind}", row.role_name)
+        format!("for role {role_name} on {kind}")
     }
 }
 

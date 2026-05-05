@@ -1168,11 +1168,11 @@ impl Database {
         namespace_oids.sort_unstable();
         namespace_oids.dedup();
         let objtype = default_acl_objtype_for_statement(stmt.object_type);
-        for role_oid in target_role_oids {
+        for role_oid in &target_role_oids {
             for namespace_oid in &namespace_oids {
                 self.update_default_acl_entry(
                     client_id,
-                    role_oid,
+                    *role_oid,
                     *namespace_oid,
                     objtype,
                     &stmt.privilege_chars,
@@ -1186,9 +1186,67 @@ impl Database {
                 )?;
             }
         }
+        self.sync_default_acl_object_address_state(
+            &auth_catalog,
+            &catcache,
+            &target_role_oids,
+            &namespace_oids,
+            objtype,
+            stmt,
+        );
         let _ = configured_search_path;
         let _ = stmt.cascade;
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn sync_default_acl_object_address_state(
+        &self,
+        auth_catalog: &AuthCatalog,
+        catcache: &CatCache,
+        target_role_oids: &[u32],
+        namespace_oids: &[u32],
+        objtype: char,
+        stmt: &AlterDefaultPrivilegesStatement,
+    ) {
+        let mut object_addresses = self.object_addresses.write();
+        for role_oid in target_role_oids {
+            let Some(role) = auth_catalog.role_by_oid(*role_oid) else {
+                continue;
+            };
+            for namespace_oid in namespace_oids {
+                let namespace_oid_opt = (*namespace_oid != 0).then_some(*namespace_oid);
+                let namespace_name = namespace_oid_opt
+                    .and_then(|oid| catcache.namespace_by_oid(oid))
+                    .map(|row| row.nspname.clone());
+                if stmt.is_grant
+                    && namespace_oid_opt.is_none()
+                    && stmt
+                        .grantee_names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&role.rolname))
+                {
+                    object_addresses.remove_default_acl(*role_oid, namespace_oid_opt, objtype);
+                    continue;
+                }
+                let grantee_name = stmt.grantee_names.first().map(String::as_str);
+                let acl_items =
+                    crate::backend::catalog::object_address::default_acl_items_for_object_address(
+                        &role.rolname,
+                        objtype,
+                        stmt.is_grant,
+                        grantee_name,
+                        &stmt.privilege_chars,
+                    );
+                object_addresses.upsert_default_acl(
+                    *role_oid,
+                    role.rolname.clone(),
+                    namespace_oid_opt,
+                    namespace_name,
+                    objtype,
+                    acl_items,
+                );
+            }
+        }
     }
 
     fn update_default_acl_entry(

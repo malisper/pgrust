@@ -44,9 +44,9 @@ use pgrust_catalog_data::{
     PERCENTILE_CONT_INTERVAL_MULTI_AGG_PROC_OID, PERCENTILE_DISC_AGG_PROC_OID,
     PERCENTILE_DISC_MULTI_AGG_PROC_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow,
-    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
-    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDefaultAclRow, PgDependRow, PgEnumRow,
+    PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
     PgPartitionedTableRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
     PgPublicationRow, PgRangeRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
     PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow,
@@ -1332,6 +1332,10 @@ pub trait CatalogLookup: Send + Sync {
     }
 
     fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        Vec::new()
+    }
+
+    fn default_acl_rows(&self) -> Vec<PgDefaultAclRow> {
         Vec::new()
     }
 
