@@ -5043,6 +5043,15 @@ fn apply_collate_regression_error_compat(sql: &str, response: &mut ExecErrorResp
         return;
     }
     match response.message.as_str() {
+        "conflicting or redundant options"
+            if response.detail.is_none()
+                && sql
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("create collation ") =>
+        {
+            response.position = conflicting_create_collation_option_position(sql);
+        }
         message if message.starts_with("collations are not supported by type ") => {
             response.position = find_case_insensitive_token_position(sql, "COLLATE");
         }
@@ -5051,6 +5060,19 @@ fn apply_collate_regression_error_compat(sql: &str, response: &mut ExecErrorResp
         }
         _ => {}
     }
+}
+
+fn conflicting_create_collation_option_position(sql: &str) -> Option<usize> {
+    [
+        "LC_COLLATE",
+        "LC_CTYPE",
+        "PROVIDER",
+        "LOCALE",
+        "DETERMINISTIC",
+        "VERSION",
+    ]
+    .into_iter()
+    .find_map(|option| conflicting_foreign_wrapper_option_position(sql, option))
 }
 
 fn copy_relation_qualified_column_error(message: &str) -> Option<&str> {
@@ -19250,6 +19272,32 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             response.position,
             find_last_case_insensitive_token_position(sql, "COLLATE")
         );
+
+        let sql =
+            "CREATE COLLATION coll_dup_chk (LC_COLLATE = \"POSIX\", LC_COLLATE = \"NONSENSE\")";
+        let err = ExecError::DetailedError {
+            message: "conflicting or redundant options".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        };
+        let mut response = exec_error_response(sql, &err);
+        apply_final_exec_error_response_compat(sql, &mut response);
+        assert_eq!(
+            response.position,
+            sql.rfind("LC_COLLATE").map(|index| index + 1)
+        );
+
+        let sql = "CREATE COLLATION coll_dup_chk (LC_COLLATE = \"POSIX\", LC_CTYPE = \"POSIX\", LOCALE = '')";
+        let err = ExecError::DetailedError {
+            message: "conflicting or redundant options".into(),
+            detail: Some("LOCALE cannot be specified together with LC_COLLATE or LC_CTYPE.".into()),
+            hint: None,
+            sqlstate: "42601",
+        };
+        let mut response = exec_error_response(sql, &err);
+        apply_final_exec_error_response_compat(sql, &mut response);
+        assert_eq!(response.position, None);
     }
 
     #[test]

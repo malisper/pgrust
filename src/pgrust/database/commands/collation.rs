@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::backend::executor::StatementResult;
 use crate::backend::parser::{
-    CreateCollationKind, CreateCollationStatement, DropCollationStatement,
+    CreateCollationKind, CreateCollationStatement, DropCollationStatement, ParseError,
 };
 use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, PgCollationRow};
 use pgrust_commands::collation::{
@@ -15,12 +15,27 @@ fn collation_error_to_exec(error: pgrust_commands::collation::CollationError) ->
             detail,
             hint,
             sqlstate,
-        } => ExecError::DetailedError {
-            message,
-            detail,
-            hint,
-            sqlstate,
-        },
+            position,
+        } => {
+            if let Some(position) = position {
+                ExecError::Parse(
+                    ParseError::DetailedError {
+                        message,
+                        detail,
+                        hint,
+                        sqlstate,
+                    }
+                    .with_position(position),
+                )
+            } else {
+                ExecError::DetailedError {
+                    message,
+                    detail,
+                    hint,
+                    sqlstate,
+                }
+            }
+        }
     }
 }
 

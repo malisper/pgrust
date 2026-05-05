@@ -1,5 +1,5 @@
 use pgrust_catalog_data::PgCollationRow;
-use pgrust_nodes::parsenodes::RelOption;
+use pgrust_nodes::parsenodes::CollationOption;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CollationError {
@@ -8,6 +8,7 @@ pub enum CollationError {
         detail: Option<String>,
         hint: Option<String>,
         sqlstate: &'static str,
+        position: Option<usize>,
     },
 }
 
@@ -15,7 +16,7 @@ pub fn create_collation_row_from_options(
     collname: String,
     collnamespace: u32,
     collowner: u32,
-    options: &[RelOption],
+    options: &[CollationOption],
 ) -> Result<PgCollationRow, CollationError> {
     validate_collation_options(options)?;
     let provider = collation_option_value(options, "provider");
@@ -131,21 +132,22 @@ pub fn split_schema_qualified_name(raw_name: &str) -> (Option<String>, String) {
         .unwrap_or_else(|| (None, raw_name.to_ascii_lowercase()))
 }
 
-fn collation_option_value(options: &[RelOption], name: &str) -> Option<String> {
+fn collation_option_value(options: &[CollationOption], name: &str) -> Option<String> {
     options
         .iter()
         .find(|option| option.name.eq_ignore_ascii_case(name))
         .map(|option| option.value.clone())
 }
 
-fn validate_collation_options(options: &[RelOption]) -> Result<(), CollationError> {
+fn validate_collation_options(options: &[CollationOption]) -> Result<(), CollationError> {
     let mut seen = std::collections::BTreeSet::new();
     for option in options {
         if option.name.chars().any(|ch| ch.is_ascii_uppercase()) {
-            return Err(detailed_error(
+            return Err(detailed_error_at(
                 format!("collation attribute \"{}\" not recognized", option.name),
                 None,
                 "42601",
+                option.position,
             ));
         }
         let name = option.name.to_ascii_lowercase();
@@ -159,17 +161,19 @@ fn validate_collation_options(options: &[RelOption]) -> Result<(), CollationErro
                 | "version"
                 | "from"
         ) {
-            return Err(detailed_error(
+            return Err(detailed_error_at(
                 format!("collation attribute \"{}\" not recognized", option.name),
                 None,
                 "42601",
+                option.position,
             ));
         }
         if !seen.insert(name) {
-            return Err(detailed_error(
+            return Err(detailed_error_at(
                 "conflicting or redundant options",
                 None,
                 "42601",
+                option.position,
             ));
         }
     }
@@ -194,10 +198,20 @@ fn detailed_error(
     detail: Option<String>,
     sqlstate: &'static str,
 ) -> CollationError {
+    detailed_error_at(message, detail, sqlstate, None)
+}
+
+fn detailed_error_at(
+    message: impl Into<String>,
+    detail: Option<String>,
+    sqlstate: &'static str,
+    position: Option<usize>,
+) -> CollationError {
     CollationError::Detailed {
         message: message.into(),
         detail,
         hint: None,
         sqlstate,
+        position,
     }
 }

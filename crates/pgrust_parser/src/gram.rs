@@ -19113,6 +19113,7 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
         .unwrap_or(base_name);
     let rest = rest.trim_start();
     if rest.starts_with('(') {
+        let options_base = slice_byte_offset(sql, rest) + 1;
         let (options_sql, trailing) = take_parenthesized_segment(rest)?;
         if !trailing.trim().is_empty() {
             return Err(ParseError::UnexpectedToken {
@@ -19123,7 +19124,7 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
         return Ok(CreateCollationStatement {
             collation_name,
             kind: CreateCollationKind::Options {
-                options: parse_collation_option_assignments(&options_sql)?,
+                options: parse_collation_option_assignments(sql, &options_sql, options_base)?,
             },
         });
     }
@@ -19149,7 +19150,11 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
     })
 }
 
-fn parse_collation_option_assignments(input: &str) -> Result<Vec<RelOption>, ParseError> {
+fn parse_collation_option_assignments(
+    sql: &str,
+    input: &str,
+    input_byte_offset: usize,
+) -> Result<Vec<CollationOption>, ParseError> {
     split_comma_separated_sql(input)?
         .into_iter()
         .map(|part| {
@@ -19159,6 +19164,11 @@ fn parse_collation_option_assignments(input: &str) -> Result<Vec<RelOption>, Par
                         expected: "collation option assignment",
                         actual: part.trim().into(),
                     })?;
+            let name_start = name_sql.len() - name_sql.trim_start().len();
+            let position = Some(sql_position_from_byte_offset(
+                sql,
+                input_byte_offset + slice_byte_offset(input, name_sql) + name_start,
+            ));
             let (name, tail) = parse_sql_identifier(name_sql)?;
             if !tail.trim().is_empty() {
                 return Err(ParseError::UnexpectedToken {
@@ -19185,7 +19195,11 @@ fn parse_collation_option_assignments(input: &str) -> Result<Vec<RelOption>, Par
                 }
                 value
             };
-            Ok(RelOption { name, value })
+            Ok(CollationOption {
+                name,
+                value,
+                position,
+            })
         })
         .collect()
 }

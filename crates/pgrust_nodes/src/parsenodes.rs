@@ -3754,7 +3754,14 @@ pub struct CreateCollationStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateCollationKind {
     From { source_collation: String },
-    Options { options: Vec<RelOption> },
+    Options { options: Vec<CollationOption> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollationOption {
+    pub name: String,
+    pub value: String,
+    pub position: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
