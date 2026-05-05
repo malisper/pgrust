@@ -14918,6 +14918,45 @@ mod tests {
     }
 
     #[test]
+    fn simple_query_create_aggregate_replays_quoted_option_warnings_before_error() {
+        let db = Database::open(temp_dir("create_aggregate_quoted_option_warning"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(1),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+            ignore_till_sync: false,
+            extended_segment_command_count: 0,
+            pipeline_implicit_txn: false,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            r#"create aggregate case_agg (
+                "Sfunc1" = int4pl,
+                "Basetype" = int4,
+                "Stype1" = int4,
+                "Initcond1" = '0',
+                "Parallel" = safe
+            );"#,
+        )
+        .unwrap();
+
+        assert_eq!(backend_message_count(&output, b'N'), 5);
+        assert!(output_contains_message(
+            &output,
+            r#"aggregate attribute "Sfunc1" not recognized"#
+        ));
+        assert!(output_contains_message(
+            &output,
+            "aggregate stype must be specified"
+        ));
+    }
+
+    #[test]
     fn simple_query_resumes_after_copy_from_stdin_continuation() {
         let db = Database::open(temp_dir("copy_from_stdin_continuation"), 16).unwrap();
         db.execute(1, "create table test3 (c int)").unwrap();
