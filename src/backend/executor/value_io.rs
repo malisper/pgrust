@@ -10,7 +10,6 @@ use super::expr_casts::{
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_multirange::{render_multirange, render_multirange_text_with_config};
-use super::expr_network::{encode_network_bytes, parse_cidr_bytes, parse_inet_bytes};
 use super::expr_range::{
     decode_range_bytes, encode_range_bytes, render_range_text, render_range_text_with_config,
 };
@@ -34,7 +33,8 @@ use pgrust_expr::expr_geometry::{
     render_geometry_text,
 };
 use pgrust_expr::{
-    parse_macaddr_bytes, parse_macaddr8_bytes, render_macaddr_text, render_macaddr8_text,
+    encode_network_bytes, parse_cidr_bytes, parse_inet_bytes, parse_macaddr_bytes,
+    parse_macaddr8_bytes, render_macaddr_text, render_macaddr8_text,
 };
 
 mod array;
@@ -2564,13 +2564,13 @@ pub(crate) fn decode_value_with_external_toast(
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            parse_inet_bytes(bytes).map(Value::Inet)
+            parse_inet_bytes(bytes).map(Value::Inet).map_err(Into::into)
         }
         ScalarType::Cidr => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            parse_cidr_bytes(bytes).map(Value::Cidr)
+            parse_cidr_bytes(bytes).map(Value::Cidr).map_err(Into::into)
         }
         ScalarType::MacAddr => {
             if column.storage.attlen != 6 || bytes.len() != 6 {

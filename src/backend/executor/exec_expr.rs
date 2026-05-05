@@ -11651,7 +11651,7 @@ fn eval_plpgsql_builtin_function(
         return result;
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if is_text_search_builtin_function(func) {
         return eval_text_search_builtin_function(func, &values, None);
@@ -13603,7 +13603,7 @@ pub(crate) fn eval_builtin_function(
         return result;
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if let Some(result) = eval_enum_function(func, &values, result_type, ctx) {
         return result;

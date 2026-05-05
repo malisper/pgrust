@@ -17,7 +17,6 @@ mod expr_json;
 mod expr_locks;
 mod expr_math;
 pub(crate) mod expr_multirange;
-mod expr_network;
 pub(crate) mod expr_numeric;
 pub(crate) mod expr_ops;
 mod expr_partition;
@@ -99,11 +98,6 @@ pub(crate) use expr_multirange::{
     range_agg_transition,
 };
 pub use expr_multirange::{render_multirange_text, render_multirange_text_with_config};
-pub(crate) use expr_network::{
-    compare_network_values, encode_network_bytes, eval_network_function, network_btree_upper_bound,
-    network_contains, network_merge, network_prefix, parse_cidr_bytes, parse_cidr_text,
-    parse_inet_bytes, parse_inet_text, render_network_text,
-};
 pub(crate) use expr_range::{
     compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,
     parse_range_text,
@@ -125,6 +119,11 @@ pub(crate) use nodes::{
 pub use pgrust_executor::ScalarFunctionCallInfo;
 pub use pgrust_expr::money_format_text;
 pub(crate) use pgrust_expr::money_parse_text;
+pub(crate) use pgrust_expr::{
+    compare_network_values, encode_network_bytes, eval_network_function, network_btree_upper_bound,
+    network_contains, network_merge, network_prefix, parse_cidr_bytes, parse_cidr_text,
+    parse_inet_bytes, parse_inet_text, render_network_text,
+};
 pub use pgrust_expr::{render_macaddr_text, render_macaddr8_text};
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
