@@ -4647,6 +4647,11 @@ fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_par
             expected_sqlstate,
             expected_message_part,
         ),
+        ExecError::Parse(ParseError::WithContext { source, .. }) => assert_sqlstate(
+            ExecError::Parse(*source),
+            expected_sqlstate,
+            expected_message_part,
+        ),
         ExecError::Parse(ParseError::UnknownColumn(name)) => {
             assert_eq!(expected_sqlstate, "42703");
             let message = format!("column \"{name}\" does not exist");
@@ -25434,14 +25439,12 @@ fn transition_tables_cannot_be_referenced_by_persistent_objects() {
     )
     .unwrap();
 
-    match db.execute(1, "insert into items values (42)") {
-        Err(ExecError::Parse(ParseError::DetailedError {
-            message, sqlstate, ..
-        })) if message
-            == "transition table \"new_table\" cannot be referenced in a persistent object"
-            && sqlstate == "0A000" => {}
-        other => panic!("expected persistent transition-table reference error, got {other:?}"),
-    }
+    let err = db.execute(1, "insert into items values (42)").unwrap_err();
+    assert_sqlstate(
+        err,
+        "0A000",
+        "transition table \"new_table\" cannot be referenced in a persistent object",
+    );
 }
 
 #[test]

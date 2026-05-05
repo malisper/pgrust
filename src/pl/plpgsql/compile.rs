@@ -1020,16 +1020,18 @@ fn compile_decl_default_expr_text(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
-    if let Some(deferred) = unresolved_decl_default_column_error(sql, env) {
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+    let assignment_query_expr = rewrite_plpgsql_assignment_query_expr(&rewritten_sql);
+    if assignment_query_expr.is_none()
+        && let Some(deferred) = unresolved_decl_default_column_error(sql, env)
+    {
         return Ok(CompiledExpr::DeferredError {
             source: sql.trim().to_string(),
             err: deferred,
         });
     }
-    match compile_assignment_expr_text(sql, catalog, env) {
-        Ok(expr) => Ok(expr),
-        Err(err) => Err(err),
-    }
+    let rewritten_sql = assignment_query_expr.unwrap_or(rewritten_sql);
+    compile_expr_sql(&rewritten_sql, sql.trim(), catalog, env)
 }
 
 fn unresolved_decl_default_column_error(sql: &str, env: &CompileEnv) -> Option<ParseError> {

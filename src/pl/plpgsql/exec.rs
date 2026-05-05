@@ -50,7 +50,7 @@ use crate::pgrust::session::{ByteaOutputFormat, resolve_thread_prepared_statemen
 use pgrust_catalog_data::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
-    ANYNONARRAYOID, ANYOID, ANYRANGEOID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID, UNKNOWN_TYPE_OID,
 };
 use pgrust_nodes::{EventTriggerCallContext, TriggerCallContext, TriggerFunctionResult};
 use pgrust_plpgsql::event_trigger_return_bindings;
@@ -6447,6 +6447,9 @@ fn record_descriptor_field_type_matches(
     expected: SqlType,
     catalog: &dyn CatalogLookup,
 ) -> bool {
+    if actual.type_oid == UNKNOWN_TYPE_OID {
+        return true;
+    }
     if actual.is_array != expected.is_array {
         return false;
     }
