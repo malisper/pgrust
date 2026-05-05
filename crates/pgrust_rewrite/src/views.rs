@@ -4125,6 +4125,12 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
         Expr::Var(var) => var_name(var, ctx).unwrap_or_else(|| format!("var{}", var.varattno)),
         Expr::Const(value) => render_literal(value),
         Expr::Cast(inner, ty) => {
+            if sql_type_is_composite_row(*ty, ctx.catalog)
+                && let Expr::Row { fields, .. } = inner.as_ref()
+                && let Some(whole_row) = render_relation_whole_row(fields, ctx)
+            {
+                return whole_row;
+            }
             if ctx.options.suppress_implicit_const_casts
                 && simple_numeric_const_cast_can_be_omitted(inner, *ty)
             {
@@ -4287,6 +4293,11 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
                 .join(", ")
         ),
         Expr::Row { descriptor, fields } => {
+            if sql_type_is_composite_row(descriptor.sql_type(), ctx.catalog)
+                && let Some(whole_row) = render_relation_whole_row(fields, ctx)
+            {
+                return whole_row;
+            }
             let rendered = format!(
                 "ROW({})",
                 fields
@@ -4579,6 +4590,65 @@ fn render_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
             .map(|json| format!("'{}'::jsonb", json.replace('\'', "''"))),
         _ => None,
     }
+}
+
+fn render_relation_whole_row(
+    fields: &[(String, Expr)],
+    ctx: &ViewDeparseContext<'_>,
+) -> Option<String> {
+    if let Some(rendered) = render_single_relation_whole_row_by_names(fields, ctx) {
+        return Some(rendered);
+    }
+    let mut varno = None;
+    for (index, (_, field)) in fields.iter().enumerate() {
+        let Expr::Var(var) = field else {
+            return None;
+        };
+        if var.varlevelsup != 0 || attrno_index(var.varattno) != Some(index) {
+            return None;
+        }
+        match varno {
+            Some(existing) if existing != var.varno => return None,
+            Some(_) => {}
+            None => varno = Some(var.varno),
+        }
+    }
+    rte_qualifier(ctx, varno?).map(|qualifier| format!("{qualifier}.*"))
+}
+
+fn render_single_relation_whole_row_by_names(
+    fields: &[(String, Expr)],
+    ctx: &ViewDeparseContext<'_>,
+) -> Option<String> {
+    if ctx.query.rtable.len() != 1 {
+        return None;
+    }
+    let rte = ctx.query.rtable.first()?;
+    let visible_columns = rte
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .collect::<Vec<_>>();
+    if fields.len() != visible_columns.len() {
+        return None;
+    }
+    for ((_, field), column) in fields.iter().zip(visible_columns) {
+        let rendered = render_expr(field, ctx);
+        let column_name = quote_identifier_if_needed(&column.name);
+        if rendered != column_name {
+            return None;
+        }
+    }
+    rte_qualifier(ctx, 1).map(|qualifier| format!("{qualifier}.*"))
+}
+
+fn sql_type_is_composite_row(ty: SqlType, catalog: &dyn CatalogLookup) -> bool {
+    ty.typrelid != 0
+        || (ty.type_oid != 0
+            && catalog
+                .type_by_oid(ty.type_oid)
+                .is_some_and(|row| row.typrelid != 0))
 }
 
 fn render_current_with_precision(name: &str, precision: Option<i32>) -> String {

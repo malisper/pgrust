@@ -26,6 +26,7 @@ use crate::backend::commands::tablecmds::{
     check_relation_column_privileges, execute_merge, execute_prepared_insert_row,
     resolve_truncate_relations,
 };
+use crate::backend::commands::trigger::RuntimeTriggers;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredConstraintSnapshot, DeferredForeignKeyTracker, ExecError, ExecutorContext,
@@ -116,6 +117,7 @@ use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
     PortalRunResult, PositionedCursorRow,
 };
+use crate::pl::plpgsql::TriggerOperation;
 use crate::pl::plpgsql::{
     EventTriggerDdlCommandRow, EventTriggerDroppedObjectRow, PlpgsqlFunctionCache,
     execute_do_with_context, execute_user_defined_procedure_values,
@@ -2053,6 +2055,7 @@ pub(crate) struct ActiveTransaction {
     pub(crate) temp_effects: Vec<TempMutationEffect>,
     pub(crate) accessed_temp_namespace: bool,
     pub(crate) sequence_effects: Vec<SequenceMutationEffect>,
+    copy_freeze_relation_events: Vec<CopyFreezeRelationEvent>,
     deferred_foreign_keys: DeferredForeignKeyTracker,
     pub(crate) async_listen_ops: Vec<AsyncListenOp>,
     pub(crate) pending_async_notifications: Vec<PendingNotification>,
@@ -2060,6 +2063,12 @@ pub(crate) struct ActiveTransaction {
     savepoints: Vec<SavepointState>,
     pub(crate) guc_start_state: GucState,
     pub(crate) guc_commit_state: GucState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CopyFreezeRelationEvent {
+    relation_oid: u32,
+    savepoint_depth: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2088,6 +2097,7 @@ struct SavepointState {
     prior_catalog_invalidation_len: usize,
     temp_effect_len: usize,
     sequence_effect_len: usize,
+    copy_freeze_relation_event_len: usize,
     deferred_foreign_key_snapshot: DeferredConstraintSnapshot,
     auth_effective_state: AuthState,
     local_auth_active: bool,
@@ -4422,6 +4432,7 @@ impl Session {
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             pending_portals: Vec::new(),
+            copy_freeze_relation_oids: Vec::new(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -4695,6 +4706,7 @@ impl Session {
             prior_cmd_catalog_invalidations: Vec::new(),
             temp_effects: Vec::new(),
             sequence_effects: Vec::new(),
+            copy_freeze_relation_events: Vec::new(),
             deferred_foreign_keys: DeferredForeignKeyTracker::default(),
             async_listen_ops: Vec::new(),
             pending_async_notifications: Vec::new(),
@@ -5127,6 +5139,38 @@ impl Session {
             .as_ref()
             .map(|txn| txn.savepoints.len())
             .unwrap_or(0)
+    }
+
+    fn note_copy_freeze_relation_events<I>(&mut self, relation_oids: I)
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        let Some(txn) = self.active_txn.as_mut() else {
+            return;
+        };
+        let savepoint_depth = txn.savepoints.len();
+        for relation_oid in relation_oids {
+            if txn.copy_freeze_relation_events.iter().any(|event| {
+                event.relation_oid == relation_oid && event.savepoint_depth == savepoint_depth
+            }) {
+                continue;
+            }
+            txn.copy_freeze_relation_events
+                .push(CopyFreezeRelationEvent {
+                    relation_oid,
+                    savepoint_depth,
+                });
+        }
+    }
+
+    fn copy_freeze_relation_is_current_subtransaction(&self, relation_oid: u32) -> bool {
+        let Some(txn) = self.active_txn.as_ref() else {
+            return false;
+        };
+        let savepoint_depth = txn.savepoints.len();
+        txn.copy_freeze_relation_events.iter().any(|event| {
+            event.relation_oid == relation_oid && event.savepoint_depth == savepoint_depth
+        })
     }
 
     fn cte_body_has_writable_insert(body: &CteBody) -> bool {
@@ -7277,6 +7321,12 @@ impl Session {
         catalog_effects.extend(mem::take(&mut ctx.pending_catalog_effects));
         let pending_table_locks = mem::take(&mut ctx.pending_table_locks);
         let pending_portals = mem::take(&mut ctx.pending_portals);
+        let copy_freeze_relation_oids = if succeeded {
+            mem::take(&mut ctx.copy_freeze_relation_oids)
+        } else {
+            ctx.copy_freeze_relation_oids.clear();
+            Vec::new()
+        };
         if let Some(txn) = self.active_txn.as_mut() {
             txn.catalog_effects.extend(catalog_effects);
             txn.temp_effects.extend(temp_effects);
@@ -7298,7 +7348,9 @@ impl Session {
             debug_assert!(catalog_effects.is_empty());
             debug_assert!(temp_effects.is_empty());
             debug_assert!(pending_table_locks.is_empty());
+            debug_assert!(copy_freeze_relation_oids.is_empty());
         }
+        self.note_copy_freeze_relation_events(copy_freeze_relation_oids);
         if !succeeded {
             ctx.pending_async_notifications.clear();
             return;
@@ -11335,6 +11387,7 @@ impl Session {
                     prior_catalog_invalidation_len: txn.prior_cmd_catalog_invalidations.len(),
                     temp_effect_len: txn.temp_effects.len(),
                     sequence_effect_len: txn.sequence_effects.len(),
+                    copy_freeze_relation_event_len: txn.copy_freeze_relation_events.len(),
                     deferred_foreign_key_snapshot: txn.deferred_foreign_keys.snapshot(),
                     auth_effective_state: self.auth.clone(),
                     local_auth_active: txn.local_auth_active,
@@ -11373,6 +11426,11 @@ impl Session {
                     txn.deferrable = savepoint.deferrable;
                     txn.snapshot_taken = savepoint.snapshot_taken;
                     txn.transaction_snapshot = savepoint.transaction_snapshot;
+                    for event in &mut txn.copy_freeze_relation_events {
+                        if event.savepoint_depth > index {
+                            event.savepoint_depth = index;
+                        }
+                    }
                     txn.savepoints.truncate(index);
                     index + 1
                 };
@@ -11463,6 +11521,8 @@ impl Session {
                     txn.current_cmd_catalog_invalidations.clear();
                     txn.temp_effects.truncate(savepoint.temp_effect_len);
                     txn.sequence_effects.truncate(savepoint.sequence_effect_len);
+                    txn.copy_freeze_relation_events
+                        .truncate(savepoint.copy_freeze_relation_event_len);
                     txn.subxids.truncate(savepoint.subxid_len);
                     txn.current_write_xid = None;
                     txn.isolation_level = savepoint.isolation_level;
@@ -20197,7 +20257,11 @@ impl Session {
                 Statement::TruncateTable(ref truncate_stmt) => {
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
                     let relations = resolve_truncate_relations(truncate_stmt, &catalog, false)?;
-                    for relation in relations {
+                    let relation_oids = relations
+                        .iter()
+                        .map(|relation| relation.relation_oid)
+                        .collect::<Vec<_>>();
+                    for relation in &relations {
                         self.lock_table_if_needed(
                             db,
                             relation.rel,
@@ -20237,6 +20301,9 @@ impl Session {
                         self.note_context_xid(xid);
                     }
                     self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                    if result.is_ok() {
+                        self.note_copy_freeze_relation_events(relation_oids);
+                    }
                     result
                 }
                 Statement::Begin(_)
@@ -21233,6 +21300,16 @@ impl Session {
                     sqlstate: "0A000",
                 });
             }
+            if !self.copy_freeze_relation_is_current_subtransaction(entry.relation_oid) {
+                return Err(ExecError::DetailedError {
+                    message:
+                        "cannot perform COPY FREEZE because the table was not created or truncated in the current subtransaction"
+                            .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55000",
+                });
+            }
         }
         let stop_on_copy_marker =
             matches!(copy.direction, CopyDirection::From(CopyEndpoint::Stdin));
@@ -21593,7 +21670,7 @@ impl Session {
                     };
 
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                    let (relation_oid, rel, toast, toast_index, desc, indexes) = {
+                    let (relation_oid, relkind, rel, toast, toast_index, desc, indexes) = {
                         let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
                             ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
                         })?;
@@ -21622,6 +21699,7 @@ impl Session {
                         });
                         (
                             entry.relation_oid,
+                            entry.relkind,
                             entry.rel,
                             entry.toast,
                             toast_index,
@@ -21943,14 +22021,6 @@ impl Session {
                                 if let Some(limit) = options.reject_limit
                                     && skipped > limit
                                 {
-                                    let err = ExecError::DetailedError {
-                                        message: format!(
-                                            "skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"
-                                        ),
-                                        detail: None,
-                                        hint: None,
-                                        sqlstate: "22P04",
-                                    };
                                     let context = copy_row_error_context(
                                         table_name,
                                         row_index,
@@ -21960,6 +22030,14 @@ impl Session {
                                         &catalog,
                                         &err,
                                     );
+                                    let err = ExecError::DetailedError {
+                                        message: format!(
+                                            "skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"
+                                        ),
+                                        detail: None,
+                                        hint: None,
+                                        sqlstate: "22P04",
+                                    };
                                     return Err(ExecError::WithContext {
                                         source: Box::new(err),
                                         context,
@@ -22027,22 +22105,34 @@ impl Session {
                             err,
                         )
                     };
-                    let result = crate::backend::commands::tablecmds::execute_insert_values(
-                        table_name,
-                        relation_oid,
-                        rel,
-                        toast,
-                        toast_index.as_ref(),
-                        &desc,
-                        &relation_constraints,
-                        &[],
-                        &indexes,
-                        &parsed_rows,
-                        Some(&copy_error_context),
-                        &mut ctx,
-                        xid,
-                        heap_cid,
-                    );
+                    let result = if relkind == 'v' {
+                        execute_copy_from_instead_of_insert_view(
+                            table_name,
+                            relation_oid,
+                            &desc,
+                            &parsed_rows,
+                            Some(&copy_error_context),
+                            &catalog,
+                            &mut ctx,
+                        )
+                    } else {
+                        crate::backend::commands::tablecmds::execute_insert_values(
+                            table_name,
+                            relation_oid,
+                            rel,
+                            toast,
+                            toast_index.as_ref(),
+                            &desc,
+                            &relation_constraints,
+                            &[],
+                            &indexes,
+                            &parsed_rows,
+                            Some(&copy_error_context),
+                            &mut ctx,
+                            xid,
+                            heap_cid,
+                        )
+                    };
                     self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
                     result
                 })();
@@ -22102,6 +22192,59 @@ impl Session {
             "\\N",
         )?;
         Ok(StatementResult::AffectedRows(count))
+    }
+}
+
+fn execute_copy_from_instead_of_insert_view(
+    relation_name: &str,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    rows: &[Vec<Value>],
+    row_error_context: Option<&dyn Fn(usize, &ExecError) -> String>,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<usize, ExecError> {
+    let triggers = RuntimeTriggers::load(
+        catalog,
+        relation_oid,
+        relation_name,
+        desc,
+        TriggerOperation::Insert,
+        &[],
+        ctx.session_replication_role,
+    )?;
+    if !triggers.has_instead_row_triggers() {
+        return Err(copy_view_missing_instead_insert_trigger_error(
+            relation_name,
+        ));
+    }
+    triggers.before_statement(ctx)?;
+    let mut affected_rows = 0usize;
+    for (row_index, values) in rows.iter().enumerate() {
+        match triggers.instead_row_insert(values.clone(), ctx) {
+            Ok(Some(_)) => affected_rows = affected_rows.saturating_add(1),
+            Ok(None) => {}
+            Err(err) => {
+                return Err(match row_error_context {
+                    Some(context) => ExecError::WithContext {
+                        context: context(row_index, &err),
+                        source: Box::new(err),
+                    },
+                    None => err,
+                });
+            }
+        }
+    }
+    triggers.after_statement(None, ctx)?;
+    Ok(affected_rows)
+}
+
+fn copy_view_missing_instead_insert_trigger_error(relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot copy to view \"{relation_name}\""),
+        detail: None,
+        hint: Some("To enable copying to a view, provide an INSTEAD OF INSERT trigger.".into()),
+        sqlstate: "55000",
     }
 }
 
@@ -25233,7 +25376,7 @@ fn copy_error_is_soft(err: &ExecError) -> bool {
 }
 
 fn push_copy_skip_notice(
-    _table_name: &str,
+    table_name: &str,
     row_index: usize,
     row: &Vec<String>,
     target_indexes: &[usize],
@@ -25253,11 +25396,14 @@ fn push_copy_skip_notice(
             }
         })
         .unwrap_or_default();
-    crate::backend::utils::misc::notices::push_notice(format!(
-        "skipping row due to data type incompatibility at line {}{}",
-        row_index + 1,
-        value
-    ));
+    crate::backend::utils::misc::notices::push_notice_with_context(
+        format!(
+            "skipping row due to data type incompatibility at line {}{}",
+            row_index + 1,
+            value
+        ),
+        format!("COPY {table_name}"),
+    );
 }
 
 fn copy_row_error_context(
@@ -25313,24 +25459,44 @@ fn copy_error_context_column(
     catalog: &dyn CatalogLookup,
     err: &ExecError,
 ) -> Option<(String, String)> {
-    let value = copy_error_value(err)?;
-    row.iter()
-        .zip(target_indexes.iter().copied())
-        .find_map(|(raw, column_index)| {
-            let display_raw = copy_display_field(raw);
-            (display_raw == value).then(|| {
-                desc.columns
-                    .get(column_index)
-                    .map(|column| (column.name.clone(), raw.clone()))
-            })?
-        })
-        .or_else(|| {
-            if copy_error_is_domain_null(err) {
-                copy_null_domain_context_column(row, target_indexes, desc, catalog)
-            } else {
-                None
-            }
-        })
+    if let Some(value) = copy_error_value(err)
+        && let Some(column) =
+            row.iter()
+                .zip(target_indexes.iter().copied())
+                .find_map(|(raw, column_index)| {
+                    let display_raw = copy_display_field(raw);
+                    (display_raw == value).then(|| {
+                        desc.columns
+                            .get(column_index)
+                            .map(|column| (column.name.clone(), raw.clone()))
+                    })?
+                })
+    {
+        return Some(column);
+    }
+    if let ExecError::ArrayInput { value, .. } = err
+        && let Some(column) = copy_array_context_column(row, target_indexes, desc, value)
+    {
+        return Some(column);
+    }
+    if let Some(value) = copy_error_value(err)
+        && let Some(column) = copy_array_context_column(row, target_indexes, desc, &value)
+    {
+        return Some(column);
+    }
+    if copy_error_is_domain_null(err)
+        && let Some(column) = copy_null_domain_context_column(row, target_indexes, desc, catalog)
+    {
+        return Some(column);
+    }
+    if copy_error_can_use_single_column_context(err)
+        && row.len() == 1
+        && target_indexes.len() == 1
+        && let Some(column) = desc.columns.get(target_indexes[0])
+    {
+        return Some((column.name.clone(), row[0].clone()));
+    }
+    None
 }
 
 fn copy_error_value(err: &ExecError) -> Option<String> {
@@ -25348,6 +25514,10 @@ fn copy_error_value(err: &ExecError) -> Option<String> {
         ExecError::TypeMismatch { right, .. } => right.as_text().map(str::to_string),
         _ => None,
     }
+}
+
+fn copy_error_can_use_single_column_context(err: &ExecError) -> bool {
+    !matches!(err, ExecError::CheckViolation { .. })
 }
 
 fn copy_character_typmod_context_column(
@@ -25383,6 +25553,31 @@ fn copy_null_domain_context_column(
                 .is_some()
                 .then_some((column.name.clone(), raw.clone()))
         })
+}
+
+fn copy_array_context_column(
+    row: &[String],
+    target_indexes: &[usize],
+    desc: &RelationDesc,
+    value: &str,
+) -> Option<(String, String)> {
+    let mut array_columns = row
+        .iter()
+        .zip(target_indexes.iter().copied())
+        .filter_map(|(raw, column_index)| {
+            let column = desc.columns.get(column_index)?;
+            (column.sql_type.is_array
+                || matches!(column.ty, ScalarType::Array(_))
+                || copy_display_field(raw).starts_with('{'))
+            .then_some((column.name.clone(), raw.clone()))
+        })
+        .collect::<Vec<_>>();
+    if array_columns.len() == 1 {
+        return array_columns.pop();
+    }
+    array_columns
+        .into_iter()
+        .find(|(_, raw)| copy_display_field(raw).contains(value))
 }
 
 fn copy_type_has_character_typmod(

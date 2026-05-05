@@ -292,6 +292,7 @@ pub struct ExecutorContext {
     pub pending_catalog_effects: Vec<CatalogMutationEffect>,
     pub pending_table_locks: Vec<RelFileLocator>,
     pub pending_portals: Vec<Portal>,
+    pub copy_freeze_relation_oids: Vec<u32>,
     pub catalog: Option<ExecutorCatalog>,
     pub scalar_function_cache: HashMap<u32, ScalarFunctionCallInfo>,
     pub proc_execute_acl_cache: HashSet<(u32, u32)>,

@@ -7,7 +7,8 @@ use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::commands::tablecmds::{
     apply_sql_type_array_subscript_assignment, collect_matching_rows_heap, execute_delete,
-    execute_insert, execute_merge, execute_update,
+    execute_insert, execute_merge, execute_truncate_table, execute_update,
+    resolve_truncate_relations,
 };
 use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::executor::function_guc::{
@@ -3425,6 +3426,7 @@ fn advance_plpgsql_command_id(ctx: &mut ExecutorContext) {
 fn advance_plpgsql_command_id_by(ctx: &mut ExecutorContext, count: CommandId) {
     ctx.next_command_id = ctx.next_command_id.saturating_add(count);
     ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
+    advance_plpgsql_heap_command_id(ctx, ctx.next_command_id);
 }
 
 fn advance_plpgsql_heap_command_id(ctx: &mut ExecutorContext, next_heap_cid: CommandId) {
@@ -3790,6 +3792,19 @@ fn execute_dynamic_sql_statement(
                 }
                 crate::backend::parser::Statement::Analyze(stmt) => {
                     exec_dynamic_analyze(&stmt, ctx)
+                }
+                crate::backend::parser::Statement::TruncateTable(stmt) => {
+                    let xid = ctx.ensure_write_xid()?;
+                    let relation_oids = resolve_truncate_relations(&stmt, catalog.as_ref(), false)?
+                        .into_iter()
+                        .map(|relation| relation.relation_oid)
+                        .collect::<Vec<_>>();
+                    let result = execute_truncate_table(stmt, catalog.as_ref(), ctx, xid);
+                    if result.is_ok() {
+                        ctx.copy_freeze_relation_oids.extend(relation_oids);
+                        advance_plpgsql_command_id(ctx);
+                    }
+                    result
                 }
                 crate::backend::parser::Statement::DropIndex(stmt) => {
                     exec_function_drop_index(&stmt, ctx)

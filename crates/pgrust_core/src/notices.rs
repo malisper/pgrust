@@ -10,6 +10,7 @@ pub struct BackendNotice {
     pub message: String,
     pub detail: Option<String>,
     pub hint: Option<String>,
+    pub context: Option<String>,
     pub position: Option<usize>,
 }
 
@@ -19,6 +20,18 @@ pub fn push_notice(message: impl Into<String>) {
 
 pub fn push_notice_with_detail(message: impl Into<String>, detail: impl Into<String>) {
     push_backend_notice("NOTICE", "00000", message, Some(detail.into()), None);
+}
+
+pub fn push_notice_with_context(message: impl Into<String>, context: impl Into<String>) {
+    push_backend_notice_with_context(
+        "NOTICE",
+        "00000",
+        message,
+        None,
+        None,
+        Some(context.into()),
+        None,
+    );
 }
 
 pub fn push_warning(message: impl Into<String>) {
@@ -36,7 +49,7 @@ pub fn push_backend_notice(
     detail: Option<String>,
     position: Option<usize>,
 ) {
-    push_backend_notice_with_hint(severity, sqlstate, message, detail, None, position);
+    push_backend_notice_with_context(severity, sqlstate, message, detail, None, None, position);
 }
 
 pub fn push_backend_notice_with_hint(
@@ -47,6 +60,18 @@ pub fn push_backend_notice_with_hint(
     hint: Option<String>,
     position: Option<usize>,
 ) {
+    push_backend_notice_with_context(severity, sqlstate, message, detail, hint, None, position);
+}
+
+pub fn push_backend_notice_with_context(
+    severity: &'static str,
+    sqlstate: &'static str,
+    message: impl Into<String>,
+    detail: Option<String>,
+    hint: Option<String>,
+    context: Option<String>,
+    position: Option<usize>,
+) {
     NOTICE_QUEUE.with(|queue| {
         queue.borrow_mut().push(BackendNotice {
             severity,
@@ -54,6 +79,7 @@ pub fn push_backend_notice_with_hint(
             message: message.into(),
             detail,
             hint,
+            context,
             position,
         });
     });

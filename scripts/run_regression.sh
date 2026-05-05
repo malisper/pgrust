@@ -940,6 +940,9 @@ direct_test_dependencies() {
         select_views)
             echo "create_view"
             ;;
+        copy2)
+            echo "create_type"
+            ;;
         brin_bloom|brin_multi)
             echo "brin"
             ;;

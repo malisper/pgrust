@@ -2525,10 +2525,12 @@ fn compile_exec_sql_stmt(
         Statement::CreateTable(stmt) => Ok(CompiledStmt::CreateTable { stmt }),
         Statement::CreateTableAs(stmt) => Ok(CompiledStmt::CreateTableAs { stmt }),
         Statement::Analyze(_) => Ok(CompiledStmt::ExecSql { sql: rewritten_sql }),
-        Statement::CreateView(_) | Statement::DropTable(_) => Ok(CompiledStmt::RuntimeSql {
-            sql: rewritten_sql,
-            scope: runtime_sql_scope(env),
-        }),
+        Statement::CreateView(_) | Statement::DropTable(_) | Statement::TruncateTable(_) => {
+            Ok(CompiledStmt::RuntimeSql {
+                sql: rewritten_sql,
+                scope: runtime_sql_scope(env),
+            })
+        }
         Statement::Set(stmt) if stmt.name.eq_ignore_ascii_case("jit") => {
             // :HACK: pgrust has no JIT subsystem; PL/pgSQL regression helpers
             // use SET LOCAL jit=0 only to stabilize EXPLAIN.
