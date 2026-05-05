@@ -29,6 +29,7 @@ use pgrust_expr::{
         render_datetime_value_text_with_config,
     },
     expr_mac::eval_macaddr_function,
+    expr_math,
     expr_money::{cash_words_text, money_larger, money_smaller},
     expr_multirange::eval_multirange_function,
     expr_numeric,
@@ -54,12 +55,6 @@ use super::expr_json::{
     jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
-use super::expr_math::{
-    cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
-    eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
-    eval_erf, eval_erfc, eval_float_send_function, eval_gamma, eval_gcd_function,
-    eval_lcm_function, eval_lgamma, eval_unary_float_function, sind, snap_degree, tand,
-};
 use super::expr_ops::compare_order_values;
 use super::expr_ops::text_collation_semantics;
 use super::expr_ops::{
@@ -11999,9 +11994,9 @@ fn eval_plpgsql_builtin_function(
             )
             .map_err(Into::into)
         }
-        BuiltinScalarFunction::Abs => eval_abs_function(&values),
-        BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
-        BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
+        BuiltinScalarFunction::Abs => expr_math::eval_abs_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Gcd => expr_math::eval_gcd_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Lcm => expr_math::eval_lcm_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Greatest => eval_greatest(&values),
         BuiltinScalarFunction::Least => eval_least(&values),
         BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
@@ -12142,8 +12137,12 @@ fn eval_plpgsql_builtin_function(
                 right: values.get(1).cloned().unwrap_or(Value::Null),
             }),
         },
-        BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
-        BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
+        BuiltinScalarFunction::BitcastIntegerToFloat4 => {
+            expr_math::eval_bitcast_integer_to_float4(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BitcastBigintToFloat8 => {
+            expr_math::eval_bitcast_bigint_to_float8(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Random
         | BuiltinScalarFunction::GetDatabaseEncoding
         | BuiltinScalarFunction::PgCharToEncoding
@@ -14267,7 +14266,7 @@ pub(crate) fn eval_builtin_function(
                 _ => Value::Null,
             })
         }
-        BuiltinScalarFunction::Abs => eval_abs_function(&values),
+        BuiltinScalarFunction::Abs => expr_math::eval_abs_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Log => expr_numeric::eval_log_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Log10 => {
             expr_numeric::eval_log10_function(&values).map_err(Into::into)
@@ -14469,36 +14468,89 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Sqrt => {
             expr_numeric::eval_sqrt_function(&values).map_err(Into::into)
         }
-        BuiltinScalarFunction::Cbrt => eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt())),
+        BuiltinScalarFunction::Cbrt => {
+            expr_math::eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt()))
+                .map_err(Into::into)
+        }
         BuiltinScalarFunction::Power => {
             expr_numeric::eval_power_function(&values).map_err(Into::into)
         }
         BuiltinScalarFunction::Exp => expr_numeric::eval_exp_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Ln => expr_numeric::eval_ln_function(&values).map_err(Into::into),
-        BuiltinScalarFunction::Sin => eval_unary_float_function("sin", &values, |v| Ok(v.sin())),
-        BuiltinScalarFunction::Cos => eval_unary_float_function("cos", &values, |v| Ok(v.cos())),
-        BuiltinScalarFunction::Sinh => eval_unary_float_function("sinh", &values, |v| Ok(v.sinh())),
-        BuiltinScalarFunction::Cosh => eval_unary_float_function("cosh", &values, |v| Ok(v.cosh())),
-        BuiltinScalarFunction::Tanh => eval_unary_float_function("tanh", &values, |v| Ok(v.tanh())),
+        BuiltinScalarFunction::Sin => {
+            expr_math::eval_unary_float_function("sin", &values, |v| Ok(v.sin()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cos => {
+            expr_math::eval_unary_float_function("cos", &values, |v| Ok(v.cos()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sinh => {
+            expr_math::eval_unary_float_function("sinh", &values, |v| Ok(v.sinh()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cosh => {
+            expr_math::eval_unary_float_function("cosh", &values, |v| Ok(v.cosh()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Tanh => {
+            expr_math::eval_unary_float_function("tanh", &values, |v| Ok(v.tanh()))
+                .map_err(Into::into)
+        }
         BuiltinScalarFunction::Asinh => {
-            eval_unary_float_function("asinh", &values, |v| Ok(v.asinh()))
+            expr_math::eval_unary_float_function("asinh", &values, |v| Ok(v.asinh()))
+                .map_err(Into::into)
         }
-        BuiltinScalarFunction::Acosh => eval_unary_float_function("acosh", &values, eval_acosh),
-        BuiltinScalarFunction::Atanh => eval_unary_float_function("atanh", &values, eval_atanh),
-        BuiltinScalarFunction::Sind => eval_unary_float_function("sind", &values, |v| Ok(sind(v))),
-        BuiltinScalarFunction::Cosd => eval_unary_float_function("cosd", &values, |v| Ok(cosd(v))),
-        BuiltinScalarFunction::Tand => eval_unary_float_function("tand", &values, |v| Ok(tand(v))),
-        BuiltinScalarFunction::Cotd => eval_unary_float_function("cotd", &values, |v| Ok(cotd(v))),
-        BuiltinScalarFunction::Asind => eval_unary_float_function("asind", &values, eval_asind),
-        BuiltinScalarFunction::Acosd => eval_unary_float_function("acosd", &values, eval_acosd),
+        BuiltinScalarFunction::Acosh => {
+            expr_math::eval_unary_float_function("acosh", &values, expr_math::eval_acosh)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Atanh => {
+            expr_math::eval_unary_float_function("atanh", &values, expr_math::eval_atanh)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sind => {
+            expr_math::eval_unary_float_function("sind", &values, |v| Ok(expr_math::sind(v)))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cosd => {
+            expr_math::eval_unary_float_function("cosd", &values, |v| Ok(expr_math::cosd(v)))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Tand => {
+            expr_math::eval_unary_float_function("tand", &values, |v| Ok(expr_math::tand(v)))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cotd => {
+            expr_math::eval_unary_float_function("cotd", &values, |v| Ok(expr_math::cotd(v)))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Asind => {
+            expr_math::eval_unary_float_function("asind", &values, expr_math::eval_asind)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Acosd => {
+            expr_math::eval_unary_float_function("acosd", &values, expr_math::eval_acosd)
+                .map_err(Into::into)
+        }
         BuiltinScalarFunction::Atand => {
-            eval_unary_float_function("atand", &values, |v| Ok(snap_degree(v.atan().to_degrees())))
+            expr_math::eval_unary_float_function("atand", &values, |v| {
+                Ok(expr_math::snap_degree(v.atan().to_degrees()))
+            })
+            .map_err(Into::into)
         }
-        BuiltinScalarFunction::Atan2d => eval_binary_float_function("atan2d", &values, |y, x| {
-            Ok(snap_degree(y.atan2(x).to_degrees()))
-        }),
-        BuiltinScalarFunction::Float4Send => eval_float_send_function("float4send", &values, true),
-        BuiltinScalarFunction::Float8Send => eval_float_send_function("float8send", &values, false),
+        BuiltinScalarFunction::Atan2d => {
+            expr_math::eval_binary_float_function("atan2d", &values, |y, x| {
+                Ok(expr_math::snap_degree(y.atan2(x).to_degrees()))
+            })
+            .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Float4Send => {
+            expr_math::eval_float_send_function("float4send", &values, true).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Float8Send => {
+            expr_math::eval_float_send_function("float8send", &values, false).map_err(Into::into)
+        }
         BuiltinScalarFunction::Float8Accum => {
             pgrust_executor::eval_float8_accum_function(&values).map_err(aggregate_support_error)
         }
@@ -14513,10 +14565,22 @@ pub(crate) fn eval_builtin_function(
             pgrust_executor::eval_float8_regr_combine_function(&values)
                 .map_err(aggregate_support_error)
         }
-        BuiltinScalarFunction::Erf => eval_unary_float_function("erf", &values, eval_erf),
-        BuiltinScalarFunction::Erfc => eval_unary_float_function("erfc", &values, eval_erfc),
-        BuiltinScalarFunction::Gamma => eval_unary_float_function("gamma", &values, eval_gamma),
-        BuiltinScalarFunction::Lgamma => eval_unary_float_function("lgamma", &values, eval_lgamma),
+        BuiltinScalarFunction::Erf => {
+            expr_math::eval_unary_float_function("erf", &values, expr_math::eval_erf)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Erfc => {
+            expr_math::eval_unary_float_function("erfc", &values, expr_math::eval_erfc)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Gamma => {
+            expr_math::eval_unary_float_function("gamma", &values, expr_math::eval_gamma)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Lgamma => {
+            expr_math::eval_unary_float_function("lgamma", &values, expr_math::eval_lgamma)
+                .map_err(Into::into)
+        }
         BuiltinScalarFunction::BoolEq => expr_bool::eval_booleq(&values).map_err(Into::into),
         BuiltinScalarFunction::BoolNe => expr_bool::eval_boolne(&values).map_err(Into::into),
         BuiltinScalarFunction::BoolAndStateFunc => {
@@ -14612,10 +14676,14 @@ pub(crate) fn eval_builtin_function(
                 right: values.get(1).cloned().unwrap_or(Value::Null),
             }),
         },
-        BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
-        BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
-        BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
-        BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
+        BuiltinScalarFunction::BitcastIntegerToFloat4 => {
+            expr_math::eval_bitcast_integer_to_float4(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BitcastBigintToFloat8 => {
+            expr_math::eval_bitcast_bigint_to_float8(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Gcd => expr_math::eval_gcd_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Lcm => expr_math::eval_lcm_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Greatest => eval_greatest(&values),
         BuiltinScalarFunction::Least => eval_least(&values),
         BuiltinScalarFunction::Length => match values.first() {

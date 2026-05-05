@@ -12,7 +12,6 @@ mod expr_casts;
 mod expr_compile;
 mod expr_json;
 mod expr_locks;
-mod expr_math;
 pub(crate) mod expr_ops;
 mod expr_partition;
 pub(crate) mod expr_range;
