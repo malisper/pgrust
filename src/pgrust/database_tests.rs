@@ -3831,6 +3831,18 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
     }
 }
 
+fn parse_error_is_unknown_column(err: &ParseError, expected: &str) -> bool {
+    matches!(err.unpositioned(), ParseError::UnknownColumn(name) if name == expected)
+}
+
+fn missing_column_or_token_name(err: &ParseError, expected: &str) -> bool {
+    match err.unpositioned() {
+        ParseError::UnknownColumn(name) => name == expected,
+        ParseError::UnexpectedToken { actual, .. } => actual.contains(expected),
+        _ => false,
+    }
+}
+
 fn return_rule_oid_for_relation(db: &Database, relname: &str) -> u32 {
     let catalog = db.catalog.read();
     let catcache = catalog.catcache().unwrap();
@@ -29093,9 +29105,7 @@ fn alter_table_add_column_uses_command_end_invalidation_and_rolls_back() {
     session.execute(&db, "rollback").unwrap();
 
     match db.execute(1, "select note from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name)))
-        | Err(ExecError::Parse(ParseError::UnexpectedToken { actual: name, .. }))
-            if name.contains("note") => {}
+        Err(ExecError::Parse(err)) if missing_column_or_token_name(&err, "note") => {}
         other => panic!("expected rolled-back column to be absent, got {other:?}"),
     }
 }
@@ -29656,6 +29666,27 @@ fn alter_table_rename_column_inheritance_recurses() {
 fn alter_table_drop_column_inheritance_metadata() {
     let base = temp_dir("alter_table_drop_column_inherits");
     let db = Database::open(&base, 16).unwrap();
+    fn assert_missing_column_hint(err: ExecError, expected_hint: &str) {
+        match err {
+            ExecError::Parse(err) => {
+                assert_eq!(err.position(), Some(8));
+                match err.unpositioned() {
+                    ParseError::DetailedError {
+                        message,
+                        hint: Some(hint),
+                        sqlstate,
+                        ..
+                    } => {
+                        assert_eq!(message, "column \"f1\" does not exist");
+                        assert_eq!(hint, expected_hint);
+                        assert_eq!(*sqlstate, "42703");
+                    }
+                    other => panic!("expected detailed missing-column hint, got {other:?}"),
+                }
+            }
+            other => panic!("expected parse missing-column hint, got {other:?}"),
+        }
+    }
 
     db.execute(1, "create table drop_parent (f1 int, f2 int)")
         .unwrap();
@@ -29689,9 +29720,10 @@ fn alter_table_drop_column_inheritance_metadata() {
     db.execute(1, "alter table drop_child drop column f1")
         .unwrap();
     match db.execute(1, "select f1 from drop_child") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(column))) => {
-            assert_eq!(column, "f1");
-        }
+        Err(err) => assert_missing_column_hint(
+            err,
+            "Perhaps you meant to reference the column \"drop_child.f2\".",
+        ),
         other => panic!("expected dropped child column to be absent, got {other:?}"),
     }
 
@@ -29702,9 +29734,10 @@ fn alter_table_drop_column_inheritance_metadata() {
     db.execute(1, "alter table drop_parent2 drop column f1")
         .unwrap();
     match db.execute(1, "select f1 from drop_child2") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(column))) => {
-            assert_eq!(column, "f1");
-        }
+        Err(err) => assert_missing_column_hint(
+            err,
+            "Perhaps you meant to reference the column \"drop_child2.f2\".",
+        ),
         other => panic!("expected inherited-only child column to be dropped, got {other:?}"),
     }
 
@@ -29736,6 +29769,18 @@ fn alter_table_drop_column_inheritance_metadata() {
             );
         }
         other => panic!("expected grandchild column to be dropped with parent, got {other:?}"),
+    }
+
+    db.execute(1, "create table p1 (f1 int, f2 int)").unwrap();
+    db.execute(1, "create table c1 (f1 int not null) inherits (p1)")
+        .unwrap();
+    db.execute(1, "alter table p1 drop column f1").unwrap();
+    db.execute(1, "alter table c1 drop column f1").unwrap();
+    match db.execute(1, "select f1 from c1") {
+        Err(err) => {
+            assert_missing_column_hint(err, "Perhaps you meant to reference the column \"c1.f2\".")
+        }
+        other => panic!("expected c1 dropped column hint, got {other:?}"),
     }
 }
 
@@ -29878,7 +29923,7 @@ fn alter_table_drop_column_hides_column_and_retargets_inserts() {
     );
 
     match db.execute(1, "select a from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "a" => {}
+        Err(ExecError::Parse(err)) if parse_error_is_unknown_column(&err, "a") => {}
         other => panic!("expected dropped column lookup to fail, got {other:?}"),
     }
 
@@ -30141,7 +30186,7 @@ fn alter_table_rename_column_updates_lookup_and_rolls_back() {
         other => panic!("expected query result, got {other:?}"),
     }
     match session.execute(&db, "select note from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "note" => {}
+        Err(ExecError::Parse(err)) if parse_error_is_unknown_column(&err, "note") => {}
         other => panic!("expected old column name to disappear, got {other:?}"),
     }
 
@@ -30152,7 +30197,7 @@ fn alter_table_rename_column_updates_lookup_and_rolls_back() {
         vec![vec![Value::Text("hello".into())]]
     );
     match db.execute(1, "select body from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "body" => {}
+        Err(ExecError::Parse(err)) if parse_error_is_unknown_column(&err, "body") => {}
         other => panic!("expected rollback to restore old column name, got {other:?}"),
     }
 }
@@ -30221,7 +30266,7 @@ fn alter_table_rename_column_persists_after_reopen() {
         vec![vec![Value::Text("hello".into())]]
     );
     match reopened.execute(1, "select note from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "note" => {}
+        Err(ExecError::Parse(err)) if parse_error_is_unknown_column(&err, "note") => {}
         other => panic!("expected persisted renamed column to hide old name, got {other:?}"),
     }
 }
@@ -68893,6 +68938,36 @@ fn drop_domain_cascade_drops_dependent_table_column_visibility() {
     assert_eq!(
         query_rows(&db, 1, "select * from dropcol_items"),
         vec![vec![Value::Int32(1), Value::Text("kept".into())]]
+    );
+
+    db.execute(1, "create domain dropcol_temp_dom as text")
+        .unwrap();
+    db.execute(
+        1,
+        "create temp table dropcol_temp_items (f1 text, doomed dropcol_temp_dom, f3 text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into dropcol_temp_items values ('bb', 'cc', 'dd')",
+    )
+    .unwrap();
+
+    db.execute(1, "drop domain dropcol_temp_dom cascade")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from dropcol_temp_items"),
+        vec![vec![Value::Text("bb".into()), Value::Text("dd".into())]]
+    );
+    db.execute(1, "insert into dropcol_temp_items values ('qq', 'rr')")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from dropcol_temp_items order by f1"),
+        vec![
+            vec![Value::Text("bb".into()), Value::Text("dd".into())],
+            vec![Value::Text("qq".into()), Value::Text("rr".into())],
+        ]
     );
 }
 

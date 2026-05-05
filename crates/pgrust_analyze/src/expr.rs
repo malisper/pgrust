@@ -177,7 +177,11 @@ pub(super) fn bind_typed_expr_with_outer_and_ctes(
     ctes: &[BoundCte],
 ) -> Result<TypedExpr, ParseError> {
     let bound =
-        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+            .map_err(|err| match err {
+                ParseError::UnknownColumn(name) => unknown_column_error_with_hint(scope, &name),
+                other => other,
+            })?;
     let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
         infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
     });
@@ -3419,7 +3423,7 @@ pub fn bind_expr_with_outer_and_ctes(
                         {
                             expr
                         } else {
-                            return Err(ParseError::UnknownColumn(name.clone()));
+                            return Err(unknown_column_error_with_hint(scope, name));
                         }
                     }
                     Err(err) => return Err(err),

@@ -132,7 +132,7 @@ fn visible_column_index(relation: &BoundRelation, column_name: &str) -> Option<u
         })
 }
 
-fn mark_column_dropped_in_desc(
+pub(super) fn mark_column_dropped_in_desc(
     desc: &mut crate::backend::executor::RelationDesc,
     column_name: &str,
 ) {
