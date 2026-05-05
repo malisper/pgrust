@@ -18,6 +18,7 @@ pub mod namespace;
 pub mod object_address;
 pub mod operator;
 pub mod partition;
+pub mod pg_catalog_view_definitions;
 pub mod psql;
 pub mod publication;
 pub mod reloptions;
