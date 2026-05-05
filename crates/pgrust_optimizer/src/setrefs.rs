@@ -1671,6 +1671,10 @@ fn exprs_match_for_setrefs(left: &Expr, right: &Expr) -> bool {
     }
 }
 
+fn is_whole_row_var_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::Var(var) if var.varattno == WHOLE_ROW_ATTR_NO)
+}
+
 fn special_slot_var(
     varno: usize,
     index: usize,
@@ -3596,6 +3600,9 @@ fn fix_semantic_output_expr_for_input(
     expr: &Expr,
     input: &Path,
 ) -> Option<Expr> {
+    if is_whole_row_var_expr(expr) {
+        return None;
+    }
     input
         .semantic_output_target()
         .exprs
@@ -3627,6 +3634,9 @@ fn fix_input_tlist_expr(
     input: &Path,
     input_tlist: &IndexedTlist,
 ) -> Option<Expr> {
+    if is_whole_row_var_expr(expr) {
+        return None;
+    }
     search_input_tlist_entry(root, expr, input, input_tlist)
         .filter(|entry| entry.sql_type == expr_sql_type(expr))
         .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr))
@@ -3771,6 +3781,9 @@ fn fix_upper_expr_for_input(
 }
 
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
+    if is_whole_row_var_expr(expr) {
+        return None;
+    }
     match mode {
         LowerMode::Scalar => None,
         LowerMode::Input { tlist, .. } => search_tlist_entry(None, expr, tlist)
@@ -5168,11 +5181,16 @@ fn subplan_target_attnos(target_list: &[TargetEntry]) -> Vec<Option<usize>> {
 }
 
 fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> Expr {
+    if matches!(&expr, Expr::Var(var) if var.varattno == WHOLE_ROW_ATTR_NO) {
+        let Expr::Var(var) = expr else {
+            unreachable!();
+        };
+        return lower_whole_row_var(ctx, var, mode);
+    }
     if let Some(lowered) = lower_direct_ref(&expr, mode) {
         return lowered;
     }
     match expr {
-        Expr::Var(var) if var.varattno == WHOLE_ROW_ATTR_NO => lower_whole_row_var(ctx, var, mode),
         Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_expr(ctx, Expr::Var(var)),
         Expr::Var(var) if is_rule_pseudo_varno(var.varno) => Expr::Var(var),
         Expr::Var(var) if is_executor_special_varno(var.varno) => {
@@ -5438,6 +5456,18 @@ fn lower_whole_row_var(ctx: &mut SetRefsContext<'_>, var: Var, mode: LowerMode<'
     {
         return expr;
     }
+    if let LowerMode::Join {
+        outer_tlist,
+        inner_tlist,
+    } = mode
+    {
+        if let Some(expr) = lower_whole_row_var_from_tlist(ctx, &var, OUTER_VAR, outer_tlist) {
+            return expr;
+        }
+        if let Some(expr) = lower_whole_row_var_from_tlist(ctx, &var, INNER_VAR, inner_tlist) {
+            return expr;
+        }
+    }
     if let Some(root) = ctx.root {
         let expr = Expr::Var(var.clone());
         let flattened = flatten_join_alias_vars(root, expr.clone());
@@ -5497,6 +5527,31 @@ fn lower_whole_row_var_from_input_tlist(
         fields.push((
             field.name.clone(),
             special_slot_var_for_expr(OUTER_VAR, entry, &attr_expr),
+        ));
+    }
+    Some(null_preserving_whole_row_expr(descriptor, fields))
+}
+
+fn lower_whole_row_var_from_tlist(
+    ctx: &SetRefsContext<'_>,
+    var: &Var,
+    slot_varno: usize,
+    tlist: &IndexedTlist,
+) -> Option<Expr> {
+    let descriptor = whole_row_descriptor_for_var(ctx, var)?;
+    let mut fields = Vec::with_capacity(descriptor.fields.len());
+    for (index, field) in descriptor.fields.iter().enumerate() {
+        let attr_expr = Expr::Var(Var {
+            varno: var.varno,
+            varattno: user_attrno(index),
+            varlevelsup: 0,
+            vartype: field.sql_type,
+            collation_oid: None,
+        });
+        let entry = search_tlist_entry(ctx.root, &attr_expr, tlist)?;
+        fields.push((
+            field.name.clone(),
+            special_slot_var_for_expr(slot_varno, entry, &attr_expr),
         ));
     }
     Some(null_preserving_whole_row_expr(descriptor, fields))
@@ -12379,6 +12434,9 @@ fn lower_join_clause_list(
 }
 
 fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, tlist: &IndexedTlist) -> Expr {
+    if is_whole_row_var_expr(&expr) {
+        return expr;
+    }
     if let Some(entry) = search_tlist_entry(root, &expr, tlist) {
         return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }
@@ -12852,6 +12910,9 @@ fn fix_join_expr(
     outer_tlist: &IndexedTlist,
     inner_tlist: &IndexedTlist,
 ) -> Expr {
+    if is_whole_row_var_expr(&expr) {
+        return expr;
+    }
     if let Some(entry) = search_tlist_entry(root, &expr, outer_tlist) {
         return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }

@@ -7,7 +7,9 @@ use pgrust_nodes::pathnodes::{
     RelOptKind, RestrictInfo,
 };
 use pgrust_nodes::plannodes::PlanEstimate;
-use pgrust_nodes::primnodes::{Expr, JoinType, OpExprKind, QueryColumn, RelationDesc, user_attrno};
+use pgrust_nodes::primnodes::{
+    Expr, JoinType, OpExprKind, QueryColumn, RelationDesc, WHOLE_ROW_ATTR_NO, user_attrno,
+};
 
 use super::bestpath;
 use super::inherit::{append_translation, translate_append_rel_expr};
@@ -178,6 +180,9 @@ fn query_accumulators_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> boo
 
 fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> bool {
     match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varattno == WHOLE_ROW_ATTR_NO => {
+            relids.contains(&var.varno) || row_type_targets_rel(root, var.vartype.typrelid, relids)
+        }
         Expr::Row {
             descriptor, fields, ..
         } => {

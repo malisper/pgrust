@@ -32,9 +32,9 @@ use pgrust_nodes::plannodes::{
 use pgrust_nodes::primnodes::{
     AggFunc, BoolExprType, BuiltinScalarFunction, BuiltinWindowFunction, Expr, JoinType,
     OpExprKind, OrderByEntry, QueryColumn, RelationDesc, ScalarArrayOpExpr, ScalarFunctionImpl,
-    SortGroupClause, ToastRelationRef, Var, WindowClause, WindowFrameBound, WindowFuncExpr,
-    WindowFuncKind, attrno_index, expr_contains_set_returning, expr_sql_type_hint, is_system_attr,
-    set_returning_call_exprs, user_attrno,
+    SortGroupClause, ToastRelationRef, Var, WHOLE_ROW_ATTR_NO, WindowClause, WindowFrameBound,
+    WindowFuncExpr, WindowFuncKind, attrno_index, expr_contains_set_returning, expr_sql_type_hint,
+    is_system_attr, set_returning_call_exprs, user_attrno,
 };
 
 use super::super::bestpath;
@@ -6762,6 +6762,9 @@ fn query_accumulators_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> boo
 
 fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> bool {
     match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varattno == WHOLE_ROW_ATTR_NO => {
+            relids.contains(&var.varno) || row_type_targets_rel(root, var.vartype.typrelid, relids)
+        }
         Expr::Row {
             descriptor, fields, ..
         } => {

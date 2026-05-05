@@ -13,7 +13,7 @@ use pgrust_nodes::primnodes::{
     OpExprKind, Param, ParamKind, QueryColumn, ScalarFunctionImpl, SetReturningCall,
     SqlJsonQueryFunction, SqlJsonQueryFunctionKind, SqlJsonTableBehavior, SqlJsonTablePassingArg,
     SqlJsonTableQuotes, SqlJsonTableWrapper, WHOLE_ROW_ATTR_NO, WindowFuncKind,
-    expr_collation_oid_hint, expr_contains_set_returning, expr_sql_type_hint,
+    expr_collation_oid_hint, expr_contains_set_returning, expr_sql_type_hint, user_attrno,
 };
 use pgrust_nodes::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
@@ -1300,11 +1300,13 @@ fn whole_row_var_from_fields(fields: &[(String, Expr)], vartype: SqlType) -> Opt
     }
     let mut varno = None;
     let mut varlevelsup = None;
-    for (_, expr) in fields {
+    for (index, (_, expr)) in fields.iter().enumerate() {
         let Expr::Var(var) = expr else {
             return None;
         };
-        attrno_index(var.varattno)?;
+        if var.varattno != user_attrno(index) {
+            return None;
+        }
         if varno.is_some_and(|existing| existing != var.varno)
             || varlevelsup.is_some_and(|existing| existing != var.varlevelsup)
         {

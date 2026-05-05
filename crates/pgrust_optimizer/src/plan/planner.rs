@@ -17,8 +17,8 @@ use pgrust_nodes::plannodes::{AggregatePhase, AggregateStrategy, PlanEstimate, P
 use pgrust_nodes::primnodes::{
     AggAccum, AggFunc, BoolExprType, BuiltinScalarFunction, BuiltinWindowFunction, Expr, JoinType,
     OpExprKind, ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TABLE_OID_ATTR_NO,
-    TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncKind, attrno_index,
-    expr_contains_set_returning, set_returning_call_exprs, user_attrno,
+    TargetEntry, WHOLE_ROW_ATTR_NO, WindowClause, WindowFrame, WindowFrameBound, WindowFuncKind,
+    attrno_index, expr_contains_set_returning, set_returning_call_exprs, user_attrno,
 };
 
 use super::super::bestpath;
@@ -1110,6 +1110,9 @@ fn aggregate_expr_contains_whole_row_rel(
     relids: &[usize],
 ) -> bool {
     match expr {
+        Expr::Var(var) => {
+            var.varlevelsup == 0 && var.varattno == WHOLE_ROW_ATTR_NO && relids.contains(&var.varno)
+        }
         Expr::Row { fields, .. } => relids.iter().any(|relid| {
             let Some(rte) = root.parse.rtable.get(relid.saturating_sub(1)) else {
                 return false;
