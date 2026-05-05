@@ -6448,7 +6448,7 @@ fn record_descriptor_field_type_matches(
     catalog: &dyn CatalogLookup,
 ) -> bool {
     if actual.type_oid == UNKNOWN_TYPE_OID {
-        return true;
+        return !expected.is_array && matches!(expected.kind, SqlTypeKind::Text);
     }
     if actual.is_array != expected.is_array {
         return false;
