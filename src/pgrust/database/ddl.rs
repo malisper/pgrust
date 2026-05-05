@@ -1923,14 +1923,14 @@ pub(super) fn validate_alter_table_alter_column_default(
         }
     }
 
+    let default_sequence_oid = normalized_default_expr_sql.as_deref().and_then(|expr| {
+        crate::pgrust::database::default_sequence_oid_from_default_expr_with_catalog(expr, catalog)
+    });
+
     Ok(AlterColumnDefaultPlan {
         column_name: current_column.name.clone(),
         default_expr_sql: normalized_default_expr_sql,
-        default_sequence_oid: default_expr_sql.and_then(|expr| {
-            crate::pgrust::database::default_sequence_oid_from_default_expr_with_catalog(
-                expr, catalog,
-            )
-        }),
+        default_sequence_oid,
     })
 }
 

@@ -41359,6 +41359,40 @@ fn drop_sequence_restrict_and_cascade_respect_serial_dependencies() {
 }
 
 #[test]
+fn drop_sequence_respects_ordinary_nextval_default_dependencies() {
+    let base = temp_dir("drop_sequence_ordinary_nextval_dependencies");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create temp sequence myseq2").unwrap();
+    db.execute(1, "create temp sequence myseq3").unwrap();
+    db.execute(
+        1,
+        "create temp table t1 (
+            f1 serial,
+            f2 int default nextval('myseq2'),
+            f3 int default nextval('myseq3'::text)
+        )",
+    )
+    .unwrap();
+
+    match db.execute(1, "drop sequence myseq2") {
+        Err(ExecError::DetailedError {
+            sqlstate,
+            detail: Some(detail),
+            ..
+        }) => {
+            assert_eq!(sqlstate, "2BP01");
+            assert!(detail.contains("default value for column f2 of table t1"));
+        }
+        other => panic!("expected dependent-object error, got {:?}", other),
+    }
+
+    db.execute(1, "drop sequence myseq3").unwrap();
+    db.execute(1, "drop table t1").unwrap();
+    db.execute(1, "drop sequence myseq2").unwrap();
+}
+
+#[test]
 fn drop_sequence_restrict_and_cascade_respect_row_type_dependencies() {
     let base = temp_dir("drop_sequence_row_type_dependencies");
     let db = Database::open(&base, 64).unwrap();

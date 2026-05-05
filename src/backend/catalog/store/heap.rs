@@ -9747,6 +9747,28 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn insert_sequence_row_mvcc(
+        &mut self,
+        row: PgSequenceRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [BootstrapCatalogKind::PgSequence];
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                sequences: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.seqrelid);
+        Ok(effect)
+    }
+
     pub fn delete_sequence_row_mvcc(
         &mut self,
         seqrelid: u32,

@@ -108,6 +108,10 @@ mod tests {
             Some(123)
         );
         assert_eq!(
+            relcache::default_sequence_oid_from_default_expr("nextval(234::regclass)::int8"),
+            Some(234)
+        );
+        assert_eq!(
             relcache::default_sequence_oid_from_default_expr("nextval(456)::int8"),
             Some(456)
         );

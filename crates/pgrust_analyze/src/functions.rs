@@ -21,6 +21,8 @@ use pgrust_parser::parse_expr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
+const NEXTVAL_TEXT_PROC_OID: u32 = 6302;
+
 #[derive(Clone, Copy)]
 enum NamedArgDefault {
     Bool(bool),
@@ -134,19 +136,14 @@ pub fn resolve_function_call(
 
         let is_variadic = row.provariadic != 0;
         let expanded = row.provariadic != 0 && !func_variadic && candidate.nvargs > 0;
+        let total_cost = candidate.cost + function_resolution_penalty(&row, actual_types);
         match &best {
             None => {
-                best = Some((
-                    resolved,
-                    namespace_rank,
-                    candidate.cost,
-                    is_variadic,
-                    expanded,
-                ));
+                best = Some((resolved, namespace_rank, total_cost, is_variadic, expanded));
                 ambiguous = false;
             }
             Some((_, best_namespace_rank, best_cost, best_variadic, best_expanded)) => {
-                let current_rank = (namespace_rank, candidate.cost, is_variadic, expanded);
+                let current_rank = (namespace_rank, total_cost, is_variadic, expanded);
                 let best_rank = (
                     *best_namespace_rank,
                     *best_cost,
@@ -154,13 +151,7 @@ pub fn resolve_function_call(
                     *best_expanded,
                 );
                 if current_rank < best_rank {
-                    best = Some((
-                        resolved,
-                        namespace_rank,
-                        candidate.cost,
-                        is_variadic,
-                        expanded,
-                    ));
+                    best = Some((resolved, namespace_rank, total_cost, is_variadic, expanded));
                     ambiguous = false;
                 } else if current_rank == best_rank {
                     ambiguous = true;
@@ -278,7 +269,7 @@ pub fn resolve_function_call_with_arg_defaults(
         };
         let is_variadic = row.provariadic != 0;
         let expanded = row.provariadic != 0 && !normalized.func_variadic && candidate.nvargs > 0;
-        let total_cost = candidate.cost;
+        let total_cost = candidate.cost + function_resolution_penalty(&row, actual_types);
         let normalized_call = ResolvedFunctionCallWithArgs {
             resolved,
             args: normalized.args,
@@ -331,6 +322,20 @@ pub fn resolve_function_call_with_arg_defaults(
         )
         .unwrap_or_else(|| undefined_function_call_error(catalog, name, args, actual_types))
     })
+}
+
+fn function_resolution_penalty(row: &PgProcRow, actual_types: &[SqlType]) -> usize {
+    if row.oid == NEXTVAL_TEXT_PROC_OID
+        && actual_types.len() == 1
+        && actual_types
+            .first()
+            .copied()
+            .is_some_and(is_unknown_sql_type)
+    {
+        10
+    } else {
+        0
+    }
 }
 
 fn validate_function_call_arg_order(args: &[SqlFunctionArg]) -> Result<(), ParseError> {

@@ -167,6 +167,11 @@ path = "src/bin/smgr_inspect.rs"
 required-features = ["tools"]
 
 [[bin]]
+name = "serialtest2_ddl_profile"
+path = "src/bin/serialtest2_ddl_profile.rs"
+required-features = ["tools"]
+
+[[bin]]
 name = "triggers_regression_profile"
 path = "src/bin/triggers_regression_profile.rs"
 required-features = ["tools"]
