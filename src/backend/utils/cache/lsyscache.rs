@@ -35,8 +35,9 @@ use crate::backend::utils::cache::system_views::{
     build_pg_stat_checkpointer_rows, build_pg_stat_database_rows, build_pg_stat_io_rows,
     build_pg_stat_recovery_prefetch_rows, build_pg_stat_slru_rows,
     build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows, build_pg_stat_wal_rows,
-    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
-    build_pg_user_mappings_rows, build_pg_views_rows_with_definition_formatter,
+    build_pg_statio_user_tables_rows, build_pg_stats_ext_exprs_rows, build_pg_stats_ext_rows,
+    build_pg_stats_rows, build_pg_tables_rows, build_pg_user_mappings_rows,
+    build_pg_views_rows_with_definition_formatter,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::time::snapmgr::get_catalog_snapshot;
@@ -3010,6 +3011,31 @@ impl CatalogLookup for LazyCatalogLookup {
             classes,
             ensure_attribute_rows(&self.db, self.client_id, self.txn_ctx),
             statistics,
+        )
+    }
+
+    fn pg_stats_ext_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stats_ext_rows(
+            ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
+            self.authid_rows(),
+            self.auth_members_rows(),
+            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_attribute_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_statistic_ext_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_statistic_ext_data_rows(&self.db, self.client_id, self.txn_ctx),
+            self.current_user_oid(),
+        )
+    }
+
+    fn pg_stats_ext_exprs_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stats_ext_exprs_rows(
+            ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
+            self.authid_rows(),
+            self.auth_members_rows(),
+            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_statistic_ext_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_statistic_ext_data_rows(&self.db, self.client_id, self.txn_ctx),
+            self.current_user_oid(),
         )
     }
 

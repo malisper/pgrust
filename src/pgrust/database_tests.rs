@@ -34474,6 +34474,59 @@ fn pg_stats_ext_views_exist_and_bind_columns() {
 }
 
 #[test]
+fn pg_stats_ext_views_expose_analyzed_statistics() {
+    let base = temp_dir("pg_stats_ext_views_expose");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table stats_ext_view_data (a int4, b int4, c int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_ext_view_data \
+         select mod(i, 100), mod(i, 50), mod(i, 25) \
+         from generate_series(1, 1000) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_ext_view_dep (dependencies) \
+         on a, b, c from stats_ext_view_data",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_ext_view_expr (mcv) \
+         on (a + b), c from stats_ext_view_data",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_ext_view_data").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_stats_ext \
+             where statistics_name = 'stats_ext_view_dep' \
+             and dependencies is not null",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_stats_ext_exprs \
+             where statistics_name = 'stats_ext_view_expr' \
+             and expr is not null",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
 fn pg_mcv_list_items_decodes_extended_statistics_payload() {
     let base = temp_dir("pg_mcv_list_items_statistics");
     let db = Database::open(&base, 16).unwrap();
@@ -46100,6 +46153,75 @@ fn insert_and_copy_from_maintain_btree_index() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+
+    assert_insert_select_assignment_to_text_maintains_multicolumn_btree_index();
+}
+
+fn assert_insert_select_assignment_to_text_maintains_multicolumn_btree_index() {
+    let base = temp_dir("insert_select_text_assignment_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table functional_dependencies (
+             filler1 text,
+             filler2 numeric,
+             a int4,
+             b text,
+             filler3 date,
+             c int4,
+             d text
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index fdeps_ab_idx on functional_dependencies (a, b)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index fdeps_abc_idx on functional_dependencies (a, b, c)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into functional_dependencies (a, b, c, filler1)
+         select mod(i, 5), mod(i, 7), mod(i, 11), i
+         from generate_series(1,1000) s(i)",
+    )
+    .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select * from functional_dependencies where a = 1 and b = '1'",
+        "fdeps_ab_idx",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from functional_dependencies where (a + 0) = 1 and (b || '') = '1'",
+        ),
+        vec![vec![Value::Int64(29)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from functional_dependencies where a = 1 and b = '1'",
+        ),
+        vec![vec![Value::Int64(29)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from functional_dependencies where a = 1 and b = '1' and c = 1",
+        ),
+        vec![vec![Value::Int64(3)]]
+    );
 }
 
 #[test]
