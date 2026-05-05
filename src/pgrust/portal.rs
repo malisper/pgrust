@@ -68,6 +68,7 @@ pub struct PortalRunResult {
     pub completed: bool,
     pub command_tag: Option<String>,
     pub current_row: Option<PositionedCursorRow>,
+    pub current_bindings: Vec<SystemVarBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +93,7 @@ pub enum PortalExecution {
         column_names: Vec<String>,
         rows: Vec<Vec<Value>>,
         row_positions: Vec<Option<PositionedCursorRow>>,
+        row_bindings: Vec<Vec<SystemVarBinding>>,
         pos: usize,
     },
     PendingSql {
@@ -114,7 +116,11 @@ pub struct Portal {
     pub created_in_transaction: bool,
     pub created_savepoint_depth: usize,
     pub execution: PortalExecution,
+    stored_rows: Vec<Vec<Value>>,
+    stored_row_positions: Vec<Option<PositionedCursorRow>>,
+    stored_row_bindings: Vec<Vec<SystemVarBinding>>,
     current_row: Option<PositionedCursorRow>,
+    current_bindings: Vec<SystemVarBinding>,
     position: usize,
 }
 
@@ -141,7 +147,11 @@ impl Portal {
             created_in_transaction,
             created_savepoint_depth,
             execution: PortalExecution::Streaming(guard),
+            stored_rows: Vec::new(),
+            stored_row_positions: Vec::new(),
+            stored_row_bindings: Vec::new(),
             current_row: None,
+            current_bindings: Vec::new(),
             position: 0,
         }
     }
@@ -159,6 +169,7 @@ impl Portal {
         rows: Vec<Vec<Value>>,
     ) -> Self {
         let row_positions = vec![None; rows.len()];
+        let row_bindings = vec![Vec::new(); row_positions.len()];
         Self {
             name,
             prep_stmt_name,
@@ -175,9 +186,14 @@ impl Portal {
                 column_names,
                 rows,
                 row_positions,
+                row_bindings,
                 pos: 0,
             },
+            stored_rows: Vec::new(),
+            stored_row_positions: Vec::new(),
+            stored_row_bindings: Vec::new(),
             current_row: None,
+            current_bindings: Vec::new(),
             position: 0,
         }
     }
@@ -212,7 +228,11 @@ impl Portal {
                 columns,
                 column_names,
             },
+            stored_rows: Vec::new(),
+            stored_row_positions: Vec::new(),
+            stored_row_bindings: Vec::new(),
             current_row: None,
+            current_bindings: Vec::new(),
             position: 0,
         }
     }
@@ -241,8 +261,9 @@ impl Portal {
         };
         let columns = guard.columns.clone();
         let column_names = guard.column_names.clone();
-        let mut rows = Vec::new();
-        let mut row_positions = Vec::new();
+        let mut rows = std::mem::take(&mut self.stored_rows);
+        let mut row_positions = std::mem::take(&mut self.stored_row_positions);
+        let mut row_bindings = std::mem::take(&mut self.stored_row_bindings);
         while let Some(slot) = exec_next(&mut guard.state, &mut guard.ctx)? {
             let tid = slot.tid();
             let table_oid = slot.table_oid;
@@ -252,26 +273,32 @@ impl Portal {
                 guard.ctx.catalog.as_deref(),
             )?;
             Value::materialize_all(&mut values);
+            let bindings = guard.state.current_system_bindings().to_vec();
             rows.push(values);
-            row_positions.push(positioned_row_from_metadata(
-                tid,
-                table_oid,
-                guard.state.current_system_bindings(),
-            ));
+            row_positions.push(positioned_row_from_metadata(tid, table_oid, &bindings));
+            row_bindings.push(bindings);
         }
         self.execution = PortalExecution::Materialized {
             columns,
             column_names,
             rows,
             row_positions,
+            row_bindings,
             // PostgreSQL cursor positions are 0 before the first row,
             // 1..=N on a row, and N+1 after the last row.
-            pos: 0,
+            pos: self.position,
         };
         self.current_row = None;
-        self.position = 0;
+        self.current_bindings.clear();
         self.status = PortalStatus::Ready;
         Ok(())
+    }
+
+    pub fn make_snapshot_see_prior_own_writes(&mut self) {
+        if let PortalExecution::Streaming(guard) = &mut self.execution {
+            guard.ctx.snapshot.current_cid = crate::backend::access::transam::xact::CommandId::MAX;
+            guard.ctx.snapshot.heap_current_cid = None;
+        }
     }
 
     pub fn fetch_forward(&mut self, limit: PortalFetchLimit) -> Result<PortalRunResult, ExecError> {
@@ -285,12 +312,25 @@ impl Portal {
             PortalExecution::Streaming(guard) => match fetch_streaming_forward(guard, limit) {
                 Ok(streaming) => {
                     if !self.options.no_scroll && streaming.result.completed {
+                        let mut rows = self.stored_rows.clone();
+                        rows.extend(streaming.result.rows.clone());
+                        let mut row_positions = self.stored_row_positions.clone();
+                        row_positions.extend(streaming.row_positions.iter().copied());
+                        let mut row_bindings = self.stored_row_bindings.clone();
+                        row_bindings.extend(streaming.row_bindings.iter().cloned());
                         completed_stream_materialization = Some((
                             streaming.result.columns.clone(),
                             streaming.result.column_names.clone(),
-                            streaming.result.rows.clone(),
-                            streaming.row_positions,
+                            rows,
+                            row_positions,
+                            row_bindings,
                         ));
+                    } else {
+                        self.stored_rows.extend(streaming.result.rows.clone());
+                        self.stored_row_positions
+                            .extend(streaming.row_positions.iter().copied());
+                        self.stored_row_bindings
+                            .extend(streaming.row_bindings.iter().cloned());
                     }
                     Ok(streaming.result)
                 }
@@ -301,12 +341,14 @@ impl Portal {
                 column_names,
                 rows,
                 row_positions,
+                row_bindings,
                 pos,
             } => Ok(fetch_materialized_forward(
                 columns,
                 column_names,
                 rows,
                 row_positions,
+                row_bindings,
                 pos,
                 limit,
             )),
@@ -319,6 +361,7 @@ impl Portal {
                     completed: true,
                     command_tag: None,
                     current_row: None,
+                    current_bindings: Vec::new(),
                 })
             }
         };
@@ -327,7 +370,8 @@ impl Portal {
             Ok(_) => self.status = PortalStatus::Ready,
             Err(_) => self.status = PortalStatus::Failed,
         }
-        if let Some((columns, column_names, rows, row_positions)) = completed_stream_materialization
+        if let Some((columns, column_names, rows, row_positions, row_bindings)) =
+            completed_stream_materialization
         {
             let pos = rows.len().saturating_add(1);
             self.execution = PortalExecution::Materialized {
@@ -335,8 +379,12 @@ impl Portal {
                 column_names,
                 rows,
                 row_positions,
+                row_bindings,
                 pos,
             };
+            self.stored_rows.clear();
+            self.stored_row_positions.clear();
+            self.stored_row_bindings.clear();
         }
         if let Ok(result) = &mut result
             && result.completed
@@ -350,8 +398,10 @@ impl Portal {
                 self.position = self.position.saturating_add(result.processed);
             }
             self.current_row = result.current_row;
+            self.current_bindings = result.current_bindings.clone();
         } else {
             self.current_row = None;
+            self.current_bindings.clear();
         }
         result
     }
@@ -428,6 +478,7 @@ impl Portal {
                     completed: true,
                     command_tag: None,
                     current_row: None,
+                    current_bindings: Vec::new(),
                 });
             }
         }
@@ -457,6 +508,7 @@ impl Portal {
             column_names,
             rows,
             row_positions,
+            row_bindings,
             pos,
         } = &mut self.execution
         else {
@@ -485,12 +537,14 @@ impl Portal {
             .rev()
             .cloned()
             .collect::<Vec<_>>();
-        let current_row = row_positions[start_idx..end_idx]
-            .iter()
-            .rev()
-            .flatten()
-            .next()
-            .copied();
+        let (current_row, current_bindings) = if count == 0 {
+            (None, Vec::new())
+        } else {
+            (
+                row_positions.get(start_idx).copied().flatten(),
+                row_bindings.get(start_idx).cloned().unwrap_or_default(),
+            )
+        };
         *pos = if count == 0 {
             *pos
         } else if completed {
@@ -506,6 +560,7 @@ impl Portal {
             completed: *pos == 0,
             command_tag: None,
             current_row,
+            current_bindings,
         })
     }
 
@@ -603,6 +658,7 @@ impl Portal {
             completed: true,
             command_tag: None,
             current_row: None,
+            current_bindings: Vec::new(),
         })
     }
 
@@ -620,6 +676,10 @@ impl Portal {
         self.current_row
     }
 
+    pub fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
     pub fn replace_current_positioned_row(
         &mut self,
         old: PositionedCursorRow,
@@ -628,14 +688,41 @@ impl Portal {
         if self.current_row == Some(old) {
             self.current_row = Some(new);
         }
+        for position in &mut self.stored_row_positions {
+            if *position == Some(old) {
+                *position = Some(new);
+            }
+        }
+        for bindings in &mut self.stored_row_bindings {
+            for binding in bindings {
+                if binding.table_oid == old.table_oid && binding.tid == Some(old.tid) {
+                    binding.tid = Some(new.tid);
+                }
+            }
+        }
+        for binding in &mut self.current_bindings {
+            if binding.table_oid == old.table_oid && binding.tid == Some(old.tid) {
+                binding.tid = Some(new.tid);
+            }
+        }
         if let PortalExecution::Materialized {
-            row_positions, pos, ..
+            row_positions,
+            row_bindings,
+            pos,
+            ..
         } = &mut self.execution
             && *pos > 0
         {
             let index = *pos - 1;
             if row_positions.get(index).copied().flatten() == Some(old) {
                 row_positions[index] = Some(new);
+            }
+            if let Some(bindings) = row_bindings.get_mut(index) {
+                for binding in bindings {
+                    if binding.table_oid == old.table_oid && binding.tid == Some(old.tid) {
+                        binding.tid = Some(new.tid);
+                    }
+                }
             }
         }
     }
@@ -651,6 +738,7 @@ fn portal_direction_can_stream_forward(direction: PortalFetchDirection) -> bool 
 struct StreamingForwardResult {
     result: PortalRunResult,
     row_positions: Vec<Option<PositionedCursorRow>>,
+    row_bindings: Vec<Vec<SystemVarBinding>>,
 }
 
 fn fetch_streaming_forward(
@@ -659,7 +747,9 @@ fn fetch_streaming_forward(
 ) -> Result<StreamingForwardResult, ExecError> {
     let mut rows = Vec::new();
     let mut row_positions = Vec::new();
+    let mut row_bindings = Vec::new();
     let mut current_row = None;
+    let mut current_bindings = Vec::new();
     let max_rows = match limit {
         PortalFetchLimit::All => usize::MAX,
         PortalFetchLimit::Count(count) => count,
@@ -676,13 +766,12 @@ fn fetch_streaming_forward(
                     guard.ctx.catalog.as_deref(),
                 )?;
                 Value::materialize_all(&mut values);
+                let bindings = guard.state.current_system_bindings().to_vec();
                 rows.push(values);
-                current_row = positioned_row_from_metadata(
-                    tid,
-                    table_oid,
-                    guard.state.current_system_bindings(),
-                );
+                current_row = positioned_row_from_metadata(tid, table_oid, &bindings);
                 row_positions.push(current_row);
+                current_bindings = bindings.clone();
+                row_bindings.push(bindings);
             }
             None => {
                 completed = true;
@@ -702,8 +791,10 @@ fn fetch_streaming_forward(
             completed,
             command_tag: None,
             current_row,
+            current_bindings,
         },
         row_positions,
+        row_bindings,
     })
 }
 
@@ -712,6 +803,7 @@ fn fetch_materialized_forward(
     column_names: &[String],
     rows: &[Vec<Value>],
     row_positions: &[Option<PositionedCursorRow>],
+    row_bindings: &[Vec<SystemVarBinding>],
     pos: &mut usize,
     limit: PortalFetchLimit,
 ) -> PortalRunResult {
@@ -723,12 +815,15 @@ fn fetch_materialized_forward(
     };
     let end = start + count;
     let out = rows[start..end].to_vec();
-    let current_row = row_positions[start..end]
-        .iter()
-        .rev()
-        .flatten()
-        .next()
-        .copied();
+    let (current_row, current_bindings) = if count == 0 {
+        (None, Vec::new())
+    } else {
+        let current_index = end - 1;
+        (
+            row_positions.get(current_index).copied().flatten(),
+            row_bindings.get(current_index).cloned().unwrap_or_default(),
+        )
+    };
     let completed = match limit {
         PortalFetchLimit::All => true,
         PortalFetchLimit::Count(requested) => count < requested,
@@ -746,6 +841,7 @@ fn fetch_materialized_forward(
         completed,
         command_tag: None,
         current_row,
+        current_bindings,
     }
 }
 
@@ -862,6 +958,15 @@ impl PortalManager {
                 portal.created_in_transaction = false;
             }
         }
+    }
+
+    pub fn materialize_holdable_portals_created_in_transaction(&mut self) -> Result<(), ExecError> {
+        for portal in self.portals.values_mut() {
+            if portal.options.holdable && portal.created_in_transaction {
+                portal.materialize_all()?;
+            }
+        }
+        Ok(())
     }
 
     pub fn drop_portals_created_at_or_after_savepoint(&mut self, depth: usize) {

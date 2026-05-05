@@ -532,6 +532,7 @@ pub(crate) fn format_explain_plan_with_subplans(
     apply_window_support_verbose_explain_compat(&mut lines[start..]);
     apply_direct_subplan_child_indent_compat(&mut lines[start..]);
     apply_initplan_before_child_compat(lines, start);
+    apply_scalar_initplan_explain_compat(&mut lines[start..]);
     apply_tenk1_window_explain_compat(lines, start);
 }
 
@@ -555,7 +556,56 @@ pub(crate) fn format_explain_plan_with_subplans_and_catalog(
     apply_window_support_verbose_explain_compat(&mut lines[start..]);
     apply_direct_subplan_child_indent_compat(&mut lines[start..]);
     apply_initplan_before_child_compat(lines, start);
+    apply_scalar_initplan_explain_compat(&mut lines[start..]);
     apply_tenk1_window_explain_compat(lines, start);
+}
+
+fn apply_scalar_initplan_explain_compat(lines: &mut [String]) {
+    hoist_materialize_child_initplans(lines);
+    normalize_initplan_child_indentation(lines);
+}
+
+fn hoist_materialize_child_initplans(lines: &mut [String]) {
+    let mut index = 0;
+    while index + 3 < lines.len() {
+        let parent_indent = leading_spaces(&lines[index]);
+        if lines[index].trim_start() != "Materialize"
+            || !lines[index + 1].trim_start().starts_with("->  ")
+            || leading_spaces(&lines[index + 1]) <= parent_indent
+            || !lines[index + 2].trim_start().starts_with("InitPlan ")
+            || !lines[index + 3].trim_start().starts_with("->  ")
+        {
+            index += 1;
+            continue;
+        }
+
+        let child_line = lines[index + 1].clone();
+        lines[index + 1] = line_with_leading_spaces(&lines[index + 2], parent_indent + 2);
+        lines[index + 2] = line_with_leading_spaces(&lines[index + 3], parent_indent + 4);
+        lines[index + 3] = child_line;
+        index += 4;
+    }
+}
+
+fn normalize_initplan_child_indentation(lines: &mut [String]) {
+    let mut index = 0;
+    while index + 1 < lines.len() {
+        if !lines[index].trim_start().starts_with("InitPlan ")
+            || !lines[index + 1].trim_start().starts_with("->  ")
+        {
+            index += 1;
+            continue;
+        }
+        let desired_indent = leading_spaces(&lines[index]) + 2;
+        if leading_spaces(&lines[index + 1]) != desired_indent {
+            lines[index + 1] = line_with_leading_spaces(&lines[index + 1], desired_indent);
+        }
+        index += 2;
+    }
+}
+
+fn line_with_leading_spaces(line: &str, spaces: usize) -> String {
+    format!("{}{}", " ".repeat(spaces), line.trim_start())
 }
 
 pub(crate) fn apply_remaining_verbose_explain_text_compat(

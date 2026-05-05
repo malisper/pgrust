@@ -120,7 +120,8 @@ use crate::include::nodes::datum::{RecordDescriptor, RecordValue, Value};
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::parsenodes::{
-    AliasColumnSpec, FromItem, IndexColumnDef, JoinConstraint, MergeAction, RelOption, SqlExpr,
+    AliasColumnSpec, CursorScrollOption, DeclareCursorStatement, FromItem, IndexColumnDef,
+    JoinConstraint, MergeAction, RelOption, SqlExpr,
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
@@ -614,7 +615,7 @@ pub(crate) fn execute_explain(
 
     let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
-        Statement::DeclareCursor(declare) => EitherExplainTarget::Select(declare.query),
+        Statement::DeclareCursor(declare) => EitherExplainTarget::DeclareCursor(declare),
         Statement::Merge(merge) => EitherExplainTarget::Merge(merge),
         Statement::Delete(_) => unreachable!("DELETE handled above"),
         Statement::CreateTableAs(create_table_as) => {
@@ -658,6 +659,20 @@ pub(crate) fn execute_explain(
             None,
             true,
         ),
+        EitherExplainTarget::DeclareCursor(declare) => {
+            let mut planned = crate::backend::parser::pg_plan_query_with_config(
+                &declare.query,
+                catalog,
+                planner_config,
+            )?;
+            if declare.scroll == CursorScrollOption::Scroll {
+                planned.plan_tree = Plan::Materialize {
+                    plan_info: planned.plan_tree.plan_info(),
+                    input: Box::new(planned.plan_tree),
+                };
+            }
+            (create_query_desc(planned, None), None, true)
+        }
         EitherExplainTarget::Merge(merge) => {
             let bound = crate::backend::parser::plan_merge(&merge, catalog)?;
             if !analyze
@@ -1225,6 +1240,7 @@ fn cte_body_is_writable(body: &CteBody) -> bool {
 
 enum EitherExplainTarget {
     Select(SelectStatement),
+    DeclareCursor(DeclareCursorStatement),
     Merge(MergeStatement),
     CreateTableAs(CreateTableAsStatement),
 }

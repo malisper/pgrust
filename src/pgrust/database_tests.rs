@@ -3900,6 +3900,46 @@ fn explain_declare_cursor_does_not_create_cursor() {
 }
 
 #[test]
+fn explain_declare_scalar_initplan_matches_pg_layout() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let lines = session_query_rows(
+        &mut session,
+        &db,
+        "explain (costs off) declare c1 cursor for select (select 42) as x",
+    )
+    .into_iter()
+    .map(|row| match row.as_slice() {
+        [Value::Text(line)] => line.to_string(),
+        other => panic!("expected explain text row, got {other:?}"),
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(lines, vec!["Result", "  InitPlan 1", "    ->  Result"]);
+
+    let scroll_lines = session_query_rows(
+        &mut session,
+        &db,
+        "explain (costs off) declare c1 scroll cursor for select (select 42) as x",
+    )
+    .into_iter()
+    .map(|row| match row.as_slice() {
+        [Value::Text(line)] => line.to_string(),
+        other => panic!("expected explain text row, got {other:?}"),
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(
+        scroll_lines,
+        vec![
+            "Materialize",
+            "  InitPlan 1",
+            "    ->  Result",
+            "  ->  Result"
+        ]
+    );
+}
+
+#[test]
 fn scroll_cursor_backward_stops_at_beginning_boundary() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -6101,6 +6141,106 @@ fn update_current_of_refreshes_scroll_cursor_tuple() {
         ),
         vec![vec![Value::Int32(2), Value::Text("two".into())]]
     );
+}
+
+#[test]
+fn for_update_cursor_skips_own_later_update() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "set transaction isolation level serializable")
+        .unwrap();
+    session
+        .execute(&db, "create table for_update_cursor_items (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into for_update_cursor_items values (1)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "declare c no scroll cursor for select * from for_update_cursor_items for update",
+        )
+        .unwrap();
+    session
+        .execute(&db, "update for_update_cursor_items set id = 2")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from c"),
+        Vec::<Vec<Value>>::new()
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn scroll_cursor_over_inheritance_preserves_child_order_and_positions() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create table current_check (currentid int, payload text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table current_check_1 () inherits (current_check)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table current_check_2 () inherits (current_check)",
+        )
+        .unwrap();
+    assert!(matches!(
+        session
+            .execute(
+                &db,
+                "insert into current_check_1 select i, 'p' || i from generate_series(1,9) i",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(9)
+    ));
+    assert!(matches!(
+        session
+            .execute(
+                &db,
+                "insert into current_check_2 select i, 'P' || i from generate_series(10,19) i",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(10)
+    ));
+    session
+        .execute(
+            &db,
+            "declare c scroll cursor for select * from current_check",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch absolute 12 from c"),
+        vec![vec![Value::Int32(12), Value::Text("P12".into())]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch absolute 8 from c"),
+        vec![vec![Value::Int32(8), Value::Text("p8".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "delete from current_check where current of c returning *",
+        ),
+        vec![vec![Value::Int32(8), Value::Text("p8".into())]]
+    );
+    session.execute(&db, "rollback").unwrap();
 }
 
 #[test]
@@ -18376,6 +18516,46 @@ fn plpgsql_dynamic_execute_declares_session_cursor() {
     assert_eq!(
         session_query_rows(&mut session, &db, "fetch next from c_dyn"),
         vec![vec![Value::Int32(2)]]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn sql_function_declares_session_cursor() {
+    let dir = temp_dir("sql_function_declare_cursor");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table sql_cursor_items(id int4, label text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into sql_cursor_items values (1, 'AB-one'), (2, 'XY-two'), (3, 'AB-three')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function open_sql_cursor(text) returns void language sql as \
+             'declare c_sql cursor for select label from sql_cursor_items where label like $1 order by id'",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "select open_sql_cursor('AB%')")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from c_sql"),
+        vec![
+            vec![Value::Text("AB-one".into())],
+            vec![Value::Text("AB-three".into())],
+        ]
     );
     session.execute(&db, "rollback").unwrap();
 }

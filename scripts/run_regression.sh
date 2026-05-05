@@ -2260,6 +2260,14 @@ run_one_regression_test() {
         return 1
     fi
 
+    if portals_needs_index_setup "$test_name" && ! run_portals_index_setup; then
+        {
+            echo "ERROR: portals index dependency setup failed"
+        } > "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
     if [[ "$test_name" == "stats" && "$ISOLATED_PARALLEL" != true ]] && ! run_stats_helper_setup; then
         {
             echo "ERROR: stats helper dependency setup failed"
@@ -2435,6 +2443,30 @@ SQL
     return 1
 }
 
+run_portals_index_setup() {
+    local output_file="$RESULTS_DIR/output/test_setup_dependency_portals_indexes.out"
+    local setup_file="$RESULTS_DIR/output/test_setup_dependency_portals_indexes.sql"
+
+    cat > "$setup_file" <<'SQL'
+CREATE INDEX IF NOT EXISTS onek_stringu1 ON onek USING btree(stringu1 name_ops);
+ANALYZE onek;
+SQL
+    echo "Dependency setup for portals: onek_stringu1"
+    if run_psql_file "$(test_file_timeout portals)" "$setup_file" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+        return 0
+    fi
+    echo "ERROR: portals index dependency setup failed" >&2
+    echo "See: $output_file" >&2
+    return 1
+}
+
+portals_needs_index_setup() {
+    case "$1" in
+        portals | portals_p2) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 select_distinct_needs_index_setup() {
     case "$1" in
         select_distinct | select_distinct_on) return 0 ;;
@@ -2587,6 +2619,16 @@ run_one_regression_test_isolated() (
     if select_distinct_needs_index_setup "$test_name" && ! run_select_distinct_index_setup; then
         {
             echo "ERROR: isolated worker $worker_name failed select_distinct index dependency setup"
+            echo "port: $PORT"
+            echo "data dir: $DATA_DIR"
+        } > "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
+    if portals_needs_index_setup "$test_name" && ! run_portals_index_setup; then
+        {
+            echo "ERROR: isolated worker $worker_name failed portals index dependency setup"
             echo "port: $PORT"
             echo "data dir: $DATA_DIR"
         } > "$output_file"

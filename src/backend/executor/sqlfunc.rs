@@ -29,7 +29,9 @@ use crate::include::nodes::datum::{ArrayValue, RecordDescriptor, RecordValue};
 use crate::include::nodes::primnodes::{Expr, expr_sql_type_hint};
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::commands::rules::execute_bound_insert_with_rules;
+use crate::pgrust::portal::{CursorOptions, Portal};
 use crate::pgrust::session::ByteaOutputFormat;
+use pgrust_plpgsql::planner_config_from_executor_gucs;
 
 pub(crate) fn execute_user_defined_sql_scalar_function(
     row: &PgProcRow,
@@ -586,8 +588,9 @@ fn execute_sql_function_query(
         .any(|statement| sql_function_statement_needs_database_executor(statement));
     let saved_expr_bindings = std::mem::take(&mut ctx.expr_bindings);
     let saved_snapshot_cid = if row.provolatile == 'v' {
-        let saved = ctx.snapshot.current_cid;
+        let saved = (ctx.snapshot.current_cid, ctx.snapshot.heap_current_cid);
         ctx.snapshot.current_cid = crate::backend::access::transam::xact::CommandId::MAX;
+        ctx.snapshot.heap_current_cid = None;
         Some(saved)
     } else {
         None
@@ -608,7 +611,7 @@ fn execute_sql_function_query(
             let result = if use_database_executor {
                 execute_sql_function_statement_with_database(statement_sql.as_ref(), ctx)
             } else {
-                execute_sql_function_statement(stmt, catalog, ctx)
+                execute_sql_function_statement(stmt, statement_sql.as_ref(), catalog, ctx)
             };
             restore_sql_function_row_security_set_config_effect(restore_row_security, ctx);
             let result = result?;
@@ -616,8 +619,9 @@ fn execute_sql_function_query(
         }
         Ok(last_result.unwrap_or(StatementResult::AffectedRows(0)))
     })();
-    if let Some(saved) = saved_snapshot_cid {
-        ctx.snapshot.current_cid = saved;
+    if let Some((current_cid, heap_current_cid)) = saved_snapshot_cid {
+        ctx.snapshot.current_cid = current_cid;
+        ctx.snapshot.heap_current_cid = heap_current_cid;
     }
     ctx.expr_bindings = saved_expr_bindings;
     result
@@ -740,6 +744,7 @@ fn sql_function_sets_row_security_off(sql: &str) -> bool {
 
 fn execute_sql_function_statement(
     stmt: Statement,
+    statement_sql: &str,
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
@@ -752,6 +757,9 @@ fn execute_sql_function_statement(
                 hint: None,
                 sqlstate: "0A000",
             })
+        }
+        Statement::DeclareCursor(stmt) => {
+            execute_sql_function_declare_cursor(&stmt, statement_sql, ctx)
         }
         Statement::Insert(stmt) => {
             if !ctx.allow_side_effects {
@@ -821,6 +829,91 @@ fn execute_sql_function_statement(
             result
         }
         stmt => execute_readonly_statement(stmt, catalog, ctx),
+    }
+}
+
+fn execute_sql_function_declare_cursor(
+    stmt: &crate::backend::parser::DeclareCursorStatement,
+    statement_sql: &str,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    if ctx
+        .pending_portals
+        .iter()
+        .any(|portal| portal.name == stmt.name)
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("cursor \"{}\" already exists", stmt.name),
+            detail: None,
+            hint: None,
+            sqlstate: "42P03",
+        });
+    }
+    let db = ctx.database.clone().ok_or_else(|| {
+        sql_function_runtime_error(
+            "DECLARE CURSOR in a LANGUAGE sql function requires database context",
+            None,
+            "0A000",
+        )
+    })?;
+    let txn_ctx = ctx.transaction_xid().map(|xid| (xid, ctx.next_command_id));
+    let search_path = configured_search_path_from_gucs(&ctx.gucs);
+    let mut guard = db.execute_streaming_with_config_and_random_state(
+        ctx.client_id,
+        &stmt.query,
+        txn_ctx,
+        ctx.statement_lock_scope_id,
+        ctx.transaction_lock_scope_id,
+        search_path.as_deref(),
+        &ctx.datetime_config,
+        &ctx.gucs,
+        Some(ctx.snapshot.clone()),
+        ctx.serializable_xact_id(),
+        planner_config_from_executor_gucs(&ctx.gucs),
+        std::sync::Arc::clone(&ctx.random_state),
+    )?;
+    guard.catalog_effect_start = ctx.catalog_effects.len();
+    guard.base_command_id = ctx.next_command_id;
+    let source_text = if statement_sql.trim_end().ends_with(';') {
+        statement_sql.trim().to_string()
+    } else {
+        format!("{};", statement_sql.trim())
+    };
+    let mut portal = Portal::streaming_select(
+        stmt.name.clone(),
+        source_text,
+        None,
+        Vec::new(),
+        sql_function_cursor_options_from_declare(stmt),
+        true,
+        0,
+        guard,
+    );
+    if portal.options.scroll || (portal.options.holdable && ctx.transaction_xid().is_none()) {
+        portal.materialize_all()?;
+    }
+    ctx.pending_portals.push(portal);
+    Ok(StatementResult::AffectedRows(0))
+}
+
+fn sql_function_cursor_options_from_declare(
+    stmt: &crate::backend::parser::DeclareCursorStatement,
+) -> CursorOptions {
+    let explicit_scroll = matches!(
+        stmt.scroll,
+        crate::backend::parser::CursorScrollOption::Scroll
+    );
+    let explicit_no_scroll = matches!(
+        stmt.scroll,
+        crate::backend::parser::CursorScrollOption::NoScroll
+    );
+    let locking_clause = stmt.query.locking_clause.is_some();
+    CursorOptions {
+        holdable: stmt.hold,
+        binary: stmt.binary,
+        scroll: explicit_scroll || (stmt.binary && !explicit_no_scroll),
+        no_scroll: explicit_no_scroll || (!explicit_scroll && locking_clause),
+        visible: true,
     }
 }
 
