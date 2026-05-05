@@ -2022,12 +2022,16 @@ fn exec_function_stmt(
             exec_function_insert(stmt, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::ExecUpdateInto { stmt, targets } => {
-            exec_function_update_into(stmt, targets, compiled, state, ctx)?;
+        CompiledStmt::ExecUpdateInto {
+            stmt,
+            scope,
+            targets,
+        } => {
+            exec_function_update_into(stmt, scope, targets, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::ExecUpdate { stmt } => {
-            exec_function_update(stmt, compiled, state, ctx)?;
+        CompiledStmt::ExecUpdate { stmt, scope } => {
+            exec_function_update(stmt, scope, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::ExecDeleteInto { stmt, targets } => {
@@ -2938,6 +2942,7 @@ fn exec_function_insert_into(
 
 fn exec_function_update(
     stmt: &crate::backend::parser::BoundUpdateStatement,
+    scope: &RuntimeSqlScope,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
@@ -2949,12 +2954,15 @@ fn exec_function_update(
             "0A000",
         )
     })?;
-    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
-    let xid = ctx.ensure_write_xid()?;
-    let cid = ctx.next_command_id;
-    let stmt = bind_update_current_of(stmt, compiled, state)?;
-    let result = execute_update(stmt, catalog.as_ref(), ctx, xid, cid);
-    ctx.expr_bindings.outer_tuple = None;
+    let saved_external_params = ctx.expr_bindings.external_params.clone();
+    install_runtime_sql_external_params(scope, state, ctx);
+    let result = (|| {
+        let xid = ctx.ensure_write_xid()?;
+        let cid = ctx.next_command_id;
+        let stmt = bind_update_current_of(stmt, compiled, state)?;
+        execute_update(stmt, catalog.as_ref(), ctx, xid, cid)
+    })();
+    ctx.expr_bindings.external_params = saved_external_params;
     let result = result?;
     advance_plpgsql_command_id(ctx);
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
@@ -2963,6 +2971,7 @@ fn exec_function_update(
 
 fn exec_function_update_into(
     stmt: &crate::backend::parser::BoundUpdateStatement,
+    scope: &RuntimeSqlScope,
     targets: &[CompiledSelectIntoTarget],
     compiled: &CompiledFunction,
     state: &mut FunctionState,
@@ -2975,12 +2984,15 @@ fn exec_function_update_into(
             "0A000",
         )
     })?;
-    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
-    let xid = ctx.ensure_write_xid()?;
-    let cid = ctx.next_command_id;
-    let stmt = bind_update_current_of(stmt, compiled, state)?;
-    let result = execute_update(stmt, catalog.as_ref(), ctx, xid, cid);
-    ctx.expr_bindings.outer_tuple = None;
+    let saved_external_params = ctx.expr_bindings.external_params.clone();
+    install_runtime_sql_external_params(scope, state, ctx);
+    let result = (|| {
+        let xid = ctx.ensure_write_xid()?;
+        let cid = ctx.next_command_id;
+        let stmt = bind_update_current_of(stmt, compiled, state)?;
+        execute_update(stmt, catalog.as_ref(), ctx, xid, cid)
+    })();
+    ctx.expr_bindings.external_params = saved_external_params;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
             "UPDATE RETURNING INTO did not produce rows",

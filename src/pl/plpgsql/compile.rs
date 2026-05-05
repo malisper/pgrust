@@ -2485,18 +2485,24 @@ fn compile_exec_sql_stmt(
             }),
             Err(err) => Err(err),
         },
-        Statement::Update(stmt) => match bind_update_with_outer_scopes(
-            &normalize_plpgsql_update(stmt, env),
-            catalog,
-            &outer_scopes,
-        ) {
-            Ok(stmt) => Ok(CompiledStmt::ExecUpdate { stmt }),
-            Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => Ok(CompiledStmt::RuntimeSql {
-                sql: rewritten_sql,
-                scope: runtime_sql_scope(env),
-            }),
-            Err(err) => Err(err),
-        },
+        Statement::Update(stmt) => {
+            let scope = runtime_sql_scope(env);
+            let param_scope = runtime_sql_param_bound_scope(&scope);
+            match bind_update_with_outer_scopes(
+                &normalize_plpgsql_update(stmt, env),
+                catalog,
+                &[param_scope],
+            ) {
+                Ok(stmt) => Ok(CompiledStmt::ExecUpdate { stmt, scope }),
+                Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => {
+                    Ok(CompiledStmt::RuntimeSql {
+                        sql: rewritten_sql,
+                        scope: runtime_sql_scope(env),
+                    })
+                }
+                Err(err) => Err(err),
+            }
+        }
         Statement::Delete(stmt) => match bind_delete_with_outer_scopes(
             &normalize_plpgsql_delete(stmt, env),
             catalog,
@@ -3126,8 +3132,10 @@ fn compile_exec_returning_into_stmt(
             })
         }
         Statement::Update(stmt) => {
+            let scope = runtime_sql_scope(env);
+            let param_scope = runtime_sql_param_bound_scope(&scope);
             let stmt = normalize_plpgsql_update(stmt, env);
-            let bound = bind_update_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
+            let bound = bind_update_with_outer_scopes(&stmt, catalog, &[param_scope])?;
             let targets = compile_dml_into_targets(
                 target_refs,
                 bound
@@ -3139,6 +3147,7 @@ fn compile_exec_returning_into_stmt(
             )?;
             Ok(CompiledStmt::ExecUpdateInto {
                 stmt: bound,
+                scope,
                 targets,
             })
         }
