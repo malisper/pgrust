@@ -1448,6 +1448,82 @@ fn repeatable_read_sees_own_writes_after_snapshot() {
 }
 
 #[test]
+fn volatile_plpgsql_function_sees_partial_update_results() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table plpgsql_xacttest (a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into plpgsql_xacttest values (56), (100), (0), (42), (777)",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "create function max_plpgsql_xacttest() returns int4 language plpgsql as \
+             $$ begin return max(a) from plpgsql_xacttest; end $$ stable",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "update plpgsql_xacttest set a = max_plpgsql_xacttest() + 10 where a > 0",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select a from plpgsql_xacttest order by a"
+        ),
+        vec![
+            vec![Value::Int32(0)],
+            vec![Value::Int32(787)],
+            vec![Value::Int32(787)],
+            vec![Value::Int32(787)],
+            vec![Value::Int32(787)],
+        ]
+    );
+    session.execute(&db, "rollback").unwrap();
+
+    session
+        .execute(
+            &db,
+            "create or replace function max_plpgsql_xacttest() returns int4 language plpgsql as \
+             $$ begin return max(a) from plpgsql_xacttest; end $$ volatile",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "update plpgsql_xacttest set a = max_plpgsql_xacttest() + 10 where a > 0",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select a from plpgsql_xacttest order by a"
+        ),
+        vec![
+            vec![Value::Int32(0)],
+            vec![Value::Int32(787)],
+            vec![Value::Int32(797)],
+            vec![Value::Int32(807)],
+            vec![Value::Int32(817)],
+        ]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn set_transaction_isolation_after_query_errors() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
