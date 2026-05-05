@@ -9267,16 +9267,8 @@ fn psql_describe_permissions_query(
                 return None;
             }
             Some((schema_name.clone(), class.relname.clone(), {
-                let column_privileges =
-                    match format_column_privileges_value(&attribute_rows, class.oid) {
-                        Value::Null => psql_text(""),
-                        value => value,
-                    };
-                let policies =
-                    match format_policy_column_value(&policy_rows, &role_names, class.oid) {
-                        Value::Null => psql_text(""),
-                        value => value,
-                    };
+                let column_privileges = format_column_privileges_value(&attribute_rows, class.oid);
+                let policies = format_policy_column_value(&policy_rows, &role_names, class.oid);
                 vec![
                     Value::Text(schema_name.into()),
                     Value::Text(class.relname.clone().into()),
@@ -10117,25 +10109,21 @@ fn psql_describe_types_query(
         {
             continue;
         }
-        let owner = role_names
-            .get(&entry.owner_oid)
-            .cloned()
+        let owner = auth_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.role_by_oid(entry.owner_oid))
+            .map(|role| role.rolname.clone())
             .unwrap_or_else(|| entry.owner_oid.to_string());
-        if psql_pattern_matches(&entry.multirange_name, name_pattern, name_regex.as_ref()) {
-            rows.push(vec![
-                Value::Text(schema.clone().into()),
-                Value::Text(entry.multirange_name.clone().into()),
-                Value::Text(entry.multirange_name.clone().into()),
-                Value::Text("var".into()),
-                Value::Text(String::new().into()),
-                Value::Text(owner.clone().into()),
-                Value::Text(String::new().into()),
-                Value::Text(entry.comment.clone().unwrap_or_default().into()),
-            ]);
-        }
-        if !psql_pattern_matches(&entry.name, name_pattern, name_regex.as_ref()) {
-            continue;
-        }
+        rows.push(vec![
+            Value::Text("public".into()),
+            Value::Text(entry.multirange_name.clone().into()),
+            Value::Text(entry.multirange_name.clone().into()),
+            Value::Text("var".into()),
+            Value::Text(String::new().into()),
+            Value::Text(owner.clone().into()),
+            Value::Text(String::new().into()),
+            Value::Text(entry.comment.clone().unwrap_or_default().into()),
+        ]);
         let acl = entry
             .typacl
             .clone()
@@ -10145,7 +10133,7 @@ fn psql_describe_types_query(
             .collect::<Vec<_>>()
             .join("\n");
         rows.push(vec![
-            Value::Text(schema.clone().into()),
+            Value::Text("public".into()),
             Value::Text(entry.name.clone().into()),
             Value::Text(entry.name.clone().into()),
             Value::Text("var".into()),
@@ -14144,7 +14132,7 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
             severity,
             &notice.sqlstate,
             &notice.message,
-            detail,
+            notice.detail.as_deref(),
             notice.hint.as_deref(),
             notice.context.as_deref(),
             None,
