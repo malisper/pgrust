@@ -10654,6 +10654,43 @@ fn vacuum_process_counts(session: &mut Session, db: &Database) -> Vec<Vec<Value>
 }
 
 #[test]
+fn heap_insert_large_tuple_can_exceed_fillfactor_on_nearly_empty_page() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table large_tuple_test (a int, b text) with (fillfactor = 10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table large_tuple_test alter column b set storage plain",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into large_tuple_test select 1, null")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into large_tuple_test select 2, repeat('a', 1000)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_relation_size('large_tuple_test'::regclass, 'main')"
+        ),
+        vec![vec![Value::Int64(8192)]]
+    );
+}
+
+#[test]
 fn vacuum_truncates_empty_tail_and_skips_catalog_full_rewrite() {
     let dir = temp_dir("vacuum_truncate_and_catalog_full");
     let db = Database::open(&dir, 128).unwrap();
@@ -11384,6 +11421,64 @@ fn routed_partition_constraint_detail_uses_parent_column_order() {
         }) if relation == "detail_child"
             && detail.as_deref() == Some("Failing row contains (20, 1, null).") => {}
         other => panic!("expected parent-ordered not-null detail, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_constraint_detail_uses_before_insert_trigger_row() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table trigger_detail_parent(c text, a int) partition by list(c)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table trigger_detail_child(a int not null, c text not null)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table trigger_detail_parent attach partition trigger_detail_child for values in ('a')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function trigger_detail_child_fn() returns trigger language plpgsql as $$ begin new.c := 'b'; return new; end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger trigger_detail_child_trig before insert on trigger_detail_child for each row execute function trigger_detail_child_fn()",
+        )
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "insert into trigger_detail_parent(a, c) values (1, 'a')",
+    ) {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) if message
+            == "new row for relation \"trigger_detail_child\" violates partition constraint"
+            && detail.as_deref() == Some("Failing row contains (b, 1).") => {}
+        other => panic!("expected routed trigger-modified partition detail, got {other:?}"),
+    }
+
+    match session.execute(&db, "insert into trigger_detail_child values (1, 'a')") {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) if message
+            == "new row for relation \"trigger_detail_child\" violates partition constraint"
+            && detail.as_deref() == Some("Failing row contains (1, b).") => {}
+        other => panic!("expected direct trigger-modified partition detail, got {other:?}"),
     }
 }
 

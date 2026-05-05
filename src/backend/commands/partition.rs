@@ -1088,18 +1088,23 @@ pub(crate) fn validate_new_partition_bound(
         to,
         is_default: false,
     } = bound
-        && compare_range_bounds(from, to, &spec.partcollation)? != Ordering::Less
     {
-        return Err(ExecError::DetailedError {
-            message: format!("empty range bound specified for partition \"{new_relation_name}\""),
-            detail: Some(format!(
-                "Specified lower bound ({}) is greater than or equal to upper bound ({}).",
-                format_range_bound_for_error(from),
-                format_range_bound_for_error(to)
-            )),
-            hint: None,
-            sqlstate: "42P17",
-        });
+        validate_range_infinite_bounds(from)?;
+        validate_range_infinite_bounds(to)?;
+        if compare_range_bounds(from, to, &spec.partcollation)? != Ordering::Less {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "empty range bound specified for partition \"{new_relation_name}\""
+                ),
+                detail: Some(format!(
+                    "Specified lower bound ({}) is greater than or equal to upper bound ({}).",
+                    format_range_bound_for_error(from),
+                    format_range_bound_for_error(to)
+                )),
+                hint: None,
+                sqlstate: "42P17",
+            });
+        }
     }
     if bound.is_default()
         && let Some(existing) = default_partition(catalog, parent, skip_child_oid)?
@@ -1188,6 +1193,44 @@ pub(crate) fn validate_new_partition_bound(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InfiniteRangeBoundKind {
+    MinValue,
+    MaxValue,
+}
+
+fn validate_range_infinite_bounds(bound: &[PartitionRangeDatumValue]) -> Result<(), ExecError> {
+    let mut required_following = None;
+    for datum in bound {
+        let datum_kind = match datum {
+            PartitionRangeDatumValue::MinValue => Some(InfiniteRangeBoundKind::MinValue),
+            PartitionRangeDatumValue::MaxValue => Some(InfiniteRangeBoundKind::MaxValue),
+            PartitionRangeDatumValue::Value(_) => None,
+        };
+        match (required_following, datum_kind) {
+            (None, Some(kind)) => required_following = Some(kind),
+            (Some(required), Some(kind)) if required == kind => {}
+            (Some(InfiniteRangeBoundKind::MinValue), _) => {
+                return Err(range_infinite_bound_error("MINVALUE"));
+            }
+            (Some(InfiniteRangeBoundKind::MaxValue), _) => {
+                return Err(range_infinite_bound_error("MAXVALUE"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn range_infinite_bound_error(kind: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("every bound following {kind} must also be {kind}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42804",
+    }
 }
 
 fn format_range_bound_for_error(bound: &[PartitionRangeDatumValue]) -> String {

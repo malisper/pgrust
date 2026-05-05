@@ -2087,6 +2087,62 @@ mod tests {
     }
 
     #[test]
+    fn range_partition_bounds_require_trailing_infinite_bounds() {
+        let base = temp_dir("range_bound_infinite_trailing");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create table range_bound_parent (a int, b int, c int) partition by range (a, b, c)",
+            )
+            .unwrap();
+
+        match session.execute(
+            &db,
+            "create table range_bound_bad_min partition of range_bound_parent
+             for values from (minvalue, 0, 0) to (1, maxvalue, maxvalue)",
+        ) {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(
+                    message,
+                    "every bound following MINVALUE must also be MINVALUE"
+                );
+                assert_eq!(sqlstate, "42804");
+            }
+            other => panic!("expected trailing MINVALUE validation error, got {other:?}"),
+        }
+
+        match session.execute(
+            &db,
+            "create table range_bound_bad_max partition of range_bound_parent
+             for values from (10, 6, minvalue) to (10, maxvalue, minvalue)",
+        ) {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(
+                    message,
+                    "every bound following MAXVALUE must also be MAXVALUE"
+                );
+                assert_eq!(sqlstate, "42804");
+            }
+            other => panic!("expected trailing MAXVALUE validation error, got {other:?}"),
+        }
+
+        session
+            .execute(
+                &db,
+                "create table range_bound_ok partition of range_bound_parent
+                 for values from (minvalue, minvalue, minvalue) to (1, maxvalue, maxvalue)",
+            )
+            .unwrap();
+    }
+
+    #[test]
     fn inherited_partition_check_added_with_not_null_cannot_be_dropped_from_child() {
         let base = temp_dir("partition_check_drop");
         let db = Database::open(&base, 16).unwrap();
