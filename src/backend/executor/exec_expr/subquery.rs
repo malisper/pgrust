@@ -1,5 +1,4 @@
 use super::*;
-use crate::backend::executor::expr_string::eval_like;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
@@ -1333,10 +1332,22 @@ pub(super) fn compare_subquery_values(
                 (_, other) => Err(ExecError::NonBoolQual(other)),
             }
         }
-        SubqueryComparisonOp::Like => eval_like(&left, &right, None, collation_oid, false, false),
-        SubqueryComparisonOp::NotLike => eval_like(&left, &right, None, collation_oid, false, true),
-        SubqueryComparisonOp::ILike => eval_like(&left, &right, None, collation_oid, true, false),
-        SubqueryComparisonOp::NotILike => eval_like(&left, &right, None, collation_oid, true, true),
+        SubqueryComparisonOp::Like => {
+            pgrust_expr::expr_string::eval_like(&left, &right, None, collation_oid, false, false)
+                .map_err(Into::into)
+        }
+        SubqueryComparisonOp::NotLike => {
+            pgrust_expr::expr_string::eval_like(&left, &right, None, collation_oid, false, true)
+                .map_err(Into::into)
+        }
+        SubqueryComparisonOp::ILike => {
+            pgrust_expr::expr_string::eval_like(&left, &right, None, collation_oid, true, false)
+                .map_err(Into::into)
+        }
+        SubqueryComparisonOp::NotILike => {
+            pgrust_expr::expr_string::eval_like(&left, &right, None, collation_oid, true, true)
+                .map_err(Into::into)
+        }
         SubqueryComparisonOp::Similar => eval_similar(&left, &right, None, collation_oid, false),
         SubqueryComparisonOp::NotSimilar => eval_similar(&left, &right, None, collation_oid, true),
     }

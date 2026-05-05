@@ -15,7 +15,6 @@ mod expr_locks;
 pub(crate) mod expr_ops;
 mod expr_partition;
 pub(crate) mod expr_reg;
-mod expr_string;
 mod expr_txid;
 mod expr_xml;
 mod fmgr;
@@ -82,7 +81,12 @@ pub(crate) use expr_casts::{
     parse_text_array_literal_with_catalog_op_and_explicit,
 };
 pub(crate) use expr_json::apply_jsonb_subscript_assignment;
-pub(crate) use expr_string::eval_to_char_function;
+pub(crate) fn eval_to_char_function(
+    values: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    pgrust_expr::expr_string::eval_to_char_function(values, datetime_config).map_err(Into::into)
+}
 pub(crate) use expr_txid::{
     cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
 };
