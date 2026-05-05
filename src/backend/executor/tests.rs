@@ -10706,6 +10706,8 @@ fn sql_json_check_constraint_deparse_matches_pg_style() {
             js text,
             i int,
             x jsonb default JSON_QUERY(jsonb '[1,2]', '$[*]' WITH WRAPPER),
+            constraint sqljson_deparse_is_json check (js IS JSON),
+            constraint sqljson_deparse_is_json_unique check (js IS JSON OBJECT WITH UNIQUE),
             constraint sqljson_deparse_check check (
                 JSON_QUERY(js::jsonb, '$.a' RETURNING char(5) OMIT QUOTES EMPTY ARRAY ON EMPTY) > 'a' COLLATE \"C\"
             )
@@ -10735,6 +10737,48 @@ fn sql_json_check_constraint_deparse_matches_pg_style() {
             "(JSON_QUERY((js)::jsonb, '$.\"a\"' RETURNING character(5) WITHOUT WRAPPER OMIT QUOTES EMPTY ARRAY ON EMPTY) > ('a'::bpchar COLLATE \"C\"))"
                 .into(),
         )]],
+    );
+    assert_query_rows(
+        session
+            .execute(
+                &db,
+                "select conname, pg_get_expr(conbin, conrelid)
+                   from pg_constraint
+                  where conname like 'sqljson_deparse_is_json%'
+                  order by conname",
+            )
+            .unwrap(),
+        vec![
+            vec![
+                Value::Text("sqljson_deparse_is_json".into()),
+                Value::Text("js IS JSON".into()),
+            ],
+            vec![
+                Value::Text("sqljson_deparse_is_json_unique".into()),
+                Value::Text("js IS JSON OBJECT WITH UNIQUE KEYS".into()),
+            ],
+        ],
+    );
+    assert_query_rows(
+        session
+            .execute(
+                &db,
+                "select constraint_name, check_clause
+                   from information_schema.check_constraints
+                  where constraint_name like 'sqljson_deparse_is_json%'
+                  order by constraint_name",
+            )
+            .unwrap(),
+        vec![
+            vec![
+                Value::Text("sqljson_deparse_is_json".into()),
+                Value::Text("(js IS JSON)".into()),
+            ],
+            vec![
+                Value::Text("sqljson_deparse_is_json_unique".into()),
+                Value::Text("(js IS JSON OBJECT WITH UNIQUE KEYS)".into()),
+            ],
+        ],
     );
 }
 
