@@ -13310,6 +13310,7 @@ impl Session {
             name: cte.name.clone(),
             location: cte.location,
             column_names: cte.column_names.clone(),
+            materialization: cte.materialization,
             body: match &cte.body {
                 CteBody::Select(select) => {
                     CteBody::Select(Box::new(Self::substitute_select_statement(select, subst)?))

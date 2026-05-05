@@ -12,8 +12,8 @@ use pgrust_catalog_data::pg_proc::builtin_aggregate_function_for_proc_oid;
 use pgrust_nodes::datum::Value;
 use pgrust_nodes::parsenodes::ParseError;
 use pgrust_nodes::parsenodes::{
-    JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RecursiveUnionQuery, SetOperationQuery,
-    SqlType, SqlTypeKind, TableSampleClause,
+    JoinTreeNode, Query, QueryCte, QueryWithClause, RangeTblEntry, RangeTblEntryKind,
+    RecursiveUnionQuery, SetOperationQuery, SqlType, SqlTypeKind, TableSampleClause,
 };
 use pgrust_nodes::primnodes::{
     AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, CaseExpr, CaseWhen,
@@ -64,6 +64,7 @@ fn const_value_is_sql_not_null(value: &Value) -> bool {
 fn simplify_query(query: Query) -> Result<Query, ParseError> {
     Ok(Query {
         command_type: query.command_type,
+        with_clause: query.with_clause.map(simplify_with_clause).transpose()?,
         depends_on_row_security: query.depends_on_row_security,
         rtable: query
             .rtable
@@ -258,6 +259,22 @@ fn simplify_recursive_union(query: RecursiveUnionQuery) -> Result<RecursiveUnion
         distinct: query.distinct,
         recursive_references_worktable: query.recursive_references_worktable,
         worktable_id: query.worktable_id,
+    })
+}
+
+fn simplify_with_clause(query: QueryWithClause) -> Result<QueryWithClause, ParseError> {
+    Ok(QueryWithClause {
+        ctes: query
+            .ctes
+            .into_iter()
+            .map(|cte| {
+                Ok(QueryCte {
+                    query: Box::new(simplify_query(*cte.query)?),
+                    ..cte
+                })
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?,
+        ..query
     })
 }
 

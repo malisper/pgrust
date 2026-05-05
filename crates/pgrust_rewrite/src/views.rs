@@ -16,10 +16,11 @@ use pgrust_nodes::CommandType;
 use pgrust_nodes::builtins::proc_oid_for_builtin_scalar_function;
 use pgrust_nodes::datum::{IntervalValue, Value};
 use pgrust_nodes::parsenodes::{
-    JoinTreeNode, ParseError, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
-    SelectStatement, SetOperator, SqlType, SqlTypeKind, Statement, SubqueryComparisonOp,
-    TableSampleClause, UnsupportedStatement, ViewCheckOption, WindowFrameExclusion,
-    WindowFrameMode, XmlOption, XmlRootVersion, XmlStandalone,
+    CteMaterialization, JoinTreeNode, ParseError, Query, QueryWithClause, RangeTblEntry,
+    RangeTblEntryKind, RangeTblEref, RawTypeName, SelectStatement, SetOperator, SqlExpr, SqlType,
+    SqlTypeKind, Statement, SubqueryComparisonOp, TableSampleClause, UnsupportedStatement,
+    ViewCheckOption, WindowFrameExclusion, WindowFrameMode, XmlOption, XmlRootVersion,
+    XmlStandalone,
 };
 use pgrust_nodes::primnodes::{
     Aggref, BoolExprType, BuiltinScalarFunction, CaseExpr, Expr, FuncExpr, JoinType, OpExpr,
@@ -50,6 +51,8 @@ struct ViewDeparseContext<'a> {
     outer_namespaces: Vec<ViewDeparseNamespace>,
     options: ViewDeparseOptions,
     namespace: ViewDeparseNamespace,
+    cte_names: HashMap<usize, String>,
+    worktable_names: HashMap<usize, String>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -75,12 +78,20 @@ struct RteDeparseName {
 }
 
 impl ViewDeparseNamespace {
-    fn build(query: &Query, catalog: &dyn CatalogLookup, inherited_used_names: &[String]) -> Self {
+    fn build(
+        query: &Query,
+        catalog: &dyn CatalogLookup,
+        inherited_used_names: &[String],
+        cte_names: &HashMap<usize, String>,
+        worktable_names: &HashMap<usize, String>,
+    ) -> Self {
         let mut used_names = inherited_used_names.to_vec();
         let mut names = HashMap::new();
         for (index, rte) in query.rtable.iter().enumerate() {
             let rtindex = index + 1;
-            let Some(candidate) = rte_deparse_name_candidate(rte, catalog) else {
+            let Some(candidate) =
+                rte_deparse_name_candidate(rte, catalog, cte_names, worktable_names)
+            else {
                 continue;
             };
             let collides = deparse_name_is_used(&used_names, &candidate);
@@ -559,7 +570,12 @@ where
     }
 }
 
-fn rte_deparse_name_candidate(rte: &RangeTblEntry, catalog: &dyn CatalogLookup) -> Option<String> {
+fn rte_deparse_name_candidate(
+    rte: &RangeTblEntry,
+    catalog: &dyn CatalogLookup,
+    cte_names: &HashMap<usize, String>,
+    worktable_names: &HashMap<usize, String>,
+) -> Option<String> {
     match &rte.kind {
         RangeTblEntryKind::Relation { .. } if rte.alias_is_user_defined => rte.alias.clone(),
         RangeTblEntryKind::Relation { relation_oid, .. } => catalog
@@ -569,11 +585,16 @@ fn rte_deparse_name_candidate(rte: &RangeTblEntry, catalog: &dyn CatalogLookup) 
         | RangeTblEntryKind::Subquery { .. }
         | RangeTblEntryKind::Values { .. }
         | RangeTblEntryKind::Function { .. } => rte.alias.clone(),
-        RangeTblEntryKind::Cte { .. } => rte
+        RangeTblEntryKind::Cte { cte_id, .. } => rte
             .alias
             .clone()
+            .or_else(|| cte_names.get(cte_id).cloned())
             .or_else(|| Some(rte.eref.aliasname.clone())),
-        RangeTblEntryKind::WorkTable { .. } => Some(rte.eref.aliasname.clone()),
+        RangeTblEntryKind::WorkTable { worktable_id } => rte
+            .alias
+            .clone()
+            .or_else(|| worktable_names.get(worktable_id).cloned())
+            .or_else(|| Some(rte.eref.aliasname.clone())),
         RangeTblEntryKind::Result => None,
     }
 }
@@ -581,7 +602,9 @@ fn rte_deparse_name_candidate(rte: &RangeTblEntry, catalog: &dyn CatalogLookup) 
 fn rte_deparse_name_needs_alias(rte: &RangeTblEntry, collides: bool) -> bool {
     match rte.kind {
         RangeTblEntryKind::Relation { .. } => rte.alias_is_user_defined || collides,
-        RangeTblEntryKind::Cte { .. } | RangeTblEntryKind::WorkTable { .. } => collides,
+        RangeTblEntryKind::Cte { .. } | RangeTblEntryKind::WorkTable { .. } => {
+            rte.alias_is_user_defined || collides
+        }
         _ => rte.alias.is_some(),
     }
 }
@@ -663,17 +686,31 @@ impl<'a> ViewDeparseContext<'a> {
         catalog: &'a dyn CatalogLookup,
         options: ViewDeparseOptions,
     ) -> Self {
+        let cte_names = collect_cte_names(query);
+        let worktable_names = collect_worktable_names(query);
         Self {
             catalog,
             query,
             outers: Vec::new(),
             outer_namespaces: Vec::new(),
             options,
-            namespace: ViewDeparseNamespace::build(query, catalog, &[]),
+            namespace: ViewDeparseNamespace::build(
+                query,
+                catalog,
+                &[],
+                &cte_names,
+                &worktable_names,
+            ),
+            cte_names,
+            worktable_names,
         }
     }
 
     fn child(&self, query: &'a Query) -> Self {
+        let mut cte_names = self.cte_names.clone();
+        collect_cte_names_into(query, &mut cte_names);
+        let mut worktable_names = self.worktable_names.clone();
+        collect_worktable_names_into(query, &mut worktable_names);
         let mut outers = Vec::with_capacity(self.outers.len() + 1);
         outers.push(self.query);
         outers.extend(self.outers.iter().copied());
@@ -686,7 +723,15 @@ impl<'a> ViewDeparseContext<'a> {
             outers,
             outer_namespaces,
             options: self.options,
-            namespace: ViewDeparseNamespace::build(query, self.catalog, &self.namespace.used_names),
+            namespace: ViewDeparseNamespace::build(
+                query,
+                self.catalog,
+                &self.namespace.used_names,
+                &cte_names,
+                &worktable_names,
+            ),
+            cte_names,
+            worktable_names,
         }
     }
 
@@ -716,8 +761,58 @@ impl<'a> ViewDeparseContext<'a> {
                 .outer_namespaces
                 .get(var.varlevelsup.saturating_sub(1))
                 .cloned()
-                .unwrap_or_else(|| ViewDeparseNamespace::build(query, self.catalog, &[])),
+                .unwrap_or_else(|| {
+                    ViewDeparseNamespace::build(
+                        query,
+                        self.catalog,
+                        &[],
+                        &self.cte_names,
+                        &self.worktable_names,
+                    )
+                }),
+            cte_names: self.cte_names.clone(),
+            worktable_names: self.worktable_names.clone(),
         })
+    }
+
+    fn cte_name(&self, cte_id: usize) -> Option<&str> {
+        self.cte_names.get(&cte_id).map(String::as_str)
+    }
+
+    fn worktable_name(&self, worktable_id: usize) -> Option<&str> {
+        self.worktable_names.get(&worktable_id).map(String::as_str)
+    }
+}
+
+fn collect_cte_names(query: &Query) -> HashMap<usize, String> {
+    let mut names = HashMap::new();
+    collect_cte_names_into(query, &mut names);
+    names
+}
+
+fn collect_cte_names_into(query: &Query, names: &mut HashMap<usize, String>) {
+    if let Some(with_clause) = &query.with_clause {
+        for cte in &with_clause.ctes {
+            names.insert(cte.cte_id, cte.name.clone());
+            collect_cte_names_into(&cte.query, names);
+        }
+    }
+}
+
+fn collect_worktable_names(query: &Query) -> HashMap<usize, String> {
+    let mut names = HashMap::new();
+    collect_worktable_names_into(query, &mut names);
+    names
+}
+
+fn collect_worktable_names_into(query: &Query, names: &mut HashMap<usize, String>) {
+    if let Some(with_clause) = &query.with_clause {
+        for cte in &with_clause.ctes {
+            if let Some(recursive_union) = &cte.query.recursive_union {
+                names.insert(recursive_union.worktable_id, cte.name.clone());
+            }
+            collect_worktable_names_into(&cte.query, names);
+        }
     }
 }
 
@@ -745,14 +840,6 @@ fn return_rule_row(
             actual: format!("multiple rewrite rules for view {display_name}"),
         }),
     }
-}
-
-fn return_rule_sql(
-    catalog: &dyn CatalogLookup,
-    relation_oid: u32,
-    display_name: &str,
-) -> Result<String, ParseError> {
-    Ok(return_rule_row(catalog, relation_oid, display_name)?.ev_action)
 }
 
 pub fn split_stored_view_definition_sql(sql: &str) -> (&str, ViewCheckOption) {
@@ -809,90 +896,9 @@ fn format_view_definition_with_options(
     catalog: &dyn CatalogLookup,
     options: ViewDeparseOptions,
 ) -> Result<String, ParseError> {
-    let display_name = view_display_name(relation_oid, None);
-    if let Ok(row) = return_rule_row(catalog, relation_oid, &display_name) {
-        if let Some(rendered) = format_special_cte_view_definition(&row.ev_action) {
-            return Ok(rendered);
-        }
-        let (body, _) = split_stored_view_definition_sql(&row.ev_action);
-        if body.trim_start().to_ascii_lowercase().starts_with("with ") {
-            return Ok(format!(" {};", body.trim()));
-        }
-    }
     let query = load_view_return_query(relation_oid, relation_desc, None, catalog, &[])?;
     let ctx = ViewDeparseContext::root_with_options(&query, catalog, options);
     Ok(render_query(&ctx))
-}
-
-fn format_special_cte_view_definition(sql: &str) -> Option<String> {
-    let (sql, check_option) = split_stored_view_definition_sql(sql);
-    if check_option != ViewCheckOption::None {
-        return None;
-    }
-    let compact = sql
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    let rowtypes_bug_18077 = "with cte(c) as materialized (select row(1, 2)), cte2(c) as (select * from cte) select 1 as one from cte2 as t where (select * from (select c as c1) s where (select (c1).f1 > 0)) is not null";
-    if compact == rowtypes_bug_18077 {
-        // :HACK: pg_rewrite currently stores view SQL text, while PostgreSQL
-        // stores analyzed query trees with CTE names/materialization metadata.
-        // Preserve the rowtypes bug-18077 CTE deparse shape until Query carries
-        // enough WITH-clause provenance to render this generically.
-        return Some(
-            [
-                "WITH cte(c) AS MATERIALIZED (",
-                "         SELECT ROW(1, 2) AS \"row\"",
-                "        ), cte2(c) AS (",
-                "         SELECT cte.c",
-                "           FROM cte",
-                "        )",
-                " SELECT 1 AS one",
-                "   FROM cte2 t",
-                "  WHERE (( SELECT s.c1",
-                "           FROM ( SELECT t.c AS c1) s",
-                "          WHERE ( SELECT (s.c1).f1 > 0))) IS NOT NULL;",
-            ]
-            .join("\n"),
-        );
-    }
-    let fieldselect_join = "with cte as materialized (select r from (values(1,2),(3,4)) r) select (r).column2 as col_a, (rr).column2 as col_b from cte join (select rr from (values(1,7),(3,8)) rr limit 2) ss on (r).column1 = (rr).column1";
-    if compact == fieldselect_join {
-        // :HACK: same CTE metadata gap as above; keep this constrained to the
-        // PostgreSQL regression's FieldSelect coverage.
-        return Some(
-            [
-                "WITH cte AS MATERIALIZED (",
-                "        SELECT r.*::record AS r",
-                "          FROM ( VALUES (1,2), (3,4)) r",
-                "       )",
-                " SELECT (cte.r).column2 AS col_a,",
-                "    (ss.rr).column2 AS col_b",
-                "   FROM cte",
-                "     JOIN ( SELECT rr.*::record AS rr",
-                "           FROM ( VALUES (1,7), (3,8)) rr",
-                "         LIMIT 2) ss ON (cte.r).column1 = (ss.rr).column1;",
-            ]
-            .join("\n"),
-        );
-    }
-    let keyword_cte =
-        "with cte as materialized (select pg_get_keywords() k) select (k).word from cte";
-    if compact == keyword_cte {
-        // :HACK: same CTE metadata gap as above.
-        return Some(
-            [
-                "WITH cte AS MATERIALIZED (",
-                "        SELECT pg_get_keywords() AS k",
-                "       )",
-                " SELECT (k).word AS word",
-                "   FROM cte;",
-            ]
-            .join("\n"),
-        );
-    }
-    None
 }
 
 pub fn render_view_query_sql(query: &Query, catalog: &dyn CatalogLookup) -> String {
@@ -954,6 +960,7 @@ fn render_relation_expr_sql_with_options(
 ) -> String {
     let query = Query {
         command_type: CommandType::Select,
+        with_clause: None,
         depends_on_row_security: false,
         rtable: vec![RangeTblEntry {
             alias: None,
@@ -1107,8 +1114,26 @@ pub fn refresh_query_relation_descriptors(query: &mut Query, catalog: &dyn Catal
             }
             continue;
         }
-        if let RangeTblEntryKind::Subquery { query: subquery } = &mut rte.kind {
+        if let RangeTblEntryKind::Subquery { query: subquery }
+        | RangeTblEntryKind::Cte {
+            query: subquery, ..
+        } = &mut rte.kind
+        {
             refresh_query_relation_descriptors(subquery, catalog);
+        }
+    }
+    if let Some(with_clause) = &mut query.with_clause {
+        for cte in &mut with_clause.ctes {
+            refresh_query_relation_descriptors(&mut cte.query, catalog);
+        }
+    }
+    if let Some(recursive_union) = &mut query.recursive_union {
+        refresh_query_relation_descriptors(&mut recursive_union.anchor, catalog);
+        refresh_query_relation_descriptors(&mut recursive_union.recursive, catalog);
+    }
+    if let Some(set_operation) = &mut query.set_operation {
+        for input in &mut set_operation.inputs {
+            refresh_query_relation_descriptors(input, catalog);
         }
     }
     if let Some(jointree) = &mut query.jointree {
@@ -1785,16 +1810,201 @@ fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
 }
 
 fn render_query(ctx: &ViewDeparseContext<'_>) -> String {
+    render_query_with_output_names(ctx, None)
+}
+
+fn render_query_with_output_names(
+    ctx: &ViewDeparseContext<'_>,
+    output_names: Option<&[String]>,
+) -> String {
+    let body = render_query_body_with_output_names(ctx, output_names);
+    if let Some(with_clause) = &ctx.query.with_clause {
+        let mut rendered = render_with_clause(ctx, with_clause);
+        rendered.push('\n');
+        rendered.push_str(&body);
+        rendered
+    } else {
+        body
+    }
+}
+
+fn render_query_body_with_output_names(
+    ctx: &ViewDeparseContext<'_>,
+    output_names: Option<&[String]>,
+) -> String {
+    if let Some(recursive_union) = &ctx.query.recursive_union {
+        return render_recursive_union_query(ctx, recursive_union);
+    }
     if let Some(set_operation) = &ctx.query.set_operation {
         return render_set_operation_query(ctx, set_operation);
     }
-    if let Some(values_sql) = render_top_level_values_query(ctx) {
+    if let Some(values_sql) = render_top_level_values_query(ctx, output_names) {
         return values_sql;
     }
-    render_plain_query(ctx, None)
+    render_plain_query(ctx, output_names)
 }
 
-fn render_top_level_values_query(ctx: &ViewDeparseContext<'_>) -> Option<String> {
+fn render_with_clause(ctx: &ViewDeparseContext<'_>, with_clause: &QueryWithClause) -> String {
+    let mut lines = Vec::new();
+    for (index, cte) in with_clause.ctes.iter().enumerate() {
+        let prefix = if index == 0 {
+            if with_clause.recursive {
+                " WITH RECURSIVE "
+            } else {
+                " WITH "
+            }
+        } else {
+            "      "
+        };
+        let materialization = match cte.materialization {
+            CteMaterialization::Default => "",
+            CteMaterialization::Materialized => "MATERIALIZED ",
+            CteMaterialization::NotMaterialized => "NOT MATERIALIZED ",
+        };
+        let column_names = render_cte_column_names(&cte.explicit_column_names);
+        let mut cte_lines = vec![format!(
+            "{prefix}{}{} AS {materialization}(",
+            quote_identifier_if_needed(&cte.name),
+            column_names
+        )];
+        let child = ctx.child(&cte.query);
+        cte_lines.push(render_query(&child).trim_end_matches(';').to_string());
+        let mut closing = "        )".to_string();
+        if let Some(search) = &cte.search {
+            closing.push_str(&format!(
+                " SEARCH {} FIRST BY {} SET {}",
+                if search.breadth_first {
+                    "BREADTH"
+                } else {
+                    "DEPTH"
+                },
+                search
+                    .columns
+                    .iter()
+                    .map(|column| quote_identifier_if_needed(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                quote_identifier_if_needed(&search.sequence_column)
+            ));
+        }
+        if let Some(cycle) = &cte.cycle {
+            closing.push_str(&render_cte_cycle_clause(cycle));
+        }
+        cte_lines.push(closing);
+        if index + 1 != with_clause.ctes.len()
+            && let Some(last) = cte_lines.last_mut()
+        {
+            last.push(',');
+        }
+        lines.extend(cte_lines);
+    }
+    lines.join("\n")
+}
+
+fn render_cte_column_names(column_names: &[String]) -> String {
+    if column_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "({})",
+            column_names
+                .iter()
+                .map(|column| quote_identifier_if_needed(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn render_cte_cycle_clause(cycle: &pgrust_nodes::parsenodes::QueryCteCycleClause) -> String {
+    let mut rendered = format!(
+        " CYCLE {} SET {}",
+        cycle
+            .columns
+            .iter()
+            .map(|column| quote_identifier_if_needed(column))
+            .collect::<Vec<_>>()
+            .join(", "),
+        quote_identifier_if_needed(&cycle.mark_column)
+    );
+    if let (Some(mark), Some(default)) = (&cycle.mark_value, &cycle.default_value) {
+        rendered.push_str(" TO ");
+        rendered.push_str(&render_cte_clause_sql_expr(mark, cycle.mark_type));
+        rendered.push_str(" DEFAULT ");
+        rendered.push_str(&render_cte_clause_sql_expr(default, cycle.mark_type));
+    }
+    rendered.push_str(" USING ");
+    rendered.push_str(&quote_identifier_if_needed(&cycle.path_column));
+    rendered
+}
+
+fn render_cte_clause_sql_expr(expr: &SqlExpr, target_type: Option<SqlType>) -> String {
+    match expr {
+        SqlExpr::Const(Value::Bool(value)) => value.to_string(),
+        SqlExpr::Const(Value::Text(value)) => {
+            let rendered = format!("'{}'", value.replace('\'', "''"));
+            if let Some(target_type) = target_type {
+                format!("{rendered}::{}", sql_type_name(target_type))
+            } else {
+                rendered
+            }
+        }
+        SqlExpr::IntegerLiteral(value) | SqlExpr::NumericLiteral(value) => value.clone(),
+        SqlExpr::Column(name) => quote_identifier_if_needed(name),
+        SqlExpr::Cast(expr, ty) => {
+            format!(
+                "{}::{}",
+                render_cte_clause_sql_expr(expr, None),
+                render_raw_type_name(ty)
+            )
+        }
+        _ => "?".into(),
+    }
+}
+
+fn render_raw_type_name(ty: &RawTypeName) -> String {
+    match ty {
+        RawTypeName::Builtin(ty) => sql_type_name(*ty),
+        RawTypeName::Named { name, array_bounds } => {
+            format!("{name}{}", "[]".repeat(*array_bounds))
+        }
+        RawTypeName::Serial(kind) => format!("{kind:?}").to_ascii_lowercase(),
+        RawTypeName::Record => "record".into(),
+    }
+}
+
+fn render_recursive_union_query(
+    ctx: &ViewDeparseContext<'_>,
+    recursive_union: &pgrust_nodes::parsenodes::RecursiveUnionQuery,
+) -> String {
+    let output_names = ctx
+        .query
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| target.name.clone())
+        .collect::<Vec<_>>();
+    let op = if recursive_union.distinct {
+        "UNION"
+    } else {
+        "UNION ALL"
+    };
+    let anchor = render_query_with_output_names(
+        &ctx.child(&recursive_union.anchor),
+        Some(output_names.as_slice()),
+    )
+    .trim_end_matches(';')
+    .to_string();
+    let recursive = render_query(&ctx.child(&recursive_union.recursive))
+        .trim_end_matches(';')
+        .to_string();
+    format!("{anchor}\n        {op}\n{recursive};")
+}
+
+fn render_top_level_values_query(
+    ctx: &ViewDeparseContext<'_>,
+    output_names: Option<&[String]>,
+) -> Option<String> {
     if ctx.query.distinct
         || ctx.query.where_qual.is_some()
         || !ctx.query.group_by.is_empty()
@@ -1832,10 +2042,11 @@ fn render_top_level_values_query(ctx: &ViewDeparseContext<'_>) -> Option<String>
         let Expr::Var(var) = &target.expr else {
             return None;
         };
-        if var.varno != 1
-            || attrno_index(var.varattno) != Some(index)
-            || !target.name.eq_ignore_ascii_case(&column.name)
-        {
+        let target_name_matches = output_names
+            .and_then(|names| names.get(index))
+            .map(|name| target.name.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| target.name.eq_ignore_ascii_case(&column.name));
+        if var.varno != 1 || attrno_index(var.varattno) != Some(index) || !target_name_matches {
             return None;
         }
     }
@@ -2621,9 +2832,25 @@ fn render_rte(ctx: &ViewDeparseContext<'_>, index: usize) -> String {
         RangeTblEntryKind::Values { rows, .. } => render_values_rte(rows, rte, ctx, index),
         RangeTblEntryKind::Function { call } => render_function_rte(call, rte, ctx, index),
         RangeTblEntryKind::Result => "(RESULT)".into(),
-        RangeTblEntryKind::WorkTable { worktable_id } => format!("worktable {worktable_id}"),
+        RangeTblEntryKind::WorkTable { worktable_id } => {
+            let base = ctx
+                .worktable_name(*worktable_id)
+                .map(quote_identifier_if_needed)
+                .unwrap_or_else(|| format!("worktable {worktable_id}"));
+            if let Some(alias) = ctx.namespace.from_alias(index) {
+                format!("{base} {}", quote_identifier_if_needed(alias))
+            } else {
+                base
+            }
+        }
         RangeTblEntryKind::Cte { .. } => {
-            let base = quote_identifier_if_needed(&rte.eref.aliasname);
+            let base = match &rte.kind {
+                RangeTblEntryKind::Cte { cte_id, .. } => ctx
+                    .cte_name(*cte_id)
+                    .map(quote_identifier_if_needed)
+                    .unwrap_or_else(|| quote_identifier_if_needed(&rte.eref.aliasname)),
+                _ => unreachable!(),
+            };
             if let Some(alias) = ctx.namespace.from_alias(index) {
                 format!("{base} {}", quote_identifier_if_needed(alias))
             } else {
@@ -3787,7 +4014,7 @@ fn render_set_operation_query(
         let mut child = ctx.child(input);
         child.options.suppress_implicit_const_casts = true;
         let branch_output_names = (index == 0).then_some(output_names.as_slice());
-        let rendered = render_plain_query(&child, branch_output_names)
+        let rendered = render_query_with_output_names(&child, branch_output_names)
             .trim_end_matches(';')
             .to_string();
         if index == 0 {

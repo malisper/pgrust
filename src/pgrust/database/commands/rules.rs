@@ -2951,6 +2951,20 @@ fn substitute_rule_query(mut query: Query, old_values: &[Value], new_values: &[V
         .into_iter()
         .map(|item| substitute_rule_sort_group(item, old_values, new_values))
         .collect();
+    query.with_clause =
+        query.with_clause.map(
+            |with_clause| crate::include::nodes::parsenodes::QueryWithClause {
+                ctes: with_clause
+                    .ctes
+                    .into_iter()
+                    .map(|cte| crate::include::nodes::parsenodes::QueryCte {
+                        query: Box::new(substitute_rule_query(*cte.query, old_values, new_values)),
+                        ..cte
+                    })
+                    .collect(),
+                ..with_clause
+            },
+        );
     query.recursive_union = query.recursive_union.map(|union| {
         Box::new(crate::include::nodes::parsenodes::RecursiveUnionQuery {
             anchor: substitute_rule_query(union.anchor, old_values, new_values),

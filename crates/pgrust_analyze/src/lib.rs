@@ -4283,12 +4283,104 @@ fn bind_ctes(
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<Vec<BoundCte>, ParseError> {
+    bind_ctes_with_metadata(
+        with_recursive,
+        ctes,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        outer_ctes,
+        expanded_views,
+    )
+    .map(|bound| bound.ctes)
+}
+
+struct BoundCteSet {
+    ctes: Vec<BoundCte>,
+    with_clause: Option<QueryWithClause>,
+}
+
+fn query_columns_from_desc(desc: &RelationDesc) -> Vec<QueryColumn> {
+    desc.columns
+        .iter()
+        .map(|column| QueryColumn {
+            name: column.name.clone(),
+            sql_type: column.sql_type,
+            wire_type_oid: None,
+        })
+        .collect()
+}
+
+fn worktable_identity_query(worktable_id: usize, output_columns: &[QueryColumn]) -> Query {
+    let worktable_plan = AnalyzedFrom::worktable(worktable_id, output_columns.to_vec());
+    Query {
+        command_type: pgrust_nodes::CommandType::Select,
+        with_clause: None,
+        depends_on_row_security: false,
+        rtable: worktable_plan.rtable,
+        jointree: worktable_plan.jointree,
+        target_list: identity_target_list(output_columns, &worktable_plan.output_exprs),
+        distinct: false,
+        distinct_on: Vec::new(),
+        where_qual: None,
+        group_by: Vec::new(),
+        group_by_refs: Vec::new(),
+        grouping_sets: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        sort_clause: Vec::new(),
+        constraint_deps: Vec::new(),
+        limit_count: None,
+        limit_offset: None,
+        locking_clause: None,
+        locking_targets: Vec::new(),
+        locking_nowait: false,
+        row_marks: Vec::new(),
+        has_target_srfs: false,
+        recursive_union: None,
+        set_operation: None,
+    }
+}
+
+fn recursive_union_wrapper_query(
+    output_desc: RelationDesc,
+    anchor: Query,
+    recursive: Query,
+    distinct: bool,
+    recursive_references_worktable: bool,
+    worktable_id: usize,
+) -> Query {
+    let output_columns = query_columns_from_desc(&output_desc);
+    let mut query = worktable_identity_query(worktable_id, &output_columns);
+    query.target_list = normalize_target_list(query.target_list);
+    query.recursive_union = Some(Box::new(RecursiveUnionQuery {
+        output_desc,
+        anchor,
+        recursive,
+        distinct,
+        recursive_references_worktable,
+        worktable_id,
+    }));
+    query
+}
+
+fn bind_ctes_with_metadata(
+    with_recursive: bool,
+    ctes: &[CommonTableExpr],
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<GroupedOuterScope>,
+    outer_ctes: &[BoundCte],
+    expanded_views: &[u32],
+) -> Result<BoundCteSet, ParseError> {
     let binding_order = if with_recursive {
         recursive_cte_binding_order(ctes)?
     } else {
         (0..ctes.len()).collect()
     };
     let mut bound_by_index = vec![None; ctes.len()];
+    let mut query_cte_by_index = vec![None; ctes.len()];
     for cte_index in binding_order {
         let cte = &ctes[cte_index];
         let cte_id = NEXT_CTE_ID.fetch_add(1, Ordering::Relaxed);
@@ -4326,7 +4418,7 @@ fn bind_ctes(
                 cte.name
             )));
         }
-        let (plan, desc) = match &cte.body {
+        let (plan, desc, deparse_query) = match &cte.body {
             CteBody::RecursiveUnion {
                 all,
                 left_nested,
@@ -4361,80 +4453,80 @@ fn bind_ctes(
                     &cte.column_names,
                 )?;
                 validate_cte_search_cycle_clauses(cte, &base_desc, catalog)?;
-                let (anchor_query, recursive_stmt, desc) =
-                    if cte.search.is_some() || cte.cycle.is_some() {
-                        validate_search_cycle_recursive_shape(
-                            &cte.name,
-                            *left_nested,
-                            anchor,
-                            recursive,
-                        )?;
-                        let (rewritten_anchor, rewritten_recursive) =
-                            rewrite_search_cycle_recursive_cte(cte, anchor, recursive, &base_desc)?;
-                        let (anchor_query, desc) = analyze_non_recursive_cte_body(
-                            &rewritten_anchor,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.clone(),
-                            &visible,
-                            expanded_views,
-                        )?;
-                        (anchor_query, rewritten_recursive, desc)
-                    } else {
-                        (base_anchor_query, (**recursive).clone(), base_desc)
-                    };
+                let source_anchor_query = base_anchor_query.clone();
+                let source_desc = base_desc.clone();
+                let has_search_cycle = cte.search.is_some() || cte.cycle.is_some();
+                let (anchor_query, recursive_stmt, desc) = if has_search_cycle {
+                    validate_search_cycle_recursive_shape(
+                        &cte.name,
+                        *left_nested,
+                        anchor,
+                        recursive,
+                    )?;
+                    let (rewritten_anchor, rewritten_recursive) =
+                        rewrite_search_cycle_recursive_cte(cte, anchor, recursive, &base_desc)?;
+                    let (anchor_query, desc) = analyze_non_recursive_cte_body(
+                        &rewritten_anchor,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer.clone(),
+                        &visible,
+                        expanded_views,
+                    )?;
+                    (anchor_query, rewritten_recursive, desc)
+                } else {
+                    (base_anchor_query, (**recursive).clone(), base_desc)
+                };
                 let recursive_references_worktable =
                     select_statement_references_table(&recursive_stmt, &cte.name);
                 let worktable_id = NEXT_WORKTABLE_ID.fetch_add(1, Ordering::Relaxed);
-                let output_columns = desc
-                    .columns
-                    .iter()
-                    .map(|column| QueryColumn {
-                        name: column.name.clone(),
-                        sql_type: column.sql_type,
-                        wire_type_oid: None,
-                    })
-                    .collect::<Vec<_>>();
-                let worktable_plan = AnalyzedFrom::worktable(worktable_id, output_columns.clone());
+                let output_columns = query_columns_from_desc(&desc);
+                let worktable_query = worktable_identity_query(worktable_id, &output_columns);
                 let mut recursive_visible = visible.clone();
                 recursive_visible.push(BoundCte {
                     name: cte.name.clone(),
                     cte_id,
-                    plan: Query {
-                        command_type: pgrust_nodes::CommandType::Select,
-                        depends_on_row_security: false,
-                        rtable: worktable_plan.rtable.clone(),
-                        jointree: worktable_plan.jointree.clone(),
-                        target_list: identity_target_list(
-                            &output_columns,
-                            &worktable_plan.output_exprs,
-                        ),
-                        distinct: false,
-                        distinct_on: Vec::new(),
-                        where_qual: None,
-                        group_by: Vec::new(),
-                        group_by_refs: Vec::new(),
-                        grouping_sets: Vec::new(),
-                        accumulators: Vec::new(),
-                        window_clauses: Vec::new(),
-                        having_qual: None,
-                        sort_clause: Vec::new(),
-                        constraint_deps: Vec::new(),
-                        limit_count: None,
-                        limit_offset: None,
-                        locking_clause: None,
-                        locking_targets: Vec::new(),
-                        locking_nowait: false,
-                        row_marks: Vec::new(),
-                        has_target_srfs: false,
-                        recursive_union: None,
-                        set_operation: None,
-                    },
+                    plan: worktable_query,
                     desc: desc.clone(),
                     self_reference: true,
                     worktable_id,
                 });
                 let recursive_outer_scopes = cte_body_outer_scopes(outer_scopes);
+                let deparse_query = if has_search_cycle {
+                    let source_output_columns = query_columns_from_desc(&desc);
+                    let source_worktable_query =
+                        worktable_identity_query(worktable_id, &source_output_columns);
+                    let mut source_recursive_visible = visible.clone();
+                    source_recursive_visible.push(BoundCte {
+                        name: cte.name.clone(),
+                        cte_id,
+                        plan: source_worktable_query,
+                        desc: desc.clone(),
+                        self_reference: true,
+                        worktable_id,
+                    });
+                    let source_recursive_references_worktable =
+                        select_statement_references_table(recursive, &cte.name);
+                    let (source_recursive_query, _) = analyze_select_query_with_outer(
+                        recursive,
+                        catalog,
+                        &recursive_outer_scopes,
+                        grouped_outer.clone(),
+                        current_visible_aggregate_scope().as_ref(),
+                        &source_recursive_visible,
+                        expanded_views,
+                    )?;
+                    Some(recursive_union_wrapper_query(
+                        source_desc.clone(),
+                        source_anchor_query,
+                        source_recursive_query,
+                        !*all,
+                        source_recursive_references_worktable,
+                        worktable_id,
+                    ))
+                } else {
+                    None
+                };
                 validate_recursive_term_target_operator_errors(
                     &recursive_stmt,
                     catalog,
@@ -4534,48 +4626,16 @@ fn bind_ctes(
                         ));
                     }
                 }
-                let recursive_plan = AnalyzedFrom::worktable(worktable_id, output_columns.clone());
-                let target_list = normalize_target_list(identity_target_list(
-                    &output_columns,
-                    &recursive_plan.output_exprs,
-                ));
-                (
-                    Query {
-                        command_type: pgrust_nodes::CommandType::Select,
-                        depends_on_row_security: false,
-                        rtable: recursive_plan.rtable,
-                        jointree: recursive_plan.jointree,
-                        target_list,
-                        distinct: false,
-                        distinct_on: Vec::new(),
-                        where_qual: None,
-                        group_by: Vec::new(),
-                        group_by_refs: Vec::new(),
-                        grouping_sets: Vec::new(),
-                        accumulators: Vec::new(),
-                        window_clauses: Vec::new(),
-                        having_qual: None,
-                        sort_clause: Vec::new(),
-                        constraint_deps: Vec::new(),
-                        limit_count: None,
-                        limit_offset: None,
-                        locking_clause: None,
-                        locking_targets: Vec::new(),
-                        locking_nowait: false,
-                        row_marks: Vec::new(),
-                        has_target_srfs: false,
-                        recursive_union: Some(Box::new(RecursiveUnionQuery {
-                            output_desc: desc.clone(),
-                            anchor: anchor_query,
-                            recursive: recursive_query,
-                            distinct: !*all,
-                            recursive_references_worktable,
-                            worktable_id,
-                        })),
-                        set_operation: None,
-                    },
-                    desc,
-                )
+                let plan = recursive_union_wrapper_query(
+                    desc.clone(),
+                    anchor_query,
+                    recursive_query,
+                    !*all,
+                    recursive_references_worktable,
+                    worktable_id,
+                );
+                let deparse_query = deparse_query.unwrap_or_else(|| plan.clone());
+                (plan, desc, deparse_query)
             }
             _ => {
                 let (query, desc) = analyze_non_recursive_cte_body(
@@ -4593,9 +4653,18 @@ fn bind_ctes(
                         non_recursive_cte_forward_reference_error(err, ctes, cte_index, &cte.body)
                     }
                 })?;
-                apply_cte_column_names(&cte.name, cte.location, query, desc, &cte.column_names)?
+                let (query, desc) = apply_cte_column_names(
+                    &cte.name,
+                    cte.location,
+                    query,
+                    desc,
+                    &cte.column_names,
+                )?;
+                (query.clone(), desc, query)
             }
         };
+        query_cte_by_index[cte_index] =
+            Some(query_cte_from_query(cte, cte_id, deparse_query, catalog)?);
         bound_by_index[cte_index] = Some(BoundCte {
             name: cte.name.clone(),
             cte_id,
@@ -4605,10 +4674,56 @@ fn bind_ctes(
             worktable_id: 0,
         });
     }
-    Ok(bound_by_index
+    let bound_ctes = bound_by_index
         .into_iter()
         .map(|bound| bound.expect("all CTEs are bound"))
-        .collect())
+        .collect::<Vec<_>>();
+    let with_clause = (!ctes.is_empty()).then(|| QueryWithClause {
+        recursive: with_recursive,
+        ctes: query_cte_by_index
+            .into_iter()
+            .map(|query_cte| query_cte.expect("all CTE metadata is bound"))
+            .collect(),
+    });
+    Ok(BoundCteSet {
+        ctes: bound_ctes,
+        with_clause,
+    })
+}
+
+fn query_cte_from_query(
+    raw: &CommonTableExpr,
+    cte_id: usize,
+    query: Query,
+    catalog: &dyn CatalogLookup,
+) -> Result<QueryCte, ParseError> {
+    let cycle = raw
+        .cycle
+        .as_ref()
+        .map(|cycle| {
+            Ok::<_, ParseError>(QueryCteCycleClause {
+                columns: cycle.columns.clone(),
+                mark_column: cycle.mark_column.clone(),
+                mark_value: cycle.mark_value.clone(),
+                default_value: cycle.default_value.clone(),
+                mark_type: Some(cte_cycle_mark_common_type(cycle, catalog)?),
+                path_column: cycle.path_column.clone(),
+            })
+        })
+        .transpose()?;
+    Ok(QueryCte {
+        name: raw.name.clone(),
+        cte_id,
+        explicit_column_names: raw.column_names.clone(),
+        materialization: raw.materialization,
+        search: raw.search.as_ref().map(|search| QueryCteSearchClause {
+            breadth_first: search.breadth_first,
+            columns: search.columns.clone(),
+            sequence_column: search.sequence_column.clone(),
+        }),
+        cycle,
+        query: Box::new(query),
+    })
 }
 
 fn non_recursive_cte_forward_reference_error(
@@ -5291,6 +5406,20 @@ fn validate_cte_cycle_clause_types(
     cycle: &CteCycleClause,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {
+    let common_type = cte_cycle_mark_common_type(cycle, catalog)?;
+    if !cycle_mark_type_has_equality(catalog, common_type) {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "could not identify an equality operator for type {}",
+            sql_type_name(common_type)
+        )));
+    }
+    Ok(())
+}
+
+fn cte_cycle_mark_common_type(
+    cycle: &CteCycleClause,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
     let scope = empty_scope();
     let outer_scopes = Vec::new();
     let mark_value = cycle_mark_value(cycle);
@@ -5307,13 +5436,7 @@ fn validate_cte_cycle_clause_types(
             cycle.location,
         )
     })?;
-    if !cycle_mark_type_has_equality(catalog, common_type) {
-        return Err(ParseError::FeatureNotSupportedMessage(format!(
-            "could not identify an equality operator for type {}",
-            sql_type_name(common_type)
-        )));
-    }
-    Ok(())
+    Ok(common_type)
 }
 
 fn cycle_mark_type_has_equality(catalog: &dyn CatalogLookup, sql_type: SqlType) -> bool {
@@ -7235,6 +7358,7 @@ pub fn bound_cte_from_materialized_rows(
         cte_id,
         plan: Query {
             command_type: pgrust_nodes::CommandType::Select,
+            with_clause: None,
             depends_on_row_security: false,
             rtable: plan.rtable,
             jointree: plan.jointree,
@@ -7287,6 +7411,7 @@ pub fn bound_cte_from_query_rows(
         cte_id,
         plan: Query {
             command_type: pgrust_nodes::CommandType::Select,
+            with_clause: None,
             depends_on_row_security: false,
             rtable: plan.rtable,
             jointree: plan.jointree,
@@ -7416,7 +7541,7 @@ fn bind_values_query_with_outer(
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
-    let local_ctes = bind_ctes(
+    let local_cte_set = bind_ctes_with_metadata(
         stmt.with_recursive,
         &stmt.with,
         catalog,
@@ -7425,6 +7550,8 @@ fn bind_values_query_with_outer(
         outer_ctes,
         expanded_views,
     )?;
+    let with_clause = local_cte_set.with_clause;
+    let local_ctes = local_cte_set.ctes;
     let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
     let limit_count = stmt
@@ -7489,6 +7616,7 @@ fn bind_values_query_with_outer(
     Ok((
         Query {
             command_type: pgrust_nodes::CommandType::Select,
+            with_clause,
             depends_on_row_security: false,
             rtable,
             jointree,
@@ -7556,7 +7684,7 @@ fn bind_select_query_with_outer(
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
     with_visible_aggregate_scope(visible_agg_scope.cloned(), || {
-        let local_ctes = bind_ctes(
+        let local_cte_set = bind_ctes_with_metadata(
             stmt.with_recursive,
             &stmt.with,
             catalog,
@@ -7565,6 +7693,8 @@ fn bind_select_query_with_outer(
             outer_ctes,
             expanded_views,
         )?;
+        let with_clause = local_cte_set.with_clause;
+        let local_ctes = local_cte_set.ctes;
         let mut visible_ctes = local_ctes.clone();
         visible_ctes.extend_from_slice(outer_ctes);
         let limit_count = stmt
@@ -7602,6 +7732,7 @@ fn bind_select_query_with_outer(
                 grouped_outer,
                 limit_count,
                 limit_offset,
+                with_clause,
                 &visible_ctes,
                 expanded_views,
             );
@@ -8572,6 +8703,7 @@ fn bind_select_query_with_outer(
 
                         let mut query = Query {
                             command_type: pgrust_nodes::CommandType::Select,
+                            with_clause: with_clause.clone(),
                             depends_on_row_security: false,
                             rtable: base.rtable,
                             jointree: base.jointree,
@@ -8683,6 +8815,7 @@ fn bind_select_query_with_outer(
                     }
                     let mut query = Query {
                         command_type: pgrust_nodes::CommandType::Select,
+                        with_clause: with_clause.clone(),
                         depends_on_row_security: false,
                         rtable: base.rtable,
                         jointree: base.jointree,
@@ -9003,6 +9136,7 @@ fn bind_set_operation_query_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     limit_count: Option<Expr>,
     limit_offset: Option<Expr>,
+    with_clause: Option<QueryWithClause>,
     visible_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
@@ -9193,6 +9327,7 @@ fn bind_set_operation_query_with_outer(
     Ok((
         Query {
             command_type: pgrust_nodes::CommandType::Select,
+            with_clause,
             depends_on_row_security: false,
             rtable: Vec::new(),
             jointree: None,

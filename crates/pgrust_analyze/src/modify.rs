@@ -2089,6 +2089,7 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
     } = input;
     Query {
         command_type: CommandType::Select,
+        with_clause: None,
         depends_on_row_security: false,
         rtable,
         jointree,

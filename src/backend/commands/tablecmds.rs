@@ -12633,6 +12633,7 @@ fn execute_insert_project_set_row(
         .collect::<Vec<_>>();
     let query = crate::include::nodes::parsenodes::Query {
         command_type: CommandType::Select,
+        with_clause: None,
         depends_on_row_security: false,
         rtable: Vec::new(),
         jointree: None,

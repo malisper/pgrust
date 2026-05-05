@@ -3637,11 +3637,10 @@ fn validate_replaced_proc_signature(
 }
 
 fn select_query_requires_original_view_sql(query: &SelectStatement) -> bool {
-    !query.with.is_empty()
-        || query
-            .from
-            .as_ref()
-            .is_some_and(from_item_requires_original_view_sql)
+    query
+        .from
+        .as_ref()
+        .is_some_and(from_item_requires_original_view_sql)
         || query.set_operation.as_ref().is_some_and(|setop| {
             setop
                 .inputs
@@ -7279,10 +7278,10 @@ impl Database {
         let reparse_view_sql_at_runtime =
             select_query_references_pg_stat_all_tables(&create_stmt.query);
         let canonical_sql = if select_query_requires_original_view_sql(&create_stmt.query) {
-            // :HACK: The analyzed `Query` does not yet retain enough CTE
-            // and table-function alias structure to deparse every stored view
-            // safely. Keep the original SELECT text for those shapes while the
-            // display deparser remains free to render PostgreSQL-style SQL.
+            // :HACK: The analyzed `Query` does not yet retain enough
+            // table-function alias structure to deparse every stored view
+            // safely. Keep the original SELECT text for those shapes while
+            // the display deparser remains free to render PostgreSQL-style SQL.
             create_stmt
                 .query_sql
                 .trim()

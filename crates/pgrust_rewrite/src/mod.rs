@@ -29,7 +29,9 @@ pub use views::{
 
 use pgrust_analyze::CatalogLookup;
 use pgrust_nodes::parsenodes::ParseError;
-use pgrust_nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
+use pgrust_nodes::parsenodes::{
+    JoinTreeNode, Query, QueryCte, QueryWithClause, RangeTblEntry, RangeTblEntryKind,
+};
 use pgrust_nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, GroupingFuncExpr, GroupingKeyExpr,
     RelationPrivilegeRequirement, RowsFromItem, RowsFromSource, SetReturningCall, SetReturningExpr,
@@ -135,6 +137,29 @@ fn rewrite_query(
                 rewrite_sort_group_clause(clause, catalog, expanded_views, active_policy_relations)
             })
             .collect::<Result<Vec<_>, _>>()?,
+        with_clause: query
+            .with_clause
+            .map(|with_clause| {
+                Ok(QueryWithClause {
+                    ctes: with_clause
+                        .ctes
+                        .into_iter()
+                        .map(|cte| {
+                            Ok(QueryCte {
+                                query: Box::new(rewrite_query(
+                                    *cte.query,
+                                    catalog,
+                                    expanded_views,
+                                    active_policy_relations,
+                                )?),
+                                ..cte
+                            })
+                        })
+                        .collect::<Result<Vec<_>, ParseError>>()?,
+                    ..with_clause
+                })
+            })
+            .transpose()?,
         has_target_srfs: query.has_target_srfs,
         recursive_union: query
             .recursive_union

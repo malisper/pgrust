@@ -969,6 +969,7 @@ mod tests {
     fn query_for_jointree(jointree: JoinTreeNode, rtable: Vec<RangeTblEntry>) -> Query {
         Query {
             command_type: CommandType::Select,
+            with_clause: None,
             depends_on_row_security: false,
             rtable,
             jointree: Some(jointree),
@@ -1070,6 +1071,7 @@ mod tests {
             comparison: None,
             subselect: Box::new(Query {
                 command_type: CommandType::Select,
+                with_clause: None,
                 depends_on_row_security: false,
                 rtable: Vec::new(),
                 jointree: None,

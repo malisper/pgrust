@@ -4584,6 +4584,7 @@ fn analyze_sql_function_target_only_body(
     let BoundSelectTargets::Plain(targets) = bound_targets;
     Ok(Some(Query {
         command_type: pgrust_nodes::CommandType::Select,
+        with_clause: None,
         depends_on_row_security: false,
         rtable: Vec::new(),
         jointree: None,
