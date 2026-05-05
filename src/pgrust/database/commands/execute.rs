@@ -47,6 +47,16 @@ fn normalize_direct_guc_name(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn unsupported_select_is_trailing_set_operator(sql: &str) -> bool {
+    sql.trim()
+        .trim_end_matches(';')
+        .trim_end()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .last()
+        .is_some_and(|token| matches!(token, "union" | "intersect" | "except"))
+}
+
 fn parse_direct_bool_guc(value: &str) -> Option<bool> {
     match value
         .trim()
@@ -2827,6 +2837,17 @@ impl Database {
                         crate::backend::parser::security_label_provider_error(
                             &unsupported_stmt.sql,
                         ),
+                    ));
+                }
+                if unsupported_stmt.feature == "SELECT form"
+                    && unsupported_select_is_trailing_set_operator(&unsupported_stmt.sql)
+                {
+                    return Err(ExecError::Parse(
+                        ParseError::UnexpectedToken {
+                            expected: "statement",
+                            actual: "syntax error at or near \";\"".into(),
+                        }
+                        .with_position(unsupported_stmt.sql.chars().count() + 1),
                     ));
                 }
                 if unsupported_stmt.feature == "ALTER TABLE form" {

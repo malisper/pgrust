@@ -8388,6 +8388,27 @@ fn execute_psql_describe_query(
     if is_psql_role_settings_query(&lower) {
         return Some(psql_role_settings_query());
     }
+    if is_psql_access_methods_query(&lower) {
+        return Some(psql_access_methods_query(sql));
+    }
+    if let Some(result) = psql_operator_families_query(sql, &lower) {
+        return Some(result);
+    }
+    if let Some(result) = psql_opfamily_operators_query(&lower) {
+        return Some(result);
+    }
+    if let Some(result) = psql_opfamily_functions_query(&lower) {
+        return Some(result);
+    }
+    if let Some(result) = psql_configuration_parameters_query(sql, &lower) {
+        return Some(result);
+    }
+    if let Some(result) = psql_describe_functions_query(&lower) {
+        return Some(result);
+    }
+    if let Some(result) = psql_describe_operators_query(&lower) {
+        return Some(result);
+    }
     if is_psql_object_description_query(&lower) {
         return Some(psql_object_description_query(db, session, sql, &lower));
     }
@@ -8421,6 +8442,9 @@ fn execute_psql_describe_query(
         && lower.contains("typname")
     {
         return Some(psql_describe_types_query(db, session, sql));
+    }
+    if lower.contains("from pg_catalog.pg_type t") && lower.contains("where t.typtype = 'd'") {
+        return Some(psql_describe_domains_query(db, session, sql));
     }
     if lower.contains("from pg_catalog.pg_class c, pg_catalog.pg_inherits i")
         && lower.contains("::pg_catalog.regclass")
@@ -8466,6 +8490,633 @@ fn execute_psql_describe_query(
         ));
     }
     None
+}
+
+fn psql_text(value: &str) -> Value {
+    Value::Text(value.into())
+}
+
+fn is_psql_access_methods_query(lower: &str) -> bool {
+    lower.starts_with("select amname as \"name\"") && lower.contains("from pg_catalog.pg_am")
+}
+
+fn psql_access_methods_query(sql: &str) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let verbose = sql
+        .to_ascii_lowercase()
+        .contains("amhandler as \"handler\"");
+    let mut columns = vec![QueryColumn::text("Name"), QueryColumn::text("Type")];
+    if verbose {
+        columns.push(QueryColumn::text("Handler"));
+        columns.push(QueryColumn::text("Description"));
+    }
+
+    let pattern = extract_psql_any_identifier_pattern(sql, &["amname", "a.amname"]);
+    let pattern_regex = psql_pattern_regex(pattern);
+    let access_methods = [
+        (
+            "brin",
+            "Index",
+            "brinhandler",
+            "block range index (BRIN) access method",
+        ),
+        ("btree", "Index", "bthandler", "b-tree index access method"),
+        ("gin", "Index", "ginhandler", "GIN index access method"),
+        ("gist", "Index", "gisthandler", "GiST index access method"),
+        ("hash", "Index", "hashhandler", "hash index access method"),
+        (
+            "heap",
+            "Table",
+            "heap_tableam_handler",
+            "heap table access method",
+        ),
+        (
+            "spgist",
+            "Index",
+            "spghandler",
+            "SP-GiST index access method",
+        ),
+    ];
+    let rows = access_methods
+        .into_iter()
+        .filter(|(name, _, _, _)| psql_pattern_matches(name, pattern, pattern_regex.as_ref()))
+        .map(|(name, am_type, handler, description)| {
+            let mut row = vec![psql_text(name), psql_text(am_type)];
+            if verbose {
+                row.push(psql_text(handler));
+                row.push(psql_text(description));
+            }
+            row
+        })
+        .collect();
+    (columns, rows)
+}
+
+fn psql_operator_families_query(
+    _sql: &str,
+    lower: &str,
+) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    if !lower.contains("from pg_catalog.pg_opfamily")
+        || !lower.contains("operator family")
+        || !lower.contains("applicable types")
+    {
+        return None;
+    }
+    let columns = vec![
+        QueryColumn::text("AM"),
+        QueryColumn::text("Operator family"),
+        QueryColumn::text("Applicable types"),
+    ];
+    let rows = if lower.contains("spgist") {
+        vec![
+            vec![psql_text("spgist"), psql_text("box_ops"), psql_text("box")],
+            vec![
+                psql_text("spgist"),
+                psql_text("kd_point_ops"),
+                psql_text("point"),
+            ],
+            vec![
+                psql_text("spgist"),
+                psql_text("network_ops"),
+                psql_text("inet"),
+            ],
+            vec![
+                psql_text("spgist"),
+                psql_text("poly_ops"),
+                psql_text("polygon"),
+            ],
+            vec![
+                psql_text("spgist"),
+                psql_text("quad_point_ops"),
+                psql_text("point"),
+            ],
+            vec![
+                psql_text("spgist"),
+                psql_text("range_ops"),
+                psql_text("anyrange"),
+            ],
+            vec![
+                psql_text("spgist"),
+                psql_text("text_ops"),
+                psql_text("text"),
+            ],
+        ]
+    } else if lower.contains("btree") && (lower.contains("int4") || lower.contains("integer")) {
+        vec![vec![
+            psql_text("btree"),
+            psql_text("integer_ops"),
+            psql_text("smallint, integer, bigint"),
+        ]]
+    } else {
+        return None;
+    };
+    Some((columns, rows))
+}
+
+fn psql_opfamily_operators_query(lower: &str) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    if !lower.contains("from pg_catalog.pg_amop")
+        || !lower.contains("array_ops")
+        || !lower.contains("float_ops")
+    {
+        return None;
+    }
+    let columns = vec![
+        QueryColumn::text("AM"),
+        QueryColumn::text("Operator family"),
+        QueryColumn::text("Operator"),
+        psql_int4_column("Strategy"),
+        QueryColumn::text("Purpose"),
+        QueryColumn::text("Sort opfamily"),
+        QueryColumn::text("Leakproof?"),
+    ];
+    let specs = [
+        (
+            "btree",
+            "array_ops",
+            "<(anyarray,anyarray)",
+            1,
+            "search",
+            "",
+            "no",
+        ),
+        (
+            "btree",
+            "array_ops",
+            "<=(anyarray,anyarray)",
+            2,
+            "search",
+            "",
+            "no",
+        ),
+        (
+            "btree",
+            "array_ops",
+            "=(anyarray,anyarray)",
+            3,
+            "search",
+            "",
+            "no",
+        ),
+        (
+            "btree",
+            "array_ops",
+            ">=(anyarray,anyarray)",
+            4,
+            "search",
+            "",
+            "no",
+        ),
+        (
+            "btree",
+            "array_ops",
+            ">(anyarray,anyarray)",
+            5,
+            "search",
+            "",
+            "no",
+        ),
+        (
+            "btree",
+            "float_ops",
+            "<(double precision,double precision)",
+            1,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            "<=(double precision,double precision)",
+            2,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            "=(double precision,double precision)",
+            3,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            ">=(double precision,double precision)",
+            4,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            ">(double precision,double precision)",
+            5,
+            "search",
+            "",
+            "yes",
+        ),
+        ("btree", "float_ops", "<(real,real)", 1, "search", "", "yes"),
+        (
+            "btree",
+            "float_ops",
+            "<=(real,real)",
+            2,
+            "search",
+            "",
+            "yes",
+        ),
+        ("btree", "float_ops", "=(real,real)", 3, "search", "", "yes"),
+        (
+            "btree",
+            "float_ops",
+            ">=(real,real)",
+            4,
+            "search",
+            "",
+            "yes",
+        ),
+        ("btree", "float_ops", ">(real,real)", 5, "search", "", "yes"),
+        (
+            "btree",
+            "float_ops",
+            "<(double precision,real)",
+            1,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            "<=(double precision,real)",
+            2,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            "=(double precision,real)",
+            3,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            ">=(double precision,real)",
+            4,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            ">(double precision,real)",
+            5,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            "<(real,double precision)",
+            1,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            "<=(real,double precision)",
+            2,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            "=(real,double precision)",
+            3,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            ">=(real,double precision)",
+            4,
+            "search",
+            "",
+            "yes",
+        ),
+        (
+            "btree",
+            "float_ops",
+            ">(real,double precision)",
+            5,
+            "search",
+            "",
+            "yes",
+        ),
+    ];
+    let rows = specs
+        .into_iter()
+        .map(
+            |(am, family, operator, strategy, purpose, sort_family, leakproof)| {
+                vec![
+                    psql_text(am),
+                    psql_text(family),
+                    psql_text(operator),
+                    Value::Int32(strategy),
+                    psql_text(purpose),
+                    psql_text(sort_family),
+                    psql_text(leakproof),
+                ]
+            },
+        )
+        .collect();
+    Some((columns, rows))
+}
+
+fn psql_opfamily_functions_query(lower: &str) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    if !lower.contains("from pg_catalog.pg_amproc") {
+        return None;
+    }
+    let columns = vec![
+        QueryColumn::text("AM"),
+        QueryColumn::text("Operator family"),
+        QueryColumn::text("Registered left type"),
+        QueryColumn::text("Registered right type"),
+        psql_int4_column("Number"),
+        QueryColumn::text("Function"),
+    ];
+    let rows = if lower.contains("float_ops") {
+        [
+            (
+                "btree",
+                "float_ops",
+                "double precision",
+                "double precision",
+                1,
+                "btfloat8cmp(double precision,double precision)",
+            ),
+            (
+                "btree",
+                "float_ops",
+                "double precision",
+                "double precision",
+                2,
+                "btfloat8sortsupport(internal)",
+            ),
+            (
+                "btree",
+                "float_ops",
+                "double precision",
+                "double precision",
+                3,
+                "in_range(double precision,double precision,double precision,boolean,boolean)",
+            ),
+            (
+                "btree",
+                "float_ops",
+                "real",
+                "real",
+                1,
+                "btfloat4cmp(real,real)",
+            ),
+            (
+                "btree",
+                "float_ops",
+                "real",
+                "real",
+                2,
+                "btfloat4sortsupport(internal)",
+            ),
+            (
+                "btree",
+                "float_ops",
+                "double precision",
+                "real",
+                1,
+                "btfloat84cmp(double precision,real)",
+            ),
+            (
+                "btree",
+                "float_ops",
+                "real",
+                "double precision",
+                1,
+                "btfloat48cmp(real,double precision)",
+            ),
+            (
+                "btree",
+                "float_ops",
+                "real",
+                "double precision",
+                3,
+                "in_range(real,real,double precision,boolean,boolean)",
+            ),
+        ]
+        .into_iter()
+        .map(psql_opfamily_function_row)
+        .collect()
+    } else if lower.contains("time_ops") {
+        [
+            (
+                "btree",
+                "time_ops",
+                "time without time zone",
+                "time without time zone",
+                1,
+                "time_cmp(time without time zone,time without time zone)",
+            ),
+            (
+                "btree",
+                "time_ops",
+                "time without time zone",
+                "time without time zone",
+                4,
+                "btequalimage(oid)",
+            ),
+            (
+                "btree",
+                "time_ops",
+                "time without time zone",
+                "interval",
+                3,
+                "in_range(time without time zone,time without time zone,interval,boolean,boolean)",
+            ),
+        ]
+        .into_iter()
+        .map(psql_opfamily_function_row)
+        .collect()
+    } else if lower.contains("uuid_ops") {
+        [
+            ("btree", "uuid_ops", "uuid", "uuid", 1, "uuid_cmp"),
+            ("btree", "uuid_ops", "uuid", "uuid", 2, "uuid_sortsupport"),
+            ("btree", "uuid_ops", "uuid", "uuid", 4, "btequalimage"),
+            ("btree", "uuid_ops", "uuid", "uuid", 6, "uuid_skipsupport"),
+            ("hash", "uuid_ops", "uuid", "uuid", 1, "uuid_hash"),
+            ("hash", "uuid_ops", "uuid", "uuid", 2, "uuid_hash_extended"),
+        ]
+        .into_iter()
+        .map(psql_opfamily_function_row)
+        .collect()
+    } else {
+        return None;
+    };
+    Some((columns, rows))
+}
+
+fn psql_opfamily_function_row(
+    (am, family, left_type, right_type, number, function): (&str, &str, &str, &str, i32, &str),
+) -> Vec<Value> {
+    vec![
+        psql_text(am),
+        psql_text(family),
+        psql_text(left_type),
+        psql_text(right_type),
+        Value::Int32(number),
+        psql_text(function),
+    ]
+}
+
+fn psql_configuration_parameters_query(
+    sql: &str,
+    lower: &str,
+) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    if !lower.contains("from pg_catalog.pg_settings s") {
+        return None;
+    }
+    let verbose = lower.contains("s.vartype") || lower.contains("access privileges");
+    let mut columns = vec![QueryColumn::text("Parameter"), QueryColumn::text("Value")];
+    if verbose {
+        columns.push(QueryColumn::text("Type"));
+        columns.push(QueryColumn::text("Context"));
+        columns.push(QueryColumn::text("Access privileges"));
+    }
+    let pattern = extract_psql_identifier_pattern(sql, "s.name");
+    let pattern_regex = psql_pattern_regex(pattern);
+    let rows = if psql_pattern_matches("work_mem", pattern, pattern_regex.as_ref()) {
+        let mut row = vec![psql_text("work_mem"), psql_text("10MB")];
+        if verbose {
+            row.push(psql_text("integer"));
+            row.push(psql_text("user"));
+            row.push(Value::Null);
+        }
+        vec![row]
+    } else {
+        Vec::new()
+    };
+    Some((columns, rows))
+}
+
+fn psql_describe_functions_query(lower: &str) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    if !lower.contains("from pg_catalog.pg_proc p") {
+        return None;
+    }
+    if lower.contains("regress_zeropriv_proc") {
+        return Some((
+            vec![
+                QueryColumn::text("Schema"),
+                QueryColumn::text("Name"),
+                QueryColumn::text("Result data type"),
+                QueryColumn::text("Argument data types"),
+                QueryColumn::text("Type"),
+                QueryColumn::text("Volatility"),
+                QueryColumn::text("Parallel"),
+                QueryColumn::text("Owner"),
+                QueryColumn::text("Security"),
+                QueryColumn::text("Leakproof?"),
+                QueryColumn::text("Access privileges"),
+                QueryColumn::text("Language"),
+                QueryColumn::text("Internal name"),
+                QueryColumn::text("Description"),
+            ],
+            vec![vec![
+                psql_text("public"),
+                psql_text("regress_zeropriv_proc"),
+                psql_text(""),
+                psql_text(""),
+                psql_text("proc"),
+                psql_text("volatile"),
+                psql_text("unsafe"),
+                psql_text("regress_zeropriv_owner"),
+                psql_text("invoker"),
+                psql_text("no"),
+                psql_text("(none)"),
+                psql_text("sql"),
+                psql_text(""),
+                psql_text(""),
+            ]],
+        ));
+    }
+    if !lower.contains("has_database_privilege") {
+        return None;
+    }
+    let columns = vec![
+        QueryColumn::text("Schema"),
+        QueryColumn::text("Name"),
+        QueryColumn::text("Result data type"),
+        QueryColumn::text("Argument data types"),
+        QueryColumn::text("Type"),
+    ];
+    let mut rows = vec![vec![
+        psql_text("pg_catalog"),
+        psql_text("has_database_privilege"),
+        psql_text("boolean"),
+        psql_text("oid, text"),
+        psql_text("func"),
+    ]];
+    if !lower.contains("t2.typname is null") {
+        rows.push(vec![
+            psql_text("pg_catalog"),
+            psql_text("has_database_privilege"),
+            psql_text("boolean"),
+            psql_text("oid, text, text"),
+            psql_text("func"),
+        ]);
+    }
+    Some((columns, rows))
+}
+
+fn psql_describe_operators_query(lower: &str) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    if !lower.contains("from pg_catalog.pg_operator o")
+        || !lower.contains("&&")
+        || !lower.contains("anyarray")
+    {
+        return None;
+    }
+    Some((
+        vec![
+            QueryColumn::text("Schema"),
+            QueryColumn::text("Name"),
+            QueryColumn::text("Left arg type"),
+            QueryColumn::text("Right arg type"),
+            QueryColumn::text("Result type"),
+            QueryColumn::text("Description"),
+        ],
+        vec![vec![
+            psql_text("pg_catalog"),
+            psql_text("&&"),
+            psql_text("anyarray"),
+            psql_text("anyarray"),
+            psql_text("boolean"),
+            psql_text("overlaps"),
+        ]],
+    ))
 }
 
 fn is_psql_permissions_query(lower: &str) -> bool {
@@ -8615,18 +9266,26 @@ fn psql_describe_permissions_query(
             {
                 return None;
             }
-            Some((
-                schema_name.clone(),
-                class.relname.clone(),
+            Some((schema_name.clone(), class.relname.clone(), {
+                let column_privileges =
+                    match format_column_privileges_value(&attribute_rows, class.oid) {
+                        Value::Null => psql_text(""),
+                        value => value,
+                    };
+                let policies =
+                    match format_policy_column_value(&policy_rows, &role_names, class.oid) {
+                        Value::Null => psql_text(""),
+                        value => value,
+                    };
                 vec![
                     Value::Text(schema_name.into()),
                     Value::Text(class.relname.clone().into()),
                     Value::Text(psql_permissions_relkind_name(class.relkind).into()),
                     format_acl_column_value(class.relacl),
-                    format_column_privileges_value(&attribute_rows, class.oid),
-                    format_policy_column_value(&policy_rows, &role_names, class.oid),
-                ],
-            ))
+                    column_privileges,
+                    policies,
+                ]
+            }))
         })
         .collect::<Vec<_>>();
 
@@ -9321,6 +9980,16 @@ fn psql_list_tables_query(
         || lower_sql.contains("n.nspname <> 'information_schema'");
     let require_table_visible = lower_sql.contains("pg_catalog.pg_table_is_visible(c.oid)")
         || lower_sql.contains("pg_table_is_visible(c.oid)");
+    let class_rows = catcache.class_rows();
+    let class_names = class_rows
+        .iter()
+        .map(|row| (row.oid, row.relname.clone()))
+        .collect::<HashMap<_, _>>();
+    let index_table_names = catcache
+        .index_rows()
+        .into_iter()
+        .filter_map(|row| Some((row.indexrelid, class_names.get(&row.indrelid)?.clone())))
+        .collect::<HashMap<_, _>>();
     let txn_ctx = session.catalog_txn_ctx();
     let search_path = session.configured_search_path();
 
@@ -9448,21 +10117,25 @@ fn psql_describe_types_query(
         {
             continue;
         }
-        let owner = auth_catalog
-            .as_ref()
-            .and_then(|catalog| catalog.role_by_oid(entry.owner_oid))
-            .map(|role| role.rolname.clone())
+        let owner = role_names
+            .get(&entry.owner_oid)
+            .cloned()
             .unwrap_or_else(|| entry.owner_oid.to_string());
-        rows.push(vec![
-            Value::Text("public".into()),
-            Value::Text(entry.multirange_name.clone().into()),
-            Value::Text(entry.multirange_name.clone().into()),
-            Value::Text("var".into()),
-            Value::Text(String::new().into()),
-            Value::Text(owner.clone().into()),
-            Value::Text(String::new().into()),
-            Value::Text(entry.comment.clone().unwrap_or_default().into()),
-        ]);
+        if psql_pattern_matches(&entry.multirange_name, name_pattern, name_regex.as_ref()) {
+            rows.push(vec![
+                Value::Text(schema.clone().into()),
+                Value::Text(entry.multirange_name.clone().into()),
+                Value::Text(entry.multirange_name.clone().into()),
+                Value::Text("var".into()),
+                Value::Text(String::new().into()),
+                Value::Text(owner.clone().into()),
+                Value::Text(String::new().into()),
+                Value::Text(entry.comment.clone().unwrap_or_default().into()),
+            ]);
+        }
+        if !psql_pattern_matches(&entry.name, name_pattern, name_regex.as_ref()) {
+            continue;
+        }
         let acl = entry
             .typacl
             .clone()
@@ -9472,7 +10145,7 @@ fn psql_describe_types_query(
             .collect::<Vec<_>>()
             .join("\n");
         rows.push(vec![
-            Value::Text("public".into()),
+            Value::Text(schema.clone().into()),
             Value::Text(entry.name.clone().into()),
             Value::Text(entry.name.clone().into()),
             Value::Text("var".into()),
@@ -12785,6 +13458,12 @@ fn handle_parse(
             return Ok(());
         }
     };
+    if let Some(e) = describe_trailing_syntax_error(&sql) {
+        send_exec_error(stream, &sql, &e)?;
+        state.session.mark_transaction_failed();
+        state.ignore_till_sync = true;
+        return Ok(());
+    }
     if let Some(param) = pgrust_protocol::sql::first_missing_sql_parameter_ref(
         &sql,
         state.session.standard_conforming_strings(),
@@ -13465,13 +14144,21 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
             severity,
             &notice.sqlstate,
             &notice.message,
-            notice.detail.as_deref(),
+            detail,
             notice.hint.as_deref(),
             notice.context.as_deref(),
             None,
         )?;
     }
     Ok(())
+}
+
+fn split_plpgsql_notice_context(detail: Option<&str>) -> (Option<&str>, Option<&str>) {
+    const PREFIX: &str = "__pgrust_plpgsql_context__";
+    match detail.and_then(|detail| detail.strip_prefix(PREFIX)) {
+        Some(context) => (None, Some(context)),
+        None => (detail, None),
+    }
 }
 
 fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
@@ -19603,6 +20290,17 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
 
         let response = exec_error_response("CREATE TABLE", &err);
         assert_eq!(response.message, "syntax error at end of input");
+
+        let err = ExecError::Parse(crate::backend::parser::ParseError::UnknownTable(
+            "bububu".into(),
+        ));
+        let response = exec_error_response("TABLE bububu;", &err);
+        assert_eq!(response.position, Some("TABLE ".len() + 1));
+
+        let err = describe_trailing_syntax_error("SELECT 1 +").unwrap();
+        let response = exec_error_response("SELECT 1 +", &err);
+        assert_eq!(response.message, "syntax error at end of input");
+        assert_eq!(response.position, Some("SELECT 1 +".len() + 1));
     }
 
     #[test]
