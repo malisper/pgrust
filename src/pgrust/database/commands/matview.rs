@@ -233,18 +233,29 @@ impl Database {
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&create_effect)?;
         catalog_effects.push(create_effect);
+        let mut next_metadata_cid = create_cid.saturating_add(1);
         if let Some(relacl) = self.default_acl_for_new_relation(
             client_id,
             created.entry.owner_oid,
             namespace_oid,
             'm',
             xid,
-            create_cid,
+            next_metadata_cid,
         )? {
+            let acl_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_metadata_cid,
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            next_metadata_cid = next_metadata_cid.saturating_add(1);
             let acl_effect = self
                 .catalog
                 .write()
-                .alter_relation_acl_mvcc(created.entry.relation_oid, Some(relacl), &ctx)
+                .alter_relation_acl_mvcc(created.entry.relation_oid, Some(relacl), &acl_ctx)
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&acl_effect)?;
             catalog_effects.push(acl_effect);
@@ -254,11 +265,12 @@ impl Database {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
                 xid,
-                cid: create_cid.saturating_add(1),
+                cid: next_metadata_cid,
                 client_id,
                 waiter: None,
                 interrupts: Arc::clone(&interrupts),
             };
+            next_metadata_cid = next_metadata_cid.saturating_add(1);
             let effect = self
                 .catalog
                 .write()
@@ -287,7 +299,7 @@ impl Database {
             &mut referenced_relation_oids,
         );
         let rule_ctx = CatalogWriteContext {
-            cid: create_cid.saturating_add(1),
+            cid: next_metadata_cid,
             ..ctx
         };
         let rule_effect = self

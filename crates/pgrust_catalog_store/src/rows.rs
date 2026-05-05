@@ -394,7 +394,7 @@ fn documented_operator_description(oid: u32) -> Option<String> {
 }
 
 fn default_relreplident_for_catalog_entry(entry: &CatalogEntry) -> char {
-    if matches!(entry.relkind, 'r' | 'p') {
+    if matches!(entry.relkind, 'r' | 'p' | 'm') {
         if matches!(
             entry.namespace_oid,
             PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
