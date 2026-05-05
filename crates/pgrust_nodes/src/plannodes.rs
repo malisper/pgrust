@@ -197,6 +197,11 @@ pub struct TidScanCond {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TidRangeScanCond {
+    pub display_expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
     Result {
         plan_info: PlanEstimate,
@@ -248,6 +253,19 @@ pub enum Plan {
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,
         tid_cond: TidScanCond,
+        filter: Option<Expr>,
+    },
+    TidRangeScan {
+        plan_info: PlanEstimate,
+        source_id: usize,
+        rel: RelFileLocator,
+        relation_name: String,
+        relation_oid: u32,
+        relkind: char,
+        relispopulated: bool,
+        toast: Option<ToastRelationRef>,
+        desc: RelationDesc,
+        tid_range_cond: TidRangeScanCond,
         filter: Option<Expr>,
     },
     IndexOnlyScan {
@@ -506,6 +524,7 @@ impl Plan {
             | Plan::Unique { plan_info, .. }
             | Plan::SeqScan { plan_info, .. }
             | Plan::TidScan { plan_info, .. }
+            | Plan::TidRangeScan { plan_info, .. }
             | Plan::IndexOnlyScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
             | Plan::BitmapIndexScan { plan_info, .. }
@@ -547,6 +566,7 @@ impl Plan {
             | Plan::Unique { plan_info, .. }
             | Plan::SeqScan { plan_info, .. }
             | Plan::TidScan { plan_info, .. }
+            | Plan::TidRangeScan { plan_info, .. }
             | Plan::IndexOnlyScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
             | Plan::BitmapIndexScan { plan_info, .. }
@@ -595,6 +615,7 @@ impl Plan {
             Plan::Unique { input, .. } => input.columns(),
             Plan::SeqScan { desc, .. }
             | Plan::TidScan { desc, .. }
+            | Plan::TidRangeScan { desc, .. }
             | Plan::IndexOnlyScan { desc, .. } => desc
                 .columns
                 .iter()

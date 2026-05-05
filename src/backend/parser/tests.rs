@@ -15491,6 +15491,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             Plan::Result { .. }
             | Plan::SeqScan { .. }
             | Plan::TidScan { .. }
+            | Plan::TidRangeScan { .. }
             | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }

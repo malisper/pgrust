@@ -519,6 +519,21 @@ pub struct TidScanState {
     pub(crate) stats: NodeExecStats,
 }
 
+pub struct TidRangeScanState {
+    pub(crate) scan: SeqScanState,
+    pub(crate) tid_range_cond: crate::include::nodes::plannodes::TidRangeScanCond,
+    pub(crate) filter_expr: Option<Expr>,
+}
+
+impl std::fmt::Debug for TidRangeScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TidRangeScanState")
+            .field("rel", &self.scan.rel)
+            .field("relation_name", &self.scan.relation_name)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for TidScanState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TidScanState")

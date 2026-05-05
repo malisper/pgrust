@@ -3697,6 +3697,37 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             },
             filter: filter.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
         },
+        Plan::TidRangeScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_range_cond,
+            filter,
+        } => Plan::TidRangeScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_range_cond: crate::include::nodes::plannodes::TidRangeScanCond {
+                display_expr: substitute_rule_expr(
+                    tid_range_cond.display_expr,
+                    old_values,
+                    new_values,
+                ),
+            },
+            filter: filter.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        },
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => plan,
     }
 }

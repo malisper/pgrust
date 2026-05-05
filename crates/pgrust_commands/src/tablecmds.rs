@@ -568,6 +568,7 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
     match plan {
         Plan::SeqScan { relation_oid, .. }
         | Plan::TidScan { relation_oid, .. }
+        | Plan::TidRangeScan { relation_oid, .. }
         | Plan::IndexOnlyScan { relation_oid, .. }
         | Plan::IndexScan { relation_oid, .. }
         | Plan::BitmapHeapScan { relation_oid, .. }
@@ -658,6 +659,7 @@ pub fn plan_contains_lock_rows(plan: &Plan) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }

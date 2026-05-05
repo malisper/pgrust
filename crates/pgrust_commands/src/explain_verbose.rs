@@ -402,6 +402,7 @@ fn plan_has_explicit_relation_alias(plan: &Plan) -> bool {
     match plan {
         Plan::SeqScan { relation_name, .. }
         | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => relation_name
@@ -4408,6 +4409,7 @@ pub fn collect_leaf_relation_bases(plan: &Plan, bases: &mut Vec<String>) {
     match plan {
         Plan::SeqScan { relation_name, .. }
         | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => {
@@ -4522,6 +4524,7 @@ pub fn collect_inherited_relation_leaf_sources(
     match plan {
         Plan::SeqScan { relation_name, .. }
         | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => {
@@ -4952,6 +4955,11 @@ pub fn plan_join_output_exprs(
             ..
         }
         | Plan::TidScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::TidRangeScan {
             relation_name,
             desc,
             ..
@@ -5449,6 +5457,11 @@ pub fn verbose_plan_output_exprs(
             desc,
             ..
         }
+        | Plan::TidRangeScan {
+            relation_name,
+            desc,
+            ..
+        }
         | Plan::IndexOnlyScan {
             relation_name,
             desc,
@@ -5474,6 +5487,11 @@ pub fn verbose_plan_output_exprs(
             ..
         }
         | Plan::TidScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::TidRangeScan {
             relation_name,
             desc,
             ..
@@ -7198,6 +7216,7 @@ pub fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -7217,6 +7236,7 @@ pub fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
                 input.as_ref(),
                 Plan::SeqScan { .. }
                     | Plan::TidScan { .. }
+                    | Plan::TidRangeScan { .. }
                     | Plan::IndexOnlyScan { .. }
                     | Plan::IndexScan { .. }
             ) =>

@@ -16,6 +16,7 @@ pub fn append_sort_key_qualifier_from_plan(plan: &Plan) -> Option<String> {
     match plan {
         Plan::SeqScan { relation_name, .. }
         | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => {
@@ -119,6 +120,7 @@ pub fn plan_depends_on_worktable(plan: &Plan, worktable_id: usize) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -189,6 +191,7 @@ fn plan_references_worktable(
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -258,6 +261,7 @@ fn collect_worktable_dependent_cte_ids(
         | Plan::WorkTableScan { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -354,6 +358,14 @@ pub fn plan_uses_outer_columns(plan: &Plan) -> bool {
         | Plan::BitmapOr { .. }
         | Plan::BitmapAnd { .. }
         | Plan::WorkTableScan { .. } => false,
+        Plan::TidRangeScan {
+            tid_range_cond,
+            filter,
+            ..
+        } => {
+            expr_uses_outer_columns(&tid_range_cond.display_expr)
+                || filter.as_ref().is_some_and(expr_uses_outer_columns)
+        }
         Plan::BitmapHeapScan {
             bitmapqual,
             recheck_qual,

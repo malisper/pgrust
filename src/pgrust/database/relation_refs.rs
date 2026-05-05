@@ -360,6 +360,18 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(filter, rels);
             }
         }
+        Plan::TidRangeScan {
+            rel,
+            tid_range_cond,
+            filter,
+            ..
+        } => {
+            rels.insert(*rel);
+            collect_rels_from_expr(&tid_range_cond.display_expr, rels);
+            if let Some(filter) = filter {
+                collect_rels_from_expr(filter, rels);
+            }
+        }
         Plan::BitmapHeapScan {
             rel, bitmapqual, ..
         } => {

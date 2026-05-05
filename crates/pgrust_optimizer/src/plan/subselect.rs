@@ -80,6 +80,7 @@ fn plan_contains_volatile_expr(plan: &Plan) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -1577,6 +1578,33 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             },
             filter: filter.map(|expr| rebase_expr_subplan_ids(expr, base)),
         },
+        Plan::TidRangeScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_range_cond,
+            filter,
+        } => Plan::TidRangeScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_range_cond: pgrust_nodes::plannodes::TidRangeScanCond {
+                display_expr: rebase_expr_subplan_ids(tid_range_cond.display_expr, base),
+            },
+            filter: filter.map(|expr| rebase_expr_subplan_ids(expr, base)),
+        },
         Plan::MergeAppend {
             plan_info,
             source_id,
@@ -2213,6 +2241,37 @@ pub(super) fn finalize_plan_subqueries(
                     })
                     .collect(),
                 display_expr: finalize_expr_subqueries(tid_cond.display_expr, catalog, subplans),
+            },
+            filter: filter.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+        },
+        Plan::TidRangeScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_range_cond,
+            filter,
+        } => Plan::TidRangeScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_range_cond: pgrust_nodes::plannodes::TidRangeScanCond {
+                display_expr: finalize_expr_subqueries(
+                    tid_range_cond.display_expr,
+                    catalog,
+                    subplans,
+                ),
             },
             filter: filter.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
         },

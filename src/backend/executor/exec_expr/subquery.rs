@@ -108,6 +108,7 @@ fn exists_plan_result_cacheable(plan: &Plan) -> bool {
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. } => true,
@@ -272,6 +273,7 @@ fn plan_is_exists_membership_safe(plan: &Plan) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }

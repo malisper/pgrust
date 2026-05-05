@@ -1865,6 +1865,7 @@ pub fn first_leaf_relation_name(plan: &Plan) -> Option<&str> {
     match plan {
         Plan::SeqScan { relation_name, .. }
         | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => Some(relation_name),
@@ -1925,6 +1926,16 @@ pub fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
                 }
             }
             collect_direct_expr_subplans(&tid_cond.display_expr, &mut found);
+            if let Some(filter) = filter {
+                collect_direct_expr_subplans(filter, &mut found);
+            }
+        }
+        Plan::TidRangeScan {
+            tid_range_cond,
+            filter,
+            ..
+        } => {
+            collect_direct_expr_subplans(&tid_range_cond.display_expr, &mut found);
             if let Some(filter) = filter {
                 collect_direct_expr_subplans(filter, &mut found);
             }
@@ -2716,6 +2727,7 @@ fn plan_contains_kind(plan: &Plan, matches_kind: fn(&Plan) -> bool) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
