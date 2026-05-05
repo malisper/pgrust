@@ -14,7 +14,7 @@ use crate::include::nodes::datetime::{
     MAX_TIME_PRECISION, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-use pgrust_expr::eval_geometry_function;
+use pgrust_expr::{eval_geometry_function, expr_bool};
 
 use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
 use super::expr_agg_support::{
@@ -27,7 +27,6 @@ use super::expr_bit::{
     overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
     substring as eval_bit_substring,
 };
-use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_boolor_statefunc};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
     cast_value_with_source_type_catalog_and_config, parse_text_array_literal_with_catalog_and_op,
@@ -12035,10 +12034,14 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ArraySample => eval_array_sample_function(&values),
         BuiltinScalarFunction::ArrayReverse => eval_array_reverse_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
-        BuiltinScalarFunction::BoolEq => eval_booleq(&values),
-        BuiltinScalarFunction::BoolNe => eval_boolne(&values),
-        BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
-        BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
+        BuiltinScalarFunction::BoolEq => expr_bool::eval_booleq(&values).map_err(Into::into),
+        BuiltinScalarFunction::BoolNe => expr_bool::eval_boolne(&values).map_err(Into::into),
+        BuiltinScalarFunction::BoolAndStateFunc => {
+            expr_bool::eval_booland_statefunc(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BoolOrStateFunc => {
+            expr_bool::eval_boolor_statefunc(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Extract => eval_extract_function(&values),
         BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
         BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
@@ -14451,10 +14454,14 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Erfc => eval_unary_float_function("erfc", &values, eval_erfc),
         BuiltinScalarFunction::Gamma => eval_unary_float_function("gamma", &values, eval_gamma),
         BuiltinScalarFunction::Lgamma => eval_unary_float_function("lgamma", &values, eval_lgamma),
-        BuiltinScalarFunction::BoolEq => eval_booleq(&values),
-        BuiltinScalarFunction::BoolNe => eval_boolne(&values),
-        BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
-        BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
+        BuiltinScalarFunction::BoolEq => expr_bool::eval_booleq(&values).map_err(Into::into),
+        BuiltinScalarFunction::BoolNe => expr_bool::eval_boolne(&values).map_err(Into::into),
+        BuiltinScalarFunction::BoolAndStateFunc => {
+            expr_bool::eval_booland_statefunc(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BoolOrStateFunc => {
+            expr_bool::eval_boolor_statefunc(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, Some(ctx)),
         BuiltinScalarFunction::XmlText => eval_xml_text_function(&values, Some(ctx)),
