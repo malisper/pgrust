@@ -27370,6 +27370,29 @@ fn stored_expression_deparse_matches_pg_for_checks_and_defaults() {
         "create table deparse_defaults (b integer default random()::int)",
     )
     .unwrap();
+    db.execute(1, "create sequence deparse_seq").unwrap();
+    db.execute(
+        1,
+        "create table deparse_builtin_defaults (id integer default nextval('deparse_seq'))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table deparse_builtin_checks (
+            op text[],
+            value text[],
+            check (cardinality(op) = cardinality(value))
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table deparse_builtin_ranges (
+            a integer,
+            r int4range generated always as (int4range(a, a + 5)) stored
+        )",
+    )
+    .unwrap();
 
     assert_eq!(
         query_rows(
@@ -27405,6 +27428,45 @@ fn stored_expression_deparse_matches_pg_for_checks_and_defaults() {
         ),
         vec![vec![Value::Text("random()::integer".into())]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(adbin, adrelid) not like '%function%'
+               from pg_attrdef
+              where adrelid = 'deparse_builtin_defaults'::regclass",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(conbin, conrelid) not like '%function%'
+               from pg_constraint
+              where conrelid = 'deparse_builtin_checks'::regclass",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(adbin, adrelid) not like '%function%'
+               from pg_attrdef
+              where adrelid = 'deparse_builtin_ranges'::regclass",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    db.execute(1, "insert into deparse_builtin_defaults default values")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into deparse_builtin_checks values ('{=}'::text[], '{1}'::text[])",
+    )
+    .unwrap();
+    db.execute(1, "insert into deparse_builtin_ranges (a) values (4)")
+        .unwrap();
     assert_eq!(
         query_rows(
             &db,
