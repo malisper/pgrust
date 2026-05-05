@@ -4940,12 +4940,16 @@ fn rebuild_insert_indexes_after_bulk_insert(
     indexes: &[BoundIndexRelation],
     ctx: &mut ExecutorContext,
     xid: TransactionId,
+    cid: CommandId,
 ) -> Result<(), ExecError> {
     let mut snapshot = ctx.write_snapshot();
     if snapshot.current_xid == INVALID_TRANSACTION_ID {
         snapshot.current_xid = xid;
         snapshot.own_xids.insert(xid);
     }
+    // The heap rows were inserted with this command id. Build the replacement
+    // indexes with a later visibility boundary so their heap scan includes them.
+    snapshot.current_cid = snapshot.current_cid.max(cid.saturating_add(1));
     for index in indexes {
         let needs_expr_eval = index_needs_build_expr_eval(index);
         let build_ctx = IndexBuildContext {
@@ -13457,7 +13461,7 @@ fn execute_insert_rows_inner(
     }
     if bulk_rebuild_indexes
         && let Err(err) =
-            rebuild_insert_indexes_after_bulk_insert(rel, toast, desc, indexes, ctx, xid)
+            rebuild_insert_indexes_after_bulk_insert(rel, toast, desc, indexes, ctx, xid, cid)
     {
         for heap_tid in inserted_tids.iter().rev().copied() {
             let _ = rollback_inserted_row(rel, toast, desc, heap_tid, ctx, xid);
