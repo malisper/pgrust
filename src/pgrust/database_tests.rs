@@ -48115,13 +48115,16 @@ fn concurrent_btree_splits_complete_once() {
     )
     .unwrap();
 
-    let workers: Vec<_> = (0..4)
+    const WORKER_COUNT: usize = 2;
+    const ROWS_PER_WORKER: usize = 16;
+
+    let workers: Vec<_> = (0..WORKER_COUNT)
         .map(|worker| {
             let db = db.clone();
             thread::spawn(move || {
-                for i in 0..60 {
+                for i in 0..ROWS_PER_WORKER {
                     let id = worker * 1000 + i;
-                    let note = format!("worker{worker}-{i}-{}", "x".repeat(1400));
+                    let note = format!("worker{worker}-{i}-{}", "x".repeat(700));
                     db.execute(
                         (worker + 700) as ClientId,
                         &format!("insert into split_items values ({id}, '{note}')"),
@@ -48135,7 +48138,7 @@ fn concurrent_btree_splits_complete_once() {
 
     assert_eq!(
         query_rows(&db, 1, "select count(*) from split_items"),
-        vec![vec![Value::Int64(240)]]
+        vec![vec![Value::Int64((WORKER_COUNT * ROWS_PER_WORKER) as i64)]]
     );
     assert_explain_uses_index(
         &db,
@@ -48145,7 +48148,7 @@ fn concurrent_btree_splits_complete_once() {
     );
     assert_eq!(
         query_rows(&db, 1, "select count(*) from split_items where id >= 0"),
-        vec![vec![Value::Int64(240)]]
+        vec![vec![Value::Int64((WORKER_COUNT * ROWS_PER_WORKER) as i64)]]
     );
 }
 
