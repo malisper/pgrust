@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod advisory_locks;
 pub mod aggregate;
 pub mod array_expr;
@@ -29,6 +30,12 @@ pub mod transaction;
 pub mod txid;
 pub mod window;
 
+pub use activity::{
+    DatabaseStatsStore, FunctionStatsDelta, FunctionStatsEntry, IoStatsDelta, IoStatsEntry,
+    IoStatsKey, RelationStatsDelta, RelationStatsEntry, SessionStatsState, StatsDelta,
+    StatsFetchConsistency, StatsMutationEffect, TrackFunctionsSetting, default_pg_stat_io_keys,
+    now_timestamptz,
+};
 pub use advisory_locks::{
     AdvisoryLockCall, AdvisoryLockEvalError, AdvisoryLockOperation, AdvisoryLockRuntime,
     AdvisoryLockScope, advisory_lock_call, execute_advisory_lock_call, is_advisory_builtin,
