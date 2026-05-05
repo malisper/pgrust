@@ -2397,7 +2397,9 @@ pub fn ensure_statistic_ext_data_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::include::catalog::{BootstrapCatalogKind, PUBLIC_NAMESPACE_OID};
+    use crate::include::catalog::{
+        BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PUBLIC_NAMESPACE_OID, PgDatabaseRow,
+    };
 
     #[test]
     fn postgres_syscache_names_map_to_catalog_indexes() {
@@ -2419,6 +2421,18 @@ mod tests {
         assert_eq!(
             SysCacheId::CONSTROID.index_oid(),
             PG_CONSTRAINT_OID_INDEX_OID
+        );
+        assert_eq!(
+            SysCacheId::DATABASEOID.index_oid(),
+            PG_DATABASE_OID_INDEX_OID
+        );
+        assert_eq!(
+            SysCacheId::TABLESPACEOID.index_oid(),
+            PG_TABLESPACE_OID_INDEX_OID
+        );
+        assert_eq!(
+            SysCacheId::TABLESPACENAME.index_oid(),
+            PG_TABLESPACE_SPCNAME_INDEX_OID
         );
     }
 
@@ -2687,8 +2701,8 @@ mod tests {
             .unwrap();
         assert_eq!(entry.relation_oid, relation_oid);
 
-        let states = db.backend_cache_states.read();
-        let state = states.get(&client_id).unwrap();
+        let mut states = db.backend_cache_states.write();
+        let state = states.get_mut(&client_id).unwrap();
         assert!(state.catcache.is_none());
         assert_eq!(state.relation_cache.len(), 1);
         assert!(state.relation_cache.contains_key(&relation_oid));
@@ -2731,6 +2745,150 @@ mod tests {
         );
         assert!(state.catcache.is_none());
         assert!(state.relation_cache.is_empty());
+    }
+
+    #[test]
+    fn database_oid_lookup_uses_keyed_syscache_without_catcache() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "database_oid");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 81;
+        let key =
+            SysCacheQueryKey::new(SysCacheId::DATABASEOID, &[oid_key(db.database_oid)]).unwrap();
+
+        let rows = SearchSysCache1(
+            &db,
+            client_id,
+            None,
+            SysCacheId::DATABASEOID,
+            oid_key(db.database_oid),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            &rows[0],
+            SysCacheTuple::Database(row)
+                if row.oid == db.database_oid && row.datdba == BOOTSTRAP_SUPERUSER_OID
+        ));
+
+        let mut states = db.backend_cache_states.write();
+        let state = states.get_mut(&client_id).unwrap();
+        assert_eq!(
+            state.syscache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &key
+            ),
+            Some(rows)
+        );
+        assert!(state.catcache.is_none());
+    }
+
+    #[test]
+    fn database_oid_lookup_caches_negative_entry_without_catcache() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "database_negative");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 82;
+        let missing_oid = db.shared_catalog.read().next_oid().saturating_add(10_000);
+        let key = SysCacheQueryKey::new(SysCacheId::DATABASEOID, &[oid_key(missing_oid)]).unwrap();
+
+        assert!(
+            SearchSysCache1(
+                &db,
+                client_id,
+                None,
+                SysCacheId::DATABASEOID,
+                oid_key(missing_oid),
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        let mut states = db.backend_cache_states.write();
+        let state = states.get_mut(&client_id).unwrap();
+        assert_eq!(
+            state.syscache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &key
+            ),
+            Some(Vec::new())
+        );
+        assert!(state.catcache.is_none());
+    }
+
+    #[test]
+    fn create_database_invalidates_negative_database_oid_entry() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "database_create");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 83;
+        let new_database_oid = db.shared_catalog.read().next_oid();
+
+        assert!(
+            SearchSysCache1(
+                &db,
+                client_id,
+                None,
+                SysCacheId::DATABASEOID,
+                oid_key(new_database_oid),
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        db.execute(client_id, "create database syscache_created_db")
+            .unwrap();
+
+        assert!(
+            SearchSysCache1(
+                &db,
+                client_id,
+                None,
+                SysCacheId::DATABASEOID,
+                oid_key(new_database_oid),
+            )
+            .unwrap()
+            .into_iter()
+            .any(|tuple| matches!(tuple, SysCacheTuple::Database(row)
+                    if row.oid == new_database_oid && row.datname == "syscache_created_db"))
+        );
+    }
+
+    #[test]
+    fn alter_database_owner_invalidates_database_oid_entry() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "database_update");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 84;
+        let original = database_row_for_cache_test(&db, client_id, db.database_oid);
+
+        db.execute(client_id, "create role database_cache_owner")
+            .unwrap();
+        let new_owner_oid = SearchSysCache1(
+            &db,
+            client_id,
+            None,
+            SysCacheId::AUTHNAME,
+            Value::Text("database_cache_owner".into()),
+        )
+        .unwrap()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::AuthId(row) => Some(row.oid),
+            _ => None,
+        })
+        .unwrap();
+
+        db.execute(
+            client_id,
+            &format!(
+                "alter database {} owner to database_cache_owner",
+                db.database_name
+            ),
+        )
+        .unwrap();
+
+        let updated = database_row_for_cache_test(&db, client_id, db.database_oid);
+        assert_eq!(updated.datdba, new_owner_oid);
+        assert_ne!(updated.datdba, original.datdba);
     }
 
     #[test]
@@ -2830,6 +2988,27 @@ mod tests {
         .into_iter()
         .find_map(|tuple| match tuple {
             SysCacheTuple::Class(row) => Some(row),
+            _ => None,
+        })
+        .unwrap()
+    }
+
+    fn database_row_for_cache_test(
+        db: &Database,
+        client_id: ClientId,
+        database_oid: u32,
+    ) -> PgDatabaseRow {
+        SearchSysCache1(
+            db,
+            client_id,
+            None,
+            SysCacheId::DATABASEOID,
+            oid_key(database_oid),
+        )
+        .unwrap()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Database(row) => Some(row),
             _ => None,
         })
         .unwrap()

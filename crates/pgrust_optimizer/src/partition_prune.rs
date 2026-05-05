@@ -2054,18 +2054,14 @@ fn partition_hash_support_proc(
 ) -> Option<u32> {
     let catalog = catalog?;
     let opclass_oid = *spec.partclass.get(key_index)?;
-    let opclass = catalog
-        .opclass_rows()
-        .into_iter()
-        .find(|row| row.oid == opclass_oid)?;
+    let opclass = catalog.opclass_row_by_oid(opclass_oid)?;
     let key_type = *spec.key_types.get(key_index)?;
     let key_type_oid = sql_type_oid(key_type);
     catalog
-        .amproc_rows()
+        .amproc_rows_for_family(opclass.opcfamily)
         .into_iter()
         .find(|row| {
-            row.amprocfamily == opclass.opcfamily
-                && row.amprocnum == 2
+            row.amprocnum == 2
                 && hash_amproc_type_matches(row.amproclefttype, key_type_oid, key_type)
                 && hash_amproc_type_matches(row.amprocrighttype, key_type_oid, key_type)
         })

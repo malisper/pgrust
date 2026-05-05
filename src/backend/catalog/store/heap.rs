@@ -374,6 +374,13 @@ impl CatalogStore {
         )?;
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(
+            &mut effect,
+            &PhysicalCatalogRows {
+                databases: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+        );
         Ok((row, effect))
     }
 
@@ -400,6 +407,13 @@ impl CatalogStore {
         )?;
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(
+            &mut effect,
+            &PhysicalCatalogRows {
+                databases: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+        );
         Ok((row, effect))
     }
 
@@ -424,6 +438,8 @@ impl CatalogStore {
             ));
         }
 
+        let old_row = existing.clone();
+        let new_row = row.clone();
         let kinds = [BootstrapCatalogKind::PgDatabase];
         delete_catalog_rows_subset_mvcc(
             ctx,
@@ -445,6 +461,13 @@ impl CatalogStore {
         )?;
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(
+            &mut effect,
+            &PhysicalCatalogRows {
+                databases: vec![old_row, new_row],
+                ..PhysicalCatalogRows::default()
+            },
+        );
         Ok(effect)
     }
 
@@ -1194,6 +1217,7 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(&mut effect, &rows);
         Ok((oid, effect))
     }
 
@@ -1205,18 +1229,15 @@ impl CatalogStore {
         let row = tablespace_row_by_oid_mvcc(self, ctx, tablespace_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(tablespace_oid.to_string()))?;
         let kinds = [BootstrapCatalogKind::PgTablespace];
-        delete_catalog_rows_subset_mvcc(
-            ctx,
-            &PhysicalCatalogRows {
-                tablespaces: vec![row],
-                ..PhysicalCatalogRows::default()
-            },
-            1,
-            &kinds,
-        )?;
+        let rows = PhysicalCatalogRows {
+            tablespaces: vec![row],
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(&mut effect, &rows);
         Ok(effect)
     }
 
@@ -1275,8 +1296,10 @@ impl CatalogStore {
     {
         let existing = tablespace_row_by_oid_mvcc(self, ctx, tablespace_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(tablespace_oid.to_string()))?;
+        let old_row = existing.clone();
         let mut updated = existing.clone();
         mutator(&mut updated);
+        let new_row = updated.clone();
         let kinds = [BootstrapCatalogKind::PgTablespace];
         delete_catalog_rows_subset_mvcc(
             ctx,
@@ -1299,6 +1322,13 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rows(
+            &mut effect,
+            &PhysicalCatalogRows {
+                tablespaces: vec![old_row, new_row],
+                ..PhysicalCatalogRows::default()
+            },
+        );
         Ok(effect)
     }
 

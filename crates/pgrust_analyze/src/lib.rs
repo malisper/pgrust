@@ -1475,6 +1475,10 @@ pub trait CatalogLookup: Send + Sync {
         bootstrap_pg_opclass_rows()
     }
 
+    fn opclass_row_by_oid(&self, oid: u32) -> Option<PgOpclassRow> {
+        self.opclass_rows().into_iter().find(|row| row.oid == oid)
+    }
+
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
         bootstrap_pg_opfamily_rows()
     }
@@ -1485,6 +1489,13 @@ pub trait CatalogLookup: Send + Sync {
 
     fn amproc_rows(&self) -> Vec<PgAmprocRow> {
         bootstrap_pg_amproc_rows()
+    }
+
+    fn amproc_rows_for_family(&self, family_oid: u32) -> Vec<PgAmprocRow> {
+        self.amproc_rows()
+            .into_iter()
+            .filter(|row| row.amprocfamily == family_oid)
+            .collect()
     }
 
     fn amop_rows(&self) -> Vec<PgAmopRow> {
@@ -2393,8 +2404,16 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
         self.inner.opclass_rows()
     }
 
+    fn opclass_row_by_oid(&self, oid: u32) -> Option<PgOpclassRow> {
+        self.inner.opclass_row_by_oid(oid)
+    }
+
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
         self.inner.opfamily_rows()
+    }
+
+    fn amproc_rows_for_family(&self, family_oid: u32) -> Vec<PgAmprocRow> {
+        self.inner.amproc_rows_for_family(family_oid)
     }
 
     fn collation_rows(&self) -> Vec<PgCollationRow> {

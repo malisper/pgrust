@@ -537,11 +537,38 @@ impl CatalogLookup for VisibleCatalog {
             .unwrap_or_else(bootstrap_pg_opclass_rows)
     }
 
+    fn opclass_row_by_oid(&self, oid: u32) -> Option<PgOpclassRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| {
+                catcache
+                    .opclass_rows()
+                    .into_iter()
+                    .find(|row| row.oid == oid)
+            })
+            .or_else(|| {
+                bootstrap_pg_opclass_rows()
+                    .into_iter()
+                    .find(|row| row.oid == oid)
+            })
+    }
+
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
         self.catcache
             .as_ref()
             .map(|catcache| catcache.opfamily_rows())
             .unwrap_or_else(bootstrap_pg_opfamily_rows)
+    }
+
+    fn amproc_rows(&self) -> Vec<PgAmprocRow> {
+        VisibleCatalog::amproc_rows(self)
+    }
+
+    fn amproc_rows_for_family(&self, family_oid: u32) -> Vec<PgAmprocRow> {
+        self.amproc_rows()
+            .into_iter()
+            .filter(|row| row.amprocfamily == family_oid)
+            .collect()
     }
 
     fn collation_rows(&self) -> Vec<PgCollationRow> {

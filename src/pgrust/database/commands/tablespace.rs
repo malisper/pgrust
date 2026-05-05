@@ -2,6 +2,7 @@ use super::super::*;
 use super::maintenance::copy_rewritten_relation_storage;
 use super::privilege::{acl_grants_privilege, effective_acl_grantee_names};
 use crate::backend::catalog::roles::find_role_by_name;
+use crate::backend::utils::cache::syscache::{SearchSysCache1, SysCacheId, SysCacheTuple, oid_key};
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{DEFAULT_TABLESPACE_OID, GLOBAL_TABLESPACE_OID, PgTablespaceRow};
 use crate::include::nodes::parsenodes::{
@@ -449,26 +450,34 @@ pub(super) fn tablespace_oid_by_name(
     if tablespace_name.eq_ignore_ascii_case("pg_default") {
         return Ok(0);
     }
-    let catcache = db
-        .backend_catcache(client_id, txn_ctx)
-        .map_err(map_catalog_error)?;
-    catcache
-        .tablespace_rows()
-        .into_iter()
-        .find(|row| row.spcname.eq_ignore_ascii_case(tablespace_name))
-        .map(|row| {
-            if row.oid == DEFAULT_TABLESPACE_OID {
-                0
-            } else {
-                row.oid
-            }
-        })
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("tablespace \"{tablespace_name}\" does not exist"),
-            detail: None,
-            hint: None,
-            sqlstate: "42704",
-        })
+    SearchSysCache1(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::TABLESPACENAME,
+        Value::Text(tablespace_name.to_ascii_lowercase().into()),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Tablespace(row) if row.spcname.eq_ignore_ascii_case(tablespace_name) => {
+            Some(row)
+        }
+        _ => None,
+    })
+    .map(|row| {
+        if row.oid == DEFAULT_TABLESPACE_OID {
+            0
+        } else {
+            row.oid
+        }
+    })
+    .ok_or_else(|| ExecError::DetailedError {
+        message: format!("tablespace \"{tablespace_name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    })
 }
 
 pub(super) fn ensure_non_global_relation_tablespace(
@@ -500,14 +509,19 @@ pub(super) fn ensure_tablespace_create_privilege(
     if tablespace_oid == 0 || tablespace_oid == DEFAULT_TABLESPACE_OID {
         return Ok(());
     }
-    let catcache = db
-        .backend_catcache(client_id, txn_ctx)
-        .map_err(map_catalog_error)?;
-    let Some(row) = catcache
-        .tablespace_rows()
-        .into_iter()
-        .find(|row| row.oid == tablespace_oid)
-    else {
+    let Some(row) = SearchSysCache1(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::TABLESPACEOID,
+        oid_key(tablespace_oid),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Tablespace(row) => Some(row),
+        _ => None,
+    }) else {
         return Ok(());
     };
     let auth = db.auth_state(client_id);

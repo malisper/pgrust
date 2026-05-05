@@ -35,6 +35,9 @@ use crate::backend::parser::{
     resolve_raw_type_name,
 };
 use crate::backend::storage::smgr::{ForkNumber, segment_path};
+use crate::backend::utils::cache::syscache::{
+    SearchSysCache1, SysCacheId, SysCacheTuple, ensure_class_rows, oid_key,
+};
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::access::htup::HeapTuple;
 use crate::include::catalog::{
@@ -1095,18 +1098,25 @@ fn current_database_owner_oid(
     client_id: ClientId,
     txn_ctx: CatalogTxnContext,
 ) -> Result<u32, ExecError> {
-    db.backend_catcache(client_id, txn_ctx)
-        .map_err(map_catalog_error)?
-        .database_rows()
-        .into_iter()
-        .find(|row| row.oid == db.database_oid)
-        .map(|row| row.datdba)
-        .ok_or_else(|| ExecError::DetailedError {
-            message: "current database does not exist".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "3D000",
-        })
+    SearchSysCache1(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::DATABASEOID,
+        oid_key(db.database_oid),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Database(row) => Some(row.datdba),
+        _ => None,
+    })
+    .ok_or_else(|| ExecError::DetailedError {
+        message: "current database does not exist".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "3D000",
+    })
 }
 
 fn collect_catalog_analyze_targets(
@@ -1128,10 +1138,7 @@ fn collect_catalog_analyze_targets(
         .role_by_oid(auth.current_user_oid())
         .is_some_and(|row| row.rolsuper);
     let database_owner_oid = current_database_owner_oid(db, client_id, txn_ctx)?;
-    let class_rows = db
-        .backend_catcache(client_id, txn_ctx)
-        .map_err(map_catalog_error)?
-        .class_rows();
+    let class_rows = ensure_class_rows(db, client_id, txn_ctx);
 
     let mut targets = Vec::new();
     for class in class_rows {
@@ -1187,10 +1194,7 @@ fn collect_catalog_vacuum_targets(
         .role_by_oid(auth.current_user_oid())
         .is_some_and(|row| row.rolsuper);
     let database_owner_oid = current_database_owner_oid(db, client_id, txn_ctx)?;
-    let class_rows = db
-        .backend_catcache(client_id, txn_ctx)
-        .map_err(map_catalog_error)?
-        .class_rows();
+    let class_rows = ensure_class_rows(db, client_id, txn_ctx);
 
     let mut targets = Vec::new();
     for class in class_rows {
@@ -1829,12 +1833,20 @@ impl Database {
         )?;
         ensure_non_global_relation_tablespace(&alter_stmt.tablespace_name, tablespace_oid, false)?;
         ensure_tablespace_create_privilege(self, client_id, Some((xid, cid)), tablespace_oid)?;
-        let current_tablespace_oid = self
-            .backend_catcache(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?
-            .class_by_oid(relation.relation_oid)
-            .map(|row| row.reltablespace)
-            .unwrap_or(relation.rel.spc_oid);
+        let current_tablespace_oid = SearchSysCache1(
+            self,
+            client_id,
+            Some((xid, cid)),
+            SysCacheId::RELOID,
+            oid_key(relation.relation_oid),
+        )
+        .map_err(map_catalog_error)?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Class(row) => Some(row.reltablespace),
+            _ => None,
+        })
+        .unwrap_or(relation.rel.spc_oid);
         if current_tablespace_oid == tablespace_oid {
             return Ok(StatementResult::AffectedRows(0));
         }
@@ -1972,15 +1984,8 @@ impl Database {
     }
 
     fn autovacuum_targets(&self, client_id: ClientId) -> Result<Vec<AutovacuumTarget>, ExecError> {
-        let catcache = self
-            .backend_catcache(client_id, None)
-            .map_err(map_catalog_error)?;
-        let namespace_names = catcache
-            .namespace_rows()
-            .into_iter()
-            .map(|row| (row.oid, row.nspname))
-            .collect::<BTreeMap<_, _>>();
-        let class_rows = catcache.class_rows();
+        let mut namespace_names = BTreeMap::<u32, Option<String>>::new();
+        let class_rows = ensure_class_rows(self, client_id, None);
         let stats = self.stats.read().clone();
         let next_xid = self.txns.read().next_xid();
         let catalog = self.lazy_catalog_lookup(client_id, None, None);
@@ -1993,7 +1998,23 @@ impl Database {
             if !autovacuum_enabled(class.reloptions.as_deref()) {
                 continue;
             }
-            let Some(namespace_name) = namespace_names.get(&class.relnamespace) else {
+            if !namespace_names.contains_key(&class.relnamespace) {
+                let namespace_name = SearchSysCache1(
+                    self,
+                    client_id,
+                    None,
+                    SysCacheId::NAMESPACEOID,
+                    oid_key(class.relnamespace),
+                )
+                .map_err(map_catalog_error)?
+                .into_iter()
+                .find_map(|tuple| match tuple {
+                    SysCacheTuple::Namespace(row) => Some(row.nspname),
+                    _ => None,
+                });
+                namespace_names.insert(class.relnamespace, namespace_name);
+            }
+            let Some(Some(namespace_name)) = namespace_names.get(&class.relnamespace) else {
                 continue;
             };
             if !autovacuum_namespace_allowed(namespace_name) {

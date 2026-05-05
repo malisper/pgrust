@@ -20,7 +20,7 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::{
     ArrayValue, BitString, IntervalValue, NumericValue, RecordValue,
 };
-use crate::include::nodes::parsenodes::MaintenanceTarget;
+use crate::include::nodes::parsenodes::{AnalyzeStatement, MaintenanceTarget, VacuumStatement};
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
 use std::collections::HashMap;
@@ -20409,6 +20409,116 @@ fn partition_ddl_uses_keyed_catalog_without_broad_catcache() {
         .unwrap();
 
     assert_no_broad_catalog_loads(&db, "partition DDL and EXPLAIN");
+}
+
+#[test]
+fn maintenance_explicit_analyze_and_vacuum_use_keyed_catalog_without_broad_catcache() {
+    let base = temp_dir("maintenance_explicit_analyze_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table maintenance_analyze_target (id int4)")
+        .unwrap();
+    db.execute(1, "insert into maintenance_analyze_target values (1), (2)")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
+
+    db.execute(1, "analyze maintenance_analyze_target").unwrap();
+    db.execute(1, "vacuum maintenance_analyze_target").unwrap();
+
+    assert_no_broad_catalog_loads(&db, "explicit ANALYZE/VACUUM maintenance setup");
+}
+
+#[test]
+fn maintenance_no_target_analyze_and_vacuum_use_class_scan_without_broad_catcache() {
+    let base = temp_dir("maintenance_no_target_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table maintenance_no_target (id int4)")
+        .unwrap();
+    db.execute(1, "insert into maintenance_no_target values (1), (2)")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
+
+    let analyze_targets = db
+        .effective_analyze_targets_with_search_path(
+            1,
+            None,
+            None,
+            &AnalyzeStatement {
+                targets: Vec::new(),
+                verbose: false,
+                skip_locked: false,
+                buffer_usage_limit: None,
+            },
+        )
+        .unwrap();
+    let vacuum_targets = db
+        .effective_vacuum_targets_with_search_path(
+            1,
+            None,
+            None,
+            &VacuumStatement {
+                targets: Vec::new(),
+                analyze: false,
+                full: false,
+                freeze: false,
+                verbose: false,
+                skip_locked: false,
+                buffer_usage_limit: None,
+                disable_page_skipping: false,
+                index_cleanup: None,
+                truncate: None,
+                parallel: None,
+                parallel_specified: false,
+                process_main: None,
+                process_toast: None,
+                skip_database_stats: false,
+                only_database_stats: false,
+            },
+        )
+        .unwrap();
+    assert!(
+        analyze_targets
+            .iter()
+            .any(|target| target.table_name == "maintenance_no_target")
+    );
+    assert!(
+        vacuum_targets
+            .iter()
+            .any(|target| target.table_name == "maintenance_no_target")
+    );
+
+    assert_no_broad_catalog_loads(&db, "no-target ANALYZE/VACUUM maintenance setup");
+}
+
+#[test]
+fn maintenance_alter_table_set_tablespace_uses_reloid_without_broad_catcache() {
+    let base = temp_dir("maintenance_set_tablespace_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set allow_in_place_tablespaces = true")
+        .unwrap();
+    session
+        .execute(&db, "create tablespace maintenance_tblspace location ''")
+        .unwrap();
+    session
+        .execute(&db, "create table maintenance_set_ts (id int4)")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
+
+    session
+        .execute(
+            &db,
+            "alter table maintenance_set_ts set tablespace maintenance_tblspace",
+        )
+        .unwrap();
+
+    assert_no_broad_catalog_loads(&db, "ALTER TABLE SET TABLESPACE");
 }
 
 #[test]

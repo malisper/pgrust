@@ -2394,12 +2394,20 @@ impl CatalogLookup for LazyCatalogLookup {
         ensure_opclass_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
+    fn opclass_row_by_oid(&self, oid: u32) -> Option<PgOpclassRow> {
+        opclass_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid)
+    }
+
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
         ensure_opfamily_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn amproc_rows(&self) -> Vec<PgAmprocRow> {
         ensure_amproc_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn amproc_rows_for_family(&self, family_oid: u32) -> Vec<PgAmprocRow> {
+        amproc_rows_for_family(&self.db, self.client_id, self.txn_ctx, family_oid)
     }
 
     fn amop_rows(&self) -> Vec<PgAmopRow> {

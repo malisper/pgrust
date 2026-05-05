@@ -4,26 +4,27 @@ use crate::rowcodec::{
     pg_amop_row_from_values, pg_amproc_row_from_values, pg_attrdef_row_from_values,
     pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
     pg_cast_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
-    pg_constraint_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
-    pg_event_trigger_row_from_values, pg_foreign_server_row_from_values, pg_index_row_from_values,
-    pg_inherits_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
-    pg_operator_row_from_values, pg_opfamily_row_from_values, pg_partitioned_table_row_from_values,
-    pg_policy_row_from_values, pg_proc_row_from_values, pg_publication_namespace_row_from_values,
+    pg_constraint_row_from_values, pg_database_row_from_values, pg_depend_row_from_values,
+    pg_description_row_from_values, pg_event_trigger_row_from_values,
+    pg_foreign_server_row_from_values, pg_index_row_from_values, pg_inherits_row_from_values,
+    pg_language_row_from_values, pg_opclass_row_from_values, pg_operator_row_from_values,
+    pg_opfamily_row_from_values, pg_partitioned_table_row_from_values, pg_policy_row_from_values,
+    pg_proc_row_from_values, pg_publication_namespace_row_from_values,
     pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
     pg_shdepend_row_from_values, pg_statistic_ext_data_row_from_values,
-    pg_statistic_ext_row_from_values, pg_statistic_row_from_values, pg_trigger_row_from_values,
-    pg_type_row_from_values,
+    pg_statistic_ext_row_from_values, pg_statistic_row_from_values, pg_tablespace_row_from_values,
+    pg_trigger_row_from_values, pg_type_row_from_values,
 };
 use crate::rows::PhysicalCatalogRows;
 use pgrust_catalog_data::{
     BootstrapCatalogKind, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgForeignServerRow,
-    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgShdependRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_composite_type_rows,
-    builtin_type_rows, system_catalog_index_by_oid,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow,
+    PgForeignServerRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgShdependRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows, system_catalog_index_by_oid,
 };
 use pgrust_nodes::{ScanKeyData, Value};
 
@@ -53,6 +54,7 @@ pub const PG_CLASS_RELNAME_NSP_INDEX_OID: u32 = 2663;
 pub const PG_COLLATION_OID_INDEX_OID: u32 = 3085;
 pub const PG_CONSTRAINT_CONRELID_CONTYPID_CONNAME_INDEX_OID: u32 = 2665;
 pub const PG_CONSTRAINT_OID_INDEX_OID: u32 = 2667;
+pub const PG_DATABASE_OID_INDEX_OID: u32 = 2672;
 pub const PG_DEPEND_DEPENDER_INDEX_OID: u32 = 2673;
 pub const PG_DEPEND_REFERENCE_INDEX_OID: u32 = 2674;
 pub const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
@@ -90,6 +92,8 @@ pub const PG_STATISTIC_EXT_RELID_INDEX_OID: u32 = 3379;
 pub const PG_STATISTIC_EXT_OID_INDEX_OID: u32 = 3380;
 pub const PG_STATISTIC_EXT_NAME_INDEX_OID: u32 = 3997;
 pub const PG_STATISTIC_EXT_DATA_STXOID_INH_INDEX_OID: u32 = 3433;
+pub const PG_TABLESPACE_OID_INDEX_OID: u32 = 2697;
+pub const PG_TABLESPACE_SPCNAME_INDEX_OID: u32 = 2698;
 pub const PG_TRIGGER_RELID_NAME_INDEX_OID: u32 = 2701;
 pub const PG_TRIGGER_OID_INDEX_OID: u32 = 2702;
 pub const PG_EVENT_TRIGGER_EVTNAME_INDEX_OID: u32 = 3467;
@@ -149,6 +153,8 @@ pub enum SysCacheId {
     ConstraintOid,
     // PostgreSQL-like relation constraint lookup over pg_constraint_conrelid_*.
     ConstraintRelId,
+    // PostgreSQL syscache name: DATABASEOID.
+    DatabaseOid,
     // PostgreSQL systable scan index: DependDependerIndexId.
     DependDepender,
     // PostgreSQL systable scan index: DependReferenceIndexId.
@@ -231,6 +237,10 @@ pub enum SysCacheId {
     StatisticExtRelId,
     // PostgreSQL systable scan index: StatisticExtDataStxoidInhIndexId.
     StatisticExtDataStxoidInh,
+    // PostgreSQL syscache name: TABLESPACEOID.
+    TablespaceOid,
+    // PostgreSQL syscache name: TABLESPACENAME.
+    TablespaceName,
     // PostgreSQL syscache name: TYPEOID.
     TypeOid,
     // PostgreSQL syscache name: TYPENAMENSP.
@@ -329,6 +339,7 @@ impl SysCacheId {
     pub const COLLOID: Self = Self::CollOid;
     pub const CONSTROID: Self = Self::ConstraintOid;
     pub const CONSTRAINTRELID: Self = Self::ConstraintRelId;
+    pub const DATABASEOID: Self = Self::DatabaseOid;
     pub const DEPENDDEPENDER: Self = Self::DependDepender;
     pub const DEPENDREFERENCE: Self = Self::DependReference;
     pub const DESCRIPTIONOBJ: Self = Self::DescriptionObj;
@@ -366,6 +377,8 @@ impl SysCacheId {
     pub const STATEXTNAMENSP: Self = Self::StatExtNameNsp;
     pub const STATEXTRELID: Self = Self::StatisticExtRelId;
     pub const STATEXTDATASTXOID: Self = Self::StatisticExtDataStxoidInh;
+    pub const TABLESPACEOID: Self = Self::TablespaceOid;
+    pub const TABLESPACENAME: Self = Self::TablespaceName;
     pub const TRIGGERRELIDNAME: Self = Self::TriggerRelidName;
     pub const TRIGGEROID: Self = Self::TriggerOid;
     pub const TYPEOID: Self = Self::TypeOid;
@@ -397,6 +410,7 @@ impl SysCacheId {
             Self::CollOid => PG_COLLATION_OID_INDEX_OID,
             Self::ConstraintOid => PG_CONSTRAINT_OID_INDEX_OID,
             Self::ConstraintRelId => PG_CONSTRAINT_CONRELID_CONTYPID_CONNAME_INDEX_OID,
+            Self::DatabaseOid => PG_DATABASE_OID_INDEX_OID,
             Self::DependDepender => PG_DEPEND_DEPENDER_INDEX_OID,
             Self::DependReference => PG_DEPEND_REFERENCE_INDEX_OID,
             Self::DescriptionObj => PG_DESCRIPTION_O_C_O_INDEX_OID,
@@ -434,6 +448,8 @@ impl SysCacheId {
             Self::StatExtNameNsp => PG_STATISTIC_EXT_NAME_INDEX_OID,
             Self::StatisticExtRelId => PG_STATISTIC_EXT_RELID_INDEX_OID,
             Self::StatisticExtDataStxoidInh => PG_STATISTIC_EXT_DATA_STXOID_INH_INDEX_OID,
+            Self::TablespaceOid => PG_TABLESPACE_OID_INDEX_OID,
+            Self::TablespaceName => PG_TABLESPACE_SPCNAME_INDEX_OID,
             Self::TriggerRelidName => PG_TRIGGER_RELID_NAME_INDEX_OID,
             Self::TriggerOid => PG_TRIGGER_OID_INDEX_OID,
             Self::EventTriggerName => PG_EVENT_TRIGGER_EVTNAME_INDEX_OID,
@@ -484,6 +500,9 @@ impl SysCacheId {
             | Self::EventTriggerOid
             | Self::ForeignServerOid
             | Self::ForeignServerName
+            | Self::DatabaseOid
+            | Self::TablespaceOid
+            | Self::TablespaceName
             | Self::TypeOid => 1,
             Self::AttrDefault
             | Self::AttrName
@@ -531,6 +550,7 @@ pub enum SysCacheTuple {
     Class(PgClassRow),
     Collation(PgCollationRow),
     Constraint(PgConstraintRow),
+    Database(PgDatabaseRow),
     Depend(PgDependRow),
     Description(PgDescriptionRow),
     ForeignServer(PgForeignServerRow),
@@ -552,6 +572,7 @@ pub enum SysCacheTuple {
     Statistic(PgStatisticRow),
     StatisticExt(PgStatisticExtRow),
     StatisticExtData(PgStatisticExtDataRow),
+    Tablespace(PgTablespaceRow),
     Trigger(PgTriggerRow),
     EventTrigger(PgEventTriggerRow),
     Type(PgTypeRow),
@@ -572,6 +593,7 @@ impl SysCacheTuple {
             Self::Class(row) => Some(row.oid),
             Self::Collation(row) => Some(row.oid),
             Self::Constraint(row) => Some(row.oid),
+            Self::Database(row) => Some(row.oid),
             Self::Depend(_) => None,
             Self::Description(_) => None,
             Self::ForeignServer(row) => Some(row.oid),
@@ -593,6 +615,7 @@ impl SysCacheTuple {
             Self::Statistic(_) => None,
             Self::StatisticExt(row) => Some(row.oid),
             Self::StatisticExtData(row) => Some(row.stxoid),
+            Self::Tablespace(row) => Some(row.oid),
             Self::Trigger(row) => Some(row.oid),
             Self::EventTrigger(row) => Some(row.oid),
             Self::Type(row) => Some(row.oid),
@@ -744,6 +767,9 @@ pub fn syscache_invalidation_keys_for_tuple(tuple: &SysCacheTuple) -> Vec<SysCac
                 ],
             ),
         ],
+        SysCacheTuple::Database(row) => {
+            vec![key(SysCacheId::DatabaseOid, vec![oid_part(row.oid)])]
+        }
         SysCacheTuple::Depend(row) => vec![
             key(
                 SysCacheId::DependDepender,
@@ -887,6 +913,10 @@ pub fn syscache_invalidation_keys_for_tuple(tuple: &SysCacheTuple) -> Vec<SysCac
             SysCacheId::StatisticExtDataStxoidInh,
             vec![oid_part(row.stxoid), bool_part(row.stxdinherit)],
         )],
+        SysCacheTuple::Tablespace(row) => vec![
+            key(SysCacheId::TablespaceOid, vec![oid_part(row.oid)]),
+            key(SysCacheId::TablespaceName, vec![name_part(&row.spcname)]),
+        ],
         SysCacheTuple::Trigger(row) => vec![
             key(
                 SysCacheId::TriggerRelidName,
@@ -1047,6 +1077,13 @@ pub fn catalog_row_invalidations_for_rows(
             &mut relcache_oids,
         );
     }
+    for row in &rows.databases {
+        extend_tuple_invalidations(
+            SysCacheTuple::Database(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
     for row in &rows.depends {
         extend_tuple_invalidations(
             SysCacheTuple::Depend(row.clone()),
@@ -1183,6 +1220,13 @@ pub fn catalog_row_invalidations_for_rows(
     for row in &rows.statistics_ext_data {
         extend_tuple_invalidations(
             SysCacheTuple::StatisticExtData(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.tablespaces {
+        extend_tuple_invalidations(
+            SysCacheTuple::Tablespace(row.clone()),
             &mut keys,
             &mut relcache_oids,
         );
@@ -1336,6 +1380,7 @@ pub fn sys_cache_tuple_from_values(
         SysCacheId::ConstraintOid | SysCacheId::ConstraintRelId => {
             pg_constraint_row_from_values(values).map(SysCacheTuple::Constraint)
         }
+        SysCacheId::DatabaseOid => pg_database_row_from_values(values).map(SysCacheTuple::Database),
         SysCacheId::DependDepender | SysCacheId::DependReference => {
             pg_depend_row_from_values(values).map(SysCacheTuple::Depend)
         }
@@ -1399,6 +1444,9 @@ pub fn sys_cache_tuple_from_values(
         }
         SysCacheId::StatisticExtDataStxoidInh => {
             pg_statistic_ext_data_row_from_values(values).map(SysCacheTuple::StatisticExtData)
+        }
+        SysCacheId::TablespaceOid | SysCacheId::TablespaceName => {
+            pg_tablespace_row_from_values(values).map(SysCacheTuple::Tablespace)
         }
         SysCacheId::TriggerRelidName | SysCacheId::TriggerOid => {
             pg_trigger_row_from_values(values).map(SysCacheTuple::Trigger)
