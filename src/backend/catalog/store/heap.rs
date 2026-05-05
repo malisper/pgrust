@@ -11861,7 +11861,7 @@ fn relation_object_name(relation_name: &str) -> &str {
 }
 
 fn default_relreplident_for_catalog_entry(entry: &CatalogEntry) -> char {
-    if matches!(entry.relkind, 'r' | 'p') {
+    if matches!(entry.relkind, 'r' | 'p' | 'm') {
         if entry.namespace_oid == crate::include::catalog::PG_CATALOG_NAMESPACE_OID {
             'n'
         } else {

@@ -4515,9 +4515,13 @@ fn materialized_view_create_refresh_metadata_and_drop() {
         query_rows(
             &db,
             1,
-            "select relkind::text, relispopulated from pg_class where relname = 'mv_items'",
+            "select relkind::text, relispopulated, relreplident::text from pg_class where relname = 'mv_items'",
         ),
-        vec![vec![Value::Text("m".into()), Value::Bool(true)]]
+        vec![vec![
+            Value::Text("m".into()),
+            Value::Bool(true),
+            Value::Text("d".into())
+        ]]
     );
     assert_eq!(
         query_rows(
@@ -4587,6 +4591,65 @@ fn materialized_view_create_refresh_metadata_and_drop() {
             "select count(*) from pg_class where relname = 'mv_items'",
         ),
         vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn materialized_view_create_ignores_owner_insert_default_acl() {
+    let db = Database::open_ephemeral(64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema matview_acl").unwrap();
+    session
+        .execute(&db, "create user matview_acl_user")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter default privileges for role matview_acl_user \
+             revoke insert on tables from matview_acl_user",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant all on schema matview_acl to public")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization matview_acl_user")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view matview_acl.mv_withdata(a) as \
+             select generate_series(1, 10) with data",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view matview_acl.mv_nodata(a) as \
+             select generate_series(1, 10) with no data",
+        )
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view matview_acl.mv_nodata")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from matview_acl.mv_withdata"
+        ),
+        vec![vec![Value::Int64(10)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from matview_acl.mv_nodata"
+        ),
+        vec![vec![Value::Int64(10)]]
     );
 }
 
