@@ -3829,6 +3829,18 @@ fn execute_dynamic_sql_statement(
                 crate::backend::parser::Statement::Do(stmt) => {
                     super::execute_do_with_context_preserving_notices(&stmt, catalog.as_ref(), ctx)
                 }
+                crate::backend::parser::Statement::DeclareCursor(stmt) => {
+                    exec_dynamic_declare_cursor(&stmt, sql, ctx)
+                }
+                crate::backend::parser::Statement::Fetch(stmt) => {
+                    exec_dynamic_fetch_cursor(&stmt, false, ctx)
+                }
+                crate::backend::parser::Statement::Move(stmt) => {
+                    exec_dynamic_fetch_cursor(&stmt, true, ctx)
+                }
+                crate::backend::parser::Statement::ClosePortal(stmt) => {
+                    exec_dynamic_close_portal(&stmt, ctx)
+                }
                 other => execute_readonly_statement_with_config(
                     other,
                     catalog.as_ref(),
@@ -3839,6 +3851,183 @@ fn execute_dynamic_sql_statement(
         },
     );
     result.map_err(|err| with_sql_statement_context(err, Some(sql)))
+}
+
+fn dynamic_cursor_options_from_declare(
+    stmt: &crate::backend::parser::DeclareCursorStatement,
+) -> CursorOptions {
+    let explicit_scroll = matches!(
+        stmt.scroll,
+        crate::backend::parser::CursorScrollOption::Scroll
+    );
+    let explicit_no_scroll = matches!(
+        stmt.scroll,
+        crate::backend::parser::CursorScrollOption::NoScroll
+    );
+    let locking_clause = stmt.query.locking_clause.is_some();
+    CursorOptions {
+        holdable: stmt.hold,
+        binary: stmt.binary,
+        scroll: explicit_scroll || (stmt.binary && !explicit_no_scroll),
+        no_scroll: explicit_no_scroll || (!explicit_scroll && locking_clause),
+        visible: true,
+    }
+}
+
+fn dynamic_portal_direction_from_fetch(
+    direction: &crate::backend::parser::FetchDirection,
+) -> PortalFetchDirection {
+    use crate::backend::parser::FetchDirection;
+    match direction {
+        FetchDirection::Next => PortalFetchDirection::Next,
+        FetchDirection::Prior => PortalFetchDirection::Prior,
+        FetchDirection::First => PortalFetchDirection::First,
+        FetchDirection::Last => PortalFetchDirection::Last,
+        FetchDirection::Absolute(value) => PortalFetchDirection::Absolute(*value),
+        FetchDirection::Relative(value) => PortalFetchDirection::Relative(*value),
+        FetchDirection::Forward(count) => {
+            PortalFetchDirection::Forward(dynamic_portal_fetch_limit(*count))
+        }
+        FetchDirection::Backward(count) => {
+            PortalFetchDirection::Backward(dynamic_portal_fetch_limit(*count))
+        }
+    }
+}
+
+fn dynamic_portal_fetch_limit(count: Option<i64>) -> PortalFetchLimit {
+    match count {
+        None => PortalFetchLimit::All,
+        Some(value) if value <= 0 => PortalFetchLimit::Count(0),
+        Some(value) => PortalFetchLimit::Count(value as usize),
+    }
+}
+
+fn dynamic_undefined_cursor(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("cursor \"{name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "34000",
+    })
+}
+
+fn dynamic_duplicate_cursor(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("cursor \"{name}\" already exists"),
+        detail: None,
+        hint: None,
+        sqlstate: "42P03",
+    })
+}
+
+fn exec_dynamic_declare_cursor(
+    stmt: &crate::backend::parser::DeclareCursorStatement,
+    sql: &str,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    if stmt.hold && ctx.security_restricted {
+        return Err(ExecError::DetailedError {
+            message: "cannot create a cursor WITH HOLD within security-restricted operation".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    if ctx
+        .pending_portals
+        .iter()
+        .any(|portal| portal.name == stmt.name)
+    {
+        return Err(dynamic_duplicate_cursor(&stmt.name));
+    }
+    let db = ctx.database.clone().ok_or_else(|| {
+        function_runtime_error(
+            "PL/pgSQL DECLARE CURSOR requires database execution context",
+            None,
+            "0A000",
+        )
+    })?;
+    let txn_ctx = ctx.transaction_xid().map(|xid| (xid, ctx.next_command_id));
+    let search_path = plpgsql_configured_search_path(ctx);
+    let mut guard = db.execute_streaming_with_config_and_random_state(
+        ctx.client_id,
+        &stmt.query,
+        txn_ctx,
+        ctx.statement_lock_scope_id,
+        ctx.transaction_lock_scope_id,
+        search_path.as_deref(),
+        &ctx.datetime_config,
+        &ctx.gucs,
+        Some(ctx.snapshot.clone()),
+        ctx.serializable_xact_id(),
+        planner_config_from_executor_gucs(&ctx.gucs),
+        Arc::clone(&ctx.random_state),
+    )?;
+    guard.catalog_effect_start = ctx.catalog_effects.len();
+    guard.base_command_id = ctx.next_command_id;
+    let source_text = if sql.trim_end().ends_with(';') {
+        sql.trim().to_string()
+    } else {
+        format!("{};", sql.trim())
+    };
+    let mut portal = Portal::streaming_select(
+        stmt.name.clone(),
+        source_text,
+        None,
+        Vec::new(),
+        dynamic_cursor_options_from_declare(stmt),
+        true,
+        0,
+        guard,
+    );
+    if portal.options.scroll || portal.options.holdable {
+        portal.materialize_all()?;
+    }
+    ctx.pending_portals.push(portal);
+    Ok(StatementResult::AffectedRows(0))
+}
+
+fn exec_dynamic_fetch_cursor(
+    stmt: &crate::backend::parser::FetchStatement,
+    move_only: bool,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let Some(portal) = ctx
+        .pending_portals
+        .iter_mut()
+        .find(|portal| portal.name == stmt.cursor_name)
+    else {
+        return Err(dynamic_undefined_cursor(&stmt.cursor_name));
+    };
+    let result = portal.fetch_direction(
+        dynamic_portal_direction_from_fetch(&stmt.direction),
+        move_only,
+    )?;
+    if move_only {
+        Ok(StatementResult::AffectedRows(result.processed))
+    } else {
+        Ok(StatementResult::Query {
+            columns: result.columns,
+            column_names: result.column_names,
+            rows: result.rows,
+        })
+    }
+}
+
+fn exec_dynamic_close_portal(
+    stmt: &crate::backend::parser::ClosePortalStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    if let Some(name) = &stmt.name {
+        let before = ctx.pending_portals.len();
+        ctx.pending_portals.retain(|portal| portal.name != *name);
+        if ctx.pending_portals.len() == before {
+            return Err(dynamic_undefined_cursor(name));
+        }
+    } else {
+        ctx.pending_portals.retain(|portal| !portal.options.visible);
+    }
+    Ok(StatementResult::AffectedRows(0))
 }
 
 fn refresh_dynamic_sql_catalog(ctx: &mut ExecutorContext) {

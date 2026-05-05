@@ -4322,6 +4322,13 @@ fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_par
                 "expected message to contain {expected_message_part:?}, got {message:?}"
             );
         }
+        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::NoEmptyLocalBuffer) => {
+            assert_eq!(expected_sqlstate, "53100");
+            assert!(
+                "no empty local buffer available".contains(expected_message_part),
+                "expected message to contain {expected_message_part:?}"
+            );
+        }
         other => panic!("expected SQLSTATE {expected_sqlstate}, got {other:?}"),
     }
 }
@@ -17858,6 +17865,41 @@ fn create_view_referencing_temp_relation_becomes_temp_view() {
         ExecError::Parse(ParseError::TempTableInNonTempSchema(_)) => {}
         other => panic!("expected temp relation in non-temp schema error, got {other:?}"),
     }
+}
+
+#[test]
+fn plpgsql_dynamic_execute_declares_session_cursor() {
+    let dir = temp_dir("plpgsql_dynamic_declare_cursor");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table cursor_items(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into cursor_items values (1), (2), (3)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function open_dynamic_cursor() returns void language plpgsql as $$
+             begin
+                 execute 'declare c_dyn cursor for select id from cursor_items order by id';
+                 execute 'fetch next from c_dyn';
+             end
+             $$",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "select open_dynamic_cursor()")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch next from c_dyn"),
+        vec![vec![Value::Int32(2)]]
+    );
+    session.execute(&db, "rollback").unwrap();
 }
 
 #[test]
@@ -51014,6 +51056,69 @@ fn pg_temp_function_drop_and_operator_create_reject_prepare() {
         ExecError::DetailedError { message, .. }
             if message == "cannot PREPARE a transaction that has operated on temporary objects"
     ));
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "create type pg_temp.twophase_type as (a int4)")
+        .unwrap();
+    let err = session
+        .execute(&db, "prepare transaction 'twophase_type'")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "cannot PREPARE a transaction that has operated on temporary objects"
+    ));
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "create view pg_temp.twophase_view as select 1")
+        .unwrap();
+    let err = session
+        .execute(&db, "prepare transaction 'twophase_view'")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message == "cannot PREPARE a transaction that has operated on temporary objects"
+    ));
+}
+
+#[test]
+fn temp_relation_access_rejects_prepare_transaction() {
+    let base = temp_dir("temp_relation_access_prepare");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table twophase_tab (a int4)")
+        .unwrap();
+
+    for (sql, gid) in [
+        ("select a from twophase_tab", "twophase_select"),
+        ("insert into twophase_tab values (1)", "twophase_insert"),
+        (
+            "lock twophase_tab in access exclusive mode",
+            "twophase_lock",
+        ),
+        (
+            "declare twophase_cur cursor for select a from twophase_tab",
+            "twophase_cursor",
+        ),
+        ("drop table twophase_tab", "twophase_drop"),
+    ] {
+        session.execute(&db, "begin").unwrap();
+        session.execute(&db, sql).unwrap();
+        let err = session
+            .execute(&db, &format!("prepare transaction '{gid}'"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError { message, .. }
+                if message == "cannot PREPARE a transaction that has operated on temporary objects"
+        ));
+        assert!(!session.in_transaction());
+    }
 }
 
 #[test]
@@ -51984,6 +52089,38 @@ fn temp_table_on_commit_actions_apply_at_commit() {
 }
 
 #[test]
+fn temp_on_commit_delete_rejects_foreign_key_with_different_action() {
+    let base = temp_dir("temp_on_commit_delete_fk");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temptest3(col int4 primary key) on commit delete rows",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temptest4(col int4 references temptest3)",
+        )
+        .unwrap();
+    let err = session.execute(&db, "commit").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate: "0A000",
+            ..
+        } if message == "unsupported ON COMMIT and foreign key combination"
+            && detail == "Table \"temptest4\" references \"temptest3\", but they do not have the same ON COMMIT setting."
+    ));
+}
+
+#[test]
 fn temp_partitioned_on_commit_ignores_storage_less_parent() {
     let base = temp_dir("temp_partitioned_on_commit");
     let db = Database::open(&base, 16).unwrap();
@@ -52904,6 +53041,126 @@ fn streaming_select_uses_temp_table_shadowing() {
             vec![Value::Int32(30)],
         ]
     );
+}
+
+#[test]
+fn temp_buffers_guc_uses_pages_and_rejects_change_after_access() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select current_setting('temp_buffers')"),
+        vec![vec![Value::Text("1024".into())]]
+    );
+
+    session.execute(&db, "set temp_buffers = 100").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show temp_buffers"),
+        vec![vec![Value::Text("100".into())]]
+    );
+
+    let err = session.execute(&db, "set temp_buffers = 99").unwrap_err();
+    assert_sqlstate(err, "22023", "invalid value for parameter \"temp_buffers\"");
+
+    session
+        .execute(&db, "create temp table temp_buffer_probe(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into temp_buffer_probe values (1)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select id from temp_buffer_probe"),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    session.execute(&db, "set temp_buffers = 100").unwrap();
+    let err = session.execute(&db, "set temp_buffers = 101").unwrap_err();
+    match err {
+        ExecError::DetailedError {
+            sqlstate, detail, ..
+        }
+        | ExecError::Parse(ParseError::DetailedError {
+            sqlstate, detail, ..
+        }) => {
+            assert_eq!(sqlstate, "22023");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "\"temp_buffers\" cannot be changed after any temporary tables have been accessed in the session."
+                )
+            );
+        }
+        other => panic!("expected temp_buffers detail error, got {other:?}"),
+    }
+}
+
+#[test]
+fn temp_cursor_page_pins_exhaust_local_buffers() {
+    let db = Database::open_ephemeral(256).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set temp_buffers = 100").unwrap();
+    session
+        .execute(
+            &db,
+            "create temporary table test_temp(a int not null unique, b text not null, cnt int not null)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into test_temp select generate_series(1, 10000), repeat('a', 200), 0",
+        )
+        .unwrap();
+    assert_eq!(db.existing_local_buffer_manager(1).unwrap().capacity(), 100);
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "select pg_relation_size('test_temp') / current_setting('block_size')::int8",
+        )
+        .unwrap()
+    else {
+        panic!("expected relation size");
+    };
+    assert!(
+        matches!(rows.first().and_then(|row| row.first()), Some(Value::Int64(blocks)) if *blocks > 105),
+        "expected test_temp to span more than 105 blocks, got {rows:?}"
+    );
+    session
+        .execute(
+            &db,
+            r#"
+            create function test_temp_pin(p_start int, p_end int)
+            returns void
+            language plpgsql
+            as $f$
+            declare
+                cursorname text;
+                query text;
+            begin
+                for i in p_start..p_end loop
+                    cursorname = 'c_' || i;
+                    query = format($q$declare %I cursor for select ctid from test_temp where ctid >= '(%s,1)'::tid$q$, cursorname, i);
+                    execute query;
+                    execute 'fetch next from ' || cursorname;
+                end loop;
+            end;
+            $f$;
+            "#,
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "select test_temp_pin(0, 9)").unwrap();
+    assert_eq!(
+        db.existing_local_buffer_manager(1).unwrap().pinned_count(),
+        10
+    );
+    let err = session
+        .execute(&db, "select test_temp_pin(10, 105)")
+        .unwrap_err();
+    assert_sqlstate(err, "53100", "no empty local buffer available");
+    session.execute(&db, "rollback").unwrap();
 }
 
 #[test]

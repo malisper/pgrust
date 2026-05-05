@@ -3,11 +3,11 @@ use crate::backend::catalog::persistence::delete_catalog_rows_subset_mvcc;
 use crate::backend::catalog::rows::{PhysicalCatalogRows, drop_relation_delete_kinds};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::include::catalog::{
-    BootstrapCatalogKind, PG_ATTRDEF_RELATION_OID, PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_POLICY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
-    relkind_has_storage,
+    BootstrapCatalogKind, CONSTRAINT_FOREIGN, PG_ATTRDEF_RELATION_OID, PG_CAST_RELATION_OID,
+    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TRIGGER_RELATION_OID,
+    PG_TYPE_RELATION_OID, relkind_has_storage,
 };
 
 fn normalize_temp_lookup_name(table_name: &str) -> String {
@@ -57,6 +57,57 @@ fn collect_temp_on_commit_drop_names(
     {
         names.push(name);
     }
+}
+
+fn temp_on_commit_relation_name(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    relation_oid: u32,
+) -> String {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_oid.to_string())
+}
+
+fn check_temp_on_commit_delete_foreign_keys(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    covered_oids: &[u32],
+) -> Result<(), ExecError> {
+    if covered_oids.is_empty() {
+        return Ok(());
+    }
+
+    for referenced_oid in covered_oids {
+        let mut references = catalog
+            .foreign_key_constraint_rows_referencing_relation(*referenced_oid)
+            .into_iter()
+            .filter(|row| {
+                row.contype == CONSTRAINT_FOREIGN && !covered_oids.contains(&row.conrelid)
+            })
+            .map(|row| {
+                (
+                    row.conrelid,
+                    temp_on_commit_relation_name(catalog, row.conrelid),
+                    temp_on_commit_relation_name(catalog, row.confrelid),
+                )
+            })
+            .collect::<Vec<_>>();
+        references.sort();
+        references.dedup();
+
+        if let Some((_, child, referenced)) = references.into_iter().next() {
+            return Err(ExecError::DetailedError {
+                message: "unsupported ON COMMIT and foreign key combination".into(),
+                detail: Some(format!(
+                    "Table \"{child}\" references \"{referenced}\", but they do not have the same ON COMMIT setting."
+                )),
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn temp_namespace_catalog_rows(
@@ -321,6 +372,52 @@ impl Database {
             .read()
             .get(&self.temp_backend_id(client_id))
             .and_then(|ns| ns.tables.get(&normalized).map(|entry| entry.entry.clone()))
+    }
+
+    fn invalidate_temp_relation_buffers_for_command(
+        &self,
+        client_id: ClientId,
+        command: &str,
+        relation_name: &str,
+        entry: &RelCacheEntry,
+    ) -> Result<(), ExecError> {
+        if let Some(local) = self.existing_local_buffer_manager(client_id)
+            && let Err(err) = local.invalidate_relation(entry.rel)
+        {
+            return match err {
+                crate::include::storage::buf_internals::Error::BufferPinned => {
+                    Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot {command} \"{relation_name}\" because it is being used by active queries in this session"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "55006",
+                    })
+                }
+                other => Err(ExecError::Heap(
+                    crate::backend::access::heap::heapam::HeapError::Buffer(other),
+                )),
+            };
+        }
+        if let Err(err) = self.pool.invalidate_relation(entry.rel) {
+            return match err {
+                crate::include::storage::buf_internals::Error::BufferPinned => {
+                    Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot {command} \"{relation_name}\" because it is being used by active queries in this session"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "55006",
+                    })
+                }
+                other => Err(ExecError::Heap(
+                    crate::backend::access::heap::heapam::HeapError::Buffer(other),
+                )),
+            };
+        }
+        Ok(())
     }
 
     pub(super) fn temp_entry_on_commit(
@@ -909,6 +1006,21 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let temp_backend_id = self.temp_backend_id(client_id);
         let normalized = normalize_temp_lookup_name(table_name);
+        let candidate = {
+            let namespaces = self.temp_relations.read();
+            let namespace = namespaces.get(&temp_backend_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
+            namespace.tables.get(&normalized).cloned().ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?
+        };
+        self.invalidate_temp_relation_buffers_for_command(
+            client_id,
+            "DROP TABLE",
+            &normalized,
+            &candidate.entry,
+        )?;
         let removed = {
             let mut namespaces = self.temp_relations.write();
             let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
@@ -1100,6 +1212,28 @@ impl Database {
         Ok(renamed)
     }
 
+    pub(crate) fn validate_temp_on_commit(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+    ) -> Result<(), ExecError> {
+        let temp_backend_id = self.temp_backend_id(client_id);
+        let mut to_delete_oids = Vec::new();
+        {
+            let namespaces = self.temp_relations.read();
+            if let Some(namespace) = namespaces.get(&temp_backend_id) {
+                for entry in namespace.tables.values() {
+                    if entry.on_commit == OnCommitAction::DeleteRows {
+                        to_delete_oids.push(entry.entry.relation_oid);
+                    }
+                }
+            }
+        }
+
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, None);
+        check_temp_on_commit_delete_foreign_keys(&catalog, &to_delete_oids)
+    }
+
     pub(crate) fn apply_temp_on_commit(&self, client_id: ClientId) -> Result<(), ExecError> {
         let temp_backend_id = self.temp_backend_id(client_id);
         let mut to_delete = Vec::new();
@@ -1225,10 +1359,12 @@ impl Database {
         let temp_backend_id = self.temp_backend_id(client_id);
         let Some(_namespace) = self.owned_temp_namespace(client_id) else {
             self.temp_relations.write().remove(&temp_backend_id);
+            self.session_local_buffers.write().remove(&client_id);
             return Ok(());
         };
         let result = self.cleanup_client_temp_relations_once(client_id, temp_backend_id);
         self.temp_relations.write().remove(&temp_backend_id);
+        self.session_local_buffers.write().remove(&client_id);
         self.invalidate_backend_cache_state(client_id);
         result
     }

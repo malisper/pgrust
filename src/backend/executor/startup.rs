@@ -199,6 +199,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 source_id,
                 relation_oid,
                 current_bindings: Vec::new(),
+                current_page_pin: None,
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -261,6 +262,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 source_id,
                 relation_oid,
                 current_bindings: Vec::new(),
+                current_page_pin: None,
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -324,6 +326,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 source_id,
                 relation_oid,
                 current_bindings: Vec::new(),
+                current_page_pin: None,
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -869,6 +872,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 source_id,
                 relation_oid,
                 current_bindings: Vec::new(),
+                current_page_pin: None,
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -941,6 +945,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 source_id,
                 relation_oid,
                 current_bindings: Vec::new(),
+                current_page_pin: None,
                 plan_info,
                 stats: NodeExecStats::default(),
             })

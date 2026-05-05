@@ -7198,12 +7198,13 @@ impl Database {
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
-        let (view_name, namespace_oid) = self.normalize_create_view_stmt_with_search_path(
-            client_id,
-            Some((xid, cid)),
-            create_stmt,
-            configured_search_path,
-        )?;
+        let (view_name, namespace_oid, target_persistence) = self
+            .normalize_create_view_stmt_with_search_path(
+                client_id,
+                Some((xid, cid)),
+                create_stmt,
+                configured_search_path,
+            )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let (analyzed_query, _) = crate::backend::parser::analyze_select_query_with_outer(
             &create_stmt.query,
@@ -7252,22 +7253,21 @@ impl Database {
                 .or_else(|| catalog.lookup_relation_by_oid(*oid))
                 .is_some_and(|relation| relation.relpersistence == 't')
         });
-        let effective_persistence = if create_stmt.persistence == TablePersistence::Permanent
-            && references_temporary_relation
-        {
-            push_notice(format!(
-                "view \"{}\" will be a temporary view",
-                create_stmt.view_name.to_ascii_lowercase()
-            ));
-            if create_stmt.schema_name.is_some() {
-                return Err(ExecError::Parse(ParseError::TempTableInNonTempSchema(
-                    view_name.clone(),
-                )));
-            }
-            TablePersistence::Temporary
-        } else {
-            create_stmt.persistence
-        };
+        let effective_persistence =
+            if target_persistence == TablePersistence::Permanent && references_temporary_relation {
+                push_notice(format!(
+                    "view \"{}\" will be a temporary view",
+                    create_stmt.view_name.to_ascii_lowercase()
+                ));
+                if create_stmt.schema_name.is_some() {
+                    return Err(ExecError::Parse(ParseError::TempTableInNonTempSchema(
+                        view_name.clone(),
+                    )));
+                }
+                TablePersistence::Temporary
+            } else {
+                target_persistence
+            };
         let temp_lookup_name = view_name
             .strip_prefix("pg_temp.")
             .unwrap_or(&view_name)

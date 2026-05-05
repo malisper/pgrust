@@ -37,7 +37,7 @@ use crate::pgrust::database::{
     load_range_type_entries,
 };
 use crate::pl::plpgsql::PlpgsqlFunctionCache;
-use crate::{BufferPool, ClientId};
+use crate::{BufferPool, ClientId, LocalBufferManager};
 
 #[derive(Clone)]
 pub struct Cluster {
@@ -108,6 +108,8 @@ pub(crate) struct OpenDatabaseState {
     pub session_plpgsql_function_caches:
         Arc<RwLock<HashMap<ClientId, Arc<RwLock<PlpgsqlFunctionCache>>>>>,
     pub session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
+    pub session_local_buffers:
+        Arc<RwLock<HashMap<ClientId, Arc<LocalBufferManager<SmgrStorageBackend>>>>>,
     pub session_guc_states: Arc<RwLock<HashMap<ClientId, HashMap<String, String>>>>,
     pub session_view_states: Arc<RwLock<HashMap<ClientId, SessionViewState>>>,
     pub database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
@@ -147,6 +149,7 @@ impl OpenDatabaseState {
             session_stats_states: Arc::new(RwLock::new(HashMap::new())),
             session_plpgsql_function_caches: Arc::new(RwLock::new(HashMap::new())),
             session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
+            session_local_buffers: Arc::new(RwLock::new(HashMap::new())),
             session_guc_states: Arc::new(RwLock::new(HashMap::new())),
             session_view_states: Arc::new(RwLock::new(HashMap::new())),
             database_create_grants: Arc::new(RwLock::new(Vec::new())),
@@ -426,6 +429,7 @@ impl Cluster {
                 session_stats_states: Arc::new(RwLock::new(HashMap::new())),
                 session_plpgsql_function_caches: Arc::new(RwLock::new(HashMap::new())),
                 session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
+                session_local_buffers: Arc::new(RwLock::new(HashMap::new())),
                 session_guc_states: Arc::new(RwLock::new(HashMap::new())),
                 session_view_states: Arc::new(RwLock::new(HashMap::new())),
                 database_create_grants: Arc::new(RwLock::new(Vec::new())),
@@ -535,6 +539,7 @@ impl Cluster {
             session_stats_states: Arc::clone(&state.session_stats_states),
             session_plpgsql_function_caches: Arc::clone(&state.session_plpgsql_function_caches),
             session_temp_backend_ids: Arc::clone(&state.session_temp_backend_ids),
+            session_local_buffers: Arc::clone(&state.session_local_buffers),
             session_guc_states: Arc::clone(&state.session_guc_states),
             session_view_states: Arc::clone(&state.session_view_states),
             database_create_grants: Arc::clone(&state.database_create_grants),

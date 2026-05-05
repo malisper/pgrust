@@ -20,10 +20,11 @@ use pgrust_storage::page::bufpage::{
 };
 use pgrust_storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use pgrust_storage::{
-    BufferId, BufferPool, ClientId, Error, OwnedBufferPin, Page, PinnedBuffer, RequestPageResult,
-    SmgrStorageBackend,
+    BufferId, BufferPool, ClientId, Error, LocalBufferManager, OwnedBufferPin, OwnedLocalBufferPin,
+    Page, PinnedBuffer, RequestPageResult, SmgrStorageBackend,
 };
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum HeapError {
@@ -33,11 +34,71 @@ pub enum HeapError {
     Mvcc(MvccError),
     VisibilityMap(VisibilityMapError),
     NoBufferAvailable,
+    NoEmptyLocalBuffer,
     TupleNotVisible(ItemPointerData),
     TupleAlreadyModified(ItemPointerData),
     TupleUpdated(ItemPointerData, ItemPointerData),
     DeadlockDetected,
     Interrupted(InterruptReason),
+}
+
+#[derive(Clone)]
+pub enum HeapBufferSource {
+    Shared(Arc<BufferPool<SmgrStorageBackend>>),
+    Local(Arc<LocalBufferManager<SmgrStorageBackend>>),
+}
+
+impl HeapBufferSource {
+    fn nblocks(&self, rel: RelFileLocator) -> Result<u32, HeapError> {
+        match self {
+            Self::Shared(pool) => pool.with_storage_mut(|s| {
+                s.smgr
+                    .nblocks(rel, ForkNumber::Main)
+                    .map_err(HeapError::Storage)
+            }),
+            Self::Local(local) => local
+                .nblocks(rel, ForkNumber::Main)
+                .map_err(HeapError::Buffer),
+        }
+    }
+
+    fn mark_buffer_dirty_hint(&self, buffer_id: BufferId) {
+        match self {
+            Self::Shared(pool) => pool.mark_buffer_dirty_hint(buffer_id),
+            Self::Local(local) => local.mark_buffer_dirty_hint(buffer_id),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum VisiblePinnedBuffer {
+    Shared(Rc<OwnedBufferPin<SmgrStorageBackend>>),
+    Local(Rc<OwnedLocalBufferPin<SmgrStorageBackend>>),
+}
+
+impl VisiblePinnedBuffer {
+    pub fn buffer_id(&self) -> BufferId {
+        match self {
+            Self::Shared(pin) => pin.buffer_id(),
+            Self::Local(pin) => pin.buffer_id(),
+        }
+    }
+}
+
+enum HeapReadGuard<'a> {
+    Shared(parking_lot::RwLockReadGuard<'a, Page>),
+    Local(parking_lot::RwLockReadGuard<'a, Page>),
+}
+
+impl std::ops::Deref for HeapReadGuard<'_> {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Shared(guard) => guard,
+            Self::Local(guard) => guard,
+        }
+    }
 }
 
 /// Result of a heap modification that encountered a concurrent modification.
@@ -163,9 +224,8 @@ pub struct VisibleHeapScan {
     /// buffer is unpinned only when the last reference is dropped — so a
     /// slot returned to the caller keeps the page alive even after the scan
     /// advances.
-    pinned_buffer: Option<(u32, Rc<OwnedBufferPin<SmgrStorageBackend>>)>,
-    /// Pool needed for wrapping pins.
-    pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
+    pinned_buffer: Option<(u32, VisiblePinnedBuffer)>,
+    buffer_source: HeapBufferSource,
     /// Page-mode visibility: offsets of visible tuples on the current page.
     /// Populated once per page by `prepare_page_tuples`, then iterated without
     /// further visibility checks (like PostgreSQL's rs_vistuples).
@@ -187,7 +247,18 @@ impl VisibleHeapScan {
 
     /// Return a clone of the current page's shared pin (cheap Rc clone).
     pub fn pinned_buffer_rc(&self) -> Option<Rc<OwnedBufferPin<SmgrStorageBackend>>> {
-        self.pinned_buffer.as_ref().map(|(_, pin)| Rc::clone(pin))
+        self.pinned_buffer.as_ref().and_then(|(_, pin)| match pin {
+            VisiblePinnedBuffer::Shared(pin) => Some(Rc::clone(pin)),
+            VisiblePinnedBuffer::Local(_) => None,
+        })
+    }
+
+    pub fn pinned_buffer_pin(&self) -> Option<VisiblePinnedBuffer> {
+        self.pinned_buffer.as_ref().map(|(_, pin)| pin.clone())
+    }
+
+    pub fn uses_local_buffers(&self) -> bool {
+        matches!(self.buffer_source, HeapBufferSource::Local(_))
     }
 
     pub fn nblocks(&self) -> u32 {
@@ -200,7 +271,7 @@ impl std::fmt::Debug for VisibleHeapScan {
         f.debug_struct("VisibleHeapScan")
             .field("scan", &self.scan)
             .field("snapshot", &self.snapshot)
-            .field("pinned_buffer", &self.pinned_buffer)
+            .field("pinned_buffer_id", &self.pinned_buffer_id())
             .finish_non_exhaustive()
     }
 }
@@ -267,11 +338,37 @@ pub fn heap_scan_begin_visible(
     rel: RelFileLocator,
     snapshot: Snapshot,
 ) -> Result<VisibleHeapScan, HeapError> {
+    heap_scan_begin_visible_with_source(
+        HeapBufferSource::Shared(std::sync::Arc::clone(pool)),
+        rel,
+        snapshot,
+    )
+}
+
+pub fn heap_scan_begin_visible_local(
+    local: std::sync::Arc<LocalBufferManager<SmgrStorageBackend>>,
+    rel: RelFileLocator,
+    snapshot: Snapshot,
+) -> Result<VisibleHeapScan, HeapError> {
+    heap_scan_begin_visible_with_source(HeapBufferSource::Local(local), rel, snapshot)
+}
+
+fn heap_scan_begin_visible_with_source(
+    buffer_source: HeapBufferSource,
+    rel: RelFileLocator,
+    snapshot: Snapshot,
+) -> Result<VisibleHeapScan, HeapError> {
+    let nblocks = buffer_source.nblocks(rel)?;
     Ok(VisibleHeapScan {
-        scan: heap_scan_begin(pool, rel)?,
+        scan: HeapScan {
+            rel,
+            nblocks,
+            current_block: 0,
+            current_offset: 1,
+        },
         snapshot: relation_snapshot(&snapshot, rel),
         pinned_buffer: None,
-        pool: std::sync::Arc::clone(pool),
+        buffer_source,
         vis_tuples: [0; MAX_HEAP_TUPLES_PER_PAGE],
         vis_count: 0,
         vis_index: 0,
@@ -292,11 +389,66 @@ pub fn heap_scan_next_visible(
     Ok(None)
 }
 
+fn scan_pin_existing_block<E: From<HeapError>>(
+    source: &HeapBufferSource,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    block: u32,
+) -> Result<(BufferId, VisiblePinnedBuffer), E> {
+    match source {
+        HeapBufferSource::Shared(pool) => {
+            let pin = pin_existing_block(pool, client_id, rel, block).map_err(E::from)?;
+            let buffer_id = pin.into_raw();
+            Ok((
+                buffer_id,
+                VisiblePinnedBuffer::Shared(Rc::new(OwnedBufferPin::wrap_existing(
+                    Arc::clone(pool),
+                    buffer_id,
+                ))),
+            ))
+        }
+        HeapBufferSource::Local(local) => {
+            let pin = local
+                .pin_existing_block(client_id, rel, ForkNumber::Main, block)
+                .map_err(|err| {
+                    E::from(match err {
+                        Error::AllBuffersPinned => HeapError::NoEmptyLocalBuffer,
+                        other => HeapError::Buffer(other),
+                    })
+                })?;
+            let buffer_id = pin.into_raw();
+            Ok((
+                buffer_id,
+                VisiblePinnedBuffer::Local(Rc::new(OwnedLocalBufferPin::wrap_existing(
+                    Arc::clone(local),
+                    buffer_id,
+                ))),
+            ))
+        }
+    }
+}
+
+fn lock_scan_buffer_shared<'a>(
+    source: &'a HeapBufferSource,
+    buffer_id: BufferId,
+) -> Result<HeapReadGuard<'a>, HeapError> {
+    match source {
+        HeapBufferSource::Shared(pool) => pool
+            .lock_buffer_shared(buffer_id)
+            .map(HeapReadGuard::Shared)
+            .map_err(HeapError::Buffer),
+        HeapBufferSource::Local(local) => local
+            .lock_buffer_shared(buffer_id)
+            .map(HeapReadGuard::Local)
+            .map_err(HeapError::Buffer),
+    }
+}
+
 /// Scan for the next visible tuple without copying tuple data.
 /// Calls `process` with the raw tuple bytes (borrowing from the page buffer)
 /// and returns its result. The tuple bytes are only valid during the callback.
 pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
-    pool: &BufferPool<SmgrStorageBackend>,
+    _pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     txns: &dyn AccessTransactionServices,
     scan: &mut VisibleHeapScan,
@@ -313,11 +465,9 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
             _ => {
                 // Drop previous pin (Rc<OwnedBufferPin> handles unpin).
                 drop(scan.pinned_buffer.take());
-                let pin =
-                    pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
-                let bid = pin.into_raw();
-                let owned = OwnedBufferPin::wrap_existing(std::sync::Arc::clone(&scan.pool), bid);
-                scan.pinned_buffer = Some((block, Rc::new(owned)));
+                let (bid, owned) =
+                    scan_pin_existing_block(&scan.buffer_source, client_id, scan.scan.rel, block)?;
+                scan.pinned_buffer = Some((block, owned));
                 bid
             }
         };
@@ -328,9 +478,7 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
 
         // Acquire shared content lock briefly for this tuple batch.
         // Released after processing — does NOT block writers across exec_next calls.
-        let guard = pool
-            .lock_buffer_shared(buffer_id)
-            .map_err(|e| E::from(HeapError::Buffer(e)))?;
+        let guard = lock_scan_buffer_shared(&scan.buffer_source, buffer_id).map_err(E::from)?;
         let page: &Page = &*guard;
         let mut any_hints_written = false;
 
@@ -399,7 +547,7 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
         })();
 
         if any_hints_written {
-            pool.mark_buffer_dirty_hint(buffer_id);
+            scan.buffer_source.mark_buffer_dirty_hint(buffer_id);
         }
         drop(guard);
 
@@ -454,7 +602,7 @@ pub fn heap_scan_prepare_page_at<E: From<HeapError>>(
 }
 
 fn heap_scan_prepare_current_page<E: From<HeapError>>(
-    pool: &BufferPool<SmgrStorageBackend>,
+    _pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     txns: &dyn AccessTransactionServices,
     scan: &mut VisibleHeapScan,
@@ -462,15 +610,12 @@ fn heap_scan_prepare_current_page<E: From<HeapError>>(
 ) -> Result<Option<usize>, E> {
     while scan.scan.current_block < scan.scan.nblocks {
         let block = scan.scan.current_block;
-        let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
-        let buffer_id = pin.into_raw();
-        let owned = OwnedBufferPin::wrap_existing(std::sync::Arc::clone(&scan.pool), buffer_id);
-        scan.pinned_buffer = Some((block, Rc::new(owned)));
+        let (buffer_id, owned) =
+            scan_pin_existing_block(&scan.buffer_source, client_id, scan.scan.rel, block)?;
+        scan.pinned_buffer = Some((block, owned));
 
         // Collect visible tuple offsets under a single lock.
-        let guard = pool
-            .lock_buffer_shared(buffer_id)
-            .map_err(|e| E::from(HeapError::Buffer(e)))?;
+        let guard = lock_scan_buffer_shared(&scan.buffer_source, buffer_id).map_err(E::from)?;
         let page: &Page = &*guard;
         let max_offset = page_get_max_offset_number(page)
             .map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
@@ -577,7 +722,7 @@ pub fn heap_scan_end<E: From<HeapError>>(
 /// Holds a single shared content lock per page, avoiding per-tuple lock
 /// acquire/release. Sets hint bits via unsafe under the shared lock.
 pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
-    pool: &BufferPool<SmgrStorageBackend>,
+    _pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     txns: &dyn AccessTransactionServices,
     scan: &mut VisibleHeapScan,
@@ -588,13 +733,11 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
     let mut count = 0usize;
     while scan.scan.current_block < scan.scan.nblocks {
         let block = scan.scan.current_block;
-        let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
-        let buffer_id = pin.buffer_id();
+        let (buffer_id, pin) =
+            scan_pin_existing_block(&scan.buffer_source, client_id, scan.scan.rel, block)?;
 
         let txns_guard = txns;
-        let guard = pool
-            .lock_buffer_shared(buffer_id)
-            .map_err(|e| E::from(HeapError::Buffer(e)))?;
+        let guard = lock_scan_buffer_shared(&scan.buffer_source, buffer_id).map_err(E::from)?;
         let page: &Page = &*guard;
         let mut any_hints_written = false;
 
@@ -655,7 +798,7 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
         })();
 
         if any_hints_written {
-            pool.mark_buffer_dirty_hint(buffer_id);
+            scan.buffer_source.mark_buffer_dirty_hint(buffer_id);
         }
         drop(guard);
         drop(pin);
@@ -710,6 +853,18 @@ pub fn heap_insert_mvcc_with_cid_and_fillfactor(
     heap_insert_version(pool, client_id, rel, tuple, xid, cid, fillfactor)
 }
 
+pub fn heap_insert_mvcc_with_cid_and_fillfactor_local(
+    local: &LocalBufferManager<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    xid: TransactionId,
+    cid: CommandId,
+    tuple: &HeapTuple,
+    fillfactor: u16,
+) -> Result<ItemPointerData, HeapError> {
+    heap_insert_version_local(local, client_id, rel, tuple, xid, cid, fillfactor)
+}
+
 pub fn heap_fetch(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
@@ -718,6 +873,23 @@ pub fn heap_fetch(
 ) -> Result<HeapTuple, HeapError> {
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let page = pool
+        .read_page(pin.buffer_id())
+        .ok_or(Error::InvalidBuffer)?;
+    let tuple = heap_page_get_tuple(&page, tid.offset_number)?;
+    drop(pin);
+    Ok(tuple)
+}
+
+pub fn heap_fetch_local(
+    local: &LocalBufferManager<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    tid: ItemPointerData,
+) -> Result<HeapTuple, HeapError> {
+    let pin = local
+        .pin_existing_block(client_id, rel, ForkNumber::Main, tid.block_number)
+        .map_err(local_buffer_heap_error)?;
+    let page = local
         .read_page(pin.buffer_id())
         .ok_or(Error::InvalidBuffer)?;
     let tuple = heap_page_get_tuple(&page, tid.offset_number)?;
@@ -764,6 +936,49 @@ pub fn heap_fetch_visible_with_txns(
     let txns_guard = txns;
     let visible = snapshot.tuple_visible(txns_guard, &tuple);
     if visible { Ok(Some(tuple)) } else { Ok(None) }
+}
+
+pub fn heap_fetch_visible_with_txns_local(
+    local: Arc<LocalBufferManager<SmgrStorageBackend>>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    tid: ItemPointerData,
+    txns: &dyn AccessTransactionServices,
+    snapshot: &Snapshot,
+) -> Result<Option<(HeapTuple, VisiblePinnedBuffer)>, HeapError> {
+    let snapshot = relation_snapshot(snapshot, rel);
+    if tid.offset_number == 0 {
+        return Ok(None);
+    }
+    let nblocks = local
+        .nblocks(rel, ForkNumber::Main)
+        .map_err(HeapError::Buffer)?;
+    if tid.block_number >= nblocks {
+        return Ok(None);
+    }
+    let pin = local
+        .pin_existing_block(client_id, rel, ForkNumber::Main, tid.block_number)
+        .map_err(local_buffer_heap_error)?;
+    let buffer_id = pin.buffer_id();
+    let guard = local
+        .lock_buffer_shared(buffer_id)
+        .map_err(HeapError::Buffer)?;
+    let tuple = match heap_page_get_tuple(&guard, tid.offset_number) {
+        Ok(tuple) => tuple,
+        Err(err) if visible_fetch_missing_tuple(&err) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    drop(guard);
+    if !snapshot.tuple_visible(txns, &tuple) {
+        return Ok(None);
+    }
+    let buffer_id = pin.into_raw();
+    Ok(Some((
+        tuple,
+        VisiblePinnedBuffer::Local(Rc::new(OwnedLocalBufferPin::wrap_existing(
+            local, buffer_id,
+        ))),
+    )))
 }
 
 fn heap_fetch_visible_impl(
@@ -1004,6 +1219,97 @@ pub fn heap_delete_with_waiter_with_wal_policy(
                     heap_page_get_ctid(&*guard2, tid.offset_number).map_err(HeapError::from)?;
                 drop(guard2);
                 drop(pin2);
+                if current_ctid == tid {
+                    return Err(HeapError::TupleAlreadyModified(tid));
+                }
+                return Err(HeapError::TupleUpdated(tid, current_ctid));
+            }
+        }
+    }
+}
+
+pub fn heap_delete_with_waiter_local(
+    local: &LocalBufferManager<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    txns: &dyn AccessTransactionServices,
+    xid: TransactionId,
+    tid: ItemPointerData,
+    snapshot: &Snapshot,
+    waiter: Option<&dyn AccessTransactionServices>,
+) -> Result<(), HeapError> {
+    loop {
+        let txns_guard = txns;
+        let snapshot = relation_snapshot(snapshot, rel);
+        let pin = local
+            .pin_existing_block(client_id, rel, ForkNumber::Main, tid.block_number)
+            .map_err(local_buffer_heap_error)?;
+        let buffer_id = pin.buffer_id();
+        let mut guard = local
+            .lock_buffer_exclusive(buffer_id)
+            .map_err(local_buffer_heap_error)?;
+        let mut new_page = *guard;
+        let mut tuple = heap_page_get_tuple(&new_page, tid.offset_number)?;
+
+        if !snapshot.tuple_visible(txns_guard, &tuple) {
+            return Err(HeapError::TupleNotVisible(tid));
+        }
+
+        let xmax = tuple.header.xmax;
+        if xmax == 0
+            || matches!(
+                txns_guard.transaction_status(xmax),
+                Some(TransactionStatus::Aborted)
+            )
+        {
+            if page_is_all_visible(&new_page)? {
+                page_clear_all_visible(&mut new_page)?;
+            }
+            let cmax = delete_command_id(txns_guard, &snapshot, &tuple, snapshot.current_cid);
+            tuple.header.xmax = xid;
+            tuple.header.cid_or_xvac = cmax;
+            tuple.header.infomask &= !crate::access::htup::HEAP_XMAX_INVALID;
+            heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
+            *guard = new_page;
+            local
+                .mark_buffer_dirty(buffer_id)
+                .map_err(local_buffer_heap_error)?;
+            drop(guard);
+            drop(pin);
+            local
+                .flush_buffer(buffer_id)
+                .map_err(local_buffer_heap_error)?;
+            return Ok(());
+        }
+        if xmax == xid {
+            return Err(HeapError::TupleAlreadyModified(tid));
+        }
+
+        drop(guard);
+        drop(pin);
+
+        match txns_guard.transaction_status(xmax) {
+            Some(TransactionStatus::InProgress) | None => {
+                if let Some(waiter) = waiter {
+                    waiter
+                        .wait_for_transaction(xmax)
+                        .map_err(heap_error_from_access_wait)?;
+                    continue;
+                }
+                return Err(HeapError::TupleAlreadyModified(tid));
+            }
+            Some(TransactionStatus::Aborted) => continue,
+            Some(TransactionStatus::Committed) => {
+                let pin = local
+                    .pin_existing_block(client_id, rel, ForkNumber::Main, tid.block_number)
+                    .map_err(local_buffer_heap_error)?;
+                let guard = local
+                    .lock_buffer_shared(pin.buffer_id())
+                    .map_err(local_buffer_heap_error)?;
+                let current_ctid =
+                    heap_page_get_ctid(&*guard, tid.offset_number).map_err(HeapError::from)?;
+                drop(guard);
+                drop(pin);
                 if current_ctid == tid {
                     return Err(HeapError::TupleAlreadyModified(tid));
                 }
@@ -1269,6 +1575,77 @@ pub fn heap_update_with_waiter_with_snapshot(
     }
 }
 
+pub fn heap_update_with_waiter_with_snapshot_local(
+    local: &LocalBufferManager<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    txns: &dyn AccessTransactionServices,
+    xid: TransactionId,
+    cid: CommandId,
+    tid: ItemPointerData,
+    replacement: &HeapTuple,
+    snapshot: &Snapshot,
+    waiter: Option<&dyn AccessTransactionServices>,
+) -> Result<ItemPointerData, HeapError> {
+    loop {
+        let old = heap_fetch_local(local, client_id, rel, tid)?;
+        let snapshot = relation_snapshot(snapshot, rel);
+        if !snapshot.tuple_visible(txns, &old) {
+            return Err(HeapError::TupleNotVisible(tid));
+        }
+        let xmax = old.header.xmax;
+        if xmax != 0 {
+            match txns.transaction_status(xmax) {
+                Some(TransactionStatus::Aborted) => {}
+                Some(TransactionStatus::InProgress) | None => {
+                    if let Some(waiter) = waiter {
+                        waiter
+                            .wait_for_transaction(xmax)
+                            .map_err(heap_error_from_access_wait)?;
+                        continue;
+                    }
+                    return Err(HeapError::TupleAlreadyModified(tid));
+                }
+                Some(TransactionStatus::Committed) => {
+                    if old.header.ctid == tid {
+                        return Err(HeapError::TupleAlreadyModified(tid));
+                    }
+                    return Err(HeapError::TupleUpdated(tid, old.header.ctid));
+                }
+            }
+        }
+
+        let new_tid = heap_insert_version_local(local, client_id, rel, replacement, xid, cid, 100)?;
+        let pin = local
+            .pin_existing_block(client_id, rel, ForkNumber::Main, tid.block_number)
+            .map_err(local_buffer_heap_error)?;
+        let buffer_id = pin.buffer_id();
+        let mut guard = local
+            .lock_buffer_exclusive(buffer_id)
+            .map_err(local_buffer_heap_error)?;
+        let mut new_page = *guard;
+        let mut old_version = heap_page_get_tuple(&new_page, tid.offset_number)?;
+        if page_is_all_visible(&new_page)? {
+            page_clear_all_visible(&mut new_page)?;
+        }
+        old_version.header.xmax = xid;
+        old_version.header.cid_or_xvac = delete_command_id(txns, &snapshot, &old_version, cid);
+        old_version.header.ctid = new_tid;
+        old_version.header.infomask &= !crate::access::htup::HEAP_XMAX_INVALID;
+        heap_page_replace_tuple(&mut new_page, tid.offset_number, &old_version)?;
+        *guard = new_page;
+        local
+            .mark_buffer_dirty(buffer_id)
+            .map_err(local_buffer_heap_error)?;
+        drop(guard);
+        drop(pin);
+        local
+            .flush_buffer(buffer_id)
+            .map_err(local_buffer_heap_error)?;
+        return Ok(new_tid);
+    }
+}
+
 pub fn heap_flush(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
@@ -1370,6 +1747,82 @@ fn heap_insert_version(
     }
 }
 
+fn heap_insert_version_local(
+    local: &LocalBufferManager<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    tuple: &HeapTuple,
+    xmin: TransactionId,
+    cid: CommandId,
+    fillfactor: u16,
+) -> Result<ItemPointerData, HeapError> {
+    if tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE {
+        return Err(HeapError::Tuple(TupleError::Oversized {
+            size: tuple.serialized_len(),
+            max_size: MAX_HEAP_TUPLE_SIZE,
+        }));
+    }
+
+    loop {
+        let target_block =
+            local
+                .backing_pool()
+                .with_storage_mut(|s| -> Result<u32, HeapError> {
+                    let nblocks = s.smgr.nblocks(rel, ForkNumber::Main)?;
+                    if nblocks == 0 {
+                        let mut page = [0u8; crate::BLCKSZ];
+                        heap_page_init(&mut page);
+                        s.smgr.extend(rel, ForkNumber::Main, 0, &page, true)?;
+                        Ok(0)
+                    } else {
+                        Ok(nblocks - 1)
+                    }
+                })?;
+
+        let pin = local
+            .pin_existing_block(client_id, rel, ForkNumber::Main, target_block)
+            .map_err(local_buffer_heap_error)?;
+        let buffer_id = pin.buffer_id();
+        let mut guard = local
+            .lock_buffer_exclusive(buffer_id)
+            .map_err(HeapError::Buffer)?;
+        let mut new_page = *guard;
+        let mut stored = tuple.clone();
+        stored.header.xmin = xmin;
+        stored.header.xmax = 0;
+        stored.header.cid_or_xvac = cid;
+        stored.header.infomask |= crate::access::htup::HEAP_XMAX_INVALID;
+
+        let serialized_tuple = stored.serialize();
+        if !heap_page_has_fillfactor_space(&new_page, serialized_tuple.len(), fillfactor)? {
+            drop(guard);
+            drop(pin);
+            extend_heap_relation_local(local, rel)?;
+            continue;
+        }
+        match heap_page_add_tuple(&mut new_page, target_block, &stored) {
+            Ok(offset_number) => {
+                *guard = new_page;
+                local
+                    .mark_buffer_dirty(buffer_id)
+                    .map_err(HeapError::Buffer)?;
+                drop(guard);
+                local.flush_buffer(buffer_id).map_err(HeapError::Buffer)?;
+                return Ok(ItemPointerData {
+                    block_number: target_block,
+                    offset_number,
+                });
+            }
+            Err(TupleError::Page(PageError::NoSpace)) => {
+                drop(guard);
+                drop(pin);
+                extend_heap_relation_local(local, rel)?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 fn heap_page_has_fillfactor_space(
     page: &Page,
     tuple_len: usize,
@@ -1392,6 +1845,22 @@ fn heap_page_has_fillfactor_space(
     Ok(free_after >= reserved)
 }
 
+fn extend_heap_relation_local(
+    local: &LocalBufferManager<SmgrStorageBackend>,
+    rel: RelFileLocator,
+) -> Result<(), HeapError> {
+    local
+        .backing_pool()
+        .with_storage_mut(|s| -> Result<(), HeapError> {
+            let current_nblocks = s.smgr.nblocks(rel, ForkNumber::Main)?;
+            let mut page = [0u8; pgrust_storage::BLCKSZ];
+            heap_page_init(&mut page);
+            s.smgr
+                .extend(rel, ForkNumber::Main, current_nblocks, &page, true)?;
+            Ok(())
+        })
+}
+
 fn extend_heap_relation(
     pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,
@@ -1404,6 +1873,13 @@ fn extend_heap_relation(
             .extend(rel, ForkNumber::Main, current_nblocks, &page, true)?;
         Ok(())
     })
+}
+
+fn local_buffer_heap_error(err: Error) -> HeapError {
+    match err {
+        Error::AllBuffersPinned => HeapError::NoEmptyLocalBuffer,
+        other => HeapError::Buffer(other),
+    }
 }
 
 fn pin_existing_block<'a>(

@@ -4959,6 +4959,7 @@ impl CatalogStore {
         name: impl Into<String>,
         desc: RelationDesc,
         namespace_oid: u32,
+        relpersistence: char,
         owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
@@ -4977,7 +4978,7 @@ impl CatalogStore {
             desc,
             namespace_oid,
             self.scope_db_oid(),
-            'p',
+            relpersistence,
             'c',
             owner_oid,
             0,

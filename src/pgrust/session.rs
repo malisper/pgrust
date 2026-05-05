@@ -69,8 +69,8 @@ use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::checkpoint::is_checkpoint_guc;
 use crate::backend::utils::misc::guc::{
-    is_postgres_guc, normalize_function_guc_assignment, normalize_guc_name,
-    plpgsql_guc_default_value,
+    TEMP_BUFFERS_DEFAULT_PAGES, TEMP_BUFFERS_MIN_PAGES, is_postgres_guc,
+    normalize_function_guc_assignment, normalize_guc_name, plpgsql_guc_default_value,
 };
 use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_datetime_config, default_intervalstyle,
@@ -2049,6 +2049,7 @@ pub(crate) struct ActiveTransaction {
     pub(crate) current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
     pub(crate) prior_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
     pub(crate) temp_effects: Vec<TempMutationEffect>,
+    pub(crate) accessed_temp_namespace: bool,
     pub(crate) sequence_effects: Vec<SequenceMutationEffect>,
     deferred_foreign_keys: DeferredForeignKeyTracker,
     pub(crate) async_listen_ops: Vec<AsyncListenOp>,
@@ -2940,6 +2941,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
+        "temp_buffers" => Some("1024"),
         "restrict_nonsystem_relation_kind" => Some(""),
         "enable_seqscan"
         | "enable_indexscan"
@@ -4520,6 +4522,7 @@ impl Session {
             savepoints: Vec::new(),
             guc_start_state: guc_state.clone(),
             guc_commit_state: guc_state,
+            accessed_temp_namespace: false,
         }
     }
 
@@ -4685,6 +4688,8 @@ impl Session {
             .or_insert_with(|| bool_guc_value(self.default_transaction_deferrable()).into());
         gucs.entry("search_path".into())
             .or_insert_with(|| "\"$user\", public".into());
+        gucs.entry("temp_buffers".into())
+            .or_insert_with(|| TEMP_BUFFERS_DEFAULT_PAGES.to_string());
         gucs
     }
 
@@ -5468,6 +5473,444 @@ impl Session {
         catalog
             .lookup_any_relation(table_name)
             .is_some_and(|relation| relation.relpersistence == 't')
+    }
+
+    fn relation_name_is_temp(catalog: &dyn CatalogLookup, table_name: &str) -> bool {
+        catalog
+            .lookup_any_relation(table_name)
+            .is_some_and(|relation| relation.relpersistence == 't')
+    }
+
+    fn mark_temp_namespace_access_for_statement(
+        &mut self,
+        stmt: &Statement,
+        catalog: &dyn CatalogLookup,
+    ) {
+        let Some(txn) = self.active_txn.as_mut() else {
+            return;
+        };
+        if txn.accessed_temp_namespace {
+            return;
+        }
+        if Self::statement_accesses_temp_relation(stmt, catalog) {
+            txn.accessed_temp_namespace = true;
+        }
+    }
+
+    fn statement_accesses_temp_relation(stmt: &Statement, catalog: &dyn CatalogLookup) -> bool {
+        match stmt {
+            Statement::Select(select) => Self::select_accesses_temp_relation(select, catalog),
+            Statement::Values(values) => Self::values_accesses_temp_relation(values, catalog),
+            Statement::Explain(explain) => {
+                Self::statement_accesses_temp_relation(&explain.statement, catalog)
+            }
+            Statement::DeclareCursor(declare) => {
+                Self::select_accesses_temp_relation(&declare.query, catalog)
+            }
+            Statement::CopyFrom(copy) => Self::relation_name_is_temp(catalog, &copy.table_name),
+            Statement::CopyTo(copy) => match &copy.source {
+                CopyToSource::Relation { table_name, .. } => {
+                    Self::relation_name_is_temp(catalog, table_name)
+                }
+                CopyToSource::Query { statement, .. } => {
+                    Self::statement_accesses_temp_relation(statement, catalog)
+                }
+            },
+            Statement::Insert(insert) => {
+                Self::relation_name_is_temp(catalog, &insert.table_name)
+                    || insert
+                        .with
+                        .iter()
+                        .any(|cte| Self::cte_body_accesses_temp_relation(&cte.body, catalog))
+                    || match &insert.source {
+                        InsertSource::Values(rows) => rows
+                            .iter()
+                            .flatten()
+                            .any(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog)),
+                        InsertSource::Select(select) => {
+                            Self::select_accesses_temp_relation(select, catalog)
+                        }
+                        InsertSource::DefaultValues => false,
+                    }
+            }
+            Statement::Update(update) => {
+                Self::relation_name_is_temp(catalog, &update.table_name)
+                    || update
+                        .with
+                        .iter()
+                        .any(|cte| Self::cte_body_accesses_temp_relation(&cte.body, catalog))
+                    || update
+                        .from
+                        .as_ref()
+                        .is_some_and(|from| Self::from_item_accesses_temp_relation(from, catalog))
+                    || update.assignments.iter().any(|assignment| {
+                        Self::sql_expr_accesses_temp_relation(&assignment.expr, catalog)
+                    })
+                    || update
+                        .where_clause
+                        .as_ref()
+                        .is_some_and(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog))
+            }
+            Statement::Delete(delete) => {
+                Self::relation_name_is_temp(catalog, &delete.table_name)
+                    || delete
+                        .with
+                        .iter()
+                        .any(|cte| Self::cte_body_accesses_temp_relation(&cte.body, catalog))
+                    || delete
+                        .using
+                        .as_ref()
+                        .is_some_and(|using| Self::from_item_accesses_temp_relation(using, catalog))
+                    || delete
+                        .where_clause
+                        .as_ref()
+                        .is_some_and(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog))
+            }
+            Statement::Merge(merge) => {
+                Self::relation_name_is_temp(catalog, &merge.target_table)
+                    || merge
+                        .with
+                        .iter()
+                        .any(|cte| Self::cte_body_accesses_temp_relation(&cte.body, catalog))
+                    || Self::from_item_accesses_temp_relation(&merge.source, catalog)
+                    || Self::sql_expr_accesses_temp_relation(&merge.join_condition, catalog)
+            }
+            Statement::LockTable(lock) => lock
+                .targets
+                .iter()
+                .any(|target| Self::relation_name_is_temp(catalog, &target.name)),
+            Statement::DropTable(drop) => drop
+                .table_names
+                .iter()
+                .any(|name| Self::relation_name_is_temp(catalog, name)),
+            Statement::TruncateTable(truncate) => truncate
+                .table_names
+                .iter()
+                .any(|name| Self::relation_name_is_temp(catalog, name)),
+            Statement::CreateTableAs(create) => match &create.query {
+                CreateTableAsQuery::Select(select) => {
+                    Self::select_accesses_temp_relation(select, catalog)
+                }
+                CreateTableAsQuery::Execute(_) => false,
+            },
+            Statement::CreateView(create) => {
+                Self::select_accesses_temp_relation(&create.query, catalog)
+            }
+            Statement::RefreshMaterializedView(refresh) => {
+                Self::relation_name_is_temp(catalog, &refresh.relation_name)
+            }
+            Statement::Cluster(cluster) => {
+                (!cluster.table_name.is_empty()
+                    && Self::relation_name_is_temp(catalog, &cluster.table_name))
+                    || (!cluster.index_name.is_empty()
+                        && Self::relation_name_is_temp(catalog, &cluster.index_name))
+            }
+            _ => false,
+        }
+    }
+
+    fn select_accesses_temp_relation(
+        select: &SelectStatement,
+        catalog: &dyn CatalogLookup,
+    ) -> bool {
+        let shadowed_ctes = select
+            .with
+            .iter()
+            .map(|cte| cte.name.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>();
+        select
+            .with
+            .iter()
+            .any(|cte| Self::cte_body_accesses_temp_relation(&cte.body, catalog))
+            || select.from.as_ref().is_some_and(|from| {
+                Self::from_item_accesses_temp_relation_with_ctes(from, catalog, &shadowed_ctes)
+            })
+            || select
+                .targets
+                .iter()
+                .any(|target| Self::sql_expr_accesses_temp_relation(&target.expr, catalog))
+            || select
+                .where_clause
+                .as_ref()
+                .is_some_and(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog))
+            || select
+                .having
+                .as_ref()
+                .is_some_and(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog))
+            || select
+                .order_by
+                .iter()
+                .any(|item| Self::sql_expr_accesses_temp_relation(&item.expr, catalog))
+            || select.set_operation.as_ref().is_some_and(|setop| {
+                setop
+                    .inputs
+                    .iter()
+                    .any(|input| Self::select_accesses_temp_relation(input, catalog))
+            })
+    }
+
+    fn values_accesses_temp_relation(
+        values: &ValuesStatement,
+        catalog: &dyn CatalogLookup,
+    ) -> bool {
+        values
+            .with
+            .iter()
+            .any(|cte| Self::cte_body_accesses_temp_relation(&cte.body, catalog))
+            || values
+                .rows
+                .iter()
+                .flatten()
+                .any(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog))
+    }
+
+    fn cte_body_accesses_temp_relation(body: &CteBody, catalog: &dyn CatalogLookup) -> bool {
+        match body {
+            CteBody::Select(select) => Self::select_accesses_temp_relation(select, catalog),
+            CteBody::Values(values) => Self::values_accesses_temp_relation(values, catalog),
+            CteBody::Insert(insert) => Self::statement_accesses_temp_relation(
+                &Statement::Insert((**insert).clone()),
+                catalog,
+            ),
+            CteBody::Update(update) => Self::statement_accesses_temp_relation(
+                &Statement::Update((**update).clone()),
+                catalog,
+            ),
+            CteBody::Delete(delete) => Self::statement_accesses_temp_relation(
+                &Statement::Delete((**delete).clone()),
+                catalog,
+            ),
+            CteBody::Merge(merge) => Self::statement_accesses_temp_relation(
+                &Statement::Merge((**merge).clone()),
+                catalog,
+            ),
+            CteBody::RecursiveUnion {
+                anchor, recursive, ..
+            } => {
+                Self::cte_body_accesses_temp_relation(anchor, catalog)
+                    || Self::select_accesses_temp_relation(recursive, catalog)
+            }
+        }
+    }
+
+    fn from_item_accesses_temp_relation(from: &FromItem, catalog: &dyn CatalogLookup) -> bool {
+        Self::from_item_accesses_temp_relation_with_ctes(from, catalog, &BTreeSet::new())
+    }
+
+    fn from_item_accesses_temp_relation_with_ctes(
+        from: &FromItem,
+        catalog: &dyn CatalogLookup,
+        ctes: &BTreeSet<String>,
+    ) -> bool {
+        match from {
+            FromItem::Table { name, .. } => {
+                !ctes.contains(&name.to_ascii_lowercase())
+                    && Self::relation_name_is_temp(catalog, name)
+            }
+            FromItem::TableSample { source, .. }
+            | FromItem::Lateral(source)
+            | FromItem::Alias { source, .. } => {
+                Self::from_item_accesses_temp_relation_with_ctes(source, catalog, ctes)
+            }
+            FromItem::DerivedTable(select) => Self::select_accesses_temp_relation(select, catalog),
+            FromItem::Join {
+                left,
+                right,
+                constraint,
+                ..
+            } => {
+                Self::from_item_accesses_temp_relation_with_ctes(left, catalog, ctes)
+                    || Self::from_item_accesses_temp_relation_with_ctes(right, catalog, ctes)
+                    || matches!(
+                        constraint,
+                        crate::backend::parser::JoinConstraint::On(expr)
+                            if Self::sql_expr_accesses_temp_relation(expr, catalog)
+                    )
+            }
+            FromItem::Values { rows } => rows
+                .iter()
+                .flatten()
+                .any(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog)),
+            FromItem::Expression { expr, .. } => {
+                Self::sql_expr_accesses_temp_relation(expr, catalog)
+            }
+            FromItem::FunctionCall { args, .. } => args
+                .iter()
+                .any(|arg| Self::sql_expr_accesses_temp_relation(&arg.value, catalog)),
+            FromItem::RowsFrom { functions, .. } => functions.iter().any(|function| {
+                function
+                    .args
+                    .iter()
+                    .any(|arg| Self::sql_expr_accesses_temp_relation(&arg.value, catalog))
+            }),
+            FromItem::JsonTable(_) | FromItem::XmlTable(_) => false,
+        }
+    }
+
+    fn sql_expr_accesses_temp_relation(expr: &SqlExpr, catalog: &dyn CatalogLookup) -> bool {
+        match expr {
+            SqlExpr::ScalarSubquery(select)
+            | SqlExpr::ArraySubquery(select)
+            | SqlExpr::Exists(select) => Self::select_accesses_temp_relation(select, catalog),
+            SqlExpr::InSubquery { expr, subquery, .. } => {
+                Self::sql_expr_accesses_temp_relation(expr, catalog)
+                    || Self::select_accesses_temp_relation(subquery, catalog)
+            }
+            SqlExpr::QuantifiedSubquery { left, subquery, .. } => {
+                Self::sql_expr_accesses_temp_relation(left, catalog)
+                    || Self::select_accesses_temp_relation(subquery, catalog)
+            }
+            SqlExpr::Add(left, right)
+            | SqlExpr::Sub(left, right)
+            | SqlExpr::BitAnd(left, right)
+            | SqlExpr::BitOr(left, right)
+            | SqlExpr::BitXor(left, right)
+            | SqlExpr::Shl(left, right)
+            | SqlExpr::Shr(left, right)
+            | SqlExpr::Mul(left, right)
+            | SqlExpr::Div(left, right)
+            | SqlExpr::Mod(left, right)
+            | SqlExpr::Concat(left, right)
+            | SqlExpr::Eq(left, right)
+            | SqlExpr::NotEq(left, right)
+            | SqlExpr::Lt(left, right)
+            | SqlExpr::LtEq(left, right)
+            | SqlExpr::Gt(left, right)
+            | SqlExpr::GtEq(left, right)
+            | SqlExpr::RegexMatch(left, right)
+            | SqlExpr::And(left, right)
+            | SqlExpr::Or(left, right)
+            | SqlExpr::IsDistinctFrom(left, right)
+            | SqlExpr::IsNotDistinctFrom(left, right)
+            | SqlExpr::Overlaps(left, right)
+            | SqlExpr::ArrayOverlap(left, right)
+            | SqlExpr::ArrayContains(left, right)
+            | SqlExpr::ArrayContained(left, right)
+            | SqlExpr::JsonbContains(left, right)
+            | SqlExpr::JsonbContained(left, right)
+            | SqlExpr::JsonbExists(left, right)
+            | SqlExpr::JsonbExistsAny(left, right)
+            | SqlExpr::JsonbExistsAll(left, right)
+            | SqlExpr::JsonbPathExists(left, right)
+            | SqlExpr::JsonbPathMatch(left, right)
+            | SqlExpr::JsonGet(left, right)
+            | SqlExpr::JsonGetText(left, right)
+            | SqlExpr::JsonPath(left, right)
+            | SqlExpr::JsonPathText(left, right)
+            | SqlExpr::BinaryOperator { left, right, .. }
+            | SqlExpr::GeometryBinaryOp { left, right, .. } => {
+                Self::sql_expr_accesses_temp_relation(left, catalog)
+                    || Self::sql_expr_accesses_temp_relation(right, catalog)
+            }
+            SqlExpr::UnaryPlus(inner)
+            | SqlExpr::Negate(inner)
+            | SqlExpr::BitNot(inner)
+            | SqlExpr::Cast(inner, _)
+            | SqlExpr::Not(inner)
+            | SqlExpr::IsNull(inner)
+            | SqlExpr::IsNotNull(inner)
+            | SqlExpr::FieldSelect { expr: inner, .. }
+            | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+            | SqlExpr::PrefixOperator { expr: inner, .. } => {
+                Self::sql_expr_accesses_temp_relation(inner, catalog)
+            }
+            SqlExpr::Subscript { expr, .. } => Self::sql_expr_accesses_temp_relation(expr, catalog),
+            SqlExpr::Collate { expr, .. } => Self::sql_expr_accesses_temp_relation(expr, catalog),
+            SqlExpr::AtTimeZone { expr, zone } => {
+                Self::sql_expr_accesses_temp_relation(expr, catalog)
+                    || Self::sql_expr_accesses_temp_relation(zone, catalog)
+            }
+            SqlExpr::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            }
+            | SqlExpr::Similar {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                Self::sql_expr_accesses_temp_relation(expr, catalog)
+                    || Self::sql_expr_accesses_temp_relation(pattern, catalog)
+                    || escape.as_ref().is_some_and(|escape| {
+                        Self::sql_expr_accesses_temp_relation(escape, catalog)
+                    })
+            }
+            SqlExpr::Case {
+                arg,
+                args,
+                defresult,
+            } => {
+                arg.as_ref()
+                    .is_some_and(|arg| Self::sql_expr_accesses_temp_relation(arg, catalog))
+                    || args.iter().any(|when| {
+                        Self::sql_expr_accesses_temp_relation(&when.expr, catalog)
+                            || Self::sql_expr_accesses_temp_relation(&when.result, catalog)
+                    })
+                    || defresult.as_ref().is_some_and(|result| {
+                        Self::sql_expr_accesses_temp_relation(result, catalog)
+                    })
+            }
+            SqlExpr::ArrayLiteral(values) | SqlExpr::Row(values) => values
+                .iter()
+                .any(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog)),
+            SqlExpr::QuantifiedArray { left, array, .. } => {
+                Self::sql_expr_accesses_temp_relation(left, catalog)
+                    || Self::sql_expr_accesses_temp_relation(array, catalog)
+            }
+            SqlExpr::ArraySubscript { array, subscripts } => {
+                Self::sql_expr_accesses_temp_relation(array, catalog)
+                    || subscripts.iter().any(|subscript| {
+                        subscript.lower.as_ref().is_some_and(|expr| {
+                            Self::sql_expr_accesses_temp_relation(expr, catalog)
+                        }) || subscript.upper.as_ref().is_some_and(|expr| {
+                            Self::sql_expr_accesses_temp_relation(expr, catalog)
+                        })
+                    })
+            }
+            SqlExpr::FuncCall {
+                args,
+                order_by,
+                within_group,
+                filter,
+                over,
+                ..
+            } => {
+                args.args()
+                    .iter()
+                    .any(|arg| Self::sql_expr_accesses_temp_relation(&arg.value, catalog))
+                    || order_by
+                        .iter()
+                        .any(|item| Self::sql_expr_accesses_temp_relation(&item.expr, catalog))
+                    || within_group.as_ref().is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|item| Self::sql_expr_accesses_temp_relation(&item.expr, catalog))
+                    })
+                    || filter
+                        .as_ref()
+                        .is_some_and(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog))
+                    || over
+                        .as_ref()
+                        .is_some_and(|spec| Self::window_spec_accesses_temp_relation(spec, catalog))
+            }
+            _ => false,
+        }
+    }
+
+    fn window_spec_accesses_temp_relation(
+        spec: &RawWindowSpec,
+        catalog: &dyn CatalogLookup,
+    ) -> bool {
+        spec.partition_by
+            .iter()
+            .any(|expr| Self::sql_expr_accesses_temp_relation(expr, catalog))
+            || spec
+                .order_by
+                .iter()
+                .any(|item| Self::sql_expr_accesses_temp_relation(&item.expr, catalog))
     }
 
     fn check_read_only_statement_allowed(
@@ -6933,6 +7376,16 @@ impl Session {
         }
     }
 
+    fn validate_temp_on_commit_for_active_txn(&self, db: &Database) -> Result<(), ExecError> {
+        let Some(txn) = self.active_txn.as_ref() else {
+            return Ok(());
+        };
+        db.validate_temp_on_commit(
+            self.client_id,
+            txn.xid.map(|xid| (xid, txn.next_command_id)),
+        )
+    }
+
     fn reject_drop_constraint_with_pending_trigger_events(
         &self,
         db: &Database,
@@ -7088,7 +7541,7 @@ impl Session {
                     "cannot PREPARE a transaction that has failed",
                 ));
             }
-            if !txn.temp_effects.is_empty() {
+            if txn.accessed_temp_namespace || !txn.temp_effects.is_empty() {
                 return Err(Self::unsupported_prepare_state(
                     "cannot PREPARE a transaction that has operated on temporary objects",
                 ));
@@ -8038,6 +8491,7 @@ impl Session {
                 .and_then(|txn| txn.xid.map(|xid| (xid, txn.next_command_id)));
             let catalog = db.lazy_catalog_lookup(self.client_id, txn_ctx, search_path.as_deref());
             self.reject_restricted_views_in_statement(&stmt, &catalog)?;
+            self.mark_temp_namespace_access_for_statement(&stmt, &catalog);
             if matches!(
                 stmt,
                 Statement::DeclareCursor(_)
@@ -10576,6 +11030,7 @@ impl Session {
                 }
                 let result = self
                     .validate_constraints_for_active_txn(db, false)
+                    .and_then(|_| self.validate_temp_on_commit_for_active_txn(db))
                     .map(|_| StatementResult::AffectedRows(0));
                 let txn = self.active_txn.take().unwrap();
                 let chained_options = options.chain.then(|| txn.chained_options());
@@ -14959,6 +15414,14 @@ impl Session {
             .is_none()
             .then(|| db.allocate_statement_lock_scope_id());
         let search_path = self.configured_search_path();
+        if self.active_txn.is_some() {
+            let catalog = db.lazy_catalog_lookup(self.client_id, txn_ctx, search_path.as_deref());
+            if Self::select_accesses_temp_relation(select_stmt, &catalog)
+                && let Some(txn) = self.active_txn.as_mut()
+            {
+                txn.accessed_temp_namespace = true;
+            }
+        }
         let statement_timestamp_usecs =
             crate::backend::utils::time::datetime::current_postgres_timestamp_usecs();
         let transaction_timestamp_usecs = self
@@ -18935,6 +19398,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
                     )
                 }
                 Statement::AlterType(ref alter_stmt) => {
@@ -19515,6 +19979,23 @@ impl Session {
             return Ok(StatementResult::AffectedRows(0));
         }
 
+        if name == "temp_buffers" && db.local_buffers_initialized(self.client_id) {
+            let new_value = stmt
+                .value
+                .clone()
+                .unwrap_or_else(|| TEMP_BUFFERS_DEFAULT_PAGES.to_string());
+            let new_pages = parse_temp_buffers_pages(&new_value)?;
+            let current_pages = self
+                .effective_gucs_for_execution()
+                .get("temp_buffers")
+                .cloned()
+                .map(|value| parse_temp_buffers_pages(&value))
+                .unwrap_or(Ok(TEMP_BUFFERS_DEFAULT_PAGES))?;
+            if new_pages != current_pages {
+                return Err(temp_buffers_change_after_init_error(&new_value));
+            }
+        }
+
         let mut effective_state = self.capture_guc_state();
         let normalized = if let Some(value) = &stmt.value {
             apply_guc_value_to_state(&mut effective_state, &stmt.name, value)?
@@ -19680,6 +20161,19 @@ impl Session {
                     sqlstate: "25001",
                 }));
             }
+            if normalized == "temp_buffers" && db.local_buffers_initialized(self.client_id) {
+                let current_pages = self
+                    .effective_gucs_for_execution()
+                    .get("temp_buffers")
+                    .cloned()
+                    .map(|value| parse_temp_buffers_pages(&value))
+                    .unwrap_or(Ok(TEMP_BUFFERS_DEFAULT_PAGES))?;
+                if current_pages != TEMP_BUFFERS_DEFAULT_PAGES {
+                    return Err(temp_buffers_change_after_init_error(
+                        &TEMP_BUFFERS_DEFAULT_PAGES.to_string(),
+                    ));
+                }
+            }
             let mut effective_state = self.capture_guc_state();
             if is_builtin {
                 reset_guc_in_state(
@@ -19711,6 +20205,19 @@ impl Session {
             }
             self.after_guc_change(db, &normalized);
         } else {
+            if db.local_buffers_initialized(self.client_id) {
+                let current_pages = self
+                    .effective_gucs_for_execution()
+                    .get("temp_buffers")
+                    .cloned()
+                    .map(|value| parse_temp_buffers_pages(&value))
+                    .unwrap_or(Ok(TEMP_BUFFERS_DEFAULT_PAGES))?;
+                if current_pages != TEMP_BUFFERS_DEFAULT_PAGES {
+                    return Err(temp_buffers_change_after_init_error(
+                        &TEMP_BUFFERS_DEFAULT_PAGES.to_string(),
+                    ));
+                }
+            }
             let mut effective_state = self.capture_guc_state();
             reset_all_gucs_in_state(&mut effective_state, &self.reset_datetime_config);
             let mut commit_state = self
@@ -22023,6 +22530,9 @@ fn apply_guc_value_to_state(
         "vacuum_cost_delay" => {
             parse_vacuum_cost_delay_ms(value)?;
         }
+        "temp_buffers" => {
+            stored_value = parse_temp_buffers_pages(value)?.to_string();
+        }
         "password_encryption" => {
             let encryption =
                 PasswordEncryption::parse(value).ok_or_else(|| ExecError::DetailedError {
@@ -22442,6 +22952,64 @@ fn parse_bool_guc(value: &str) -> Option<bool> {
 
 fn bool_guc_value(value: bool) -> &'static str {
     if value { "on" } else { "off" }
+}
+
+fn parse_temp_buffers_pages(value: &str) -> Result<usize, ExecError> {
+    let trimmed = value.trim().trim_matches('\'').trim();
+    if trimmed.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+
+    let split_at = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let (number, suffix) = trimmed.split_at(split_at);
+    if number.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    let amount = number
+        .parse::<usize>()
+        .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
+    let suffix = suffix.trim().to_ascii_lowercase();
+    let pages = match suffix.as_str() {
+        "" => amount,
+        "b" | "kb" | "k" | "mb" | "m" | "gb" | "g" => {
+            let bytes = parse_size_guc_bytes(trimmed)?;
+            bytes.div_ceil(crate::BLCKSZ)
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                value.to_string(),
+            )));
+        }
+    };
+    if pages < TEMP_BUFFERS_MIN_PAGES {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid value for parameter \"temp_buffers\": \"{value}\""),
+            detail: Some(format!(
+                "\"temp_buffers\" must be at least {TEMP_BUFFERS_MIN_PAGES}."
+            )),
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    Ok(pages)
+}
+
+fn temp_buffers_change_after_init_error(value: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid value for parameter \"temp_buffers\": \"{value}\""),
+        detail: Some(
+            "\"temp_buffers\" cannot be changed after any temporary tables have been accessed in the session."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "22023",
+    }
 }
 
 fn parse_size_guc_bytes(value: &str) -> Result<usize, ExecError> {

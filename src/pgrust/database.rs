@@ -98,7 +98,7 @@ use crate::pgrust::auth::{AuthCatalog, AuthState};
 pub use crate::pgrust::autovacuum::AutovacuumConfig;
 use crate::pgrust::cluster::{Cluster, ClusterShared, SessionActivityEntry, SessionActivityState};
 use crate::pl::plpgsql::PlpgsqlFunctionCache;
-use crate::{BufferPool, ClientId, SmgrStorageBackend};
+use crate::{BufferPool, ClientId, LocalBufferManager, SmgrStorageBackend};
 use ddl::{
     ensure_can_set_role, ensure_relation_owner, map_catalog_error,
     reject_index_with_referencing_foreign_keys, reject_relation_with_dependent_views,
@@ -557,6 +557,8 @@ pub struct Database {
     pub(crate) session_plpgsql_function_caches:
         Arc<RwLock<HashMap<ClientId, Arc<RwLock<PlpgsqlFunctionCache>>>>>,
     pub(crate) session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
+    pub(crate) session_local_buffers:
+        Arc<RwLock<HashMap<ClientId, Arc<LocalBufferManager<SmgrStorageBackend>>>>>,
     pub(crate) session_guc_states: Arc<RwLock<HashMap<ClientId, HashMap<String, String>>>>,
     pub(crate) session_view_states: Arc<RwLock<HashMap<ClientId, SessionViewState>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
@@ -1102,6 +1104,36 @@ impl Database {
             .insert(client_id, temp_backend_id);
     }
 
+    pub(crate) fn local_buffers_initialized(&self, client_id: ClientId) -> bool {
+        self.session_local_buffers.read().contains_key(&client_id)
+    }
+
+    pub(crate) fn local_buffer_manager(
+        &self,
+        client_id: ClientId,
+        capacity: usize,
+    ) -> Arc<LocalBufferManager<SmgrStorageBackend>> {
+        if let Some(local) = self.session_local_buffers.read().get(&client_id) {
+            return Arc::clone(local);
+        }
+        let mut buffers = self.session_local_buffers.write();
+        Arc::clone(
+            buffers.entry(client_id).or_insert_with(|| {
+                Arc::new(LocalBufferManager::new(Arc::clone(&self.pool), capacity))
+            }),
+        )
+    }
+
+    pub(crate) fn existing_local_buffer_manager(
+        &self,
+        client_id: ClientId,
+    ) -> Option<Arc<LocalBufferManager<SmgrStorageBackend>>> {
+        self.session_local_buffers
+            .read()
+            .get(&client_id)
+            .map(Arc::clone)
+    }
+
     pub(crate) fn install_session_view_state(&self, client_id: ClientId, state: SessionViewState) {
         self.session_view_states.write().insert(client_id, state);
     }
@@ -1187,6 +1219,7 @@ impl Database {
 
     pub(crate) fn clear_temp_backend_id(&self, client_id: ClientId) {
         self.session_temp_backend_ids.write().remove(&client_id);
+        self.session_local_buffers.write().remove(&client_id);
     }
 
     pub(crate) fn clear_session_view_state(&self, client_id: ClientId) {

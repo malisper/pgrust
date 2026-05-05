@@ -1,4 +1,4 @@
-use crate::backend::access::heap::heapam::VisibleHeapScan;
+use crate::backend::access::heap::heapam::{VisibleHeapScan, VisiblePinnedBuffer};
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::executor::hashjoin::{HashInstrumentation, HashJoinPhase, HashJoinTable};
 use crate::backend::executor::mergejoin::MergeJoinBufferedRow;
@@ -513,6 +513,7 @@ pub struct TidScanState {
     pub(crate) source_id: usize,
     pub(crate) relation_oid: u32,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_page_pin: Option<VisiblePinnedBuffer>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -556,6 +557,7 @@ pub struct IndexScanState {
     pub(crate) source_id: usize,
     pub(crate) relation_oid: u32,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_page_pin: Option<VisiblePinnedBuffer>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -602,6 +604,7 @@ pub struct IndexOnlyScanState {
     pub(crate) source_id: usize,
     pub(crate) relation_oid: u32,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_page_pin: Option<VisiblePinnedBuffer>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -709,7 +712,7 @@ pub struct BitmapHeapScanState {
     pub(crate) parallel_page_index: usize,
     pub(crate) current_page_offsets: Vec<u16>,
     pub(crate) current_offset_index: usize,
-    pub(crate) current_page_pin: Option<Rc<OwnedBufferPin<SmgrStorageBackend>>>,
+    pub(crate) current_page_pin: Option<VisiblePinnedBuffer>,
     pub(crate) recheck_qual: Option<Expr>,
     pub(crate) compiled_recheck: Option<crate::backend::executor::expr::CompiledPredicate>,
     pub(crate) filter_qual: Option<Expr>,
