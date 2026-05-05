@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, Write};
 
@@ -26,6 +27,33 @@ use crate::pgrust::session::ByteaOutputFormat;
 // options live in pgrust_expr.
 pub(crate) type FloatFormatOptions = pgrust_expr::libpq::pqformat::FloatFormatOptions;
 
+fn postgres_srf_placement_error(message: &str) -> Option<Cow<'_, str>> {
+    match message {
+        "set-returning functions are not allowed in aggregate arguments" => Some(Cow::Borrowed(
+            "aggregate function calls cannot contain set-returning function calls",
+        )),
+        "set-returning functions are not allowed in window aggregate arguments" => Some(
+            Cow::Borrowed("window function calls cannot contain set-returning function calls"),
+        ),
+        message if message.starts_with("set-returning functions are not allowed in ") => {
+            Some(Cow::Borrowed(message))
+        }
+        _ => None,
+    }
+}
+
+fn postgres_srf_placement_hint(message: &str) -> Option<&'static str> {
+    match message {
+        "set-returning functions are not allowed in CASE"
+        | "set-returning functions are not allowed in COALESCE"
+        | "set-returning functions are not allowed in aggregate arguments"
+        | "set-returning functions are not allowed in window aggregate arguments" => {
+            Some("You might be able to move the set-returning function into a LATERAL FROM item.")
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
         ExecError::WithContext { source, .. }
@@ -43,6 +71,14 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         }) if actual.starts_with("Length(") => {
             let signature = actual.replace("Length", "length");
             format!("function {signature} does not exist")
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(message)) => {
+            postgres_srf_placement_error(message)
+                .map(Cow::into_owned)
+                .unwrap_or_else(|| {
+                    crate::backend::parser::ParseError::FeatureNotSupported(message.clone())
+                        .to_string()
+                })
         }
         ExecError::Parse(p) => p.to_string(),
         ExecError::Regex(err) => err.message.clone(),
@@ -185,6 +221,11 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => Some(
             "No operator matches the given name and argument types. You might need to add explicit type casts.".into(),
         ),
+        ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(message))
+            if postgres_srf_placement_hint(message).is_some() =>
+        {
+            postgres_srf_placement_hint(message).map(str::to_string)
+        }
         ExecError::TypeMismatch { op, .. } if type_mismatch_op_is_operator(op) => Some(
             "No operator matches the given name and argument types. You might need to add explicit type casts.".into(),
         ),
