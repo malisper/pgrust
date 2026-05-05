@@ -320,8 +320,8 @@ impl OptimizerServices for RootOptimizerServices {
     }
 
     fn eval_power_function(&self, values: &[Value]) -> Result<Value, OptimizerEvalError> {
-        crate::backend::executor::expr_numeric::eval_power_function(values)
-            .map_err(optimizer_error_from_exec)
+        pgrust_expr::eval_power_function(values)
+            .map_err(|err| optimizer_error_from_exec(err.into()))
     }
 
     fn eval_range_function(

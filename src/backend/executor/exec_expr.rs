@@ -31,6 +31,7 @@ use pgrust_expr::{
     expr_mac::eval_macaddr_function,
     expr_money::{cash_words_text, money_larger, money_smaller},
     expr_multirange::eval_multirange_function,
+    expr_numeric,
 };
 
 use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
@@ -68,13 +69,6 @@ use super::expr_math::{
     eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
     eval_erf, eval_erfc, eval_float_send_function, eval_gamma, eval_gcd_function,
     eval_lcm_function, eval_lgamma, eval_unary_float_function, sind, snap_degree, tand,
-};
-use super::expr_numeric::{
-    eval_ceil_function, eval_div_function, eval_exp_function, eval_factorial_function,
-    eval_floor_function, eval_ln_function, eval_log_function, eval_log10_function,
-    eval_min_scale_function, eval_numeric_inc_function, eval_pg_lsn_function, eval_power_function,
-    eval_round_function, eval_scale_function, eval_sign_function, eval_sqrt_function,
-    eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
 };
 use super::expr_ops::compare_order_values;
 use super::expr_ops::text_collation_semantics;
@@ -14236,15 +14230,27 @@ pub(crate) fn eval_builtin_function(
             })
         }
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
-        BuiltinScalarFunction::Log => eval_log_function(&values),
-        BuiltinScalarFunction::Log10 => eval_log10_function(&values),
-        BuiltinScalarFunction::Div => eval_div_function(&values),
+        BuiltinScalarFunction::Log => expr_numeric::eval_log_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Log10 => {
+            expr_numeric::eval_log10_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Div => expr_numeric::eval_div_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Mod => mod_values(values[0].clone(), values[1].clone()),
-        BuiltinScalarFunction::Scale => eval_scale_function(&values),
-        BuiltinScalarFunction::MinScale => eval_min_scale_function(&values),
-        BuiltinScalarFunction::TrimScale => eval_trim_scale_function(&values),
-        BuiltinScalarFunction::NumericInc => eval_numeric_inc_function(&values),
-        BuiltinScalarFunction::Factorial => eval_factorial_function(&values),
+        BuiltinScalarFunction::Scale => {
+            expr_numeric::eval_scale_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MinScale => {
+            expr_numeric::eval_min_scale_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::TrimScale => {
+            expr_numeric::eval_trim_scale_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::NumericInc => {
+            expr_numeric::eval_numeric_inc_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Factorial => {
+            expr_numeric::eval_factorial_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
         BuiltinScalarFunction::ArrayDims => eval_array_dims_function(&values),
         BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
@@ -14390,19 +14396,31 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
-        BuiltinScalarFunction::PgLsn => eval_pg_lsn_function(&values),
-        BuiltinScalarFunction::Trunc => eval_trunc_function(&values),
-        BuiltinScalarFunction::Round => eval_round_function(&values),
+        BuiltinScalarFunction::PgLsn => {
+            expr_numeric::eval_pg_lsn_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Trunc => {
+            expr_numeric::eval_trunc_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Round => {
+            expr_numeric::eval_round_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::WidthBucket => {
             if values.len() == 2 {
                 eval_width_bucket_thresholds(&values)
             } else {
-                eval_width_bucket_function(&values)
+                expr_numeric::eval_width_bucket_function(&values).map_err(Into::into)
             }
         }
-        BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => eval_ceil_function(&values),
-        BuiltinScalarFunction::Floor => eval_floor_function(&values),
-        BuiltinScalarFunction::Sign => eval_sign_function(&values),
+        BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => {
+            expr_numeric::eval_ceil_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Floor => {
+            expr_numeric::eval_floor_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sign => {
+            expr_numeric::eval_sign_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Pi => {
             if values.is_empty() {
                 Ok(Value::Float64(std::f64::consts::PI))
@@ -14410,11 +14428,15 @@ pub(crate) fn eval_builtin_function(
                 Err(malformed_expr_error("pi"))
             }
         }
-        BuiltinScalarFunction::Sqrt => eval_sqrt_function(&values),
+        BuiltinScalarFunction::Sqrt => {
+            expr_numeric::eval_sqrt_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Cbrt => eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt())),
-        BuiltinScalarFunction::Power => eval_power_function(&values),
-        BuiltinScalarFunction::Exp => eval_exp_function(&values),
-        BuiltinScalarFunction::Ln => eval_ln_function(&values),
+        BuiltinScalarFunction::Power => {
+            expr_numeric::eval_power_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Exp => expr_numeric::eval_exp_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Ln => expr_numeric::eval_ln_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Sin => eval_unary_float_function("sin", &values, |v| Ok(v.sin())),
         BuiltinScalarFunction::Cos => eval_unary_float_function("cos", &values, |v| Ok(v.cos())),
         BuiltinScalarFunction::Sinh => eval_unary_float_function("sinh", &values, |v| Ok(v.sinh())),
