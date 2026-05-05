@@ -8779,10 +8779,10 @@ fn memoize_inner_plan_decision(
     {
         return None;
     }
-    if plan_contains_tid_range_scan(&right_plan) {
+    if plan_contains_tid_range_scan(right_plan) {
         // :HACK: PostgreSQL exposes parameterized Tid Range Scan rescans
         // directly in tidrangescan instead of wrapping them in Memoize.
-        return right_plan;
+        return None;
     }
     // :HACK: PostgreSQL avoids wrapping the whole lateral VALUES branch in
     // Memoize when the outer key has little reuse; keeping the inner index
@@ -9072,6 +9072,16 @@ fn plan_contains_volatile_expr(plan: &Plan, catalog: Option<&dyn CatalogLookup>)
             }) || filter
                 .as_ref()
                 .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::TidRangeScan {
+            tid_range_cond,
+            filter,
+            ..
+        } => {
+            expr_contains_volatile(&tid_range_cond.display_expr, catalog)
+                || filter
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
         }
         Plan::IndexOnlyScan {
             keys,
