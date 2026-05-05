@@ -5085,6 +5085,9 @@ fn render_special_builtin_function(
                 Some(format!("({value} IS {form} NORMALIZED)"))
             }
         }
+        BuiltinScalarFunction::SqlJsonIsJson if func.args.len() == 2 => {
+            render_sql_json_is_json_predicate(func, ctx)
+        }
         BuiltinScalarFunction::Overlay if matches!(func.args.len(), 3 | 4) => {
             let source = render_text_function_arg(&func.args[0], ctx);
             let placing = render_text_function_arg(&func.args[1], ctx);
@@ -5176,6 +5179,47 @@ fn render_special_builtin_function(
             Some(render_trim_function("TRAILING", &func.args, ctx))
         }
         _ => None,
+    }
+}
+
+fn render_sql_json_is_json_predicate(
+    func: &FuncExpr,
+    ctx: &ViewDeparseContext<'_>,
+) -> Option<String> {
+    let [subject, predicate] = func.args.as_slice() else {
+        return None;
+    };
+    let predicate = literal_text(predicate)?;
+    let (predicate, unique_keys) = predicate
+        .strip_suffix(":unique")
+        .map(|predicate| (predicate, true))
+        .unwrap_or((predicate, false));
+    let item_type = match predicate {
+        "value" => "",
+        "scalar" => " SCALAR",
+        "array" => " ARRAY",
+        "object" => " OBJECT",
+        _ => return None,
+    };
+    let mut rendered = format!(
+        "{} IS JSON{item_type}",
+        render_sql_json_is_json_subject(subject, ctx)
+    );
+    if unique_keys {
+        rendered.push_str(" WITH UNIQUE KEYS");
+    }
+    Some(rendered)
+}
+
+fn render_sql_json_is_json_subject(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    let rendered = match expr {
+        Expr::Const(Value::Text(_) | Value::TextRef(_, _)) => render_text_function_arg(expr, ctx),
+        _ => render_expr(expr, ctx),
+    };
+    if expr_needs_parentheses(expr, ExprPrecedence::Comparison, ChildSide::Left) {
+        format!("({rendered})")
+    } else {
+        rendered
     }
 }
 
