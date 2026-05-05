@@ -6858,6 +6858,10 @@ fn execute_simple_query_statements(
         .filter(|sql| !sql_is_effectively_empty_after_comments(sql))
         .count()
         > 1;
+    let use_hidden_implicit_txn = multi_statement
+        && !statements
+            .iter()
+            .any(|sql| !matches!(simple_query_txn_control(sql), SimpleQueryTxnControl::Other));
     let mut executed_any = false;
     let mut statements = statements.into_iter();
     let mut hidden_implicit_txn = false;
@@ -6867,7 +6871,7 @@ fn execute_simple_query_statements(
         }
         executed_any = true;
         let txn_control = simple_query_txn_control(&raw_stmt);
-        if multi_statement
+        if use_hidden_implicit_txn
             && !hidden_implicit_txn
             && !state.session.in_transaction()
             && simple_query_starts_implicit_transaction(txn_control)
@@ -6878,9 +6882,14 @@ fn execute_simple_query_statements(
         if hidden_implicit_txn {
             match txn_control {
                 SimpleQueryTxnControl::Begin => {
+                    if let Err(e) = state.session.commit_implicit_query_transaction(db) {
+                        send_exec_error(stream, &raw_stmt, &e)?;
+                        return Ok(SimpleQueryExecutionResult {
+                            executed_any,
+                            copy_in_started: false,
+                        });
+                    }
                     hidden_implicit_txn = false;
-                    send_command_complete(stream, "BEGIN")?;
-                    continue;
                 }
                 SimpleQueryTxnControl::Commit { chain: false } => {
                     if let Err(e) = state.session.commit_implicit_query_transaction(db) {
@@ -7322,6 +7331,7 @@ fn execute_query_statement(
                 match &copy.direction {
                     CopyDirection::From(CopyEndpoint::Stdin) => {
                         if let Err(e) = state.session.validate_copy_from_stdin_start(db, &copy) {
+                            state.session.mark_transaction_failed();
                             send_exec_error(stream, error_sql.as_ref(), &e)?;
                             return Ok(QueryStatementFlow::Continue);
                         }
@@ -7340,6 +7350,7 @@ fn execute_query_statement(
                         {
                             Ok(needs_interleaved_stdout) => needs_interleaved_stdout,
                             Err(e) => {
+                                state.session.mark_transaction_failed();
                                 send_exec_error(stream, error_sql.as_ref(), &e)?;
                                 return Ok(QueryStatementFlow::Stop);
                             }
@@ -7358,6 +7369,7 @@ fn execute_query_statement(
                                     return Ok(QueryStatementFlow::Continue);
                                 }
                                 Err(e) => {
+                                    state.session.mark_transaction_failed();
                                     send_exec_error(stream, error_sql.as_ref(), &e)?;
                                     return Ok(QueryStatementFlow::Stop);
                                 }
@@ -7378,6 +7390,7 @@ fn execute_query_statement(
                                 return Ok(QueryStatementFlow::Continue);
                             }
                             Err(e) => {
+                                state.session.mark_transaction_failed();
                                 send_exec_error(stream, error_sql.as_ref(), &e)?;
                                 return Ok(QueryStatementFlow::Stop);
                             }
@@ -7391,6 +7404,7 @@ fn execute_query_statement(
                             return Ok(QueryStatementFlow::Continue);
                         }
                         Err(e) => {
+                            state.session.mark_transaction_failed();
                             send_exec_error(stream, error_sql.as_ref(), &e)?;
                             return Ok(QueryStatementFlow::Stop);
                         }
@@ -7398,6 +7412,7 @@ fn execute_query_statement(
                 }
             }
             Err(e) => {
+                state.session.mark_transaction_failed();
                 send_exec_error(stream, error_sql.as_ref(), &e)?;
                 return Ok(QueryStatementFlow::Stop);
             }
@@ -11959,6 +11974,7 @@ fn handle_copy_done(
     };
     let text = copy.pending_text_lossy();
     if let Err(e) = state.session.copy_from_text(db, &copy.copy, &text) {
+        state.session.mark_transaction_failed();
         send_exec_error(stream, &copy.sql, &e)?;
         send_ready_with_pending_messages(stream, db, &state.session)?;
         return Ok(());

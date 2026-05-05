@@ -1667,6 +1667,19 @@ impl Database {
         let mut rewritten_index_oids = Vec::new();
         let mut truncated_relation_oids = Vec::new();
         for target in targets.iter().filter(|target| target.relkind == 'r') {
+            // Transactional TRUNCATE swaps relfilenodes. Keep the pre-truncate
+            // relfilenode durable before dropping its buffers so ROLLBACK can
+            // restore the old table contents.
+            if target.relpersistence == 't'
+                && let Some(local) = self.existing_local_buffer_manager(client_id)
+            {
+                local.flush_relation(target.rel).map_err(|err| {
+                    ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Buffer(err))
+                })?;
+            }
+            ctx.pool.flush_relation(target.rel).map_err(|err| {
+                ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Buffer(err))
+            })?;
             invalidate_relation_buffers_for_command(
                 "TRUNCATE",
                 pgrust_commands::truncate::relation_name_for_oid(&catalog, target.relation_oid),

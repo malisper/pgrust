@@ -1,18 +1,13 @@
 Goal:
-Investigate copy.out regression mismatches around HEADER option errors and COPY TO materialized views.
-
+Diagnose copy regression diff where partitioned COPY rows disappear after COPY FREEZE error and ROLLBACK.
 Key decisions:
-PostgreSQL accepts only true/false/on/off/0/1/match for COPY HEADER; invalid values should produce `header requires a Boolean value or "match"`.
-PostgreSQL permits COPY TO from populated materialized views and rejects only unpopulated materialized views with the REFRESH hint.
-
+PostgreSQL makes transactional TRUNCATE safe by switching to a new relfilenode while preserving the old relfilenode until commit/abort. pgrust already restored the catalog relfilenode on ROLLBACK, but invalidated dirty buffers for the old relfilenode before they were durable, so rollback pointed back to an empty on-disk table. The fix flushes the old relation buffers before invalidating them during transactional TRUNCATE, and marks COPY fast-path errors as transaction failures in the server protocol.
 Files touched:
-.codex/task-notes/copy-regression.md
-
+src/backend/tcop/postgres.rs
+src/pgrust/database/commands/execute.rs
+src/pgrust/database_tests.rs
 Tests run:
-scripts/cargo_isolated.sh test --lib --quiet copy_from_rejects_invalid_header_choice
-scripts/cargo_isolated.sh test --lib --quiet copy_to_populated_materialized_view_outputs_rows
-scripts/cargo_isolated.sh test --lib --quiet copy_to_unpopulated_materialized_view_uses_copy_error
-scripts/run_regression.sh --test copy --timeout 120 --jobs 1
-
+env -u CARGO_TARGET_DIR PGRUST_TARGET_SLOT=3 scripts/cargo_isolated.sh test --lib --quiet truncate_partitioned_copy_freeze_error_rollback
+env -u CARGO_TARGET_DIR PGRUST_TARGET_SLOT=3 scripts/run_regression.sh --test copy --timeout 120 --port 60123
 Remaining:
 None.

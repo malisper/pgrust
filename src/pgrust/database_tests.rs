@@ -55826,6 +55826,107 @@ fn truncate_partitioned_table_clears_leaf_partitions() {
 }
 
 #[test]
+fn truncate_partitioned_copy_freeze_error_rollback() {
+    let base = temp_dir("truncate_partitioned_copy_freeze_rollback");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+    let copy_path = base.join("parted_copytest.data");
+
+    session
+        .execute(
+            &db,
+            "create table parted_copytest (a int4, b int4, c text) partition by list (b)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_copytest_a1 (c text, b int4, a int4)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_copytest_a2 (a int4, c text, b int4)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table parted_copytest attach partition parted_copytest_a1 for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table parted_copytest attach partition parted_copytest_a2 for values in (2)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into parted_copytest select x, 1, 'One' from generate_series(1, 1000) x",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into parted_copytest select x, 2, 'Two' from generate_series(1001, 1010) x",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into parted_copytest select x, 1, 'One' from generate_series(1011, 1020) x",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            &format!(
+                "copy (select * from parted_copytest order by a) to '{}'",
+                copy_path.display()
+            ),
+        )
+        .unwrap();
+    session.execute(&db, "truncate parted_copytest").unwrap();
+    session
+        .execute(
+            &db,
+            &format!("copy parted_copytest from '{}'", copy_path.display()),
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "truncate parted_copytest").unwrap();
+    match session.execute(
+        &db,
+        &format!(
+            "copy parted_copytest from '{}' (freeze)",
+            copy_path.display()
+        ),
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "cannot perform COPY FREEZE on a partitioned table" => {}
+        other => panic!("expected COPY FREEZE partitioned error, got {other:?}"),
+    }
+    session.mark_transaction_failed();
+    session.execute(&db, "rollback").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select b, count(*), sum(a) from parted_copytest group by b order by b"
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Int64(1010), Value::Int64(510655)],
+            vec![Value::Int32(2), Value::Int64(10), Value::Int64(10055)],
+        ]
+    );
+}
+
+#[test]
 fn copy_freeze_rejects_partitioned_table() {
     let base = temp_dir("copy_freeze_partitioned");
     let db = Database::open(&base, 16).unwrap();
