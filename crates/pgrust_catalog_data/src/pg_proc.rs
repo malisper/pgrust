@@ -258,6 +258,25 @@ pub const HASH_MULTIRANGE_PROC_OID: u32 = 4278;
 pub const HASH_MULTIRANGE_EXTENDED_PROC_OID: u32 = 4279;
 pub const HASH_UUID_PROC_OID: u32 = 2963;
 pub const HASH_UUID_EXTENDED_PROC_OID: u32 = 3412;
+pub const HEAP_TABLE_AM_HANDLER_PROC_OID: u32 = 3;
+pub const BTREE_AM_HANDLER_PROC_OID: u32 = 330;
+pub const HASH_AM_HANDLER_PROC_OID: u32 = 331;
+pub const GIST_AM_HANDLER_PROC_OID: u32 = 332;
+pub const GIN_AM_HANDLER_PROC_OID: u32 = 333;
+pub const SPGIST_AM_HANDLER_PROC_OID: u32 = 334;
+pub const BRIN_AM_HANDLER_PROC_OID: u32 = 335;
+pub const BTFLOAT4_CMP_PROC_OID: u32 = 354;
+pub const BTFLOAT8_CMP_PROC_OID: u32 = 355;
+pub const BTFLOAT4_SORTSUPPORT_PROC_OID: u32 = 3132;
+pub const BTFLOAT8_SORTSUPPORT_PROC_OID: u32 = 3133;
+pub const TIME_CMP_PROC_OID: u32 = 1107;
+pub const BTFLOAT48_CMP_PROC_OID: u32 = 2194;
+pub const BTFLOAT84_CMP_PROC_OID: u32 = 2195;
+pub const IN_RANGE_FLOAT8_FLOAT8_PROC_OID: u32 = 4139;
+pub const IN_RANGE_FLOAT4_FLOAT8_PROC_OID: u32 = 4140;
+pub const IN_RANGE_TIME_INTERVAL_PROC_OID: u32 = 6421;
+pub const UUID_SORTSUPPORT_PROC_OID: u32 = 3300;
+pub const UUID_SKIPSUPPORT_PROC_OID: u32 = 76490;
 pub const HASH_RANGE_PROC_OID: u32 = 3902;
 pub const HASH_RANGE_EXTENDED_PROC_OID: u32 = 3417;
 pub const HASH_INTERVAL_PROC_OID: u32 = 1697;
@@ -558,8 +577,186 @@ pub fn bootstrap_proc_acl_override(oid: u32) -> Option<Vec<String>> {
 }
 
 fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
-    serde_json::from_slice(include_bytes!("../data/pg_proc.json"))
-        .expect("decode embedded pg_proc catalog data")
+    let mut rows: Vec<PgProcRow> = serde_json::from_slice(include_bytes!("../data/pg_proc.json"))
+        .expect("decode embedded pg_proc catalog data");
+    extend_compatibility_proc_rows(&mut rows);
+    rows
+}
+
+fn extend_compatibility_proc_rows(rows: &mut Vec<PgProcRow>) {
+    for (oid, name, return_type) in [
+        (
+            HEAP_TABLE_AM_HANDLER_PROC_OID,
+            "heap_tableam_handler",
+            TABLE_AM_HANDLER_TYPE_OID,
+        ),
+        (
+            BTREE_AM_HANDLER_PROC_OID,
+            "bthandler",
+            INDEX_AM_HANDLER_TYPE_OID,
+        ),
+        (
+            HASH_AM_HANDLER_PROC_OID,
+            "hashhandler",
+            INDEX_AM_HANDLER_TYPE_OID,
+        ),
+        (
+            GIST_AM_HANDLER_PROC_OID,
+            "gisthandler",
+            INDEX_AM_HANDLER_TYPE_OID,
+        ),
+        (
+            GIN_AM_HANDLER_PROC_OID,
+            "ginhandler",
+            INDEX_AM_HANDLER_TYPE_OID,
+        ),
+        (
+            SPGIST_AM_HANDLER_PROC_OID,
+            "spghandler",
+            INDEX_AM_HANDLER_TYPE_OID,
+        ),
+        (
+            BRIN_AM_HANDLER_PROC_OID,
+            "brinhandler",
+            INDEX_AM_HANDLER_TYPE_OID,
+        ),
+    ] {
+        push_proc_row_if_missing(
+            rows,
+            compatibility_proc_row(
+                oid,
+                name,
+                return_type,
+                &[INTERNAL_TYPE_OID],
+                name,
+                false,
+                false,
+            ),
+        );
+    }
+    for (oid, name) in [
+        (BTFLOAT4_SORTSUPPORT_PROC_OID, "btfloat4sortsupport"),
+        (BTFLOAT8_SORTSUPPORT_PROC_OID, "btfloat8sortsupport"),
+        (UUID_SORTSUPPORT_PROC_OID, "uuid_sortsupport"),
+        (UUID_SKIPSUPPORT_PROC_OID, "uuid_skipsupport"),
+    ] {
+        push_proc_row_if_missing(
+            rows,
+            compatibility_proc_row(
+                oid,
+                name,
+                VOID_TYPE_OID,
+                &[INTERNAL_TYPE_OID],
+                name,
+                false,
+                false,
+            ),
+        );
+    }
+    for (oid, prosrc, argtypes) in [
+        (
+            IN_RANGE_FLOAT8_FLOAT8_PROC_OID,
+            "in_range_float8_float8",
+            [
+                FLOAT8_TYPE_OID,
+                FLOAT8_TYPE_OID,
+                FLOAT8_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+            ],
+        ),
+        (
+            IN_RANGE_FLOAT4_FLOAT8_PROC_OID,
+            "in_range_float4_float8",
+            [
+                FLOAT4_TYPE_OID,
+                FLOAT4_TYPE_OID,
+                FLOAT8_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+            ],
+        ),
+        (
+            IN_RANGE_TIME_INTERVAL_PROC_OID,
+            "in_range_time_interval",
+            [
+                TIME_TYPE_OID,
+                TIME_TYPE_OID,
+                INTERVAL_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+            ],
+        ),
+    ] {
+        push_proc_row_if_missing(
+            rows,
+            compatibility_proc_row(
+                oid,
+                "in_range",
+                BOOL_TYPE_OID,
+                &argtypes,
+                prosrc,
+                true,
+                false,
+            ),
+        );
+    }
+}
+
+fn push_proc_row_if_missing(rows: &mut Vec<PgProcRow>, row: PgProcRow) {
+    if rows.iter().all(|existing| existing.oid != row.oid) {
+        rows.push(row);
+    }
+}
+
+fn compatibility_proc_row(
+    oid: u32,
+    proname: &str,
+    prorettype: u32,
+    proargtypes: &[u32],
+    prosrc: &str,
+    proisstrict: bool,
+    proleakproof: bool,
+) -> PgProcRow {
+    PgProcRow {
+        oid,
+        proname: proname.into(),
+        pronamespace: PG_CATALOG_NAMESPACE_OID,
+        proowner: BOOTSTRAP_SUPERUSER_OID,
+        proacl: None,
+        prolang: PG_LANGUAGE_INTERNAL_OID,
+        procost: 1.0,
+        prorows: 0.0,
+        provariadic: 0,
+        prosupport: 0,
+        prokind: 'f',
+        prosecdef: false,
+        proleakproof,
+        proisstrict,
+        proretset: false,
+        provolatile: 'i',
+        proparallel: 's',
+        pronargs: i16::try_from(proargtypes.len()).unwrap_or(0),
+        pronargdefaults: 0,
+        prorettype,
+        proargtypes: proc_argtypes(proargtypes),
+        proallargtypes: None,
+        proargmodes: None,
+        proargnames: None,
+        proargdefaults: None,
+        prosrc: prosrc.into(),
+        probin: None,
+        prosqlbody: None,
+        proconfig: None,
+    }
+}
+
+fn proc_argtypes(arg_oids: &[u32]) -> String {
+    arg_oids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn aggregate_transition_proc_oid(aggfnoid: u32) -> u32 {

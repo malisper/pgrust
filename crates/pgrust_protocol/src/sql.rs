@@ -413,7 +413,9 @@ pub fn normalize_extended_query_sql(
     let Some(statement) = statements.first() else {
         return Ok(String::new());
     };
-    Ok(strip_one_terminal_semicolon(statement).trim().to_string())
+    Ok(strip_one_terminal_semicolon(statement)
+        .trim_start()
+        .to_string())
 }
 
 pub fn extended_query_segment_is_empty(sql: &str) -> bool {
@@ -427,7 +429,7 @@ pub fn extended_query_segment_is_empty(sql: &str) -> bool {
 
 pub fn strip_one_terminal_semicolon(sql: &str) -> &str {
     let trimmed = sql.trim_end();
-    trimmed.strip_suffix(';').unwrap_or(trimmed)
+    trimmed.strip_suffix(';').unwrap_or(sql)
 }
 
 fn simple_query_current_statement_is_create_routine(
@@ -820,6 +822,10 @@ mod tests {
         assert_eq!(
             normalize_extended_query_sql("SELECT 1; -- trailing comment", true).unwrap(),
             "SELECT 1"
+        );
+        assert_eq!(
+            normalize_extended_query_sql("SELECT $1, $2 ", true).unwrap(),
+            "SELECT $1, $2 "
         );
         assert!(normalize_extended_query_sql("SELECT 1; SELECT 2", true).is_err());
         assert_eq!(

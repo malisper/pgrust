@@ -25,6 +25,7 @@ pub const DATE_BTREE_OPCLASS_OID: u32 = 3122;
 pub const TIMESTAMP_BTREE_OPCLASS_OID: u32 = 3129;
 pub const TIMESTAMPTZ_BTREE_OPCLASS_OID: u32 = 3130;
 pub const MONEY_BTREE_OPCLASS_OID: u32 = 10056;
+pub const TIME_BTREE_OPCLASS_OID: u32 = 10057;
 pub const BYTEA_BTREE_OPCLASS_OID: u32 = 10003;
 pub const UUID_BTREE_OPCLASS_OID: u32 = 2969;
 pub const BIT_BTREE_OPCLASS_OID: u32 = 10004;
@@ -253,7 +254,7 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
         row(
             XID8_BTREE_OPCLASS_OID,
             "xid8_ops",
-            BTREE_INTEGER_FAMILY_OID,
+            BTREE_XID8_FAMILY_OID,
             XID8_TYPE_OID,
         ),
         row(
@@ -337,6 +338,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "float8_ops",
             BTREE_FLOAT_FAMILY_OID,
             FLOAT8_TYPE_OID,
+        ),
+        row(
+            TIME_BTREE_OPCLASS_OID,
+            "time_ops",
+            BTREE_TIME_FAMILY_OID,
+            TIME_TYPE_OID,
         ),
         row(
             NUMERIC_BTREE_OPCLASS_OID,
@@ -1128,7 +1135,7 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
         hash_row(
             XID8_HASH_OPCLASS_OID,
             "xid8_ops",
-            HASH_INTEGER_FAMILY_OID,
+            HASH_XID8_FAMILY_OID,
             XID8_TYPE_OID,
         ),
         hash_row(
@@ -1522,6 +1529,7 @@ pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
         MONEY_TYPE_OID => MONEY_BTREE_OPCLASS_OID,
         INTERVAL_TYPE_OID => INTERVAL_BTREE_OPCLASS_OID,
         DATE_TYPE_OID => DATE_BTREE_OPCLASS_OID,
+        TIME_TYPE_OID => TIME_BTREE_OPCLASS_OID,
         TIMESTAMP_TYPE_OID => TIMESTAMP_BTREE_OPCLASS_OID,
         TIMESTAMPTZ_TYPE_OID => TIMESTAMPTZ_BTREE_OPCLASS_OID,
         BYTEA_TYPE_OID => BYTEA_BTREE_OPCLASS_OID,

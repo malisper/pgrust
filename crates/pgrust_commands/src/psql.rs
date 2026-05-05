@@ -26,11 +26,7 @@ pub fn format_column_privileges_value(attributes: &[PgAttributeRow], relation_oi
             Some(format!("{}:\n  {}", attribute.attname, acl.join("\n  ")))
         })
         .collect::<Vec<_>>();
-    if parts.is_empty() {
-        Value::Null
-    } else {
-        Value::Text(parts.join("\n").into())
-    }
+    Value::Text(parts.join("\n").into())
 }
 
 pub fn format_policy_column_value(
@@ -86,11 +82,7 @@ pub fn format_policy_column_value(
             text
         })
         .collect::<Vec<_>>();
-    if parts.is_empty() {
-        Value::Null
-    } else {
-        Value::Text(parts.join("\n").into())
-    }
+    Value::Text(parts.join("\n").into())
 }
 
 pub fn describe_policy_command_value(command: PolicyCommand) -> Value {

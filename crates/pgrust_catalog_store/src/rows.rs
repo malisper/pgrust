@@ -5,10 +5,10 @@ use crate::catalog::{
 };
 use crate::catcache::{CatCache, sql_type_oid};
 use pgrust_catalog_data::{
-    BootstrapCatalogKind, PG_CATALOG_NAMESPACE_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_TOAST_NAMESPACE_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDefaultAclRow, PgDependRow,
+    BootstrapCatalogKind, PG_AM_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_OPERATOR_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_TOAST_NAMESPACE_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow,
+    PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
+    PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDefaultAclRow, PgDependRow,
     PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow,
     PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgLargeobjectMetadataRow,
     PgLargeobjectRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
@@ -351,6 +351,32 @@ pub fn add_builtin_description_rows(descriptions: &mut Vec<PgDescriptionRow>, ca
             });
         }
     }
+
+    for row in catcache.am_rows().into_iter().filter(|row| row.oid <= 9999) {
+        if let Some(description) = documented_access_method_description(&row.amname)
+            && seen.insert((row.oid, PG_AM_RELATION_OID, 0))
+        {
+            descriptions.push(PgDescriptionRow {
+                objoid: row.oid,
+                classoid: PG_AM_RELATION_OID,
+                objsubid: 0,
+                description: description.into(),
+            });
+        }
+    }
+}
+
+fn documented_access_method_description(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "brin" => "block range index (BRIN) access method",
+        "btree" => "b-tree index access method",
+        "gin" => "GIN index access method",
+        "gist" => "GiST index access method",
+        "hash" => "hash index access method",
+        "heap" => "heap table access method",
+        "spgist" => "SP-GiST index access method",
+        _ => return None,
+    })
 }
 
 fn documented_operator_proc_description(oid: u32) -> Option<String> {

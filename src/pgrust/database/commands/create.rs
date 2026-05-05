@@ -4782,6 +4782,37 @@ impl Database {
         create_stmt: &CreateDomainStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_create_domain_stmt_with_search_path_and_txn(
+            client_id,
+            create_stmt,
+            configured_search_path,
+            None,
+        )
+    }
+
+    pub(crate) fn execute_create_domain_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateDomainStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_create_domain_stmt_with_search_path_and_txn(
+            client_id,
+            create_stmt,
+            configured_search_path,
+            Some((xid, cid)),
+        )
+    }
+
+    fn execute_create_domain_stmt_with_search_path_and_txn(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateDomainStatement,
+        configured_search_path: Option<&[String]>,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+    ) -> Result<StatementResult, ExecError> {
         let explicit_pg_temp =
             create_stmt
                 .domain_name
@@ -4810,11 +4841,11 @@ impl Database {
             result?;
         }
 
-        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
         let sql_type = crate::backend::parser::resolve_raw_type_name(&create_stmt.ty, &catalog)
             .map_err(ExecError::Parse)?;
         Self::validate_create_domain_base_type(sql_type)?;
-        self.ensure_sql_type_usage_privilege(client_id, None, configured_search_path, sql_type)?;
+        self.ensure_sql_type_usage_privilege(client_id, txn_ctx, configured_search_path, sql_type)?;
         Self::validate_create_domain_collation(create_stmt.collation.as_deref(), sql_type)?;
         if let Some(default_sql) = create_stmt.default.as_deref() {
             Self::validate_create_domain_default_expr(default_sql, &catalog)?;
@@ -4910,12 +4941,16 @@ impl Database {
             })
             .collect::<Vec<_>>();
         let owner_oid = self.auth_state(client_id).current_user_oid();
+        let (default_acl_xid, default_acl_cid) = txn_ctx.unwrap_or((
+            crate::backend::access::transam::xact::INVALID_TRANSACTION_ID,
+            0,
+        ));
         let typacl = self.default_acl_for_new_type(
             client_id,
             owner_oid,
             namespace_oid,
-            crate::backend::access::transam::xact::INVALID_TRANSACTION_ID,
-            0,
+            default_acl_xid,
+            default_acl_cid,
         )?;
         let mut domains = self.domains.write();
         domains.insert(

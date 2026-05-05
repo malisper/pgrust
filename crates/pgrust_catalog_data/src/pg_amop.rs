@@ -124,7 +124,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         (BTREE_FLOAT_FAMILY_OID, FLOAT8_TYPE_OID),
         (BTREE_INTEGER_FAMILY_OID, INT2_TYPE_OID),
         (BTREE_INTEGER_FAMILY_OID, INT8_TYPE_OID),
-        (BTREE_INTEGER_FAMILY_OID, XID8_TYPE_OID),
+        (BTREE_XID8_FAMILY_OID, XID8_TYPE_OID),
         (BTREE_MONEY_FAMILY_OID, MONEY_TYPE_OID),
         (BTREE_NUMERIC_FAMILY_OID, NUMERIC_TYPE_OID),
         (BTREE_OID_FAMILY_OID, OID_TYPE_OID),
@@ -139,6 +139,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         (BTREE_RANGE_FAMILY_OID, ANYRANGEOID),
         (BTREE_JSONB_FAMILY_OID, JSONB_TYPE_OID),
         (BTREE_NETWORK_FAMILY_OID, INET_TYPE_OID),
+        (BTREE_TIME_FAMILY_OID, TIME_TYPE_OID),
     ] {
         for (strategy, name) in [(1_i16, "<"), (2, "<="), (3, "="), (4, ">="), (5, ">")] {
             rows.push(PgAmopRow {
@@ -149,6 +150,33 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
                 amopstrategy: strategy,
                 amoppurpose: 's',
                 amopopr: operator_oid(&operators, name, type_oid, type_oid),
+                amopmethod: BTREE_AM_OID,
+                amopsortfamily: 0,
+            });
+            oid = oid.saturating_add(1);
+        }
+    }
+    for (left_type, right_type, operators) in [
+        (
+            FLOAT4_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            [1122_u32, 1124, 1120, 1125, 1123],
+        ),
+        (
+            FLOAT8_TYPE_OID,
+            FLOAT4_TYPE_OID,
+            [1132_u32, 1134, 1130, 1135, 1133],
+        ),
+    ] {
+        for (strategy, operator_oid) in (1_i16..=5).zip(operators) {
+            rows.push(PgAmopRow {
+                oid,
+                amopfamily: BTREE_FLOAT_FAMILY_OID,
+                amoplefttype: left_type,
+                amoprighttype: right_type,
+                amopstrategy: strategy,
+                amoppurpose: 's',
+                amopopr: operator_oid,
                 amopmethod: BTREE_AM_OID,
                 amopsortfamily: 0,
             });
@@ -907,7 +935,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         (HASH_INTEGER_FAMILY_OID, INT2_TYPE_OID),
         (HASH_INTEGER_FAMILY_OID, INT4_TYPE_OID),
         (HASH_INTEGER_FAMILY_OID, INT8_TYPE_OID),
-        (HASH_INTEGER_FAMILY_OID, XID8_TYPE_OID),
+        (HASH_XID8_FAMILY_OID, XID8_TYPE_OID),
         (HASH_OID_FAMILY_OID, OID_TYPE_OID),
         (HASH_ENUM_FAMILY_OID, ANYENUMOID),
         (HASH_RECORD_FAMILY_OID, RECORD_TYPE_OID),

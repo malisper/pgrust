@@ -31,7 +31,7 @@ pub fn pg_am_desc() -> RelationDesc {
         columns: vec![
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("amname", SqlType::new(SqlTypeKind::Name), false),
-            column_desc("amhandler", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("amhandler", SqlType::new(SqlTypeKind::RegProc), false),
             column_desc("amtype", SqlType::new(SqlTypeKind::InternalChar), false),
         ],
     }
