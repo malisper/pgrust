@@ -20,7 +20,8 @@ use crate::backend::executor::{
     TupleSlot, Value, cast_value, cast_value_with_config,
     cast_value_with_source_type_catalog_and_config, compare_order_values,
     enforce_domain_constraints_for_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
-    execute_readonly_statement_with_config, executor_start, render_interval_text,
+    execute_readonly_statement_with_config, execute_user_defined_sql_scalar_function_values,
+    executor_start, render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::libpq::pqformat::{format_exec_error, format_exec_error_hint};
@@ -37,7 +38,7 @@ use crate::backend::utils::misc::notices::push_notice;
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
-use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PgProcRow};
+use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PG_LANGUAGE_SQL_OID, PgProcRow};
 use crate::include::executor::execdesc::create_query_desc;
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow, SystemVarBinding};
@@ -69,9 +70,9 @@ use pgrust_plpgsql::{
     parse_proc_argtype_oids, plpgsql_extra_check_level, plpgsql_query_column, push_context_frame,
     push_event_trigger_ddl_commands, push_event_trigger_dropped_objects,
     push_event_trigger_table_rewrite, push_plpgsql_notice, queue_plpgsql_warning, quote_identifier,
-    quote_sql_string, resolve_raise_sqlstate, runtime_sql_param_id, transition_table_visible_rows,
-    trigger_return_bindings, validate_foreach_target,
-    validate_plpgsql_function_row as validate_plpgsql_function_row_impl,
+    quote_sql_string, resolve_raise_sqlstate, runtime_sql_param_id,
+    split_plpgsql_statement_line_context, transition_table_visible_rows, trigger_return_bindings,
+    validate_foreach_target, validate_plpgsql_function_row as validate_plpgsql_function_row_impl,
     validate_plpgsql_procedure_row as validate_plpgsql_procedure_row_impl,
     validate_scalar_call_return_contract,
 };
@@ -1266,8 +1267,12 @@ fn exec_do_stmt(
             table_expr,
             schema_expr,
             params,
+            option_error,
             ..
         } => {
+            if let Some(err) = option_error {
+                return Err(ExecError::Parse(err.clone()));
+            }
             let param_values = params
                 .iter()
                 .map(|expr| eval_do_expr(expr, values))
@@ -1862,14 +1867,18 @@ fn exec_function_stmt(
             table_expr,
             schema_expr,
             params,
+            option_error,
             ..
         } => {
+            if let Some(err) = option_error {
+                return Err(ExecError::Parse(err.clone()));
+            }
             let param_values = params
                 .iter()
-                .map(|expr| eval_function_expr(expr, &state.values, ctx))
+                .map(|expr| eval_function_raise_expr(expr, &state.values, ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             let message = match message_expr {
-                Some(expr) => Some(render_raise_option_value(eval_function_expr(
+                Some(expr) => Some(render_raise_option_value(eval_function_raise_expr(
                     expr,
                     &state.values,
                     ctx,
@@ -1879,19 +1888,22 @@ fn exec_function_stmt(
             let detail = detail_expr
                 .as_ref()
                 .map(|expr| {
-                    eval_function_expr(expr, &state.values, ctx).map(render_raise_option_value)
+                    eval_function_raise_expr(expr, &state.values, ctx)
+                        .map(render_raise_option_value)
                 })
                 .transpose()?;
             let hint = hint_expr
                 .as_ref()
                 .map(|expr| {
-                    eval_function_expr(expr, &state.values, ctx).map(render_raise_option_value)
+                    eval_function_raise_expr(expr, &state.values, ctx)
+                        .map(render_raise_option_value)
                 })
                 .transpose()?;
             let dynamic_sqlstate = errcode_expr
                 .as_ref()
                 .map(|expr| {
-                    eval_function_expr(expr, &state.values, ctx).map(render_raise_option_value)
+                    eval_function_raise_expr(expr, &state.values, ctx)
+                        .map(render_raise_option_value)
                 })
                 .transpose()?;
             let fields = PlpgsqlErrorFields {
@@ -2169,14 +2181,31 @@ fn cast_function_scalar_return_value(value: Value, ty: SqlType) -> Result<Value,
     }
 }
 
+struct FunctionReturnRow {
+    values: Vec<Value>,
+    descriptor: Option<RecordDescriptor>,
+}
+
+impl FunctionReturnRow {
+    fn untyped(values: Vec<Value>) -> Self {
+        Self {
+            values,
+            descriptor: None,
+        }
+    }
+}
+
 fn return_row_values_from_value(
     value: Value,
     contract: &FunctionReturnContract,
     expected_record_shape: Option<&[QueryColumn]>,
-) -> Result<Vec<Value>, ExecError> {
+) -> Result<FunctionReturnRow, ExecError> {
     match value {
-        Value::Record(record) => Ok(record.fields),
-        Value::Null => Ok(match contract {
+        Value::Record(record) => Ok(FunctionReturnRow {
+            values: record.fields,
+            descriptor: Some(record.descriptor),
+        }),
+        Value::Null => Ok(FunctionReturnRow::untyped(match contract {
             FunctionReturnContract::FixedRow { columns, .. } => {
                 vec![Value::Null; expected_record_shape.unwrap_or(columns).len()]
             }
@@ -2184,7 +2213,7 @@ fn return_row_values_from_value(
                 .map(|columns| vec![Value::Null; columns.len()])
                 .unwrap_or_else(|| vec![Value::Null]),
             _ => vec![Value::Null],
-        }),
+        })),
         _ if matches!(contract, FunctionReturnContract::FixedRow { .. }) => {
             Err(function_runtime_error(
                 "cannot return non-composite value from function returning composite type",
@@ -2192,7 +2221,7 @@ fn return_row_values_from_value(
                 "42804",
             ))
         }
-        other => Ok(vec![other]),
+        other => Ok(FunctionReturnRow::untyped(vec![other])),
     }
 }
 
@@ -2258,12 +2287,15 @@ fn exec_function_return(
                     expected_record_shape,
                 )?;
                 state.rows.clear();
-                state.rows.push(coerce_function_result_row(
-                    row,
-                    &compiled.return_contract,
-                    expected_record_shape,
-                    ctx,
-                )?);
+                state.rows.push(
+                    coerce_function_result_row(
+                        row,
+                        &compiled.return_contract,
+                        expected_record_shape,
+                        ctx,
+                    )
+                    .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?,
+                );
             }
             Ok(FunctionControl::Return)
         }
@@ -2277,7 +2309,9 @@ fn exec_function_return(
                         &compiled.return_contract,
                         expected_record_shape,
                     )?;
-                    state.rows.push(coerce_row_to_columns(row, shape, ctx)?);
+                    state
+                        .rows
+                        .push(coerce_row_to_columns(row.values, shape, ctx)?);
                 } else {
                     state.rows.push(TupleSlot::virtual_row(vec![value]));
                 }
@@ -2402,12 +2436,15 @@ fn exec_function_return_next(
                     "0A000",
                 ));
             };
-            state.rows.push(coerce_function_result_row(
-                row,
-                &compiled.return_contract,
-                expected_record_shape,
-                ctx,
-            )?);
+            state.rows.push(
+                coerce_function_result_row(
+                    row,
+                    &compiled.return_contract,
+                    expected_record_shape,
+                    ctx,
+                )
+                .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?,
+            );
             Ok(())
         }
         FunctionReturnContract::Trigger { .. } | FunctionReturnContract::EventTrigger { .. } => {
@@ -2436,7 +2473,7 @@ fn exec_function_return_query(
     let row_count = result.rows.len();
     for row in result.rows {
         state.rows.push(coerce_function_result_row(
-            row.values,
+            FunctionReturnRow::untyped(row.values),
             &compiled.return_contract,
             expected_record_shape,
             ctx,
@@ -2570,7 +2607,7 @@ fn exec_function_return_runtime_query(
             state.rows.clear();
             let row = rows.first().cloned().unwrap_or_default();
             state.rows.push(coerce_function_result_row(
-                row,
+                FunctionReturnRow::untyped(row),
                 &compiled.return_contract,
                 expected_record_shape,
                 ctx,
@@ -5112,6 +5149,11 @@ fn cast_function_value(
     target_type: SqlType,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if let Some(casted) =
+        cast_function_value_with_catalog_cast(value.clone(), source_type, target_type, ctx)?
+    {
+        return enforce_domain_constraints_for_value(casted, target_type, ctx);
+    }
     let mut casted = cast_value_with_source_type_catalog_and_config(
         value,
         source_type,
@@ -5136,10 +5178,44 @@ fn cast_function_value(
     enforce_domain_constraints_for_value(casted, target_type, ctx)
 }
 
+fn cast_function_value_with_catalog_cast(
+    value: Value,
+    source_type: Option<SqlType>,
+    target_type: SqlType,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Value>, ExecError> {
+    let Some(source_type) = source_type else {
+        return Ok(None);
+    };
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return Ok(None);
+    };
+    let Some(source_oid) = catalog.type_oid_for_sql_type(source_type) else {
+        return Ok(None);
+    };
+    let Some(target_oid) = catalog.type_oid_for_sql_type(target_type) else {
+        return Ok(None);
+    };
+    let Some(cast_row) = catalog.cast_by_source_target(source_oid, target_oid) else {
+        return Ok(None);
+    };
+    if cast_row.castmethod != 'f' || cast_row.castfunc == 0 {
+        return Ok(None);
+    }
+    let Some(proc_row) = catalog.proc_row_by_oid(cast_row.castfunc) else {
+        return Ok(None);
+    };
+    if proc_row.prolang != PG_LANGUAGE_SQL_OID {
+        return Ok(None);
+    }
+    execute_user_defined_sql_scalar_function_values(&proc_row, &[value], ctx).map(Some)
+}
+
 fn compiled_expr_sql_type_hint(expr: &CompiledExpr) -> Option<SqlType> {
     match expr {
         CompiledExpr::Scalar { expr, .. } => expr_sql_type_hint(expr),
         CompiledExpr::QueryCompare { .. } => Some(SqlType::new(SqlTypeKind::Bool)),
+        CompiledExpr::DeferredError { .. } => None,
     }
 }
 
@@ -6120,13 +6196,13 @@ fn current_output_row(
 }
 
 fn coerce_function_result_row(
-    row: Vec<Value>,
+    row: FunctionReturnRow,
     contract: &FunctionReturnContract,
     expected_record_shape: Option<&[QueryColumn]>,
     ctx: &mut ExecutorContext,
 ) -> Result<TupleSlot, ExecError> {
     match contract {
-        FunctionReturnContract::Scalar { ty, .. } => match row.as_slice() {
+        FunctionReturnContract::Scalar { ty, .. } => match row.values.as_slice() {
             [value] => Ok(TupleSlot::virtual_row(vec![cast_function_value(
                 value.clone(),
                 None,
@@ -6135,7 +6211,7 @@ fn coerce_function_result_row(
             )?])),
             _ => Err(function_runtime_error(
                 "structure of query does not match function result type",
-                Some(format!("expected 1 column, got {}", row.len())),
+                Some(format!("expected 1 column, got {}", row.values.len())),
                 "42804",
             )),
         },
@@ -6153,10 +6229,10 @@ fn coerce_function_result_row(
                     ctx,
                 );
             }
-            coerce_row_to_columns(row, expected_columns, ctx)
+            coerce_row_to_columns(row.values, expected_columns, ctx)
         }
         FunctionReturnContract::AnonymousRecord { .. } => coerce_row_to_columns(
-            row,
+            row.values,
             expected_record_shape.ok_or_else(|| {
                 function_runtime_error(
                     "record-returning function requires a caller-provided row shape",
@@ -6205,16 +6281,16 @@ fn coerce_row_to_columns(
 }
 
 fn coerce_named_composite_row_to_columns(
-    row: Vec<Value>,
+    row: FunctionReturnRow,
     expected_columns: &[QueryColumn],
     typrelid: u32,
     ctx: &mut ExecutorContext,
 ) -> Result<TupleSlot, ExecError> {
     let Some(catalog) = ctx.catalog.as_deref() else {
-        return coerce_row_to_columns(row, expected_columns, ctx);
+        return coerce_row_to_columns(row.values, expected_columns, ctx);
     };
     let Some(relation) = catalog.lookup_relation_by_oid(typrelid) else {
-        return coerce_row_to_columns(row, expected_columns, ctx);
+        return coerce_row_to_columns(row.values, expected_columns, ctx);
     };
     let relation_desc = relation.desc.clone();
     let live_columns = relation_desc
@@ -6223,8 +6299,11 @@ fn coerce_named_composite_row_to_columns(
         .enumerate()
         .filter(|(_, column)| !column.dropped)
         .collect::<Vec<_>>();
-    if row.len() != live_columns.len() {
-        return coerce_row_to_columns(row, expected_columns, ctx);
+    if let Some(descriptor) = &row.descriptor {
+        validate_record_descriptor_by_position(descriptor, expected_columns, catalog)?;
+    }
+    if row.values.len() != live_columns.len() {
+        return coerce_row_to_columns(row.values, expected_columns, ctx);
     }
 
     let mut values = Vec::with_capacity(expected_columns.len());
@@ -6239,7 +6318,7 @@ fn coerce_named_composite_row_to_columns(
         if let Some((live_index, (physical_index, column))) = found {
             live_cursor = live_index.saturating_add(1);
             physical_cursor = physical_index.saturating_add(1);
-            let value = row.get(live_index).cloned().unwrap_or(Value::Null);
+            let value = row.values.get(live_index).cloned().unwrap_or(Value::Null);
             if column.sql_type == expected.sql_type {
                 values.push(cast_function_value(
                     value,
@@ -6271,9 +6350,79 @@ fn coerce_named_composite_row_to_columns(
             continue;
         }
 
-        return coerce_row_to_columns(row, expected_columns, ctx);
+        return coerce_row_to_columns(row.values, expected_columns, ctx);
     }
     Ok(TupleSlot::virtual_row(values))
+}
+
+fn validate_record_descriptor_by_position(
+    descriptor: &RecordDescriptor,
+    expected_columns: &[QueryColumn],
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if descriptor.fields.len() != expected_columns.len() {
+        return Err(returned_record_type_mismatch_error(Some(format!(
+            "Number of returned columns ({}) does not match expected column count ({}).",
+            descriptor.fields.len(),
+            expected_columns.len()
+        ))));
+    }
+    for (index, (actual, expected)) in descriptor
+        .fields
+        .iter()
+        .zip(expected_columns.iter())
+        .enumerate()
+    {
+        if record_descriptor_field_type_matches(actual.sql_type, expected.sql_type, catalog) {
+            continue;
+        }
+        return Err(returned_record_type_mismatch_error(Some(format!(
+            "Returned type {} does not match expected type {} in column \"{}\" (position {}).",
+            format_record_descriptor_sql_type(actual.sql_type, catalog),
+            format_record_descriptor_sql_type(expected.sql_type, catalog),
+            expected.name,
+            index + 1
+        ))));
+    }
+    Ok(())
+}
+
+fn record_descriptor_field_type_matches(
+    actual: SqlType,
+    expected: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    if actual.is_array != expected.is_array {
+        return false;
+    }
+    let actual_oid = record_descriptor_sql_type_oid(actual, catalog);
+    let expected_oid = record_descriptor_sql_type_oid(expected, catalog);
+    actual_oid == expected_oid
+        && (expected.typmod == SqlType::NO_TYPEMOD || actual.typmod == expected.typmod)
+}
+
+fn record_descriptor_sql_type_oid(sql_type: SqlType, catalog: &dyn CatalogLookup) -> Option<u32> {
+    if !sql_type.is_array && sql_type.type_oid != 0 {
+        return Some(sql_type.type_oid);
+    }
+    catalog.type_oid_for_sql_type(sql_type)
+}
+
+fn format_record_descriptor_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> String {
+    if let Some(oid) = record_descriptor_sql_type_oid(sql_type, catalog) {
+        format_type_text(oid, Some(sql_type.typmod), catalog)
+    } else {
+        sql_type_name(sql_type)
+    }
+}
+
+fn returned_record_type_mismatch_error(detail: Option<String>) -> ExecError {
+    ExecError::DetailedError {
+        message: "returned record type does not match expected record type".into(),
+        detail,
+        hint: None,
+        sqlstate: "42804",
+    }
 }
 
 fn dropped_named_composite_attr_index(
@@ -6325,6 +6474,7 @@ fn eval_do_expr(expr: &CompiledExpr, values: &[Value]) -> Result<Value, ExecErro
                 "query-style PL/pgSQL conditions are only supported inside CREATE FUNCTION".into(),
             )))
         }
+        CompiledExpr::DeferredError { err, .. } => Err(ExecError::Parse(err.clone())),
     }
 }
 
@@ -6338,19 +6488,24 @@ fn eval_function_expr(
         .map_err(|err| with_plpgsql_expression_context(err, source))
 }
 
+fn eval_function_raise_expr(
+    expr: &CompiledExpr,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let source = compiled_expr_source(expr);
+    eval_function_expr_inner(expr, values, ctx)
+        .map_err(|err| with_plpgsql_raise_expression_context(err, source))
+}
+
 fn eval_function_return_expr(
     expr: &CompiledExpr,
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     let source = compiled_expr_source(expr);
-    eval_function_expr_inner(expr, values, ctx).map_err(|err| {
-        if plpgsql_expression_uses_internal_query(&err) {
-            with_plpgsql_expression_context(err, source)
-        } else {
-            err
-        }
-    })
+    eval_function_expr_inner(expr, values, ctx)
+        .map_err(|err| with_plpgsql_expression_context(err, source))
 }
 
 fn eval_function_expr_inner(
@@ -6394,12 +6549,15 @@ fn eval_function_expr_inner(
             let right = eval_expr(rhs, &mut slot, ctx)?;
             Ok(Value::Bool(eval_query_compare(*op, &left, &right)?))
         }
+        CompiledExpr::DeferredError { err, .. } => Err(ExecError::Parse(err.clone())),
     }
 }
 
 fn compiled_expr_source(expr: &CompiledExpr) -> &str {
     match expr {
-        CompiledExpr::Scalar { source, .. } | CompiledExpr::QueryCompare { source, .. } => source,
+        CompiledExpr::Scalar { source, .. }
+        | CompiledExpr::QueryCompare { source, .. }
+        | CompiledExpr::DeferredError { source, .. } => source,
     }
 }
 
@@ -6777,7 +6935,7 @@ fn eval_function_raise_field(
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Option<String>, ExecError> {
-    expr.map(|expr| eval_function_expr(expr, values, ctx).map(render_raise_option_value))
+    expr.map(|expr| eval_function_raise_expr(expr, values, ctx).map(render_raise_option_value))
         .transpose()
 }
 
@@ -6892,11 +7050,13 @@ fn function_runtime_error_with_hint(
 }
 
 fn plpgsql_compile_error(err: ParseError, row: &PgProcRow) -> ExecError {
+    let (err, line) = split_plpgsql_statement_line_context(err);
     ExecError::WithContext {
         source: Box::new(ExecError::Parse(err)),
         context: format!(
-            "compilation of PL/pgSQL function \"{}\" near line 1",
-            row.proname
+            "compilation of PL/pgSQL function \"{}\" near line {}",
+            row.proname,
+            line.unwrap_or(1)
         ),
     }
 }
@@ -6990,6 +7150,22 @@ fn with_plpgsql_expression_context(err: ExecError, source: &str) -> ExecError {
         source: Box::new(err),
         context,
     }
+}
+
+fn with_plpgsql_raise_expression_context(err: ExecError, source: &str) -> ExecError {
+    let source = source.trim();
+    if source.is_empty() || has_any_context(&err) {
+        return err;
+    }
+    if plpgsql_expression_uses_internal_query(&err) {
+        return ExecError::WithInternalQueryContext {
+            position: plpgsql_expression_error_position(source, &err),
+            query: source.to_string(),
+            source: Box::new(err),
+            context: String::new(),
+        };
+    }
+    err
 }
 
 fn plpgsql_expression_context(source: &str, err: &ExecError) -> String {

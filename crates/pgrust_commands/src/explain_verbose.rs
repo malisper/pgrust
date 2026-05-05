@@ -5209,6 +5209,20 @@ pub fn verbose_display_output_exprs(
         {
             vec![format!("({row_output})")]
         }
+        Plan::Gather {
+            input,
+            single_copy: true,
+            ..
+        } if !for_parent_ref => verbose_plan_output_exprs(input, ctx, true)
+            .into_iter()
+            .map(|output| {
+                if output.contains('(') {
+                    format!("({output})")
+                } else {
+                    output
+                }
+            })
+            .collect(),
         Plan::SubqueryScan {
             scan_name,
             output_columns,

@@ -52,8 +52,8 @@ pub fn execute_do_with_gucs(
         }
         exec::clear_notices();
         let block = parse_block(&stmt.code)?;
-        let compiled =
-            compile::compile_do_block_with_gucs(&block, &Catalog::default(), Some(gucs))?;
+        let compiled = compile::compile_do_block_with_gucs(&block, &Catalog::default(), Some(gucs))
+            .map_err(plpgsql_do_compile_error)?;
         exec::execute_block_with_gucs(&compiled, gucs)
     })
 }
@@ -96,9 +96,15 @@ fn execute_do_with_context_options(
             exec::clear_notices();
         }
         let block = parse_block(&stmt.code)?;
-        let compiled = compile::compile_do_function(&block, catalog, Some(&ctx.gucs))?;
+        let compiled = compile::compile_do_function(&block, catalog, Some(&ctx.gucs))
+            .map_err(plpgsql_do_compile_error)?;
         exec::execute_do_function(&compiled, ctx)
     })
+}
+
+fn plpgsql_do_compile_error(err: ParseError) -> ExecError {
+    let (err, _) = split_plpgsql_statement_line_context(err);
+    ExecError::Parse(err)
 }
 
 #[cfg(test)]

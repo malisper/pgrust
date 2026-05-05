@@ -3086,6 +3086,9 @@ fn current_of_view_error() -> ExecError {
 }
 
 fn locate_current_of_clause(sql: &str) -> Option<(usize, usize, String)> {
+    if !top_level_statement_can_use_current_of(sql) {
+        return None;
+    }
     let lower = sql.to_ascii_lowercase();
     let marker = "current of";
     let start = lower.find(marker)?;
@@ -3109,6 +3112,18 @@ fn locate_current_of_clause(sql: &str) -> Option<(usize, usize, String)> {
         cursor_end += 1;
     }
     Some((start, cursor_end, sql[cursor_start..cursor_end].to_string()))
+}
+
+fn top_level_statement_can_use_current_of(sql: &str) -> bool {
+    let first_word = sql
+        .trim_start()
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default();
+    matches!(
+        first_word.to_ascii_lowercase().as_str(),
+        "update" | "delete"
+    )
 }
 
 fn unqualified_relation_name(name: &str) -> String {

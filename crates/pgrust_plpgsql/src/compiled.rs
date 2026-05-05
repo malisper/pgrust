@@ -147,6 +147,10 @@ pub enum CompiledExpr {
         rhs: Expr,
         source: String,
     },
+    DeferredError {
+        source: String,
+        err: pgrust_nodes::parsenodes::ParseError,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +383,7 @@ pub enum CompiledStmt {
         table_expr: Option<CompiledExpr>,
         schema_expr: Option<CompiledExpr>,
         params: Vec<CompiledExpr>,
+        option_error: Option<pgrust_nodes::parsenodes::ParseError>,
         line: usize,
     },
     Reraise,

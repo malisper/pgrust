@@ -288,7 +288,29 @@ pub fn resolve_regclass_oid(
 
 pub fn regclass_lookup_error(input: &str, _catalog: Option<&dyn CatalogLookup>) -> ExecError {
     let trimmed = input.trim();
+    if let Some(schema) = missing_unquoted_schema_name(trimmed, _catalog) {
+        return detailed_error(format!("schema \"{schema}\" does not exist"), "3F000");
+    }
     detailed_error(format!("relation \"{trimmed}\" does not exist"), "42P01")
+}
+
+fn missing_unquoted_schema_name<'a>(
+    input: &'a str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<&'a str> {
+    if input.contains('"') {
+        return None;
+    }
+    let (schema, relation) = input.split_once('.')?;
+    if schema.is_empty() || relation.is_empty() || relation.contains('.') {
+        return None;
+    }
+    let lookup = effective_catalog(catalog);
+    lookup
+        .namespace_rows()
+        .into_iter()
+        .all(|row| !row.nspname.eq_ignore_ascii_case(schema))
+        .then_some(schema)
 }
 
 pub fn resolve_regtype_oid(

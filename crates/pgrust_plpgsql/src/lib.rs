@@ -26,8 +26,46 @@ pub use normalize::*;
 pub use polymorphic::*;
 pub use runtime::*;
 
+const PLPGSQL_STATEMENT_LINE_CONTEXT_PREFIX: &str = "__pgrust_plpgsql_statement_line:";
+
 pub fn normalize_sql_context_text(sql: &str) -> String {
     sql.trim().trim_end_matches(';').trim_end().to_string()
+}
+
+pub fn with_plpgsql_statement_line_context(err: ParseError, line: usize) -> ParseError {
+    if plpgsql_statement_line_from_error(&err).is_some() {
+        err
+    } else {
+        err.with_context(format!("{PLPGSQL_STATEMENT_LINE_CONTEXT_PREFIX}{line}"))
+    }
+}
+
+pub fn split_plpgsql_statement_line_context(err: ParseError) -> (ParseError, Option<usize>) {
+    match err {
+        ParseError::WithContext { source, context } => {
+            let (source, inner_line) = split_plpgsql_statement_line_context(*source);
+            if let Some(line) = plpgsql_statement_line_from_context(&context) {
+                (source, inner_line.or(Some(line)))
+            } else {
+                (source.with_context(context), inner_line)
+            }
+        }
+        other => (other, None),
+    }
+}
+
+pub fn plpgsql_statement_line_from_error(err: &ParseError) -> Option<usize> {
+    match err {
+        ParseError::WithContext { source, context } => plpgsql_statement_line_from_error(source)
+            .or_else(|| plpgsql_statement_line_from_context(context)),
+        _ => None,
+    }
+}
+
+fn plpgsql_statement_line_from_context(context: &str) -> Option<usize> {
+    context
+        .strip_prefix(PLPGSQL_STATEMENT_LINE_CONTEXT_PREFIX)
+        .and_then(|line| line.parse::<usize>().ok())
 }
 
 pub fn decode_nonstandard_backslash_escapes(value: &str) -> String {
@@ -1424,7 +1462,8 @@ fn validate_raise_placeholders(block: &Block) -> Result<(), ParseError> {
 
 fn validate_raise_placeholders_in_stmt(stmt: &Stmt) -> Result<(), ParseError> {
     match stmt {
-        Stmt::WithLine { stmt, .. } => validate_raise_placeholders_in_stmt(stmt),
+        Stmt::WithLine { line, stmt } => validate_raise_placeholders_in_stmt(stmt)
+            .map_err(|err| with_plpgsql_statement_line_context(err, *line)),
         Stmt::Block(block) => validate_raise_placeholders(block),
         Stmt::If {
             branches,

@@ -46,7 +46,7 @@ use pgrust_plpgsql::{
     split_cte_prefixed_select_into_target, split_dml_returning_into_targets,
     split_select_into_target, split_select_with_into_targets, static_query_source_known_columns,
     target_entry_query_column, transaction_command_name, variable_conflict_from_gucs,
-    variable_conflict_mode,
+    variable_conflict_mode, with_plpgsql_statement_line_context,
 };
 
 #[cfg(test)]
@@ -1145,10 +1145,14 @@ fn compile_stmt(
     return_contract: Option<&FunctionReturnContract>,
 ) -> Result<CompiledStmt, ParseError> {
     Ok(match stmt {
-        Stmt::WithLine { line, stmt } => CompiledStmt::WithLine {
-            line: *line,
-            stmt: Box::new(compile_stmt(stmt, catalog, env, return_contract)?),
-        },
+        Stmt::WithLine { line, stmt } => {
+            let stmt = compile_stmt(stmt, catalog, env, return_contract)
+                .map_err(|err| with_plpgsql_statement_line_context(err, *line))?;
+            CompiledStmt::WithLine {
+                line: *line,
+                stmt: Box::new(stmt),
+            }
+        }
         Stmt::Block(block) => {
             CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
         }
@@ -1400,59 +1404,69 @@ fn compile_raise_stmt(
     let mut datatype_expr = None::<String>;
     let mut table_expr = None::<String>;
     let mut schema_expr = None::<String>;
+    let mut option_error = None::<ParseError>;
     for option in using_options {
         match option.name.to_ascii_lowercase().as_str() {
             "message" => {
                 if message.is_some() || message_expr.is_some() {
-                    return duplicate_raise_option("MESSAGE");
+                    record_duplicate_raise_option(&mut option_error, "MESSAGE");
+                    continue;
                 }
                 message_expr = Some(option.expr.clone());
             }
             "detail" => {
                 if detail_expr.is_some() {
-                    return duplicate_raise_option("DETAIL");
+                    record_duplicate_raise_option(&mut option_error, "DETAIL");
+                    continue;
                 }
                 detail_expr = Some(option.expr.clone());
             }
             "hint" => {
                 if hint_expr.is_some() {
-                    return duplicate_raise_option("HINT");
+                    record_duplicate_raise_option(&mut option_error, "HINT");
+                    continue;
                 }
                 hint_expr = Some(option.expr.clone());
             }
             "errcode" => {
                 if condition_sets_errcode || errcode_expr.is_some() {
-                    return duplicate_raise_option("ERRCODE");
+                    record_duplicate_raise_option(&mut option_error, "ERRCODE");
+                    continue;
                 }
                 errcode_expr = Some(option.expr.clone());
             }
             "column" | "column_name" => {
                 if column_expr.is_some() {
-                    return duplicate_raise_option("COLUMN");
+                    record_duplicate_raise_option(&mut option_error, "COLUMN");
+                    continue;
                 }
                 column_expr = Some(option.expr.clone());
             }
             "constraint" | "constraint_name" => {
                 if constraint_expr.is_some() {
-                    return duplicate_raise_option("CONSTRAINT");
+                    record_duplicate_raise_option(&mut option_error, "CONSTRAINT");
+                    continue;
                 }
                 constraint_expr = Some(option.expr.clone());
             }
             "datatype" | "datatype_name" => {
                 if datatype_expr.is_some() {
-                    return duplicate_raise_option("DATATYPE");
+                    record_duplicate_raise_option(&mut option_error, "DATATYPE");
+                    continue;
                 }
                 datatype_expr = Some(option.expr.clone());
             }
             "table" | "table_name" => {
                 if table_expr.is_some() {
-                    return duplicate_raise_option("TABLE");
+                    record_duplicate_raise_option(&mut option_error, "TABLE");
+                    continue;
                 }
                 table_expr = Some(option.expr.clone());
             }
             "schema" | "schema_name" => {
                 if schema_expr.is_some() {
-                    return duplicate_raise_option("SCHEMA");
+                    record_duplicate_raise_option(&mut option_error, "SCHEMA");
+                    continue;
                 }
                 schema_expr = Some(option.expr.clone());
             }
@@ -1503,52 +1517,89 @@ fn compile_raise_stmt(
         message,
         message_expr: message_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         detail_expr: detail_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         hint_expr: hint_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         errcode_expr: errcode_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         column_expr: column_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         constraint_expr: constraint_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         datatype_expr: datatype_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         table_expr: table_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         schema_expr: schema_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         params: params
             .iter()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .collect::<Result<_, _>>()?,
+        option_error,
     })
 }
 
-fn duplicate_raise_option<T>(name: &str) -> Result<T, ParseError> {
-    Err(ParseError::UnexpectedToken {
+fn compile_raise_expr_text(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledExpr, ParseError> {
+    match compile_expr_text(sql, catalog, env) {
+        Ok(expr) => Ok(expr),
+        Err(err) if should_defer_raise_expr_error(&err) => Ok(CompiledExpr::DeferredError {
+            source: sql.trim().to_string(),
+            err: position_deferred_raise_expr_error(err, sql),
+        }),
+        Err(err) => Err(err),
+    }
+}
+
+fn should_defer_raise_expr_error(err: &ParseError) -> bool {
+    matches!(err.unpositioned(), ParseError::UnknownColumn(_))
+}
+
+fn position_deferred_raise_expr_error(err: ParseError, source: &str) -> ParseError {
+    if err.position().is_some() {
+        return err;
+    }
+    let ParseError::UnknownColumn(name) = err.unpositioned() else {
+        return err;
+    };
+    let position = identifier_position(source, name)
+        .map(|position| position + 1)
+        .unwrap_or(1);
+    err.with_position(position)
+}
+
+fn record_duplicate_raise_option(option_error: &mut Option<ParseError>, name: &str) {
+    option_error.get_or_insert_with(|| duplicate_raise_option_error(name));
+}
+
+fn duplicate_raise_option_error(name: &str) -> ParseError {
+    ParseError::UnexpectedToken {
         expected: "RAISE option specified once",
         actual: format!("RAISE option already specified: {name}"),
-    })
+    }
 }
 
 fn compile_return_stmt(
@@ -3410,6 +3461,7 @@ fn compile_condition_text(
                             "query-style PL/pgSQL conditions do not support query comparisons on both sides".into(),
                         ))
                     }
+                    CompiledExpr::DeferredError { err, .. } => return Err(err),
                 };
                 return Ok(CompiledExpr::QueryCompare {
                     plan,

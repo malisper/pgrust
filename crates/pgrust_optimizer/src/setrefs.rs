@@ -187,12 +187,13 @@ pub(super) fn create_plan_with_param_base(
 fn maybe_wrap_parallel_gather(root: &PlannerInfo, catalog: &dyn CatalogLookup, plan: Plan) -> Plan {
     if root.config.force_parallel_gather
         && root.config.max_parallel_workers_per_gather > 0
-        && root.parse.limit_count.is_some()
+        && !matches!(plan, Plan::Gather { .. } | Plan::GatherMerge { .. })
+        && plan_parallel_safe(&plan, catalog)
     {
         return Plan::Gather {
             plan_info: plan.plan_info(),
             input: Box::new(plan),
-            workers_planned: root.config.max_parallel_workers_per_gather,
+            workers_planned: 1,
             single_copy: true,
         };
     }
