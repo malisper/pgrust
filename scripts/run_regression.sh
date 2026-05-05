@@ -534,6 +534,9 @@ sub mark_matching_expected_blocks {
                 last;
             }
         }
+        while ($end > $start && $expected_lines->[$end] =~ /^\s*(?:--.*)?$/) {
+            $end--;
+        }
         $remove->{$_} = 1 for $start .. $end;
     }
 }
