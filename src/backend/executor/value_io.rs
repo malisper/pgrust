@@ -7,7 +7,6 @@ use super::expr_casts::{
     cast_value, cast_value_with_config, parse_text_array_literal_with_catalog_op_and_explicit,
     render_internal_char_text, render_interval_text_with_config, render_pg_lsn_text,
 };
-use super::expr_multirange::{render_multirange, render_multirange_text_with_config};
 use super::expr_range::{
     decode_range_bytes, encode_range_bytes, render_range_text, render_range_text_with_config,
 };
@@ -31,6 +30,7 @@ use pgrust_expr::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
 };
+use pgrust_expr::expr_multirange::{render_multirange, render_multirange_text_with_config};
 use pgrust_expr::{
     encode_network_bytes, parse_cidr_bytes, parse_inet_bytes, parse_macaddr_bytes,
     parse_macaddr8_bytes, render_bit_text, render_datetime_value_text,

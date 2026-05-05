@@ -7058,13 +7058,13 @@ fn temporal_periods_overlap(left: &Value, right: &Value) -> bool {
             crate::backend::executor::expr_range::range_overlap(left, right)
         }
         (Value::Multirange(left), Value::Range(right)) => {
-            crate::backend::executor::expr_multirange::multirange_overlaps_range(left, right)
+            pgrust_expr::expr_multirange::multirange_overlaps_range(left, right)
         }
         (Value::Range(left), Value::Multirange(right)) => {
-            crate::backend::executor::expr_multirange::multirange_overlaps_range(right, left)
+            pgrust_expr::expr_multirange::multirange_overlaps_range(right, left)
         }
         (Value::Multirange(left), Value::Multirange(right)) => {
-            crate::backend::executor::expr_multirange::multirange_overlaps_multirange(left, right)
+            pgrust_expr::expr_multirange::multirange_overlaps_multirange(left, right)
         }
         _ => false,
     }

@@ -30,6 +30,7 @@ use pgrust_expr::{
     },
     expr_mac::eval_macaddr_function,
     expr_money::{cash_words_text, money_larger, money_smaller},
+    expr_multirange::eval_multirange_function,
 };
 
 use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
@@ -68,7 +69,6 @@ use super::expr_math::{
     eval_erf, eval_erfc, eval_float_send_function, eval_gamma, eval_gcd_function,
     eval_lcm_function, eval_lgamma, eval_unary_float_function, sind, snap_degree, tand,
 };
-use super::expr_multirange::eval_multirange_function;
 use super::expr_numeric::{
     eval_ceil_function, eval_div_function, eval_exp_function, eval_factorial_function,
     eval_floor_function, eval_ln_function, eval_log_function, eval_log10_function,
@@ -7625,7 +7625,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
             .len(),
         Value::MacAddr(v) => crate::backend::executor::render_macaddr_text(v).len(),
         Value::MacAddr8(v) => crate::backend::executor::render_macaddr8_text(v).len(),
-        Value::Multirange(_) => super::expr_multirange::render_multirange_text(value)
+        Value::Multirange(_) => crate::backend::executor::render_multirange_text(value)
             .unwrap_or_default()
             .len(),
         Value::Point(_)
@@ -11639,7 +11639,7 @@ fn eval_plpgsql_builtin_function(
             .any(|value| matches!(value, Value::Multirange(_))))
         && let Some(result) = eval_multirange_function(func, &values, result_type, func_variadic)
     {
-        return result;
+        return result.map_err(Into::into);
     }
     if let Some(result) = eval_range_function(
         func,
@@ -13591,7 +13591,7 @@ pub(crate) fn eval_builtin_function(
             .any(|value| matches!(value, Value::Multirange(_))))
         && let Some(result) = eval_multirange_function(func, &values, result_type, func_variadic)
     {
-        return result;
+        return result.map_err(Into::into);
     }
     if let Some(result) = eval_range_function(
         func,

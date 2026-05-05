@@ -28,10 +28,10 @@ use crate::pgrust::session::ByteaOutputFormat;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use super::expr_multirange::{multirange_intersection_agg_transition, range_agg_transition};
 use super::expr_range::{range_intersection_agg_transition, render_range_text};
 use super::expr_xml::concat_xml_texts;
 use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
+use super::{multirange_intersection_agg_transition, range_agg_transition};
 pub(crate) use pgrust_executor::{
     CustomAggregateRuntime, NumericAccum, accumulate_sum_value, accumulate_value,
     aggregate_float_value, aggregate_numeric_value, format_numeric_result, numeric_accum_to_value,
@@ -766,7 +766,8 @@ impl AccumState {
                     let value = values.first().unwrap_or(&Value::Null);
                     *current = match value {
                         Value::Range(_) => range_intersection_agg_transition(current.take(), value),
-                        _ => multirange_intersection_agg_transition(current.take(), value),
+                        _ => multirange_intersection_agg_transition(current.take(), value)
+                            .map_err(Into::into),
                     }
                     .expect("range_intersect_agg inputs should be typechecked");
                 }
