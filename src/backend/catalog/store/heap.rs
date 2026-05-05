@@ -9824,8 +9824,9 @@ impl CatalogStore {
     pub fn copy_relation_column_comments_mvcc(
         &mut self,
         source_relation_oid: u32,
+        source_desc: &RelationDesc,
         target_relation_oid: u32,
-        max_target_attnum: i32,
+        target_desc: &RelationDesc,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let snapshot = ctx.snapshot_for_command()?;
@@ -9853,33 +9854,37 @@ impl CatalogStore {
         .map(pg_description_row_from_values)
         .collect::<Result<Vec<_>, _>>()?;
 
-        let copied_rows = source_rows
-            .into_iter()
-            .filter(|row| row.objsubid > 0 && row.objsubid <= max_target_attnum)
-            .map(|row| PgDescriptionRow {
-                objoid: target_relation_oid,
-                classoid: PG_CLASS_RELATION_OID,
-                objsubid: row.objsubid,
-                description: row.description,
-            })
-            .collect::<Vec<_>>();
-        if copied_rows.is_empty() {
-            return Ok(CatalogMutationEffect::default());
-        }
-
-        insert_catalog_rows_subset_mvcc(
-            ctx,
-            &PhysicalCatalogRows {
-                descriptions: copied_rows,
-                ..PhysicalCatalogRows::default()
-            },
-            self.scope_db_oid(),
-            &[BootstrapCatalogKind::PgDescription],
-        )?;
-
         let mut effect = CatalogMutationEffect::default();
-        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgDescription]);
-        effect_record_oid(&mut effect.relation_oids, target_relation_oid);
+        for row in source_rows {
+            if row.objsubid <= 0 {
+                continue;
+            }
+            let Some(source_column) = usize::try_from(row.objsubid)
+                .ok()
+                .and_then(|attnum| attnum.checked_sub(1))
+                .and_then(|index| source_desc.columns.get(index))
+            else {
+                continue;
+            };
+            if source_column.dropped {
+                continue;
+            }
+            let Some((target_index, _)) =
+                target_desc.columns.iter().enumerate().find(|(_, column)| {
+                    !column.dropped && column.name.eq_ignore_ascii_case(&source_column.name)
+                })
+            else {
+                continue;
+            };
+            let target_attnum = i32::try_from(target_index.saturating_add(1)).unwrap_or(i32::MAX);
+            let comment_effect = self.comment_column_mvcc(
+                target_relation_oid,
+                target_attnum,
+                Some(&row.description),
+                ctx,
+            )?;
+            merge_catalog_mutation_effect(&mut effect, comment_effect);
+        }
         Ok(effect)
     }
 
@@ -9923,26 +9928,13 @@ impl CatalogStore {
         let Some(source_row) = source_rows.first() else {
             return Ok(CatalogMutationEffect::default());
         };
-
-        insert_catalog_rows_subset_mvcc(
+        self.comment_object_subid_mvcc(
+            target_object_oid,
+            target_classoid,
+            0,
+            Some(&source_row.description),
             ctx,
-            &PhysicalCatalogRows {
-                descriptions: vec![PgDescriptionRow {
-                    objoid: target_object_oid,
-                    classoid: target_classoid,
-                    objsubid: 0,
-                    description: source_row.description.clone(),
-                }],
-                ..PhysicalCatalogRows::default()
-            },
-            self.scope_db_oid(),
-            &[BootstrapCatalogKind::PgDescription],
-        )?;
-
-        let mut effect = CatalogMutationEffect::default();
-        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgDescription]);
-        effect_record_oid(&mut effect.relation_oids, target_object_oid);
-        Ok(effect)
+        )
     }
 
     pub fn comment_role_mvcc(
@@ -14296,6 +14288,35 @@ fn effect_record_rows(effect: &mut CatalogMutationEffect, rows: &PhysicalCatalog
     for relation_oid in relation_oids {
         effect_record_oid(&mut effect.relation_oids, relation_oid);
     }
+}
+
+fn merge_catalog_mutation_effect(effect: &mut CatalogMutationEffect, other: CatalogMutationEffect) {
+    for kind in other.touched_catalogs {
+        if !effect.touched_catalogs.contains(&kind) {
+            effect.touched_catalogs.push(kind);
+        }
+    }
+    for key in other.syscache_keys {
+        if !effect.syscache_keys.contains(&key) {
+            effect.syscache_keys.push(key);
+        }
+    }
+    for rel in other.created_rels {
+        effect_record_rel(&mut effect.created_rels, rel);
+    }
+    for rel in other.dropped_rels {
+        effect_record_rel(&mut effect.dropped_rels, rel);
+    }
+    for oid in other.relation_oids {
+        effect_record_oid(&mut effect.relation_oids, oid);
+    }
+    for oid in other.namespace_oids {
+        effect_record_oid(&mut effect.namespace_oids, oid);
+    }
+    for oid in other.type_oids {
+        effect_record_oid(&mut effect.type_oids, oid);
+    }
+    effect.full_reset |= other.full_reset;
 }
 
 fn effect_record_rel(

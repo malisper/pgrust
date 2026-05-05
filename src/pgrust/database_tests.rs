@@ -34256,6 +34256,101 @@ fn create_table_like_copies_column_comments_only_when_requested() {
 }
 
 #[test]
+fn create_table_like_maps_column_comments_by_name() {
+    let base = temp_dir("create_table_like_comments_by_name");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table like_comment_src1 (a text, b text)")
+        .unwrap();
+    db.execute(1, "create table like_comment_src2 (c text)")
+        .unwrap();
+    db.execute(1, "comment on column like_comment_src1.a is 'A'")
+        .unwrap();
+    db.execute(1, "comment on column like_comment_src1.b is 'B'")
+        .unwrap();
+    db.execute(1, "comment on column like_comment_src2.c is 'C'")
+        .unwrap();
+    db.execute(
+        1,
+        "create table like_comment_copy (like like_comment_src1 including comments, like like_comment_src2 including comments)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a.attname, d.description \
+             from pg_attribute a \
+             left join pg_description d on d.objoid = a.attrelid and d.classoid = 1259 and d.objsubid = a.attnum \
+             where a.attrelid = 'like_comment_copy'::regclass and a.attnum > 0 \
+             order by a.attnum",
+        ),
+        vec![
+            vec![Value::Text("a".into()), Value::Text("A".into())],
+            vec![Value::Text("b".into()), Value::Text("B".into())],
+            vec![Value::Text("c".into()), Value::Text("C".into())],
+        ]
+    );
+}
+
+#[test]
+fn create_table_like_rejects_duplicate_columns_before_catalog_insert() {
+    let base = temp_dir("create_table_like_duplicate_columns");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table like_duplicate_src (xx text)")
+        .unwrap();
+    let err = db
+        .execute(
+            1,
+            "create table like_duplicate_copy (like like_duplicate_src, like like_duplicate_src)",
+        )
+        .unwrap_err();
+
+    match err {
+        ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "column \"xx\" specified more than once");
+            assert_eq!(sqlstate, "42701");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn create_table_like_copies_constraint_comments_by_name() {
+    let base = temp_dir("create_table_like_constraint_comments");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table like_constraint_src (c text not null)")
+        .unwrap();
+    db.execute(
+        1,
+        "comment on constraint like_constraint_src_c_not_null on like_constraint_src is 'not null c'",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table like_constraint_copy (like like_constraint_src including comments)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select description \
+             from pg_description d \
+             join pg_constraint c on c.oid = d.objoid \
+             where d.classoid = 2606 and c.conrelid = 'like_constraint_copy'::regclass",
+        ),
+        vec![vec![Value::Text("not null c".into())]]
+    );
+}
+
+#[test]
 fn create_table_like_copies_statistics_only_when_requested() {
     let base = temp_dir("create_table_like_statistics");
     let db = Database::open(&base, 16).unwrap();
