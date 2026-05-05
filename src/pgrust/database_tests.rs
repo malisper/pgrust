@@ -60827,6 +60827,47 @@ fn explain_insert_select_shows_rewritten_source_plan() {
 }
 
 #[test]
+fn explain_insert_on_conflict_do_nothing_shows_arbiter_indexes() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table insertconflicttest(key int4, fruit text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index op_index_key on insertconflicttest(key, fruit text_pattern_ops)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index collation_index_key on insertconflicttest(key, fruit collate \"C\")",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index both_index_key on insertconflicttest(key, fruit collate \"C\" text_pattern_ops)",
+        )
+        .unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "(costs off) insert into insertconflicttest values(0, 'Crowberry') on conflict (key, fruit) do nothing",
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line.trim()
+                == "Conflict Arbiter Indexes: op_index_key, collation_index_key, both_index_key"
+        }),
+        "expected arbiter indexes in EXPLAIN output, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_delete_shows_target_scans_with_rls_filters() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);

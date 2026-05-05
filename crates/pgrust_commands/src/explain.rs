@@ -485,7 +485,20 @@ pub fn push_insert_conflict_lines(
         return;
     };
     match &on_conflict.action {
-        BoundOnConflictAction::Nothing => lines.push("  Conflict Resolution: NOTHING".into()),
+        BoundOnConflictAction::Nothing => {
+            lines.push("  Conflict Resolution: NOTHING".into());
+            if !on_conflict.arbiter_indexes.is_empty() {
+                lines.push(format!(
+                    "  Conflict Arbiter Indexes: {}",
+                    on_conflict
+                        .arbiter_indexes
+                        .iter()
+                        .map(|index| index.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
         BoundOnConflictAction::Update { predicate, .. } => {
             lines.push("  Conflict Resolution: UPDATE".into());
             if !on_conflict.arbiter_indexes.is_empty() {

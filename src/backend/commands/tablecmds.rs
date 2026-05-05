@@ -1790,26 +1790,43 @@ fn execute_explain_insert(
         &mut lines,
     );
     push_explain_insert_conflict_lines(&explain_target, &mut lines);
-    let mut child_lines = Vec::new();
-    if verbose {
-        format_verbose_explain_child_plan_with_catalog(
-            &planned.plan_tree,
-            &planned.subplans,
-            1,
-            costs,
-            catalog,
-            &mut child_lines,
-        );
-    } else {
-        format_explain_child_plan_with_subplans(
-            &planned.plan_tree,
-            &planned.subplans,
-            1,
-            costs,
-            &mut child_lines,
-        );
+    match &bound.source {
+        BoundInsertSource::Values(_)
+        | BoundInsertSource::ProjectSetValues(_)
+        | BoundInsertSource::DefaultValues(_) => {
+            push_explain_insert_source_lines(
+                &bound,
+                conflict_target_prefix,
+                verbose,
+                costs,
+                catalog,
+                planner_config,
+                &mut lines,
+            )?;
+        }
+        BoundInsertSource::Select(_) => {
+            let mut child_lines = Vec::new();
+            if verbose {
+                format_verbose_explain_child_plan_with_catalog(
+                    &planned.plan_tree,
+                    &planned.subplans,
+                    1,
+                    costs,
+                    catalog,
+                    &mut child_lines,
+                );
+            } else {
+                format_explain_child_plan_with_subplans(
+                    &planned.plan_tree,
+                    &planned.subplans,
+                    1,
+                    costs,
+                    &mut child_lines,
+                );
+            }
+            lines.extend(reorder_insert_explain_cte_lines(child_lines));
+        }
     }
-    lines.extend(reorder_insert_explain_cte_lines(child_lines));
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
