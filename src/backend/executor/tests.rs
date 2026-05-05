@@ -6491,7 +6491,9 @@ fn explain_group_by_uses_matching_index_key_order() {
                 })
                 .collect::<Vec<_>>();
             assert!(
-                rendered.iter().any(|line| line.contains("Index Scan")),
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan")),
                 "expected grouping path to use the b, a index, got {rendered:?}"
             );
             assert!(
