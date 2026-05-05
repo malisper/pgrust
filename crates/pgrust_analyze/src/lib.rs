@@ -89,6 +89,35 @@ use runtime::{cast_value, pg_rewrite_query, planner_with_config};
 
 static NEXT_WORKTABLE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
+
+const SRF_LATERAL_HINT: &str =
+    "You might be able to move the set-returning function into a LATERAL FROM item.";
+
+pub(crate) fn srf_not_allowed_error(context: &'static str) -> ParseError {
+    match context {
+        "aggregate arguments" => ParseError::DetailedError {
+            message: "aggregate function calls cannot contain set-returning function calls".into(),
+            detail: None,
+            hint: Some(SRF_LATERAL_HINT.into()),
+            sqlstate: "0A000",
+        },
+        "window aggregate arguments" | "window function arguments" => ParseError::DetailedError {
+            message: "window function calls cannot contain set-returning function calls".into(),
+            detail: None,
+            hint: Some(SRF_LATERAL_HINT.into()),
+            sqlstate: "0A000",
+        },
+        "CASE" | "COALESCE" => ParseError::DetailedError {
+            message: format!("set-returning functions are not allowed in {context}"),
+            detail: None,
+            hint: Some(SRF_LATERAL_HINT.into()),
+            sqlstate: "0A000",
+        },
+        _ => ParseError::FeatureNotSupportedMessage(format!(
+            "set-returning functions are not allowed in {context}"
+        )),
+    }
+}
 use agg::*;
 use agg_output::*;
 pub use agg_scope::VisibleAggregateScope;
@@ -7485,9 +7514,7 @@ fn bind_limit_count_expr(
         visible_ctes,
     )?;
     if expr_contains_set_returning(&bound) {
-        return Err(ParseError::FeatureNotSupported(
-            "set-returning functions are not allowed in LIMIT".into(),
-        ));
+        return Err(srf_not_allowed_error("LIMIT"));
     }
     Ok(coerce_bound_expr(
         bound,
@@ -7522,9 +7549,7 @@ fn bind_limit_offset_expr(
         visible_ctes,
     )?;
     if expr_contains_set_returning(&bound) {
-        return Err(ParseError::FeatureNotSupported(
-            "set-returning functions are not allowed in OFFSET".into(),
-        ));
+        return Err(srf_not_allowed_error("OFFSET"));
     }
     Ok(coerce_bound_expr(
         bound,
@@ -7851,9 +7876,7 @@ fn bind_select_query_with_outer(
             .as_ref()
             .is_some_and(expr_contains_set_returning)
         {
-            return Err(ParseError::FeatureNotSupported(
-                "set-returning functions are not allowed in WHERE".into(),
-            ));
+            return Err(srf_not_allowed_error("WHERE"));
         }
 
         let needs_agg = !effective_group_by.is_empty()
@@ -8507,9 +8530,7 @@ fn bind_select_query_with_outer(
                                 })
                                 .transpose()?;
                             if having.as_ref().is_some_and(expr_contains_set_returning) {
-                                return Err(ParseError::FeatureNotSupported(
-                                    "set-returning functions are not allowed in HAVING".into(),
-                                ));
+                                return Err(srf_not_allowed_error("HAVING"));
                             }
 
                             let targets: Vec<TargetEntry> = with_window_binding(
@@ -8675,18 +8696,10 @@ fn bind_select_query_with_outer(
                             )?;
                             let target_list = normalize_target_list(targets);
                             let has_target_srfs =
-                                target_or_sort_clause_contains_srf(&target_list, &sort_clause);
-                            if stmt.distinct
-                                && !stmt.distinct_on.is_empty()
-                                && target_list
-                                    .iter()
-                                    .any(|target| expr_contains_set_returning(&target.expr))
-                            {
-                                return Err(ParseError::FeatureNotSupportedMessage(
-                                    "SELECT DISTINCT ON with set-returning functions is not supported"
-                                        .into(),
-                                ));
-                            }
+                                target_or_sort_clause_contains_srf(&target_list, &sort_clause)
+                                    || distinct_on
+                                        .iter()
+                                        .any(|clause| expr_contains_set_returning(&clause.expr));
 
                             Ok((
                                 having,
@@ -8801,18 +8814,10 @@ fn bind_select_query_with_outer(
                     };
 
                     let has_target_srfs =
-                        target_or_sort_clause_contains_srf(&target_list, &sort_clause);
-                    if stmt.distinct
-                        && !stmt.distinct_on.is_empty()
-                        && target_list
-                            .iter()
-                            .any(|target| expr_contains_set_returning(&target.expr))
-                    {
-                        return Err(ParseError::FeatureNotSupportedMessage(
-                            "SELECT DISTINCT ON with set-returning functions is not supported"
-                                .into(),
-                        ));
-                    }
+                        target_or_sort_clause_contains_srf(&target_list, &sort_clause)
+                            || distinct_on
+                                .iter()
+                                .any(|clause| expr_contains_set_returning(&clause.expr));
                     let mut query = Query {
                         command_type: pgrust_nodes::CommandType::Select,
                         with_clause: with_clause.clone(),
@@ -9103,30 +9108,7 @@ fn set_operation_order_by_error_with_input_detail(err: ParseError, inputs: &[Que
 }
 
 fn set_returning_not_allowed_error(context: &'static str) -> ParseError {
-    let message = match context {
-        "aggregate arguments" => {
-            "aggregate function calls cannot contain set-returning function calls"
-        }
-        _ => {
-            return ParseError::DetailedError {
-                message: format!("set-returning functions are not allowed in {context}"),
-                detail: None,
-                hint: Some(
-                    "You might be able to move the set-returning function into a LATERAL FROM item."
-                        .into(),
-                ),
-                sqlstate: "0A000",
-            };
-        }
-    };
-    ParseError::DetailedError {
-        message: message.into(),
-        detail: None,
-        hint: Some(
-            "You might be able to move the set-returning function into a LATERAL FROM item.".into(),
-        ),
-        sqlstate: "0A000",
-    }
+    srf_not_allowed_error(context)
 }
 
 fn bind_set_operation_query_with_outer(

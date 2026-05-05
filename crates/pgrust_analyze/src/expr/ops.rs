@@ -2317,6 +2317,21 @@ pub(super) fn bind_prefix_operator_expr(
     if let Some((operator, declared_type, result_type)) =
         resolve_prefix_operator(catalog, op, raw_type)
     {
+        if let Some(proc_row) = catalog.proc_row_by_oid(operator.oprcode)
+            && proc_row.proretset
+        {
+            return bind_set_returning_expr_from_parts(
+                &proc_row.proname,
+                &[SqlFunctionArg::positional(expr.clone())],
+                false,
+                None,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+        }
         return Ok(Expr::func(
             operator.oprcode,
             Some(result_type),
@@ -2389,6 +2404,13 @@ fn resolve_prefix_operator(
 fn prefix_operator_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usize> {
     if actual_type == target_type {
         return Some(0);
+    }
+    if matches!(
+        target_type.kind,
+        SqlTypeKind::AnyArray | SqlTypeKind::AnyCompatibleArray
+    ) && actual_type.is_array
+    {
+        return Some(1);
     }
     if actual_type.is_array != target_type.is_array {
         return None;

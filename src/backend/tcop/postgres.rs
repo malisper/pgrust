@@ -602,6 +602,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             detail,
             ..
         }) => {
+            if let Some(position) = set_returning_context_error_position(sql, message) {
+                return Some(position);
+            }
             if let Some(position) = window_error_position(sql, message) {
                 return Some(position);
             }
@@ -782,6 +785,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupportedMessage(
             message,
         )) => {
+            if let Some(position) = set_returning_context_error_position(sql, message) {
+                return Some(position);
+            }
             if message == "set-returning functions must appear at top level of FROM" {
                 return find_nested_from_function_srf_position(sql);
             }
@@ -4251,6 +4257,20 @@ fn find_first_srf_position(sql: &str) -> Option<usize> {
         .iter()
         .filter_map(|name| find_identifier_in_segment(sql, name).map(|offset| offset + 1))
         .min()
+}
+
+fn set_returning_context_error_position(sql: &str, message: &str) -> Option<usize> {
+    if message.starts_with("set-returning functions are not allowed in ")
+        || matches!(
+            message,
+            "aggregate function calls cannot contain set-returning function calls"
+                | "window function calls cannot contain set-returning function calls"
+        )
+    {
+        find_first_srf_position(sql)
+    } else {
+        None
+    }
 }
 
 fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize> {

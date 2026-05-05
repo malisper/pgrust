@@ -1322,6 +1322,14 @@ fn reject_default_indirection_assignment(target: &BoundAssignmentTarget) -> Resu
     Err(ParseError::FeatureNotSupportedMessage(message.into()))
 }
 
+fn reject_update_assignment_srf(expr: &Expr) -> Result<(), ParseError> {
+    if expr_contains_set_returning(expr) {
+        Err(srf_not_allowed_error("UPDATE"))
+    } else {
+        Ok(())
+    }
+}
+
 fn merge_visible_insert_targets(
     desc: &RelationDesc,
     width: usize,
@@ -1448,26 +1456,28 @@ fn bind_merge_when_clause(
                         &target,
                         &assignment.expr,
                     )?;
+                    let expr = if matches!(assignment.expr, SqlExpr::Default)
+                        && target_desc.columns[column_index].generated.is_some()
+                    {
+                        Expr::Const(Value::Null)
+                    } else {
+                        bind_expr_with_outer_and_ctes(
+                            &assignment.expr,
+                            &action_scope,
+                            catalog,
+                            outer_scopes,
+                            None,
+                            local_ctes,
+                        )?
+                    };
+                    reject_update_assignment_srf(&expr)?;
                     Ok(BoundAssignment {
                         column_index,
                         subscripts: target.subscripts,
                         field_path: target.field_path,
                         indirection: target.indirection,
                         target_sql_type: target.target_sql_type,
-                        expr: if matches!(assignment.expr, SqlExpr::Default)
-                            && target_desc.columns[column_index].generated.is_some()
-                        {
-                            Expr::Const(Value::Null)
-                        } else {
-                            bind_expr_with_outer_and_ctes(
-                                &assignment.expr,
-                                &action_scope,
-                                catalog,
-                                outer_scopes,
-                                None,
-                                local_ctes,
-                            )?
-                        },
+                        expr,
                     })
                 })
                 .collect::<Result<Vec<_>, ParseError>>()?;
@@ -1633,9 +1643,7 @@ fn bind_returning_targets(
                 .iter()
                 .any(|target| expr_contains_set_returning(&target.expr)) =>
         {
-            Err(ParseError::FeatureNotSupported(
-                "set-returning functions are not allowed in RETURNING".into(),
-            ))
+            Err(srf_not_allowed_error("RETURNING"))
         }
         BoundSelectTargets::Plain(targets) if targets.is_empty() => {
             Err(ParseError::UnexpectedToken {
@@ -2984,9 +2992,7 @@ fn bind_merge_returning_targets(
         .iter()
         .any(|target| expr_contains_set_returning(&target.expr))
     {
-        return Err(ParseError::FeatureNotSupported(
-            "set-returning functions are not allowed in RETURNING".into(),
-        ));
+        return Err(srf_not_allowed_error("RETURNING"));
     }
     Ok(entries)
 }
@@ -4986,6 +4992,9 @@ fn bind_auto_view_on_conflict_clause(
                     };
                     let expr = rewrite_local_vars_for_output_exprs(expr, 1, &old_view_output_exprs);
                     let expr = rewrite_local_vars_for_output_exprs(expr, 2, &new_view_output_exprs);
+                    reject_update_assignment_srf(&expr).map_err(|err| {
+                        ViewDmlRewriteError::UnsupportedViewShape(err.to_string())
+                    })?;
                     Ok(BoundAssignment {
                         column_index: target.column_index,
                         subscripts: target.subscripts,
@@ -6960,24 +6969,26 @@ fn bind_simple_update(
             )?;
             ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
             ensure_identity_update_assignment_allowed(&entry.desc, &target, &assignment.expr)?;
+            let expr = if matches!(assignment.expr, SqlExpr::Default) {
+                column_defaults[column_index].clone()
+            } else {
+                bind_expr_with_outer_and_ctes(
+                    &assignment.expr,
+                    &scope,
+                    catalog,
+                    outer_scopes,
+                    None,
+                    local_ctes,
+                )?
+            };
+            reject_update_assignment_srf(&expr)?;
             Ok(BoundAssignment {
                 column_index,
                 subscripts: target.subscripts,
                 field_path: target.field_path,
                 indirection: target.indirection,
                 target_sql_type: target.target_sql_type,
-                expr: if matches!(assignment.expr, SqlExpr::Default) {
-                    column_defaults[column_index].clone()
-                } else {
-                    bind_expr_with_outer_and_ctes(
-                        &assignment.expr,
-                        &scope,
-                        catalog,
-                        outer_scopes,
-                        None,
-                        local_ctes,
-                    )?
-                },
+                expr,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -7168,24 +7179,26 @@ fn bind_update_from(
             )?;
             ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
             ensure_identity_update_assignment_allowed(&entry.desc, &target, &assignment.expr)?;
+            let expr = if matches!(assignment.expr, SqlExpr::Default) {
+                column_defaults[column_index].clone()
+            } else {
+                bind_expr_with_outer_and_ctes(
+                    &assignment.expr,
+                    &eval_scope,
+                    catalog,
+                    outer_scopes,
+                    None,
+                    local_ctes,
+                )?
+            };
+            reject_update_assignment_srf(&expr)?;
             Ok(BoundAssignment {
                 column_index,
                 subscripts: target.subscripts,
                 field_path: target.field_path,
                 indirection: target.indirection,
                 target_sql_type: target.target_sql_type,
-                expr: if matches!(assignment.expr, SqlExpr::Default) {
-                    column_defaults[column_index].clone()
-                } else {
-                    bind_expr_with_outer_and_ctes(
-                        &assignment.expr,
-                        &eval_scope,
-                        catalog,
-                        outer_scopes,
-                        None,
-                        local_ctes,
-                    )?
-                },
+                expr,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;

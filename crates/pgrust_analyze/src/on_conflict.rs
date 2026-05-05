@@ -87,6 +87,9 @@ pub(super) fn bind_on_conflict_clause(
                     };
                     let expr = rewrite_local_vars_for_output_exprs(expr, 1, &outer_output_exprs);
                     let expr = rewrite_local_vars_for_output_exprs(expr, 2, &inner_output_exprs);
+                    if expr_contains_set_returning(&expr) {
+                        return Err(srf_not_allowed_error("UPDATE"));
+                    }
                     Ok(BoundAssignment {
                         column_index: target.column_index,
                         subscripts: target.subscripts,

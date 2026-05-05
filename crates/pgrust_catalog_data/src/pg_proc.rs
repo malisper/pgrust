@@ -2191,6 +2191,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("numeric_inc", BuiltinScalarFunction::NumericInc),
         ("int4smaller", BuiltinScalarFunction::Int4Smaller),
         ("int4mi", BuiltinScalarFunction::Int4Mi),
+        ("int4mul", BuiltinScalarFunction::Int4Mul),
         ("int4pl", BuiltinScalarFunction::Int4Pl),
         ("int4_sum", BuiltinScalarFunction::Int4Sum),
         ("int8inc", BuiltinScalarFunction::Int8Inc),

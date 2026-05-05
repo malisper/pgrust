@@ -2470,6 +2470,7 @@ pub(super) fn validate_scalar_function_arity(
             }
             BuiltinScalarFunction::Int4Pl
             | BuiltinScalarFunction::Int4Mi
+            | BuiltinScalarFunction::Int4Mul
             | BuiltinScalarFunction::Int4Smaller
             | BuiltinScalarFunction::Int4Sum => args.len() == 2,
             BuiltinScalarFunction::Int8Inc => args.len() == 1,
@@ -5413,6 +5414,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("numeric_inc", BuiltinScalarFunction::NumericInc),
         ("int4smaller", BuiltinScalarFunction::Int4Smaller),
         ("int4mi", BuiltinScalarFunction::Int4Mi),
+        ("int4mul", BuiltinScalarFunction::Int4Mul),
         ("int4pl", BuiltinScalarFunction::Int4Pl),
         ("int8inc", BuiltinScalarFunction::Int8Inc),
         ("int8inc_any", BuiltinScalarFunction::Int8IncAny),

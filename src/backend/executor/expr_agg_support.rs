@@ -6,7 +6,7 @@ use super::exec_expr::{
     eval_pg_relation_is_updatable, eval_pg_settings_get_flags,
 };
 use super::expr_casts::cast_value_with_source_type_catalog_and_config;
-use super::expr_ops::{add_values, compare_order_values, div_values, sub_values};
+use super::expr_ops::{add_values, compare_order_values, div_values, mul_values, sub_values};
 use super::sqlfunc::{
     execute_user_defined_sql_scalar_function_values,
     execute_user_defined_sql_scalar_function_values_with_arg_type_oids,
@@ -480,6 +480,10 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
         BuiltinScalarFunction::Int4Mi => match arg_values {
             [left, right] => sub_values(left.clone(), right.clone()),
             _ => malformed_aggregate_support_call("int4mi"),
+        },
+        BuiltinScalarFunction::Int4Mul => match arg_values {
+            [left, right] => mul_values(left.clone(), right.clone()),
+            _ => malformed_aggregate_support_call("int4mul"),
         },
         BuiltinScalarFunction::Int4Smaller => match arg_values {
             [Value::Int32(left), Value::Int32(right)] => Ok(Value::Int32((*left).min(*right))),
