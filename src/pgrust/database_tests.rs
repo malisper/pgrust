@@ -25164,6 +25164,236 @@ fn update_rule_insert_select_uses_old_new_without_exec_params() {
 }
 
 #[test]
+fn conditional_insert_instead_rule_does_not_suppress_unmatched_row() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table fk_parent (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_child (a int4, b int4, note text, \
+         primary key (a, b), foreign key (a, b) references fk_parent(a, b))",
+    )
+    .unwrap();
+    db.execute(1, "insert into fk_parent values (1, 1)")
+        .unwrap();
+    db.execute(1, "insert into fk_child values (1, 1, 'row1')")
+        .unwrap();
+    assert!(
+        db.execute(1, "insert into fk_child values (1, 2, 'missing parent')")
+            .is_err()
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, b, note from fk_child order by a, b"),
+        vec![vec![
+            Value::Int32(1),
+            Value::Int32(1),
+            Value::Text("row1".into())
+        ]]
+    );
+    db.execute(
+        1,
+        "create rule fk_child_upsert as on insert to fk_child \
+         where exists (select 1 from fk_child where fk_child.a = new.a and fk_child.b = new.b) \
+         do instead update fk_child set note = new.note \
+         where fk_child.a = new.a and fk_child.b = new.b",
+    )
+    .unwrap();
+
+    let err = db
+        .execute(1, "insert into fk_child values (1, 2, 'missing parent')")
+        .unwrap_err();
+    match err {
+        ExecError::ForeignKeyViolation {
+            message,
+            detail: Some(detail),
+            ..
+        } => {
+            assert!(message.contains("violates foreign key constraint"));
+            assert!(detail.contains("Key (a, b)=(1, 2) is not present"));
+        }
+        other => panic!("expected foreign key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn inherited_parent_view_preserves_inherited_scan() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(1, "create table id (id serial primary key, name text)")
+        .unwrap();
+    db.execute(1, "create table test_1 (id int4 primary key) inherits (id)")
+        .unwrap();
+    db.execute(1, "create table test_2 (id int4 primary key) inherits (id)")
+        .unwrap();
+    db.execute(1, "insert into test_1 (name) values ('Test 1'), ('Test 2')")
+        .unwrap();
+    db.execute(1, "insert into test_2 (name) values ('Test 3'), ('Test 4')")
+        .unwrap();
+    db.execute(1, "create view id_ordered as select * from id order by id")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule update_id_ordered as on update to id_ordered \
+         do instead update id set name = new.name where id = old.id",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from id_ordered"),
+        vec![
+            vec![Value::Int32(1), Value::Text("Test 1".into())],
+            vec![Value::Int32(2), Value::Text("Test 2".into())],
+            vec![Value::Int32(3), Value::Text("Test 3".into())],
+            vec![Value::Int32(4), Value::Text("Test 4".into())],
+        ]
+    );
+
+    db.execute(1, "update id_ordered set name = 'update 2' where id = 2")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from id_ordered where id = 2"),
+        vec![vec![Value::Int32(2), Value::Text("update 2".into())]]
+    );
+}
+
+#[test]
+fn unconditional_update_instead_select_rule_runs_once() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(1, "create table rules_base(f1 int4, f2 int4)")
+        .unwrap();
+    db.execute(1, "insert into rules_base values(1, 2), (11, 12)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule r1 as on update to rules_base do instead \
+         select * from rules_base where f1 = 1 for update",
+    )
+    .unwrap();
+
+    match db.execute(1, "update rules_base set f2 = f2 + 1").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1), Value::Int32(2)]]);
+        }
+        other => panic!("expected rule SELECT query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn auto_view_do_also_rules_see_rows_inserted_by_auto_rewrite() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table rule_t1(a int4, b text default 'xxx', c int4)",
+    )
+    .unwrap();
+    db.execute(1, "create view rule_v1 as select * from rule_t1")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule v1_ins as on insert to rule_v1 \
+         do also insert into rule_t1 \
+         select * from (select a + 10 from rule_t1 where a = new.a) tt",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule v1_upd as on update to rule_v1 \
+         do also update rule_t1 t set c = tt.a * 10 \
+         from (select a from rule_t1 where a = old.a) tt where t.a = tt.a",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into rule_v1 values (1, 'a'), (2, 'b')")
+        .unwrap();
+    db.execute(1, "update rule_v1 set b = upper(b)").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from rule_t1 order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Text("A".into()), Value::Int32(10)],
+            vec![Value::Int32(2), Value::Text("B".into()), Value::Int32(20)],
+            vec![
+                Value::Int32(11),
+                Value::Text("XXX".into()),
+                Value::Int32(110)
+            ],
+            vec![
+                Value::Int32(12),
+                Value::Text("XXX".into()),
+                Value::Int32(120)
+            ],
+        ]
+    );
+}
+
+#[test]
+fn insert_select_instead_rule_updates_view_per_source_row() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table shoelace_data(sl_name char(10), sl_avail int4)",
+    )
+    .unwrap();
+    db.execute(1, "create view shoelace as select * from shoelace_data")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule shoelace_upd as on update to shoelace do instead \
+         update shoelace_data set sl_avail = new.sl_avail where sl_name = old.sl_name",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table shoelace_arrive(arr_name char(10), arr_quant int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table shoelace_ok(ok_name char(10), ok_quant int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule shoelace_ok_ins as on insert to shoelace_ok do instead \
+         update shoelace set sl_avail = sl_avail + new.ok_quant where sl_name = new.ok_name",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into shoelace_data values ('sl3', 0), ('sl6', 0), ('sl8', 1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into shoelace_arrive values ('sl3', 10), ('sl6', 20), ('sl8', 20)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into shoelace_ok select * from shoelace_arrive")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select sl_name::text, sl_avail from shoelace_data order by sl_name"
+        ),
+        vec![
+            vec![Value::Text("sl3".into()), Value::Int32(10)],
+            vec![Value::Text("sl6".into()), Value::Int32(20)],
+            vec![Value::Text("sl8".into()), Value::Int32(21)],
+        ]
+    );
+}
+
+#[test]
 fn create_rule_rejects_unqualified_action_reference() {
     let base = temp_dir("rule_unqualified_action");
     let db = Database::open(&base, 16).unwrap();

@@ -2882,6 +2882,9 @@ pub(super) fn relation_ordered_index_paths(
     pathkeys: &[PathKey],
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
+    if !append_child_rtindexes(root, rtindex).is_empty() {
+        return Vec::new();
+    }
     let Some(order_items) = order_items_for_base_rel_pathkeys(root, rtindex, pathkeys) else {
         return Vec::new();
     };
@@ -3087,6 +3090,9 @@ pub(super) fn relation_index_only_full_scan_paths(
     rtindex: usize,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
+    if !append_child_rtindexes(root, rtindex).is_empty() {
+        return Vec::new();
+    }
     if !root.config.enable_indexonlyscan
         || relation_uses_virtual_scan(relation_oid_for_rtindex(root, rtindex).unwrap_or(0))
     {
