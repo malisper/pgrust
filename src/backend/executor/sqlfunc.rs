@@ -1657,8 +1657,28 @@ fn substitute_sql_function_body_args(
     datetime_config: &DateTimeConfig,
 ) -> Result<String, ExecError> {
     let arg_type_oids = effective_sql_function_arg_type_oids(row, args.len(), call_arg_type_oids);
-    let mut sql = substitute_positional_args_with_catalog(
-        &body,
+    let mut sql = body;
+    for (index, arg) in args.iter().enumerate() {
+        let position = index + 1;
+        if let Some(field_list) = composite_field_list_sql(arg, catalog, datetime_config)? {
+            sql = substitute_sql_fragment_outside_quotes(
+                &sql,
+                &format!("${position}.*"),
+                &field_list,
+            );
+            for (field_name, field_sql) in
+                composite_field_sql_fragments(arg, catalog, datetime_config)?
+            {
+                sql = substitute_sql_fragment_outside_quotes(
+                    &sql,
+                    &format!("${position}.{field_name}"),
+                    &field_sql,
+                );
+            }
+        }
+    }
+    sql = substitute_positional_args_with_catalog(
+        &sql,
         args,
         &arg_type_oids,
         catalog,
@@ -1685,6 +1705,20 @@ fn substitute_sql_function_body_args(
                 );
                 sql =
                     substitute_sql_fragment_outside_quotes(&sql, &format!("{name}.*"), &field_list);
+                for (field_name, field_sql) in
+                    composite_field_sql_fragments(&args[index], catalog, datetime_config)?
+                {
+                    sql = substitute_sql_fragment_outside_quotes(
+                        &sql,
+                        &format!("{}.{}.{}", row.proname, name, field_name),
+                        &field_sql,
+                    );
+                    sql = substitute_sql_fragment_outside_quotes(
+                        &sql,
+                        &format!("{name}.{field_name}"),
+                        &field_sql,
+                    );
+                }
             }
             let replacement = parenthesized_sql_literal(
                 &args[index],
@@ -1692,10 +1726,113 @@ fn substitute_sql_function_body_args(
                 catalog,
                 datetime_config,
             )?;
-            sql = substitute_named_arg(&sql, name, &replacement);
+            sql = substitute_sql_fragment_outside_quotes(
+                &sql,
+                &format!("{}.{}", row.proname, name),
+                &replacement,
+            );
+            if !sql_function_body_has_visible_column_named(&sql, name, catalog) {
+                sql = substitute_named_arg(&sql, name, &replacement);
+            }
         }
     }
     Ok(sql)
+}
+
+fn sql_function_body_has_visible_column_named(
+    sql: &str,
+    column_name: &str,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    relation_names_after_from_or_join(sql)
+        .into_iter()
+        .any(|name| {
+            catalog.lookup_relation(&name).is_some_and(|relation| {
+                relation
+                    .desc
+                    .columns
+                    .iter()
+                    .any(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+            })
+        })
+}
+
+fn relation_names_after_from_or_join(sql: &str) -> Vec<String> {
+    let tokens = sql_identifier_tokens_outside_quotes(sql);
+    let mut names = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if tokens[index].eq_ignore_ascii_case("from") || tokens[index].eq_ignore_ascii_case("join")
+        {
+            index += 1;
+            if index < tokens.len() && tokens[index].eq_ignore_ascii_case("only") {
+                index += 1;
+            }
+            if index < tokens.len() {
+                names.push(tokens[index].clone());
+            }
+        }
+        index += 1;
+    }
+    names
+}
+
+fn sql_identifier_tokens_outside_quotes(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if in_single_quote {
+            if ch == '\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double_quote {
+            if ch == '"' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                    i += 2;
+                    continue;
+                }
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single_quote = true;
+                i += 1;
+            }
+            '"' => {
+                in_double_quote = true;
+                i += 1;
+            }
+            _ if ch == '_' || ch.is_ascii_alphabetic() => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() {
+                    let ch = bytes[i] as char;
+                    if ch == '_' || ch.is_ascii_alphanumeric() {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(sql[start..i].to_string());
+            }
+            _ => i += 1,
+        }
+    }
+    tokens
 }
 
 fn composite_field_list_sql(
@@ -1714,6 +1851,25 @@ fn composite_field_list_sql(
             .collect::<Result<Vec<_>, _>>()?
             .join(", "),
     ))
+}
+
+fn composite_field_sql_fragments(
+    value: &Value,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<Vec<(String, String)>, ExecError> {
+    let Value::Record(record) = value else {
+        return Ok(Vec::new());
+    };
+    record
+        .iter()
+        .map(|(field, value)| {
+            Ok((
+                field.name.clone(),
+                render_sql_literal_with_catalog(value, catalog, datetime_config)?,
+            ))
+        })
+        .collect()
 }
 
 fn substitute_sql_fragment_outside_quotes(input: &str, needle: &str, replacement: &str) -> String {

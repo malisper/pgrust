@@ -6611,6 +6611,65 @@ fn eval_test_canonicalize_path(values: &[Value]) -> Result<Value, ExecError> {
     pgrust_executor::eval_test_canonicalize_path(values).map_err(misc_builtin_error)
 }
 
+fn eval_test_reverse_name(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "reverse_name(name)",
+            actual: format!("{} args", values.len()),
+        }));
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Text(text) => Ok(Value::Text(CompactString::from_owned(
+            text.chars().rev().collect(),
+        ))),
+        other => Err(ExecError::TypeMismatch {
+            op: "reverse_name",
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn eval_test_overpaid(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "overpaid(emp)",
+            actual: format!("{} args", values.len()),
+        }));
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Record(record) => {
+            let Some((_, salary)) = record
+                .iter()
+                .find(|(field, _)| field.name.eq_ignore_ascii_case("salary"))
+            else {
+                return Err(ExecError::DetailedError {
+                    message: "overpaid requires a salary field".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42703",
+                });
+            };
+            match salary {
+                Value::Null => Ok(Value::Null),
+                Value::Int32(salary) => Ok(Value::Bool(*salary > 699)),
+                other => Err(ExecError::TypeMismatch {
+                    op: "overpaid",
+                    left: other.clone(),
+                    right: Value::Null,
+                }),
+            }
+        }
+        other => Err(ExecError::TypeMismatch {
+            op: "overpaid",
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
 fn eval_gist_translate_cmptype_common(values: &[Value]) -> Result<Value, ExecError> {
     pgrust_executor::eval_gist_translate_cmptype_common(values).map_err(misc_builtin_error)
 }
@@ -11696,6 +11755,8 @@ fn eval_plpgsql_builtin_function(
         }
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(&values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Null),
+        BuiltinScalarFunction::TestReverseName => eval_test_reverse_name(&values),
+        BuiltinScalarFunction::TestOverpaid => eval_test_overpaid(&values),
         BuiltinScalarFunction::PgSizePretty => {
             expr_string::eval_pg_size_pretty_function(&values).map_err(Into::into)
         }
@@ -13193,6 +13254,8 @@ pub(crate) fn eval_native_builtin_scalar_typed_value_call(
         }
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Bool(false)),
+        BuiltinScalarFunction::TestReverseName => eval_test_reverse_name(values),
+        BuiltinScalarFunction::TestOverpaid => eval_test_overpaid(values),
         BuiltinScalarFunction::NextVal
         | BuiltinScalarFunction::IdentityNextVal
         | BuiltinScalarFunction::CurrVal
@@ -14481,6 +14544,8 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(&values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Null),
+        BuiltinScalarFunction::TestReverseName => eval_test_reverse_name(&values),
+        BuiltinScalarFunction::TestOverpaid => eval_test_overpaid(&values),
         BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
         BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgTableIsVisible => eval_pg_table_is_visible(&values, ctx),

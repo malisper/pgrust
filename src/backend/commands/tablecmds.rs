@@ -5883,15 +5883,6 @@ pub(crate) fn write_updated_row(
         Some(relation_oid),
         ctx,
     )?;
-    let refreshed_referenced_by_foreign_keys;
-    let referenced_by_foreign_keys = if let Some(catalog) = ctx.catalog.as_deref() {
-        refreshed_referenced_by_foreign_keys =
-            bind_referenced_by_foreign_keys(relation_oid, desc, catalog)
-                .map_err(ExecError::Parse)?;
-        refreshed_referenced_by_foreign_keys.as_slice()
-    } else {
-        referenced_by_foreign_keys
-    };
     if let Some(catalog) = ctx.catalog.as_deref() {
         let namespace_oid = catalog
             .class_row_by_oid(relation_oid)

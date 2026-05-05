@@ -10,10 +10,10 @@ use pgrust_nodes::datum::RecordDescriptor;
 use pgrust_nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, CaseExpr as BoundCaseExpr,
     CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, FuncExpr,
-    OpExprKind, Param, ParamKind, ScalarFunctionImpl, SqlJsonQueryFunction,
-    SqlJsonQueryFunctionKind, SqlJsonTableBehavior, SqlJsonTablePassingArg, SqlJsonTableQuotes,
-    SqlJsonTableWrapper, WindowFuncKind, expr_collation_oid_hint, expr_contains_set_returning,
-    expr_sql_type_hint,
+    OpExprKind, Param, ParamKind, QueryColumn, ScalarFunctionImpl, SetReturningCall,
+    SqlJsonQueryFunction, SqlJsonQueryFunctionKind, SqlJsonTableBehavior, SqlJsonTablePassingArg,
+    SqlJsonTableQuotes, SqlJsonTableWrapper, WindowFuncKind, expr_collation_oid_hint,
+    expr_contains_set_returning, expr_sql_type_hint,
 };
 use pgrust_nodes::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
@@ -6035,6 +6035,17 @@ pub fn bind_expr_with_outer_and_ctes(
                     *resolution_type = SqlType::new(SqlTypeKind::AnyElement);
                 }
             }
+            if let Some(fallback) = try_bind_functional_field_notation(
+                name,
+                args_list,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )? {
+                return Ok(fallback);
+            }
             if matches!(args_list.len(), 3)
                 && !*func_variadic
                 && (name.eq_ignore_ascii_case("lag") || name.eq_ignore_ascii_case("lead"))
@@ -6635,15 +6646,15 @@ fn bind_field_select_expr(
     for part in field.split('.') {
         let field_type = match resolve_bound_field_select_type(&current, part, catalog) {
             Ok(field_type) => field_type,
-            Err(err) if part == field => {
+            Err(err) => {
                 if let Some(fallback) =
                     try_bind_column_notation_function_call(&current, part, catalog)?
                 {
-                    return Ok(fallback);
+                    current = fallback;
+                    continue;
                 }
                 return Err(err);
             }
-            Err(err) => return Err(err),
         };
         current = Expr::FieldSelect {
             expr: Box::new(current),
@@ -6699,7 +6710,6 @@ fn try_bind_column_notation_function_call(
         return Ok(None);
     }
     if let Ok(resolved) = resolve_function_call(catalog, name, &[actual_type], false)
-        && !resolved.proretset
         && resolved.prokind == 'f'
     {
         let declared_type = resolved
@@ -6707,11 +6717,19 @@ fn try_bind_column_notation_function_call(
             .first()
             .copied()
             .unwrap_or(actual_type);
+        let coerced = coerce_bound_expr(arg.clone(), actual_type, declared_type);
+        if resolved.proretset {
+            return Ok(Some(set_returning_expr_for_resolved_column_notation(
+                &resolved,
+                name,
+                vec![coerced],
+            )));
+        }
         return Ok(Some(Expr::func(
             resolved.proc_oid,
             Some(resolved.result_type),
             resolved.func_variadic,
-            vec![coerce_bound_expr(arg.clone(), actual_type, declared_type)],
+            vec![coerced],
         )));
     }
     try_bind_column_notation_single_arg_proc(arg, name, actual_type, catalog)
@@ -6727,7 +6745,7 @@ fn try_bind_column_notation_single_arg_proc(
     let mut matches = catalog
         .proc_rows_by_name(name)
         .into_iter()
-        .filter(|row| row.prokind == 'f' && !row.proretset)
+        .filter(|row| row.prokind == 'f')
         .filter_map(|row| {
             let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
             let [declared_oid] = declared_oids.as_slice() else {
@@ -6773,12 +6791,107 @@ fn try_bind_column_notation_single_arg_proc(
         .type_by_oid(row.prorettype)
         .map(|row| row.sql_type)
         .ok_or_else(|| ParseError::UnsupportedType(row.prorettype.to_string()))?;
+    if row.proretset {
+        let output_columns = set_returning_output_columns_for_type(name, result_type, catalog);
+        let sql_type = if output_columns.len() == 1 {
+            output_columns[0].sql_type
+        } else {
+            result_type
+        };
+        let column_index = if output_columns.len() == 1 { 1 } else { 0 };
+        return Ok(Some(Expr::set_returning(
+            name.to_ascii_lowercase(),
+            SetReturningCall::UserDefined {
+                proc_oid: row.oid,
+                function_name: row.proname,
+                func_variadic: false,
+                args: vec![coerce_bound_expr(arg.clone(), actual_type, declared_type)],
+                inlined_expr: None,
+                output_columns,
+                with_ordinality: false,
+            },
+            sql_type,
+            column_index,
+        )));
+    }
     Ok(Some(Expr::func(
         row.oid,
         Some(result_type),
         false,
         vec![coerce_bound_expr(arg.clone(), actual_type, declared_type)],
     )))
+}
+
+fn set_returning_expr_for_resolved_column_notation(
+    resolved: &ResolvedFunctionCall,
+    name: &str,
+    args: Vec<Expr>,
+) -> Expr {
+    let output_columns = resolved_function_output_columns(name, resolved);
+    let (sql_type, column_index) = if output_columns.len() == 1 {
+        (output_columns[0].sql_type, 1)
+    } else {
+        (resolved.result_type, 0)
+    };
+    Expr::set_returning(
+        name.to_ascii_lowercase(),
+        SetReturningCall::UserDefined {
+            proc_oid: resolved.proc_oid,
+            function_name: resolved.proname.clone(),
+            func_variadic: resolved.func_variadic,
+            args,
+            inlined_expr: None,
+            output_columns,
+            with_ordinality: false,
+        },
+        sql_type,
+        column_index,
+    )
+}
+
+fn resolved_function_output_columns(
+    name: &str,
+    resolved: &ResolvedFunctionCall,
+) -> Vec<QueryColumn> {
+    match &resolved.row_shape {
+        ResolvedFunctionRowShape::OutParameters(columns)
+        | ResolvedFunctionRowShape::NamedComposite { columns, .. } => columns.clone(),
+        ResolvedFunctionRowShape::AnonymousRecord | ResolvedFunctionRowShape::None => {
+            vec![QueryColumn {
+                name: name.to_ascii_lowercase(),
+                sql_type: resolved.result_type,
+                wire_type_oid: None,
+            }]
+        }
+    }
+}
+
+fn set_returning_output_columns_for_type(
+    name: &str,
+    result_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Vec<QueryColumn> {
+    if matches!(result_type.kind, SqlTypeKind::Composite)
+        && result_type.typrelid != 0
+        && let Some(relation) = catalog.lookup_relation_by_oid(result_type.typrelid)
+    {
+        return relation
+            .desc
+            .columns
+            .into_iter()
+            .filter(|column| !column.dropped)
+            .map(|column| QueryColumn {
+                name: column.name,
+                sql_type: column.sql_type,
+                wire_type_oid: None,
+            })
+            .collect();
+    }
+    vec![QueryColumn {
+        name: name.to_ascii_lowercase(),
+        sql_type: result_type,
+        wire_type_oid: None,
+    }]
 }
 
 fn expr_record_descriptor(expr: &Expr) -> Option<&pgrust_nodes::datum::RecordDescriptor> {
@@ -6837,10 +6950,7 @@ fn try_bind_functional_field_notation(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Option<Expr>, ParseError> {
-    if args.len() != 1
-        || args[0].name.is_some()
-        || resolve_function_cast_type(catalog, name).is_some()
-    {
+    if args.len() != 1 || args[0].name.is_some() {
         return Ok(None);
     }
     let field_expr = SqlExpr::FieldSelect {

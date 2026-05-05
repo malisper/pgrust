@@ -578,7 +578,7 @@ pub fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinSc
         // as unsupported internal functions.
         if matches!(
             row.prosrc.to_ascii_lowercase().as_str(),
-            "interpt_pp" | "test_canonicalize_path" | "test_relpath"
+            "interpt_pp" | "test_canonicalize_path" | "test_relpath" | "reverse_name" | "overpaid"
         ) {
             return builtin_by_src;
         }
@@ -822,6 +822,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "make_tuple_indirect",
             BuiltinScalarFunction::MakeTupleIndirect,
         ),
+        ("reverse_name", BuiltinScalarFunction::TestReverseName),
+        ("overpaid", BuiltinScalarFunction::TestOverpaid),
         ("current_schemas", BuiltinScalarFunction::CurrentSchemas),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
         ("pg_cancel_backend", BuiltinScalarFunction::PgCancelBackend),
