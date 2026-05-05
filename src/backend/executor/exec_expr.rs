@@ -3632,7 +3632,23 @@ fn eval_pg_get_acl(values: &[Value], ctx: &ExecutorContext) -> Result<Value, Exe
     }
 }
 
-fn eval_make_acl_item(values: &[Value]) -> Result<Value, ExecError> {
+fn acl_role_display_name(ctx: &ExecutorContext, role_oid: u32) -> String {
+    if role_oid == 0 {
+        return String::new();
+    }
+    ctx.catalog
+        .as_deref()
+        .and_then(|catalog| {
+            catalog
+                .authid_rows()
+                .into_iter()
+                .find(|row| row.oid == role_oid)
+        })
+        .map(|row| quote_identifier_if_needed(&row.rolname))
+        .unwrap_or_else(|| role_oid.to_string())
+}
+
+fn eval_make_acl_item(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _, _, _]
         | [_, Value::Null, _, _]
@@ -3655,13 +3671,15 @@ fn eval_make_acl_item(values: &[Value]) -> Result<Value, ExecError> {
                     right: Value::Bool(false),
                 });
             };
-            let mut privilege_bits = acl_privilege_abbrev(privileges);
+            let mut privilege_bits = acl_privilege_abbrev(privileges)?;
             if *grant_option {
                 privilege_bits = privilege_bits
                     .chars()
                     .flat_map(|ch| [ch, '*'])
                     .collect::<String>();
             }
+            let grantee = acl_role_display_name(ctx, grantee);
+            let grantor = acl_role_display_name(ctx, grantor);
             Ok(Value::Text(
                 format!("{grantee}={privilege_bits}/{grantor}").into(),
             ))
@@ -3673,29 +3691,35 @@ fn eval_make_acl_item(values: &[Value]) -> Result<Value, ExecError> {
     }
 }
 
-fn acl_privilege_abbrev(privileges: &str) -> String {
-    privileges
+fn acl_privilege_abbrev(privileges: &str) -> Result<String, ExecError> {
+    let mut selected = std::collections::BTreeSet::new();
+    for part in privileges
         .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
         .filter(|part| !part.is_empty())
-        .map(|part| {
-            let lower = part.to_ascii_lowercase();
-            match lower.as_str() {
-                "select" => "r",
-                "insert" => "a",
-                "update" => "w",
-                "delete" => "d",
-                "truncate" => "D",
-                "references" => "x",
-                "trigger" => "t",
-                "execute" => "X",
-                "usage" => "U",
-                "create" => "C",
-                "connect" => "c",
-                "temporary" | "temp" => "T",
-                _ => part,
-            }
-        })
-        .collect()
+    {
+        let lower = part.to_ascii_lowercase();
+        let abbrev = match lower.as_str() {
+            "insert" => 'a',
+            "select" => 'r',
+            "update" => 'w',
+            "delete" => 'd',
+            "truncate" => 'D',
+            "references" => 'x',
+            "trigger" => 't',
+            "execute" => 'X',
+            "usage" => 'U',
+            "create" => 'C',
+            "temporary" | "temp" => 'T',
+            "connect" => 'c',
+            _ => return Err(invalid_privilege_type_error(part)),
+        };
+        selected.insert(abbrev);
+    }
+    let order = ['a', 'r', 'w', 'd', 'D', 'x', 't', 'X', 'U', 'C', 'T', 'c'];
+    Ok(order
+        .into_iter()
+        .filter(|abbrev| selected.contains(abbrev))
+        .collect())
 }
 
 fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -14081,7 +14105,7 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::PgGetAcl => eval_pg_get_acl(&values, ctx),
-        BuiltinScalarFunction::MakeAclItem => eval_make_acl_item(&values),
+        BuiltinScalarFunction::MakeAclItem => eval_make_acl_item(&values, ctx),
         BuiltinScalarFunction::PgGetStatisticsObjDef => eval_pg_get_statisticsobjdef(&values, ctx),
         BuiltinScalarFunction::PgGetStatisticsObjDefColumns => {
             eval_pg_get_statisticsobjdef_columns(&values, ctx)

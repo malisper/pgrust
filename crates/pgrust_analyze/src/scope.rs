@@ -6294,6 +6294,15 @@ fn apply_relation_alias(
     let mut columns = scope.columns.clone();
     let mut relations = scope.relations.clone();
     let mut renamed = false;
+    let join_using_alias_merged_cols = plan.rtable.last().and_then(|rte| {
+        if let RangeTblEntryKind::Join { joinmergedcols, .. } = &rte.kind
+            && *joinmergedcols > 0
+        {
+            Some(*joinmergedcols)
+        } else {
+            None
+        }
+    });
     if let Some(rte) = plan.rtable.last_mut() {
         let preserve_rte_name = rte.alias_preserves_source_names;
         rte.alias = Some(alias.to_string());
@@ -6361,15 +6370,6 @@ fn apply_relation_alias(
     }
 
     if preserve_source_names {
-        let join_using_alias_merged_cols = plan.rtable.last().and_then(|rte| {
-            if let RangeTblEntryKind::Join { joinmergedcols, .. } = &rte.kind
-                && *joinmergedcols > 0
-            {
-                Some(*joinmergedcols)
-            } else {
-                None
-            }
-        });
         let alias_only_anonymous = columns
             .iter()
             .any(|column| column.relation_names.is_empty());
@@ -6438,6 +6438,9 @@ fn apply_relation_alias(
                     }
                 }
                 column.relation_names.clear();
+            }
+            if join_using_alias_merged_cols.is_some() && column.hidden {
+                continue;
             }
             column.relation_names = vec![alias.to_string()];
         }

@@ -1658,12 +1658,13 @@ impl Database {
             check_truncate_relation_privileges, fire_after_truncate_triggers,
             fire_before_truncate_triggers, invalidate_relation_buffers_for_command,
             owned_sequence_oids_for_truncate, reinitialize_index_relation,
-            resolve_truncate_relations,
+            resolve_explicit_truncate_relations, resolve_truncate_relations,
         };
 
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let targets = resolve_truncate_relations(stmt, &catalog, true)?;
-        check_truncate_relation_privileges(&targets, ctx)?;
+        let privilege_targets = resolve_explicit_truncate_relations(stmt, &catalog)?;
+        check_truncate_relation_privileges(&privilege_targets, ctx)?;
         let triggers = fire_before_truncate_triggers(&targets, &catalog, ctx)?;
 
         let mut rewrite_oids = Vec::new();

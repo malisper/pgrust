@@ -17326,6 +17326,163 @@ fn merge_checks_target_and_source_privileges() {
 }
 
 #[test]
+fn merge_column_privileges_track_referenced_source_and_target_columns() {
+    let dir = temp_dir("merge_column_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role merge_col_owner login")
+        .unwrap();
+    session
+        .execute(&db, "create role merge_col_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization merge_col_owner")
+        .unwrap();
+    session
+        .execute(&db, "create table merge_col_target(id int4, value text)")
+        .unwrap();
+    session
+        .execute(&db, "create table merge_col_source(id int4, value text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into merge_col_target values (1, 'old')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into merge_col_source values (1, 'new'), (2, 'inserted')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select(id) on merge_col_target to merge_col_tenant",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant insert(id, value), update(value) on merge_col_target to merge_col_tenant",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select(id) on merge_col_source to merge_col_tenant",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization merge_col_tenant")
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "merge into merge_col_target t using merge_col_source s on t.id = s.id \
+             when matched then update set value = 'ok' \
+             when not matched then insert values (id, null)",
+        )
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "merge into merge_col_target t using merge_col_source s on t.id = s.id \
+         when matched then update set value = s.value \
+         when not matched then insert values (id, null)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table merge_col_source");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected merge source column privilege error, got {other:?}"),
+    }
+}
+
+#[test]
+fn truncate_parent_checks_privilege_on_explicit_target_not_inherited_child() {
+    let dir = temp_dir("truncate_inherited_privileges");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role truncate_owner login")
+        .unwrap();
+    session
+        .execute(&db, "create role truncate_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization truncate_owner")
+        .unwrap();
+    session
+        .execute(&db, "create table truncate_parent(id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table truncate_child() inherits (truncate_parent)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant truncate on truncate_parent to truncate_tenant")
+        .unwrap();
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization truncate_tenant")
+        .unwrap();
+
+    session.execute(&db, "truncate truncate_parent").unwrap();
+    match session.execute(&db, "truncate truncate_child") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table truncate_child");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected child truncate privilege error, got {other:?}"),
+    }
+}
+
+#[test]
+fn select_view_without_view_privilege_reports_view_before_base_table() {
+    let dir = temp_dir("view_privilege_error_order");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role view_owner login")
+        .unwrap();
+    session
+        .execute(&db, "create role view_reader login")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization view_owner")
+        .unwrap();
+    session
+        .execute(&db, "create table view_base(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create view view_gate as select * from view_base")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization view_reader")
+        .unwrap();
+
+    match session.execute(&db, "select * from view_gate") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for view view_gate");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected view privilege error, got {other:?}"),
+    }
+}
+
+#[test]
 fn relation_privileges_gate_select_dml_copy_and_locking() {
     fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
         match result {
@@ -63382,6 +63539,227 @@ fn has_relation_column_sequence_and_role_privilege_builtins_use_catalog_acls() {
             Value::Bool(true),
         ]]
     );
+}
+
+#[test]
+fn table_revoke_respects_grantor_and_dependent_grants() {
+    let dir = temp_dir("table_revoke_grantor_dependencies");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create role acl_owner login").unwrap();
+    session
+        .execute(&db, "create role acl_grantor login")
+        .unwrap();
+    session.execute(&db, "create role acl_child login").unwrap();
+    session
+        .execute(&db, "set session authorization acl_owner")
+        .unwrap();
+    session
+        .execute(&db, "create table acl_dep(id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select on acl_dep to acl_grantor with grant option",
+        )
+        .unwrap();
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization acl_grantor")
+        .unwrap();
+    session
+        .execute(&db, "grant select on acl_dep to acl_child")
+        .unwrap();
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization acl_owner")
+        .unwrap();
+
+    session
+        .execute(&db, "revoke select on acl_dep from acl_child")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_table_privilege('acl_child', 'acl_dep', 'select')",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+
+    match session.execute(&db, "revoke select on acl_dep from acl_grantor") {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "dependent privileges exist");
+            assert_eq!(hint.as_deref(), Some("Use CASCADE to revoke them too."));
+            assert_eq!(sqlstate, "2BP01");
+        }
+        other => panic!("expected dependent privilege error, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "revoke grant option for select on acl_dep from acl_grantor cascade",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_table_privilege('acl_grantor', 'acl_dep', 'select'), \
+                    has_table_privilege('acl_child', 'acl_dep', 'select')",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn non_owner_revoke_cascades_only_when_last_grant_option_disappears() {
+    let dir = temp_dir("table_revoke_parallel_grantors");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    for role in [
+        "acl_owner2",
+        "acl_grantor2",
+        "acl_grantor3",
+        "acl_mid",
+        "acl_leaf",
+    ] {
+        session
+            .execute(&db, &format!("create role {role} login"))
+            .unwrap();
+    }
+    session
+        .execute(&db, "set session authorization acl_owner2")
+        .unwrap();
+    session
+        .execute(&db, "create table acl_parallel(id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select on acl_parallel to acl_grantor2 with grant option",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select on acl_parallel to acl_grantor3 with grant option",
+        )
+        .unwrap();
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization acl_grantor2")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select on acl_parallel to acl_mid with grant option",
+        )
+        .unwrap();
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization acl_grantor3")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select on acl_parallel to acl_mid with grant option",
+        )
+        .unwrap();
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization acl_mid")
+        .unwrap();
+    session
+        .execute(&db, "grant select on acl_parallel to acl_leaf")
+        .unwrap();
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization acl_grantor2")
+        .unwrap();
+    session
+        .execute(&db, "revoke select on acl_parallel from acl_mid cascade")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_table_privilege('acl_mid', 'acl_parallel', 'select'), \
+                    has_table_privilege('acl_leaf', 'acl_parallel', 'select')",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization acl_grantor3")
+        .unwrap();
+    session
+        .execute(&db, "revoke select on acl_parallel from acl_mid cascade")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_table_privilege('acl_mid', 'acl_parallel', 'select'), \
+                    has_table_privilege('acl_leaf', 'acl_parallel', 'select')",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn makeaclitem_formats_role_names_and_rejects_unknown_privileges() {
+    let dir = temp_dir("makeaclitem_acl_text");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role acl_make_grantee").unwrap();
+    db.execute(1, "create role acl_make_grantor").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select makeaclitem('acl_make_grantee'::regrole, 'acl_make_grantor'::regrole, \
+                    'select, update', true)",
+        ),
+        vec![vec![Value::Text(
+            "acl_make_grantee=r*w*/acl_make_grantor".into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select makeaclitem('acl_make_grantee'::regrole, 'acl_make_grantor'::regrole, \
+                    'select, insert, update, delete', false)",
+        ),
+        vec![vec![Value::Text(
+            "acl_make_grantee=arwd/acl_make_grantor".into()
+        )]]
+    );
+
+    match db.execute(
+        1,
+        "select makeaclitem('acl_make_grantee'::regrole, 'acl_make_grantor'::regrole, \
+         'select, fake_privilege', false)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "unrecognized privilege type: \"fake_privilege\"");
+            assert_eq!(sqlstate, "22023");
+        }
+        other => panic!("expected makeaclitem privilege error, got {other:?}"),
+    }
 }
 
 #[test]

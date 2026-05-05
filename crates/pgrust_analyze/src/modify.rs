@@ -329,9 +329,17 @@ fn view_context_merge_privilege_requirement(
     context: &crate::rewrite::ViewPrivilegeContext,
     relation_name: impl Into<String>,
     clauses: &[BoundMergeWhenClause],
+    join_condition: &Expr,
+    returning: &[TargetEntry],
 ) -> RelationPrivilegeRequirement {
-    let mut requirement = merge_privilege_requirement(&context.relation, relation_name, clauses)
-        .checked_as(context.check_as_user_oid);
+    let mut requirement = merge_privilege_requirement(
+        &context.relation,
+        relation_name,
+        clauses,
+        join_condition,
+        returning,
+    )
+    .checked_as(context.check_as_user_oid);
     let inserted_columns = requirement.inserted_columns.clone();
     let updated_columns = requirement.updated_columns.clone();
     requirement.selected_columns = mapped_view_context_columns(context);
@@ -429,9 +437,17 @@ fn assignment_expr_selected_columns(assignments: &[BoundAssignment]) -> Vec<usiz
 }
 
 fn collect_local_selected_columns(expr: &Expr, selected: &mut Vec<usize>) {
+    collect_selected_columns_by(expr, selected, &local_modify_var_column_index);
+}
+
+fn collect_selected_columns_by(
+    expr: &Expr,
+    selected: &mut Vec<usize>,
+    map_var: &impl Fn(&Var) -> Option<usize>,
+) {
     match expr {
         Expr::Var(var) => {
-            if let Some(index) = local_modify_var_column_index(var) {
+            if let Some(index) = map_var(var) {
                 selected.push(index);
             }
         }
@@ -452,91 +468,91 @@ fn collect_local_selected_columns(expr: &Expr, selected: &mut Vec<usize>) {
         | Expr::LocalTimestamp { .. }
         | Expr::CaseTest(_) => {}
         Expr::GroupingKey(grouping_key) => {
-            collect_local_selected_columns(&grouping_key.expr, selected)
+            collect_selected_columns_by(&grouping_key.expr, selected, map_var)
         }
         Expr::GroupingFunc(grouping_func) => {
             for arg in &grouping_func.args {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
         }
         Expr::Aggref(aggref) => {
             for arg in &aggref.direct_args {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
             for arg in &aggref.args {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
             for item in &aggref.aggorder {
-                collect_local_selected_columns(&item.expr, selected);
+                collect_selected_columns_by(&item.expr, selected, map_var);
             }
             if let Some(filter) = &aggref.aggfilter {
-                collect_local_selected_columns(filter, selected);
+                collect_selected_columns_by(filter, selected, map_var);
             }
         }
         Expr::WindowFunc(func) => {
             for arg in &func.args {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
         }
         Expr::Op(op) => {
             for arg in &op.args {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
         }
         Expr::Bool(bool_expr) => {
             for arg in &bool_expr.args {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
         }
         Expr::Case(case_expr) => {
             if let Some(arg) = &case_expr.arg {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
             for arm in &case_expr.args {
-                collect_local_selected_columns(&arm.expr, selected);
-                collect_local_selected_columns(&arm.result, selected);
+                collect_selected_columns_by(&arm.expr, selected, map_var);
+                collect_selected_columns_by(&arm.result, selected, map_var);
             }
-            collect_local_selected_columns(&case_expr.defresult, selected);
+            collect_selected_columns_by(&case_expr.defresult, selected, map_var);
         }
         Expr::Func(func) => {
             for arg in &func.args {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
         }
         Expr::SqlJsonQueryFunction(func) => {
             for child in func.child_exprs() {
-                collect_local_selected_columns(child, selected);
+                collect_selected_columns_by(child, selected, map_var);
             }
         }
         Expr::SetReturning(srf) => {
             for arg in pgrust_nodes::primnodes::set_returning_call_exprs(&srf.call) {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
         }
         Expr::SubLink(sublink) => {
             if let Some(testexpr) = &sublink.testexpr {
-                collect_local_selected_columns(testexpr, selected);
+                collect_selected_columns_by(testexpr, selected, map_var);
             }
         }
         Expr::SubPlan(subplan) => {
             if let Some(testexpr) = &subplan.testexpr {
-                collect_local_selected_columns(testexpr, selected);
+                collect_selected_columns_by(testexpr, selected, map_var);
             }
             for arg in &subplan.args {
-                collect_local_selected_columns(arg, selected);
+                collect_selected_columns_by(arg, selected, map_var);
             }
         }
         Expr::ScalarArrayOp(saop) => {
-            collect_local_selected_columns(&saop.left, selected);
-            collect_local_selected_columns(&saop.right, selected);
+            collect_selected_columns_by(&saop.left, selected, map_var);
+            collect_selected_columns_by(&saop.right, selected, map_var);
         }
         Expr::Xml(xml) => {
             for child in xml.child_exprs() {
-                collect_local_selected_columns(child, selected);
+                collect_selected_columns_by(child, selected, map_var);
             }
         }
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
-            collect_local_selected_columns(inner, selected);
+            collect_selected_columns_by(inner, selected, map_var);
         }
         Expr::Like {
             expr,
@@ -550,40 +566,40 @@ fn collect_local_selected_columns(expr: &Expr, selected: &mut Vec<usize>) {
             escape,
             ..
         } => {
-            collect_local_selected_columns(expr, selected);
-            collect_local_selected_columns(pattern, selected);
+            collect_selected_columns_by(expr, selected, map_var);
+            collect_selected_columns_by(pattern, selected, map_var);
             if let Some(escape) = escape {
-                collect_local_selected_columns(escape, selected);
+                collect_selected_columns_by(escape, selected, map_var);
             }
         }
         Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-            collect_local_selected_columns(inner, selected);
+            collect_selected_columns_by(inner, selected, map_var);
         }
         Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right)
         | Expr::Coalesce(left, right) => {
-            collect_local_selected_columns(left, selected);
-            collect_local_selected_columns(right, selected);
+            collect_selected_columns_by(left, selected, map_var);
+            collect_selected_columns_by(right, selected, map_var);
         }
         Expr::ArrayLiteral { elements, .. } => {
             for element in elements {
-                collect_local_selected_columns(element, selected);
+                collect_selected_columns_by(element, selected, map_var);
             }
         }
         Expr::Row { fields, .. } => {
             for (_, expr) in fields {
-                collect_local_selected_columns(expr, selected);
+                collect_selected_columns_by(expr, selected, map_var);
             }
         }
-        Expr::FieldSelect { expr, .. } => collect_local_selected_columns(expr, selected),
+        Expr::FieldSelect { expr, .. } => collect_selected_columns_by(expr, selected, map_var),
         Expr::ArraySubscript { array, subscripts } => {
-            collect_local_selected_columns(array, selected);
+            collect_selected_columns_by(array, selected, map_var);
             for subscript in subscripts {
                 if let Some(lower) = &subscript.lower {
-                    collect_local_selected_columns(lower, selected);
+                    collect_selected_columns_by(lower, selected, map_var);
                 }
                 if let Some(upper) = &subscript.upper {
-                    collect_local_selected_columns(upper, selected);
+                    collect_selected_columns_by(upper, selected, map_var);
                 }
             }
         }
@@ -685,13 +701,20 @@ fn merge_privilege_requirement(
     relation: &BoundRelation,
     relation_name: impl Into<String>,
     clauses: &[BoundMergeWhenClause],
+    join_condition: &Expr,
+    returning: &[TargetEntry],
 ) -> RelationPrivilegeRequirement {
     let mut needs_insert = false;
     let mut needs_update = false;
     let mut needs_delete = false;
+    let mut selected_columns = Vec::new();
     let mut inserted_columns = Vec::new();
     let mut updated_columns = Vec::new();
+    collect_local_selected_columns(join_condition, &mut selected_columns);
     for clause in clauses {
+        if let Some(condition) = &clause.condition {
+            collect_local_selected_columns(condition, &mut selected_columns);
+        }
         match &clause.action {
             BoundMergeAction::DoNothing => {}
             BoundMergeAction::Delete => needs_delete = true,
@@ -699,13 +722,28 @@ fn merge_privilege_requirement(
                 needs_update = true;
                 updated_columns
                     .extend(assignments.iter().map(|assignment| assignment.column_index));
+                selected_columns.extend(assignment_expr_selected_columns(assignments));
             }
-            BoundMergeAction::Insert { target_columns, .. } => {
+            BoundMergeAction::Insert {
+                target_columns,
+                values,
+            } => {
                 needs_insert = true;
                 inserted_columns.extend(target_columns.iter().map(|target| target.column_index));
+                if let Some(values) = values {
+                    for value in values {
+                        collect_local_selected_columns(value, &mut selected_columns);
+                    }
+                }
             }
         }
     }
+    for target in returning {
+        collect_local_selected_columns(&target.expr, &mut selected_columns);
+    }
+    selected_columns.sort_unstable();
+    selected_columns.dedup();
+    selected_columns.retain(|column_index| *column_index < relation.desc.columns.len());
     inserted_columns.sort_unstable();
     inserted_columns.dedup();
     updated_columns.sort_unstable();
@@ -716,10 +754,163 @@ fn merge_privilege_requirement(
         relation_name,
         RelationPrivilegeMask::merge_actions(needs_insert, needs_update, needs_delete),
     );
-    requirement.selected_columns = relation.desc.visible_column_indexes();
+    requirement.selected_columns = selected_columns;
+    requirement.required.select = !requirement.selected_columns.is_empty();
     requirement.inserted_columns = inserted_columns;
     requirement.updated_columns = updated_columns;
     requirement
+}
+
+fn merge_source_output_column_index(var: &Var, source_output_exprs: &[Expr]) -> Option<usize> {
+    if var.varlevelsup != 0 {
+        return None;
+    }
+    source_output_exprs
+        .iter()
+        .position(|expr| matches!(expr, Expr::Var(source_var) if source_var == var))
+}
+
+fn collect_merge_source_output_columns(
+    expr: &Expr,
+    source_output_exprs: &[Expr],
+    projected_start: usize,
+    source_width: usize,
+    selected: &mut Vec<usize>,
+) {
+    collect_selected_columns_by(expr, selected, &|var| {
+        merge_source_output_column_index(var, source_output_exprs).or_else(|| {
+            if var.varlevelsup == 0
+                && var.varno == 1
+                && let Some(index) = attrno_index(var.varattno)
+                && index >= projected_start
+                && index < projected_start + source_width
+            {
+                Some(index - projected_start)
+            } else {
+                None
+            }
+        })
+    });
+}
+
+fn merge_source_privilege_requirements(
+    catalog: &dyn CatalogLookup,
+    source_scope: &BoundScope,
+    clauses: &[BoundMergeWhenClause],
+    join_condition: &Expr,
+    returning: &[TargetEntry],
+    projected_start: usize,
+    source_width: usize,
+) -> Vec<RelationPrivilegeRequirement> {
+    let mut output_columns = Vec::new();
+    collect_merge_source_output_columns(
+        join_condition,
+        &source_scope.output_exprs,
+        projected_start,
+        source_width,
+        &mut output_columns,
+    );
+    for clause in clauses {
+        if let Some(condition) = &clause.condition {
+            collect_merge_source_output_columns(
+                condition,
+                &source_scope.output_exprs,
+                projected_start,
+                source_width,
+                &mut output_columns,
+            );
+        }
+        match &clause.action {
+            BoundMergeAction::DoNothing | BoundMergeAction::Delete => {}
+            BoundMergeAction::Update { assignments } => {
+                for assignment in assignments {
+                    collect_merge_source_output_columns(
+                        &assignment.expr,
+                        &source_scope.output_exprs,
+                        projected_start,
+                        source_width,
+                        &mut output_columns,
+                    );
+                    for subscript in &assignment.subscripts {
+                        if let Some(lower) = &subscript.lower {
+                            collect_merge_source_output_columns(
+                                lower,
+                                &source_scope.output_exprs,
+                                projected_start,
+                                source_width,
+                                &mut output_columns,
+                            );
+                        }
+                        if let Some(upper) = &subscript.upper {
+                            collect_merge_source_output_columns(
+                                upper,
+                                &source_scope.output_exprs,
+                                projected_start,
+                                source_width,
+                                &mut output_columns,
+                            );
+                        }
+                    }
+                }
+            }
+            BoundMergeAction::Insert { values, .. } => {
+                if let Some(values) = values {
+                    for value in values {
+                        collect_merge_source_output_columns(
+                            value,
+                            &source_scope.output_exprs,
+                            projected_start,
+                            source_width,
+                            &mut output_columns,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for target in returning {
+        collect_merge_source_output_columns(
+            &target.expr,
+            &source_scope.output_exprs,
+            projected_start,
+            source_width,
+            &mut output_columns,
+        );
+    }
+    output_columns.sort_unstable();
+    output_columns.dedup();
+
+    let mut selected_by_relation = std::collections::BTreeMap::<u32, Vec<usize>>::new();
+    for output_index in output_columns {
+        let Some(column) = source_scope.columns.get(output_index) else {
+            continue;
+        };
+        for (relation_oid, attno) in &column.source_columns {
+            if let Some(column_index) = attrno_index(*attno) {
+                selected_by_relation
+                    .entry(*relation_oid)
+                    .or_default()
+                    .push(column_index);
+            }
+        }
+    }
+
+    selected_by_relation
+        .into_iter()
+        .filter_map(|(relation_oid, mut selected_columns)| {
+            selected_columns.sort_unstable();
+            selected_columns.dedup();
+            let row = catalog.class_row_by_oid(relation_oid)?;
+            let mut requirement = RelationPrivilegeRequirement::new(
+                relation_oid,
+                row.relname,
+                row.relkind,
+                RelationPrivilegeMask::select(),
+            );
+            requirement.selected_columns = selected_columns;
+            Some(requirement)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3311,7 +3502,18 @@ pub fn plan_merge_with_outer_scopes_and_ctes(
         &entry,
         &stmt.target_table,
         &when_clauses,
+        &join_condition,
+        &returning,
     )];
+    required_privileges.extend(merge_source_privilege_requirements(
+        catalog,
+        &source_scope,
+        &when_clauses,
+        &join_condition,
+        &returning,
+        execution_relation.desc.columns.len(),
+        source_visible_count,
+    ));
     if let Some(resolved) = auto_view_target.as_ref() {
         for context in &resolved.privilege_contexts {
             let context_name =
@@ -3320,6 +3522,8 @@ pub fn plan_merge_with_outer_scopes_and_ctes(
                 context,
                 context_name,
                 &when_clauses,
+                &join_condition,
+                &returning,
             ));
         }
         when_clauses = when_clauses

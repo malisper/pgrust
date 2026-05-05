@@ -420,6 +420,149 @@ fn revoke_acl_grant_options_only(
     });
 }
 
+fn acl_grantee_has_grant_option(acl: &[String], grantee: &str, privilege: char) -> bool {
+    acl.iter().any(|item| {
+        parse_acl_item(item)
+            .map(|(item_grantee, privileges, _)| {
+                item_grantee == grantee && acl_privilege_grantable(&privileges, privilege)
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn transform_acl_privilege(
+    existing_privileges: &str,
+    privilege: char,
+    allowed: &str,
+    grant_option_for: bool,
+) -> String {
+    let mut remaining = String::new();
+    for ch in allowed.chars() {
+        if !acl_privilege_present(existing_privileges, ch) {
+            continue;
+        }
+        if ch == privilege {
+            if grant_option_for {
+                remaining.push(ch);
+            }
+            continue;
+        }
+        remaining.push(ch);
+        if acl_privilege_grantable(existing_privileges, ch) {
+            remaining.push('*');
+        }
+    }
+    remaining
+}
+
+fn revoke_acl_privilege_by_grantor(
+    acl: &mut Vec<String>,
+    grantee: &str,
+    grantor_name: &str,
+    privilege: char,
+    grant_option_for: bool,
+    allowed: &str,
+) -> bool {
+    let mut changed = false;
+    acl.retain_mut(|item| {
+        let Some((item_grantee, existing_privileges, grantor)) = parse_acl_item(item) else {
+            return true;
+        };
+        if item_grantee != grantee || grantor != grantor_name {
+            return true;
+        }
+        if !acl_privilege_present(&existing_privileges, privilege)
+            || (grant_option_for && !acl_privilege_grantable(&existing_privileges, privilege))
+        {
+            return true;
+        }
+        changed = true;
+        let remaining =
+            transform_acl_privilege(&existing_privileges, privilege, allowed, grant_option_for);
+        if remaining.is_empty() {
+            return false;
+        }
+        *item = format!("{grantee}={remaining}/{grantor}");
+        true
+    });
+    changed
+}
+
+fn table_acl_dependent_privileges_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "dependent privileges exist".into(),
+        detail: None,
+        hint: Some("Use CASCADE to revoke them too.".into()),
+        sqlstate: "2BP01",
+    }
+}
+
+fn cascade_revoke_table_grants_by_grantor(
+    acl: &mut Vec<String>,
+    grantor_name: &str,
+    privilege: char,
+    cascade: bool,
+    allowed: &str,
+) -> Result<(), ExecError> {
+    let dependent_grantees = acl
+        .iter()
+        .filter_map(|item| {
+            parse_acl_item(item).and_then(|(item_grantee, privileges, grantor)| {
+                (grantor == grantor_name && acl_privilege_present(&privileges, privilege))
+                    .then_some(item_grantee)
+            })
+        })
+        .collect::<Vec<_>>();
+    if !dependent_grantees.is_empty() && !cascade {
+        return Err(table_acl_dependent_privileges_error());
+    }
+    for dependent_grantee in dependent_grantees {
+        revoke_acl_privilege_by_grantor(
+            acl,
+            &dependent_grantee,
+            grantor_name,
+            privilege,
+            false,
+            allowed,
+        );
+        if !acl_grantee_has_grant_option(acl, &dependent_grantee, privilege) {
+            cascade_revoke_table_grants_by_grantor(
+                acl,
+                &dependent_grantee,
+                privilege,
+                cascade,
+                allowed,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn revoke_table_acl_entry_by_grantor(
+    acl: &mut Vec<String>,
+    grantee: &str,
+    grantor_name: &str,
+    privilege_chars: &str,
+    allowed: &str,
+    grant_option_for: bool,
+    cascade: bool,
+) -> Result<(), ExecError> {
+    for privilege in privilege_chars.chars() {
+        let changed = revoke_acl_privilege_by_grantor(
+            acl,
+            grantee,
+            grantor_name,
+            privilege,
+            grant_option_for,
+            allowed,
+        );
+        if changed && !acl_grantee_has_grant_option(acl, grantee, privilege) {
+            cascade_revoke_table_grants_by_grantor(acl, grantee, privilege, cascade, allowed)?;
+        }
+    }
+    Ok(())
+}
+
 fn collapse_relation_acl_defaults(
     acl: Vec<String>,
     owner_name: &str,
@@ -2523,14 +2666,35 @@ impl Database {
                                 effective_names.as_ref().expect("effective names"),
                                 privilege_chars,
                             );
+                            if effective_privilege_chars.is_empty() {
+                                if !privilege_chars.chars().any(|ch| {
+                                    acl_grants_privilege(
+                                        acl,
+                                        effective_names.as_ref().expect("effective names"),
+                                        ch,
+                                    )
+                                }) {
+                                    return Err(ExecError::DetailedError {
+                                        message: format!(
+                                            "permission denied for table {object_name}"
+                                        ),
+                                        detail: None,
+                                        hint: None,
+                                        sqlstate: "42501",
+                                    });
+                                }
+                                warn_grant_privileges(
+                                    &format!("{column_name} of relation {object_name}"),
+                                    privilege_chars,
+                                    &effective_privilege_chars,
+                                );
+                                continue;
+                            }
                             warn_grant_privileges(
                                 &format!("{column_name} of relation {object_name}"),
                                 privilege_chars,
                                 &effective_privilege_chars,
                             );
-                            if effective_privilege_chars.is_empty() {
-                                continue;
-                            }
                             effective_privilege_chars.as_str()
                         };
                         for grantee_name in &stmt.grantee_names {
@@ -2582,6 +2746,22 @@ impl Database {
                             effective_names.as_ref().expect("effective names"),
                             &relation_privilege_chars_acc,
                         );
+                        if effective_privilege_chars.is_empty()
+                            && !relation_privilege_chars_acc.chars().any(|ch| {
+                                acl_grants_privilege(
+                                    &acl,
+                                    effective_names.as_ref().expect("effective names"),
+                                    ch,
+                                )
+                            })
+                        {
+                            return Err(ExecError::DetailedError {
+                                message: format!("permission denied for table {object_name}"),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "42501",
+                            });
+                        }
                         warn_grant_privileges(
                             object_name,
                             &relation_privilege_chars_acc,
@@ -2683,10 +2863,25 @@ impl Database {
                     effective_names.as_ref().expect("effective names"),
                     privilege_chars,
                 );
-                warn_grant_privileges(object_name, privilege_chars, &effective_privilege_chars);
                 if effective_privilege_chars.is_empty() {
+                    if !privilege_chars.chars().any(|ch| {
+                        acl_grants_privilege(
+                            &acl,
+                            effective_names.as_ref().expect("effective names"),
+                            ch,
+                        )
+                    }) {
+                        return Err(ExecError::DetailedError {
+                            message: format!("permission denied for table {object_name}"),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42501",
+                        });
+                    }
+                    warn_grant_privileges(object_name, privilege_chars, &effective_privilege_chars);
                     continue;
                 }
+                warn_grant_privileges(object_name, privilege_chars, &effective_privilege_chars);
                 effective_privilege_chars.as_str()
             };
             for grantee_name in &stmt.grantee_names {
@@ -2768,23 +2963,24 @@ impl Database {
             let auth_catalog = self
                 .auth_catalog(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;
-            if !auth_catalog
+            let current_user_can_revoke_as_owner = auth_catalog
                 .role_by_oid(auth.current_user_oid())
                 .is_some_and(|row| row.rolsuper)
-                && !auth.has_effective_membership(relation.owner_oid, &auth_catalog)
-            {
-                return Err(ExecError::DetailedError {
-                    message: format!("must be owner of table {object_name}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42501",
-                });
-            }
+                || auth.has_effective_membership(relation.owner_oid, &auth_catalog);
             let owner_name = auth_catalog
                 .role_by_oid(relation.owner_oid)
                 .map(|row| row.rolname.clone())
                 .ok_or_else(|| ExecError::DetailedError {
                     message: format!("owner for table \"{object_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let current_user_name = auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .map(|row| row.rolname.clone())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "current user does not exist".into(),
                     detail: None,
                     hint: None,
                     sqlstate: "XX000",
@@ -2816,12 +3012,40 @@ impl Database {
                         for grantee_name in &stmt.grantee_names {
                             let grantee_acl_name =
                                 resolve_acl_grantee_name(&auth, &auth_catalog, grantee_name)?;
-                            revoke_table_acl_entry(
+                            let grantor_name = if current_user_can_revoke_as_owner {
+                                owner_name.as_str()
+                            } else {
+                                current_user_name.as_str()
+                            };
+                            let revoke_privilege_chars = if current_user_can_revoke_as_owner {
+                                privilege_chars.to_string()
+                            } else {
+                                let effective_names =
+                                    effective_acl_grantee_names(&auth, &auth_catalog);
+                                let effective_privilege_chars = grantable_acl_privilege_chars(
+                                    acl,
+                                    &effective_names,
+                                    privilege_chars,
+                                );
+                                warn_revoke_privileges(
+                                    &format!("{column_name} of relation {object_name}"),
+                                    privilege_chars,
+                                    &effective_privilege_chars,
+                                );
+                                if effective_privilege_chars.is_empty() {
+                                    continue;
+                                }
+                                effective_privilege_chars
+                            };
+                            revoke_table_acl_entry_by_grantor(
                                 acl,
                                 &grantee_acl_name,
-                                privilege_chars,
+                                grantor_name,
+                                &revoke_privilege_chars,
                                 TABLE_ALL_PRIVILEGE_CHARS,
-                            );
+                                stmt.grant_option_for,
+                                stmt.cascade,
+                            )?;
                         }
                     }
                 }
@@ -2865,15 +3089,36 @@ impl Database {
                         .into_iter()
                         .collect()
                 });
+            let effective_privilege_chars;
+            let revoke_privilege_chars = if current_user_can_revoke_as_owner {
+                privilege_chars
+            } else {
+                let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
+                effective_privilege_chars =
+                    grantable_acl_privilege_chars(&acl, &effective_names, privilege_chars);
+                warn_revoke_privileges(object_name, privilege_chars, &effective_privilege_chars);
+                if effective_privilege_chars.is_empty() {
+                    continue;
+                }
+                effective_privilege_chars.as_str()
+            };
+            let grantor_name = if current_user_can_revoke_as_owner {
+                owner_name.as_str()
+            } else {
+                current_user_name.as_str()
+            };
             for grantee_name in &stmt.grantee_names {
                 let grantee_acl_name =
                     resolve_acl_grantee_name(&auth, &auth_catalog, grantee_name)?;
-                revoke_table_acl_entry(
+                revoke_table_acl_entry_by_grantor(
                     &mut acl,
                     &grantee_acl_name,
-                    privilege_chars,
+                    grantor_name,
+                    revoke_privilege_chars,
                     allowed_privilege_chars,
-                );
+                    stmt.grant_option_for,
+                    stmt.cascade,
+                )?;
             }
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
@@ -2896,7 +3141,6 @@ impl Database {
             catalog_effects.push(effect);
             current_cid = current_cid.saturating_add(1);
         }
-        let _ = stmt.cascade;
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -3362,10 +3606,23 @@ impl Database {
                     effective_names.as_ref().expect("effective names"),
                     privilege_chars,
                 );
-                warn_revoke_privileges(object_name, privilege_chars, &effective_privilege_chars);
                 if effective_privilege_chars.is_empty() {
+                    if !acl_grants_privilege(
+                        &acl,
+                        effective_names.as_ref().expect("effective names"),
+                        'U',
+                    ) {
+                        return Err(ExecError::DetailedError {
+                            message: format!("permission denied for type {object_name}"),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42501",
+                        });
+                    }
+                    warn_revoke_privileges(object_name, privilege_chars, "");
                     continue;
                 }
+                warn_revoke_privileges(object_name, privilege_chars, &effective_privilege_chars);
                 effective_privilege_chars
             };
             if revoke
@@ -6148,6 +6405,77 @@ mod tests {
             ),
             vec![vec![Value::Bool(false)]]
         );
+    }
+
+    #[test]
+    fn non_owner_revoke_type_usage_without_grant_option_errors() {
+        let base = temp_dir("type_revoke_requires_grant_option");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create role type_acl_owner").unwrap();
+        session.execute(&db, "create role type_acl_user").unwrap();
+        session
+            .execute(&db, "set session authorization type_acl_owner")
+            .unwrap();
+        session
+            .execute(&db, "create type type_acl_composite as (a int)")
+            .unwrap();
+        session
+            .execute(&db, "revoke usage on type type_acl_composite from public")
+            .unwrap();
+        session
+            .execute(&db, "set session authorization type_acl_user")
+            .unwrap();
+
+        match session.execute(&db, "revoke usage on type type_acl_composite from public") {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(
+                    message,
+                    "permission denied for type type_acl_composite".to_string()
+                );
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected type permission error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_owner_grant_table_without_privilege_errors_without_warning() {
+        let base = temp_dir("table_grant_requires_privilege");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create role table_acl_owner").unwrap();
+        session
+            .execute(&db, "create role table_acl_grantor")
+            .unwrap();
+        session
+            .execute(&db, "create role table_acl_grantee")
+            .unwrap();
+        session
+            .execute(&db, "set session authorization table_acl_owner")
+            .unwrap();
+        session
+            .execute(&db, "create table table_acl_t(a int)")
+            .unwrap();
+        session
+            .execute(&db, "set session authorization table_acl_grantor")
+            .unwrap();
+        crate::backend::utils::misc::notices::clear_notices();
+
+        match session.execute(&db, "grant select on table_acl_t to table_acl_grantee") {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, "permission denied for table table_acl_t");
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error, got {other:?}"),
+        }
+        assert!(crate::backend::utils::misc::notices::take_notices().is_empty());
     }
 
     #[test]

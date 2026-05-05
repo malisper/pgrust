@@ -2280,6 +2280,9 @@ fn analyze_join_using_alias_exposes_only_merged_columns() {
     let err =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap_err();
     assert!(matches!(err, ParseError::UnknownColumn(name) if name == "x.name"));
+
+    let stmt = parse_select("select x.id from (people join pets using (id)) x").unwrap();
+    assert!(analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).is_ok());
 }
 
 #[test]
