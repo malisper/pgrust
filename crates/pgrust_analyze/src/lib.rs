@@ -30,6 +30,7 @@ mod scope;
 mod sqlfunc_inline;
 pub mod system_view_registry;
 mod system_views;
+pub mod tsearch;
 mod window;
 
 pub use self::scope::{ScopeColumn, ScopeRelation};

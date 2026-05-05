@@ -27,18 +27,18 @@ use crate::compat::backend::utils::time::datetime::{
     named_timezone_abbreviation_at_utc, timestamp_parts_from_usecs, timezone_offset_seconds_at_utc,
     ymd_from_days,
 };
-use crate::compat::include::nodes::datetime::{
-    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, USECS_PER_DAY,
-    USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
-};
-use crate::compat::include::nodes::datum::{IntervalValue, NumericValue};
-use crate::compat::pgrust::compact_string::CompactString;
 use crate::compat::pgrust::session::ByteaOutputFormat;
 use base64::Engine as _;
 use encoding_rs::{DecoderResult, EncoderResult, Encoding};
 use md5::{Digest, Md5};
 use num_bigint::BigInt;
 use num_traits::Signed;
+use pgrust_core::CompactString;
+use pgrust_nodes::datetime::{
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, USECS_PER_DAY,
+    USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
+};
+use pgrust_nodes::datum::{IntervalValue, NumericValue};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 use unicode_general_category::{GeneralCategory, get_general_category};
 use unicode_normalization::{UnicodeNormalization, is_nfc, is_nfd, is_nfkc, is_nfkd};
@@ -2639,8 +2639,8 @@ fn parse_ident_text(input: &Value, strict: bool) -> Result<Value, ExecError> {
     })?;
     let parts = parse_ident_parts(input, strict)?;
     Ok(Value::PgArray(
-        crate::compat::include::nodes::datum::ArrayValue::from_dimensions(
-            vec![crate::compat::include::nodes::datum::ArrayDimension {
+        pgrust_nodes::datum::ArrayValue::from_dimensions(
+            vec![pgrust_nodes::datum::ArrayDimension {
                 lower_bound: 1,
                 length: parts.len(),
             }],
@@ -2649,7 +2649,7 @@ fn parse_ident_text(input: &Value, strict: bool) -> Result<Value, ExecError> {
                 .map(|part| Value::Text(part.into()))
                 .collect(),
         )
-        .with_element_type_oid(crate::compat::include::catalog::TEXT_TYPE_OID),
+        .with_element_type_oid(pgrust_catalog_data::TEXT_TYPE_OID),
     ))
 }
 
@@ -4636,12 +4636,10 @@ fn build_test_enc_conversion_record(validlen: usize, result: Vec<u8>) -> Value {
         ("validlen".into(), SqlType::new(SqlTypeKind::Int4)),
         ("result".into(), SqlType::new(SqlTypeKind::Bytea)),
     ]);
-    Value::Record(
-        crate::compat::include::nodes::datum::RecordValue::from_descriptor(
-            descriptor,
-            vec![Value::Int32(validlen as i32), Value::Bytea(result)],
-        ),
-    )
+    Value::Record(pgrust_nodes::datum::RecordValue::from_descriptor(
+        descriptor,
+        vec![Value::Int32(validlen as i32), Value::Bytea(result)],
+    ))
 }
 fn eval_pad_function(op: &'static str, values: &[Value], left: bool) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
@@ -4824,10 +4822,8 @@ mod tests {
     use crate::compat::backend::libpq::pqformat::format_exec_error;
     use crate::compat::backend::utils::misc::guc_datetime::DateTimeConfig;
     use crate::compat::backend::utils::time::timestamp::parse_timestamptz_text;
-    use crate::compat::include::catalog::{
-        C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID,
-    };
-    use crate::compat::include::nodes::datum::{NumericValue, Value};
+    use pgrust_catalog_data::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
+    use pgrust_nodes::datum::{NumericValue, Value};
 
     #[test]
     fn eval_like_accepts_builtin_collations() {

@@ -5,10 +5,8 @@ use std::sync::Arc;
 
 use super::bufmgr::BufferPool;
 use super::storage_backend::{SmgrStorageBackend, StorageBackend};
-use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
-use crate::include::storage::buf_internals::{
-    BufferId, BufferState, BufferTag, ClientId, Error, PAGE_SIZE, Page,
-};
+use crate::buf_internals::{BufferId, BufferState, BufferTag, ClientId, Error, PAGE_SIZE, Page};
+use crate::smgr::{ForkNumber, RelFileLocator, StorageManager};
 
 const LOCAL_MAX_USAGE_COUNT: u8 = 5;
 
@@ -174,7 +172,7 @@ impl<S: StorageBackend + Send> LocalBufferManager<S> {
         *frame.tag.lock() = Some(tag);
         frame
             .state
-            .store(1 | (1u32 << 14) | crate::include::storage::buf_internals::BM_VALID_PUB);
+            .store(1 | (1u32 << 14) | crate::buf_internals::BM_VALID_PUB);
         self.lookup.lock().insert(tag, buffer_id);
         Ok(buffer_id)
     }

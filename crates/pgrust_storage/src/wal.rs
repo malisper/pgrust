@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use crate::include::storage::buf_internals::{BufferTag, Page};
+use crate::buf_internals::{BufferTag, Page};
 
 pub use pgrust_core::{
     INVALID_LSN, Lsn, RM_BTREE_ID, RM_GIN_ID, RM_GIST_ID, RM_HASH_ID, RM_HEAP_ID, RM_HEAP2_ID,

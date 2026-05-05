@@ -2,20 +2,10 @@
 
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
-use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
     cast_numeric_value, cast_text_value_with_catalog_and_config, cast_text_value_with_config,
     cast_value, cast_value_with_config, parse_text_array_literal_with_catalog_op_and_explicit,
     render_internal_char_text, render_interval_text_with_config, render_pg_lsn_text,
-};
-use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
-use super::expr_mac::{
-    parse_macaddr_bytes, parse_macaddr8_bytes, render_macaddr_text, render_macaddr8_text,
-};
-use super::expr_multirange::{render_multirange, render_multirange_text_with_config};
-use super::expr_network::{encode_network_bytes, parse_cidr_bytes, parse_inet_bytes};
-use super::expr_range::{
-    decode_range_bytes, encode_range_bytes, render_range_text, render_range_text_with_config,
 };
 use super::node_types::*;
 use crate::backend::catalog::catalog::column_desc;
@@ -32,9 +22,17 @@ use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::primnodes::ColumnDesc;
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
+use pgrust_expr::expr_bit::coerce_bit_string;
 use pgrust_expr::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
+};
+use pgrust_expr::expr_multirange::{render_multirange, render_multirange_text_with_config};
+use pgrust_expr::{
+    decode_range_bytes, encode_network_bytes, encode_range_bytes, parse_cidr_bytes,
+    parse_inet_bytes, parse_macaddr_bytes, parse_macaddr8_bytes, render_bit_text,
+    render_datetime_value_text, render_datetime_value_text_with_config, render_macaddr_text,
+    render_macaddr8_text, render_range_text, render_range_text_with_config,
 };
 
 mod array;
@@ -1516,7 +1514,7 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
             let sql_type = decode_sql_type_identity(rest, &mut offset)?;
             let text =
                 std::str::from_utf8(decode_internal_text(rest, &mut offset)?).unwrap_or_default();
-            crate::backend::executor::expr_range::parse_range_text(text, sql_type)?
+            pgrust_expr::expr_range::parse_range_text(text, sql_type)?
         }
         INTERNAL_VALUE_TAG_MULTIRANGE => {
             let mut offset = 0usize;
@@ -2564,13 +2562,13 @@ pub(crate) fn decode_value_with_external_toast(
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            parse_inet_bytes(bytes).map(Value::Inet)
+            parse_inet_bytes(bytes).map(Value::Inet).map_err(Into::into)
         }
         ScalarType::Cidr => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            parse_cidr_bytes(bytes).map(Value::Cidr)
+            parse_cidr_bytes(bytes).map(Value::Cidr).map_err(Into::into)
         }
         ScalarType::MacAddr => {
             if column.storage.attlen != 6 || bytes.len() != 6 {
@@ -2581,7 +2579,9 @@ pub(crate) fn decode_value_with_external_toast(
                     actual_len: Some(bytes.len()),
                 });
             }
-            parse_macaddr_bytes(bytes).map(Value::MacAddr)
+            parse_macaddr_bytes(bytes)
+                .map(Value::MacAddr)
+                .map_err(Into::into)
         }
         ScalarType::MacAddr8 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
@@ -2592,7 +2592,9 @@ pub(crate) fn decode_value_with_external_toast(
                     actual_len: Some(bytes.len()),
                 });
             }
-            parse_macaddr8_bytes(bytes).map(Value::MacAddr8)
+            parse_macaddr8_bytes(bytes)
+                .map(Value::MacAddr8)
+                .map_err(Into::into)
         }
         ScalarType::Float32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
@@ -2825,13 +2827,13 @@ pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
 mod tests {
     use super::*;
     use crate::backend::catalog::catalog::column_desc;
-    use crate::backend::executor::expr_range::parse_range_text;
     use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
     use crate::backend::utils::time::timestamp::parse_timestamp_text;
     use crate::include::catalog::{INT4_TYPE_OID, INT4RANGE_TYPE_OID};
     use crate::include::nodes::datum::{
         ArrayDimension, IndirectVarlenaValue, NumericValue, RecordDescriptor, RecordValue,
     };
+    use pgrust_expr::parse_range_text;
     use std::sync::Arc;
 
     #[test]

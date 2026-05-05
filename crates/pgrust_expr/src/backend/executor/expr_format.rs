@@ -1,7 +1,7 @@
 use super::ExecError;
 use super::expr_ops::parse_numeric_text;
-use crate::compat::include::nodes::datum::NumericValue;
 use num_traits::Signed;
+use pgrust_nodes::datum::NumericValue;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SignKind {
@@ -1583,7 +1583,7 @@ pub fn ordinal_suffix(value: i128) -> &'static str {
 mod tests {
     use super::{to_char_float, to_char_float4, to_char_int, to_char_numeric, to_number_numeric};
     use crate::compat::backend::executor::ExecError;
-    use crate::compat::include::nodes::datum::NumericValue;
+    use pgrust_nodes::datum::NumericValue;
 
     #[test]
     fn formats_grouped_integers() {

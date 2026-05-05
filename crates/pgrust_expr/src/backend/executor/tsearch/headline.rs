@@ -6,7 +6,7 @@ use crate::compat::backend::tsearch::parser::{
     ASCIIHWORD, DECIMAL_T, HWORD, NUMHWORD, SCIENTIFIC, SIGNEDINT, TAG_T, UNSIGNEDINT, URL_T,
     VERSIONNUMBER, parse_default, token_has_dictionary,
 };
-use crate::compat::include::nodes::tsearch::{TsQuery, TsQueryNode, TsQueryOperand};
+use pgrust_nodes::tsearch::{TsQuery, TsQueryNode, TsQueryOperand};
 
 #[derive(Debug, Clone)]
 struct HeadlineOptions {

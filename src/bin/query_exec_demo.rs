@@ -3,19 +3,19 @@
 //! Run with: cargo run --bin query_exec_demo
 
 use parking_lot::RwLock;
-use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
-use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::backend::catalog::catalog::column_desc;
-use pgrust::backend::storage::smgr::MdStorageManager;
-use pgrust::backend::utils::misc::interrupts::InterruptState;
-use pgrust::executor::{
+use pgrust::catalog::column_desc;
+use pgrust::sql::{SqlType, SqlTypeKind};
+use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
+use pgrust::{
     ExecError, ExecutorContext, Expr, Plan, RelationDesc, TargetEntry, Value, exec_next,
     executor_start,
 };
-use pgrust::include::access::htup::{HeapTuple, TupleValue};
-use pgrust::include::nodes::primnodes::{Var, user_attrno};
-use pgrust::parser::{SqlType, SqlTypeKind};
-use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
+use pgrust_access::access::htup::{HeapTuple, TupleValue};
+use pgrust_access::heap::heapam::{heap_flush, heap_insert_mvcc};
+use pgrust_access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
+use pgrust_core::InterruptState;
+use pgrust_nodes::primnodes::{Var, user_attrno};
+use pgrust_storage::smgr::MdStorageManager;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,24 +65,20 @@ fn render_value(value: &Value) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Xid8(v) => v.to_string(),
         Value::PgLsn(v) => format!("{:X}/{:X}", v >> 32, v & 0xFFFF_FFFF),
-        Value::Money(v) => pgrust::backend::executor::money_format_text(*v),
+        Value::Money(v) => pgrust_expr::money_format_text(*v),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
         | Value::Timestamp(_)
-        | Value::TimestampTz(_) => {
-            pgrust::backend::executor::render_datetime_value_text(value).unwrap()
-        }
+        | Value::TimestampTz(_) => pgrust_expr::render_datetime_value_text(value).unwrap(),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => format!("{v:?}"),
-        Value::Uuid(v) => pgrust::backend::executor::render_uuid_text(v),
+        Value::Uuid(v) => pgrust_expr::render_uuid_text(v),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),
-        Value::Multirange(_) => {
-            pgrust::backend::executor::render_multirange_text(value).unwrap_or_default()
-        }
+        Value::Multirange(_) => pgrust_expr::render_multirange_text(value).unwrap_or_default(),
         Value::Xml(v) => v.to_string(),
         Value::Point(_)
         | Value::Lseg(_)
@@ -94,21 +90,20 @@ fn render_value(value: &Value) -> String {
         Value::TsVector(v) => v.render(),
         Value::TsQuery(v) => v.render(),
         Value::Bit(v) => v.render(),
-        Value::Bytea(v) => pgrust::backend::libpq::pqformat::format_bytea_text(
-            v,
-            pgrust::pgrust::session::ByteaOutputFormat::Hex,
-        ),
+        Value::Bytea(v) => {
+            pgrust_expr::libpq::pqformat::format_bytea_text(v, pgrust::ByteaOutputFormat::Hex)
+        }
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
-        Value::MacAddr(v) => pgrust::backend::executor::render_macaddr_text(v),
-        Value::MacAddr8(v) => pgrust::backend::executor::render_macaddr8_text(v),
+        Value::MacAddr(v) => pgrust_expr::render_macaddr_text(v),
+        Value::MacAddr8(v) => pgrust_expr::render_macaddr8_text(v),
         Value::Tid(v) => format!("({},{})", v.block_number, v.offset_number),
         Value::Text(v) => format!("{:?}", v),
         Value::TextRef(_, _) => format!("{:?}", value.as_text().unwrap()),
-        Value::InternalChar(v) => pgrust::backend::executor::render_internal_char_text(*v),
+        Value::InternalChar(v) => pgrust_expr::render_internal_char_text(*v),
         Value::EnumOid(v) => v.to_string(),
         Value::Bool(v) => v.to_string(),
-        Value::Range(_) => pgrust::backend::executor::render_range_text(value).unwrap_or_default(),
+        Value::Range(_) => pgrust_expr::render_range_text(value).unwrap_or_default(),
         Value::Array(items) => format!(
             "{{{}}}",
             items
@@ -117,9 +112,10 @@ fn render_value(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        Value::PgArray(array) => pgrust::backend::executor::format_array_value_text(array),
+        Value::PgArray(array) => pgrust_expr::format_array_value_text(array),
         Value::Record(record) => format!("{:?}", record.fields),
         Value::Null => "NULL".into(),
+        _ => format!("{value:?}"),
     }
 }
 
@@ -164,11 +160,11 @@ fn main() -> Result<(), ExecError> {
     println!("  SEQSCAN rel {}", rel().rel_number);
 
     let plan = Plan::Projection {
-        plan_info: pgrust::backend::executor::PlanEstimate::default(),
+        plan_info: pgrust_nodes::plannodes::PlanEstimate::default(),
         input: Box::new(Plan::Filter {
-            plan_info: pgrust::backend::executor::PlanEstimate::default(),
+            plan_info: pgrust_nodes::plannodes::PlanEstimate::default(),
             input: Box::new(Plan::SeqScan {
-                plan_info: pgrust::backend::executor::PlanEstimate::default(),
+                plan_info: pgrust_nodes::plannodes::PlanEstimate::default(),
                 source_id: 1,
                 parallel_scan_id: None,
                 rel: rel(),
@@ -180,9 +176,10 @@ fn main() -> Result<(), ExecError> {
                 toast: None,
                 tablesample: None,
                 desc: desc(),
+                parallel_aware: false,
             }),
             predicate: Expr::op_auto(
-                pgrust::include::nodes::primnodes::OpExprKind::Gt,
+                pgrust_nodes::primnodes::OpExprKind::Gt,
                 vec![
                     local_var(0, SqlType::new(SqlTypeKind::Int4)),
                     Expr::Const(Value::Int32(1)),
@@ -208,10 +205,10 @@ fn main() -> Result<(), ExecError> {
     let mut state = executor_start(plan);
     let interrupts = Arc::new(InterruptState::new());
     let stats = std::sync::Arc::new(parking_lot::RwLock::new(
-        pgrust::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+        pgrust::DatabaseStatsStore::with_default_io_rows(),
     ));
     let session_stats = std::sync::Arc::new(parking_lot::RwLock::new(
-        pgrust::pgrust::database::SessionStatsState::default(),
+        pgrust::SessionStatsState::default(),
     ));
     let mut ctx = ExecutorContext {
         pool: std::sync::Arc::clone(&pool),
@@ -223,11 +220,10 @@ fn main() -> Result<(), ExecError> {
         large_objects: None,
         stats_import_runtime: None,
         async_notify_runtime: None,
-        checkpoint_stats:
-            pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
-        datetime_config: pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        checkpoint_stats: pgrust_access::transam::CheckpointStatsSnapshot::default(),
+        datetime_config: pgrust_expr::DateTimeConfig::default(),
         statement_timestamp_usecs:
-            pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+            pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
         interrupts,
         stats,
@@ -236,14 +232,14 @@ fn main() -> Result<(), ExecError> {
         write_xid_override: None,
         transaction_state: None,
         client_id: 7,
-        session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-        current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+        current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
         session_replication_role: Default::default(),
         next_command_id: 0,
-        default_toast_compression: pgrust::include::access::htup::AttributeCompression::Pglz,
-        random_state: pgrust::backend::executor::PgPrngState::shared(),
-        expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+        default_toast_compression: pgrust::AttributeCompression::Pglz,
+        random_state: pgrust_expr::PgPrngState::shared(),
+        expr_bindings: pgrust_executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
         active_grouping_refs: Vec::new(),
@@ -263,7 +259,7 @@ fn main() -> Result<(), ExecError> {
         proc_execute_acl_cache: std::collections::HashSet::new(),
         srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
-            pgrust::pl::plpgsql::PlpgsqlFunctionCache::default(),
+            pgrust::plpgsql::PlpgsqlFunctionCache::default(),
         )),
         pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -271,8 +267,8 @@ fn main() -> Result<(), ExecError> {
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
         trigger_depth: 0,
-        advisory_locks: Arc::new(pgrust::backend::storage::lmgr::AdvisoryLockManager::new()),
-        row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+        advisory_locks: Arc::new(pgrust_storage::lmgr::AdvisoryLockManager::new()),
+        row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
         current_database_name: String::new(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,

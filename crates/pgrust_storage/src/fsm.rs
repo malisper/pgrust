@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::SmgrStorageBackend;
-use crate::backend::storage::buffer::{BufferPool, PAGE_SIZE};
-use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
+use crate::buffer::{BufferPool, PAGE_SIZE};
+use crate::smgr::{ForkNumber, RelFileLocator, StorageManager};
 
 fn load_free_pages(
     pool: &BufferPool<SmgrStorageBackend>,

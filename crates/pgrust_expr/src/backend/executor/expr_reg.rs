@@ -3,7 +3,7 @@ use crate::compat::backend::parser::{
     CatalogLookup, ParseError, RawTypeName, SqlType, SqlTypeKind, parse_type_name,
     resolve_raw_type_name,
 };
-use crate::compat::include::catalog::{
+use pgrust_catalog_data::{
     ACLITEM_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID,
     FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
     INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, REGCOLLATION_TYPE_OID,
@@ -11,7 +11,7 @@ use crate::compat::include::catalog::{
     TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, VARBIT_TYPE_OID,
     VARCHAR_TYPE_OID,
 };
-use crate::compat::include::nodes::datum::Value;
+use pgrust_nodes::datum::Value;
 
 struct BootstrapLookup;
 
@@ -131,7 +131,7 @@ fn parse_optional_schema_name(input: &str) -> Result<(Option<String>, String), E
 }
 
 fn proc_schema_matches(
-    row: &crate::compat::include::catalog::PgProcRow,
+    row: &pgrust_catalog_data::PgProcRow,
     schema: Option<&str>,
     catalog: &dyn CatalogLookup,
 ) -> bool {
@@ -610,7 +610,7 @@ pub fn format_type_text(oid: u32, typmod: Option<i32>, catalog: &dyn CatalogLook
         REGOPER_TYPE_OID => "regoper".into(),
         REGOPERATOR_TYPE_OID => "regoperator".into(),
         REGCOLLATION_TYPE_OID => "regcollation".into(),
-        crate::compat::include::catalog::ANYOID => "\"any\"".into(),
+        pgrust_catalog_data::ANYOID => "\"any\"".into(),
         _ => catalog
             .type_by_oid(oid)
             .map(|row| {
@@ -732,7 +732,7 @@ pub fn format_regcollation_oid_optional(
 }
 
 pub fn function_signature_text(
-    proc_row: &crate::compat::include::catalog::PgProcRow,
+    proc_row: &pgrust_catalog_data::PgProcRow,
     catalog: &dyn CatalogLookup,
 ) -> String {
     let arg_types = parse_oid_list(&proc_row.proargtypes)
@@ -754,7 +754,7 @@ fn function_name_text(proname: &str) -> String {
 }
 
 pub fn operator_signature_text(
-    operator_row: &crate::compat::include::catalog::PgOperatorRow,
+    operator_row: &pgrust_catalog_data::PgOperatorRow,
     catalog: &dyn CatalogLookup,
 ) -> String {
     let left = if operator_row.oprleft == 0 {
@@ -1032,7 +1032,7 @@ fn parse_single_i32_typmod(input: &str, type_name: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::include::catalog::{
+    use pgrust_catalog_data::{
         ACLITEM_ARRAY_TYPE_OID, ACLITEM_TYPE_OID, BIT_TYPE_OID,
         INFORMATION_SCHEMA_INDEX_POSITION_PROC_OID, INT4_TYPE_OID, NUMERIC_TYPE_OID,
         POSIX_COLLATION_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID,

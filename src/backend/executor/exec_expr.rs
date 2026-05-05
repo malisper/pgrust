@@ -14,7 +14,26 @@ use crate::include::nodes::datetime::{
     MAX_TIME_PRECISION, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-use pgrust_expr::eval_geometry_function;
+use pgrust_expr::{
+    eval_geometry_function,
+    expr_bit::{
+        bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
+        overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
+        substring as eval_bit_substring,
+    },
+    expr_bool, expr_date,
+    expr_datetime::{
+        current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
+        current_time_value_from_timestamp_with_config, current_timestamp_value,
+        current_timestamp_value_from_timestamp_with_config, current_timestamp_value_with_config,
+        render_datetime_value_text_with_config,
+    },
+    expr_mac::eval_macaddr_function,
+    expr_math,
+    expr_money::{cash_words_text, money_larger, money_smaller},
+    expr_multirange::eval_multirange_function,
+    expr_numeric, expr_range, expr_string,
+};
 
 use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
 use super::expr_agg_support::{
@@ -22,12 +41,6 @@ use super::expr_agg_support::{
     execute_scalar_function_value_call,
 };
 use super::expr_async::{eval_pg_notification_queue_usage_function, eval_pg_notify_function};
-use super::expr_bit::{
-    bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
-    overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
-    substring as eval_bit_substring,
-};
-use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_boolor_statefunc};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
     cast_value_with_source_type_catalog_and_config, parse_text_array_literal_with_catalog_and_op,
@@ -36,44 +49,12 @@ use super::expr_casts::{
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
-use super::expr_date::{
-    eval_age_function, eval_date_bin_function, eval_date_part_function_with_config,
-    eval_date_trunc_function, eval_datetime_add_function, eval_extract_function,
-    eval_extract_function_with_config, eval_isfinite_function, eval_justify_days_function,
-    eval_justify_hours_function, eval_justify_interval_function, eval_make_date_function,
-    eval_make_interval_function, eval_make_time_function, eval_make_timestamp_function,
-    eval_make_timestamptz_function, eval_timestamptz_constructor_function,
-    eval_timezone_function as eval_timetz_timezone_function, eval_to_date_function,
-    eval_to_timestamp_function, timezone_interval_seconds, timezone_target_offset_seconds,
-};
-use super::expr_datetime::{
-    current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
-    current_time_value_from_timestamp_with_config, current_timestamp_value,
-    current_timestamp_value_from_timestamp_with_config, current_timestamp_value_with_config,
-    render_datetime_value_text_with_config,
-};
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
     eval_jsonpath_operator, eval_sql_json_query_function_expr, json_to_tsvector_value,
     jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
-use super::expr_mac::eval_macaddr_function;
-use super::expr_math::{
-    cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
-    eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
-    eval_erf, eval_erfc, eval_float_send_function, eval_gamma, eval_gcd_function,
-    eval_lcm_function, eval_lgamma, eval_unary_float_function, sind, snap_degree, tand,
-};
-use super::expr_money::{cash_words_text, money_larger, money_smaller};
-use super::expr_multirange::eval_multirange_function;
-use super::expr_numeric::{
-    eval_ceil_function, eval_div_function, eval_exp_function, eval_factorial_function,
-    eval_floor_function, eval_ln_function, eval_log_function, eval_log10_function,
-    eval_min_scale_function, eval_numeric_inc_function, eval_pg_lsn_function, eval_power_function,
-    eval_round_function, eval_scale_function, eval_sign_function, eval_sqrt_function,
-    eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
-};
 use super::expr_ops::compare_order_values;
 use super::expr_ops::text_collation_semantics;
 use super::expr_ops::{
@@ -87,34 +68,7 @@ use super::expr_ops::{
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_partition::eval_satisfies_hash_partition;
-use super::expr_range::eval_range_function;
 use super::expr_reg;
-use super::expr_string::{
-    eval_ascii_function, eval_bit_count_bytes, eval_bit_length_function,
-    eval_bpchar_to_text_function, eval_bytea_overlay, eval_bytea_position_function,
-    eval_bytea_substring, eval_casefold_function_with_collation, eval_chr_function,
-    eval_concat_function, eval_concat_ws_function, eval_convert_from_function,
-    eval_convert_to_function, eval_crc32_function, eval_crc32c_function, eval_decode_function,
-    eval_encode_function, eval_format_function, eval_get_bit_bytes, eval_get_byte,
-    eval_initcap_function, eval_initcap_function_with_collation, eval_left_function,
-    eval_length_function, eval_like, eval_lower_function, eval_lower_function_with_collation,
-    eval_lpad_function, eval_md5_function, eval_octet_length_function, eval_parse_ident_function,
-    eval_pg_rust_is_catalog_text_unique_index_oid, eval_pg_rust_test_enc_conversion,
-    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_pg_rust_test_int44in,
-    eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
-    eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
-    eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_position_function,
-    eval_quote_ident_function, eval_quote_literal_function, eval_quote_nullable_function,
-    eval_repeat_function, eval_replace_function, eval_reverse_function, eval_right_function,
-    eval_rpad_function, eval_set_bit_bytes, eval_set_byte, eval_sha224_function,
-    eval_sha256_function, eval_sha384_function, eval_sha512_function, eval_split_part_function,
-    eval_strpos_function, eval_text_overlay, eval_text_starts_with_function, eval_text_substring,
-    eval_to_bin_function, eval_to_char_float4_function, eval_to_char_function,
-    eval_to_hex_function, eval_to_number_function, eval_to_oct_function, eval_translate_function,
-    eval_trim_function, eval_unicode_assigned_function, eval_unicode_is_normalized_function,
-    eval_unicode_normalize_function, eval_unicode_version_function, eval_unistr_function,
-    eval_upper_function, eval_upper_function_with_collation,
-};
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{
     eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function,
@@ -7623,7 +7577,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
             .len(),
         Value::MacAddr(v) => crate::backend::executor::render_macaddr_text(v).len(),
         Value::MacAddr8(v) => crate::backend::executor::render_macaddr8_text(v).len(),
-        Value::Multirange(_) => super::expr_multirange::render_multirange_text(value)
+        Value::Multirange(_) => crate::backend::executor::render_multirange_text(value)
             .unwrap_or_default()
             .len(),
         Value::Point(_)
@@ -10341,7 +10295,7 @@ pub fn eval_expr(
                 Some(value) => Some(eval_expr(value, slot, ctx)?),
                 None => None,
             };
-            eval_like(
+            expr_string::eval_like(
                 &left,
                 &pattern,
                 escape.as_ref(),
@@ -10349,6 +10303,7 @@ pub fn eval_expr(
                 *case_insensitive,
                 *negated,
             )
+            .map_err(Into::into)
         }
         Expr::Similar {
             expr,
@@ -10789,7 +10744,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 Some(value) => Some(eval_plpgsql_expr(value, slot)?),
                 None => None,
             };
-            eval_like(
+            expr_string::eval_like(
                 &left,
                 &pattern,
                 escape.as_ref(),
@@ -10797,6 +10752,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 *case_insensitive,
                 *negated,
             )
+            .map_err(Into::into)
         }
         Expr::Similar {
             expr,
@@ -11629,7 +11585,7 @@ fn eval_plpgsql_builtin_function(
         return result.map_err(Into::into);
     }
     if let Some(result) = eval_macaddr_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if (result_type.is_some_and(SqlType::is_multirange)
         || values
@@ -11637,9 +11593,9 @@ fn eval_plpgsql_builtin_function(
             .any(|value| matches!(value, Value::Multirange(_))))
         && let Some(result) = eval_multirange_function(func, &values, result_type, func_variadic)
     {
-        return result;
+        return result.map_err(Into::into);
     }
-    if let Some(result) = eval_range_function(
+    if let Some(result) = expr_range::eval_range_function(
         func,
         &values,
         result_type,
@@ -11647,10 +11603,10 @@ fn eval_plpgsql_builtin_function(
         None,
         &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
     ) {
-        return result;
+        return result.map_err(Into::into);
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if is_text_search_builtin_function(func) {
         return eval_text_search_builtin_function(func, &values, None);
@@ -11666,12 +11622,14 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values, None),
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
-            _ => eval_length_function(&values),
+            _ => expr_string::eval_length_function(&values).map_err(Into::into),
         },
-        BuiltinScalarFunction::OctetLength => eval_octet_length_function(&values),
+        BuiltinScalarFunction::OctetLength => {
+            expr_string::eval_octet_length_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::BitLength => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
-            _ => eval_bit_length_function(&values),
+            _ => expr_string::eval_bit_length_function(&values).map_err(Into::into),
         },
         BuiltinScalarFunction::ArrayUpper => eval_array_upper_function(&values),
         BuiltinScalarFunction::PgSleep => eval_pg_sleep_function(&values),
@@ -11738,23 +11696,50 @@ fn eval_plpgsql_builtin_function(
         }
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(&values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Null),
-        BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
-        BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
-        BuiltinScalarFunction::Lower => eval_lower_function(&values),
-        BuiltinScalarFunction::Upper => eval_upper_function(&values),
-        BuiltinScalarFunction::Casefold => eval_casefold_function_with_collation(
+        BuiltinScalarFunction::PgSizePretty => {
+            expr_string::eval_pg_size_pretty_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgSizeBytes => {
+            expr_string::eval_pg_size_bytes_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Lower => {
+            expr_string::eval_lower_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Upper => {
+            expr_string::eval_upper_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Casefold => expr_string::eval_casefold_function_with_collation(
             &values,
             super::expr_ops::TextCollationSemantics::Default,
-        ),
-        BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
-        BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
-        BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
-        BuiltinScalarFunction::Normalize => eval_unicode_normalize_function(&values),
-        BuiltinScalarFunction::IsNormalized => eval_unicode_is_normalized_function(&values),
-        BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
-        BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
-        BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
-        BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::Unistr => {
+            expr_string::eval_unistr_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::UnicodeVersion => {
+            expr_string::eval_unicode_version_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::UnicodeAssigned => {
+            expr_string::eval_unicode_assigned_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Normalize => {
+            expr_string::eval_unicode_normalize_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::IsNormalized => {
+            expr_string::eval_unicode_is_normalized_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Initcap => {
+            expr_string::eval_initcap_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BTrim => {
+            expr_string::eval_trim_function("btrim", &values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::LTrim => {
+            expr_string::eval_trim_function("ltrim", &values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::RTrim => {
+            expr_string::eval_trim_function("rtrim", &values).map_err(Into::into)
+        }
         BuiltinScalarFunction::TextCat => match values.as_slice() {
             [left, right] => concat_values(left.clone(), right.clone()),
             _ => Err(ExecError::DetailedError {
@@ -11764,32 +11749,49 @@ fn eval_plpgsql_builtin_function(
                 sqlstate: "42883",
             }),
         },
-        BuiltinScalarFunction::Concat => eval_concat_function(
+        BuiltinScalarFunction::Concat => expr_string::eval_concat_function(
             &values,
             func_variadic,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        ),
-        BuiltinScalarFunction::ConcatWs => eval_concat_ws_function(
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::ConcatWs => expr_string::eval_concat_ws_function(
             &values,
             func_variadic,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        ),
-        BuiltinScalarFunction::Format => eval_format_function(
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::Format => expr_string::eval_format_function(
             &values,
             func_variadic,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        ),
-        BuiltinScalarFunction::Left => eval_left_function(&values),
-        BuiltinScalarFunction::Right => eval_right_function(&values),
-        BuiltinScalarFunction::LPad => eval_lpad_function(&values),
-        BuiltinScalarFunction::RPad => eval_rpad_function(&values),
-        BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
-        BuiltinScalarFunction::Replace => eval_replace_function(&values),
-        BuiltinScalarFunction::SplitPart => eval_split_part_function(&values),
-        BuiltinScalarFunction::Translate => eval_translate_function(&values),
-        BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
-        BuiltinScalarFunction::Chr => eval_chr_function(&values),
-        BuiltinScalarFunction::ParseIdent => eval_parse_ident_function(&values),
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::Left => expr_string::eval_left_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Right => {
+            expr_string::eval_right_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::LPad => expr_string::eval_lpad_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::RPad => expr_string::eval_rpad_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Repeat => {
+            expr_string::eval_repeat_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Replace => {
+            expr_string::eval_replace_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::SplitPart => {
+            expr_string::eval_split_part_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Translate => {
+            expr_string::eval_translate_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Ascii => {
+            expr_string::eval_ascii_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Chr => expr_string::eval_chr_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::ParseIdent => {
+            expr_string::eval_parse_ident_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::TextToRegClass => eval_text_to_regclass_function(&values, None),
         BuiltinScalarFunction::ToRegProc => {
             eval_to_reg_object_function(&values, SqlTypeKind::RegProc, None)
@@ -11876,17 +11878,29 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::RegCollationToText => {
             eval_reg_object_to_text(&values[0], SqlTypeKind::RegCollation, None)
         }
-        BuiltinScalarFunction::QuoteIdent => eval_quote_ident_function(&values),
-        BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
-        BuiltinScalarFunction::QuoteNullable => eval_quote_nullable_function(&values),
-        BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
-        BuiltinScalarFunction::Strpos => eval_strpos_function(&values),
+        BuiltinScalarFunction::QuoteIdent => {
+            expr_string::eval_quote_ident_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::QuoteLiteral => {
+            expr_string::eval_quote_literal_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::QuoteNullable => {
+            expr_string::eval_quote_nullable_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BpcharToText => {
+            expr_string::eval_bpchar_to_text_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Strpos => {
+            expr_string::eval_strpos_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Position => match values.as_slice() {
             [Value::Bit(needle), Value::Bit(haystack)] => {
                 Ok(Value::Int32(eval_bit_position(needle, haystack)))
             }
-            [Value::Bytea(_), Value::Bytea(_)] => eval_bytea_position_function(&values),
-            _ => eval_position_function(&values),
+            [Value::Bytea(_), Value::Bytea(_)] => {
+                expr_string::eval_bytea_position_function(&values).map_err(Into::into)
+            }
+            _ => expr_string::eval_position_function(&values).map_err(Into::into),
         },
         BuiltinScalarFunction::Substring => match values.as_slice() {
             [Value::Bit(bits), Value::Int32(start)] => {
@@ -11896,9 +11910,11 @@ fn eval_plpgsql_builtin_function(
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
             }
             [Value::Bytea(_), Value::Int32(_)]
-            | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => eval_bytea_substring(&values),
+            | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
+                expr_string::eval_bytea_substring(&values).map_err(Into::into)
+            }
             [Value::Text(_), Value::Text(_)] => eval_sql_regex_substring(&values),
-            _ => eval_text_substring(&values),
+            _ => expr_string::eval_text_substring(&values).map_err(Into::into),
         },
         BuiltinScalarFunction::SimilarSubstring => eval_similar_substring(&values),
         BuiltinScalarFunction::Overlay => match values.as_slice() {
@@ -11922,14 +11938,14 @@ fn eval_plpgsql_builtin_function(
                 Value::Bytea(_),
                 Value::Int32(_),
                 Value::Int32(_),
-            ] => eval_bytea_overlay(&values),
+            ] => expr_string::eval_bytea_overlay(&values).map_err(Into::into),
             [Value::Text(_), Value::Text(_), Value::Int32(_)]
             | [
                 Value::Text(_),
                 Value::Text(_),
                 Value::Int32(_),
                 Value::Int32(_),
-            ] => eval_text_overlay(&values),
+            ] => expr_string::eval_text_overlay(&values).map_err(Into::into),
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -11939,7 +11955,9 @@ fn eval_plpgsql_builtin_function(
             [Value::Bit(bits), Value::Int32(index)] => {
                 Ok(Value::Int32(eval_get_bit(bits, *index)?))
             }
-            [Value::Bytea(_), Value::Int32(_)] => eval_get_bit_bytes(&values),
+            [Value::Bytea(_), Value::Int32(_)] => {
+                expr_string::eval_get_bit_bytes(&values).map_err(Into::into)
+            }
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -11951,7 +11969,9 @@ fn eval_plpgsql_builtin_function(
                 Value::Int32(index),
                 Value::Int32(new_value),
             ] => Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?)),
-            [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => eval_set_bit_bytes(&values),
+            [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
+                expr_string::eval_set_bit_bytes(&values).map_err(Into::into)
+            }
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -11959,31 +11979,61 @@ fn eval_plpgsql_builtin_function(
         },
         BuiltinScalarFunction::BitCount => match values.as_slice() {
             [Value::Bit(bits)] => Ok(Value::Int64(eval_bit_count(bits))),
-            [Value::Bytea(_)] => eval_bit_count_bytes(&values),
+            [Value::Bytea(_)] => expr_string::eval_bit_count_bytes(&values).map_err(Into::into),
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
             })),
         },
-        BuiltinScalarFunction::GetByte => eval_get_byte(&values),
-        BuiltinScalarFunction::SetByte => eval_set_byte(&values),
+        BuiltinScalarFunction::GetByte => expr_string::eval_get_byte(&values).map_err(Into::into),
+        BuiltinScalarFunction::SetByte => expr_string::eval_set_byte(&values).map_err(Into::into),
         BuiltinScalarFunction::Convert => eval_convert(&values),
-        BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
-        BuiltinScalarFunction::ConvertTo => eval_convert_to_function(&values),
-        BuiltinScalarFunction::Md5 => eval_md5_function(&values),
-        BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
-        BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
-        BuiltinScalarFunction::Encode => eval_encode_function(&values),
-        BuiltinScalarFunction::Decode => eval_decode_function(&values),
-        BuiltinScalarFunction::Sha224 => eval_sha224_function(&values),
-        BuiltinScalarFunction::Sha256 => eval_sha256_function(&values),
-        BuiltinScalarFunction::Sha384 => eval_sha384_function(&values),
-        BuiltinScalarFunction::Sha512 => eval_sha512_function(&values),
-        BuiltinScalarFunction::Crc32 => eval_crc32_function(&values),
-        BuiltinScalarFunction::Crc32c => eval_crc32c_function(&values),
-        BuiltinScalarFunction::ToBin => eval_to_bin_function(&values),
-        BuiltinScalarFunction::ToOct => eval_to_oct_function(&values),
-        BuiltinScalarFunction::ToHex => eval_to_hex_function(&values),
+        BuiltinScalarFunction::ConvertFrom => {
+            expr_string::eval_convert_from_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ConvertTo => {
+            expr_string::eval_convert_to_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Md5 => expr_string::eval_md5_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Reverse => {
+            expr_string::eval_reverse_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::TextStartsWith => {
+            expr_string::eval_text_starts_with_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Encode => {
+            expr_string::eval_encode_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Decode => {
+            expr_string::eval_decode_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sha224 => {
+            expr_string::eval_sha224_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sha256 => {
+            expr_string::eval_sha256_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sha384 => {
+            expr_string::eval_sha384_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sha512 => {
+            expr_string::eval_sha512_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Crc32 => {
+            expr_string::eval_crc32_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Crc32c => {
+            expr_string::eval_crc32c_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToBin => {
+            expr_string::eval_to_bin_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToOct => {
+            expr_string::eval_to_oct_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToHex => {
+            expr_string::eval_to_hex_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::RegexpMatch => eval_regexp_match(&values),
         BuiltinScalarFunction::RegexpLike => {
             eval_regexp_like(&values, super::expr_ops::TextCollationSemantics::Default)
@@ -11993,23 +12043,32 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::RegexpInstr => eval_regexp_instr(&values),
         BuiltinScalarFunction::RegexpSubstr => eval_regexp_substr(&values),
         BuiltinScalarFunction::RegexpSplitToArray => eval_regexp_split_to_array(&values),
-        BuiltinScalarFunction::ToChar => eval_to_char_function(
+        BuiltinScalarFunction::ToChar => expr_string::eval_to_char_function(
             &values,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        ),
-        BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
-        BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
-        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::ToDate => {
+            expr_date::eval_to_date_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToNumber => {
+            expr_string::eval_to_number_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToTimestamp => expr_date::eval_to_timestamp_function(
             &values,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        ),
-        BuiltinScalarFunction::TimestampTzConstructor => eval_timestamptz_constructor_function(
-            &values,
-            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        ),
-        BuiltinScalarFunction::Abs => eval_abs_function(&values),
-        BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
-        BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::TimestampTzConstructor => {
+            expr_date::eval_timestamptz_constructor_function(
+                &values,
+                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            )
+            .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Abs => expr_math::eval_abs_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Gcd => expr_math::eval_gcd_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Lcm => expr_math::eval_lcm_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Greatest => eval_greatest(&values),
         BuiltinScalarFunction::Least => eval_least(&values),
         BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
@@ -12035,16 +12094,32 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ArraySample => eval_array_sample_function(&values),
         BuiltinScalarFunction::ArrayReverse => eval_array_reverse_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
-        BuiltinScalarFunction::BoolEq => eval_booleq(&values),
-        BuiltinScalarFunction::BoolNe => eval_boolne(&values),
-        BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
-        BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
-        BuiltinScalarFunction::Extract => eval_extract_function(&values),
-        BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
-        BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
-        BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
-        BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
-        BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
+        BuiltinScalarFunction::BoolEq => expr_bool::eval_booleq(&values).map_err(Into::into),
+        BuiltinScalarFunction::BoolNe => expr_bool::eval_boolne(&values).map_err(Into::into),
+        BuiltinScalarFunction::BoolAndStateFunc => {
+            expr_bool::eval_booland_statefunc(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BoolOrStateFunc => {
+            expr_bool::eval_boolor_statefunc(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Extract => {
+            expr_date::eval_extract_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::DateBin => {
+            expr_date::eval_date_bin_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyDays => {
+            expr_date::eval_justify_days_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyHours => {
+            expr_date::eval_justify_hours_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyInterval => {
+            expr_date::eval_justify_interval_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeInterval => {
+            expr_date::eval_make_interval_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::IntervalHash => {
             eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
         }
@@ -12134,8 +12209,12 @@ fn eval_plpgsql_builtin_function(
                 right: values.get(1).cloned().unwrap_or(Value::Null),
             }),
         },
-        BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
-        BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
+        BuiltinScalarFunction::BitcastIntegerToFloat4 => {
+            expr_math::eval_bitcast_integer_to_float4(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BitcastBigintToFloat8 => {
+            expr_math::eval_bitcast_bigint_to_float8(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Random
         | BuiltinScalarFunction::GetDatabaseEncoding
         | BuiltinScalarFunction::PgCharToEncoding
@@ -12282,15 +12361,15 @@ fn eval_timezone_function(
                 timetz_args.push(zone.clone());
             }
             timetz_args.push(value.clone());
-            eval_timetz_timezone_function(&timetz_args, config)
+            expr_date::eval_timezone_function(&timetz_args, config).map_err(Into::into)
         }
         Value::Time(time) => Ok(Value::TimeTz(TimeTzADT {
             time: *time,
-            offset_seconds: timezone_target_offset_seconds(&zone, config)?,
+            offset_seconds: expr_date::timezone_target_offset_seconds(&zone, config)?,
         })),
         Value::Timestamp(timestamp) => match &zone {
             Value::Interval(interval) => {
-                let micros = timezone_interval_seconds(*interval)?
+                let micros = expr_date::timezone_interval_seconds(*interval)?
                     .checked_mul(USECS_PER_SEC)
                     .ok_or_else(timezone_timestamp_out_of_range)?;
                 if !timestamp.is_finite() {
@@ -12324,7 +12403,7 @@ fn eval_timezone_function(
         },
         Value::TimestampTz(timestamptz) => match &zone {
             Value::Interval(interval) => {
-                let micros = timezone_interval_seconds(*interval)?
+                let micros = expr_date::timezone_interval_seconds(*interval)?
                     .checked_mul(USECS_PER_SEC)
                     .ok_or_else(timezone_timestamp_out_of_range)?;
                 if !timestamptz.is_finite() {
@@ -13568,7 +13647,7 @@ pub(crate) fn eval_builtin_function(
             ))
         )
     {
-        return eval_to_char_float4_function(&values);
+        return expr_string::eval_to_char_float4_function(&values).map_err(Into::into);
     }
     if matches!(func, BuiltinScalarFunction::PgRustDomainCheckUpperLessThan) {
         return eval_domain_check_upper_less_than(&values);
@@ -13577,7 +13656,7 @@ pub(crate) fn eval_builtin_function(
         return result.map_err(Into::into);
     }
     if let Some(result) = eval_macaddr_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if (result_type.is_some_and(SqlType::is_multirange)
         || values
@@ -13585,20 +13664,22 @@ pub(crate) fn eval_builtin_function(
             .any(|value| matches!(value, Value::Multirange(_))))
         && let Some(result) = eval_multirange_function(func, &values, result_type, func_variadic)
     {
-        return result;
+        return result.map_err(Into::into);
     }
-    if let Some(result) = eval_range_function(
-        func,
-        &values,
-        result_type,
-        func_variadic,
-        ctx.catalog.as_deref(),
-        &ctx.datetime_config,
-    ) {
-        return result;
+    if let Some(result) = super::expr_ops::with_expr_catalog(ctx.catalog.as_deref(), |catalog| {
+        expr_range::eval_range_function(
+            func,
+            &values,
+            result_type,
+            func_variadic,
+            catalog,
+            &ctx.datetime_config,
+        )
+    }) {
+        return result.map_err(Into::into);
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if let Some(result) = eval_enum_function(func, &values, result_type, ctx) {
         return result;
@@ -13876,33 +13957,63 @@ pub(crate) fn eval_builtin_function(
             unreachable!("sequence builtins handled earlier");
         }
         BuiltinScalarFunction::DatePart => {
-            eval_date_part_function_with_config(&values, &ctx.datetime_config)
+            expr_date::eval_date_part_function_with_config(&values, &ctx.datetime_config)
+                .map_err(Into::into)
         }
         BuiltinScalarFunction::Extract => {
-            eval_extract_function_with_config(&values, &ctx.datetime_config)
+            expr_date::eval_extract_function_with_config(&values, &ctx.datetime_config)
+                .map_err(Into::into)
         }
-        BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
-        BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
+        BuiltinScalarFunction::DateTrunc => {
+            expr_date::eval_date_trunc_function(&values, &ctx.datetime_config).map_err(Into::into)
+        }
+        BuiltinScalarFunction::DateBin => {
+            expr_date::eval_date_bin_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Timezone => eval_timezone_function(&values, &ctx.datetime_config),
-        BuiltinScalarFunction::DateAdd => eval_datetime_add_function(&values, false),
-        BuiltinScalarFunction::DateSubtract => eval_datetime_add_function(&values, true),
-        BuiltinScalarFunction::Age => eval_age_function(&values, &ctx.datetime_config),
-        BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
-        BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
-        BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
-        BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
-        BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
-        BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
-        BuiltinScalarFunction::MakeTime => eval_make_time_function(&values),
-        BuiltinScalarFunction::MakeTimestamp => eval_make_timestamp_function(&values),
+        BuiltinScalarFunction::DateAdd => {
+            expr_date::eval_datetime_add_function(&values, false).map_err(Into::into)
+        }
+        BuiltinScalarFunction::DateSubtract => {
+            expr_date::eval_datetime_add_function(&values, true).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Age => {
+            expr_date::eval_age_function(&values, &ctx.datetime_config).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyDays => {
+            expr_date::eval_justify_days_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyHours => {
+            expr_date::eval_justify_hours_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyInterval => {
+            expr_date::eval_justify_interval_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::IsFinite => {
+            expr_date::eval_isfinite_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeInterval => {
+            expr_date::eval_make_interval_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeDate => {
+            expr_date::eval_make_date_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeTime => {
+            expr_date::eval_make_time_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeTimestamp => {
+            expr_date::eval_make_timestamp_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::MakeTimestampTz => {
-            eval_make_timestamptz_function(&values, &ctx.datetime_config)
+            expr_date::eval_make_timestamptz_function(&values, &ctx.datetime_config)
+                .map_err(Into::into)
         }
         BuiltinScalarFunction::TimestampTzConstructor => {
-            eval_timestamptz_constructor_function(&values, &ctx.datetime_config)
+            expr_date::eval_timestamptz_constructor_function(&values, &ctx.datetime_config)
+                .map_err(Into::into)
         }
         BuiltinScalarFunction::ToTimestamp => {
-            eval_to_timestamp_function(&values, &ctx.datetime_config)
+            expr_date::eval_to_timestamp_function(&values, &ctx.datetime_config).map_err(Into::into)
         }
         BuiltinScalarFunction::IntervalHash => {
             eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
@@ -13914,10 +14025,18 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::GetDatabaseEncoding => {
             Ok(pgrust_executor::eval_get_database_encoding())
         }
-        BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
-        BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
-        BuiltinScalarFunction::Normalize => eval_unicode_normalize_function(&values),
-        BuiltinScalarFunction::IsNormalized => eval_unicode_is_normalized_function(&values),
+        BuiltinScalarFunction::UnicodeVersion => {
+            expr_string::eval_unicode_version_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::UnicodeAssigned => {
+            expr_string::eval_unicode_assigned_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Normalize => {
+            expr_string::eval_unicode_normalize_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::IsNormalized => {
+            expr_string::eval_unicode_is_normalized_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::PgCharToEncoding => eval_pg_char_to_encoding(&values),
         BuiltinScalarFunction::PgEncodingToChar => eval_pg_encoding_to_char(&values),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
@@ -13930,19 +14049,35 @@ pub(crate) fn eval_builtin_function(
             unreachable!("domain check handled earlier")
         }
         BuiltinScalarFunction::PgRustTestOpclassOptionsFunc => {
-            eval_pg_rust_test_opclass_options_func(&values)
+            expr_string::eval_pg_rust_test_opclass_options_func(&values).map_err(Into::into)
         }
-        BuiltinScalarFunction::PgRustTestFdwHandler => eval_pg_rust_test_fdw_handler(&values),
-        BuiltinScalarFunction::PgRustTestEncSetup => eval_pg_rust_test_enc_setup(&values),
-        BuiltinScalarFunction::PgRustTestEncConversion => eval_pg_rust_test_enc_conversion(&values),
-        BuiltinScalarFunction::PgRustTestWidgetIn => eval_pg_rust_test_widget_in(&values),
-        BuiltinScalarFunction::PgRustTestWidgetOut => eval_pg_rust_test_widget_out(&values),
-        BuiltinScalarFunction::PgRustTestInt44In => eval_pg_rust_test_int44in(&values),
-        BuiltinScalarFunction::PgRustTestInt44Out => eval_pg_rust_test_int44out(&values),
-        BuiltinScalarFunction::PgRustTestPtInWidget => eval_pg_rust_test_pt_in_widget(&values),
+        BuiltinScalarFunction::PgRustTestFdwHandler => {
+            expr_string::eval_pg_rust_test_fdw_handler(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgRustTestEncSetup => {
+            expr_string::eval_pg_rust_test_enc_setup(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgRustTestEncConversion => {
+            expr_string::eval_pg_rust_test_enc_conversion(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgRustTestWidgetIn => {
+            expr_string::eval_pg_rust_test_widget_in(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgRustTestWidgetOut => {
+            expr_string::eval_pg_rust_test_widget_out(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgRustTestInt44In => {
+            expr_string::eval_pg_rust_test_int44in(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgRustTestInt44Out => {
+            expr_string::eval_pg_rust_test_int44out(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgRustTestPtInWidget => {
+            expr_string::eval_pg_rust_test_pt_in_widget(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::PgRustTestAtomicOps => Ok(Value::Bool(true)),
         BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => {
-            eval_pg_rust_is_catalog_text_unique_index_oid(&values)
+            expr_string::eval_pg_rust_is_catalog_text_unique_index_oid(&values).map_err(Into::into)
         }
         BuiltinScalarFunction::MakeTupleIndirect => eval_make_tuple_indirect(&values, ctx),
         BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
@@ -14229,16 +14364,28 @@ pub(crate) fn eval_builtin_function(
                 _ => Value::Null,
             })
         }
-        BuiltinScalarFunction::Abs => eval_abs_function(&values),
-        BuiltinScalarFunction::Log => eval_log_function(&values),
-        BuiltinScalarFunction::Log10 => eval_log10_function(&values),
-        BuiltinScalarFunction::Div => eval_div_function(&values),
+        BuiltinScalarFunction::Abs => expr_math::eval_abs_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Log => expr_numeric::eval_log_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Log10 => {
+            expr_numeric::eval_log10_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Div => expr_numeric::eval_div_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Mod => mod_values(values[0].clone(), values[1].clone()),
-        BuiltinScalarFunction::Scale => eval_scale_function(&values),
-        BuiltinScalarFunction::MinScale => eval_min_scale_function(&values),
-        BuiltinScalarFunction::TrimScale => eval_trim_scale_function(&values),
-        BuiltinScalarFunction::NumericInc => eval_numeric_inc_function(&values),
-        BuiltinScalarFunction::Factorial => eval_factorial_function(&values),
+        BuiltinScalarFunction::Scale => {
+            expr_numeric::eval_scale_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MinScale => {
+            expr_numeric::eval_min_scale_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::TrimScale => {
+            expr_numeric::eval_trim_scale_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::NumericInc => {
+            expr_numeric::eval_numeric_inc_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Factorial => {
+            expr_numeric::eval_factorial_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
         BuiltinScalarFunction::ArrayDims => eval_array_dims_function(&values),
         BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
@@ -14382,21 +14529,37 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgIndexColumnHasProperty => {
             eval_pg_index_column_has_property(&values, ctx)
         }
-        BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
-        BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
-        BuiltinScalarFunction::PgLsn => eval_pg_lsn_function(&values),
-        BuiltinScalarFunction::Trunc => eval_trunc_function(&values),
-        BuiltinScalarFunction::Round => eval_round_function(&values),
+        BuiltinScalarFunction::PgSizePretty => {
+            expr_string::eval_pg_size_pretty_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgSizeBytes => {
+            expr_string::eval_pg_size_bytes_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::PgLsn => {
+            expr_numeric::eval_pg_lsn_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Trunc => {
+            expr_numeric::eval_trunc_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Round => {
+            expr_numeric::eval_round_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::WidthBucket => {
             if values.len() == 2 {
                 eval_width_bucket_thresholds(&values)
             } else {
-                eval_width_bucket_function(&values)
+                expr_numeric::eval_width_bucket_function(&values).map_err(Into::into)
             }
         }
-        BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => eval_ceil_function(&values),
-        BuiltinScalarFunction::Floor => eval_floor_function(&values),
-        BuiltinScalarFunction::Sign => eval_sign_function(&values),
+        BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => {
+            expr_numeric::eval_ceil_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Floor => {
+            expr_numeric::eval_floor_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sign => {
+            expr_numeric::eval_sign_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Pi => {
             if values.is_empty() {
                 Ok(Value::Float64(std::f64::consts::PI))
@@ -14404,35 +14567,92 @@ pub(crate) fn eval_builtin_function(
                 Err(malformed_expr_error("pi"))
             }
         }
-        BuiltinScalarFunction::Sqrt => eval_sqrt_function(&values),
-        BuiltinScalarFunction::Cbrt => eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt())),
-        BuiltinScalarFunction::Power => eval_power_function(&values),
-        BuiltinScalarFunction::Exp => eval_exp_function(&values),
-        BuiltinScalarFunction::Ln => eval_ln_function(&values),
-        BuiltinScalarFunction::Sin => eval_unary_float_function("sin", &values, |v| Ok(v.sin())),
-        BuiltinScalarFunction::Cos => eval_unary_float_function("cos", &values, |v| Ok(v.cos())),
-        BuiltinScalarFunction::Sinh => eval_unary_float_function("sinh", &values, |v| Ok(v.sinh())),
-        BuiltinScalarFunction::Cosh => eval_unary_float_function("cosh", &values, |v| Ok(v.cosh())),
-        BuiltinScalarFunction::Tanh => eval_unary_float_function("tanh", &values, |v| Ok(v.tanh())),
+        BuiltinScalarFunction::Sqrt => {
+            expr_numeric::eval_sqrt_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cbrt => {
+            expr_math::eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Power => {
+            expr_numeric::eval_power_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Exp => expr_numeric::eval_exp_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Ln => expr_numeric::eval_ln_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Sin => {
+            expr_math::eval_unary_float_function("sin", &values, |v| Ok(v.sin()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cos => {
+            expr_math::eval_unary_float_function("cos", &values, |v| Ok(v.cos()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sinh => {
+            expr_math::eval_unary_float_function("sinh", &values, |v| Ok(v.sinh()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cosh => {
+            expr_math::eval_unary_float_function("cosh", &values, |v| Ok(v.cosh()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Tanh => {
+            expr_math::eval_unary_float_function("tanh", &values, |v| Ok(v.tanh()))
+                .map_err(Into::into)
+        }
         BuiltinScalarFunction::Asinh => {
-            eval_unary_float_function("asinh", &values, |v| Ok(v.asinh()))
+            expr_math::eval_unary_float_function("asinh", &values, |v| Ok(v.asinh()))
+                .map_err(Into::into)
         }
-        BuiltinScalarFunction::Acosh => eval_unary_float_function("acosh", &values, eval_acosh),
-        BuiltinScalarFunction::Atanh => eval_unary_float_function("atanh", &values, eval_atanh),
-        BuiltinScalarFunction::Sind => eval_unary_float_function("sind", &values, |v| Ok(sind(v))),
-        BuiltinScalarFunction::Cosd => eval_unary_float_function("cosd", &values, |v| Ok(cosd(v))),
-        BuiltinScalarFunction::Tand => eval_unary_float_function("tand", &values, |v| Ok(tand(v))),
-        BuiltinScalarFunction::Cotd => eval_unary_float_function("cotd", &values, |v| Ok(cotd(v))),
-        BuiltinScalarFunction::Asind => eval_unary_float_function("asind", &values, eval_asind),
-        BuiltinScalarFunction::Acosd => eval_unary_float_function("acosd", &values, eval_acosd),
+        BuiltinScalarFunction::Acosh => {
+            expr_math::eval_unary_float_function("acosh", &values, expr_math::eval_acosh)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Atanh => {
+            expr_math::eval_unary_float_function("atanh", &values, expr_math::eval_atanh)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sind => {
+            expr_math::eval_unary_float_function("sind", &values, |v| Ok(expr_math::sind(v)))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cosd => {
+            expr_math::eval_unary_float_function("cosd", &values, |v| Ok(expr_math::cosd(v)))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Tand => {
+            expr_math::eval_unary_float_function("tand", &values, |v| Ok(expr_math::tand(v)))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cotd => {
+            expr_math::eval_unary_float_function("cotd", &values, |v| Ok(expr_math::cotd(v)))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Asind => {
+            expr_math::eval_unary_float_function("asind", &values, expr_math::eval_asind)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Acosd => {
+            expr_math::eval_unary_float_function("acosd", &values, expr_math::eval_acosd)
+                .map_err(Into::into)
+        }
         BuiltinScalarFunction::Atand => {
-            eval_unary_float_function("atand", &values, |v| Ok(snap_degree(v.atan().to_degrees())))
+            expr_math::eval_unary_float_function("atand", &values, |v| {
+                Ok(expr_math::snap_degree(v.atan().to_degrees()))
+            })
+            .map_err(Into::into)
         }
-        BuiltinScalarFunction::Atan2d => eval_binary_float_function("atan2d", &values, |y, x| {
-            Ok(snap_degree(y.atan2(x).to_degrees()))
-        }),
-        BuiltinScalarFunction::Float4Send => eval_float_send_function("float4send", &values, true),
-        BuiltinScalarFunction::Float8Send => eval_float_send_function("float8send", &values, false),
+        BuiltinScalarFunction::Atan2d => {
+            expr_math::eval_binary_float_function("atan2d", &values, |y, x| {
+                Ok(expr_math::snap_degree(y.atan2(x).to_degrees()))
+            })
+            .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Float4Send => {
+            expr_math::eval_float_send_function("float4send", &values, true).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Float8Send => {
+            expr_math::eval_float_send_function("float8send", &values, false).map_err(Into::into)
+        }
         BuiltinScalarFunction::Float8Accum => {
             pgrust_executor::eval_float8_accum_function(&values).map_err(aggregate_support_error)
         }
@@ -14447,14 +14667,30 @@ pub(crate) fn eval_builtin_function(
             pgrust_executor::eval_float8_regr_combine_function(&values)
                 .map_err(aggregate_support_error)
         }
-        BuiltinScalarFunction::Erf => eval_unary_float_function("erf", &values, eval_erf),
-        BuiltinScalarFunction::Erfc => eval_unary_float_function("erfc", &values, eval_erfc),
-        BuiltinScalarFunction::Gamma => eval_unary_float_function("gamma", &values, eval_gamma),
-        BuiltinScalarFunction::Lgamma => eval_unary_float_function("lgamma", &values, eval_lgamma),
-        BuiltinScalarFunction::BoolEq => eval_booleq(&values),
-        BuiltinScalarFunction::BoolNe => eval_boolne(&values),
-        BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
-        BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
+        BuiltinScalarFunction::Erf => {
+            expr_math::eval_unary_float_function("erf", &values, expr_math::eval_erf)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Erfc => {
+            expr_math::eval_unary_float_function("erfc", &values, expr_math::eval_erfc)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Gamma => {
+            expr_math::eval_unary_float_function("gamma", &values, expr_math::eval_gamma)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Lgamma => {
+            expr_math::eval_unary_float_function("lgamma", &values, expr_math::eval_lgamma)
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::BoolEq => expr_bool::eval_booleq(&values).map_err(Into::into),
+        BuiltinScalarFunction::BoolNe => expr_bool::eval_boolne(&values).map_err(Into::into),
+        BuiltinScalarFunction::BoolAndStateFunc => {
+            expr_bool::eval_booland_statefunc(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BoolOrStateFunc => {
+            expr_bool::eval_boolor_statefunc(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, Some(ctx)),
         BuiltinScalarFunction::XmlText => eval_xml_text_function(&values, Some(ctx)),
@@ -14542,23 +14778,30 @@ pub(crate) fn eval_builtin_function(
                 right: values.get(1).cloned().unwrap_or(Value::Null),
             }),
         },
-        BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
-        BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
-        BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
-        BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
+        BuiltinScalarFunction::BitcastIntegerToFloat4 => {
+            expr_math::eval_bitcast_integer_to_float4(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::BitcastBigintToFloat8 => {
+            expr_math::eval_bitcast_bigint_to_float8(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Gcd => expr_math::eval_gcd_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Lcm => expr_math::eval_lcm_function(&values).map_err(Into::into),
         BuiltinScalarFunction::Greatest => eval_greatest(&values),
         BuiltinScalarFunction::Least => eval_least(&values),
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
-            _ => eval_length_function(&values),
+            _ => expr_string::eval_length_function(&values).map_err(Into::into),
         },
-        BuiltinScalarFunction::OctetLength => eval_octet_length_function(&values),
+        BuiltinScalarFunction::OctetLength => {
+            expr_string::eval_octet_length_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::BitLength => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
-            _ => eval_bit_length_function(&values),
+            _ => expr_string::eval_bit_length_function(&values).map_err(Into::into),
         },
         BuiltinScalarFunction::Concat => {
-            eval_concat_function(&values, func_variadic, &ctx.datetime_config)
+            expr_string::eval_concat_function(&values, func_variadic, &ctx.datetime_config)
+                .map_err(Into::into)
         }
         BuiltinScalarFunction::TextCat => match values.as_slice() {
             [left, right] => concat_values(left.clone(), right.clone()),
@@ -14570,39 +14813,61 @@ pub(crate) fn eval_builtin_function(
             }),
         },
         BuiltinScalarFunction::ConcatWs => {
-            eval_concat_ws_function(&values, func_variadic, &ctx.datetime_config)
+            expr_string::eval_concat_ws_function(&values, func_variadic, &ctx.datetime_config)
+                .map_err(Into::into)
         }
         BuiltinScalarFunction::Format => {
-            eval_format_function(&values, func_variadic, &ctx.datetime_config)
+            expr_string::eval_format_function(&values, func_variadic, &ctx.datetime_config)
+                .map_err(Into::into)
         }
-        BuiltinScalarFunction::Left => eval_left_function(&values),
-        BuiltinScalarFunction::Right => eval_right_function(&values),
-        BuiltinScalarFunction::LPad => eval_lpad_function(&values),
-        BuiltinScalarFunction::RPad => eval_rpad_function(&values),
-        BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
-        BuiltinScalarFunction::Lower => eval_lower_function_with_collation(
+        BuiltinScalarFunction::Left => expr_string::eval_left_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Right => {
+            expr_string::eval_right_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::LPad => expr_string::eval_lpad_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::RPad => expr_string::eval_rpad_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Repeat => {
+            expr_string::eval_repeat_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Lower => expr_string::eval_lower_function_with_collation(
             &values,
             text_collation_semantics(function_collation_oid(args), ctx.catalog.as_deref())?,
-        ),
-        BuiltinScalarFunction::Upper => eval_upper_function_with_collation(
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::Upper => expr_string::eval_upper_function_with_collation(
             &values,
             text_collation_semantics(function_collation_oid(args), ctx.catalog.as_deref())?,
-        ),
-        BuiltinScalarFunction::Casefold => eval_casefold_function_with_collation(
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::Casefold => expr_string::eval_casefold_function_with_collation(
             &values,
             text_collation_semantics(function_collation_oid(args), ctx.catalog.as_deref())?,
-        ),
-        BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
-        BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
-        BuiltinScalarFunction::Initcap => eval_initcap_function_with_collation(
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::TextStartsWith => {
+            expr_string::eval_text_starts_with_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Unistr => {
+            expr_string::eval_unistr_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Initcap => expr_string::eval_initcap_function_with_collation(
             &values,
             text_collation_semantics(function_collation_oid(args), ctx.catalog.as_deref())?,
-        ),
-        BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
-        BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
-        BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
-        BuiltinScalarFunction::Md5 => eval_md5_function(&values),
-        BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::BTrim => {
+            expr_string::eval_trim_function("btrim", &values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::LTrim => {
+            expr_string::eval_trim_function("ltrim", &values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::RTrim => {
+            expr_string::eval_trim_function("rtrim", &values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Md5 => expr_string::eval_md5_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::Reverse => {
+            expr_string::eval_reverse_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::TextToRegClass => eval_text_to_regclass_function(&values, Some(ctx)),
         BuiltinScalarFunction::ToRegProc => {
             eval_to_reg_object_function(&values, SqlTypeKind::RegProc, Some(ctx))
@@ -14647,23 +14912,45 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::RegClassToText => eval_regclass_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegTypeToText => eval_regtype_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, Some(ctx)),
-        BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
-        BuiltinScalarFunction::QuoteIdent => eval_quote_ident_function(&values),
-        BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
-        BuiltinScalarFunction::QuoteNullable => eval_quote_nullable_function(&values),
-        BuiltinScalarFunction::Replace => eval_replace_function(&values),
-        BuiltinScalarFunction::SplitPart => eval_split_part_function(&values),
-        BuiltinScalarFunction::Translate => eval_translate_function(&values),
-        BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
-        BuiltinScalarFunction::Chr => eval_chr_function(&values),
-        BuiltinScalarFunction::ParseIdent => eval_parse_ident_function(&values),
-        BuiltinScalarFunction::Strpos => eval_strpos_function(&values),
+        BuiltinScalarFunction::BpcharToText => {
+            expr_string::eval_bpchar_to_text_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::QuoteIdent => {
+            expr_string::eval_quote_ident_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::QuoteLiteral => {
+            expr_string::eval_quote_literal_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::QuoteNullable => {
+            expr_string::eval_quote_nullable_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Replace => {
+            expr_string::eval_replace_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::SplitPart => {
+            expr_string::eval_split_part_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Translate => {
+            expr_string::eval_translate_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Ascii => {
+            expr_string::eval_ascii_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Chr => expr_string::eval_chr_function(&values).map_err(Into::into),
+        BuiltinScalarFunction::ParseIdent => {
+            expr_string::eval_parse_ident_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Strpos => {
+            expr_string::eval_strpos_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Position => match values.as_slice() {
             [Value::Bit(needle), Value::Bit(haystack)] => {
                 Ok(Value::Int32(eval_bit_position(needle, haystack)))
             }
-            [Value::Bytea(_), Value::Bytea(_)] => eval_bytea_position_function(&values),
-            _ => eval_position_function(&values),
+            [Value::Bytea(_), Value::Bytea(_)] => {
+                expr_string::eval_bytea_position_function(&values).map_err(Into::into)
+            }
+            _ => expr_string::eval_position_function(&values).map_err(Into::into),
         },
         BuiltinScalarFunction::Substring => match values.as_slice() {
             [Value::Bit(bits), Value::Int32(start)] => {
@@ -14673,9 +14960,11 @@ pub(crate) fn eval_builtin_function(
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
             }
             [Value::Bytea(_), Value::Int32(_)]
-            | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => eval_bytea_substring(&values),
+            | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
+                expr_string::eval_bytea_substring(&values).map_err(Into::into)
+            }
             [Value::Text(_), Value::Text(_)] => eval_sql_regex_substring(&values),
-            _ => eval_text_substring(&values),
+            _ => expr_string::eval_text_substring(&values).map_err(Into::into),
         },
         BuiltinScalarFunction::SimilarSubstring => eval_similar_substring(&values),
         BuiltinScalarFunction::Overlay => match values.as_slice() {
@@ -14699,21 +14988,23 @@ pub(crate) fn eval_builtin_function(
                 Value::Bytea(_),
                 Value::Int32(_),
                 Value::Int32(_),
-            ] => eval_bytea_overlay(&values),
+            ] => expr_string::eval_bytea_overlay(&values).map_err(Into::into),
             [Value::Text(_), Value::Text(_), Value::Int32(_)]
             | [
                 Value::Text(_),
                 Value::Text(_),
                 Value::Int32(_),
                 Value::Int32(_),
-            ] => eval_text_overlay(&values),
+            ] => expr_string::eval_text_overlay(&values).map_err(Into::into),
             _ => unreachable!("validated overlay arguments"),
         },
         BuiltinScalarFunction::GetBit => match values.as_slice() {
             [Value::Bit(bits), Value::Int32(index)] => {
                 Ok(Value::Int32(eval_get_bit(bits, *index)?))
             }
-            [Value::Bytea(_), Value::Int32(_)] => eval_get_bit_bytes(&values),
+            [Value::Bytea(_), Value::Int32(_)] => {
+                expr_string::eval_get_bit_bytes(&values).map_err(Into::into)
+            }
             _ => unreachable!("validated get_bit arguments"),
         },
         BuiltinScalarFunction::SetBit => match values.as_slice() {
@@ -14722,30 +15013,58 @@ pub(crate) fn eval_builtin_function(
                 Value::Int32(index),
                 Value::Int32(new_value),
             ] => Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?)),
-            [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => eval_set_bit_bytes(&values),
+            [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
+                expr_string::eval_set_bit_bytes(&values).map_err(Into::into)
+            }
             _ => unreachable!("validated set_bit arguments"),
         },
         BuiltinScalarFunction::BitCount => match values.as_slice() {
             [Value::Bit(bits)] => Ok(Value::Int64(eval_bit_count(bits))),
-            [Value::Bytea(_)] => eval_bit_count_bytes(&values),
+            [Value::Bytea(_)] => expr_string::eval_bit_count_bytes(&values).map_err(Into::into),
             _ => unreachable!("validated bit_count arguments"),
         },
-        BuiltinScalarFunction::GetByte => eval_get_byte(&values),
-        BuiltinScalarFunction::SetByte => eval_set_byte(&values),
+        BuiltinScalarFunction::GetByte => expr_string::eval_get_byte(&values).map_err(Into::into),
+        BuiltinScalarFunction::SetByte => expr_string::eval_set_byte(&values).map_err(Into::into),
         BuiltinScalarFunction::Convert => eval_convert(&values),
-        BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
-        BuiltinScalarFunction::ConvertTo => eval_convert_to_function(&values),
-        BuiltinScalarFunction::Encode => eval_encode_function(&values),
-        BuiltinScalarFunction::Decode => eval_decode_function(&values),
-        BuiltinScalarFunction::Sha224 => eval_sha224_function(&values),
-        BuiltinScalarFunction::Sha256 => eval_sha256_function(&values),
-        BuiltinScalarFunction::Sha384 => eval_sha384_function(&values),
-        BuiltinScalarFunction::Sha512 => eval_sha512_function(&values),
-        BuiltinScalarFunction::Crc32 => eval_crc32_function(&values),
-        BuiltinScalarFunction::Crc32c => eval_crc32c_function(&values),
-        BuiltinScalarFunction::ToBin => eval_to_bin_function(&values),
-        BuiltinScalarFunction::ToOct => eval_to_oct_function(&values),
-        BuiltinScalarFunction::ToHex => eval_to_hex_function(&values),
+        BuiltinScalarFunction::ConvertFrom => {
+            expr_string::eval_convert_from_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ConvertTo => {
+            expr_string::eval_convert_to_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Encode => {
+            expr_string::eval_encode_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Decode => {
+            expr_string::eval_decode_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sha224 => {
+            expr_string::eval_sha224_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sha256 => {
+            expr_string::eval_sha256_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sha384 => {
+            expr_string::eval_sha384_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Sha512 => {
+            expr_string::eval_sha512_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Crc32 => {
+            expr_string::eval_crc32_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Crc32c => {
+            expr_string::eval_crc32c_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToBin => {
+            expr_string::eval_to_bin_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToOct => {
+            expr_string::eval_to_oct_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToHex => {
+            expr_string::eval_to_hex_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::RegexpMatch => eval_regexp_match(&values),
         BuiltinScalarFunction::RegexpLike => eval_regexp_like(
             &values,
@@ -14756,9 +15075,15 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::RegexpInstr => eval_regexp_instr(&values),
         BuiltinScalarFunction::RegexpSubstr => eval_regexp_substr(&values),
         BuiltinScalarFunction::RegexpSplitToArray => eval_regexp_split_to_array(&values),
-        BuiltinScalarFunction::ToChar => eval_to_char_function(&values, &ctx.datetime_config),
-        BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
-        BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
+        BuiltinScalarFunction::ToChar => {
+            expr_string::eval_to_char_function(&values, &ctx.datetime_config).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToDate => {
+            expr_date::eval_to_date_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::ToNumber => {
+            expr_string::eval_to_number_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::PgNumaAvailable => Ok(Value::Bool(false)),
         _ => unreachable!("json builtins handled by expr_json"),
     }

@@ -26,7 +26,6 @@ use crate::backend::commands::tablecmds::{
     check_relation_column_privileges, execute_merge, execute_prepared_insert_row,
     resolve_truncate_relations,
 };
-use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredConstraintSnapshot, DeferredForeignKeyTracker, ExecError, ExecutorContext,
@@ -123,6 +122,7 @@ use crate::pl::plpgsql::{
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
+use pgrust_expr::expr_bool::parse_pg_bool_text;
 use pgrust_nodes::{SessionReplicationRole, StatementResult};
 use pgrust_protocol::fastpath::LargeObjectFastpathCall;
 
@@ -2368,7 +2368,7 @@ pub struct Session {
 
 // :HACK: Preserve the old session path while bytea scalar formatting config
 // lives in pgrust_expr.
-pub use pgrust_expr::compat::pgrust::session::ByteaOutputFormat;
+pub use pgrust_expr::ByteaOutputFormat;
 
 #[derive(Debug, Clone)]
 struct ResolvedCallProcedure {

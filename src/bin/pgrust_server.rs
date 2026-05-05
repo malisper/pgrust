@@ -5,8 +5,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use std::path::PathBuf;
 
-use pgrust::pgrust::cluster::Cluster;
-use pgrust::pgrust::server::serve;
+use pgrust::{Cluster, serve};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {

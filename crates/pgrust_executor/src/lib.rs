@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod advisory_locks;
 pub mod aggregate;
 pub mod array_expr;
@@ -5,6 +6,7 @@ pub mod async_notify;
 pub mod bindings;
 pub mod catalog_builtins;
 pub mod constraints;
+pub mod copy_progress;
 pub mod domain;
 pub mod driver;
 pub mod exec_tuples;
@@ -23,11 +25,18 @@ pub mod services;
 pub mod sqlfunc;
 pub mod srf;
 pub mod startup;
+pub mod statistics;
 pub mod stats;
 pub mod transaction;
 pub mod txid;
 pub mod window;
 
+pub use activity::{
+    DatabaseStatsStore, FunctionStatsDelta, FunctionStatsEntry, IoStatsDelta, IoStatsEntry,
+    IoStatsKey, RelationStatsDelta, RelationStatsEntry, SessionStatsState, StatsDelta,
+    StatsFetchConsistency, StatsMutationEffect, TrackFunctionsSetting, default_pg_stat_io_keys,
+    now_timestamptz,
+};
 pub use advisory_locks::{
     AdvisoryLockCall, AdvisoryLockEvalError, AdvisoryLockOperation, AdvisoryLockRuntime,
     AdvisoryLockScope, advisory_lock_call, execute_advisory_lock_call, is_advisory_builtin,
@@ -82,6 +91,10 @@ pub use constraints::{
     PendingUserConstraintTrigger, RlsDetailSource, RlsWriteCheckFailure, RlsWriteCheckSource,
     check_constraint_failure, find_not_null_violation, rls_write_check_failure,
     row_security_new_row_tid,
+};
+pub use copy_progress::{
+    CopyProgressGuard, CopyProgressSnapshot, current_pg_stat_progress_copy_rows,
+    install_copy_progress,
 };
 pub use domain::{
     DomainConstraintError, DomainConstraintLookup, DomainConstraintLookupKind,
@@ -216,9 +229,10 @@ pub use startup::{
 };
 pub use stats::NodeExecStats;
 pub use stats::{
-    FunctionStatsSnapshot, RelationStatsSnapshot, StatsArgError, function_stats_value,
-    function_xact_stats_value, pg_stat_get_backend_pid_value, pg_stat_get_backend_wal_value,
-    relation_stats_value, relation_xact_stats_value, stats_oid_arg,
+    FunctionStatsSnapshot, RelationStatsSnapshot, StatsArgError, checkpoint_stats_value,
+    default_checkpoint_stats_value, function_stats_value, function_xact_stats_value,
+    pg_stat_get_backend_pid_value, pg_stat_get_backend_wal_value, relation_stats_value,
+    relation_xact_stats_value, stats_oid_arg,
 };
 pub use transaction::{ExecutorTransactionState, SharedExecutorTransactionState};
 pub use txid::{

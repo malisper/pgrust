@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use pgrust::executor::{StatementResult, Value};
-use pgrust::pgrust::database::{Database, Session};
+use pgrust::{Database, Session};
+use pgrust::{StatementResult, Value};
 
 fn main() -> Result<(), String> {
     let args = parse_args()?;
@@ -281,7 +281,7 @@ fn value_checksum(value: &Value) -> i64 {
         | Value::Time(_)
         | Value::TimeTz(_)
         | Value::Timestamp(_)
-        | Value::TimestampTz(_) => pgrust::backend::executor::render_datetime_value_text(value)
+        | Value::TimestampTz(_) => pgrust_expr::render_datetime_value_text(value)
             .unwrap()
             .bytes()
             .map(i64::from)
@@ -289,7 +289,7 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Float64(v) => *v as i64,
         Value::Numeric(v) => v.render().bytes().map(i64::from).sum(),
         Value::Interval(v) => format!("{v:?}").bytes().map(i64::from).sum(),
-        Value::Uuid(v) => pgrust::backend::executor::render_uuid_text(v)
+        Value::Uuid(v) => pgrust_expr::render_uuid_text(v)
             .bytes()
             .map(i64::from)
             .sum(),
@@ -297,12 +297,12 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Jsonb(v) => v.iter().copied().map(i64::from).sum(),
         Value::JsonPath(v) => v.bytes().map(i64::from).sum(),
         Value::Xml(v) => v.bytes().map(i64::from).sum(),
-        Value::Range(_) => pgrust::backend::executor::render_range_text(value)
+        Value::Range(_) => pgrust_expr::render_range_text(value)
             .unwrap_or_default()
             .bytes()
             .map(i64::from)
             .sum(),
-        Value::Multirange(_) => pgrust::backend::executor::render_multirange_text(value)
+        Value::Multirange(_) => pgrust_expr::render_multirange_text(value)
             .unwrap_or_default()
             .bytes()
             .map(i64::from)
@@ -320,11 +320,11 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Bytea(v) => v.iter().copied().map(i64::from).sum(),
         Value::Inet(v) => v.render_inet().bytes().map(i64::from).sum(),
         Value::Cidr(v) => v.render_cidr().bytes().map(i64::from).sum(),
-        Value::MacAddr(v) => pgrust::backend::executor::render_macaddr_text(v)
+        Value::MacAddr(v) => pgrust_expr::render_macaddr_text(v)
             .bytes()
             .map(i64::from)
             .sum(),
-        Value::MacAddr8(v) => pgrust::backend::executor::render_macaddr8_text(v)
+        Value::MacAddr8(v) => pgrust_expr::render_macaddr8_text(v)
             .bytes()
             .map(i64::from)
             .sum(),
@@ -343,5 +343,6 @@ fn value_checksum(value: &Value) -> i64 {
             .sum(),
         Value::Tid(v) => i64::from(v.block_number) + i64::from(v.offset_number),
         Value::Null => 0,
+        _ => 0,
     }
 }

@@ -5,9 +5,7 @@ use crate::compat::backend::tsearch::parser::{
     ASCIIWORD, DECIMAL_T, EMAIL, FILEPATH, HOST, SCIENTIFIC, SIGNEDINT, UNSIGNEDINT, URL_T,
     URLPATH, normalized_query_node_from_text,
 };
-use crate::compat::include::nodes::tsearch::{
-    TextSearchParserToken, TsQuery, TsQueryNode, TsQueryOperand,
-};
+use pgrust_nodes::tsearch::{TextSearchParserToken, TsQuery, TsQueryNode, TsQueryOperand};
 
 const DEFAULT_PARSER_TOKEN_TYPES: &[(i32, &str, &str)] = &[
     (1, "asciiword", "Word, all ASCII"),

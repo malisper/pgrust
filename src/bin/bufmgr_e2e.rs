@@ -7,11 +7,11 @@
 //!
 //! Run with:  cargo run --bin bufmgr_e2e
 
-use pgrust::backend::storage::smgr::{MdStorageManager, StorageManager};
 use pgrust::{
     BufferPool, BufferTag, FlushResult, ForkNumber, PAGE_SIZE, RelFileLocator, RequestPageResult,
     SmgrStorageBackend,
 };
+use pgrust_storage::smgr::{MdStorageManager, StorageManager};
 use std::fs;
 use std::path::PathBuf;
 

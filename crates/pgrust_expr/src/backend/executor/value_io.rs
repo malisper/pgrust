@@ -32,12 +32,12 @@ use crate::compat::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::compat::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::compat::backend::utils::record::register_anonymous_record_descriptor;
 use crate::compat::include::access::htup::{HeapTuple, TupleValue};
-use crate::compat::include::catalog::range_type_ref_for_sql_type;
-use crate::compat::include::nodes::datum::IndirectVarlenaValue;
 use crate::compat::include::nodes::execnodes::ToastFetchContext;
-use crate::compat::include::nodes::primnodes::ColumnDesc;
-use crate::compat::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
+use pgrust_catalog_data::range_type_ref_for_sql_type;
+use pgrust_core::CompactString;
+use pgrust_nodes::datum::IndirectVarlenaValue;
+use pgrust_nodes::primnodes::ColumnDesc;
 
 mod array;
 
@@ -111,12 +111,12 @@ pub fn render_tid_text(value: &crate::compat::include::access::itemptr::ItemPoin
     format!("({},{})", value.block_number, value.offset_number)
 }
 
-pub fn format_record_text(record: &crate::compat::include::nodes::datum::RecordValue) -> String {
+pub fn format_record_text(record: &pgrust_nodes::datum::RecordValue) -> String {
     format_record_text_with_options(record, &FloatFormatOptions::default())
 }
 
 pub fn format_record_text_with_config(
-    record: &crate::compat::include::nodes::datum::RecordValue,
+    record: &pgrust_nodes::datum::RecordValue,
     datetime_config: &DateTimeConfig,
 ) -> String {
     format_record_text_with_options(
@@ -129,7 +129,7 @@ pub fn format_record_text_with_config(
 }
 
 pub fn format_record_text_with_options(
-    record: &crate::compat::include::nodes::datum::RecordValue,
+    record: &pgrust_nodes::datum::RecordValue,
     float_format: &FloatFormatOptions,
 ) -> String {
     let mut out = String::from("(");
@@ -662,9 +662,7 @@ fn canonical_sql_type_identity(sql_type: SqlType) -> SqlType {
         canonical.typrelid = sql_type.typrelid;
         return canonical;
     }
-    if let Some(multirange_type) =
-        crate::compat::include::catalog::multirange_type_ref_for_sql_type(sql_type)
-    {
+    if let Some(multirange_type) = pgrust_catalog_data::multirange_type_ref_for_sql_type(sql_type) {
         let mut canonical = multirange_type.sql_type.with_typmod(sql_type.typmod);
         canonical.is_array = sql_type.is_array;
         canonical.type_oid = if sql_type.is_array {
@@ -822,9 +820,7 @@ fn decode_sql_type_identity(bytes: &[u8], offset: &mut usize) -> Result<SqlType,
     })
 }
 
-fn record_relation_desc(
-    descriptor: &crate::compat::include::nodes::datum::RecordDescriptor,
-) -> RelationDesc {
+fn record_relation_desc(descriptor: &pgrust_nodes::datum::RecordDescriptor) -> RelationDesc {
     RelationDesc {
         columns: descriptor
             .fields
@@ -834,9 +830,7 @@ fn record_relation_desc(
     }
 }
 
-fn encode_composite_datum(
-    record: &crate::compat::include::nodes::datum::RecordValue,
-) -> Result<Vec<u8>, ExecError> {
+fn encode_composite_datum(record: &pgrust_nodes::datum::RecordValue) -> Result<Vec<u8>, ExecError> {
     let desc = record_relation_desc(&record.descriptor);
     let tuple = tuple_from_values(&desc, &record.fields)?;
     let tuple_bytes = tuple.serialize();
@@ -855,9 +849,7 @@ fn encode_composite_datum(
     Ok(out)
 }
 
-fn decode_composite_datum(
-    bytes: &[u8],
-) -> Result<crate::compat::include::nodes::datum::RecordValue, ExecError> {
+fn decode_composite_datum(bytes: &[u8]) -> Result<pgrust_nodes::datum::RecordValue, ExecError> {
     let mut offset = 0usize;
     let version = *bytes
         .get(offset)
@@ -896,11 +888,9 @@ fn decode_composite_datum(
     }
     let tuple_payload = decode_internal_text(bytes, &mut offset)?;
     let descriptor = if typrelid != 0 {
-        crate::compat::include::nodes::datum::RecordDescriptor::named(
-            type_oid, typrelid, typmod, fields,
-        )
+        pgrust_nodes::datum::RecordDescriptor::named(type_oid, typrelid, typmod, fields)
     } else {
-        crate::compat::include::nodes::datum::RecordDescriptor::anonymous(fields, typmod)
+        pgrust_nodes::datum::RecordDescriptor::anonymous(fields, typmod)
     };
     if descriptor.typrelid == 0 {
         register_anonymous_record_descriptor(&descriptor);
@@ -917,12 +907,12 @@ fn decode_composite_datum(
         .zip(raw_values.iter())
         .map(|(column, raw)| decode_value(column, *raw))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(crate::compat::include::nodes::datum::RecordValue::from_descriptor(descriptor, values))
+    Ok(pgrust_nodes::datum::RecordValue::from_descriptor(
+        descriptor, values,
+    ))
 }
 
-fn encode_internal_array(
-    array: &crate::compat::include::nodes::datum::ArrayValue,
-) -> Result<Vec<u8>, ExecError> {
+fn encode_internal_array(array: &pgrust_nodes::datum::ArrayValue) -> Result<Vec<u8>, ExecError> {
     let mut out = Vec::new();
     match array.element_type_oid {
         Some(oid) => {
@@ -944,9 +934,7 @@ fn encode_internal_array(
     Ok(out)
 }
 
-fn decode_internal_array(
-    bytes: &[u8],
-) -> Result<crate::compat::include::nodes::datum::ArrayValue, ExecError> {
+fn decode_internal_array(bytes: &[u8]) -> Result<pgrust_nodes::datum::ArrayValue, ExecError> {
     let mut offset = 0usize;
     if offset >= bytes.len() {
         return Err(ExecError::InvalidStorageValue {
@@ -988,7 +976,7 @@ fn decode_internal_array(
         let lower_bound = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
         let length = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
         offset += 8;
-        dimensions.push(crate::compat::include::nodes::datum::ArrayDimension {
+        dimensions.push(pgrust_nodes::datum::ArrayDimension {
             lower_bound,
             length,
         });
@@ -1006,22 +994,18 @@ fn decode_internal_array(
         let payload = decode_internal_text(bytes, &mut offset)?;
         elements.push(decode_internal_value(payload)?);
     }
-    Ok(crate::compat::include::nodes::datum::ArrayValue {
+    Ok(pgrust_nodes::datum::ArrayValue {
         element_type_oid,
         dimensions,
         elements,
     })
 }
 
-fn encode_internal_record(
-    record: &crate::compat::include::nodes::datum::RecordValue,
-) -> Result<Vec<u8>, ExecError> {
+fn encode_internal_record(record: &pgrust_nodes::datum::RecordValue) -> Result<Vec<u8>, ExecError> {
     encode_composite_datum(record)
 }
 
-fn decode_internal_record(
-    bytes: &[u8],
-) -> Result<crate::compat::include::nodes::datum::RecordValue, ExecError> {
+fn decode_internal_record(bytes: &[u8]) -> Result<pgrust_nodes::datum::RecordValue, ExecError> {
     decode_composite_datum(bytes)
 }
 
@@ -1230,9 +1214,7 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
         Value::Array(v) => {
             out.push(INTERNAL_VALUE_TAG_ARRAY);
             encode_internal_text(
-                &encode_internal_array(
-                    &crate::compat::include::nodes::datum::ArrayValue::from_1d(v),
-                )?,
+                &encode_internal_array(&pgrust_nodes::datum::ArrayValue::from_1d(v))?,
                 &mut out,
             );
         }
@@ -1305,24 +1287,24 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                 }
             })?))
         }
-        INTERNAL_VALUE_TAG_DATE => Value::Date(crate::compat::include::nodes::datetime::DateADT(
-            i32::from_le_bytes(
+        INTERNAL_VALUE_TAG_DATE => {
+            Value::Date(pgrust_nodes::datetime::DateADT(i32::from_le_bytes(
                 rest.try_into()
                     .map_err(|_| ExecError::InvalidStorageValue {
                         column: "<record>".into(),
                         details: "invalid date record payload".into(),
                     })?,
-            ),
-        )),
-        INTERNAL_VALUE_TAG_TIME => Value::Time(crate::compat::include::nodes::datetime::TimeADT(
-            i64::from_le_bytes(
+            )))
+        }
+        INTERNAL_VALUE_TAG_TIME => {
+            Value::Time(pgrust_nodes::datetime::TimeADT(i64::from_le_bytes(
                 rest.try_into()
                     .map_err(|_| ExecError::InvalidStorageValue {
                         column: "<record>".into(),
                         details: "invalid time record payload".into(),
                     })?,
-            ),
-        )),
+            )))
+        }
         INTERNAL_VALUE_TAG_TIMETZ => {
             if rest.len() != 12 {
                 return Err(ExecError::InvalidStorageValue {
@@ -1330,30 +1312,29 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                     details: "invalid timetz record payload".into(),
                 });
             }
-            Value::TimeTz(crate::compat::include::nodes::datetime::TimeTzADT {
-                time: crate::compat::include::nodes::datetime::TimeADT(i64::from_le_bytes(
+            Value::TimeTz(pgrust_nodes::datetime::TimeTzADT {
+                time: pgrust_nodes::datetime::TimeADT(i64::from_le_bytes(
                     rest[0..8].try_into().unwrap(),
                 )),
                 offset_seconds: i32::from_le_bytes(rest[8..12].try_into().unwrap()),
             })
         }
-        INTERNAL_VALUE_TAG_TIMESTAMP => Value::Timestamp(
-            crate::compat::include::nodes::datetime::TimestampADT(i64::from_le_bytes(
+        INTERNAL_VALUE_TAG_TIMESTAMP => {
+            Value::Timestamp(pgrust_nodes::datetime::TimestampADT(i64::from_le_bytes(
                 rest.try_into()
                     .map_err(|_| ExecError::InvalidStorageValue {
                         column: "<record>".into(),
                         details: "invalid timestamp record payload".into(),
                     })?,
-            )),
-        ),
+            )))
+        }
         INTERNAL_VALUE_TAG_TIMESTAMPTZ => Value::TimestampTz(
-            crate::compat::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes(
-                rest.try_into()
-                    .map_err(|_| ExecError::InvalidStorageValue {
-                        column: "<record>".into(),
-                        details: "invalid timestamptz record payload".into(),
-                    })?,
-            )),
+            pgrust_nodes::datetime::TimestampTzADT(i64::from_le_bytes(rest.try_into().map_err(
+                |_| ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid timestamptz record payload".into(),
+                },
+            )?)),
         ),
         INTERNAL_VALUE_TAG_INTERVAL => {
             if rest.len() != 16 {
@@ -1362,7 +1343,7 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                     details: "invalid interval record payload".into(),
                 });
             }
-            Value::Interval(crate::compat::include::nodes::datum::IntervalValue {
+            Value::Interval(pgrust_nodes::datum::IntervalValue {
                 time_micros: i64::from_le_bytes(rest[0..8].try_into().unwrap()),
                 days: i32::from_le_bytes(rest[8..12].try_into().unwrap()),
                 months: i32::from_le_bytes(rest[12..16].try_into().unwrap()),
@@ -1378,9 +1359,7 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
             let bit_len = i32::from_le_bytes(rest[0..4].try_into().unwrap());
             let mut offset = 4usize;
             let bit_bytes = decode_internal_text(rest, &mut offset)?.to_vec();
-            Value::Bit(crate::compat::include::nodes::datum::BitString::new(
-                bit_len, bit_bytes,
-            ))
+            Value::Bit(pgrust_nodes::datum::BitString::new(bit_len, bit_bytes))
         }
         INTERNAL_VALUE_TAG_BYTEA => {
             let mut offset = 0usize;
@@ -1412,7 +1391,7 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                     details: "invalid point record payload".into(),
                 });
             }
-            Value::Point(crate::compat::include::nodes::datum::GeoPoint {
+            Value::Point(pgrust_nodes::datum::GeoPoint {
                 x: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
                 y: f64::from_le_bytes(rest[8..16].try_into().unwrap()),
             })
@@ -1424,13 +1403,13 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                     details: "invalid lseg record payload".into(),
                 });
             }
-            Value::Lseg(crate::compat::include::nodes::datum::GeoLseg {
+            Value::Lseg(pgrust_nodes::datum::GeoLseg {
                 p: [
-                    crate::compat::include::nodes::datum::GeoPoint {
+                    pgrust_nodes::datum::GeoPoint {
                         x: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
                         y: f64::from_le_bytes(rest[8..16].try_into().unwrap()),
                     },
-                    crate::compat::include::nodes::datum::GeoPoint {
+                    pgrust_nodes::datum::GeoPoint {
                         x: f64::from_le_bytes(rest[16..24].try_into().unwrap()),
                         y: f64::from_le_bytes(rest[24..32].try_into().unwrap()),
                     },
@@ -1455,13 +1434,13 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
             let mut points = Vec::with_capacity(count);
             let mut offset = 5usize;
             for _ in 0..count {
-                points.push(crate::compat::include::nodes::datum::GeoPoint {
+                points.push(pgrust_nodes::datum::GeoPoint {
                     x: f64::from_le_bytes(rest[offset..offset + 8].try_into().unwrap()),
                     y: f64::from_le_bytes(rest[offset + 8..offset + 16].try_into().unwrap()),
                 });
                 offset += 16;
             }
-            Value::Path(crate::compat::include::nodes::datum::GeoPath { closed, points })
+            Value::Path(pgrust_nodes::datum::GeoPath { closed, points })
         }
         INTERNAL_VALUE_TAG_LINE => {
             if rest.len() != 24 {
@@ -1470,7 +1449,7 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                     details: "invalid line record payload".into(),
                 });
             }
-            Value::Line(crate::compat::include::nodes::datum::GeoLine {
+            Value::Line(pgrust_nodes::datum::GeoLine {
                 a: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
                 b: f64::from_le_bytes(rest[8..16].try_into().unwrap()),
                 c: f64::from_le_bytes(rest[16..24].try_into().unwrap()),
@@ -1483,12 +1462,12 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                     details: "invalid box record payload".into(),
                 });
             }
-            Value::Box(crate::compat::include::nodes::datum::GeoBox {
-                high: crate::compat::include::nodes::datum::GeoPoint {
+            Value::Box(pgrust_nodes::datum::GeoBox {
+                high: pgrust_nodes::datum::GeoPoint {
                     x: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
                     y: f64::from_le_bytes(rest[8..16].try_into().unwrap()),
                 },
-                low: crate::compat::include::nodes::datum::GeoPoint {
+                low: pgrust_nodes::datum::GeoPoint {
                     x: f64::from_le_bytes(rest[16..24].try_into().unwrap()),
                     y: f64::from_le_bytes(rest[24..32].try_into().unwrap()),
                 },
@@ -1508,8 +1487,8 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                     details: "invalid circle record payload".into(),
                 });
             }
-            Value::Circle(crate::compat::include::nodes::datum::GeoCircle {
-                center: crate::compat::include::nodes::datum::GeoPoint {
+            Value::Circle(pgrust_nodes::datum::GeoCircle {
+                center: pgrust_nodes::datum::GeoPoint {
                     x: f64::from_le_bytes(rest[0..8].try_into().unwrap()),
                     y: f64::from_le_bytes(rest[8..16].try_into().unwrap()),
                 },
@@ -2433,7 +2412,7 @@ pub fn decode_value_with_toast(
             if column.storage.attlen != 8 || bytes.len() != 8 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            if column.sql_type.type_oid == crate::compat::include::catalog::XID8_TYPE_OID {
+            if column.sql_type.type_oid == pgrust_catalog_data::XID8_TYPE_OID {
                 return Ok(Value::Xid8(u64::from_le_bytes(bytes.try_into().map_err(
                     |_| ExecError::InvalidStorageValue {
                         column: column.name.clone(),
@@ -2463,66 +2442,54 @@ pub fn decode_value_with_toast(
             if column.storage.attlen != 4 || bytes.len() != 4 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            Ok(Value::Date(
-                crate::compat::include::nodes::datetime::DateADT(i32::from_le_bytes(
-                    bytes.try_into().unwrap(),
-                )),
-            ))
+            Ok(Value::Date(pgrust_nodes::datetime::DateADT(
+                i32::from_le_bytes(bytes.try_into().unwrap()),
+            )))
         }
         ScalarType::Time => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            Ok(Value::Time(
-                crate::compat::include::nodes::datetime::TimeADT(i64::from_le_bytes(
-                    bytes.try_into().unwrap(),
-                )),
-            ))
+            Ok(Value::Time(pgrust_nodes::datetime::TimeADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
         }
         ScalarType::TimeTz => {
             if column.storage.attlen != 12 || bytes.len() != 12 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            Ok(Value::TimeTz(
-                crate::compat::include::nodes::datetime::TimeTzADT {
-                    time: crate::compat::include::nodes::datetime::TimeADT(i64::from_le_bytes(
-                        bytes[0..8].try_into().unwrap(),
-                    )),
-                    offset_seconds: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-                },
-            ))
+            Ok(Value::TimeTz(pgrust_nodes::datetime::TimeTzADT {
+                time: pgrust_nodes::datetime::TimeADT(i64::from_le_bytes(
+                    bytes[0..8].try_into().unwrap(),
+                )),
+                offset_seconds: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            }))
         }
         ScalarType::Timestamp => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            Ok(Value::Timestamp(
-                crate::compat::include::nodes::datetime::TimestampADT(i64::from_le_bytes(
-                    bytes.try_into().unwrap(),
-                )),
-            ))
+            Ok(Value::Timestamp(pgrust_nodes::datetime::TimestampADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
         }
         ScalarType::TimestampTz => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            Ok(Value::TimestampTz(
-                crate::compat::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes(
-                    bytes.try_into().unwrap(),
-                )),
-            ))
+            Ok(Value::TimestampTz(pgrust_nodes::datetime::TimestampTzADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
         }
         ScalarType::Interval => {
             if column.storage.attlen != 16 || bytes.len() != 16 {
                 return Err(unsupported_storage_type(column, bytes));
             }
-            Ok(Value::Interval(
-                crate::compat::include::nodes::datum::IntervalValue {
-                    time_micros: i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-                    days: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-                    months: i32::from_le_bytes(bytes[12..16].try_into().unwrap()),
-                },
-            ))
+            Ok(Value::Interval(pgrust_nodes::datum::IntervalValue {
+                time_micros: i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                days: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                months: i32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            }))
         }
         ScalarType::BitString => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -2535,9 +2502,10 @@ pub fn decode_value_with_toast(
                 });
             }
             let bit_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as i32;
-            Ok(Value::Bit(
-                crate::compat::include::nodes::datum::BitString::new(bit_len, bytes[4..].to_vec()),
-            ))
+            Ok(Value::Bit(pgrust_nodes::datum::BitString::new(
+                bit_len,
+                bytes[4..].to_vec(),
+            )))
         }
         ScalarType::Bytea => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -2821,8 +2789,8 @@ mod tests {
         DateOrder, DateStyleFormat, DateTimeConfig,
     };
     use crate::compat::backend::utils::time::timestamp::parse_timestamp_text;
-    use crate::compat::include::catalog::{INT4_TYPE_OID, INT4RANGE_TYPE_OID};
-    use crate::compat::include::nodes::datum::{
+    use pgrust_catalog_data::{INT4_TYPE_OID, INT4RANGE_TYPE_OID};
+    use pgrust_nodes::datum::{
         ArrayDimension, IndirectVarlenaValue, NumericValue, RecordDescriptor, RecordValue,
     };
     use std::sync::Arc;
@@ -2834,7 +2802,7 @@ mod tests {
         };
         let value = Value::PgArray(
             ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2)])
-                .with_element_type_oid(crate::compat::include::catalog::INT4_TYPE_OID),
+                .with_element_type_oid(pgrust_catalog_data::INT4_TYPE_OID),
         );
 
         let tuple = tuple_from_values(&desc, std::slice::from_ref(&value)).unwrap();
@@ -2851,22 +2819,22 @@ mod tests {
             column_desc("c2::circle", SqlType::new(SqlTypeKind::Circle), false),
         ];
         let proposed = vec![
-            Value::Circle(crate::compat::include::nodes::datum::GeoCircle {
-                center: crate::compat::include::nodes::datum::GeoPoint { x: 20.0, y: 20.0 },
+            Value::Circle(pgrust_nodes::datum::GeoCircle {
+                center: pgrust_nodes::datum::GeoPoint { x: 20.0, y: 20.0 },
                 radius: 10.0,
             }),
-            Value::Circle(crate::compat::include::nodes::datum::GeoCircle {
-                center: crate::compat::include::nodes::datum::GeoPoint { x: 0.0, y: 0.0 },
+            Value::Circle(pgrust_nodes::datum::GeoCircle {
+                center: pgrust_nodes::datum::GeoPoint { x: 0.0, y: 0.0 },
                 radius: 4.0,
             }),
         ];
         let existing = vec![
-            Value::Circle(crate::compat::include::nodes::datum::GeoCircle {
-                center: crate::compat::include::nodes::datum::GeoPoint { x: 10.0, y: 10.0 },
+            Value::Circle(pgrust_nodes::datum::GeoCircle {
+                center: pgrust_nodes::datum::GeoPoint { x: 10.0, y: 10.0 },
                 radius: 10.0,
             }),
-            Value::Circle(crate::compat::include::nodes::datum::GeoCircle {
-                center: crate::compat::include::nodes::datum::GeoPoint { x: 0.0, y: 0.0 },
+            Value::Circle(pgrust_nodes::datum::GeoCircle {
+                center: pgrust_nodes::datum::GeoPoint { x: 0.0, y: 0.0 },
                 radius: 5.0,
             }),
         ];
@@ -2880,7 +2848,7 @@ mod tests {
     #[test]
     fn anyarray_payload_roundtrips_directly() {
         let array = ArrayValue::from_1d(vec![Value::Text("a".into()), Value::Text("b".into())])
-            .with_element_type_oid(crate::compat::include::catalog::TEXT_TYPE_OID);
+            .with_element_type_oid(pgrust_catalog_data::TEXT_TYPE_OID);
         let bytes = encode_anyarray_bytes(&array).unwrap();
         let decoded = decode_anyarray_bytes(&bytes).unwrap();
 
@@ -2917,7 +2885,7 @@ mod tests {
     #[test]
     fn concrete_array_payload_preserves_element_oid() {
         let array = ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2)])
-            .with_element_type_oid(crate::compat::include::catalog::INT4_TYPE_OID);
+            .with_element_type_oid(pgrust_catalog_data::INT4_TYPE_OID);
         let bytes = encode_array_bytes(SqlType::new(SqlTypeKind::Int4), &array).unwrap();
         let decoded = decode_array_bytes(SqlType::new(SqlTypeKind::Int4), &bytes).unwrap();
 
@@ -2927,7 +2895,7 @@ mod tests {
     #[test]
     fn concrete_array_decoder_ignores_varchar_typmod_in_header_check() {
         let array = ArrayValue::from_1d(vec![Value::Text("ab".into())])
-            .with_element_type_oid(crate::compat::include::catalog::VARCHAR_TYPE_OID);
+            .with_element_type_oid(pgrust_catalog_data::VARCHAR_TYPE_OID);
         let bytes =
             encode_array_bytes(SqlType::with_char_len(SqlTypeKind::Varchar, 4), &array).unwrap();
         let decoded =
@@ -2941,7 +2909,7 @@ mod tests {
         let desc = RelationDesc {
             columns: vec![column_desc(
                 "v",
-                SqlType::record(crate::compat::include::catalog::RECORD_TYPE_OID),
+                SqlType::record(pgrust_catalog_data::RECORD_TYPE_OID),
                 true,
             )],
         };
@@ -2967,7 +2935,7 @@ mod tests {
         let desc = RelationDesc {
             columns: vec![column_desc(
                 "v",
-                SqlType::record(crate::compat::include::catalog::RECORD_TYPE_OID),
+                SqlType::record(pgrust_catalog_data::RECORD_TYPE_OID),
                 true,
             )],
         };
@@ -3000,7 +2968,7 @@ mod tests {
         let desc = RelationDesc {
             columns: vec![column_desc(
                 "v",
-                SqlType::record(crate::compat::include::catalog::RECORD_TYPE_OID),
+                SqlType::record(pgrust_catalog_data::RECORD_TYPE_OID),
                 true,
             )],
         };
@@ -3041,7 +3009,7 @@ mod tests {
         let desc = RelationDesc {
             columns: vec![column_desc(
                 "v",
-                SqlType::record(crate::compat::include::catalog::RECORD_TYPE_OID),
+                SqlType::record(pgrust_catalog_data::RECORD_TYPE_OID),
                 true,
             )],
         };
@@ -3067,11 +3035,11 @@ mod tests {
         );
         assert_eq!(
             decoded.descriptor.fields[0].sql_type.type_oid,
-            crate::compat::include::catalog::INT4RANGE_TYPE_OID
+            pgrust_catalog_data::INT4RANGE_TYPE_OID
         );
         assert_eq!(
             decoded.descriptor.fields[0].sql_type.range_subtype_oid,
-            crate::compat::include::catalog::INT4_TYPE_OID
+            pgrust_catalog_data::INT4_TYPE_OID
         );
         assert_eq!(decoded.fields[0], expected_range);
     }
@@ -3086,7 +3054,7 @@ mod tests {
         assert_eq!(i32::from_le_bytes(bytes[4..8].try_into().unwrap()), 0);
         assert_eq!(
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            crate::compat::include::catalog::INT4_TYPE_OID
+            pgrust_catalog_data::INT4_TYPE_OID
         );
         assert_eq!(i32::from_le_bytes(bytes[12..16].try_into().unwrap()), 2);
         assert_eq!(i32::from_le_bytes(bytes[16..20].try_into().unwrap()), 1);
@@ -3109,7 +3077,7 @@ mod tests {
         assert_eq!(i32::from_le_bytes(bytes[4..8].try_into().unwrap()), 24);
         assert_eq!(
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            crate::compat::include::catalog::TEXT_TYPE_OID
+            pgrust_catalog_data::TEXT_TYPE_OID
         );
         assert_eq!(i32::from_le_bytes(bytes[12..16].try_into().unwrap()), 3);
         assert_eq!(i32::from_le_bytes(bytes[16..20].try_into().unwrap()), 1);
@@ -3122,12 +3090,12 @@ mod tests {
     #[test]
     fn concrete_arrays_use_declared_element_oid() {
         let array = ArrayValue::from_1d(vec![Value::Int32(1)])
-            .with_element_type_oid(crate::compat::include::catalog::TEXT_TYPE_OID);
+            .with_element_type_oid(pgrust_catalog_data::TEXT_TYPE_OID);
         let bytes = encode_array_bytes(SqlType::new(SqlTypeKind::Int4), &array).unwrap();
 
         assert_eq!(
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            crate::compat::include::catalog::INT4_TYPE_OID
+            pgrust_catalog_data::INT4_TYPE_OID
         );
     }
 
@@ -3137,7 +3105,7 @@ mod tests {
             Value::Text("00:00:00".into()),
             Value::Text("01:42:20".into()),
         ])
-        .with_element_type_oid(crate::compat::include::catalog::INTERVAL_TYPE_OID);
+        .with_element_type_oid(pgrust_catalog_data::INTERVAL_TYPE_OID);
 
         assert_eq!(format_array_value_text(&array), "{00:00:00,01:42:20}");
     }
@@ -3151,7 +3119,7 @@ mod tests {
             }],
             Vec::new(),
         )
-        .with_element_type_oid(crate::compat::include::catalog::INT4_TYPE_OID);
+        .with_element_type_oid(pgrust_catalog_data::INT4_TYPE_OID);
         let bytes = encode_array_bytes(SqlType::new(SqlTypeKind::Int4), &array).unwrap();
         let decoded = decode_array_bytes(SqlType::new(SqlTypeKind::Int4), &bytes).unwrap();
 
@@ -3161,7 +3129,7 @@ mod tests {
     #[test]
     fn typed_array_decoder_rejects_mismatched_header_oid() {
         let array = ArrayValue::from_1d(vec![Value::Text("a".into())])
-            .with_element_type_oid(crate::compat::include::catalog::TEXT_TYPE_OID);
+            .with_element_type_oid(pgrust_catalog_data::TEXT_TYPE_OID);
         let bytes = encode_anyarray_bytes(&array).unwrap();
         let error = decode_array_bytes(SqlType::new(SqlTypeKind::Int4), &bytes).unwrap_err();
 
@@ -3238,7 +3206,7 @@ mod tests {
         )
         .expect("parse float4");
         let record = RecordValue::from_descriptor(
-            crate::compat::include::nodes::datum::RecordDescriptor::anonymous(
+            pgrust_nodes::datum::RecordDescriptor::anonymous(
                 vec![
                     ("a".into(), SqlType::new(SqlTypeKind::Int2)),
                     ("b".into(), SqlType::new(SqlTypeKind::Float4)),

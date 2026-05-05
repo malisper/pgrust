@@ -14,14 +14,14 @@ use crate::compat::backend::utils::time::timestamp::{
     is_valid_finite_timestamp_usecs, make_timestamptz_from_parts, timestamp_at_time_zone,
     timestamptz_at_time_zone,
 };
-use crate::compat::include::nodes::datetime::{
+use chrono::Datelike;
+use num_traits::ToPrimitive;
+use pgrust_nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
     TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE,
     USECS_PER_SEC,
 };
-use crate::compat::include::nodes::datum::{IntervalValue, NumericValue};
-use chrono::Datelike;
-use num_traits::ToPrimitive;
+use pgrust_nodes::datum::{IntervalValue, NumericValue};
 
 const MONTHS_PER_YEAR: i32 = 12;
 const DAYS_PER_MONTH: i32 = 30;
@@ -762,7 +762,7 @@ pub fn eval_isfinite_function(values: &[Value]) -> Result<Value, ExecError> {
         other => Err(ExecError::TypeMismatch {
             op: "isfinite",
             left: other.clone(),
-            right: Value::Date(crate::compat::include::nodes::datetime::DateADT(0)),
+            right: Value::Date(pgrust_nodes::datetime::DateADT(0)),
         }),
     }
 }
@@ -2826,7 +2826,7 @@ fn parse_to_timestamp_text_format(
 
     if let Some(julian_day) = fields.julian_day {
         let days = julian_day
-            .checked_sub(crate::compat::include::nodes::datetime::POSTGRES_EPOCH_JDATE)
+            .checked_sub(pgrust_nodes::datetime::POSTGRES_EPOCH_JDATE)
             .ok_or_else(|| to_timestamp_field_out_of_range(input))?;
         let (resolved_year, resolved_month, resolved_day) = ymd_from_days(days);
         fields.year = Some(resolved_year);
@@ -3138,9 +3138,7 @@ pub fn eval_make_date_function(values: &[Value]) -> Result<Value, ExecError> {
     let day_u32 = u32::try_from(day).map_err(|_| invalid_make_date(year, month, day))?;
     let days = days_from_ymd(astronomical_year, month_u32, day_u32)
         .ok_or_else(|| invalid_make_date(year, month, day))?;
-    Ok(Value::Date(
-        crate::compat::include::nodes::datetime::DateADT(days),
-    ))
+    Ok(Value::Date(pgrust_nodes::datetime::DateADT(days)))
 }
 
 fn invalid_make_time(hour: i32, minute: i32, second: f64) -> ExecError {
@@ -3680,7 +3678,7 @@ fn to_date_template_error(err: ExecError, input: &str) -> ExecError {
 mod tests {
     use super::*;
     use crate::compat::backend::libpq::pqformat::format_exec_error;
-    use crate::compat::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT};
+    use pgrust_nodes::datetime::{DateADT, TimeADT, TimeTzADT};
 
     #[test]
     fn to_timestamp_text_format_supports_horology_templates() {

@@ -1,6 +1,6 @@
 use super::super::ExecError;
-use crate::compat::include::nodes::tsearch::{TsLexeme, TsPosition, TsVector, TsWeight};
-use crate::compat::pgrust::compact_string::CompactString;
+use pgrust_core::CompactString;
+use pgrust_nodes::tsearch::{TsLexeme, TsPosition, TsVector, TsWeight};
 
 pub fn parse_tsvector_text(text: &str) -> Result<TsVector, ExecError> {
     TsVector::parse(text).map_err(|message| tsvector_input_parse_error(text, message))

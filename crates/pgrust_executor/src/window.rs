@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use pgrust_expr::backend::utils::time::datetime::{
+use pgrust_expr::utils::time::datetime::{
     days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
 };
 use pgrust_nodes::datetime::{
@@ -612,10 +612,10 @@ mod tests {
 
     #[test]
     fn timestamp_month_offsets_clamp_to_last_day() {
-        let jan_31 = pgrust_expr::backend::utils::time::datetime::days_from_ymd(2024, 1, 31)
+        let jan_31 = pgrust_expr::utils::time::datetime::days_from_ymd(2024, 1, 31)
             .map(|days| i64::from(days) * USECS_PER_DAY)
             .unwrap();
-        let feb_29 = pgrust_expr::backend::utils::time::datetime::days_from_ymd(2024, 2, 29)
+        let feb_29 = pgrust_expr::utils::time::datetime::days_from_ymd(2024, 2, 29)
             .map(|days| i64::from(days) * USECS_PER_DAY)
             .unwrap();
         let offset = Value::Interval(IntervalValue {

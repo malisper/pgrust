@@ -103,18 +103,18 @@ fn catalog_attmissingval_value(value: Value) -> Value {
         // encode array-typed elements, so persist array defaults as their SQL
         // array literal and parse them back when rebuilding the relation desc.
         Value::Array(values) => {
-            Value::Text(pgrust_expr::backend::executor::value_io::format_array_text(&values).into())
+            Value::Text(pgrust_expr::executor::value_io::format_array_text(&values).into())
         }
-        Value::PgArray(array) => Value::Text(
-            pgrust_expr::backend::executor::value_io::format_array_value_text(&array).into(),
-        ),
+        Value::PgArray(array) => {
+            Value::Text(pgrust_expr::executor::value_io::format_array_value_text(&array).into())
+        }
         other => other,
     }
 }
 
 pub fn missing_default_value_from_attmissingval(value: Value, sql_type: SqlType) -> Value {
     if sql_type.is_array && matches!(value, Value::Text(_) | Value::TextRef(_, _)) {
-        pgrust_expr::backend::executor::cast_value(value.clone(), sql_type).unwrap_or(value)
+        pgrust_expr::executor::cast_value(value.clone(), sql_type).unwrap_or(value)
     } else {
         value
     }

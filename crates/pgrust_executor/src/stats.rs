@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use pgrust_access::transam::CheckpointStatsSnapshot;
 use pgrust_nodes::Value;
 use pgrust_nodes::datetime::TimestampTzADT;
 use pgrust_nodes::datum::RecordValue;
@@ -134,6 +135,43 @@ pub fn function_xact_stats_value(
     }
 }
 
+pub fn checkpoint_stats_value(
+    func: BuiltinScalarFunction,
+    stats: &CheckpointStatsSnapshot,
+) -> Option<Value> {
+    match func {
+        BuiltinScalarFunction::PgStatGetCheckpointerNumTimed => {
+            Some(Value::Int64(stats.num_timed as i64))
+        }
+        BuiltinScalarFunction::PgStatGetCheckpointerNumRequested => {
+            Some(Value::Int64(stats.num_requested as i64))
+        }
+        BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed => {
+            Some(Value::Int64(stats.num_done as i64))
+        }
+        BuiltinScalarFunction::PgStatGetCheckpointerBuffersWritten => {
+            Some(Value::Int64(stats.buffers_written as i64))
+        }
+        BuiltinScalarFunction::PgStatGetCheckpointerSlruWritten => {
+            Some(Value::Int64(stats.slru_written as i64))
+        }
+        BuiltinScalarFunction::PgStatGetCheckpointerWriteTime => {
+            Some(Value::Float64(stats.write_time_ms))
+        }
+        BuiltinScalarFunction::PgStatGetCheckpointerSyncTime => {
+            Some(Value::Float64(stats.sync_time_ms))
+        }
+        BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime => {
+            Some(Value::TimestampTz(stats.stats_reset))
+        }
+        _ => None,
+    }
+}
+
+pub fn default_checkpoint_stats_value(func: BuiltinScalarFunction) -> Option<Value> {
+    checkpoint_stats_value(func, &CheckpointStatsSnapshot::default())
+}
+
 pub fn pg_stat_get_backend_pid_value(
     values: &[Value],
     current_backend_id: i32,
@@ -245,6 +283,35 @@ mod tests {
         assert_eq!(
             pg_stat_get_backend_wal_value(&[Value::Int32(41)], 42, 99, TimestampTzADT(123)),
             Value::Null
+        );
+    }
+
+    #[test]
+    fn checkpoint_stats_map_to_sql_values() {
+        let stats = CheckpointStatsSnapshot {
+            num_timed: 1,
+            num_requested: 2,
+            buffers_written: 3,
+            stats_reset: TimestampTzADT(456),
+            ..Default::default()
+        };
+        assert_eq!(
+            checkpoint_stats_value(BuiltinScalarFunction::PgStatGetCheckpointerNumTimed, &stats),
+            Some(Value::Int64(1))
+        );
+        assert_eq!(
+            checkpoint_stats_value(
+                BuiltinScalarFunction::PgStatGetCheckpointerBuffersWritten,
+                &stats
+            ),
+            Some(Value::Int64(3))
+        );
+        assert_eq!(
+            checkpoint_stats_value(
+                BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime,
+                &stats
+            ),
+            Some(Value::TimestampTz(TimestampTzADT(456)))
         );
     }
 }

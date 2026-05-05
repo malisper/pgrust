@@ -1,9 +1,9 @@
 use std::cmp::Ordering;
 
 use super::super::ExecError;
-use crate::compat::include::catalog::{INT2_TYPE_OID, TEXT_TYPE_OID};
-use crate::compat::include::nodes::datum::{ArrayValue, Value};
-use crate::compat::include::nodes::tsearch::{TsLexeme, TsPosition, TsVector, TsWeight};
+use pgrust_catalog_data::{INT2_TYPE_OID, TEXT_TYPE_OID};
+use pgrust_nodes::datum::{ArrayValue, Value};
+use pgrust_nodes::tsearch::{TsLexeme, TsPosition, TsVector, TsWeight};
 
 pub fn compare_tsvector(left: &TsVector, right: &TsVector) -> Ordering {
     left.render().cmp(&right.render())
@@ -210,13 +210,11 @@ pub fn unnest_tsvector(vector: &TsVector) -> Vec<Value> {
                     .with_element_type_oid(TEXT_TYPE_OID),
                 )
             };
-            Value::Record(
-                crate::compat::include::nodes::datum::RecordValue::anonymous(vec![
-                    ("lexeme".into(), Value::Text(lexeme.text.clone())),
-                    ("positions".into(), positions),
-                    ("weights".into(), weights),
-                ]),
-            )
+            Value::Record(pgrust_nodes::datum::RecordValue::anonymous(vec![
+                ("lexeme".into(), Value::Text(lexeme.text.clone())),
+                ("positions".into(), positions),
+                ("weights".into(), weights),
+            ]))
         })
         .collect()
 }

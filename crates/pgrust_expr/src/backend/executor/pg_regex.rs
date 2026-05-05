@@ -2,7 +2,7 @@ use super::ExecError;
 use super::RegexError;
 use super::expr_ops::{TextCollationSemantics, ensure_builtin_collation_supported};
 use super::node_types::Value;
-use crate::compat::pgrust::compact_string::CompactString;
+use pgrust_core::CompactString;
 use regex::{Regex, RegexBuilder};
 use unicode_general_category::{GeneralCategory, get_general_category};
 
@@ -2544,9 +2544,9 @@ mod tests {
     #[test]
     fn eval_similar_accepts_builtin_collations() {
         for oid in [
-            crate::compat::include::catalog::DEFAULT_COLLATION_OID,
-            crate::compat::include::catalog::C_COLLATION_OID,
-            crate::compat::include::catalog::POSIX_COLLATION_OID,
+            pgrust_catalog_data::DEFAULT_COLLATION_OID,
+            pgrust_catalog_data::C_COLLATION_OID,
+            pgrust_catalog_data::POSIX_COLLATION_OID,
         ] {
             assert_eq!(
                 eval_similar(

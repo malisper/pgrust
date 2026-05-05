@@ -1,14 +1,12 @@
 use std::collections::BTreeMap;
 
 use crate::compat::backend::parser::CatalogLookup;
-use crate::compat::include::catalog::pg_ts_dict::{
-    ENGLISH_STEM_TS_DICTIONARY_OID, SIMPLE_TS_DICTIONARY_OID,
-};
-use crate::compat::include::catalog::pg_ts_template::{
+use pgrust_catalog_data::pg_ts_dict::{ENGLISH_STEM_TS_DICTIONARY_OID, SIMPLE_TS_DICTIONARY_OID};
+use pgrust_catalog_data::pg_ts_template::{
     ISPELL_TS_TEMPLATE_OID, SIMPLE_TS_TEMPLATE_OID, SYNONYM_TS_TEMPLATE_OID,
     THESAURUS_TS_TEMPLATE_OID,
 };
-use crate::compat::include::catalog::{PgTsConfigMapRow, PgTsDictRow};
+use pgrust_catalog_data::{PgTsConfigMapRow, PgTsDictRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextSearchConfig {

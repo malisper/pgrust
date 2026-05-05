@@ -1,7 +1,7 @@
 use super::super::ExecError;
 use super::tsvector_io::{Cursor, decode_weight, weight_code};
-use crate::compat::include::nodes::tsearch::{TsQuery, TsQueryNode, TsQueryOperand};
-use crate::compat::pgrust::compact_string::CompactString;
+use pgrust_core::CompactString;
+use pgrust_nodes::tsearch::{TsQuery, TsQueryNode, TsQueryOperand};
 
 const NODE_OPERAND: u8 = 1;
 const NODE_AND: u8 = 2;

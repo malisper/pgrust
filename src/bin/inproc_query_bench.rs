@@ -9,8 +9,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pgrust::pgrust::cluster::Cluster;
-use pgrust::pgrust::server::serve;
+use pgrust::Cluster;
+use pgrust::serve;
 
 struct Args {
     base_dir: PathBuf,

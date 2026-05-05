@@ -1,5 +1,5 @@
 use super::ExecError;
-use crate::compat::include::nodes::datum::Value;
+use pgrust_nodes::datum::Value;
 
 pub fn parse_pg_bool_text(raw: &str) -> Result<bool, ExecError> {
     let trimmed = raw.trim_matches(|ch: char| ch.is_ascii_whitespace());
@@ -109,7 +109,7 @@ pub fn cast_integer_to_bool(value: i64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{order_bool_values, parse_pg_bool_text};
-    use crate::compat::include::nodes::datum::Value;
+    use pgrust_nodes::datum::Value;
 
     #[test]
     fn parse_pg_bool_text_accepts_postgres_spellings() {

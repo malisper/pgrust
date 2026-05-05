@@ -6,11 +6,7 @@ use super::exec_expr::{
     eval_pg_relation_is_updatable, eval_pg_settings_get_flags,
 };
 use super::expr_casts::cast_value_with_source_type_catalog_and_config;
-use super::expr_math::eval_abs_function;
 use super::expr_ops::{add_values, compare_order_values, div_values, sub_values};
-use super::expr_string::{
-    eval_parse_ident_function, eval_pg_rust_test_enc_conversion, eval_quote_nullable_function,
-};
 use super::sqlfunc::{
     execute_user_defined_sql_scalar_function_values,
     execute_user_defined_sql_scalar_function_values_with_arg_type_oids,
@@ -514,7 +510,9 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             [array, element] => append_array_value(array, element, false),
             _ => malformed_aggregate_support_call("array_append"),
         },
-        BuiltinScalarFunction::Abs => eval_abs_function(arg_values),
+        BuiltinScalarFunction::Abs => {
+            pgrust_expr::expr_math::eval_abs_function(arg_values).map_err(Into::into)
+        }
         BuiltinScalarFunction::ArrayLarger => match arg_values {
             [left, right] => {
                 if matches!(left, Value::Null) || matches!(right, Value::Null) {
@@ -563,17 +561,22 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
             _ => malformed_aggregate_support_call("boolor_statefunc"),
         },
-        BuiltinScalarFunction::QuoteNullable => eval_quote_nullable_function(arg_values),
+        BuiltinScalarFunction::QuoteNullable => {
+            pgrust_expr::expr_string::eval_quote_nullable_function(arg_values).map_err(Into::into)
+        }
         BuiltinScalarFunction::HashValue(kind) => {
             execute_builtin_hash_value_call(kind, false, arg_values)
         }
         BuiltinScalarFunction::HashValueExtended(kind) => {
             execute_builtin_hash_value_call(kind, true, arg_values)
         }
-        BuiltinScalarFunction::ParseIdent => eval_parse_ident_function(arg_values),
+        BuiltinScalarFunction::ParseIdent => {
+            pgrust_expr::expr_string::eval_parse_ident_function(arg_values).map_err(Into::into)
+        }
         BuiltinScalarFunction::PgSettingsGetFlags => eval_pg_settings_get_flags(arg_values),
         BuiltinScalarFunction::PgRustTestEncConversion => {
-            eval_pg_rust_test_enc_conversion(arg_values)
+            pgrust_expr::expr_string::eval_pg_rust_test_enc_conversion(arg_values)
+                .map_err(Into::into)
         }
         BuiltinScalarFunction::TsVectorIn => match arg_values {
             [Value::Null] | [Value::Null, _, _] => Ok(Value::Null),

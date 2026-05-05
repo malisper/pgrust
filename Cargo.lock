@@ -581,16 +581,19 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "hmac",
+ "parking_lot",
  "pbkdf2",
  "pgrust_access",
  "pgrust_analyze",
  "pgrust_catalog_data",
  "pgrust_catalog_store",
  "pgrust_core",
+ "pgrust_executor",
  "pgrust_expr",
  "pgrust_nodes",
  "pgrust_parser",
  "pgrust_protocol",
+ "pgrust_rewrite",
  "rand",
  "serde_json",
  "sha2",
@@ -623,6 +626,8 @@ dependencies = [
  "pgrust_nodes",
  "pgrust_storage",
  "rand",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -654,6 +659,7 @@ dependencies = [
  "sha2",
  "unicode-general-category",
  "unicode-normalization",
+ "web-time",
 ]
 
 [[package]]

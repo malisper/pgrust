@@ -1,6 +1,6 @@
 use crate::compat::backend::tsearch::cache::TextSearchConfig;
 use crate::compat::backend::tsearch::ts_utils::lexize_token_for_config_and_type;
-use crate::compat::include::nodes::tsearch::{TsQueryNode, TsQueryOperand};
+use pgrust_nodes::tsearch::{TsQueryNode, TsQueryOperand};
 
 pub const ASCIIWORD: i32 = 1;
 pub const WORD_T: i32 = 2;

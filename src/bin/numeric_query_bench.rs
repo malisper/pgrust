@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use pgrust::Database;
-use pgrust::backend::executor::StatementResult;
+use pgrust::StatementResult;
 
 struct Args {
     base_dir: PathBuf,

@@ -11,14 +11,10 @@ use crate::backend::access::index::indexam::{
 };
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
-use crate::backend::catalog::catalog::{
-    Catalog, CatalogEntry, CatalogError, CatalogIndexMeta, catalog_attribute_collation_oid,
-};
+use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::store::CatalogWriteContext;
-use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
-use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::backend::utils::time::snapmgr::Snapshot;
 use crate::include::access::amapi::{
@@ -29,11 +25,15 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, CatalogIndexDescriptor,
-    PG_CATALOG_NAMESPACE_OID, system_catalog_index_by_oid, system_catalog_index_is_primary,
+    BTREE_AM_OID, BootstrapCatalogKind, CatalogIndexDescriptor, system_catalog_index_by_oid,
     system_catalog_indexes, system_catalog_indexes_for_heap,
 };
 use crate::include::nodes::datum::Value;
+pub use pgrust_catalog_store::indexing::{
+    insert_bootstrap_system_indexes, system_catalog_index_desc, system_catalog_index_entry,
+    system_catalog_index_entry_for_db, system_catalog_index_meta, system_catalog_index_rel_for_db,
+    system_catalog_index_relcache,
+};
 
 const SYSTEM_CATALOG_INDEX_SHADOW_REL_NUMBER_BASE: u32 = 0xF000_0000;
 
@@ -51,206 +51,15 @@ pub(crate) struct CatalogScannedTuple {
     pub(crate) tuple: crate::include::access::htup::HeapTuple,
 }
 
-pub fn insert_bootstrap_system_indexes(catalog: &mut Catalog) {
-    for descriptor in system_catalog_indexes() {
-        if catalog.get_by_oid(descriptor.relation_oid).is_some() {
-            continue;
-        }
-        let entry = system_catalog_index_entry(*descriptor);
-        catalog.insert(descriptor.relation_name, entry);
-    }
-}
-
-pub fn system_catalog_index_entry(
-    descriptor: crate::include::catalog::CatalogIndexDescriptor,
-) -> CatalogEntry {
-    system_catalog_index_entry_for_db(descriptor, 1)
-}
-
-pub fn system_catalog_index_entry_for_db(
-    descriptor: crate::include::catalog::CatalogIndexDescriptor,
-    db_oid: u32,
-) -> CatalogEntry {
-    CatalogEntry {
-        rel: system_catalog_index_rel(descriptor, db_oid),
-        relation_oid: descriptor.relation_oid,
-        namespace_oid: PG_CATALOG_NAMESPACE_OID,
-        owner_oid: BOOTSTRAP_SUPERUSER_OID,
-        relacl: None,
-        reloptions: None,
-        of_type_oid: 0,
-        row_type_oid: 0,
-        array_type_oid: 0,
-        reltoastrelid: 0,
-        relhasindex: false,
-        relpersistence: 'p',
-        relkind: 'i',
-        am_oid: BTREE_AM_OID,
-        relhassubclass: false,
-        relhastriggers: false,
-        relispartition: false,
-        relispopulated: true,
-        relpartbound: None,
-        relrowsecurity: false,
-        relforcerowsecurity: false,
-        relpages: 0,
-        reltuples: 0.0,
-        relallvisible: 0,
-        relallfrozen: 0,
-        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
-        desc: system_catalog_index_desc(descriptor),
-        partitioned_table: None,
-        index_meta: Some(system_catalog_index_meta(descriptor)),
-    }
-}
-
-fn system_catalog_index_rel(
-    descriptor: crate::include::catalog::CatalogIndexDescriptor,
-    db_oid: u32,
-) -> RelFileLocator {
-    let heap_rel = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
-    RelFileLocator {
-        spc_oid: heap_rel.spc_oid,
-        db_oid: heap_rel.db_oid,
-        rel_number: descriptor.relation_oid,
-    }
-}
-
 fn system_catalog_index_shadow_rel(
     descriptor: CatalogIndexDescriptor,
     db_oid: u32,
     ordinal: usize,
 ) -> RelFileLocator {
-    let target = system_catalog_index_rel(descriptor, db_oid);
+    let target = system_catalog_index_rel_for_db(descriptor, db_oid);
     RelFileLocator {
         rel_number: SYSTEM_CATALOG_INDEX_SHADOW_REL_NUMBER_BASE.saturating_add(ordinal as u32),
         ..target
-    }
-}
-
-/// Public accessor so that the wasm ephemeral bootstrap path can resolve
-/// system-catalog index locators with the correct shared/db scope.
-pub fn system_catalog_index_rel_for_db(
-    descriptor: crate::include::catalog::CatalogIndexDescriptor,
-    db_oid: u32,
-) -> RelFileLocator {
-    system_catalog_index_rel(descriptor, db_oid)
-}
-
-pub fn system_catalog_index_desc(
-    descriptor: crate::include::catalog::CatalogIndexDescriptor,
-) -> RelationDesc {
-    let heap_desc = crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind);
-    let columns = descriptor
-        .key_attnums
-        .iter()
-        .map(|attnum| {
-            heap_desc
-                .columns
-                .get(attnum.saturating_sub(1) as usize)
-                .cloned()
-                .ok_or(CatalogError::Corrupt(
-                    "system catalog index key out of range",
-                ))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .expect("valid system catalog index descriptors");
-    RelationDesc {
-        columns: columns
-            .into_iter()
-            .map(|mut column| {
-                column.collation_oid =
-                    catalog_attribute_collation_oid(descriptor.relation_oid, column.collation_oid);
-                column
-            })
-            .collect(),
-    }
-}
-
-pub fn system_catalog_index_meta(
-    descriptor: crate::include::catalog::CatalogIndexDescriptor,
-) -> CatalogIndexMeta {
-    let heap_desc = crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind);
-    let indcollation = descriptor
-        .key_attnums
-        .iter()
-        .map(|attnum| {
-            let column = heap_desc
-                .columns
-                .get(attnum.saturating_sub(1) as usize)
-                .expect("valid system catalog index descriptors");
-            catalog_attribute_collation_oid(
-                descriptor.heap_kind.relation_oid(),
-                column.collation_oid,
-            )
-        })
-        .collect();
-    CatalogIndexMeta {
-        indrelid: descriptor.heap_kind.relation_oid(),
-        indkey: descriptor.key_attnums.to_vec(),
-        indisunique: descriptor.unique,
-        indnullsnotdistinct: false,
-        indisprimary: system_catalog_index_is_primary(&descriptor),
-        indisexclusion: false,
-        indimmediate: true,
-        indisvalid: true,
-        indisready: true,
-        indislive: true,
-        indclass: descriptor.opclass_oids.to_vec(),
-        indclass_options: vec![Vec::new(); descriptor.key_attnums.len()],
-        indcollation,
-        indoption: vec![0; descriptor.key_attnums.len()],
-        indexprs: None,
-        indpred: None,
-        btree_options: None,
-        brin_options: None,
-        gist_options: None,
-        gin_options: None,
-        hash_options: None,
-    }
-}
-
-pub fn system_catalog_index_relcache(
-    descriptor: crate::include::catalog::CatalogIndexDescriptor,
-) -> IndexRelCacheEntry {
-    let meta = system_catalog_index_meta(descriptor);
-    IndexRelCacheEntry {
-        indexrelid: descriptor.relation_oid,
-        indrelid: meta.indrelid,
-        indnatts: meta.indkey.len() as i16,
-        indnkeyatts: meta.indclass.len() as i16,
-        indisunique: meta.indisunique,
-        indnullsnotdistinct: false,
-        indisprimary: system_catalog_index_is_primary(&descriptor),
-        indisexclusion: false,
-        indimmediate: true,
-        indisclustered: false,
-        indisvalid: true,
-        indcheckxmin: false,
-        indisready: true,
-        indislive: true,
-        indisreplident: false,
-        am_oid: BTREE_AM_OID,
-        am_handler_oid: None,
-        indkey: meta.indkey,
-        indclass: meta.indclass,
-        indclass_options: meta.indclass_options,
-        indcollation: meta.indcollation,
-        indoption: meta.indoption,
-        opfamily_oids: Vec::new(),
-        opcintype_oids: Vec::new(),
-        opckeytype_oids: Vec::new(),
-        amop_entries: Vec::new(),
-        amproc_entries: Vec::new(),
-        indexprs: None,
-        indpred: None,
-        rd_indexprs: None,
-        rd_indpred: None,
-        btree_options: None,
-        brin_options: None,
-        gist_options: None,
-        gin_options: None,
-        hash_options: None,
     }
 }
 
@@ -287,7 +96,7 @@ fn rebuild_system_catalog_indexes_for_db_with_hook(
         .map_err(|err| CatalogError::Io(format!("system catalog snapshot failed: {err:?}")))?;
     let interrupts = Arc::new(InterruptState::new());
     for (ordinal, descriptor) in system_catalog_indexes().iter().enumerate() {
-        let target_rel = system_catalog_index_rel(*descriptor, db_oid);
+        let target_rel = system_catalog_index_rel_for_db(*descriptor, db_oid);
         let shadow_rel = system_catalog_index_shadow_rel(*descriptor, db_oid, ordinal);
         pool.with_storage_mut(|storage| {
             storage.smgr.unlink(shadow_rel, None, false);
@@ -365,7 +174,7 @@ pub fn rebuild_system_catalog_indexes_in_pool_for_db(
             &interrupts,
             *descriptor,
             db_oid,
-            system_catalog_index_rel(*descriptor, db_oid),
+            system_catalog_index_rel_for_db(*descriptor, db_oid),
         );
         index_build_stub(&build_ctx, BTREE_AM_OID).map_err(|err| {
             CatalogError::Io(format!(
@@ -395,7 +204,7 @@ pub fn rebuild_system_catalog_index_in_pool_for_db(
         &interrupts,
         descriptor,
         db_oid,
-        system_catalog_index_rel(descriptor, db_oid),
+        system_catalog_index_rel_for_db(descriptor, db_oid),
     );
     index_build_stub(&build_ctx, BTREE_AM_OID).map_err(|err| {
         CatalogError::Io(format!(
@@ -403,7 +212,7 @@ pub fn rebuild_system_catalog_index_in_pool_for_db(
             descriptor.relation_name
         ))
     })?;
-    let _ = pool.invalidate_relation(system_catalog_index_rel(descriptor, db_oid));
+    let _ = pool.invalidate_relation(system_catalog_index_rel_for_db(descriptor, db_oid));
     Ok(())
 }
 
@@ -493,7 +302,7 @@ pub(crate) fn catalog_index_insert_state_for_db(
             snapshot: snapshot.clone(),
             heap_relation,
             heap_desc: heap_desc.clone(),
-            index_relation: system_catalog_index_rel(*descriptor, db_oid),
+            index_relation: system_catalog_index_rel_for_db(*descriptor, db_oid),
             index_name: descriptor.relation_name.to_string(),
             index_desc: system_catalog_index_desc(*descriptor),
             index_meta: system_catalog_index_relcache(*descriptor),
@@ -559,7 +368,7 @@ pub(crate) fn probe_system_catalog_tuples_visible_in_db(
         client_id,
         snapshot: snapshot.clone(),
         heap_relation,
-        index_relation: system_catalog_index_rel(descriptor, db_oid),
+        index_relation: system_catalog_index_rel_for_db(descriptor, db_oid),
         index_desc,
         index_meta,
         key_data,
@@ -666,7 +475,7 @@ pub fn vacuum_system_catalog_indexes_for_kinds_in_db(
                 heap_relation: bootstrap_catalog_rel(descriptor.heap_kind, db_oid),
                 heap_desc: crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind),
                 heap_toast: None,
-                index_relation: system_catalog_index_rel(*descriptor, db_oid),
+                index_relation: system_catalog_index_rel_for_db(*descriptor, db_oid),
                 index_name: descriptor.relation_name.to_string(),
                 index_desc: system_catalog_index_desc(*descriptor),
                 index_meta: system_catalog_index_relcache(*descriptor),
@@ -705,7 +514,7 @@ pub fn vacuum_system_catalog_heaps_and_indexes_for_kinds_in_db(
 
         let mut vacuumed_all_indexes = true;
         for descriptor in system_catalog_indexes_for_heap(kind) {
-            let index_relation = system_catalog_index_rel(*descriptor, db_oid);
+            let index_relation = system_catalog_index_rel_for_db(*descriptor, db_oid);
             let index_blocks = pool
                 .with_storage_mut(|storage| storage.smgr.nblocks(index_relation, ForkNumber::Main))
                 .unwrap_or(0);
@@ -779,7 +588,7 @@ mod tests {
         let base = temp_dir("shadow_failure");
         let _store = CatalogStore::load_database(&base, 1).unwrap();
         let descriptor = system_catalog_indexes()[0];
-        let target_rel = system_catalog_index_rel(descriptor, 1);
+        let target_rel = system_catalog_index_rel_for_db(descriptor, 1);
         let shadow_rel = system_catalog_index_shadow_rel(descriptor, 1, 0);
         let target_path = segment_path(&base, target_rel, ForkNumber::Main, 0);
         let shadow_path = segment_path(&base, shadow_rel, ForkNumber::Main, 0);

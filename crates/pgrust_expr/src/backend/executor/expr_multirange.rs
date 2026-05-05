@@ -12,7 +12,7 @@ use super::node_types::{
 };
 use crate::compat::backend::parser::SqlType;
 use crate::compat::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::compat::include::catalog::multirange_type_ref_for_sql_type;
+use pgrust_catalog_data::multirange_type_ref_for_sql_type;
 
 pub fn parse_multirange_text(text: &str, ty: SqlType) -> Result<Value, ExecError> {
     let Some(multirange_type) = multirange_type_ref_for_sql_type(ty) else {
@@ -1065,8 +1065,8 @@ fn char_at(text: &str, idx: usize) -> Option<char> {
 mod tests {
     use super::*;
     use crate::compat::backend::parser::SqlTypeKind;
-    use crate::compat::include::catalog::{INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID};
-    use crate::compat::include::nodes::primnodes::BuiltinScalarFunction;
+    use pgrust_catalog_data::{INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID};
+    use pgrust_nodes::primnodes::BuiltinScalarFunction;
 
     fn int4_multirange_type() -> SqlType {
         SqlType::multirange(INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID)

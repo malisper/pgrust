@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
-use crate::compat::include::nodes::tsearch::{TsQuery, TsQueryNode, TsQueryOperand};
+use pgrust_nodes::tsearch::{TsQuery, TsQueryNode, TsQueryOperand};
 
 pub fn compare_tsquery(left: &TsQuery, right: &TsQuery) -> Ordering {
     query_item_count(&left.root)

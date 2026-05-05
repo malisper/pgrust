@@ -6,8 +6,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use pgrust::executor::StatementResult;
-use pgrust::pgrust::database::Database;
+use pgrust::Database;
+use pgrust::StatementResult;
 
 const QUERIES: [&str; 4] = [
     "select ('{{1,2,3},{4,5,6},{7,8,9}}'::int[])[1:2][2]",

@@ -8,10 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use pgrust::executor::{ExecError, StatementResult, Value};
-use pgrust::pgrust::cluster::Cluster;
-use pgrust::pgrust::database::Database;
-use pgrust::pgrust::session::Session;
+use pgrust::Cluster;
+use pgrust::Database;
+use pgrust::Session;
+use pgrust::{ExecError, StatementResult, Value};
 
 struct Args {
     seed_dir: PathBuf,

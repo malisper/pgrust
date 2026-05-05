@@ -20,3 +20,5 @@ pgrust_expr = { path = "../pgrust_expr" }
 pgrust_nodes = { path = "../pgrust_nodes" }
 pgrust_storage = { path = "../pgrust_storage" }
 rand = "0.8.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }

@@ -9,9 +9,7 @@ use crate::compat::backend::tsearch::ts_utils::{
     lexize_token_for_config, lexize_token_for_config_and_type, lexize_token_with_config,
     lexize_token_with_config_and_type,
 };
-use crate::compat::include::nodes::tsearch::{
-    TsLexeme, TsPosition, TsQuery, TsQueryNode, TsQueryOperand, TsVector,
-};
+use pgrust_nodes::tsearch::{TsLexeme, TsPosition, TsQuery, TsQueryNode, TsQueryOperand, TsVector};
 
 pub fn to_tsvector_with_config_name(
     config_name: Option<&str>,

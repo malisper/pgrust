@@ -1,12 +1,10 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use pgrust_expr::backend::access::hash::support::hash_bytes_extended;
-use pgrust_expr::backend::utils::time::datetime::current_postgres_timestamp_usecs;
-use pgrust_expr::backend::{
-    executor::expr_casts::parse_uuid_text, executor::value_io::render_uuid_text,
-};
+use pgrust_expr::access::hash::support::hash_bytes_extended;
 use pgrust_expr::parse_interval_text_value;
+use pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs;
+use pgrust_expr::{executor::expr_casts::parse_uuid_text, executor::value_io::render_uuid_text};
 use pgrust_nodes::Value;
 use pgrust_nodes::datetime::TimestampTzADT;
 use pgrust_nodes::datum::IntervalValue;

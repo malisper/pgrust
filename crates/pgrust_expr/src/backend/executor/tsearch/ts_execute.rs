@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::compat::include::nodes::tsearch::{TsQuery, TsQueryNode, TsVector};
+use pgrust_nodes::tsearch::{TsQuery, TsQueryNode, TsVector};
 
 pub fn eval_tsvector_matches_tsquery(vector: &TsVector, query: &TsQuery) -> bool {
     eval_match(vector, &query.root).matched
@@ -186,7 +186,7 @@ fn not_inner(node: &TsQueryNode) -> Option<&TsQueryNode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::include::nodes::tsearch::{TsQuery, TsVector};
+    use pgrust_nodes::tsearch::{TsQuery, TsVector};
 
     fn matches(vector: &str, query: &str) -> bool {
         let vector = TsVector::parse(vector).unwrap();

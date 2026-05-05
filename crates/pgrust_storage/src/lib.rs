@@ -7,91 +7,32 @@ pub mod smgr;
 pub mod sync;
 pub mod wal;
 
-pub use buffer::*;
-pub use include::storage::buf_internals::{
+pub use buf_internals::{
     BufferId, BufferTag, BufferUsageStats, ClientId, FlushResult, Page, RequestPageResult,
 };
+pub use buffer::*;
+pub use include::storage::buf_internals;
 pub use smgr::{BLCKSZ, ForkNumber, RelFileLocator};
 
-/// :HACK: Compatibility namespace for mechanically moved storage files. The
-/// long-term shape is direct `pgrust_storage::*` imports inside this crate.
-pub mod backend {
-    pub mod access {
-        pub mod transam {
-            pub mod xact {
-                pub use pgrust_core::{
-                    CommandId, FIRST_NORMAL_TRANSACTION_ID, FROZEN_TRANSACTION_ID,
-                    INVALID_TRANSACTION_ID, Snapshot, TransactionId,
-                };
-            }
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web_time::Instant;
+
+pub(crate) fn now_timestamptz() -> pgrust_nodes::datetime::TimestampTzADT {
+    use pgrust_nodes::datetime::{TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC};
+
+    const UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS: i64 = 10_957;
+
+    let unix_usecs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs() as i64 * USECS_PER_SEC + duration.subsec_micros() as i64,
+        Err(err) => {
+            let duration = err.duration();
+            -(duration.as_secs() as i64 * USECS_PER_SEC + duration.subsec_micros() as i64)
         }
-    }
+    };
 
-    pub mod storage {
-        pub use crate::{
-            buffer, fsm, fsync_dir, fsync_file, lmgr, page, smgr, sync, sync_file_data,
-        };
-    }
-
-    pub mod utils {
-        pub mod activity {
-            use pgrust_nodes::datetime::{TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC};
-
-            const UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS: i64 = 10_957;
-
-            pub fn now_timestamptz() -> TimestampTzADT {
-                TimestampTzADT(current_postgres_timestamp_usecs())
-            }
-
-            fn current_postgres_timestamp_usecs() -> i64 {
-                match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                    Ok(duration) => {
-                        let unix_usecs = duration.as_secs() as i64 * USECS_PER_SEC
-                            + duration.subsec_micros() as i64;
-                        unix_usecs - UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS * USECS_PER_DAY
-                    }
-                    Err(err) => {
-                        let duration = err.duration();
-                        let unix_usecs = duration.as_secs() as i64 * USECS_PER_SEC
-                            + duration.subsec_micros() as i64;
-                        -unix_usecs - UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS * USECS_PER_DAY
-                    }
-                }
-            }
-        }
-
-        pub mod misc {
-            pub mod interrupts {
-                pub use pgrust_core::{InterruptReason, InterruptState, check_for_interrupts};
-            }
-        }
-
-        pub mod time {
-            pub mod instant {
-                #[cfg(not(target_arch = "wasm32"))]
-                pub use std::time::Instant;
-                #[cfg(target_arch = "wasm32")]
-                pub use web_time::Instant;
-            }
-        }
-    }
-}
-
-/// :HACK: Compatibility namespace for storage include files moved before the
-/// root `include` module is fully removed.
-pub mod compat_include {
-    pub mod storage {
-        pub use crate::include::storage::*;
-    }
-}
-
-pub mod include_compat_nodes {
-    pub mod datetime {
-        pub use pgrust_nodes::datetime::*;
-    }
-    pub mod parsenodes {
-        pub use pgrust_nodes::parsenodes::*;
-    }
+    TimestampTzADT(unix_usecs - UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS * USECS_PER_DAY)
 }
 
 #[cfg(all(unix, not(test)))]

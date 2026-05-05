@@ -10,7 +10,7 @@ use crate::compat::backend::utils::time::datetime::{
     parse_timezone_spec, split_time_and_offset, time_usecs_from_hms, timestamp_parts_from_usecs,
     timezone_offset_seconds, timezone_offset_seconds_at_utc, today_pg_days, ymd_from_days,
 };
-use crate::compat::include::nodes::datetime::{
+use pgrust_nodes::datetime::{
     POSTGRES_EPOCH_JDATE, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
 
@@ -806,12 +806,12 @@ fn timestamp_keyword_value(
         Some(DateTimeKeyword::Epoch) => days_from_ymd(1970, 1, 1)
             .map(|days| TimestampADT(days as i64 * USECS_PER_DAY))
             .map(Ok),
-        Some(DateTimeKeyword::Infinity) => Some(Ok(TimestampADT(
-            crate::compat::include::nodes::datetime::TIMESTAMP_NOEND,
-        ))),
-        Some(DateTimeKeyword::NegInfinity) => Some(Ok(TimestampADT(
-            crate::compat::include::nodes::datetime::TIMESTAMP_NOBEGIN,
-        ))),
+        Some(DateTimeKeyword::Infinity) => {
+            Some(Ok(TimestampADT(pgrust_nodes::datetime::TIMESTAMP_NOEND)))
+        }
+        Some(DateTimeKeyword::NegInfinity) => {
+            Some(Ok(TimestampADT(pgrust_nodes::datetime::TIMESTAMP_NOBEGIN)))
+        }
         None => None,
     }
 }
@@ -848,14 +848,10 @@ pub fn parse_timestamptz_text(
             ));
         }
         Some(DateTimeKeyword::Infinity) => {
-            return Ok(TimestampTzADT(
-                crate::compat::include::nodes::datetime::TIMESTAMP_NOEND,
-            ));
+            return Ok(TimestampTzADT(pgrust_nodes::datetime::TIMESTAMP_NOEND));
         }
         Some(DateTimeKeyword::NegInfinity) => {
-            return Ok(TimestampTzADT(
-                crate::compat::include::nodes::datetime::TIMESTAMP_NOBEGIN,
-            ));
+            return Ok(TimestampTzADT(pgrust_nodes::datetime::TIMESTAMP_NOBEGIN));
         }
         Some(DateTimeKeyword::Epoch) => {
             return days_from_ymd(1970, 1, 1)
@@ -955,10 +951,10 @@ fn timestamp_usecs_from_parts(
 }
 
 pub fn format_timestamp_text(value: TimestampADT, _config: &DateTimeConfig) -> String {
-    if value.0 == crate::compat::include::nodes::datetime::TIMESTAMP_NOEND {
+    if value.0 == pgrust_nodes::datetime::TIMESTAMP_NOEND {
         return "infinity".into();
     }
-    if value.0 == crate::compat::include::nodes::datetime::TIMESTAMP_NOBEGIN {
+    if value.0 == pgrust_nodes::datetime::TIMESTAMP_NOBEGIN {
         return "-infinity".into();
     }
     let (days, time_usecs) = timestamp_parts_from_usecs(value.0);
@@ -999,10 +995,10 @@ pub fn format_timestamp_text(value: TimestampADT, _config: &DateTimeConfig) -> S
 }
 
 pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -> String {
-    if value.0 == crate::compat::include::nodes::datetime::TIMESTAMP_NOEND {
+    if value.0 == pgrust_nodes::datetime::TIMESTAMP_NOEND {
         return "infinity".into();
     }
-    if value.0 == crate::compat::include::nodes::datetime::TIMESTAMP_NOBEGIN {
+    if value.0 == pgrust_nodes::datetime::TIMESTAMP_NOBEGIN {
         return "-infinity".into();
     }
     let offset_seconds = timezone_offset_seconds_at_utc(config, value.0);

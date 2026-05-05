@@ -1,5 +1,5 @@
 use super::{ExecError, Value};
-use crate::compat::include::catalog::{PG_SNAPSHOT_TYPE_OID, TXID_SNAPSHOT_TYPE_OID};
+use pgrust_catalog_data::{PG_SNAPSHOT_TYPE_OID, TXID_SNAPSHOT_TYPE_OID};
 use pgrust_core::CompactString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

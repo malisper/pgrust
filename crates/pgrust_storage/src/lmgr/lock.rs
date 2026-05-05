@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::backend::utils::activity::now_timestamptz;
+use crate::now_timestamptz;
 use crate::{ClientId, RelFileLocator};
 use pgrust_core::{InterruptReason, InterruptState, check_for_interrupts};
 use pgrust_nodes::datetime::TimestampTzADT;

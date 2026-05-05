@@ -3310,9 +3310,7 @@ mod tests {
         path_intersects_path, point_path_distance, point_polygon_distance,
         polygon_contains_polygon,
     };
-    use crate::compat::include::nodes::datum::{
-        GeoBox, GeoCircle, GeoLine, GeoLseg, GeoPath, GeoPoint, Value,
-    };
+    use pgrust_nodes::datum::{GeoBox, GeoCircle, GeoLine, GeoLseg, GeoPath, GeoPoint, Value};
 
     #[test]
     fn parse_lseg_accepts_flat_text_input() {

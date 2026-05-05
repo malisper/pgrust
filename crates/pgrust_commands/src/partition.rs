@@ -706,12 +706,10 @@ pub fn render_value_for_describe_bound(value: &Value) -> String {
         | Value::TimeTz(_)
         | Value::Timestamp(_)
         | Value::TimestampTz(_) => {
-            pgrust_expr::backend::executor::render_datetime_value_text(value).unwrap_or_default()
+            pgrust_expr::executor::render_datetime_value_text(value).unwrap_or_default()
         }
-        Value::Array(values) => pgrust_expr::backend::executor::value_io::format_array_text(values),
-        Value::PgArray(array) => {
-            pgrust_expr::backend::executor::value_io::format_array_value_text(array)
-        }
+        Value::Array(values) => pgrust_expr::executor::value_io::format_array_text(values),
+        Value::PgArray(array) => pgrust_expr::executor::value_io::format_array_value_text(array),
         _ => value.as_text().unwrap_or_default().to_string(),
     }
 }

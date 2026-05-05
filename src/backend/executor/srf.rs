@@ -1,7 +1,6 @@
 use super::exec_expr::{
     eval_native_builtin_scalar_typed_value_call, eval_string_to_table_rows, normalize_array_value,
 };
-use super::expr_date::add_interval_to_local_timestamp;
 use super::expr_json::{
     eval_json_record_set_returning_function, eval_json_table_function, eval_sql_json_table,
 };
@@ -37,6 +36,7 @@ use crate::pl::plpgsql::{
     execute_user_defined_set_returning_function,
 };
 use pgrust_executor::{GenerateSeriesState, SrfValueError, UnnestRows};
+use pgrust_expr::expr_date::add_interval_to_local_timestamp;
 
 impl From<SrfValueError> for ExecError {
     fn from(err: SrfValueError) -> Self {

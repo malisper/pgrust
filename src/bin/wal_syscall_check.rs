@@ -17,7 +17,7 @@
 //! Run with:  cargo run --bin wal_syscall_check
 
 use pgrust::ClientId;
-use pgrust::pgrust::database::Database;
+use pgrust::Database;
 
 const CLIENT: ClientId = 1;
 
@@ -56,7 +56,7 @@ fn main() {
         .execute(CLIENT, "SELECT id, name FROM t ORDER BY id")
         .unwrap();
     match result {
-        pgrust::executor::StatementResult::Query {
+        pgrust::StatementResult::Query {
             column_names: _,
             rows,
             ..

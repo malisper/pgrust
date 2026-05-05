@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::backend::storage::smgr::{
-    AnyStorageManager, MdStorageManager, SmgrError, StorageManager,
-};
-use crate::include::storage::buf_internals::*;
+use crate::buf_internals::*;
+use crate::smgr::{AnyStorageManager, MdStorageManager, SmgrError, StorageManager};
 
 pub trait StorageBackend {
     fn read_page(&mut self, tag: BufferTag) -> Result<Page, String>;

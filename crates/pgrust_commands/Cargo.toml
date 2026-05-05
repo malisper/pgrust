@@ -10,16 +10,19 @@ path = "src/lib.rs"
 [dependencies]
 base64 = "0.22"
 hmac = "0.12"
+parking_lot = "0.12"
 pbkdf2 = "0.12"
 pgrust_catalog_data = { path = "../pgrust_catalog_data" }
 pgrust_catalog_store = { path = "../pgrust_catalog_store" }
 pgrust_access = { path = "../pgrust_access" }
 pgrust_analyze = { path = "../pgrust_analyze" }
 pgrust_core = { path = "../pgrust_core" }
+pgrust_executor = { path = "../pgrust_executor" }
 pgrust_expr = { path = "../pgrust_expr" }
 pgrust_nodes = { path = "../pgrust_nodes" }
 pgrust_parser = { path = "../pgrust_parser" }
 pgrust_protocol = { path = "../pgrust_protocol" }
+pgrust_rewrite = { path = "../pgrust_rewrite" }
 rand = "0.8"
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"

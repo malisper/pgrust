@@ -5,8 +5,8 @@ use std::time::Duration;
 use parking_lot::{Condvar, Mutex};
 
 use crate::ClientId;
-use crate::backend::utils::activity::now_timestamptz;
-use crate::backend::utils::time::instant::Instant;
+use crate::Instant;
+use crate::now_timestamptz;
 use pgrust_core::ItemPointerData;
 use pgrust_core::{InterruptReason, InterruptState, check_for_interrupts};
 use pgrust_nodes::datetime::TimestampTzADT;

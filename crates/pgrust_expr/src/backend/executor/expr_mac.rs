@@ -1,7 +1,7 @@
 use super::ExecError;
 use crate::compat::backend::access::hash::hash_bytes_extended;
-use crate::compat::include::nodes::datum::Value;
-use crate::compat::include::nodes::primnodes::BuiltinScalarFunction;
+use pgrust_nodes::datum::Value;
+use pgrust_nodes::primnodes::BuiltinScalarFunction;
 use std::cmp::Ordering;
 
 pub fn parse_macaddr_text(text: &str) -> Result<[u8; 6], ExecError> {

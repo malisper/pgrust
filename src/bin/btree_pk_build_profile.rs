@@ -6,7 +6,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use pgrust::pgrust::database::Database;
+use pgrust::Database;
 
 struct Args {
     base_dir: PathBuf,

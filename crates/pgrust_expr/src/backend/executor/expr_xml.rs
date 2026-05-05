@@ -4,17 +4,15 @@ use super::{ExecError, ExecutorContext, TupleSlot, format_array_value_text};
 use crate::compat::backend::utils::misc::guc_xml::XmlBinaryFormat;
 use crate::compat::backend::utils::misc::guc_xml::XmlOptionSetting;
 use crate::compat::backend::utils::misc::notices::push_warning;
-use crate::compat::include::catalog::XML_TYPE_OID;
-use crate::compat::include::nodes::datetime::{
-    DateADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
-};
-use crate::compat::include::nodes::datum::{ArrayValue, Value};
-use crate::compat::include::nodes::parsenodes::{SqlType, SqlTypeKind, XmlRootVersion};
-use crate::compat::include::nodes::primnodes::{
+use base64::Engine as _;
+use pgrust_catalog_data::XML_TYPE_OID;
+use pgrust_core::CompactString;
+use pgrust_nodes::datetime::{DateADT, TimestampADT, TimestampTzADT, USECS_PER_SEC};
+use pgrust_nodes::datum::{ArrayValue, Value};
+use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind, XmlRootVersion};
+use pgrust_nodes::primnodes::{
     SqlXmlTable, SqlXmlTableColumnKind, XmlExpr, XmlExprOp, expr_sql_type_hint,
 };
-use crate::compat::pgrust::compact_string::CompactString;
-use base64::Engine as _;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
@@ -1702,7 +1700,7 @@ fn eval_xml_table_namespaces(
 }
 
 fn eval_xml_table_path_expr(
-    expr: &crate::compat::include::nodes::primnodes::Expr,
+    expr: &pgrust_nodes::primnodes::Expr,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<String, ExecError> {
@@ -1726,7 +1724,7 @@ fn eval_xml_table_column_value(
     matches: &[XmlTablePathValue<'_>],
     target_type: SqlType,
     path: &str,
-    default: Option<&crate::compat::include::nodes::primnodes::Expr>,
+    default: Option<&pgrust_nodes::primnodes::Expr>,
     not_null: bool,
     column_name: &str,
     slot: &mut TupleSlot,

@@ -6814,7 +6814,7 @@ fn eval_exclusion_operator(proc_oid: u32, left: &Value, right: &Value) -> Result
         return result.map_err(Into::into);
     }
     if let Some(func) = crate::include::catalog::builtin_scalar_function_for_proc_oid(proc_oid)
-        && let Some(result) = crate::backend::executor::expr_range::eval_range_function(
+        && let Some(result) = pgrust_expr::expr_range::eval_range_function(
             func,
             &[left.clone(), right.clone()],
             None,
@@ -6823,7 +6823,7 @@ fn eval_exclusion_operator(proc_oid: u32, left: &Value, right: &Value) -> Result
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         )
     {
-        return result;
+        return result.map_err(Into::into);
     }
     if is_scalar_equality_proc_oid(proc_oid) {
         return crate::backend::executor::expr_ops::compare_values(
@@ -7055,16 +7055,16 @@ fn temporal_rows_conflict(
 fn temporal_periods_overlap(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Range(left), Value::Range(right)) => {
-            crate::backend::executor::expr_range::range_overlap(left, right)
+            pgrust_expr::expr_range::range_overlap(left, right)
         }
         (Value::Multirange(left), Value::Range(right)) => {
-            crate::backend::executor::expr_multirange::multirange_overlaps_range(left, right)
+            pgrust_expr::expr_multirange::multirange_overlaps_range(left, right)
         }
         (Value::Range(left), Value::Multirange(right)) => {
-            crate::backend::executor::expr_multirange::multirange_overlaps_range(right, left)
+            pgrust_expr::expr_multirange::multirange_overlaps_range(right, left)
         }
         (Value::Multirange(left), Value::Multirange(right)) => {
-            crate::backend::executor::expr_multirange::multirange_overlaps_multirange(left, right)
+            pgrust_expr::expr_multirange::multirange_overlaps_multirange(left, right)
         }
         _ => false,
     }

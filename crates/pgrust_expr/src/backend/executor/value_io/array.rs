@@ -5,7 +5,7 @@ use crate::compat::backend::executor::expr_casts::{
 use crate::compat::backend::storage::page::bufpage::max_align;
 use crate::compat::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::compat::include::access::htup::AttributeAlign;
-use crate::compat::include::catalog::{
+use pgrust_catalog_data::{
     BOOL_TYPE_OID, BYTEA_TYPE_OID, DATE_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID,
     INT4_TYPE_OID, INT8_TYPE_OID, INTERVAL_TYPE_OID, NAME_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID,
     REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID, builtin_type_rows,
@@ -828,8 +828,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::EnumOid(_) => Some(SqlType::new(SqlTypeKind::Enum)),
         Value::Int64(_) => Some(SqlType::new(SqlTypeKind::Int8)),
         Value::Xid8(_) => Some(
-            SqlType::new(SqlTypeKind::Int8)
-                .with_identity(crate::compat::include::catalog::XID8_TYPE_OID, 0),
+            SqlType::new(SqlTypeKind::Int8).with_identity(pgrust_catalog_data::XID8_TYPE_OID, 0),
         ),
         Value::Money(_) => Some(SqlType::new(SqlTypeKind::Money)),
         Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
@@ -1017,11 +1016,9 @@ fn decode_array_element_value(
                     details: "date array element must be 4 bytes".into(),
                 });
             }
-            Ok(Value::Date(
-                crate::compat::include::nodes::datetime::DateADT(i32::from_le_bytes(
-                    bytes.try_into().unwrap(),
-                )),
-            ))
+            Ok(Value::Date(pgrust_nodes::datetime::DateADT(
+                i32::from_le_bytes(bytes.try_into().unwrap()),
+            )))
         }
         SqlTypeKind::Time => {
             if bytes.len() != 8 {
@@ -1030,11 +1027,9 @@ fn decode_array_element_value(
                     details: "time array element must be 8 bytes".into(),
                 });
             }
-            Ok(Value::Time(
-                crate::compat::include::nodes::datetime::TimeADT(i64::from_le_bytes(
-                    bytes.try_into().unwrap(),
-                )),
-            ))
+            Ok(Value::Time(pgrust_nodes::datetime::TimeADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
         }
         SqlTypeKind::TimeTz => {
             if bytes.len() != 12 {
@@ -1043,14 +1038,12 @@ fn decode_array_element_value(
                     details: "timetz array element must be 12 bytes".into(),
                 });
             }
-            Ok(Value::TimeTz(
-                crate::compat::include::nodes::datetime::TimeTzADT {
-                    time: crate::compat::include::nodes::datetime::TimeADT(i64::from_le_bytes(
-                        bytes[0..8].try_into().unwrap(),
-                    )),
-                    offset_seconds: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-                },
-            ))
+            Ok(Value::TimeTz(pgrust_nodes::datetime::TimeTzADT {
+                time: pgrust_nodes::datetime::TimeADT(i64::from_le_bytes(
+                    bytes[0..8].try_into().unwrap(),
+                )),
+                offset_seconds: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            }))
         }
         SqlTypeKind::Timestamp => {
             if bytes.len() != 8 {
@@ -1059,11 +1052,9 @@ fn decode_array_element_value(
                     details: "timestamp array element must be 8 bytes".into(),
                 });
             }
-            Ok(Value::Timestamp(
-                crate::compat::include::nodes::datetime::TimestampADT(i64::from_le_bytes(
-                    bytes.try_into().unwrap(),
-                )),
-            ))
+            Ok(Value::Timestamp(pgrust_nodes::datetime::TimestampADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
         }
         SqlTypeKind::TimestampTz => {
             if bytes.len() != 8 {
@@ -1072,11 +1063,9 @@ fn decode_array_element_value(
                     details: "timestamptz array element must be 8 bytes".into(),
                 });
             }
-            Ok(Value::TimestampTz(
-                crate::compat::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes(
-                    bytes.try_into().unwrap(),
-                )),
-            ))
+            Ok(Value::TimestampTz(pgrust_nodes::datetime::TimestampTzADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
         }
         SqlTypeKind::Interval => {
             if bytes.len() != 16 {
@@ -1085,13 +1074,11 @@ fn decode_array_element_value(
                     details: "interval array element must be 16 bytes".into(),
                 });
             }
-            Ok(Value::Interval(
-                crate::compat::include::nodes::datum::IntervalValue {
-                    time_micros: i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-                    days: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-                    months: i32::from_le_bytes(bytes[12..16].try_into().unwrap()),
-                },
-            ))
+            Ok(Value::Interval(pgrust_nodes::datum::IntervalValue {
+                time_micros: i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                days: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                months: i32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            }))
         }
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
             let width = if matches!(element_type.kind, SqlTypeKind::Float4) {
@@ -1131,9 +1118,10 @@ fn decode_array_element_value(
                 });
             }
             let bit_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as i32;
-            Ok(Value::Bit(
-                crate::compat::include::nodes::datum::BitString::new(bit_len, bytes[4..].to_vec()),
-            ))
+            Ok(Value::Bit(pgrust_nodes::datum::BitString::new(
+                bit_len,
+                bytes[4..].to_vec(),
+            )))
         }
         SqlTypeKind::Bytea => Ok(Value::Bytea(bytes.to_vec())),
         SqlTypeKind::Uuid => {

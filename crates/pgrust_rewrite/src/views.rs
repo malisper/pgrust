@@ -1,18 +1,17 @@
 use pgrust_analyze::CatalogLookup;
 use pgrust_analyze::{analyze_select_query_with_outer, sql_type_name};
 use pgrust_catalog_data::DEFAULT_COLLATION_OID;
-use pgrust_expr::backend::libpq::pqformat::format_bytea_text;
-use pgrust_expr::backend::utils::misc::guc_datetime::{
-    DateOrder, DateStyleFormat, DateTimeConfig, IntervalStyle,
-};
-use pgrust_expr::backend::utils::time::date::{format_date_text, parse_date_text};
-use pgrust_expr::backend::utils::time::timestamp::{
-    format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
-};
-use pgrust_expr::compat::pgrust::session::ByteaOutputFormat;
 use pgrust_expr::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use pgrust_expr::jsonpath::canonicalize_jsonpath;
-use pgrust_expr::{parse_interval_text_value, render_interval_text_with_config};
+use pgrust_expr::libpq::pqformat::format_bytea_text;
+use pgrust_expr::utils::misc::guc_datetime::{
+    DateOrder, DateStyleFormat, DateTimeConfig, IntervalStyle,
+};
+use pgrust_expr::utils::time::date::{format_date_text, parse_date_text};
+use pgrust_expr::utils::time::timestamp::{
+    format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
+};
+use pgrust_expr::{ByteaOutputFormat, parse_interval_text_value, render_interval_text_with_config};
 use pgrust_nodes::CommandType;
 use pgrust_nodes::datum::{IntervalValue, Value};
 use pgrust_nodes::parsenodes::{

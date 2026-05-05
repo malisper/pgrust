@@ -4,9 +4,9 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use pgrust::ClientId;
+use pgrust::Database;
 use pgrust::DatabaseOpenOptions;
-use pgrust::executor::StatementResult;
-use pgrust::pgrust::database::Database;
+use pgrust::StatementResult;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;

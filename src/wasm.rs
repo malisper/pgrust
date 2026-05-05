@@ -1,9 +1,7 @@
 use wasm_bindgen::prelude::*;
 
-use crate::backend::executor::{StatementResult, Value};
-use crate::backend::libpq::pqformat::{format_exec_error, infer_command_tag};
-use crate::pgrust::database::{Database, Session};
-use crate::pgrust::session::ByteaOutputFormat;
+use crate::wire::{format_exec_error, infer_command_tag};
+use crate::{ByteaOutputFormat, Database, Session, StatementResult, Value};
 
 #[wasm_bindgen]
 pub struct WasmEngine {
@@ -105,30 +103,27 @@ fn render_value_json(value: &Value) -> String {
         Value::TextRef(_, _) => json_string(value.as_text().unwrap_or("")),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => json_string(
-            &crate::backend::executor::jsonb::render_jsonb_bytes(v)
-                .unwrap_or_else(|_| "null".to_string()),
+            &pgrust_expr::jsonb::render_jsonb_bytes(v).unwrap_or_else(|_| "null".to_string()),
         ),
         Value::JsonPath(v) => json_string(v.as_str()),
-        Value::Bytea(v) => json_string(&crate::backend::libpq::pqformat::format_bytea_text(
+        Value::Bytea(v) => json_string(&pgrust_expr::libpq::pqformat::format_bytea_text(
             v,
             ByteaOutputFormat::Hex,
         )),
-        Value::Uuid(v) => json_string(&crate::backend::executor::render_uuid_text(v)),
+        Value::Uuid(v) => json_string(&pgrust_expr::render_uuid_text(v)),
         Value::Inet(v) => json_string(&v.render_inet()),
         Value::Cidr(v) => json_string(&v.render_cidr()),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
         | Value::Timestamp(_)
-        | Value::TimestampTz(_) => json_string(
-            &crate::backend::executor::render_datetime_value_text(value).unwrap_or_default(),
-        ),
+        | Value::TimestampTz(_) => {
+            json_string(&pgrust_expr::render_datetime_value_text(value).unwrap_or_default())
+        }
         Value::Bit(v) => json_string(&v.render()),
         Value::TsVector(v) => json_string(&v.render()),
         Value::TsQuery(v) => json_string(&v.render()),
-        Value::InternalChar(v) => {
-            json_string(&crate::backend::executor::render_internal_char_text(*v))
-        }
+        Value::InternalChar(v) => json_string(&pgrust_expr::render_internal_char_text(*v)),
         Value::Array(items) => format!(
             "[{}]",
             items
@@ -137,9 +132,7 @@ fn render_value_json(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        Value::PgArray(array) => {
-            json_string(&crate::backend::executor::format_array_value_text(array))
-        }
+        Value::PgArray(array) => json_string(&pgrust_expr::format_array_value_text(array)),
         other => json_string(&format!("{other:?}")),
     }
 }
@@ -151,13 +144,12 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::render_value_json;
-    use crate::backend::executor::Value;
+    use crate::Value;
 
     #[test]
     fn render_value_json_formats_jsonb_textually() {
         let value = Value::Jsonb(
-            crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1,\"b\":[true,null]}")
-                .unwrap(),
+            pgrust_expr::jsonb::parse_jsonb_text("{\"a\":1,\"b\":[true,null]}").unwrap(),
         );
         assert_eq!(
             render_value_json(&value),

@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, RelFileLocator};
+use crate::smgr::{BLCKSZ, ForkNumber, RelFileLocator};
 
 pub const PAGE_SIZE: usize = BLCKSZ;
 pub type Page = [u8; PAGE_SIZE];

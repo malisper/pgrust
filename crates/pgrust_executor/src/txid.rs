@@ -101,15 +101,15 @@ where
             current_txid_snapshot_text(runtime.snapshot()).into(),
         )),
         BuiltinScalarFunction::TxidSnapshotXmin => {
-            pgrust_expr::backend::executor::expr_txid::eval_txid_snapshot_xmin_value(values)
+            pgrust_expr::executor::expr_txid::eval_txid_snapshot_xmin_value(values)
                 .map_err(TxidBuiltinError::Expr)
         }
         BuiltinScalarFunction::TxidSnapshotXmax => {
-            pgrust_expr::backend::executor::expr_txid::eval_txid_snapshot_xmax_value(values)
+            pgrust_expr::executor::expr_txid::eval_txid_snapshot_xmax_value(values)
                 .map_err(TxidBuiltinError::Expr)
         }
         BuiltinScalarFunction::TxidVisibleInSnapshot => {
-            pgrust_expr::backend::executor::expr_txid::eval_txid_visible_in_snapshot_value(values)
+            pgrust_expr::executor::expr_txid::eval_txid_visible_in_snapshot_value(values)
                 .map_err(TxidBuiltinError::Expr)
         }
         BuiltinScalarFunction::TxidStatus => match values {

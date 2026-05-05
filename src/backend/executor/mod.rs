@@ -8,26 +8,13 @@ pub mod exec_expr;
 pub(crate) mod exec_tuples;
 mod expr_agg_support;
 mod expr_async;
-mod expr_bit;
-pub(crate) mod expr_bool;
 mod expr_casts;
 mod expr_compile;
-mod expr_date;
-mod expr_datetime;
-mod expr_format;
 mod expr_json;
 mod expr_locks;
-mod expr_mac;
-mod expr_math;
-mod expr_money;
-pub(crate) mod expr_multirange;
-mod expr_network;
-pub(crate) mod expr_numeric;
 pub(crate) mod expr_ops;
 mod expr_partition;
-pub(crate) mod expr_range;
 pub(crate) mod expr_reg;
-mod expr_string;
 mod expr_txid;
 mod expr_xml;
 mod fmgr;
@@ -80,7 +67,6 @@ pub(crate) use exec_expr::clear_subquery_eval_cache;
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_agg_support::build_aggregate_runtime;
 pub(crate) use expr_agg_support::execute_scalar_function_value_call;
-pub(crate) use expr_bit::render_bit_text;
 pub(crate) use expr_casts::cast_value_with_source_type_catalog_and_config;
 pub(crate) use expr_casts::parse_bytea_text;
 pub(crate) use expr_casts::parse_interval_text_value;
@@ -94,33 +80,13 @@ pub(crate) use expr_casts::{
     parse_text_array_literal_with_catalog_and_op,
     parse_text_array_literal_with_catalog_op_and_explicit,
 };
-pub(crate) use expr_datetime::current_timestamp_value;
-pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_json::apply_jsonb_subscript_assignment;
-pub(crate) use expr_mac::{
-    eval_macaddr_function, macaddr_to_macaddr8, macaddr8_to_macaddr, parse_macaddr_bytes,
-    parse_macaddr_text, parse_macaddr8_bytes, parse_macaddr8_text,
-};
-pub use expr_mac::{render_macaddr_text, render_macaddr8_text};
-pub use expr_money::money_format_text;
-pub(crate) use expr_money::money_parse_text;
-pub(crate) use expr_multirange::{
-    compare_multirange_values, decode_multirange_bytes, encode_multirange_bytes,
-    eval_multirange_function, multirange_intersection_agg_transition, parse_multirange_text,
-    range_agg_transition,
-};
-pub use expr_multirange::{render_multirange_text, render_multirange_text_with_config};
-pub(crate) use expr_network::{
-    compare_network_values, encode_network_bytes, eval_network_function, network_btree_upper_bound,
-    network_contains, network_merge, network_prefix, parse_cidr_bytes, parse_cidr_text,
-    parse_inet_bytes, parse_inet_text, render_network_text,
-};
-pub(crate) use expr_range::{
-    compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,
-    parse_range_text,
-};
-pub use expr_range::{render_range_text, render_range_text_with_config};
-pub(crate) use expr_string::eval_to_char_function;
+pub(crate) fn eval_to_char_function(
+    values: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    pgrust_expr::expr_string::eval_to_char_function(values, datetime_config).map_err(Into::into)
+}
 pub(crate) use expr_txid::{
     cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
 };
@@ -134,6 +100,26 @@ pub(crate) use nodes::{
     render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
 };
 pub use pgrust_executor::ScalarFunctionCallInfo;
+pub(crate) use pgrust_expr::current_timestamp_value;
+pub use pgrust_expr::money_format_text;
+pub(crate) use pgrust_expr::money_parse_text;
+pub(crate) use pgrust_expr::render_bit_text;
+pub(crate) use pgrust_expr::{
+    compare_multirange_values, decode_multirange_bytes, encode_multirange_bytes,
+    multirange_intersection_agg_transition, parse_multirange_text, range_agg_transition,
+};
+pub(crate) use pgrust_expr::{
+    compare_network_values, encode_network_bytes, eval_network_function, network_btree_upper_bound,
+    network_contains, network_merge, network_prefix, parse_cidr_bytes, parse_cidr_text,
+    parse_inet_bytes, parse_inet_text, render_network_text,
+};
+pub(crate) use pgrust_expr::{
+    compare_range_values, decode_range_bytes, encode_range_bytes, parse_range_text,
+};
+pub use pgrust_expr::{render_datetime_value_text, render_datetime_value_text_with_config};
+pub use pgrust_expr::{render_macaddr_text, render_macaddr8_text};
+pub use pgrust_expr::{render_multirange_text, render_multirange_text_with_config};
+pub use pgrust_expr::{render_range_text, render_range_text_with_config};
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
 pub(crate) use srf::set_returning_call_label;

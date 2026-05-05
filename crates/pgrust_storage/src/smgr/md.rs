@@ -14,7 +14,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::backend::storage::sync::SyncQueue;
+use crate::sync::SyncQueue;
 use pgrust_core::GLOBAL_TABLESPACE_OID;
 
 #[cfg(unix)]
@@ -406,7 +406,7 @@ impl MdStorageManager {
             .read(true)
             .write(true)
             .open(&shadow_path)?;
-        crate::backend::storage::fsync_file(&shadow_file)?;
+        crate::fsync_file(&shadow_file)?;
         drop(shadow_file);
 
         let parent = target_path.parent().ok_or_else(|| {
@@ -415,9 +415,9 @@ impl MdStorageManager {
                 "target relfile has no parent directory",
             ))
         })?;
-        crate::backend::storage::fsync_dir(parent)?;
+        crate::fsync_dir(parent)?;
         fs::rename(&shadow_path, &target_path)?;
-        crate::backend::storage::fsync_dir(parent)?;
+        crate::fsync_dir(parent)?;
 
         for fork in [
             ForkNumber::Main,
@@ -633,7 +633,7 @@ impl StorageManager for MdStorageManager {
         file_write_all_at(&mut seg.file, data, byte_offset)?;
 
         if !skip_fsync {
-            crate::backend::storage::fsync_file(&seg.file)?;
+            crate::fsync_file(&seg.file)?;
         } else if let Some(sync_queue) = self.sync_queue.as_ref() {
             sync_queue.register(rel, fork);
         }
@@ -659,7 +659,7 @@ impl StorageManager for MdStorageManager {
         for segno in first_seg..=last_seg {
             let key = SegKey { rel, fork, segno };
             if let Some(seg) = self.open_segs.get_mut(&key) {
-                crate::backend::storage::fsync_file(&seg.file)?;
+                crate::fsync_file(&seg.file)?;
             }
         }
 
@@ -741,7 +741,7 @@ impl StorageManager for MdStorageManager {
         file_write_all_at(&mut seg.file, data, byte_offset)?;
 
         if !skip_fsync {
-            crate::backend::storage::fsync_file(&seg.file)?;
+            crate::fsync_file(&seg.file)?;
         } else if let Some(sync_queue) = self.sync_queue.as_ref() {
             sync_queue.register(rel, fork);
         }
@@ -788,7 +788,7 @@ impl StorageManager for MdStorageManager {
         seg.file.set_len(len)?;
 
         if !skip_fsync {
-            crate::backend::storage::fsync_file(&seg.file)?;
+            crate::fsync_file(&seg.file)?;
         } else if let Some(sync_queue) = self.sync_queue.as_ref() {
             sync_queue.register(rel, fork);
         }
@@ -874,7 +874,7 @@ impl StorageManager for MdStorageManager {
             }
 
             let seg = self.open_segs.get_mut(&key).unwrap();
-            crate::backend::storage::fsync_file(&seg.file)?;
+            crate::fsync_file(&seg.file)?;
         }
 
         Ok(())

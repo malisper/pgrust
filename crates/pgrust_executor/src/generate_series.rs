@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use pgrust_expr::backend::utils::time::datetime::{
+use pgrust_expr::utils::time::datetime::{
     days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
 };
 use pgrust_nodes::SqlTypeKind;
