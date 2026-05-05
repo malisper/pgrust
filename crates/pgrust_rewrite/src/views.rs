@@ -5139,6 +5139,30 @@ fn render_special_builtin_function(
         BuiltinScalarFunction::RegClassToText if func.args.len() == 1 => Some(
             render_function_cast_arg(&func.args[0], SqlTypeKind::Text, ctx),
         ),
+        BuiltinScalarFunction::NextVal | BuiltinScalarFunction::IdentityNextVal => {
+            (func.args.len() == 1).then(|| {
+                format!(
+                    "nextval({})",
+                    render_function_cast_arg(&func.args[0], SqlTypeKind::RegClass, ctx)
+                )
+            })
+        }
+        BuiltinScalarFunction::CurrVal => (func.args.len() == 1).then(|| {
+            format!(
+                "currval({})",
+                render_function_cast_arg(&func.args[0], SqlTypeKind::RegClass, ctx)
+            )
+        }),
+        BuiltinScalarFunction::SetVal => matches!(func.args.len(), 2 | 3).then(|| {
+            let rendered_args = std::iter::once(render_function_cast_arg(
+                &func.args[0],
+                SqlTypeKind::RegClass,
+                ctx,
+            ))
+            .chain(func.args[1..].iter().map(|arg| render_expr(arg, ctx)))
+            .collect::<Vec<_>>();
+            format!("setval({})", rendered_args.join(", "))
+        }),
         BuiltinScalarFunction::BTrim if matches!(func.args.len(), 1 | 2) => {
             Some(render_trim_function("BOTH", &func.args, ctx))
         }
@@ -5157,6 +5181,12 @@ fn render_function_cast_arg(
     target_kind: SqlTypeKind,
     ctx: &ViewDeparseContext<'_>,
 ) -> String {
+    if let Expr::Cast(_, ty) = arg
+        && !ty.is_array
+        && ty.kind == target_kind
+    {
+        return render_expr(arg, ctx);
+    }
     let rendered = render_expr(arg, ctx);
     let target_type = render_sql_type_with_catalog(SqlType::new(target_kind), ctx.catalog);
     if matches!(arg, Expr::Const(_) | Expr::Var(_) | Expr::Func(_))
@@ -6228,6 +6258,10 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
         BuiltinScalarFunction::TransactionTimestamp => "transaction_timestamp",
         BuiltinScalarFunction::StatementTimestamp => "statement_timestamp",
         BuiltinScalarFunction::ClockTimestamp => "clock_timestamp",
+        BuiltinScalarFunction::NextVal | BuiltinScalarFunction::IdentityNextVal => "nextval",
+        BuiltinScalarFunction::CurrVal => "currval",
+        BuiltinScalarFunction::LastVal => "lastval",
+        BuiltinScalarFunction::SetVal => "setval",
         BuiltinScalarFunction::Timezone => "timezone",
         BuiltinScalarFunction::DatePart => "date_part",
         BuiltinScalarFunction::Extract => "extract",
