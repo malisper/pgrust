@@ -288,6 +288,7 @@ fn collect_query_relation_privileges_into(
         .iter()
         .map(|rte| rte.permission.clone())
         .collect::<Vec<_>>();
+    let mut nested_from_queries = Vec::new();
     for rte in &query.rtable {
         for qual in &rte.security_quals {
             collect_expr_relation_privileges(qual, query, &mut local_privileges, privileges);
@@ -315,7 +316,7 @@ fn collect_query_relation_privileges_into(
                 }
             }
             RangeTblEntryKind::Subquery { query } | RangeTblEntryKind::Cte { query, .. } => {
-                collect_query_relation_privileges_into(query, privileges);
+                nested_from_queries.push(query.as_ref());
             }
             RangeTblEntryKind::Result
             | RangeTblEntryKind::Relation { .. }
@@ -375,6 +376,9 @@ fn collect_query_relation_privileges_into(
         }
     }
     privileges.extend(local_privileges.into_iter().flatten());
+    for nested_query in nested_from_queries {
+        collect_query_relation_privileges_into(nested_query, privileges);
+    }
 }
 
 fn collect_join_tree_relation_privileges(

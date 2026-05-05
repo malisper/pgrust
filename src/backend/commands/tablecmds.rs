@@ -9086,7 +9086,8 @@ pub fn execute_truncate_table(
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
     let targets = resolve_truncate_relations(&stmt, catalog, true)?;
-    check_truncate_relation_privileges(&targets, ctx)?;
+    let privilege_targets = resolve_explicit_truncate_relations(&stmt, catalog)?;
+    check_truncate_relation_privileges(&privilege_targets, ctx)?;
     let triggers = fire_before_truncate_triggers(&targets, catalog, ctx)?;
     for target in targets.iter().filter(|target| target.relkind == 'r') {
         let indexes = catalog.index_relations_for_heap(target.relation_oid);
@@ -9145,6 +9146,19 @@ pub(crate) fn resolve_truncate_relations(
         }
     }
     Ok(targets)
+}
+
+pub(crate) fn resolve_explicit_truncate_relations(
+    stmt: &TruncateTableStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<BoundRelation>, ExecError> {
+    stmt.targets
+        .iter()
+        .map(|target| {
+            pgrust_commands::truncate::lookup_truncate_relation(catalog, &target.relation_name)
+                .map_err(truncate_error_to_exec)
+        })
+        .collect()
 }
 
 pub(crate) fn fire_before_truncate_triggers(
@@ -10676,7 +10690,11 @@ fn check_merge_privileges(
     input_plan: &PlannedStmt,
     ctx: &ExecutorContext,
 ) -> Result<(), ExecError> {
-    let excluded_oids = BTreeSet::from([stmt.relation_oid]);
+    let excluded_oids = stmt
+        .required_privileges
+        .iter()
+        .map(|requirement| requirement.relation_oid)
+        .collect::<BTreeSet<_>>();
     check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     check_planned_stmt_relation_privileges_except(input_plan, ctx, &excluded_oids)?;
     Ok(())
