@@ -372,6 +372,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return Some(position);
     }
+    if let ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(message)) = e
+        && srf_placement_feature_error(message)
+    {
+        return find_first_srf_position(sql);
+    }
     if let Some(position) = cte_error_position(sql, e) {
         return Some(position);
     }
@@ -1098,6 +1103,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn srf_placement_feature_error(message: &str) -> bool {
+    message == "set-returning functions are not allowed in aggregate arguments"
+        || message == "set-returning functions are not allowed in window aggregate arguments"
+        || message.starts_with("set-returning functions are not allowed in ")
 }
 
 fn prepared_parameter_coercion_error_index(e: &ExecError) -> Option<usize> {
