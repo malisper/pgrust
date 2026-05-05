@@ -6057,6 +6057,35 @@ fn take_backend_notice_messages() -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn create_aggregate_warns_for_quoted_option_names_before_missing_stype_error() {
+    let db = Database::open_ephemeral(32).unwrap();
+    clear_backend_notices();
+
+    let result = db.execute(
+        1,
+        r#"create aggregate case_agg (
+            "Sfunc1" = int4pl,
+            "Basetype" = int4,
+            "Stype1" = int4,
+            "Initcond1" = '0',
+            "Parallel" = safe
+        )"#,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            r#"aggregate attribute "Sfunc1" not recognized"#,
+            r#"aggregate attribute "Basetype" not recognized"#,
+            r#"aggregate attribute "Stype1" not recognized"#,
+            r#"aggregate attribute "Initcond1" not recognized"#,
+            r#"aggregate attribute "Parallel" not recognized"#,
+        ]
+    );
+}
+
 fn explain_lines(db: &Database, client_id: u32, sql: &str) -> Vec<String> {
     match db.execute(client_id, &format!("explain {sql}")).unwrap() {
         StatementResult::Query { rows, .. } => rows
