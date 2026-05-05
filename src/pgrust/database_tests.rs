@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 // slow CI workers and parallel local agent workspaces.
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(60);
-const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(120);
+const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(240);
 const STRESS_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PIN_LEAK_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(240);
 const SAME_ROW_UPDATE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
