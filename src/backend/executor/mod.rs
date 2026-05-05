@@ -15,7 +15,6 @@ mod expr_date;
 mod expr_datetime;
 mod expr_json;
 mod expr_locks;
-mod expr_mac;
 mod expr_math;
 pub(crate) mod expr_multirange;
 mod expr_network;
@@ -94,11 +93,6 @@ pub(crate) use expr_casts::{
 pub(crate) use expr_datetime::current_timestamp_value;
 pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_json::apply_jsonb_subscript_assignment;
-pub(crate) use expr_mac::{
-    eval_macaddr_function, macaddr_to_macaddr8, macaddr8_to_macaddr, parse_macaddr_bytes,
-    parse_macaddr_text, parse_macaddr8_bytes, parse_macaddr8_text,
-};
-pub use expr_mac::{render_macaddr_text, render_macaddr8_text};
 pub(crate) use expr_multirange::{
     compare_multirange_values, decode_multirange_bytes, encode_multirange_bytes,
     eval_multirange_function, multirange_intersection_agg_transition, parse_multirange_text,
@@ -131,6 +125,7 @@ pub(crate) use nodes::{
 pub use pgrust_executor::ScalarFunctionCallInfo;
 pub use pgrust_expr::money_format_text;
 pub(crate) use pgrust_expr::money_parse_text;
+pub use pgrust_expr::{render_macaddr_text, render_macaddr8_text};
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
 pub(crate) use srf::set_returning_call_label;

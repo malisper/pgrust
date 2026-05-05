@@ -16,6 +16,7 @@ use crate::include::nodes::datetime::{
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use pgrust_expr::{
     eval_geometry_function, expr_bool,
+    expr_mac::eval_macaddr_function,
     expr_money::{cash_words_text, money_larger, money_smaller},
 };
 
@@ -60,7 +61,6 @@ use super::expr_json::{
     jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
-use super::expr_mac::eval_macaddr_function;
 use super::expr_math::{
     cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
     eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
@@ -11630,7 +11630,7 @@ fn eval_plpgsql_builtin_function(
         return result.map_err(Into::into);
     }
     if let Some(result) = eval_macaddr_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if (result_type.is_some_and(SqlType::is_multirange)
         || values
@@ -13582,7 +13582,7 @@ pub(crate) fn eval_builtin_function(
         return result.map_err(Into::into);
     }
     if let Some(result) = eval_macaddr_function(func, &values) {
-        return result;
+        return result.map_err(Into::into);
     }
     if (result_type.is_some_and(SqlType::is_multirange)
         || values

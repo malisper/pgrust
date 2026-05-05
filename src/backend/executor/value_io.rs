@@ -9,9 +9,6 @@ use super::expr_casts::{
     render_internal_char_text, render_interval_text_with_config, render_pg_lsn_text,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
-use super::expr_mac::{
-    parse_macaddr_bytes, parse_macaddr8_bytes, render_macaddr_text, render_macaddr8_text,
-};
 use super::expr_multirange::{render_multirange, render_multirange_text_with_config};
 use super::expr_network::{encode_network_bytes, parse_cidr_bytes, parse_inet_bytes};
 use super::expr_range::{
@@ -35,6 +32,9 @@ use num_bigint::BigInt;
 use pgrust_expr::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
+};
+use pgrust_expr::{
+    parse_macaddr_bytes, parse_macaddr8_bytes, render_macaddr_text, render_macaddr8_text,
 };
 
 mod array;
@@ -2581,7 +2581,9 @@ pub(crate) fn decode_value_with_external_toast(
                     actual_len: Some(bytes.len()),
                 });
             }
-            parse_macaddr_bytes(bytes).map(Value::MacAddr)
+            parse_macaddr_bytes(bytes)
+                .map(Value::MacAddr)
+                .map_err(Into::into)
         }
         ScalarType::MacAddr8 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
@@ -2592,7 +2594,9 @@ pub(crate) fn decode_value_with_external_toast(
                     actual_len: Some(bytes.len()),
                 });
             }
-            parse_macaddr8_bytes(bytes).map(Value::MacAddr8)
+            parse_macaddr8_bytes(bytes)
+                .map(Value::MacAddr8)
+                .map_err(Into::into)
         }
         ScalarType::Float32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
