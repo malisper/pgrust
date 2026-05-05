@@ -20557,6 +20557,8 @@ fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
 
     db.execute(1, "create table relcache_lifetime (id int4 not null)")
         .unwrap();
+    db.execute(1, "create table relcache_lifetime_other (id int4)")
+        .unwrap();
     let xid = db.txns.write().begin();
     let cid = 1;
     db.backend_cache_states.write().remove(&1);
@@ -20580,17 +20582,29 @@ fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
         .relation_by_oid(relation_oid)
         .unwrap();
     assert_eq!(cached_with_later_cid.relation_oid, relation_oid);
+    let other_relation = db
+        .lazy_catalog_lookup(1, Some((xid, cid.saturating_add(1))), None)
+        .lookup_any_relation("relcache_lifetime_other")
+        .unwrap();
+    let other_relation_oid = other_relation.relation_oid;
+    assert!(
+        db.backend_cache_states
+            .read()
+            .get(&1)
+            .unwrap()
+            .relation_cache
+            .contains_key(&other_relation_oid)
+    );
     db.txns.write().abort(xid).unwrap();
 
     let mut invalidation = crate::backend::utils::cache::inval::CatalogInvalidation::default();
-    invalidation
-        .touched_catalogs
-        .insert(BootstrapCatalogKind::PgClass);
+    invalidation.relation_oids.insert(relation_oid);
     crate::backend::utils::cache::inval::apply_backend_cache_invalidation(&db, 1, &invalidation);
 
     let states = db.backend_cache_states.read();
     let state = states.get(&1).unwrap();
-    assert!(state.relation_cache.is_empty());
+    assert!(!state.relation_cache.contains_key(&relation_oid));
+    assert!(state.relation_cache.contains_key(&other_relation_oid));
     assert!(state.catcache.is_none());
 }
 

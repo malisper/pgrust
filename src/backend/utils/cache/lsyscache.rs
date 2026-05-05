@@ -1822,8 +1822,9 @@ pub fn resolve_relation_name_to_oid(
     name: &str,
 ) -> Option<u32> {
     let catalog_name = normalize_catalog_name(name);
+    let temp_namespace = owned_temp_namespace(db, client_id);
     if let Some((schema, relname)) = catalog_name.split_once('.') {
-        if let Some(temp_namespace) = owned_temp_namespace(db, client_id)
+        if let Some(temp_namespace) = temp_namespace.as_ref()
             && (schema.eq_ignore_ascii_case("pg_temp")
                 || temp_namespace.name.eq_ignore_ascii_case(schema))
         {
@@ -1837,11 +1838,16 @@ pub fn resolve_relation_name_to_oid(
             .map(|row| row.oid);
     }
 
-    if let Some(entry) = temp_relation_entry_by_name(db, client_id, &catalog_name) {
-        return Some(entry.relation_oid);
-    }
-
     for namespace_name in search_path {
+        if let Some(temp_namespace) = temp_namespace.as_ref()
+            && (namespace_name.eq_ignore_ascii_case("pg_temp")
+                || temp_namespace.name.eq_ignore_ascii_case(namespace_name))
+        {
+            if let Some(entry) = temp_relation_entry_by_name(db, client_id, &catalog_name) {
+                return Some(entry.relation_oid);
+            }
+            continue;
+        }
         let Some(namespace_oid) =
             namespace_row_by_name(db, client_id, txn_ctx, namespace_name).map(|row| row.oid)
         else {

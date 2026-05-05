@@ -1390,15 +1390,38 @@ fn validate_maintenance_targets_for_analyze(
 }
 
 fn validate_resolved_target_columns(target: &ResolvedMaintenanceTarget) -> Result<(), ExecError> {
+    let mut seen = BTreeSet::new();
     for column in &target.columns {
+        let normalized = column.to_ascii_lowercase();
+        if !seen.insert(normalized) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" of relation \"{}\" appears more than once",
+                    column,
+                    relation_basename(&target.original_name)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42701",
+            });
+        }
         if !target
             .relation
             .desc
             .columns
             .iter()
-            .any(|desc| desc.name.eq_ignore_ascii_case(column))
+            .any(|desc| !desc.dropped && desc.name.eq_ignore_ascii_case(column))
         {
-            return Err(ExecError::Parse(ParseError::UnknownColumn(column.clone())));
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    column,
+                    relation_basename(&target.original_name)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            });
         }
     }
     Ok(())

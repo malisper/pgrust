@@ -99,38 +99,11 @@ pub fn apply_backend_cache_invalidation(
         state.shared_catcache = None;
         state.shared_catcache_ctx = None;
     }
-    if invalidation.relation_oids.is_empty() && relation_cache_flush_required(invalidation) {
-        state.relation_cache.clear();
-        state.relation_cache_ctx = None;
-    } else if !invalidation.relation_oids.is_empty() {
-        for relation_oid in &invalidation.relation_oids {
-            state.relation_cache.remove(relation_oid);
-        }
+    for relation_oid in &invalidation.relation_oids {
+        state.relation_cache.remove(relation_oid);
     }
     state.catalog_snapshot = None;
     state.catalog_snapshot_ctx = None;
-}
-
-fn relation_cache_flush_required(invalidation: &CatalogInvalidation) -> bool {
-    invalidation.syscache_flush_catalogs.iter().any(|kind| {
-        matches!(
-            kind,
-            BootstrapCatalogKind::PgClass
-                | BootstrapCatalogKind::PgAttribute
-                | BootstrapCatalogKind::PgAttrdef
-                | BootstrapCatalogKind::PgIndex
-                | BootstrapCatalogKind::PgInherits
-                | BootstrapCatalogKind::PgConstraint
-                | BootstrapCatalogKind::PgPartitionedTable
-                | BootstrapCatalogKind::PgRewrite
-                | BootstrapCatalogKind::PgTrigger
-                | BootstrapCatalogKind::PgPolicy
-                | BootstrapCatalogKind::PgStatistic
-                | BootstrapCatalogKind::PgStatisticExt
-                | BootstrapCatalogKind::PgStatisticExtData
-                | BootstrapCatalogKind::PgPublicationRel
-        )
-    })
 }
 
 #[allow(non_snake_case)]
