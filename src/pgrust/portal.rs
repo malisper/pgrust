@@ -280,8 +280,22 @@ impl Portal {
         }
         self.status = PortalStatus::Active;
         let was_streaming = matches!(self.execution, PortalExecution::Streaming(_));
+        let mut completed_stream_materialization = None;
         let mut result = match &mut self.execution {
-            PortalExecution::Streaming(guard) => fetch_streaming_forward(guard, limit),
+            PortalExecution::Streaming(guard) => match fetch_streaming_forward(guard, limit) {
+                Ok(streaming) => {
+                    if !self.options.no_scroll && streaming.result.completed {
+                        completed_stream_materialization = Some((
+                            streaming.result.columns.clone(),
+                            streaming.result.column_names.clone(),
+                            streaming.result.rows.clone(),
+                            streaming.row_positions,
+                        ));
+                    }
+                    Ok(streaming.result)
+                }
+                Err(err) => Err(err),
+            },
             PortalExecution::Materialized {
                 columns,
                 column_names,
@@ -312,6 +326,17 @@ impl Portal {
             Ok(result) if result.completed => self.status = PortalStatus::Done,
             Ok(_) => self.status = PortalStatus::Ready,
             Err(_) => self.status = PortalStatus::Failed,
+        }
+        if let Some((columns, column_names, rows, row_positions)) = completed_stream_materialization
+        {
+            let pos = rows.len().saturating_add(1);
+            self.execution = PortalExecution::Materialized {
+                columns,
+                column_names,
+                rows,
+                row_positions,
+                pos,
+            };
         }
         if let Ok(result) = &mut result
             && result.completed
@@ -623,11 +648,17 @@ fn portal_direction_can_stream_forward(direction: PortalFetchDirection) -> bool 
     )
 }
 
+struct StreamingForwardResult {
+    result: PortalRunResult,
+    row_positions: Vec<Option<PositionedCursorRow>>,
+}
+
 fn fetch_streaming_forward(
     guard: &mut SelectGuard,
     limit: PortalFetchLimit,
-) -> Result<PortalRunResult, ExecError> {
+) -> Result<StreamingForwardResult, ExecError> {
     let mut rows = Vec::new();
+    let mut row_positions = Vec::new();
     let mut current_row = None;
     let max_rows = match limit {
         PortalFetchLimit::All => usize::MAX,
@@ -651,6 +682,7 @@ fn fetch_streaming_forward(
                     table_oid,
                     guard.state.current_system_bindings(),
                 );
+                row_positions.push(current_row);
             }
             None => {
                 completed = true;
@@ -661,14 +693,17 @@ fn fetch_streaming_forward(
     if matches!(limit, PortalFetchLimit::All) {
         completed = true;
     }
-    Ok(PortalRunResult {
-        columns: guard.columns.clone(),
-        column_names: guard.column_names.clone(),
-        processed: rows.len(),
-        rows,
-        completed,
-        command_tag: None,
-        current_row,
+    Ok(StreamingForwardResult {
+        result: PortalRunResult {
+            columns: guard.columns.clone(),
+            column_names: guard.column_names.clone(),
+            processed: rows.len(),
+            rows,
+            completed,
+            command_tag: None,
+            current_row,
+        },
+        row_positions,
     })
 }
 

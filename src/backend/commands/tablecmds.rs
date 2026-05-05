@@ -9,7 +9,8 @@ use crate::backend::access::heap::heapam::{
     HeapError, heap_delete_with_waiter, heap_delete_with_waiter_local,
     heap_delete_with_waiter_with_wal_policy, heap_fetch, heap_fetch_local,
     heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid_and_fillfactor,
-    heap_insert_mvcc_with_cid_and_fillfactor_local, heap_scan_begin_visible, heap_scan_end,
+    heap_insert_mvcc_with_cid_and_fillfactor_local, heap_scan_begin_visible,
+    heap_scan_begin_visible_local, heap_scan_end, heap_scan_next_visible_raw,
     heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_update_with_waiter_with_snapshot,
     heap_update_with_waiter_with_snapshot_local,
 };
@@ -6233,6 +6234,9 @@ pub(crate) fn collect_matching_rows_heap_with_table_oid(
     if let Some(table_oid) = table_oid {
         ctx.predicate_lock_relation(table_oid)?;
     }
+    if table_oid.is_some_and(|oid| ctx.relation_uses_local_buffers(oid)) {
+        return collect_matching_rows_heap_local(rel, desc, toast, table_oid, predicate, ctx);
+    }
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, rel, ctx.snapshot.clone())?;
 
     let desc = Rc::new(desc.clone());
@@ -6289,6 +6293,65 @@ pub(crate) fn collect_matching_rows_heap_with_table_oid(
             }
             rows.push((tid, values));
         }
+    }
+
+    heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
+    Ok(rows)
+}
+
+fn collect_matching_rows_heap_local(
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    desc: &RelationDesc,
+    toast: Option<ToastRelationRef>,
+    table_oid: Option<u32>,
+    predicate: Option<&Expr>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+    let mut scan =
+        heap_scan_begin_visible_local(ctx.local_buffer_manager()?, rel, ctx.snapshot.clone())?;
+
+    let desc = Rc::new(desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
+    let qual = predicate.map(|p| compile_predicate_with_decoder(p, &decoder));
+
+    let mut rows = Vec::new();
+    loop {
+        let next = heap_scan_next_visible_raw::<
+            (ItemPointerData, crate::include::access::htup::HeapTuple),
+            ExecError,
+        >(
+            &ctx.pool,
+            ctx.client_id,
+            &ctx.txns,
+            &mut scan,
+            |tid, tuple_bytes| {
+                Ok((
+                    tid,
+                    crate::include::access::htup::HeapTuple::parse(tuple_bytes)?,
+                ))
+            },
+        )?;
+        let Some((tid, tuple)) = next else {
+            break;
+        };
+
+        let mut slot =
+            TupleSlot::from_heap_tuple(Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple);
+        slot.decoder = Some(Rc::clone(&decoder));
+        slot.toast = slot_toast_context(toast, ctx);
+        ctx.check_serializable_visible_tuple_xmax(slot.xmax())?;
+        let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+        Value::materialize_all(&mut values);
+
+        let mut predicate_slot =
+            TupleSlot::virtual_row_with_metadata(values.clone(), Some(tid), table_oid);
+        if let Some(q) = &qual
+            && !q(&mut predicate_slot, ctx)?
+        {
+            continue;
+        }
+        rows.push((tid, values));
     }
 
     heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
