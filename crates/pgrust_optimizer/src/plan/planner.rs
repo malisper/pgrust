@@ -133,6 +133,48 @@ fn group_pathkey_candidates(
     candidates
 }
 
+fn reorder_group_by_for_pathkeys(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    group_by_refs: &[usize],
+    pathkeys: &[PathKey],
+) -> (Vec<Expr>, Vec<usize>) {
+    if group_by.len() < 2 || pathkeys.is_empty() {
+        return (group_by.to_vec(), group_by_refs.to_vec());
+    }
+
+    let base_pathkeys = group_pathkeys(root, group_by);
+    let mut used = vec![false; group_by.len()];
+    let mut reordered_group_by = Vec::with_capacity(group_by.len());
+    let mut reordered_refs = Vec::with_capacity(group_by_refs.len());
+
+    for pathkey in pathkeys {
+        let Some((index, _)) = base_pathkeys
+            .iter()
+            .enumerate()
+            .find(|(index, base)| !used[*index] && pathkey_same_expr_for_root(root, base, pathkey))
+        else {
+            break;
+        };
+        used[index] = true;
+        reordered_group_by.push(group_by[index].clone());
+        reordered_refs.push(group_by_refs.get(index).copied().unwrap_or(index + 1));
+    }
+
+    if reordered_group_by.is_empty() {
+        return (group_by.to_vec(), group_by_refs.to_vec());
+    }
+
+    for (index, expr) in group_by.iter().enumerate() {
+        if used[index] {
+            continue;
+        }
+        reordered_group_by.push(expr.clone());
+        reordered_refs.push(group_by_refs.get(index).copied().unwrap_or(index + 1));
+    }
+    (reordered_group_by, reordered_refs)
+}
+
 fn permuted_group_pathkeys(root: &PlannerInfo, group_by: &[Expr]) -> Vec<Vec<PathKey>> {
     let base = group_pathkeys(root, group_by);
     if base.len() <= 1 || base.len() > 4 {
@@ -250,6 +292,9 @@ fn aggregate_input_pathkeys(
             accum
         })
         .collect::<Vec<_>>();
+    if !root.config.enable_presorted_aggregate {
+        return (group_pathkeys.to_vec(), marked_accumulators);
+    }
     let candidates = accumulators
         .iter()
         .enumerate()
@@ -317,30 +362,31 @@ fn aggregate_input_pathkeys(
 
 fn aggregate_accum_can_use_presort(accum: &AggAccum, catalog: &dyn CatalogLookup) -> bool {
     accum.direct_args.is_empty()
+        && !(accum.distinct && !accum.order_by.is_empty())
         && builtin_hypothetical_aggregate_function_for_proc_oid(accum.aggfnoid).is_none()
         && builtin_ordered_set_aggregate_function_for_proc_oid(accum.aggfnoid).is_none()
+        && (!accum.filter.is_some() || aggregate_accum_filter_presort_safe(accum))
         && catalog
             .aggregate_by_fnoid(accum.aggfnoid)
             .is_none_or(|row| row.aggkind == 'n')
 }
 
+fn aggregate_accum_filter_presort_safe(accum: &AggAccum) -> bool {
+    accum.args.iter().all(|arg| {
+        matches!(
+            strip_binary_coercible_casts(arg),
+            Expr::Var(_) | Expr::Const(_)
+        )
+    })
+}
+
 fn aggregate_accum_pathkeys(root: &PlannerInfo, accum: &AggAccum) -> Vec<PathKey> {
     let mut pathkeys = Vec::new();
-    for item in &accum.order_by {
-        push_unique_pathkey(
-            root,
-            &mut pathkeys,
-            PathKey {
-                expr: item.expr.clone(),
-                ressortgroupref: item.ressortgroupref,
-                descending: item.descending,
-                nulls_first: item.nulls_first,
-                collation_oid: item.collation_oid,
-            },
-        );
-    }
     if accum.distinct {
         for arg in &accum.args {
+            if matches!(strip_binary_coercible_casts(arg), Expr::Const(_)) {
+                continue;
+            }
             push_unique_pathkey(
                 root,
                 &mut pathkeys,
@@ -350,6 +396,20 @@ fn aggregate_accum_pathkeys(root: &PlannerInfo, accum: &AggAccum) -> Vec<PathKey
                     descending: false,
                     nulls_first: None,
                     collation_oid: None,
+                },
+            );
+        }
+    } else {
+        for item in &accum.order_by {
+            push_unique_pathkey(
+                root,
+                &mut pathkeys,
+                PathKey {
+                    expr: item.expr.clone(),
+                    ressortgroupref: item.ressortgroupref,
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
                 },
             );
         }
@@ -537,6 +597,10 @@ fn ordered_group_input(
         ordered_index_group_input(root, &path, required_pathkeys, catalog)
     {
         index_path
+    } else if let Some(index_path) =
+        incremental_ordered_index_group_input(root, &path, required_pathkeys, catalog)
+    {
+        index_path
     } else {
         let presorted_count = common_presorted_prefix_len(&path.pathkeys(), required_pathkeys);
         let display_items = sort_key_display_items(root, required_pathkeys, catalog);
@@ -582,6 +646,63 @@ fn ordered_index_group_input(
     relation_ordered_index_paths(root, rtindex, required_pathkeys, catalog)
         .into_iter()
         .filter(|path| path.semantic_output_target() == input.semantic_output_target())
+        .min_by(|left, right| {
+            if bestpath::cheaper_than(left, Some(right), bestpath::CostSelector::Total) {
+                Ordering::Less
+            } else if bestpath::cheaper_than(right, Some(left), bestpath::CostSelector::Total) {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        })
+}
+
+fn incremental_ordered_index_group_input(
+    root: &PlannerInfo,
+    input: &Path,
+    required_pathkeys: &[PathKey],
+    catalog: &dyn CatalogLookup,
+) -> Option<Path> {
+    if required_pathkeys.len() < 2 {
+        return None;
+    }
+    let rtindex = path_base_scan_rtindex(input)?;
+    let required_target = input.semantic_output_target();
+    (1..required_pathkeys.len())
+        .rev()
+        .flat_map(|presorted_count| {
+            relation_ordered_index_paths(
+                root,
+                rtindex,
+                &required_pathkeys[..presorted_count],
+                catalog,
+            )
+            .into_iter()
+            .filter({
+                let required_target = required_target.clone();
+                move |path| path.semantic_output_target() == required_target
+            })
+            .map(move |path| (presorted_count, path))
+        })
+        .map(|(presorted_count, path)| {
+            let display_items = sort_key_display_items(root, required_pathkeys, catalog);
+            let mut presorted_display_pathkeys = required_pathkeys[..presorted_count].to_vec();
+            for key in &mut presorted_display_pathkeys {
+                key.descending = false;
+                key.nulls_first = None;
+            }
+            let presorted_display_items =
+                sort_key_display_items(root, &presorted_display_pathkeys, catalog);
+            Path::IncrementalSort {
+                plan_info: PlanEstimate::default(),
+                pathtarget: path.semantic_output_target(),
+                items: pathkeys_to_order_items(required_pathkeys),
+                presorted_count,
+                display_items,
+                presorted_display_items,
+                input: Box::new(path),
+            }
+        })
         .min_by(|left, right| {
             if bestpath::cheaper_than(left, Some(right), bestpath::CostSelector::Total) {
                 Ordering::Less
@@ -2225,13 +2346,20 @@ fn make_aggregate_rel(
         if path_is_const_false_filter(&path)
             && !matches!(root.parse.where_qual, Some(Expr::Const(Value::Bool(false))))
         {
+            let (ordered_group_by, _) =
+                reorder_group_by_for_pathkeys(root, &group_by, &group_by_refs, &group_pathkeys);
+            let output_columns = build_aggregate_output_columns(
+                &ordered_group_by,
+                &passthrough_exprs,
+                &accumulators,
+            );
             rel.add_path(aggregate_path(
                 AggregateStrategy::Sorted,
                 AggregatePhase::Complete,
                 group_pathkeys.clone(),
                 slot_id,
                 path,
-                group_by.clone(),
+                ordered_group_by,
                 passthrough_exprs.clone(),
                 accumulators.clone(),
                 having.clone(),
@@ -2246,13 +2374,20 @@ fn make_aggregate_rel(
             for group_pathkeys in group_pathkey_candidates {
                 let (input_pathkeys, presorted_accumulators) =
                     aggregate_input_pathkeys(root, &group_pathkeys, &accumulators, catalog);
+                let (ordered_group_by, _) =
+                    reorder_group_by_for_pathkeys(root, &group_by, &group_by_refs, &group_pathkeys);
+                let output_columns = build_aggregate_output_columns(
+                    &ordered_group_by,
+                    &passthrough_exprs,
+                    &presorted_accumulators,
+                );
                 rel.add_path(aggregate_path(
                     AggregateStrategy::Sorted,
                     AggregatePhase::Complete,
                     group_pathkeys,
                     slot_id,
                     ordered_group_input(root, path.clone(), &input_pathkeys, catalog),
-                    group_by.clone(),
+                    ordered_group_by,
                     passthrough_exprs.clone(),
                     presorted_accumulators,
                     having.clone(),
@@ -2291,6 +2426,13 @@ fn make_aggregate_rel(
                 {
                     continue;
                 }
+                let (ordered_group_by, _) =
+                    reorder_group_by_for_pathkeys(root, &group_by, &group_by_refs, &group_pathkeys);
+                let output_columns = build_aggregate_output_columns(
+                    &ordered_group_by,
+                    &passthrough_exprs,
+                    &accumulators,
+                );
                 rel.add_path(aggregate_path(
                     AggregateStrategy::Sorted,
                     AggregatePhase::Complete,
@@ -2301,7 +2443,7 @@ fn make_aggregate_rel(
                     } else {
                         ordered_group_input(root, path.clone(), &group_pathkeys, catalog)
                     },
-                    group_by.clone(),
+                    ordered_group_by,
                     passthrough_exprs.clone(),
                     accumulators.clone(),
                     having.clone(),

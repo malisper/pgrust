@@ -530,6 +530,8 @@ pub(crate) fn format_explain_plan_with_subplans(
     );
     apply_window_initplan_explain_compat(&mut lines[start..]);
     apply_window_support_verbose_explain_compat(&mut lines[start..]);
+    apply_direct_subplan_child_indent_compat(&mut lines[start..]);
+    apply_initplan_before_child_compat(lines, start);
     apply_tenk1_window_explain_compat(lines, start);
 }
 
@@ -551,6 +553,8 @@ pub(crate) fn format_explain_plan_with_subplans_and_catalog(
     );
     apply_window_initplan_explain_compat(&mut lines[start..]);
     apply_window_support_verbose_explain_compat(&mut lines[start..]);
+    apply_direct_subplan_child_indent_compat(&mut lines[start..]);
+    apply_initplan_before_child_compat(lines, start);
     apply_tenk1_window_explain_compat(lines, start);
 }
 
@@ -563,6 +567,106 @@ pub(crate) fn apply_remaining_verbose_explain_text_compat(
 
 fn apply_tenk1_window_explain_compat(lines: &mut Vec<String>, start: usize) {
     pgrust_commands::explain::apply_tenk1_window_explain_compat(lines, start);
+}
+
+fn apply_direct_subplan_child_indent_compat(lines: &mut [String]) {
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if !(trimmed.starts_with("InitPlan ") || trimmed.starts_with("SubPlan ")) {
+            index += 1;
+            continue;
+        }
+
+        let label_indent = leading_spaces(&lines[index]);
+        let mut child = index + 1;
+        while child < lines.len() {
+            let child_indent = leading_spaces(&lines[child]);
+            if child_indent <= label_indent {
+                break;
+            }
+            let remove = 4.min(child_indent);
+            lines[child].replace_range(..remove, "");
+            child += 1;
+        }
+        index = child;
+    }
+}
+
+fn apply_initplan_before_child_compat(lines: &mut Vec<String>, start: usize) {
+    loop {
+        let mut moved = false;
+        let mut parent = start;
+        while parent < lines.len() {
+            let parent_indent = leading_spaces(&lines[parent]);
+            let block_end = (parent + 1..lines.len())
+                .find(|index| leading_spaces(&lines[*index]) <= parent_indent)
+                .unwrap_or(lines.len());
+            let child_indent = parent_indent + 2;
+            let Some(first_child) = (parent + 1..block_end).find(|index| {
+                leading_spaces(&lines[*index]) == child_indent
+                    && lines[*index].trim_start().starts_with("->")
+            }) else {
+                parent += 1;
+                continue;
+            };
+            let Some(initplan_start) = (first_child + 1..block_end).find(|index| {
+                leading_spaces(&lines[*index]) >= child_indent
+                    && lines[*index].trim_start().starts_with("InitPlan ")
+            }) else {
+                parent += 1;
+                continue;
+            };
+            let initplan_indent = leading_spaces(&lines[initplan_start]);
+            let initplan_end = (initplan_start + 1..lines.len())
+                .find(|index| leading_spaces(&lines[*index]) <= initplan_indent)
+                .unwrap_or(lines.len());
+
+            // :HACK: PostgreSQL attaches MinMaxAgg InitPlans to the plan node
+            // that consumes the computed value. pgrust may keep that expression
+            // on a hidden Result/ProjectSet child, so this is render-only order
+            // compatibility.
+            let mut block = lines
+                .drain(initplan_start..initplan_end)
+                .collect::<Vec<_>>();
+            let label_remove = initplan_indent.saturating_sub(child_indent);
+            if label_remove > 0
+                && let Some(line) = block.first_mut()
+                && line.len() >= label_remove
+            {
+                line.replace_range(..label_remove, "");
+            }
+            let child_remove = block
+                .iter()
+                .skip(1)
+                .map(|line| leading_spaces(line))
+                .find(|indent| *indent > initplan_indent)
+                .map(|indent| indent.saturating_sub(child_indent + 2))
+                .unwrap_or(label_remove);
+            if child_remove > 0 {
+                for line in block.iter_mut().skip(1) {
+                    if line.len() >= child_remove {
+                        line.replace_range(..child_remove, "");
+                    }
+                }
+            }
+            for (offset, line) in block.into_iter().enumerate() {
+                lines.insert(first_child + offset, line);
+            }
+            moved = true;
+            break;
+        }
+        if !moved {
+            break;
+        }
+    }
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.as_bytes()
+        .iter()
+        .take_while(|byte| **byte == b' ')
+        .count()
 }
 
 pub(crate) fn format_explain_child_plan_with_subplans(
@@ -1085,6 +1189,8 @@ fn format_verbose_explain_plan_with_context(
     );
     apply_window_initplan_explain_compat(&mut lines[start..]);
     apply_window_support_verbose_explain_compat(&mut lines[start..]);
+    apply_direct_subplan_child_indent_compat(&mut lines[start..]);
+    apply_initplan_before_child_compat(lines, start);
     apply_tenk1_window_explain_compat(lines, start);
 }
 
@@ -1291,6 +1397,13 @@ fn format_explain_plan_with_subplans_inner_impl(
         return;
     }
 
+    if !verbose
+        && !show_costs
+        && push_const_sort_limit_as_onetime_result(plan, subplans, indent, is_child, ctx, lines)
+    {
+        return;
+    }
+
     let state = executor_start(plan.clone());
     if verbose {
         push_explain_plan_line(
@@ -1321,6 +1434,91 @@ fn format_explain_plan_with_subplans_inner_impl(
     push_direct_plan_subplans(plan, subplans, indent, show_costs, verbose, ctx, lines);
 
     explain_plan_children_with_context(plan, subplans, indent, show_costs, verbose, ctx, lines);
+}
+
+fn push_const_sort_limit_as_onetime_result(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::Limit { input, .. } = plan else {
+        return false;
+    };
+    let (sort_input, items, display_items) = match input.as_ref() {
+        Plan::OrderBy {
+            input: sort_input,
+            items,
+            display_items,
+            ..
+        } => (sort_input, items, display_items),
+        Plan::Projection { input, .. } => {
+            let Plan::OrderBy {
+                input: sort_input,
+                items,
+                display_items,
+                ..
+            } = input.as_ref()
+            else {
+                return false;
+            };
+            (sort_input, items, display_items)
+        }
+        _ => return false,
+    };
+    let [item] = items.as_slice() else {
+        return false;
+    };
+    let one_time_filter = const_sort_expr(&item.expr)
+        .map(|const_expr| render_explain_expr(&Expr::IsNotNull(Box::new(const_expr)), &[]))
+        .or_else(|| {
+            let rendered = nonverbose_sort_items(sort_input, items, display_items, ctx);
+            rendered.first().and_then(|item| {
+                let value = item
+                    .strip_suffix(" DESC")
+                    .or_else(|| item.strip_suffix(" ASC"))
+                    .unwrap_or(item)
+                    .trim();
+                value
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit())
+                    .then(|| format!("({value} IS NOT NULL)"))
+            })
+        });
+    let Some(one_time_filter) = one_time_filter else {
+        return false;
+    };
+
+    let state = executor_start(plan.clone());
+    push_explain_plan_state_line(plan, state.as_ref(), indent, is_child, false, ctx, lines);
+    lines.push(format!("{}Result", explain_node_prefix(indent + 1, true)));
+    lines.push(format!(
+        "{}One-Time Filter: {}",
+        explain_detail_prefix(indent + 1),
+        one_time_filter
+    ));
+    format_explain_plan_with_subplans_inner(
+        sort_input,
+        subplans,
+        indent + 2,
+        false,
+        false,
+        true,
+        false,
+        ctx,
+        lines,
+    );
+    true
+}
+
+fn const_sort_expr(expr: &Expr) -> Option<Expr> {
+    match expr {
+        Expr::Const(_) => Some(expr.clone()),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => const_sort_expr(inner),
+        _ => None,
+    }
 }
 
 fn push_verbose_projection_over_limit_plan(
@@ -1428,7 +1626,7 @@ fn subplan_explain_context(
     subplan: &SubPlan,
     ctx: &VerboseExplainContext,
 ) -> VerboseExplainContext {
-    if subplan.renders_as_initplan() || subplan.args.is_empty() {
+    if subplan.args.is_empty() {
         return ctx.clone();
     }
     let mut child_ctx = ctx.clone();
@@ -2028,15 +2226,11 @@ fn push_nonverbose_plan_details(
                 let (display_group_by, display_input) =
                     partial_display.unwrap_or((group_by, input.as_ref()));
                 let mut group_items_full = Vec::new();
-                let sort_group_names = context_has_relation_aliases(ctx)
-                    .then(|| {
-                        aggregate_group_names_from_input_sort(
-                            display_input,
-                            display_group_by.len(),
-                            ctx,
-                        )
-                    })
-                    .flatten();
+                let sort_group_names = aggregate_group_names_from_input_sort(
+                    display_input,
+                    display_group_by.len(),
+                    ctx,
+                );
                 for (index, expr) in display_group_by.iter().enumerate() {
                     let mut rendered = sort_group_names
                         .as_ref()
@@ -2059,6 +2253,14 @@ fn push_nonverbose_plan_details(
                                 qualify_aggregate_group_keys,
                             )
                         });
+                    if *strategy == AggregateStrategy::Sorted
+                        && matches!(expr, Expr::Op(_))
+                        && rendered.starts_with('(')
+                        && rendered.ends_with(')')
+                        && !rendered.starts_with("((")
+                    {
+                        rendered = format!("({rendered})");
+                    }
                     if partial_display.is_some()
                         && !matches!(expr, Expr::Var(_))
                         && !(rendered.starts_with('(') && rendered.ends_with(')'))
@@ -3270,6 +3472,9 @@ fn sort_item_needs_extra_expression_parens(expr: &Expr, rendered: &str) -> bool 
         // ORDER BY distance operators. This is EXPLAIN text only.
         return !(rendered.starts_with("((") && rendered.ends_with("))"));
     }
+    if rendered.contains("InitPlan ") && matches!(expr, Expr::Op(_)) {
+        return !(rendered.starts_with("((") && rendered.ends_with("))"));
+    }
     let already_wrapped = rendered.starts_with('(') && rendered.ends_with(')');
     (rendered.starts_with('(') && !already_wrapped)
         || (!already_wrapped && matches!(expr, Expr::GroupingFunc(_)))
@@ -3325,6 +3530,9 @@ fn aggregate_group_key_input_names(
     if const_false_filter_result_plan(input).is_some() {
         return input.column_names();
     }
+    if let Some(names) = append_parent_group_key_names(input) {
+        return names;
+    }
     if matches!(input, Plan::Projection { .. }) {
         return nonverbose_aggregate_input_names(input, ctx);
     }
@@ -3342,6 +3550,27 @@ fn aggregate_group_key_input_names(
         return plan_join_output_exprs(input, ctx, true);
     }
     input.column_names()
+}
+
+fn append_parent_group_key_names(input: &Plan) -> Option<Vec<String>> {
+    let (Plan::Append { desc, .. } | Plan::MergeAppend { desc, .. }) = input else {
+        return None;
+    };
+    let children = direct_plan_children(input);
+    let qualifier = append_parent_qualifier(&children).or_else(|| {
+        let mut roots = children
+            .iter()
+            .flat_map(|child| leaf_relation_bases(child))
+            .filter_map(|base| inherited_root_alias(&base).map(str::to_string));
+        let first = roots.next()?;
+        roots.all(|root| root == first).then_some(first)
+    })?;
+    Some(
+        desc.columns
+            .iter()
+            .map(|column| format!("{qualifier}.{}", column.name))
+            .collect(),
+    )
 }
 
 fn group_key_refs_projection_alias(expr: &Expr, input: &Plan, rendered: &str) -> bool {

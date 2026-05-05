@@ -32,6 +32,7 @@ pub fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> Plan
             .unwrap_or(true),
         retain_partial_index_filters: false,
         enable_hashagg: bool_executor_guc(gucs, "enable_hashagg", true),
+        enable_presorted_aggregate: bool_executor_guc(gucs, "enable_presorted_aggregate", true),
         enable_sort: bool_executor_guc(gucs, "enable_sort", true),
         enable_parallel_append: bool_executor_guc(gucs, "enable_parallel_append", true),
         enable_parallel_hash: bool_executor_guc(gucs, "enable_parallel_hash", true),

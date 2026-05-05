@@ -913,7 +913,7 @@ direct_test_dependencies() {
             echo "date time timetz timestamp timestamptz interval"
             ;;
         aggregates)
-            echo "create_aggregate"
+            echo "create_index create_aggregate"
             ;;
         numeric_big)
             echo "numeric"

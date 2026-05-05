@@ -4887,6 +4887,42 @@ fn planner_memoizes_expression_key_nested_loop() {
 }
 
 #[test]
+fn planner_does_not_memoize_volatile_lateral_inner_target() {
+    let catalog = catalog_with_expr_key();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select * from expr_key t1, lateral (select t2.x, random() as r from expr_key t2 where t2.x = t1.x) ss",
+        &catalog,
+        PlannerConfig {
+            enable_hashjoin: false,
+            enable_mergejoin: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            match plan {
+            Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => keys.iter().any(
+                |key| matches!(&key.argument, IndexScanKeyArgument::Runtime(expr) if contains_exec_param_for_tests(expr))
+            ),
+            _ => false,
+        }
+        }),
+        "expected runtime index probe in volatile lateral plan: {:#?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Memoize { .. }
+        )),
+        "volatile lateral inner target must not be memoized: {:#?}",
+        planned.plan_tree
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
 fn unused_lateral_subquery_output_does_not_parameterize_join() {
     let mut catalog = Catalog::default();
     let table = catalog

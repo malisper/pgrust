@@ -6491,7 +6491,9 @@ fn explain_group_by_uses_matching_index_key_order() {
                 })
                 .collect::<Vec<_>>();
             assert!(
-                rendered.iter().any(|line| line.contains("Index Scan")),
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan")),
                 "expected grouping path to use the b, a index, got {rendered:?}"
             );
             assert!(
@@ -18839,6 +18841,11 @@ fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
                 rendered.join("\n")
             );
             assert!(
+                !rendered.iter().any(|line| line.trim() == "->  Memoize"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
                 rendered
                     .iter()
                     .any(|line| line.trim() == "->  Function Scan on pg_catalog.generate_series s1"),
@@ -18863,6 +18870,13 @@ fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
                 rendered
                     .iter()
                     .any(|line| line.trim() == "Output: s1.s1, s2.s2, (sum((s1.s1 + s2.s2)))"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                !rendered
+                    .iter()
+                    .any(|line| line.trim() == "Output: s1.s1, s2, (sum((s1 + s2)))"),
                 "{}",
                 rendered.join("\n")
             );

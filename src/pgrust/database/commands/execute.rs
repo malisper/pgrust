@@ -75,6 +75,7 @@ fn direct_guc_default(name: &str) -> Option<&'static str> {
         | "enable_material"
         | "enable_partition_pruning"
         | "enable_hashagg"
+        | "enable_presorted_aggregate"
         | "enable_sort"
         | "enable_parallel_append"
         | "enable_parallel_hash"
@@ -178,6 +179,7 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
             .unwrap_or(true),
         retain_partial_index_filters: false,
         enable_hashagg: direct_bool_config(gucs, "enable_hashagg", true),
+        enable_presorted_aggregate: direct_bool_config(gucs, "enable_presorted_aggregate", true),
         enable_sort: direct_bool_config(gucs, "enable_sort", true),
         enable_parallel_append: direct_bool_config(gucs, "enable_parallel_append", true),
         enable_parallel_hash: direct_bool_config(gucs, "enable_parallel_hash", true),

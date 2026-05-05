@@ -528,10 +528,10 @@ fn remove_redundant_relation_group_keys(query: &Query, catalog: &dyn CatalogLook
         else {
             continue;
         };
-        if *relkind != 'r' {
+        if !matches!(*relkind, 'r' | 'p') {
             continue;
         }
-        if rte.inh && catalog.find_all_inheritors(*relation_oid).len() > 1 {
+        if *relkind != 'p' && rte.inh && catalog.find_all_inheritors(*relation_oid).len() > 1 {
             continue;
         }
 
@@ -576,6 +576,11 @@ fn best_unique_group_subset(
     desc: &pgrust_nodes::primnodes::RelationDesc,
     grouped_attnos: &BTreeSet<i16>,
 ) -> Option<BTreeSet<i16>> {
+    let not_null_attnos = catalog
+        .attribute_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter_map(|attr| (attr.attnum > 0 && attr.attnotnull).then_some(attr.attnum))
+        .collect::<BTreeSet<_>>();
     let mut best_key: Option<BTreeSet<i16>> = None;
     for index in catalog.index_relations_for_heap(relation_oid) {
         let meta = &index.index_meta;
@@ -594,10 +599,11 @@ fn best_unique_group_subset(
         if key_attnos.is_empty() || key_attnos.iter().any(|attno| *attno <= 0) {
             continue;
         }
-        if !meta.indnullsnotdistinct
+        if !meta.indisprimary
+            && !meta.indnullsnotdistinct
             && key_attnos
                 .iter()
-                .any(|attno| desc.columns[(attno - 1) as usize].storage.nullable)
+                .any(|attno| !column_known_not_null(desc, &not_null_attnos, *attno))
         {
             continue;
         }
@@ -612,6 +618,18 @@ fn best_unique_group_subset(
         }
     }
     best_key
+}
+
+fn column_known_not_null(
+    desc: &pgrust_nodes::primnodes::RelationDesc,
+    not_null_attnos: &BTreeSet<i16>,
+    attno: i16,
+) -> bool {
+    not_null_attnos.contains(&attno)
+        || desc
+            .columns
+            .get((attno - 1) as usize)
+            .is_some_and(|column| !column.storage.nullable)
 }
 
 fn collapse_duplicate_group_keys(query: &Query, group_by: Vec<Expr>) -> Vec<Expr> {
@@ -712,7 +730,8 @@ fn collect_pairs_from_qual(query: &Query, expr: &Expr, pairs: &mut Vec<(VarKey, 
 }
 
 fn analyze_group_var(query: &Query, expr: &Expr) -> Option<GroupVarInfo> {
-    let Expr::Var(var) = expr else {
+    let flattened = flatten_join_alias_vars_query(query, expr.clone());
+    let Expr::Var(var) = &flattened else {
         return None;
     };
     if var.varlevelsup != 0 || var.varattno <= 0 {
