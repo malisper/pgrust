@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
 
@@ -41,6 +43,21 @@ use crate::pgrust::database::Database;
 use crate::{BufferPool, ClientId};
 
 pub use pgrust_catalog_store::syscache::*;
+
+#[cfg(test)]
+thread_local! {
+    static CLASS_SCAN_COUNT_FOR_TESTS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_class_scan_count_for_tests() {
+    CLASS_SCAN_COUNT_FOR_TESTS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn class_scan_count_for_tests() -> usize {
+    CLASS_SCAN_COUNT_FOR_TESTS.with(Cell::get)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ResolvedIndexSupportMetadata {
@@ -2195,6 +2212,8 @@ pub fn scan_class_rows_without_catcache(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgClassRow> {
+    #[cfg(test)]
+    CLASS_SCAN_COUNT_FOR_TESTS.with(|count| count.set(count.get() + 1));
     scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::RELOID)
         .into_iter()
         .filter_map(|tuple| match tuple {

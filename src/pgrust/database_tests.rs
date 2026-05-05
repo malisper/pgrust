@@ -20422,10 +20422,16 @@ fn maintenance_explicit_analyze_and_vacuum_use_keyed_catalog_without_broad_catca
         .unwrap();
     db.backend_cache_states.write().remove(&1);
     reset_broad_catalog_load_counters(&db);
+    crate::backend::utils::cache::syscache::reset_class_scan_count_for_tests();
 
     db.execute(1, "analyze maintenance_analyze_target").unwrap();
     db.execute(1, "vacuum maintenance_analyze_target").unwrap();
 
+    assert_eq!(
+        crate::backend::utils::cache::syscache::class_scan_count_for_tests(),
+        0,
+        "explicit maintenance targets should resolve through RELNAMENSP/RELOID, not pg_class scans"
+    );
     assert_no_broad_catalog_loads(&db, "explicit ANALYZE/VACUUM maintenance setup");
 }
 
@@ -20440,6 +20446,7 @@ fn maintenance_no_target_analyze_and_vacuum_use_class_scan_without_broad_catcach
         .unwrap();
     db.backend_cache_states.write().remove(&1);
     reset_broad_catalog_load_counters(&db);
+    crate::backend::utils::cache::syscache::reset_class_scan_count_for_tests();
 
     let analyze_targets = db
         .effective_analyze_targets_with_search_path(
@@ -20479,6 +20486,11 @@ fn maintenance_no_target_analyze_and_vacuum_use_class_scan_without_broad_catcach
             },
         )
         .unwrap();
+    assert_eq!(
+        crate::backend::utils::cache::syscache::class_scan_count_for_tests(),
+        2,
+        "database-wide maintenance should enumerate pg_class once per ANALYZE/VACUUM target collection"
+    );
     assert!(
         analyze_targets
             .iter()

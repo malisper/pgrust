@@ -21,8 +21,10 @@ use super::tablespace::{
 };
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
+use crate::backend::commands::analyze::ResolvedAnalyzeTarget;
 use crate::backend::commands::tablecmds::{
-    collect_matching_rows_heap, evaluate_default_value, maintain_indexes_for_row,
+    collect_matching_rows_heap, collect_vacuum_stats_for_relations_with_truncate_policy,
+    evaluate_default_value, maintain_indexes_for_row,
 };
 use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
@@ -78,6 +80,14 @@ struct AddColumnTarget {
     append_column: bool,
     rewrite_existing_rows: bool,
     direct_parent_count: i16,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedMaintenanceTarget {
+    pub(crate) relation: BoundRelation,
+    pub(crate) columns: Vec<String>,
+    pub(crate) only: bool,
+    pub(crate) original_name: String,
 }
 
 const AUTOVACUUM_CLIENT_ID_BASE: ClientId = 0xFF00_0000;
@@ -1228,6 +1238,109 @@ fn collect_catalog_vacuum_targets(
     Ok(targets)
 }
 
+fn collect_catalog_analyze_targets_resolved(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    configured_search_path: Option<&[String]>,
+    analyze_stmt: &AnalyzeStatement,
+) -> Result<Vec<ResolvedMaintenanceTarget>, ExecError> {
+    if !analyze_stmt.targets.is_empty() {
+        let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        return expand_explicit_analyze_targets_resolved(&analyze_stmt.targets, &catalog);
+    }
+
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    let is_superuser = auth_catalog
+        .role_by_oid(auth.current_user_oid())
+        .is_some_and(|row| row.rolsuper);
+    let database_owner_oid = current_database_owner_oid(db, client_id, txn_ctx)?;
+    let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+    let class_rows = ensure_class_rows(db, client_id, txn_ctx);
+
+    let mut targets = Vec::new();
+    for class in class_rows {
+        if !relkind_is_analyzable(class.relkind) {
+            continue;
+        }
+        if db.other_session_temp_namespace_oid(client_id, class.relnamespace) {
+            continue;
+        }
+        if !is_superuser
+            && auth.current_user_oid() != database_owner_oid
+            && !auth.has_effective_membership(class.relowner, &auth_catalog)
+        {
+            continue;
+        }
+        let Some(relation) = catalog.relation_by_oid(class.oid) else {
+            continue;
+        };
+        targets.push(ResolvedMaintenanceTarget {
+            relation,
+            columns: Vec::new(),
+            only: false,
+            original_name: class.relname,
+        });
+    }
+    Ok(targets)
+}
+
+fn collect_catalog_vacuum_targets_resolved(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    configured_search_path: Option<&[String]>,
+    vacuum_stmt: &VacuumStatement,
+) -> Result<Vec<ResolvedMaintenanceTarget>, ExecError> {
+    if vacuum_stmt.only_database_stats {
+        return Ok(Vec::new());
+    }
+    if !vacuum_stmt.targets.is_empty() {
+        let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        return expand_explicit_vacuum_targets_resolved(&vacuum_stmt.targets, &catalog);
+    }
+
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    let is_superuser = auth_catalog
+        .role_by_oid(auth.current_user_oid())
+        .is_some_and(|row| row.rolsuper);
+    let database_owner_oid = current_database_owner_oid(db, client_id, txn_ctx)?;
+    let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+    let class_rows = ensure_class_rows(db, client_id, txn_ctx);
+
+    let mut targets = Vec::new();
+    for class in class_rows {
+        if !matches!(class.relkind, 'r' | 'm') {
+            continue;
+        }
+        if db.other_session_temp_namespace_oid(client_id, class.relnamespace) {
+            continue;
+        }
+        if !is_superuser
+            && auth.current_user_oid() != database_owner_oid
+            && !auth.has_effective_membership(class.relowner, &auth_catalog)
+        {
+            continue;
+        }
+        let Some(relation) = catalog.relation_by_oid(class.oid) else {
+            continue;
+        };
+        targets.push(ResolvedMaintenanceTarget {
+            relation,
+            columns: Vec::new(),
+            only: false,
+            original_name: class.relname,
+        });
+    }
+    Ok(targets)
+}
+
 fn relation_display_name_for_target(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
     catalog
         .class_row_by_oid(relation_oid)
@@ -1274,6 +1387,68 @@ fn validate_maintenance_targets_for_analyze(
 ) -> Result<(), ExecError> {
     pgrust_commands::maintenance::validate_analyze_targets(targets, catalog)
         .map_err(maintenance_error_to_exec)
+}
+
+fn validate_resolved_target_columns(target: &ResolvedMaintenanceTarget) -> Result<(), ExecError> {
+    for column in &target.columns {
+        if !target
+            .relation
+            .desc
+            .columns
+            .iter()
+            .any(|desc| desc.name.eq_ignore_ascii_case(column))
+        {
+            return Err(ExecError::Parse(ParseError::UnknownColumn(column.clone())));
+        }
+    }
+    Ok(())
+}
+
+fn resolved_target_warning_name(
+    catalog: &dyn CatalogLookup,
+    target: &ResolvedMaintenanceTarget,
+) -> String {
+    catalog
+        .class_row_by_oid(target.relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_basename(&target.original_name).to_string())
+}
+
+fn resolved_analyze_targets(targets: &[ResolvedMaintenanceTarget]) -> Vec<ResolvedAnalyzeTarget> {
+    targets
+        .iter()
+        .map(|target| ResolvedAnalyzeTarget {
+            relation: target.relation.clone(),
+            columns: target.columns.clone(),
+            only: target.only,
+        })
+        .collect()
+}
+
+fn vacuum_relations_for_resolved_targets(
+    targets: &[ResolvedMaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+    process_main: bool,
+    process_toast: bool,
+) -> Vec<BoundRelation> {
+    let mut relations = Vec::with_capacity(targets.len());
+    let mut seen = BTreeSet::new();
+    for target in targets {
+        if process_main
+            && matches!(target.relation.relkind, 'r' | 'm')
+            && seen.insert(target.relation.relation_oid)
+        {
+            relations.push(target.relation.clone());
+        }
+        if process_toast
+            && let Some(toast) = target.relation.toast
+            && seen.insert(toast.relation_oid)
+            && let Some(toast_relation) = catalog.relation_by_oid(toast.relation_oid)
+        {
+            relations.push(toast_relation);
+        }
+    }
+    relations
 }
 
 fn expand_explicit_maintenance_targets(
@@ -1350,6 +1525,105 @@ fn expand_explicit_analyze_targets(
                 columns: target.columns.clone(),
                 only: false,
             });
+        }
+    }
+    Ok(expanded)
+}
+
+fn expand_explicit_vacuum_targets_resolved(
+    targets: &[MaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<ResolvedMaintenanceTarget>, ExecError> {
+    let mut expanded = Vec::new();
+    let mut seen = BTreeSet::new();
+    for target in targets {
+        let relation = lookup_vacuum_relation_for_ddl(catalog, &target.table_name)?;
+        let root = ResolvedMaintenanceTarget {
+            relation: relation.clone(),
+            columns: target.columns.clone(),
+            only: target.only,
+            original_name: target.table_name.clone(),
+        };
+        validate_resolved_target_columns(&root)?;
+        if target.only {
+            if relation.relkind == 'p' {
+                push_warning(format!(
+                    "VACUUM ONLY of partitioned table \"{}\" has no effect",
+                    relation_display_name_for_target(catalog, relation.relation_oid)
+                ));
+                continue;
+            }
+            if seen.insert(relation.relation_oid) {
+                expanded.push(root);
+            }
+            continue;
+        }
+
+        if seen.insert(relation.relation_oid) {
+            expanded.push(root);
+        }
+        for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+            if child_oid == relation.relation_oid || !seen.insert(child_oid) {
+                continue;
+            }
+            let Some(child) = catalog.relation_by_oid(child_oid) else {
+                continue;
+            };
+            if !matches!(child.relkind, 'r' | 'm' | 'p') {
+                continue;
+            }
+            let child_target = ResolvedMaintenanceTarget {
+                relation: child,
+                columns: target.columns.clone(),
+                only: false,
+                original_name: relation_display_name_for_target(catalog, child_oid),
+            };
+            validate_resolved_target_columns(&child_target)?;
+            expanded.push(child_target);
+        }
+    }
+    Ok(expanded)
+}
+
+fn expand_explicit_analyze_targets_resolved(
+    targets: &[MaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<ResolvedMaintenanceTarget>, ExecError> {
+    let mut expanded = Vec::new();
+    let mut seen = BTreeSet::new();
+    for target in targets {
+        let relation = lookup_analyzable_relation_for_ddl(catalog, &target.table_name)?;
+        let root = ResolvedMaintenanceTarget {
+            relation: relation.clone(),
+            columns: target.columns.clone(),
+            only: target.only,
+            original_name: target.table_name.clone(),
+        };
+        validate_resolved_target_columns(&root)?;
+        if seen.insert(relation.relation_oid) {
+            expanded.push(root);
+        }
+        if target.only {
+            continue;
+        }
+        for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+            if child_oid == relation.relation_oid || !seen.insert(child_oid) {
+                continue;
+            }
+            let Some(child) = catalog.relation_by_oid(child_oid) else {
+                continue;
+            };
+            if !relkind_is_analyzable(child.relkind) {
+                continue;
+            }
+            let child_target = ResolvedMaintenanceTarget {
+                relation: child,
+                columns: target.columns.clone(),
+                only: false,
+                original_name: relation_display_name_for_target(catalog, child_oid),
+            };
+            validate_resolved_target_columns(&child_target)?;
+            expanded.push(child_target);
         }
     }
     Ok(expanded)
@@ -1433,6 +1707,71 @@ fn filter_explicit_analyze_targets_by_permission(
     Ok(allowed)
 }
 
+fn filter_explicit_vacuum_targets_by_permission_resolved(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    targets: &[ResolvedMaintenanceTarget],
+    options: &VacuumExecOptions,
+) -> Result<Vec<ResolvedMaintenanceTarget>, ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    let database_owner_oid = current_database_owner_oid(db, client_id, txn_ctx)?;
+    let mut allowed = Vec::with_capacity(targets.len());
+    for target in targets {
+        if relation_is_maintenance_owner(&target.relation, &auth, &auth_catalog, database_owner_oid)
+        {
+            allowed.push(target.clone());
+            continue;
+        }
+        let relname = resolved_target_warning_name(catalog, target);
+        let warned_vacuum = options.process_main || options.process_toast;
+        if warned_vacuum {
+            push_warning(format!(
+                "permission denied to vacuum \"{}\", skipping it",
+                relname
+            ));
+        } else if options.analyze {
+            push_warning(format!(
+                "permission denied to analyze \"{}\", skipping it",
+                relname
+            ));
+        }
+    }
+    Ok(allowed)
+}
+
+fn filter_explicit_analyze_targets_by_permission_resolved(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    targets: &[ResolvedMaintenanceTarget],
+) -> Result<Vec<ResolvedMaintenanceTarget>, ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    let database_owner_oid = current_database_owner_oid(db, client_id, txn_ctx)?;
+    let mut allowed = Vec::with_capacity(targets.len());
+    for target in targets {
+        if relation_is_maintenance_owner(&target.relation, &auth, &auth_catalog, database_owner_oid)
+        {
+            allowed.push(target.clone());
+            continue;
+        }
+        let relname = resolved_target_warning_name(catalog, target);
+        push_warning(format!(
+            "permission denied to analyze \"{}\", skipping it",
+            relname
+        ));
+    }
+    Ok(allowed)
+}
+
 fn warn_parallel_vacuum_temp_tables(
     catalog: &dyn CatalogLookup,
     targets: &[MaintenanceTarget],
@@ -1448,6 +1787,24 @@ fn warn_parallel_vacuum_temp_tables(
             push_warning(format!(
                 "disabling parallel option of vacuum on \"{}\" --- cannot vacuum temporary tables in parallel",
                 relation_display_name_for_target(catalog, relation.relation_oid)
+            ));
+        }
+    }
+}
+
+fn warn_parallel_vacuum_temp_tables_resolved(
+    catalog: &dyn CatalogLookup,
+    targets: &[ResolvedMaintenanceTarget],
+    options: &VacuumExecOptions,
+) {
+    if options.full || options.parallel_workers.unwrap_or(0) <= 0 {
+        return;
+    }
+    for target in targets {
+        if target.relation.relpersistence == 't' {
+            push_warning(format!(
+                "disabling parallel option of vacuum on \"{}\" --- cannot vacuum temporary tables in parallel",
+                relation_display_name_for_target(catalog, target.relation.relation_oid)
             ));
         }
     }
@@ -1916,6 +2273,33 @@ impl Database {
         filter_explicit_analyze_targets_by_permission(self, client_id, txn_ctx, &catalog, &expanded)
     }
 
+    pub(crate) fn effective_analyze_resolved_targets_with_search_path(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        configured_search_path: Option<&[String]>,
+        analyze_stmt: &AnalyzeStatement,
+    ) -> Result<Vec<ResolvedMaintenanceTarget>, ExecError> {
+        let raw_targets = collect_catalog_analyze_targets_resolved(
+            self,
+            client_id,
+            txn_ctx,
+            configured_search_path,
+            analyze_stmt,
+        )?;
+        if analyze_stmt.targets.is_empty() {
+            return Ok(raw_targets);
+        }
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        filter_explicit_analyze_targets_by_permission_resolved(
+            self,
+            client_id,
+            txn_ctx,
+            &catalog,
+            &raw_targets,
+        )
+    }
+
     pub(crate) fn effective_vacuum_targets_with_search_path(
         &self,
         client_id: ClientId,
@@ -1929,6 +2313,35 @@ impl Database {
             txn_ctx,
             configured_search_path,
             vacuum_stmt,
+        )
+    }
+
+    pub(crate) fn effective_vacuum_resolved_targets_with_search_path(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        configured_search_path: Option<&[String]>,
+        vacuum_stmt: &VacuumStatement,
+        options: &VacuumExecOptions,
+    ) -> Result<Vec<ResolvedMaintenanceTarget>, ExecError> {
+        let raw_targets = collect_catalog_vacuum_targets_resolved(
+            self,
+            client_id,
+            txn_ctx,
+            configured_search_path,
+            vacuum_stmt,
+        )?;
+        if vacuum_stmt.targets.is_empty() {
+            return Ok(raw_targets);
+        }
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        filter_explicit_vacuum_targets_by_permission_resolved(
+            self,
+            client_id,
+            txn_ctx,
+            &catalog,
+            &raw_targets,
+            options,
         )
     }
 
@@ -3001,22 +3414,16 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
-        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let targets = self.effective_analyze_targets_with_search_path(
+        let targets = self.effective_analyze_resolved_targets_with_search_path(
             client_id,
             None,
             configured_search_path,
             analyze_stmt,
         )?;
-        let relation_names = targets
+        let rel_locs = targets
             .iter()
-            .map(|target| target.table_name.clone())
+            .map(|target| target.relation.rel)
             .collect::<Vec<_>>();
-        let rels = relation_names
-            .iter()
-            .map(|name| lookup_analyzable_relation_for_ddl(&catalog, name))
-            .collect::<Result<Vec<_>, _>>()?;
-        let rel_locs = rels.iter().map(|rel| rel.rel).collect::<Vec<_>>();
         lock_tables_interruptible(
             &self.table_locks,
             client_id,
@@ -3028,7 +3435,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result = self.execute_analyze_stmt_in_transaction_with_search_path(
+        let result = self.execute_analyze_resolved_targets_in_transaction_with_search_path(
             client_id,
             &targets,
             xid,
@@ -3055,31 +3462,18 @@ impl Database {
         let options = vacuum_exec_options(vacuum_stmt, gucs)?;
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let raw_targets = self.effective_vacuum_targets_with_search_path(
+        let targets = self.effective_vacuum_resolved_targets_with_search_path(
             client_id,
             None,
             configured_search_path,
             vacuum_stmt,
+            &options,
         )?;
-        validate_maintenance_targets_for_vacuum(&raw_targets, &catalog, options.analyze)?;
-        let targets = if vacuum_stmt.targets.is_empty() {
-            raw_targets
-        } else {
-            let expanded = expand_explicit_maintenance_targets(&raw_targets, &catalog)?;
-            filter_explicit_vacuum_targets_by_permission(
-                self, client_id, None, &catalog, &expanded, &options,
-            )?
-        };
-        warn_parallel_vacuum_temp_tables(&catalog, &targets, &options);
-        let relation_names = targets
+        warn_parallel_vacuum_temp_tables_resolved(&catalog, &targets, &options);
+        let rel_locs = targets
             .iter()
-            .map(|target| target.table_name.clone())
+            .map(|target| target.relation.rel)
             .collect::<Vec<_>>();
-        let rels = relation_names
-            .iter()
-            .map(|name| lookup_vacuum_relation_for_ddl(&catalog, name))
-            .collect::<Result<Vec<_>, _>>()?;
-        let rel_locs = rels.iter().map(|rel| rel.rel).collect::<Vec<_>>();
         let lock_mode = if options.full {
             TableLockMode::AccessExclusive
         } else {
@@ -3096,7 +3490,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result = self.execute_vacuum_stmt_in_transaction_with_search_path(
+        let result = self.execute_vacuum_resolved_targets_in_transaction_with_search_path(
             client_id,
             &targets,
             &options,
@@ -3118,6 +3512,29 @@ impl Database {
         &self,
         client_id: ClientId,
         targets: &[MaintenanceTarget],
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        auto: bool,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let resolved = expand_explicit_analyze_targets_resolved(targets, &catalog)?;
+        self.execute_analyze_resolved_targets_in_transaction_with_search_path(
+            client_id,
+            &resolved,
+            xid,
+            cid,
+            configured_search_path,
+            auto,
+            catalog_effects,
+        )
+    }
+
+    pub(crate) fn execute_analyze_resolved_targets_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        targets: &[ResolvedMaintenanceTarget],
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
@@ -3192,7 +3609,13 @@ impl Database {
             ctx.session_stats.write().flush_pending(&ctx.stats);
         }
         let analyze_started = Instant::now();
-        let analyzed = collect_analyze_stats(targets, &catalog, &mut ctx)?;
+        let analyze_targets = resolved_analyze_targets(targets);
+        let analyzed =
+            crate::backend::commands::analyze::collect_analyze_stats_for_resolved_targets(
+                &analyze_targets,
+                &catalog,
+                &mut ctx,
+            )?;
         let analyze_elapsed = analyze_started.elapsed();
         let session_stats = Arc::clone(&ctx.session_stats);
         drop(ctx);
@@ -3247,6 +3670,31 @@ impl Database {
         &self,
         client_id: ClientId,
         targets: &[MaintenanceTarget],
+        options: &VacuumExecOptions,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        auto: bool,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let resolved = expand_explicit_vacuum_targets_resolved(targets, &catalog)?;
+        self.execute_vacuum_resolved_targets_in_transaction_with_search_path(
+            client_id,
+            &resolved,
+            options,
+            xid,
+            cid,
+            configured_search_path,
+            auto,
+            catalog_effects,
+        )
+    }
+
+    pub(crate) fn execute_vacuum_resolved_targets_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        targets: &[ResolvedMaintenanceTarget],
         options: &VacuumExecOptions,
         xid: TransactionId,
         cid: CommandId,
@@ -3325,7 +3773,7 @@ impl Database {
         let vacuumed = if options.only_database_stats {
             Vec::new()
         } else if options.full {
-            self.execute_vacuum_full_targets_with_search_path(
+            self.execute_vacuum_full_resolved_targets_with_search_path(
                 client_id,
                 targets,
                 xid,
@@ -3336,23 +3784,31 @@ impl Database {
                 catalog_effects,
             )?
         } else if !options.process_main {
-            crate::backend::commands::tablecmds::collect_vacuum_stats_with_options(
+            let vacuum_targets = vacuum_relations_for_resolved_targets(
                 targets,
                 &catalog,
-                &mut ctx,
                 false,
                 options.process_toast,
+            );
+            collect_vacuum_stats_for_relations_with_truncate_policy(
+                &vacuum_targets,
+                &catalog,
+                &mut ctx,
                 options.index_cleanup,
                 options.truncate,
                 options.default_truncate,
             )?
         } else {
-            crate::backend::commands::tablecmds::collect_vacuum_stats_with_options(
+            let vacuum_targets = vacuum_relations_for_resolved_targets(
                 targets,
                 &catalog,
-                &mut ctx,
                 true,
                 options.process_toast,
+            );
+            collect_vacuum_stats_for_relations_with_truncate_policy(
+                &vacuum_targets,
+                &catalog,
+                &mut ctx,
                 options.index_cleanup,
                 options.truncate,
                 options.default_truncate,
@@ -3373,14 +3829,29 @@ impl Database {
                 ctx.catalog = Some(crate::backend::executor::executor_catalog(
                     analyze_catalog.clone(),
                 ));
-                crate::backend::commands::analyze::collect_analyze_stats(
-                    targets,
+                let analyze_targets = targets
+                    .iter()
+                    .filter_map(|target| {
+                        analyze_catalog
+                            .relation_by_oid(target.relation.relation_oid)
+                            .map(|relation| ResolvedAnalyzeTarget {
+                                relation,
+                                columns: target.columns.clone(),
+                                only: target.only,
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                crate::backend::commands::analyze::collect_analyze_stats_for_resolved_targets(
+                    &analyze_targets,
                     &analyze_catalog,
                     &mut ctx,
                 )?
             } else {
-                crate::backend::commands::analyze::collect_analyze_stats(
-                    targets, &catalog, &mut ctx,
+                let analyze_targets = resolved_analyze_targets(targets);
+                crate::backend::commands::analyze::collect_analyze_stats_for_resolved_targets(
+                    &analyze_targets,
+                    &catalog,
+                    &mut ctx,
                 )?
             };
             analyze_results

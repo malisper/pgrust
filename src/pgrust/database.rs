@@ -37,7 +37,6 @@ use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::catalog::{
     bootstrap::bootstrap_catalog_kinds, persistence::sync_catalog_rows_subset_in_pool,
 };
-use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{
     ExecError, ExecutorContext, LockStatusProvider, Value, execute_readonly_statement,
 };

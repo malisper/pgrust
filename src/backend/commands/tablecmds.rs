@@ -8545,7 +8545,7 @@ fn relation_vacuum_truncate(
     )
 }
 
-fn collect_vacuum_stats_for_relations_with_truncate_policy(
+pub(crate) fn collect_vacuum_stats_for_relations_with_truncate_policy(
     relations: &[BoundRelation],
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
