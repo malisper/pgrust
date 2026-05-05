@@ -11,7 +11,7 @@ use pgrust_analyze::{
 };
 use pgrust_catalog_data::{BTREE_AM_OID, builtin_aggregate_function_for_proc_oid};
 use pgrust_nodes::CommandType;
-use pgrust_nodes::datum::Value;
+use pgrust_nodes::datum::{RecordDescriptor, Value};
 use pgrust_nodes::parsenodes::{
     Query, QueryRowMark, RangeTblEntryKind, SqlType, SqlTypeKind, SubqueryComparisonOp,
     TableSampleClause,
@@ -27,7 +27,7 @@ use pgrust_nodes::primnodes::{
     ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
     Param, ParamKind, ProjectSetTarget, QueryColumn, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO,
     ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SubLinkType, SubPlan, TargetEntry,
-    Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
+    Var, WHOLE_ROW_ATTR_NO, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
     is_executor_special_varno, is_rule_pseudo_varno, is_special_varno, is_system_attr,
     set_returning_call_exprs, user_attrno,
 };
@@ -1669,6 +1669,10 @@ fn exprs_match_for_setrefs(left: &Expr, right: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_whole_row_var_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::Var(var) if var.varattno == WHOLE_ROW_ATTR_NO)
 }
 
 fn special_slot_var(
@@ -3596,6 +3600,9 @@ fn fix_semantic_output_expr_for_input(
     expr: &Expr,
     input: &Path,
 ) -> Option<Expr> {
+    if is_whole_row_var_expr(expr) {
+        return None;
+    }
     input
         .semantic_output_target()
         .exprs
@@ -3627,6 +3634,9 @@ fn fix_input_tlist_expr(
     input: &Path,
     input_tlist: &IndexedTlist,
 ) -> Option<Expr> {
+    if is_whole_row_var_expr(expr) {
+        return None;
+    }
     search_input_tlist_entry(root, expr, input, input_tlist)
         .filter(|entry| entry.sql_type == expr_sql_type(expr))
         .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr))
@@ -3771,6 +3781,9 @@ fn fix_upper_expr_for_input(
 }
 
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
+    if is_whole_row_var_expr(expr) {
+        return None;
+    }
     match mode {
         LowerMode::Scalar => None,
         LowerMode::Input { tlist, .. } => search_tlist_entry(None, expr, tlist)
@@ -5168,6 +5181,12 @@ fn subplan_target_attnos(target_list: &[TargetEntry]) -> Vec<Option<usize>> {
 }
 
 fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> Expr {
+    if matches!(&expr, Expr::Var(var) if var.varattno == WHOLE_ROW_ATTR_NO) {
+        let Expr::Var(var) = expr else {
+            unreachable!();
+        };
+        return lower_whole_row_var(ctx, var, mode);
+    }
     if let Some(lowered) = lower_direct_ref(&expr, mode) {
         return lowered;
     }
@@ -5413,6 +5432,208 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
         },
         other => other,
     }
+}
+
+fn lower_whole_row_var(ctx: &mut SetRefsContext<'_>, var: Var, mode: LowerMode<'_>) -> Expr {
+    if var.varlevelsup > 0 {
+        return exec_param_for_outer_expr(ctx, Expr::Var(var));
+    }
+    if is_rule_pseudo_varno(var.varno) || is_executor_special_varno(var.varno) {
+        return Expr::Var(var);
+    }
+    if let LowerMode::Input {
+        path: Some(input), ..
+    } = mode
+        && path_preserves_base_whole_row_slot(input, var.varno)
+    {
+        return executor_whole_row_var(OUTER_VAR, &var);
+    }
+    if let LowerMode::Input {
+        path: Some(input),
+        tlist,
+    } = mode
+        && let Some(expr) = lower_whole_row_var_from_input_tlist(ctx, &var, input, tlist)
+    {
+        return expr;
+    }
+    if let LowerMode::Join {
+        outer_tlist,
+        inner_tlist,
+    } = mode
+    {
+        if let Some(expr) = lower_whole_row_var_from_tlist(ctx, &var, OUTER_VAR, outer_tlist) {
+            return expr;
+        }
+        if let Some(expr) = lower_whole_row_var_from_tlist(ctx, &var, INNER_VAR, inner_tlist) {
+            return expr;
+        }
+    }
+    if let Some(root) = ctx.root {
+        let expr = Expr::Var(var.clone());
+        let flattened = flatten_join_alias_vars(root, expr.clone());
+        if flattened != expr {
+            return lower_expr(ctx, flattened, mode);
+        }
+    }
+    panic!(
+        "unresolved whole-row Var {var:?} survived setrefs in mode {mode:?}; \
+         executable plans should only contain executor-facing refs or allowed scan/system Vars"
+    )
+}
+
+fn path_preserves_base_whole_row_slot(path: &Path, varno: usize) -> bool {
+    match path {
+        Path::SeqScan { source_id, .. }
+        | Path::IndexOnlyScan { source_id, .. }
+        | Path::IndexScan { source_id, .. }
+        | Path::BitmapHeapScan { source_id, .. } => *source_id == varno,
+        Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. } => path_preserves_base_whole_row_slot(input, varno),
+        _ => false,
+    }
+}
+
+fn executor_whole_row_var(varno: usize, var: &Var) -> Expr {
+    Expr::Var(Var {
+        varno,
+        varattno: WHOLE_ROW_ATTR_NO,
+        varlevelsup: 0,
+        vartype: var.vartype,
+        collation_oid: var.collation_oid,
+    })
+}
+
+fn lower_whole_row_var_from_input_tlist(
+    ctx: &SetRefsContext<'_>,
+    var: &Var,
+    input: &Path,
+    tlist: &IndexedTlist,
+) -> Option<Expr> {
+    let descriptor = whole_row_descriptor_for_var(ctx, var)?;
+    let mut fields = Vec::with_capacity(descriptor.fields.len());
+    for (index, field) in descriptor.fields.iter().enumerate() {
+        let attr_expr = Expr::Var(Var {
+            varno: var.varno,
+            varattno: user_attrno(index),
+            varlevelsup: 0,
+            vartype: field.sql_type,
+            collation_oid: None,
+        });
+        let entry = search_input_tlist_entry(ctx.root, &attr_expr, input, tlist)?;
+        fields.push((
+            field.name.clone(),
+            special_slot_var_for_expr(OUTER_VAR, entry, &attr_expr),
+        ));
+    }
+    Some(null_preserving_whole_row_expr(descriptor, fields))
+}
+
+fn lower_whole_row_var_from_tlist(
+    ctx: &SetRefsContext<'_>,
+    var: &Var,
+    slot_varno: usize,
+    tlist: &IndexedTlist,
+) -> Option<Expr> {
+    let descriptor = whole_row_descriptor_for_var(ctx, var)?;
+    let mut fields = Vec::with_capacity(descriptor.fields.len());
+    for (index, field) in descriptor.fields.iter().enumerate() {
+        let attr_expr = Expr::Var(Var {
+            varno: var.varno,
+            varattno: user_attrno(index),
+            varlevelsup: 0,
+            vartype: field.sql_type,
+            collation_oid: None,
+        });
+        let entry = search_tlist_entry(ctx.root, &attr_expr, tlist)?;
+        fields.push((
+            field.name.clone(),
+            special_slot_var_for_expr(slot_varno, entry, &attr_expr),
+        ));
+    }
+    Some(null_preserving_whole_row_expr(descriptor, fields))
+}
+
+fn whole_row_descriptor_for_var(ctx: &SetRefsContext<'_>, var: &Var) -> Option<RecordDescriptor> {
+    let mut sql_type = var.vartype;
+    if (!matches!(sql_type.kind, SqlTypeKind::Composite) || sql_type.typrelid == 0)
+        && let Some(catalog) = ctx.catalog
+        && let Some(row) = catalog.type_by_oid(sql_type.type_oid)
+        && row.typrelid != 0
+    {
+        sql_type = sql_type.with_identity(row.oid, row.typrelid);
+    }
+    if !matches!(sql_type.kind, SqlTypeKind::Composite) || sql_type.typrelid == 0 {
+        return None;
+    }
+    let catalog_fields = ctx
+        .catalog
+        .and_then(|catalog| catalog.lookup_relation_by_oid(sql_type.typrelid))
+        .map(|relation| {
+            relation
+                .desc
+                .columns
+                .iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect::<Vec<_>>()
+        });
+    let catalog_field_count = catalog_fields.as_ref().map(Vec::len);
+    let fields = ctx
+        .root
+        .and_then(|root| root.parse.rtable.get(var.varno.saturating_sub(1)))
+        .map(|rte| {
+            let mut fields = rte
+                .desc
+                .columns
+                .iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect::<Vec<_>>();
+            if let Some(field_count) = catalog_field_count {
+                fields.truncate(field_count);
+            }
+            fields
+        })
+        .filter(|fields| !fields.is_empty())
+        .or(catalog_fields)?;
+    Some(RecordDescriptor::named(
+        sql_type.type_oid,
+        sql_type.typrelid,
+        sql_type.typmod,
+        fields,
+    ))
+}
+
+fn null_preserving_whole_row_expr(
+    descriptor: RecordDescriptor,
+    fields: Vec<(String, Expr)>,
+) -> Expr {
+    let row_expr = Expr::Row {
+        descriptor: descriptor.clone(),
+        fields: fields.clone(),
+    };
+    if fields.is_empty() {
+        return row_expr;
+    }
+    Expr::Case(Box::new(pgrust_nodes::primnodes::CaseExpr {
+        casetype: descriptor.sql_type(),
+        arg: None,
+        args: vec![pgrust_nodes::primnodes::CaseWhen {
+            expr: Expr::Bool(Box::new(BoolExpr {
+                boolop: BoolExprType::And,
+                args: fields
+                    .iter()
+                    .map(|(_, expr)| Expr::IsNull(Box::new(expr.clone())))
+                    .collect(),
+            })),
+            result: Expr::Const(Value::Null),
+        }],
+        defresult: Box::new(row_expr),
+    }))
 }
 
 fn lower_index_scan_key(
@@ -12213,6 +12434,9 @@ fn lower_join_clause_list(
 }
 
 fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, tlist: &IndexedTlist) -> Expr {
+    if is_whole_row_var_expr(&expr) {
+        return expr;
+    }
     if let Some(entry) = search_tlist_entry(root, &expr, tlist) {
         return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }
@@ -12686,6 +12910,9 @@ fn fix_join_expr(
     outer_tlist: &IndexedTlist,
     inner_tlist: &IndexedTlist,
 ) -> Expr {
+    if is_whole_row_var_expr(&expr) {
+        return expr;
+    }
     if let Some(entry) = search_tlist_entry(root, &expr, outer_tlist) {
         return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }

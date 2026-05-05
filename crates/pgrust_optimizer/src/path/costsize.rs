@@ -53,8 +53,8 @@ use pgrust_nodes::plannodes::{
 use pgrust_nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExprKind,
     OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl,
-    SetReturningCall, TargetEntry, ToastRelationRef, Var, WindowClause, WindowFrameBound,
-    attrno_index, set_returning_call_exprs, user_attrno,
+    SetReturningCall, TargetEntry, ToastRelationRef, Var, WHOLE_ROW_ATTR_NO, WindowClause,
+    WindowFrameBound, attrno_index, set_returning_call_exprs, user_attrno,
 };
 
 use super::super::joininfo;
@@ -3536,6 +3536,9 @@ fn query_targets_whole_row_path(root: &PlannerInfo, path: &Path) -> bool {
 
 fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> bool {
     match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varattno == WHOLE_ROW_ATTR_NO => {
+            relids.contains(&var.varno) || row_type_targets_rel(root, var.vartype.typrelid, relids)
+        }
         Expr::Row {
             descriptor, fields, ..
         } => {

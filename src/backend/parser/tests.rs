@@ -36,7 +36,7 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var,
-    is_system_attr,
+    WHOLE_ROW_ATTR_NO, is_system_attr,
 };
 
 fn desc() -> RelationDesc {
@@ -13383,10 +13383,6 @@ fn assert_returning_row(expr: &Expr, varno: usize, attnos: &[AttrNumber]) {
     }
 }
 
-fn assert_whole_row_expr(expr: &Expr, width: usize) {
-    assert_eq!(returning_row_fields(expr).len(), width);
-}
-
 struct ReturningTestCatalog {
     relation: BoundRelation,
 }
@@ -13744,7 +13740,7 @@ fn bind_insert_returning_relation_name_as_whole_row() {
 
     let bound =
         stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog)).unwrap();
-    assert_whole_row_expr(&bound.returning[0].expr, 3);
+    assert_returning_var(&bound.returning[0].expr, 1, WHOLE_ROW_ATTR_NO);
 }
 
 #[test]

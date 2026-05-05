@@ -15,8 +15,8 @@ use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, BoolExprType, BuiltinScalarFunction, Expr, INNER_VAR, JoinType, OUTER_VAR,
     OpExprKind, ParamKind, ProjectSetTarget, QueryColumn, SELF_ITEM_POINTER_ATTR_NO,
-    ScalarFunctionImpl, SetReturningCall, SubPlan, TargetEntry, WindowClause, WindowFrameBound,
-    WindowFuncKind, attrno_index, set_returning_call_exprs,
+    ScalarFunctionImpl, SetReturningCall, SubPlan, TargetEntry, WHOLE_ROW_ATTR_NO, WindowClause,
+    WindowFrameBound, WindowFuncKind, attrno_index, expr_sql_type_hint, set_returning_call_exprs,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 use pgrust_commands::explain::apply_remaining_verbose_explain_text_compat as apply_remaining_verbose_explain_text_compat_impl;
@@ -2449,6 +2449,10 @@ fn push_nonverbose_plan_details(
             } else if expr_contains_exec_param(predicate) {
                 render_nonverbose_expr_with_exec_params(predicate, &column_names, ctx)
             } else if let Some(rendered) =
+                render_scan_filter_with_whole_row_qualifier(predicate, input, &column_names, ctx)
+            {
+                rendered
+            } else if let Some(rendered) =
                 render_nonverbose_expr_with_dynamic_type_names(predicate, &column_names, ctx)
             {
                 rendered
@@ -4036,6 +4040,193 @@ fn expr_column_name<'a>(expr: &Expr, column_names: &'a [String]) -> Option<&'a s
         }
         _ => None,
     }
+}
+
+fn render_scan_filter_with_whole_row_qualifier(
+    expr: &Expr,
+    input: &Plan,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    if !expr_contains_whole_row_var(expr) {
+        return None;
+    }
+    let qualifier = scan_filter_whole_row_qualifier(input)?;
+    let mut rendered = pgrust_commands::explain_expr::render_explain_expr_with_qualifier(
+        expr,
+        Some(&qualifier),
+        column_names,
+    );
+    let mut replacements = Vec::new();
+    collect_dynamic_const_cast_replacements(expr, ctx, &mut replacements);
+    replacements.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+    replacements.dedup();
+    for (from, to) in replacements {
+        rendered = rendered.replace(&from, &to);
+    }
+    if let Some(array_type_name) = whole_row_scalar_array_type_name(expr, ctx)
+        && let Some((prefix, suffix)) = rendered.rsplit_once("::text[]")
+    {
+        rendered = format!("{prefix}::{array_type_name}{suffix}");
+    }
+    Some(rendered)
+}
+
+fn whole_row_scalar_array_type_name(expr: &Expr, ctx: &VerboseExplainContext) -> Option<String> {
+    let Expr::ScalarArrayOp(saop) = expr else {
+        return None;
+    };
+    if !matches!(saop.left.as_ref(), Expr::Var(var) if var.varattno == WHOLE_ROW_ATTR_NO) {
+        return None;
+    }
+    let left_type = expr_sql_type_hint(&saop.left)?;
+    if left_type.type_oid == 0 || !ctx.type_names.contains_key(&left_type.type_oid) {
+        return None;
+    }
+    Some(render_type_name(SqlType::array_of(left_type), ctx))
+}
+
+fn expr_contains_whole_row_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varattno == WHOLE_ROW_ATTR_NO,
+        Expr::GroupingKey(grouping_key) => expr_contains_whole_row_var(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => {
+            grouping_func.args.iter().any(expr_contains_whole_row_var)
+        }
+        Expr::Op(op) => op.args.iter().any(expr_contains_whole_row_var),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_whole_row_var),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_whole_row_var)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_whole_row_var(&arm.expr)
+                        || expr_contains_whole_row_var(&arm.result)
+                })
+                || expr_contains_whole_row_var(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_whole_row_var),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(expr_contains_whole_row_var),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_whole_row_var),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_whole_row_var),
+        Expr::SubPlan(subplan) => subplan.args.iter().any(expr_contains_whole_row_var),
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_whole_row_var(&saop.left) || expr_contains_whole_row_var(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_contains_whole_row_var(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_whole_row_var(expr)
+                || expr_contains_whole_row_var(pattern)
+                || escape.as_deref().is_some_and(expr_contains_whole_row_var)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_whole_row_var(left) || expr_contains_whole_row_var(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_whole_row_var),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_whole_row_var(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_whole_row_var(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_whole_row_var)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_whole_row_var)
+                })
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .into_iter()
+            .any(expr_contains_whole_row_var),
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_contains_whole_row_var)
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| expr_contains_whole_row_var(&item.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_whole_row_var)
+        }
+        Expr::WindowFunc(window_func) => {
+            window_func.args.iter().any(expr_contains_whole_row_var)
+                || match &window_func.kind {
+                    WindowFuncKind::Aggregate(aggref) => {
+                        aggref.args.iter().any(expr_contains_whole_row_var)
+                            || aggref
+                                .aggorder
+                                .iter()
+                                .any(|item| expr_contains_whole_row_var(&item.expr))
+                            || aggref
+                                .aggfilter
+                                .as_ref()
+                                .is_some_and(expr_contains_whole_row_var)
+                    }
+                    _ => false,
+                }
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn scan_filter_whole_row_qualifier(input: &Plan) -> Option<String> {
+    let relation_name = match input {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. }
+        | Plan::BitmapHeapScan { relation_name, .. } => relation_name,
+        _ => return None,
+    };
+    Some(relation_alias_or_base_name(relation_name).to_string())
 }
 
 fn expr_contains_exec_param(expr: &Expr) -> bool {

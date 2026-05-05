@@ -12,8 +12,8 @@ use pgrust_nodes::primnodes::{
     CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, FuncExpr,
     OpExprKind, Param, ParamKind, QueryColumn, ScalarFunctionImpl, SetReturningCall,
     SqlJsonQueryFunction, SqlJsonQueryFunctionKind, SqlJsonTableBehavior, SqlJsonTablePassingArg,
-    SqlJsonTableQuotes, SqlJsonTableWrapper, WindowFuncKind, expr_collation_oid_hint,
-    expr_contains_set_returning, expr_sql_type_hint,
+    SqlJsonTableQuotes, SqlJsonTableWrapper, WHOLE_ROW_ATTR_NO, WindowFuncKind,
+    expr_collation_oid_hint, expr_contains_set_returning, expr_sql_type_hint, user_attrno,
 };
 use pgrust_nodes::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
@@ -1287,6 +1287,9 @@ fn build_whole_row_expr(fields: Vec<(String, Expr)>, named_row_type: Option<(u32
         Expr::Row { descriptor, .. } => descriptor.clone(),
         _ => unreachable!("build_plain_row_expr always returns Expr::Row"),
     };
+    if let Some(var) = whole_row_var_from_fields(&fields, descriptor.sql_type()) {
+        return Expr::Var(var);
+    }
     if descriptor.typrelid == 0 {
         return row_expr;
     }
@@ -1314,6 +1317,36 @@ fn build_whole_row_expr(fields: Vec<(String, Expr)>, named_row_type: Option<(u32
         }],
         defresult: Box::new(row_expr),
     }))
+}
+
+fn whole_row_var_from_fields(fields: &[(String, Expr)], vartype: SqlType) -> Option<Var> {
+    if fields.is_empty() || vartype.typrelid == 0 {
+        return None;
+    }
+    let mut varno = None;
+    let mut varlevelsup = None;
+    for (index, (_, expr)) in fields.iter().enumerate() {
+        let Expr::Var(var) = expr else {
+            return None;
+        };
+        if var.varattno != user_attrno(index) {
+            return None;
+        }
+        if varno.is_some_and(|existing| existing != var.varno)
+            || varlevelsup.is_some_and(|existing| existing != var.varlevelsup)
+        {
+            return None;
+        }
+        varno = Some(var.varno);
+        varlevelsup = Some(var.varlevelsup);
+    }
+    Some(Var {
+        varno: varno?,
+        varattno: WHOLE_ROW_ATTR_NO,
+        varlevelsup: varlevelsup?,
+        vartype,
+        collation_oid: None,
+    })
 }
 
 fn relation_row_type_identity(

@@ -1782,6 +1782,7 @@ impl WindowFrame {
 
 pub type AttrNumber = i32;
 
+pub const WHOLE_ROW_ATTR_NO: AttrNumber = 0;
 pub const SELF_ITEM_POINTER_ATTR_NO: AttrNumber = -1;
 pub const XMIN_ATTR_NO: AttrNumber = -2;
 pub const CMIN_ATTR_NO: AttrNumber = -3;
