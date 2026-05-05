@@ -154,6 +154,11 @@ fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
                 flatten_and_conjuncts(where_qual)
                     .into_iter()
                     .map(|clause| expand_join_rte_vars(root, clause))
+                    // :HACK: Join path construction does not currently preserve
+                    // correlated subplans inside join quals. Leave those clauses
+                    // for the residual filter path so PostgreSQL-visible WHERE
+                    // semantics survive until subplan-aware join quals are wired.
+                    .filter(|clause| !expr_contains_subplan(clause))
                     .filter(|clause| expr_relids(clause).len() > 1)
                     .map(joininfo::make_restrict_info),
             );
@@ -173,8 +178,11 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
             let relids = expr_relids(clause);
             let pushed_to_single_base =
                 relids.is_empty() && single_direct_base_relid(root).is_some();
+            let has_subplan = expr_contains_subplan(clause);
             !pushed_to_single_base
-                && !(!has_outer_joins(root) && relids.len() > 1)
+                // :HACK: Keep correlated subplan-bearing multi-rel clauses as
+                // residual filters. The join path currently drops that shape.
+                && !(!has_subplan && !has_outer_joins(root) && relids.len() > 1)
                 && !clause_reduces_outer_join(root, clause)
                 && !is_pushable_base_clause(root, &relids)
         })
