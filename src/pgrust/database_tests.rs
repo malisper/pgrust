@@ -27428,6 +27428,32 @@ fn stored_expression_deparse_matches_pg_for_checks_and_defaults() {
         ),
         vec![vec![Value::Text("random()::integer".into())]]
     );
+    let nextval_default_expr = query_rows(
+        &db,
+        1,
+        "select pg_get_expr(adbin, adrelid)
+           from pg_attrdef
+          where adrelid = 'deparse_builtin_defaults'::regclass",
+    );
+    let [nextval_default_row] = nextval_default_expr.as_slice() else {
+        panic!("unexpected nextval default expression: {nextval_default_expr:?}");
+    };
+    let [Value::Text(nextval_default_expr)] = nextval_default_row.as_slice() else {
+        panic!("unexpected nextval default expression: {nextval_default_expr:?}");
+    };
+    assert!(
+        nextval_default_expr.starts_with("nextval(")
+            && nextval_default_expr.contains("::regclass)")
+            && !nextval_default_expr.contains("function(")
+            && !nextval_default_expr.contains("::regclass)::regclass"),
+        "unexpected nextval default expression: {nextval_default_expr}"
+    );
+    db.execute(1, "insert into deparse_builtin_defaults default values")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from deparse_builtin_defaults"),
+        vec![vec![Value::Int32(1)]]
+    );
     assert_eq!(
         query_rows(
             &db,
@@ -27458,8 +27484,6 @@ fn stored_expression_deparse_matches_pg_for_checks_and_defaults() {
         ),
         vec![vec![Value::Bool(true)]]
     );
-    db.execute(1, "insert into deparse_builtin_defaults default values")
-        .unwrap();
     db.execute(
         1,
         "insert into deparse_builtin_checks values ('{=}'::text[], '{1}'::text[])",
