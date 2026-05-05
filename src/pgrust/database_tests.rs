@@ -4515,9 +4515,13 @@ fn materialized_view_create_refresh_metadata_and_drop() {
         query_rows(
             &db,
             1,
-            "select relkind::text, relispopulated from pg_class where relname = 'mv_items'",
+            "select relkind::text, relispopulated, relreplident::text from pg_class where relname = 'mv_items'",
         ),
-        vec![vec![Value::Text("m".into()), Value::Bool(true)]]
+        vec![vec![
+            Value::Text("m".into()),
+            Value::Bool(true),
+            Value::Text("d".into())
+        ]]
     );
     assert_eq!(
         query_rows(
@@ -4587,6 +4591,65 @@ fn materialized_view_create_refresh_metadata_and_drop() {
             "select count(*) from pg_class where relname = 'mv_items'",
         ),
         vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn materialized_view_create_ignores_owner_insert_default_acl() {
+    let db = Database::open_ephemeral(64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema matview_acl").unwrap();
+    session
+        .execute(&db, "create user matview_acl_user")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter default privileges for role matview_acl_user \
+             revoke insert on tables from matview_acl_user",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant all on schema matview_acl to public")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization matview_acl_user")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view matview_acl.mv_withdata(a) as \
+             select generate_series(1, 10) with data",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view matview_acl.mv_nodata(a) as \
+             select generate_series(1, 10) with no data",
+        )
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view matview_acl.mv_nodata")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from matview_acl.mv_withdata"
+        ),
+        vec![vec![Value::Int64(10)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from matview_acl.mv_nodata"
+        ),
+        vec![vec![Value::Int64(10)]]
     );
 }
 
@@ -6055,6 +6118,35 @@ fn take_backend_notice_messages() -> Vec<String> {
         .into_iter()
         .map(|notice| notice.message)
         .collect()
+}
+
+#[test]
+fn create_aggregate_warns_for_quoted_option_names_before_missing_stype_error() {
+    let db = Database::open_ephemeral(32).unwrap();
+    clear_backend_notices();
+
+    let result = db.execute(
+        1,
+        r#"create aggregate case_agg (
+            "Sfunc1" = int4pl,
+            "Basetype" = int4,
+            "Stype1" = int4,
+            "Initcond1" = '0',
+            "Parallel" = safe
+        )"#,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            r#"aggregate attribute "Sfunc1" not recognized"#,
+            r#"aggregate attribute "Basetype" not recognized"#,
+            r#"aggregate attribute "Stype1" not recognized"#,
+            r#"aggregate attribute "Initcond1" not recognized"#,
+            r#"aggregate attribute "Parallel" not recognized"#,
+        ]
+    );
 }
 
 fn explain_lines(db: &Database, client_id: u32, sql: &str) -> Vec<String> {
@@ -27278,11 +27370,27 @@ fn stored_expression_deparse_matches_pg_for_checks_and_defaults() {
         "create table deparse_defaults (b integer default random()::int)",
     )
     .unwrap();
-    db.execute(1, "create sequence deparse_default_seq")
-        .unwrap();
+    db.execute(1, "create sequence deparse_seq").unwrap();
     db.execute(
         1,
-        "create table deparse_nextval_defaults (b integer default nextval('deparse_default_seq'))",
+        "create table deparse_builtin_defaults (id integer default nextval('deparse_seq'))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table deparse_builtin_checks (
+            op text[],
+            value text[],
+            check (cardinality(op) = cardinality(value))
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table deparse_builtin_ranges (
+            a integer,
+            r int4range generated always as (int4range(a, a + 5)) stored
+        )",
     )
     .unwrap();
 
@@ -27325,7 +27433,7 @@ fn stored_expression_deparse_matches_pg_for_checks_and_defaults() {
         1,
         "select pg_get_expr(adbin, adrelid)
            from pg_attrdef
-          where adrelid = 'deparse_nextval_defaults'::regclass",
+          where adrelid = 'deparse_builtin_defaults'::regclass",
     );
     let [nextval_default_row] = nextval_default_expr.as_slice() else {
         panic!("unexpected nextval default expression: {nextval_default_expr:?}");
@@ -27340,12 +27448,49 @@ fn stored_expression_deparse_matches_pg_for_checks_and_defaults() {
             && !nextval_default_expr.contains("::regclass)::regclass"),
         "unexpected nextval default expression: {nextval_default_expr}"
     );
-    db.execute(1, "insert into deparse_nextval_defaults default values")
+    db.execute(1, "insert into deparse_builtin_defaults default values")
         .unwrap();
     assert_eq!(
-        query_rows(&db, 1, "select * from deparse_nextval_defaults"),
+        query_rows(&db, 1, "select * from deparse_builtin_defaults"),
         vec![vec![Value::Int32(1)]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(adbin, adrelid) not like '%function%'
+               from pg_attrdef
+              where adrelid = 'deparse_builtin_defaults'::regclass",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(conbin, conrelid) not like '%function%'
+               from pg_constraint
+              where conrelid = 'deparse_builtin_checks'::regclass",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(adbin, adrelid) not like '%function%'
+               from pg_attrdef
+              where adrelid = 'deparse_builtin_ranges'::regclass",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    db.execute(
+        1,
+        "insert into deparse_builtin_checks values ('{=}'::text[], '{1}'::text[])",
+    )
+    .unwrap();
+    db.execute(1, "insert into deparse_builtin_ranges (a) values (4)")
+        .unwrap();
     assert_eq!(
         query_rows(
             &db,

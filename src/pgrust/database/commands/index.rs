@@ -309,6 +309,23 @@ fn invalid_fillfactor_error(value: &str) -> ExecError {
     }
 }
 
+fn reloption_error_to_exec(err: pgrust_commands::reloptions::RelOptionError) -> ExecError {
+    match err {
+        pgrust_commands::reloptions::RelOptionError::Parse(err) => ExecError::Parse(err),
+        pgrust_commands::reloptions::RelOptionError::Detailed {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+    }
+}
+
 fn index_expression_immutable_error() -> ExecError {
     ExecError::DetailedError {
         message: "functions in index expression must be marked IMMUTABLE".into(),
@@ -1135,29 +1152,7 @@ impl Database {
     }
 
     fn resolve_gist_options(&self, options: &[RelOption]) -> Result<GistOptions, ExecError> {
-        let mut resolved = GistOptions::default();
-        for option in options {
-            if option.name.eq_ignore_ascii_case("buffering") {
-                resolved.buffering_mode = match option.value.to_ascii_lowercase().as_str() {
-                    "auto" => GistBufferingMode::Auto,
-                    "on" => GistBufferingMode::On,
-                    "off" => GistBufferingMode::Off,
-                    _ => {
-                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "GiST buffering option auto, on, or off",
-                            actual: option.value.clone(),
-                        }));
-                    }
-                };
-                continue;
-            }
-
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-                "GiST option \"{}\"",
-                option.name
-            ))));
-        }
-        Ok(resolved)
+        pgrust_commands::reloptions::resolve_gist_options(options).map_err(reloption_error_to_exec)
     }
 
     fn resolve_gin_options(&self, options: &[RelOption]) -> Result<GinOptions, ExecError> {
@@ -4369,20 +4364,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_gist_options_rejects_unknown_option() {
-        let dir = temp_dir("gist_unknown_option");
+    fn resolve_gist_options_accepts_fillfactor() {
+        let dir = temp_dir("gist_fillfactor");
         let db = Database::open(&dir, 16).unwrap();
 
-        let err = db
+        let options = db
             .resolve_gist_options(&[RelOption {
                 name: "fillfactor".into(),
                 value: "90".into(),
             }])
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            ExecError::Parse(ParseError::FeatureNotSupported(message))
-                if message == "GiST option \"fillfactor\""
-        ));
+            .unwrap();
+        assert_eq!(options.fillfactor, 90);
     }
 }
