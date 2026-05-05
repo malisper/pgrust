@@ -6970,6 +6970,10 @@ fn try_bind_functional_field_notation(
             sqlstate: "42703", ..
         })
         | Err(ParseError::UnexpectedToken {
+            expected: "record field",
+            ..
+        })
+        | Err(ParseError::UnexpectedToken {
             expected: "record expression",
             ..
         }) => Ok(None),
