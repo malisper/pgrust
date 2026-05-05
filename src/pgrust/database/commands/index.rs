@@ -1155,6 +1155,11 @@ impl Database {
         pgrust_commands::reloptions::resolve_gist_options(options).map_err(reloption_error_to_exec)
     }
 
+    fn resolve_spgist_options(&self, options: &[RelOption]) -> Result<(), ExecError> {
+        pgrust_commands::reloptions::resolve_spgist_options(options)
+            .map_err(reloption_error_to_exec)
+    }
+
     fn resolve_gin_options(&self, options: &[RelOption]) -> Result<GinOptions, ExecError> {
         let mut resolved = GinOptions::default();
         for option in options {
@@ -1881,6 +1886,10 @@ impl Database {
                     None,
                     Some(self.resolve_hash_options(options)?),
                 ),
+                SPGIST_AM_OID => {
+                    self.resolve_spgist_options(options)?;
+                    (None, None, None, None, None)
+                }
                 _ => {
                     if !options.is_empty() {
                         return Err(ExecError::Parse(ParseError::UnexpectedToken {
