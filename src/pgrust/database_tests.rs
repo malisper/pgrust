@@ -68153,6 +68153,26 @@ fn create_range_type_exposes_pg_range_metadata() {
 }
 
 #[test]
+fn pg_range_subtype_opclass_sanity_query_matches_postgres() {
+    let dir = temp_dir("pg_range_subtype_opclass_sanity");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "SELECT r.rngtypid, r.rngsubtype, o.opcmethod, o.opcname
+         FROM pg_range r JOIN pg_opclass o ON o.oid = r.rngsubopc
+         WHERE o.opcmethod != 403 OR
+             ((o.opcintype != r.rngsubtype) AND NOT
+              (o.opcintype = 'pg_catalog.anyarray'::regtype AND
+               EXISTS(select 1 from pg_catalog.pg_type where
+                      oid = r.rngsubtype and typelem != 0 and
+                      typsubscript = 'array_subscript_handler'::regproc)))",
+    );
+    assert!(rows.is_empty(), "rows={rows:?}");
+}
+
+#[test]
 fn create_range_type_survives_database_reopen() {
     let dir = temp_dir("create_range_type_reload");
     {
