@@ -34,4 +34,5 @@ pub mod tablespace;
 pub mod trigger;
 pub mod truncate;
 pub mod typed_table;
+pub mod visible_catalog;
 pub mod wire;
