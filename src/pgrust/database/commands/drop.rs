@@ -15,7 +15,7 @@ use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_POLICY_RELATION_OID,
     PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgCastRow,
-    PgConstraintRow, PgPolicyRow, PgProcRow, PgRewriteRow,
+    PgConstraintRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -38,6 +38,7 @@ struct DropForeignKeyConstraintPlan {
 #[derive(Debug, Clone)]
 struct DropRulePlan {
     rewrite_oid: u32,
+    relation_oid: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1408,6 +1409,7 @@ fn drop_table_direct_dependencies(
                         ),
                         rule: DropRulePlan {
                             rewrite_oid: rewrite.oid,
+                            relation_oid: owner.oid,
                         },
                         rule_name: rewrite.rulename.clone(),
                     });
@@ -3263,6 +3265,30 @@ impl Database {
                 );
             }
             sort_policy_cascade_notices(&dependency_ctx, &mut plan);
+            let mut statement_type_rows = plan
+                .relation_drop_order
+                .iter()
+                .filter_map(|relation_oid| catalog.class_row_by_oid(*relation_oid))
+                .flat_map(|class_row| {
+                    let mut rows = Vec::<PgTypeRow>::new();
+                    if class_row.reltype != 0
+                        && let Some(row) = catalog.type_by_oid(class_row.reltype)
+                    {
+                        rows.push(row);
+                    }
+                    rows
+                })
+                .collect::<Vec<_>>();
+            statement_type_rows.sort_by_key(|row| row.oid);
+            statement_type_rows.dedup_by_key(|row| row.oid);
+            for row in statement_type_rows {
+                if !dynamic_type_rows
+                    .iter()
+                    .any(|existing| existing.oid == row.oid)
+                {
+                    dynamic_type_rows.push(row);
+                }
+            }
 
             if !drop_stmt.cascade && !plan.blocker_details.is_empty() {
                 let (_, source_name) = plan.blocker_source.unwrap_or(('r', "table".to_string()));
@@ -3290,9 +3316,17 @@ impl Database {
                 ),
             }
 
+            let relation_drop_set = plan
+                .relation_drop_order
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
             let mut next_cid = cid;
 
             for policy in &plan.policy_drops {
+                if relation_drop_set.contains(&policy.relation_oid) {
+                    continue;
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -3312,6 +3346,9 @@ impl Database {
             }
 
             for rule in &plan.rule_drops {
+                if relation_drop_set.contains(&rule.relation_oid) {
+                    continue;
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -3331,6 +3368,9 @@ impl Database {
             }
 
             for constraint in &plan.constraint_drops {
+                if relation_drop_set.contains(&constraint.relation_oid) {
+                    continue;
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -3376,7 +3416,11 @@ impl Database {
                 next_cid = next_cid.saturating_add(1);
             }
 
+            let mut dropped_relation_oids = BTreeSet::new();
             for relation_oid in &plan.relation_drop_order {
+                if dropped_relation_oids.contains(relation_oid) {
+                    continue;
+                }
                 let (relkind, relpersistence) = catalog
                     .class_row_by_oid(*relation_oid)
                     .map(|row| (row.relkind, row.relpersistence))
@@ -3451,6 +3495,8 @@ impl Database {
                 }
                 .map_err(map_catalog_error)?;
                 let (dropped_relations, effect) = effect;
+                dropped_relation_oids
+                    .extend(dropped_relations.iter().map(|entry| entry.relation_oid));
 
                 if relkind != 'v' {
                     self.apply_catalog_mutation_effect_immediate(&effect)?;

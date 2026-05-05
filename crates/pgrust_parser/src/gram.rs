@@ -14153,7 +14153,7 @@ fn build_comment_on_column_statement(sql: &str) -> Result<CommentOnColumnStateme
         });
     };
     let target = rest[..is_index].trim();
-    let Some((table_name, column_name)) = target.rsplit_once('.') else {
+    let Some((table_name, column_name)) = split_comment_on_column_target(target) else {
         return Err(ParseError::UnexpectedToken {
             expected: "relation.column",
             actual: target.into(),
@@ -14161,9 +14161,35 @@ fn build_comment_on_column_statement(sql: &str) -> Result<CommentOnColumnStateme
     };
     Ok(CommentOnColumnStatement {
         table_name: table_name.trim().to_string(),
-        column_name: column_name.trim().to_string(),
+        column_name: parse_sql_identifier(column_name)
+            .ok()
+            .filter(|(_, rest)| rest.trim().is_empty())
+            .map(|(ident, _)| ident)
+            .unwrap_or_else(|| column_name.trim().to_string()),
         comment: parse_comment_value(&rest[is_index..], "end of COMMENT ON COLUMN")?,
     })
+}
+
+fn split_comment_on_column_target(target: &str) -> Option<(&str, &str)> {
+    let bytes = target.as_bytes();
+    let mut idx = bytes.len();
+    while idx > 0 {
+        idx -= 1;
+        if bytes[idx] == b'"' {
+            idx = idx.checked_sub(1)?;
+            while idx > 0 {
+                if bytes[idx] == b'"' {
+                    break;
+                }
+                idx -= 1;
+            }
+            continue;
+        }
+        if bytes[idx] == b'.' {
+            return Some((target[..idx].trim(), target[idx + 1..].trim()));
+        }
+    }
+    None
 }
 
 fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOptions, ParseError> {

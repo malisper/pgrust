@@ -7,9 +7,10 @@ use super::create_table::{
 };
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
-    CreateTableStatement, ParseError, PartitionColumnOverride, RawTypeName, TableConstraint,
-    TablePersistence, lower_partition_clause, validate_partitioned_check_constraints,
-    validate_partitioned_index_backed_constraints, validate_partitioned_not_null_constraints,
+    CreateTableStatement, ParseError, PartitionColumnOverride, RawTypeName, SqlType, SqlTypeKind,
+    TableConstraint, TablePersistence, lower_partition_clause,
+    validate_partitioned_check_constraints, validate_partitioned_index_backed_constraints,
+    validate_partitioned_not_null_constraints,
 };
 use crate::notices::{push_notice, push_notice_with_detail};
 
@@ -753,7 +754,6 @@ fn merge_local_column(
     local_index: usize,
     inherited_index: usize,
 ) -> Result<(), ParseError> {
-    ensure_matching_column_type(&merged.column.name, &merged.column.ty, &local.ty)?;
     if merged.attinhcount > 0 {
         if local_index != inherited_index {
             push_notice_with_detail(
@@ -770,6 +770,12 @@ fn merge_local_column(
             ));
         }
     }
+    ensure_matching_column_type(&merged.column.name, &merged.column.ty, &local.ty)?;
+    ensure_matching_column_collation(
+        &merged.column.name,
+        merged.column.collation.as_deref(),
+        local.collation.as_deref(),
+    )?;
     merged.attislocal = true;
     if let Some(local_compression) = local.compression {
         ensure_matching_column_compression(
@@ -1213,10 +1219,81 @@ fn ensure_matching_column_type(
     if left == right {
         return Ok(());
     }
-    Err(ParseError::UnexpectedToken {
-        expected: "matching inherited column types",
-        actual: format!("column {name} has incompatible inherited types"),
+    Err(ParseError::DetailedError {
+        message: format!("column \"{name}\" has a type conflict"),
+        detail: Some(format!(
+            "{} versus {}",
+            format_inherited_type_name(left),
+            format_inherited_type_name(right)
+        )),
+        hint: None,
+        sqlstate: "42804",
     })
+}
+
+fn ensure_matching_column_collation(
+    name: &str,
+    left: Option<&str>,
+    right: Option<&str>,
+) -> Result<(), ParseError> {
+    if left == right {
+        return Ok(());
+    }
+    Err(ParseError::DetailedError {
+        message: format!("column \"{name}\" has a collation conflict"),
+        detail: Some(format!(
+            "\"{}\" versus \"{}\"",
+            left.unwrap_or("default"),
+            right.unwrap_or("default")
+        )),
+        hint: None,
+        sqlstate: "42P21",
+    })
+}
+
+fn format_inherited_type_name(ty: &RawTypeName) -> String {
+    match ty {
+        RawTypeName::Builtin(ty) => format_inherited_sql_type_name(*ty),
+        RawTypeName::Named { name, array_bounds } => {
+            let mut out = name.clone();
+            for _ in 0..*array_bounds {
+                out.push_str("[]");
+            }
+            out
+        }
+        RawTypeName::Serial(kind) => format!("{kind:?}").to_ascii_lowercase(),
+        RawTypeName::Record => "record".into(),
+    }
+}
+
+fn format_inherited_sql_type_name(ty: SqlType) -> String {
+    let base = match ty.kind {
+        SqlTypeKind::Float4 => "real".into(),
+        SqlTypeKind::Float8 => "double precision".into(),
+        SqlTypeKind::Numeric => ty
+            .numeric_precision_scale()
+            .map(|(precision, scale)| format!("numeric({precision},{scale})"))
+            .unwrap_or_else(|| "numeric".into()),
+        SqlTypeKind::Text => "text".into(),
+        SqlTypeKind::Int4 => "integer".into(),
+        SqlTypeKind::Int8 => "bigint".into(),
+        SqlTypeKind::Int2 => "smallint".into(),
+        SqlTypeKind::Bool => "boolean".into(),
+        SqlTypeKind::Varchar => ty
+            .char_len()
+            .map(|len| format!("character varying({len})"))
+            .unwrap_or_else(|| "character varying".into()),
+        SqlTypeKind::Char => ty
+            .char_len()
+            .map(|len| format!("character({len})"))
+            .unwrap_or_else(|| "character".into()),
+        other => format!("{other:?}").to_ascii_lowercase(),
+    };
+    if ty.is_array {
+        format!("{base}[]")
+    } else {
+        base
+    }
 }
 
 fn ensure_matching_column_compression(

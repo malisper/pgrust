@@ -13979,6 +13979,9 @@ fn drop_relation_entries_mvcc(
             publication_rows_for_relation_mvcc(store, ctx, entry.relation_oid)?,
         );
     }
+    sort_pg_depend_rows(&mut rows_to_delete.depends);
+    rows_to_delete.depends.dedup();
+    dedup_description_rows(&mut rows_to_delete.descriptions);
 
     let mut rows_to_insert = PhysicalCatalogRows::default();
     for parent_oid in &affected_parent_oids {

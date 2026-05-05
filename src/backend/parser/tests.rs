@@ -3196,6 +3196,15 @@ fn parse_comment_on_type_and_column_statements() {
             comment: None,
         })
     );
+    assert_eq!(
+        parse_statement(r#"comment on column atacc1."........pg.dropped.1........" is 'testing'"#)
+            .unwrap(),
+        Statement::CommentOnColumn(CommentOnColumnStatement {
+            table_name: "atacc1".into(),
+            column_name: "........pg.dropped.1........".into(),
+            comment: Some("testing".into()),
+        })
+    );
 }
 
 #[test]

@@ -14831,6 +14831,75 @@ fn drop_table_still_rejects_legacy_inheritance_parents() {
 }
 
 #[test]
+fn create_table_inherits_reports_type_and_collation_conflicts_like_postgres() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"create table inherit_conflict_parent (a float8, b numeric(10,4), c text collate "C")"#,
+        )
+        .unwrap();
+
+    clear_backend_notices();
+    match session.execute(
+        &db,
+        "create table inherit_conflict_child (a float4) inherits (inherit_conflict_parent)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message == r#"column "a" has a type conflict"#
+            && detail == "double precision versus real"
+            && sqlstate == "42804" => {}
+        other => panic!("expected inherited type conflict for a, got {other:?}"),
+    }
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![r#"merging column "a" with inherited definition"#.to_string()]
+    );
+
+    clear_backend_notices();
+    match session.execute(
+        &db,
+        "create table inherit_conflict_child (b decimal(10,7)) inherits (inherit_conflict_parent)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message == r#"column "b" has a type conflict"#
+            && detail == "numeric(10,4) versus numeric(10,7)"
+            && sqlstate == "42804" => {}
+        other => panic!("expected inherited type conflict for b, got {other:?}"),
+    }
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![r#"moving and merging column "b" with inherited definition"#.to_string()]
+    );
+
+    clear_backend_notices();
+    match session.execute(
+        &db,
+        r#"create table inherit_conflict_child (c text collate "POSIX") inherits (inherit_conflict_parent)"#,
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message == r#"column "c" has a collation conflict"#
+            && detail == r#""C" versus "POSIX""#
+            && sqlstate == "42P21" => {}
+        other => panic!("expected inherited collation conflict for c, got {other:?}"),
+    }
+}
+
+#[test]
 fn new_tables_report_never_analyzed_reltuples() {
     let dir = temp_dir("new_table_reltuples");
     let db = Database::open(&dir, 128).unwrap();
@@ -28752,6 +28821,61 @@ fn alter_table_add_column_merges_existing_child_column_and_not_null() {
                 Value::Text("inh_parent_i_not_null".into()),
                 Value::Int16(0),
                 Value::Bool(true),
+                Value::Bool(false),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn alter_table_add_column_does_not_notice_single_inherited_descendant_merge() {
+    let base = temp_dir("alter_add_column_single_inherited_descendant_notice");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table depth0()").unwrap();
+    session
+        .execute(&db, "create table depth1(c text) inherits (depth0)")
+        .unwrap();
+    session
+        .execute(&db, "create table depth2() inherits (depth1)")
+        .unwrap();
+
+    clear_backend_notices();
+    session
+        .execute(&db, "alter table depth0 add c text")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![r#"merging definition of column "c" for child "depth1""#.to_string()],
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, a.attname, a.attinhcount, a.attislocal
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where c.relname in ('depth0', 'depth1', 'depth2') and a.attname = 'c'
+             order by 1",
+        ),
+        vec![
+            vec![
+                Value::Text("depth0".into()),
+                Value::Text("c".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("depth1".into()),
+                Value::Text("c".into()),
+                Value::Int16(1),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("depth2".into()),
+                Value::Text("c".into()),
+                Value::Int16(1),
                 Value::Bool(false),
             ],
         ],
@@ -43008,6 +43132,55 @@ fn alter_column_type_with_foreign_key_after_referenced_type_change_finishes() {
             vec![Value::Text("bigint".into())],
         ]
     );
+}
+
+#[test]
+fn alter_table_catalog_drop_paths_handle_statement_local_dependencies() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    for sql in [
+        "begin",
+        "create table skip_wal_skip_rewrite_index (c varchar(10) primary key)",
+        "alter table skip_wal_skip_rewrite_index alter c type varchar(20)",
+        "commit",
+        "create table at_tab1 (a int, b text) partition by list(a)",
+        "create table at_tab2 (x int, y at_tab1)",
+    ] {
+        db.execute(1, sql).unwrap();
+    }
+    let _ = db.execute(1, "alter table at_tab1 alter column b type varchar");
+    db.execute(1, "drop table at_tab1, at_tab2").unwrap();
+
+    for sql in [
+        "create table at_partitioned(id int, name varchar(64), unique (id, name)) partition by hash(id)",
+        "comment on constraint at_partitioned_id_name_key on at_partitioned is 'parent constraint'",
+        "comment on index at_partitioned_id_name_key is 'parent index'",
+        "create table at_partitioned_0 partition of at_partitioned for values with (modulus 2, remainder 0)",
+        "comment on constraint at_partitioned_0_id_name_key on at_partitioned_0 is 'child 0 constraint'",
+        "comment on index at_partitioned_0_id_name_key is 'child 0 index'",
+        "create table at_partitioned_1 partition of at_partitioned for values with (modulus 2, remainder 1)",
+        "comment on constraint at_partitioned_1_id_name_key on at_partitioned_1 is 'child 1 constraint'",
+        "comment on index at_partitioned_1_id_name_key is 'child 1 index'",
+        "insert into at_partitioned values(1, 'foo')",
+        "insert into at_partitioned values(3, 'bar')",
+        "alter table at_partitioned alter column name type varchar(127)",
+        "drop table at_partitioned",
+        "create table attbl(a int)",
+        "create table atref(b attbl check ((b).a is not null))",
+    ] {
+        db.execute(1, sql).unwrap();
+    }
+    let _ = db.execute(1, "alter table attbl alter column a type numeric");
+    db.execute(1, "alter table atref drop constraint atref_b_check")
+        .unwrap();
+    db.execute(
+        1,
+        "create statistics atref_stat on ((b).a is not null) from atref",
+    )
+    .unwrap();
+    let _ = db.execute(1, "alter table attbl alter column a type numeric");
+    db.execute(1, "drop statistics atref_stat").unwrap();
+    db.execute(1, "drop table attbl, atref").unwrap();
 }
 
 #[test]
