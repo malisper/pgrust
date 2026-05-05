@@ -14114,6 +14114,16 @@ fn collect_relation_drop_oids_visible(
             );
         }
     }
+    if let Some(relation) = relcache.get_by_oid(relation_oid) {
+        for sequence_oid in default_sequence_oids_for_desc(&relation.desc) {
+            if relcache
+                .get_by_oid(sequence_oid)
+                .is_some_and(|sequence| sequence.relkind == 'S')
+            {
+                collect_relation_drop_oids_visible(relcache, catcache, sequence_oid, seen, order);
+            }
+        }
+    }
     for constraint in catcache.constraint_rows_for_relation(relation_oid) {
         if matches!(
             constraint.contype,
@@ -14155,6 +14165,15 @@ fn collect_relation_drop_oids_mvcc(
                 continue;
             }
             collect_relation_drop_oids_mvcc(store, ctx, dependent.oid, seen, order)?;
+        }
+    }
+    if let Ok(relation) = catalog_entry_by_oid_mvcc(store, ctx, relation_oid) {
+        for sequence_oid in default_sequence_oids_for_desc(&relation.desc) {
+            if class_row_by_oid_mvcc(store, ctx, sequence_oid)?
+                .is_some_and(|sequence| sequence.relkind == 'S')
+            {
+                collect_relation_drop_oids_mvcc(store, ctx, sequence_oid, seen, order)?;
+            }
         }
     }
     for constraint in relation_constraints_mvcc(store, ctx, relation_oid)? {
@@ -14220,9 +14239,31 @@ fn collect_relation_drop_oids(
             collect_relation_drop_oids(catalog, depend_rows, dependent.relation_oid, seen, order);
         }
     }
+    if let Some(relation) = catalog.get_by_oid(relation_oid) {
+        for sequence_oid in default_sequence_oids_for_desc(&relation.desc) {
+            if catalog
+                .get_by_oid(sequence_oid)
+                .is_some_and(|sequence| sequence.relkind == 'S')
+            {
+                collect_relation_drop_oids(catalog, depend_rows, sequence_oid, seen, order);
+            }
+        }
+    }
     collect_constraint_backed_index_drop_oids(catalog, depend_rows, relation_oid, seen, order);
 
     order.push(relation_oid);
+}
+
+fn default_sequence_oids_for_desc(desc: &RelationDesc) -> Vec<u32> {
+    let mut oids = desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .filter_map(|column| column.default_sequence_oid)
+        .collect::<Vec<_>>();
+    oids.sort_unstable();
+    oids.dedup();
+    oids
 }
 
 fn collect_constraint_backed_index_drop_oids(
