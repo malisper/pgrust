@@ -229,9 +229,7 @@ pub(super) fn lookup_analyzable_relation_for_ddl(
             name: name.to_string(),
             expected: "table",
         })),
-        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
-            name.to_string(),
-        ))),
+        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
     }
 }
 
