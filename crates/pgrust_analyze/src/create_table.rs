@@ -150,12 +150,14 @@ pub fn lower_create_table(
                     )));
                 }
                 if column.generated.is_some() && column.default_expr.is_some() {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "generated column without DEFAULT",
-                        actual: format!(
+                    return Err(ParseError::DetailedError {
+                        message: format!(
                             "both default and generation expression specified for column \"{}\" of table \"{}\"",
                             column.name, stmt.table_name
                         ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
                     });
                 }
                 if column.identity.is_some()
@@ -354,6 +356,9 @@ fn canonicalize_stored_defaults(
 ) {
     let snapshot = desc.clone();
     for column in &mut desc.columns {
+        if column.generated.is_some() {
+            continue;
+        }
         let Some(expr_sql) = column.default_expr.clone() else {
             continue;
         };
@@ -490,6 +495,14 @@ fn expand_create_table_of_type(
                 };
                 column.collation = options.collation.clone();
                 column.default_expr = options.default_expr.clone();
+                if options.generated.is_some() {
+                    return Err(ParseError::DetailedError {
+                        message: "generated columns are not supported on typed tables".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
                 column.generated = options.generated.clone();
                 if options.identity.is_some() {
                     return Err(ParseError::DetailedError {

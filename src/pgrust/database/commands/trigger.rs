@@ -1160,6 +1160,12 @@ fn validate_trigger_stmt(
         rewrite_trigger_system_column_refs(&mut parsed);
         for event in &stmt.events {
             validate_trigger_when_usage(stmt, event.event, when_clause_sql)?;
+            validate_before_trigger_generated_when_usage(
+                stmt,
+                event.event,
+                &relation.desc,
+                when_clause_sql,
+            )?;
             let mut relation_scopes = Vec::new();
             if stmt.level == TriggerLevel::Row {
                 match event.event {
@@ -1191,6 +1197,74 @@ fn validate_trigger_stmt(
         }
     }
     Ok(())
+}
+
+fn validate_before_trigger_generated_when_usage(
+    stmt: &CreateTriggerStatement,
+    event: TriggerEvent,
+    relation_desc: &crate::include::nodes::primnodes::RelationDesc,
+    when_clause_sql: &str,
+) -> Result<(), ExecError> {
+    if stmt.level != TriggerLevel::Row
+        || stmt.timing != TriggerTiming::Before
+        || !matches!(event, TriggerEvent::Insert | TriggerEvent::Update)
+    {
+        return Ok(());
+    }
+    if !relation_desc
+        .columns
+        .iter()
+        .any(|column| !column.dropped && column.generated.is_some())
+    {
+        return Ok(());
+    }
+
+    let lowered = when_clause_sql.to_ascii_lowercase();
+    if lowered.contains("new.*") {
+        return Err(ExecError::DetailedError {
+            message: "BEFORE trigger's WHEN condition cannot reference NEW generated columns"
+                .into(),
+            detail: Some(
+                "A whole-row reference is used and the table contains generated columns.".into(),
+            ),
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    for column in relation_desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped && column.generated.is_some())
+    {
+        if trigger_when_mentions_new_column(&lowered, &column.name) {
+            return Err(ExecError::DetailedError {
+                message: "BEFORE trigger's WHEN condition cannot reference NEW generated columns"
+                    .into(),
+                detail: Some(format!("Column \"{}\" is a generated column.", column.name)),
+                hint: None,
+                sqlstate: "42P17",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn trigger_when_mentions_new_column(lowered_when: &str, column_name: &str) -> bool {
+    let needle = format!("new.{}", column_name.to_ascii_lowercase());
+    let mut start = 0usize;
+    while let Some(offset) = lowered_when[start..].find(&needle) {
+        let absolute = start + offset;
+        let end = absolute + needle.len();
+        if lowered_when[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        {
+            return true;
+        }
+        start = end;
+    }
+    false
 }
 
 fn trigger_row_is_row(row: &PgTriggerRow) -> bool {

@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::BTreeSet;
+
 use pgrust_catalog_data::PG_CATALOG_NAMESPACE_OID;
 use pgrust_nodes::primnodes::{
     CMAX_ATTR_NO, CMIN_ATTR_NO, ExprArraySubscript, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr,
@@ -70,6 +72,7 @@ fn bind_generated_expr_for_relation(
     }
     let parsed = pgrust_parser::parse_expr(sql)?;
     let scope = scope_for_base_relation_with_optional_name(relation_name, desc);
+    validate_raw_generated_column_refs(&parsed, desc, relation_name)?;
     if kind == ColumnGeneratedKind::Virtual && raw_expr_uses_user_defined_function(&parsed, catalog)
     {
         return Err(virtual_generated_user_function_error());
@@ -87,7 +90,8 @@ fn bind_generated_expr_for_relation(
             let rewritten = pgrust_parser::parse_expr(&rewritten_sql)?;
             bind_expr_with_outer_and_ctes(&rewritten, &scope, catalog, &[], None, &[])?
         }
-        other => other?,
+        Err(err) => return Err(map_generated_bind_error(err)),
+        Ok(bound) => bound,
     };
     validate_generated_expr(&bound, desc, column_index, catalog)?;
     if kind == ColumnGeneratedKind::Virtual && expr_uses_user_defined_function(&bound, catalog) {
@@ -202,6 +206,286 @@ fn rewrite_self_regclass_for_validation(sql: &str, relation_name: &str) -> Strin
             &format!("'{relation_name}'::pg_catalog.regclass"),
             "0::pg_catalog.regclass",
         )
+}
+
+fn map_generated_bind_error(err: ParseError) -> ParseError {
+    match err {
+        ParseError::UnexpectedToken { actual, .. } if actual == "aggregate function" => {
+            generation_error("aggregate functions are not allowed in column generation expressions")
+        }
+        ParseError::WindowingError(message)
+            if message == "window functions are not allowed in this context" =>
+        {
+            generation_error("window functions are not allowed in column generation expressions")
+        }
+        other => other,
+    }
+}
+
+fn validate_raw_generated_column_refs(
+    expr: &pgrust_nodes::parsenodes::SqlExpr,
+    desc: &RelationDesc,
+    relation_name: Option<&str>,
+) -> Result<(), ParseError> {
+    use pgrust_nodes::parsenodes::{SqlExpr, function_arg_values};
+    match expr {
+        SqlExpr::Column(name) => validate_raw_generated_column_ref(name, desc, relation_name),
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::GeometryBinaryOp { left, right, .. }
+        | SqlExpr::BinaryOperator { left, right, .. } => {
+            validate_raw_generated_column_refs(left, desc, relation_name)?;
+            validate_raw_generated_column_refs(right, desc, relation_name)
+        }
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::Subscript { expr: inner, .. }
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::FieldSelect { expr: inner, .. } => {
+            validate_raw_generated_column_refs(inner, desc, relation_name)
+        }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            validate_raw_generated_column_refs(expr, desc, relation_name)?;
+            validate_raw_generated_column_refs(zone, desc, relation_name)
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            validate_raw_generated_column_refs(expr, desc, relation_name)?;
+            validate_raw_generated_column_refs(pattern, desc, relation_name)?;
+            if let Some(escape) = escape {
+                validate_raw_generated_column_refs(escape, desc, relation_name)?;
+            }
+            Ok(())
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                validate_raw_generated_column_refs(arg, desc, relation_name)?;
+            }
+            for arm in args {
+                validate_raw_generated_column_refs(&arm.expr, desc, relation_name)?;
+                validate_raw_generated_column_refs(&arm.result, desc, relation_name)?;
+            }
+            if let Some(defresult) = defresult {
+                validate_raw_generated_column_refs(defresult, desc, relation_name)?;
+            }
+            Ok(())
+        }
+        SqlExpr::ArrayLiteral(exprs) | SqlExpr::Row(exprs) => exprs
+            .iter()
+            .try_for_each(|expr| validate_raw_generated_column_refs(expr, desc, relation_name)),
+        SqlExpr::QuantifiedArray { left, array, .. } => {
+            validate_raw_generated_column_refs(left, desc, relation_name)?;
+            validate_raw_generated_column_refs(array, desc, relation_name)
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            validate_raw_generated_column_refs(array, desc, relation_name)?;
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    validate_raw_generated_column_refs(lower, desc, relation_name)?;
+                }
+                if let Some(upper) = &subscript.upper {
+                    validate_raw_generated_column_refs(upper, desc, relation_name)?;
+                }
+            }
+            Ok(())
+        }
+        SqlExpr::Xml(xml) => xml
+            .child_exprs()
+            .try_for_each(|expr| validate_raw_generated_column_refs(expr, desc, relation_name)),
+        SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .try_for_each(|expr| validate_raw_generated_column_refs(expr, desc, relation_name)),
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
+            for arg in function_arg_values(args) {
+                validate_raw_generated_column_refs(arg, desc, relation_name)?;
+            }
+            for item in order_by {
+                validate_raw_generated_column_refs(&item.expr, desc, relation_name)?;
+            }
+            if let Some(items) = within_group {
+                for item in items {
+                    validate_raw_generated_column_refs(&item.expr, desc, relation_name)?;
+                }
+            }
+            if let Some(filter) = filter {
+                validate_raw_generated_column_refs(filter, desc, relation_name)?;
+            }
+            if let Some(over) = over {
+                validate_raw_window_spec_column_refs(over, desc, relation_name)?;
+            }
+            Ok(())
+        }
+        SqlExpr::InSubquery { expr, .. } | SqlExpr::QuantifiedSubquery { left: expr, .. } => {
+            validate_raw_generated_column_refs(expr, desc, relation_name)
+        }
+        SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
+        | SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
+        | SqlExpr::CurrentUser
+        | SqlExpr::User
+        | SqlExpr::SessionUser
+        | SqlExpr::SystemUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => Ok(()),
+    }
+}
+
+fn validate_raw_window_spec_column_refs(
+    spec: &pgrust_nodes::parsenodes::RawWindowSpec,
+    desc: &RelationDesc,
+    relation_name: Option<&str>,
+) -> Result<(), ParseError> {
+    for expr in &spec.partition_by {
+        validate_raw_generated_column_refs(expr, desc, relation_name)?;
+    }
+    for item in &spec.order_by {
+        validate_raw_generated_column_refs(&item.expr, desc, relation_name)?;
+    }
+    if let Some(frame) = &spec.frame {
+        validate_raw_window_frame_bound_column_refs(&frame.start_bound, desc, relation_name)?;
+        validate_raw_window_frame_bound_column_refs(&frame.end_bound, desc, relation_name)?;
+    }
+    Ok(())
+}
+
+fn validate_raw_window_frame_bound_column_refs(
+    bound: &pgrust_nodes::parsenodes::RawWindowFrameBound,
+    desc: &RelationDesc,
+    relation_name: Option<&str>,
+) -> Result<(), ParseError> {
+    use pgrust_nodes::parsenodes::RawWindowFrameBound;
+    match bound {
+        RawWindowFrameBound::OffsetPreceding(expr) | RawWindowFrameBound::OffsetFollowing(expr) => {
+            validate_raw_generated_column_refs(expr, desc, relation_name)
+        }
+        RawWindowFrameBound::UnboundedPreceding
+        | RawWindowFrameBound::CurrentRow
+        | RawWindowFrameBound::UnboundedFollowing => Ok(()),
+    }
+}
+
+fn validate_raw_generated_column_ref(
+    name: &str,
+    desc: &RelationDesc,
+    relation_name: Option<&str>,
+) -> Result<(), ParseError> {
+    if name == "*" {
+        return Ok(());
+    }
+    if let Some(row_name) = name.strip_suffix(".*") {
+        if raw_generated_relation_name_matches(row_name, relation_name) {
+            return Ok(());
+        }
+    }
+    if raw_generated_relation_name_matches(name, relation_name) {
+        return Ok(());
+    }
+    let column_name = name.rsplit('.').next().unwrap_or(name);
+    if is_system_column_name(column_name) {
+        return Ok(());
+    }
+    let visible_columns = desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| column.name.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    if visible_columns.contains(&column_name.to_ascii_lowercase()) {
+        return Ok(());
+    }
+    Err(ParseError::DetailedError {
+        message: format!("column \"{column_name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "42703",
+    })
+}
+
+fn raw_generated_relation_name_matches(name: &str, relation_name: Option<&str>) -> bool {
+    relation_name.is_some_and(|relation_name| {
+        relation_name.eq_ignore_ascii_case(name)
+            || relation_name
+                .rsplit('.')
+                .next()
+                .is_some_and(|unqualified| unqualified.eq_ignore_ascii_case(name))
+    })
 }
 
 fn raw_expr_uses_user_defined_function(
@@ -396,8 +680,7 @@ fn validate_generated_expr_inner(
                             desc.columns[column_index].name
                         ),
                         detail: Some(
-                            "This would cause the generated column to depend on its own value."
-                                .into(),
+                            "A generated column cannot reference another generated column.".into(),
                         ),
                         hint: None,
                         sqlstate: "42P17",

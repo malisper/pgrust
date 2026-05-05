@@ -2066,6 +2066,28 @@ pub fn render_explain_infix_operand_with_display_type(
         expr
     };
     let rendered = match (display_type, expr) {
+        (Some(sql_type), Expr::Const(value))
+            if matches!(
+                sql_type.kind,
+                SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+            ) =>
+        {
+            let literal = render_explain_literal(value).trim_matches('\'').to_string();
+            if literal
+                .strip_prefix('-')
+                .unwrap_or(&literal)
+                .chars()
+                .all(|ch| ch.is_ascii_digit())
+            {
+                literal
+            } else {
+                format!(
+                    "{}::{}",
+                    render_explain_typed_literal(value, sql_type),
+                    render_explain_sql_type_name(sql_type.with_typmod(SqlType::NO_TYPEMOD))
+                )
+            }
+        }
         (Some(sql_type), Expr::Const(value)) => {
             format!(
                 "{}::{}",

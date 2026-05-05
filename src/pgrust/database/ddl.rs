@@ -60,11 +60,16 @@ pub(super) fn reject_column_referenced_by_generated_columns(
                 .iter()
                 .any(|name| name.eq_ignore_ascii_case(&referenced.name))
             {
-                return Err(ExecError::DetailedError {
-                    message: format!(
+                let message = if operation == "alter type of" {
+                    "cannot alter type of a column used by a generated column".into()
+                } else {
+                    format!(
                         "cannot {operation} column \"{}\" because other objects depend on it",
                         referenced.name
-                    ),
+                    )
+                };
+                return Err(ExecError::DetailedError {
+                    message,
                     detail: Some(format!(
                         "Column \"{}\" is used by generated column \"{}\".",
                         referenced.name, generated_column.name
@@ -80,11 +85,16 @@ pub(super) fn reject_column_referenced_by_generated_columns(
             continue;
         };
         if expr_references_column(&expr, column_index) {
-            return Err(ExecError::DetailedError {
-                message: format!(
+            let message = if operation == "alter type of" {
+                "cannot alter type of a column used by a generated column".into()
+            } else {
+                format!(
                     "cannot {operation} column \"{}\" because other objects depend on it",
                     referenced.name
-                ),
+                )
+            };
+            return Err(ExecError::DetailedError {
+                message,
                 detail: Some(format!(
                     "Column \"{}\" is used by generated column \"{}\".",
                     referenced.name, generated_column.name
@@ -1451,9 +1461,13 @@ pub(super) fn validate_alter_table_add_column(
     relation_with_new_column.columns.push(desc.clone());
     crate::backend::parser::validate_generated_columns(&relation_with_new_column, catalog)
         .map_err(ExecError::Parse)?;
-    let constraint_actions =
-        normalize_alter_table_add_column_constraints(table_name, column, existing_constraints)
-            .map_err(ExecError::Parse)?;
+    let constraint_actions = normalize_alter_table_add_column_constraints(
+        table_name,
+        column,
+        relation_desc,
+        existing_constraints,
+    )
+    .map_err(ExecError::Parse)?;
     let owned_sequence = if let Some(serial_kind) = serial_kind {
         Some((
             serial_kind,
@@ -1848,9 +1862,12 @@ pub(super) fn validate_alter_table_alter_column_default(
     let current_column = &desc.columns[column_index];
     if current_column.generated.is_some() {
         return Err(ExecError::DetailedError {
-            message: format!("column \"{}\" is a generated column", current_column.name),
+            message: format!(
+                "column \"{}\" of relation \"{}\" is a generated column",
+                current_column.name, relation_name
+            ),
             detail: None,
-            hint: None,
+            hint: Some("Use ALTER TABLE ... ALTER COLUMN ... DROP EXPRESSION instead.".into()),
             sqlstate: "428C9",
         });
     }
@@ -1961,8 +1978,9 @@ pub(super) fn validate_alter_table_alter_column_expression(
             let Some(kind) = current_column.generated else {
                 return Err(ExecError::DetailedError {
                     message: format!(
-                        "column \"{}\" is not a generated column",
-                        current_column.name
+                        "column \"{}\" of relation \"{}\" is not a generated column",
+                        current_column.name,
+                        relation_name_for_oid(catalog, relation_oid)
                     ),
                     detail: None,
                     hint: None,
@@ -1999,7 +2017,13 @@ pub(super) fn validate_alter_table_alter_column_expression(
         }
         AlterColumnExpressionAction::Drop { missing_ok } => {
             if current_column.generated.is_none() {
+                let message = format!(
+                    "column \"{}\" of relation \"{}\" is not a generated column",
+                    current_column.name,
+                    relation_name_for_oid(catalog, relation_oid)
+                );
                 if *missing_ok {
+                    push_notice(format!("{message}, skipping"));
                     return Ok(AlterColumnExpressionPlan {
                         column_name: current_column.name.clone(),
                         default_expr_sql: None,
@@ -2008,10 +2032,7 @@ pub(super) fn validate_alter_table_alter_column_expression(
                     });
                 }
                 return Err(ExecError::DetailedError {
-                    message: format!(
-                        "column \"{}\" is not a generated column",
-                        current_column.name
-                    ),
+                    message,
                     detail: None,
                     hint: None,
                     sqlstate: "42704",

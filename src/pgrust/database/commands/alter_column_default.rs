@@ -1,9 +1,12 @@
 use super::super::*;
 use super::alter_column_type::{
     apply_rewritten_rows_for_alter_column_type, plan_rewritten_rows_for_alter_column_type,
-    rebuild_relation_indexes_for_alter_column_type, validate_unique_indexes_for_rewritten_rows,
+    rebuild_relation_indexes_for_alter_column_type,
+    reject_row_type_dependents_for_column_type_change, validate_unique_indexes_for_rewritten_rows,
 };
-use super::alter_table_work_queue::{build_alter_table_work_queue, relation_name_for_alter_error};
+use super::alter_table_work_queue::{
+    build_alter_table_work_queue, has_inheritance_children, relation_name_for_alter_error,
+};
 use crate::backend::parser::{bind_generated_expr, bind_relation_constraints};
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::include::nodes::parsenodes::ColumnGeneratedKind;
@@ -91,7 +94,8 @@ where
             &relation_constraints,
             &row.values,
             &mut ctx,
-        )?;
+        )
+        .map_err(map_stored_generated_rewrite_constraint_error)?;
     }
     let indexes = catalog.index_relations_for_heap(relation.relation_oid);
     validate_unique_indexes_for_rewritten_rows(new_desc, &indexes, &rewritten_rows, &mut ctx)?;
@@ -102,7 +106,8 @@ where
         &mut ctx,
         xid,
         cid,
-    )?;
+    )
+    .map_err(map_stored_generated_rewrite_constraint_error)?;
     rebuild_relation_indexes_for_alter_column_type(
         relation,
         new_desc,
@@ -112,6 +117,24 @@ where
         xid,
     )?;
     Ok(())
+}
+
+fn map_stored_generated_rewrite_constraint_error(err: ExecError) -> ExecError {
+    match err {
+        ExecError::CheckViolation {
+            relation,
+            constraint,
+            ..
+        } => ExecError::DetailedError {
+            message: format!(
+                "check constraint \"{constraint}\" of relation \"{relation}\" is violated by some row"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "23514",
+        },
+        other => other,
+    }
 }
 
 impl Database {
@@ -304,6 +327,24 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
+        if matches!(
+            &alter_stmt.action,
+            crate::backend::parser::AlterColumnExpressionAction::Drop { .. }
+        ) && alter_stmt.only
+            && has_inheritance_children(&catalog, relation.relation_oid)
+            && relation.desc.columns.iter().any(|column| {
+                !column.dropped
+                    && column.name.eq_ignore_ascii_case(&alter_stmt.column_name)
+                    && column.generated.is_some()
+            })
+        {
+            return Err(ExecError::DetailedError {
+                message: "ALTER TABLE / DROP EXPRESSION must be applied to child tables too".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -323,12 +364,6 @@ impl Database {
                 &alter_stmt.column_name,
                 &alter_stmt.action,
             )?;
-            if plan.noop {
-                continue;
-            }
-
-            let default_expr_sql = plan.default_expr_sql.clone();
-            let generated = plan.generated;
             let column_index = item
                 .relation
                 .desc
@@ -338,6 +373,53 @@ impl Database {
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::UnknownColumn(plan.column_name.clone()))
                 })?;
+            if matches!(
+                &alter_stmt.action,
+                crate::backend::parser::AlterColumnExpressionAction::Drop { .. }
+            ) && (item.relation.desc.columns[column_index].attinhcount > item.expected_parents
+                || (!item.recursing
+                    && catalog
+                        .inheritance_parents(item.relation.relation_oid)
+                        .into_iter()
+                        .any(|parent| !parent.inhdetachpending)))
+            {
+                return Err(ExecError::DetailedError {
+                    message: "cannot drop generation expression from inherited column".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P16",
+                });
+            }
+            if matches!(
+                &alter_stmt.action,
+                crate::backend::parser::AlterColumnExpressionAction::Set { .. }
+            ) && item.relation.relkind != 'p'
+                && !item.relation.relispartition
+            {
+                reject_row_type_dependents_for_column_type_change(&catalog, &item.relation)?;
+            }
+            let force_inherited_drop = matches!(
+                &alter_stmt.action,
+                crate::backend::parser::AlterColumnExpressionAction::Drop { .. }
+            ) && item.recursing
+                && plan.noop
+                && item.relation.desc.columns[column_index]
+                    .default_expr
+                    .is_some();
+            if plan.noop && !force_inherited_drop {
+                continue;
+            }
+
+            let default_expr_sql = if force_inherited_drop {
+                None
+            } else {
+                plan.default_expr_sql.clone()
+            };
+            let generated = if force_inherited_drop {
+                None
+            } else {
+                plan.generated
+            };
             let mut new_desc = item.relation.desc.clone();
             {
                 let column = &mut new_desc.columns[column_index];
