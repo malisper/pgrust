@@ -297,6 +297,38 @@ fn ephemeral_database_executes_basic_sql() {
 }
 
 #[test]
+fn sequence_acl_grant_survives_savepoint_rollback_after_failed_setval() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    for sql in [
+        "create user regress_seq_user",
+        "begin",
+        "set local session authorization regress_seq_user",
+        "create sequence seq3",
+        "revoke all on seq3 from regress_seq_user",
+        "savepoint save",
+    ] {
+        session.execute(&db, sql).unwrap();
+    }
+
+    assert!(session.execute(&db, "select setval('seq3', 5)").is_err());
+    session.execute(&db, "rollback to save").unwrap();
+    session
+        .execute(&db, "grant update on seq3 to regress_seq_user")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select setval('seq3', 5)"),
+        vec![vec![Value::Int64(5)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select nextval('seq3')"),
+        vec![vec![Value::Int64(6)]]
+    );
+}
+
+#[test]
 fn prepared_transaction_commit_and_rollback_control_visibility() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut writer = Session::new(1);
