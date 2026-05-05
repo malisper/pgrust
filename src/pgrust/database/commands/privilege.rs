@@ -1753,7 +1753,7 @@ impl Database {
                             xid,
                             cid: current_cid,
                             client_id,
-                            waiter: None,
+                            waiter: Some(self.txn_waiter.clone()),
                             interrupts: self.interrupt_state(client_id),
                         };
                         let effect = self
@@ -1865,7 +1865,7 @@ impl Database {
                             xid,
                             cid: current_cid,
                             client_id,
-                            waiter: None,
+                            waiter: Some(self.txn_waiter.clone()),
                             interrupts: self.interrupt_state(client_id),
                         };
                         let effect = self
@@ -2619,7 +2619,7 @@ impl Database {
                             xid,
                             cid: current_cid,
                             client_id,
-                            waiter: None,
+                            waiter: Some(self.txn_waiter.clone()),
                             interrupts: self.interrupt_state(client_id),
                         };
                         let effect = self
@@ -2642,7 +2642,7 @@ impl Database {
                         xid,
                         cid: current_cid,
                         client_id,
-                        waiter: None,
+                        waiter: Some(self.txn_waiter.clone()),
                         interrupts: self.interrupt_state(client_id),
                     };
                     let effect = self
@@ -2718,7 +2718,7 @@ impl Database {
                 xid,
                 cid: current_cid,
                 client_id,
-                waiter: None,
+                waiter: Some(self.txn_waiter.clone()),
                 interrupts: self.interrupt_state(client_id),
             };
             let effect = self
@@ -2842,7 +2842,7 @@ impl Database {
                     xid,
                     cid: current_cid,
                     client_id,
-                    waiter: None,
+                    waiter: Some(self.txn_waiter.clone()),
                     interrupts: self.interrupt_state(client_id),
                 };
                 let effect = self
@@ -2903,7 +2903,7 @@ impl Database {
                 xid,
                 cid: current_cid,
                 client_id,
-                waiter: None,
+                waiter: Some(self.txn_waiter.clone()),
                 interrupts: self.interrupt_state(client_id),
             };
             let effect = self
@@ -3119,7 +3119,7 @@ impl Database {
             xid,
             cid,
             client_id,
-            waiter: None,
+            waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
         };
         for object_name in object_names {
@@ -3302,7 +3302,7 @@ impl Database {
             xid,
             cid,
             client_id,
-            waiter: None,
+            waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
         };
         for object_name in object_names {
@@ -3678,7 +3678,7 @@ impl Database {
             xid,
             cid,
             client_id,
-            waiter: None,
+            waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
         };
         let routine_kind = match privilege {
@@ -3883,7 +3883,7 @@ impl Database {
                 xid,
                 cid: current_cid,
                 client_id,
-                waiter: None,
+                waiter: Some(self.txn_waiter.clone()),
                 interrupts: self.interrupt_state(client_id),
             };
             match kind {
@@ -4155,7 +4155,7 @@ impl Database {
                     xid,
                     cid: current_cid,
                     client_id,
-                    waiter: None,
+                    waiter: Some(self.txn_waiter.clone()),
                     interrupts: interrupts.clone(),
                 };
                 upsert_role_membership_in_transaction(
@@ -4250,7 +4250,7 @@ impl Database {
                         xid,
                         cid: current_cid,
                         client_id,
-                        waiter: None,
+                        waiter: Some(self.txn_waiter.clone()),
                         interrupts: interrupts.clone(),
                     };
                     match action {

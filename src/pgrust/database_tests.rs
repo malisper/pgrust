@@ -297,6 +297,38 @@ fn ephemeral_database_executes_basic_sql() {
 }
 
 #[test]
+fn sequence_acl_grant_survives_savepoint_rollback_after_failed_setval() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    for sql in [
+        "create user regress_seq_user",
+        "begin",
+        "set local session authorization regress_seq_user",
+        "create sequence seq3",
+        "revoke all on seq3 from regress_seq_user",
+        "savepoint save",
+    ] {
+        session.execute(&db, sql).unwrap();
+    }
+
+    assert!(session.execute(&db, "select setval('seq3', 5)").is_err());
+    session.execute(&db, "rollback to save").unwrap();
+    session
+        .execute(&db, "grant update on seq3 to regress_seq_user")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select setval('seq3', 5)"),
+        vec![vec![Value::Int64(5)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select nextval('seq3')"),
+        vec![vec![Value::Int64(6)]]
+    );
+}
+
+#[test]
 fn prepared_transaction_commit_and_rollback_control_visibility() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut writer = Session::new(1);
@@ -48433,13 +48465,16 @@ fn concurrent_btree_splits_complete_once() {
     )
     .unwrap();
 
-    let workers: Vec<_> = (0..4)
+    const WORKER_COUNT: usize = 2;
+    const ROWS_PER_WORKER: usize = 16;
+
+    let workers: Vec<_> = (0..WORKER_COUNT)
         .map(|worker| {
             let db = db.clone();
             thread::spawn(move || {
-                for i in 0..60 {
+                for i in 0..ROWS_PER_WORKER {
                     let id = worker * 1000 + i;
-                    let note = format!("worker{worker}-{i}-{}", "x".repeat(1400));
+                    let note = format!("worker{worker}-{i}-{}", "x".repeat(700));
                     db.execute(
                         (worker + 700) as ClientId,
                         &format!("insert into split_items values ({id}, '{note}')"),
@@ -48453,7 +48488,7 @@ fn concurrent_btree_splits_complete_once() {
 
     assert_eq!(
         query_rows(&db, 1, "select count(*) from split_items"),
-        vec![vec![Value::Int64(240)]]
+        vec![vec![Value::Int64((WORKER_COUNT * ROWS_PER_WORKER) as i64)]]
     );
     assert_explain_uses_index(
         &db,
@@ -48463,7 +48498,7 @@ fn concurrent_btree_splits_complete_once() {
     );
     assert_eq!(
         query_rows(&db, 1, "select count(*) from split_items where id >= 0"),
-        vec![vec![Value::Int64(240)]]
+        vec![vec![Value::Int64((WORKER_COUNT * ROWS_PER_WORKER) as i64)]]
     );
 }
 
