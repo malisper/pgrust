@@ -3065,6 +3065,14 @@ fn format_ordered_explain_json(value: &JsonValue, indent: usize) -> String {
             lines.join("\n")
         }
         JsonValue::Array(items) => {
+            if items.iter().all(is_json_scalar) {
+                let rendered = items
+                    .iter()
+                    .map(|item| serde_json::to_string(item).unwrap_or_else(|_| "null".into()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return format!("[{rendered}]");
+            }
             if items.is_empty() {
                 let pad = " ".repeat(indent);
                 return format!("[\n{pad}]");
@@ -3084,6 +3092,10 @@ fn format_ordered_explain_json(value: &JsonValue, indent: usize) -> String {
         }
         scalar => serde_json::to_string(scalar).unwrap_or_else(|_| "null".into()),
     }
+}
+
+fn is_json_scalar(value: &JsonValue) -> bool {
+    !matches!(value, JsonValue::Array(_) | JsonValue::Object(_))
 }
 
 pub fn format_explain_xml_from_json(json: &str) -> Option<String> {
@@ -3273,6 +3285,7 @@ fn explain_json_key_order(key: &str) -> usize {
         "Node Type",
         "Parallel Aware",
         "Async Capable",
+        "Table Function Name",
         "Relation Name",
         "Alias",
         "Schema",
@@ -3286,6 +3299,7 @@ fn explain_json_key_order(key: &str) -> usize {
         "Actual Loops",
         "Disabled",
         "Output",
+        "Table Function Call",
         "Sort Key",
         "Filter",
         "Recheck Cond",
@@ -3360,6 +3374,32 @@ mod tests {
         assert!(rendered.contains(r#""Relation Name": "foo""#));
         assert!(rendered.contains(r#""Alias": "f""#));
         assert!(rendered.contains(r#""Serialization""#));
+    }
+
+    #[test]
+    fn structured_json_orders_table_function_fields_and_inlines_output_list() {
+        let json = r#"[{"Plan":{"Node Type":"Table Function Scan","Table Function Call":"JSON_TABLE('[]', '$' COLUMNS (id FOR ORDINALITY))","Output":["id"],"Alias":"jt","Table Function Name":"json_table"}}]"#.to_string();
+        let rendered = format_structured_explain_output(
+            ExplainFormat::Json,
+            json,
+            false,
+            false,
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+        );
+
+        let table_function_name_pos = rendered.find(r#""Table Function Name""#).unwrap();
+        let alias_pos = rendered.find(r#""Alias""#).unwrap();
+        let output_pos = rendered.find(r#""Output": ["id"]"#).unwrap();
+        let table_function_call_pos = rendered.find(r#""Table Function Call""#).unwrap();
+
+        assert!(table_function_name_pos < alias_pos);
+        assert!(alias_pos < output_pos);
+        assert!(output_pos < table_function_call_pos);
     }
 
     #[test]
