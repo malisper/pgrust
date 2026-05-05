@@ -2338,6 +2338,176 @@ fn sql_function_qualified_composite_arg_star_passes_whole_value() {
 }
 
 #[test]
+fn regression_c_language_helpers_dispatch_by_symbol() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function reverse_name(name) returns name as 'reverse_name' language c strict",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table overpaid_emp(name text, salary int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into overpaid_emp values ('sam', 700), ('lee', 699)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function overpaid(overpaid_emp) returns bool as 'overpaid' language c strict",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select reverse_name('JBAAAA'::name), name, overpaid(overpaid_emp.*) \
+             from overpaid_emp order by name",
+        ),
+        vec![
+            vec![
+                Value::Text("AAAABJ".into()),
+                Value::Text("lee".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("AAAABJ".into()),
+                Value::Text("sam".into()),
+                Value::Bool(true),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn composite_function_field_notation_matches_postgres_regression_shapes() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table postquel_person(name text)")
+        .unwrap();
+    session
+        .execute(&db, "create table postquel_hobby(name text, person text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table postquel_equipment(name text, hobby text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into postquel_person values ('mike'), ('joe'), ('alex')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into postquel_hobby values ('posthacking', 'mike'), ('basketball', 'joe')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into postquel_equipment values \
+             ('advil', 'posthacking'), ('peet''s coffee', 'posthacking'), ('hightops', 'basketball')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function hobbies(postquel_person) returns setof postquel_hobby \
+             as 'select * from postquel_hobby where person = $1.name' language sql",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function equipment(postquel_hobby) returns setof postquel_equipment \
+             as 'select * from postquel_equipment where hobby = $1.name' language sql",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function equipment_named(hobby postquel_hobby) returns setof postquel_equipment \
+             as 'select * from postquel_equipment where postquel_equipment.hobby = equipment_named.hobby.name' \
+             language sql",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select p.name, name(p.hobbies), name(equipment(p.hobbies)) \
+             from postquel_person p order by 1, 2, 3",
+        ),
+        vec![
+            vec![
+                Value::Text("joe".into()),
+                Value::Text("basketball".into()),
+                Value::Text("hightops".into()),
+            ],
+            vec![
+                Value::Text("mike".into()),
+                Value::Text("posthacking".into()),
+                Value::Text("advil".into()),
+            ],
+            vec![
+                Value::Text("mike".into()),
+                Value::Text("posthacking".into()),
+                Value::Text("peet's coffee".into()),
+            ],
+        ]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (p.hobbies).equipment.name, p.name, name(p.hobbies) \
+             from postquel_person p order by 2, 1",
+        ),
+        vec![
+            vec![
+                Value::Text("hightops".into()),
+                Value::Text("joe".into()),
+                Value::Text("basketball".into()),
+            ],
+            vec![
+                Value::Text("advil".into()),
+                Value::Text("mike".into()),
+                Value::Text("posthacking".into()),
+            ],
+            vec![
+                Value::Text("peet's coffee".into()),
+                Value::Text("mike".into()),
+                Value::Text("posthacking".into()),
+            ],
+        ]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select name(equipment_named(row('basketball', 'joe')))",
+        ),
+        vec![vec![Value::Text("hightops".into())]]
+    );
+}
+
+#[test]
 fn sql_function_from_item_resolves_qualified_utility_function() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

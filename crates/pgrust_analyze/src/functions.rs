@@ -1241,7 +1241,7 @@ fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalar
         // as unsupported internal functions.
         if matches!(
             row.prosrc.to_ascii_lowercase().as_str(),
-            "interpt_pp" | "test_canonicalize_path" | "test_relpath"
+            "interpt_pp" | "test_canonicalize_path" | "test_relpath" | "reverse_name" | "overpaid"
         ) {
             return builtin_by_src;
         }
@@ -2670,7 +2670,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgSplitWalfileName
             | BuiltinScalarFunction::PgReplicationOriginCreate
             | BuiltinScalarFunction::GistTranslateCmpTypeCommon
-            | BuiltinScalarFunction::TestCanonicalizePath => args.len() == 1,
+            | BuiltinScalarFunction::TestCanonicalizePath
+            | BuiltinScalarFunction::TestReverseName
+            | BuiltinScalarFunction::TestOverpaid => args.len() == 1,
             BuiltinScalarFunction::PgControlSystem
             | BuiltinScalarFunction::PgControlCheckpoint
             | BuiltinScalarFunction::PgControlRecovery
@@ -4509,6 +4511,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::TestCanonicalizePath,
         ),
         ("test_relpath", BuiltinScalarFunction::TestRelpath),
+        ("reverse_name", BuiltinScalarFunction::TestReverseName),
+        ("overpaid", BuiltinScalarFunction::TestOverpaid),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("lastval", BuiltinScalarFunction::LastVal),
