@@ -135,6 +135,13 @@ fn combine_many_expr_collations(
         .fold(DerivedCollation::None, combine_expr_collations)
 }
 
+fn default_if_no_collation(collation: DerivedCollation) -> DerivedCollation {
+    match collation {
+        DerivedCollation::None => DerivedCollation::Default(DEFAULT_COLLATION_OID),
+        other => other,
+    }
+}
+
 pub fn derive_expr_collation(expr: &Expr, sql_type: SqlType) -> DerivedCollation {
     if !is_collatable_type(sql_type) {
         return DerivedCollation::None;
@@ -170,9 +177,9 @@ pub fn derive_expr_collation(expr: &Expr, sql_type: SqlType) -> DerivedCollation
             .collation_oid
             .map(DerivedCollation::Implicit)
             .unwrap_or_else(|| {
-                combine_many_expr_collations(func.args.iter().map(|arg| {
+                default_if_no_collation(combine_many_expr_collations(func.args.iter().map(|arg| {
                     derive_expr_collation(arg, expr_sql_type_hint(arg).unwrap_or(sql_type))
-                }))
+                })))
             }),
         Expr::Op(op) => op
             .collation_oid
@@ -182,9 +189,11 @@ pub fn derive_expr_collation(expr: &Expr, sql_type: SqlType) -> DerivedCollation
                     op.op,
                     OpExprKind::Concat | OpExprKind::JsonGetText | OpExprKind::JsonPathText
                 ) {
-                    combine_many_expr_collations(op.args.iter().map(|arg| {
-                        derive_expr_collation(arg, expr_sql_type_hint(arg).unwrap_or(sql_type))
-                    }))
+                    default_if_no_collation(combine_many_expr_collations(op.args.iter().map(
+                        |arg| {
+                            derive_expr_collation(arg, expr_sql_type_hint(arg).unwrap_or(sql_type))
+                        },
+                    )))
                 } else {
                     DerivedCollation::Default(DEFAULT_COLLATION_OID)
                 }
@@ -321,8 +330,10 @@ pub fn finalize_order_by_expr(
     expr: Expr,
     catalog: &dyn CatalogLookup,
 ) -> Result<(Expr, Option<u32>), ParseError> {
-    let expr_type = expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text));
     let (expr, explicit_collation_oid) = strip_explicit_collation(expr);
+    let Some(expr_type) = expr_sql_type_hint(&expr) else {
+        return Ok((expr, explicit_collation_oid));
+    };
     let collation_oid = derive_consumer_collation_from_exprs(
         catalog,
         CollationConsumer::OrderBy,
@@ -379,6 +390,7 @@ mod tests {
     use pgrust_catalog_data::{C_COLLATION_OID, POSIX_COLLATION_OID};
     use pgrust_nodes::datum::Value;
     use pgrust_nodes::parsenodes::ParseError;
+    use pgrust_nodes::primnodes::{FuncExpr, ScalarFunctionImpl};
 
     struct TestCatalog;
 
@@ -443,5 +455,34 @@ mod tests {
                     == "collation mismatch between explicit collations \"C\" and \"POSIX\""
                     && sqlstate == "42P21"
         ));
+    }
+
+    #[test]
+    fn text_function_without_collatable_args_uses_default_collation() {
+        let expr = Expr::Func(Box::new(FuncExpr {
+            funcid: 1,
+            funcname: Some("test_text_func".into()),
+            funcresulttype: Some(SqlType::new(SqlTypeKind::Text)),
+            funcvariadic: false,
+            implementation: ScalarFunctionImpl::UserDefined { proc_oid: 1 },
+            collation_oid: None,
+            display_args: None,
+            args: vec![Expr::Const(Value::Int32(1))],
+        }));
+
+        assert_eq!(
+            derive_expr_collation(&expr, SqlType::new(SqlTypeKind::Text)),
+            DerivedCollation::Default(DEFAULT_COLLATION_OID)
+        );
+    }
+
+    #[test]
+    fn order_by_finalization_does_not_invent_text_type() {
+        let catalog = TestCatalog;
+
+        assert_eq!(
+            finalize_order_by_expr(Expr::Random, &catalog).unwrap(),
+            (Expr::Random, None)
+        );
     }
 }
