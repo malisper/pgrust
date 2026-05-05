@@ -80,8 +80,8 @@ use super::explain::{
     push_explain_line, render_modify_join_expr,
 };
 use super::partition::{
-    exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
-    remap_partition_row_to_child_layout, remap_partition_row_to_parent_layout,
+    PartitionCheckState, exec_find_partition, exec_setup_partition_tuple_routing,
+    partition_root_oid, remap_partition_row_to_child_layout, remap_partition_row_to_parent_layout,
 };
 use super::trigger::{RuntimeTriggers, TriggerTransitionCapture, relation_has_instead_row_trigger};
 use super::upsert::execute_insert_on_conflict_rows;
@@ -5404,6 +5404,7 @@ fn route_updated_partition_row(
         indexes,
         toast_index,
         routed,
+        None,
     )?;
     Ok(Some(PartitionUpdateDestination {
         relation_info,
@@ -9349,6 +9350,7 @@ fn enforce_partitioned_on_conflict_update_publication_identity(
             &stmt.indexes,
             stmt.toast_index.as_ref(),
             leaf,
+            None,
         )?;
         enforce_publication_replica_identity(
             &result_rel_info.relation_name,
@@ -9401,6 +9403,8 @@ struct PartitionResultRelInfo {
     relation_constraints: BoundRelationConstraints,
     indexes: Vec<BoundIndexRelation>,
     toast_index: Option<BoundIndexRelation>,
+    insert_triggers: Option<RuntimeTriggers>,
+    partition_check_state: Option<PartitionCheckState>,
     parent_rows: Vec<Vec<Value>>,
     rows: Vec<Vec<Value>>,
 }
@@ -9415,6 +9419,7 @@ impl PartitionResultRelInfo {
         root_indexes: &[BoundIndexRelation],
         root_toast_index: Option<&BoundIndexRelation>,
         relation: crate::backend::parser::BoundRelation,
+        insert_runtime: Option<crate::backend::executor::SessionReplicationRole>,
     ) -> Result<Self, ExecError> {
         let relation_name = catalog
             .class_row_by_oid(relation.relation_oid)
@@ -9440,15 +9445,72 @@ impl PartitionResultRelInfo {
         } else {
             first_toast_index_for_relation(catalog, relation.toast)
         };
+        let insert_triggers = insert_runtime
+            .map(|session_replication_role| {
+                RuntimeTriggers::load(
+                    catalog,
+                    relation.relation_oid,
+                    &relation_name,
+                    &relation.desc,
+                    TriggerOperation::Insert,
+                    &[],
+                    session_replication_role,
+                )
+            })
+            .transpose()?;
+        let partition_check_state = if insert_runtime.is_some() {
+            PartitionCheckState::new(catalog, &relation)?
+        } else {
+            None
+        };
         Ok(Self {
             relation_name,
             relation,
             relation_constraints,
             indexes,
             toast_index,
+            insert_triggers,
+            partition_check_state,
             parent_rows: Vec::new(),
             rows: Vec::new(),
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PartitionInsertCheckMode {
+    None,
+    Always(PartitionCheckState),
+    OnlyAfterBeforeRowInsert(PartitionCheckState),
+}
+
+impl PartitionInsertCheckMode {
+    fn direct(check_state: Option<PartitionCheckState>) -> Self {
+        check_state.map(Self::Always).unwrap_or(Self::None)
+    }
+
+    fn routed(check_state: Option<PartitionCheckState>) -> Self {
+        check_state
+            .map(Self::OnlyAfterBeforeRowInsert)
+            .unwrap_or(Self::None)
+    }
+
+    fn check(
+        &self,
+        triggers: Option<&RuntimeTriggers>,
+        values: &[Value],
+        ctx: &mut ExecutorContext,
+    ) -> Result<(), ExecError> {
+        match self {
+            Self::None => Ok(()),
+            Self::Always(state) => state.check(values, ctx),
+            Self::OnlyAfterBeforeRowInsert(state)
+                if triggers.is_some_and(RuntimeTriggers::has_before_row_insert) =>
+            {
+                state.check(values, ctx)
+            }
+            Self::OnlyAfterBeforeRowInsert(_) => Ok(()),
+        }
     }
 }
 
@@ -9511,6 +9573,7 @@ fn execute_partitioned_insert_on_conflict_rows(
                         &stmt.indexes,
                         stmt.toast_index.as_ref(),
                         leaf,
+                        None,
                     )?;
                     result_rel_info.rows.push(leaf_row);
                     entry.insert(result_rel_info);
@@ -9981,6 +10044,7 @@ fn execute_insert_rows_with_routing(
                         indexes,
                         toast_index,
                         leaf,
+                        Some(ctx.session_replication_role),
                     )?;
                     result_rel_info.parent_rows.push(row.clone());
                     result_rel_info.rows.push(leaf_row);
@@ -9991,18 +10055,27 @@ fn execute_insert_rows_with_routing(
 
         let mut inserted_rows = Vec::new();
         for (_, result_rel_info) in routed {
+            let leaf_insert_triggers = result_rel_info
+                .insert_triggers
+                .as_ref()
+                .expect("routed insert result relation initialized insert triggers");
+            let leaf_write_checks = remap_partition_write_checks(
+                rls_write_checks,
+                desc,
+                &result_rel_info.relation.desc,
+                1,
+            );
+            let partition_check_mode = if target_relation.relkind == 'p' {
+                PartitionInsertCheckMode::routed(result_rel_info.partition_check_state.clone())
+            } else {
+                PartitionInsertCheckMode::direct(result_rel_info.partition_check_state.clone())
+            };
             for (parent_row, leaf_input_row) in result_rel_info
                 .parent_rows
                 .iter()
                 .zip(result_rel_info.rows.iter())
             {
-                let leaf_write_checks = remap_partition_write_checks(
-                    rls_write_checks,
-                    desc,
-                    &result_rel_info.relation.desc,
-                    1,
-                );
-                let leaf_inserted_rows = execute_insert_rows(
+                let leaf_inserted_rows = execute_insert_rows_inner(
                     &result_rel_info.relation_name,
                     relation_name,
                     result_rel_info.relation.relation_oid,
@@ -10016,6 +10089,9 @@ fn execute_insert_rows_with_routing(
                     std::slice::from_ref(leaf_input_row),
                     None,
                     None,
+                    Some(leaf_insert_triggers),
+                    true,
+                    partition_check_mode.clone(),
                     ctx,
                     xid,
                     cid,
@@ -13216,22 +13292,63 @@ pub(crate) fn execute_insert_rows(
             )
         })
         .transpose()?;
-    if let Some(triggers) = &triggers {
+    let partition_check_mode = insert_partition_check_mode(relation_oid, ctx)?;
+    execute_insert_rows_inner(
+        relation_name,
+        rls_relation_name,
+        relation_oid,
+        rel,
+        toast,
+        toast_index,
+        desc,
+        relation_constraints,
+        rls_write_checks,
+        indexes,
+        rows,
+        returning,
+        row_error_context,
+        triggers.as_ref(),
+        true,
+        partition_check_mode,
+        ctx,
+        xid,
+        cid,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_insert_rows_inner(
+    relation_name: &str,
+    rls_relation_name: &str,
+    relation_oid: u32,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    toast_index: Option<&BoundIndexRelation>,
+    desc: &RelationDesc,
+    relation_constraints: &BoundRelationConstraints,
+    rls_write_checks: &[RlsWriteCheck],
+    indexes: &[BoundIndexRelation],
+    rows: &[Vec<Value>],
+    returning: Option<&[TargetEntry]>,
+    row_error_context: Option<&dyn Fn(usize, &ExecError) -> String>,
+    triggers: Option<&RuntimeTriggers>,
+    fire_statement_triggers: bool,
+    partition_check_mode: PartitionInsertCheckMode,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    if fire_statement_triggers && let Some(triggers) = triggers {
         triggers.before_statement(ctx)?;
     }
-    let mut transition_capture = triggers
-        .as_ref()
-        .map(|triggers| triggers.new_transition_capture());
-    let partition_recheck = insert_partition_constraint_recheck(relation_oid, ctx);
+    let mut transition_capture = triggers.map(|triggers| triggers.new_transition_capture());
     let bulk_rebuild_indexes = should_bulk_rebuild_insert_indexes(
         relation_oid,
         relation_constraints,
         rls_write_checks,
         indexes,
         rows.len(),
-        triggers
-            .as_ref()
-            .is_some_and(|triggers| !triggers.is_empty()),
+        triggers.is_some_and(|triggers| !triggers.is_empty()),
         returning,
         ctx,
     );
@@ -13241,7 +13358,7 @@ pub(crate) fn execute_insert_rows(
     let mut returned_rows = Vec::new();
     for (row_index, values) in rows.iter().enumerate() {
         let row_result = (|| -> Result<(), ExecError> {
-            let Some(mut values) = (match &triggers {
+            let Some(mut values) = (match triggers {
                 Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
                 None => Some(values.clone()),
             }) else {
@@ -13256,11 +13373,7 @@ pub(crate) fn execute_insert_rows(
             )?;
             coerce_user_defined_base_assignments(desc, &mut values, ctx)?;
             enforce_insert_domain_constraints(desc, &values, ctx)?;
-            enforce_partition_constraint_after_before_insert(
-                partition_recheck.as_ref(),
-                &values,
-                ctx,
-            )?;
+            partition_check_mode.check(triggers, &values, ctx)?;
             enforce_exclusion_constraints_against_values(
                 relation_name,
                 desc,
@@ -13302,7 +13415,7 @@ pub(crate) fn execute_insert_rows(
                 capture_copy_to_dml_returning_row(row.clone());
                 returned_rows.push(row);
             }
-            if let Some(triggers) = &triggers {
+            if let Some(triggers) = triggers {
                 if let Some(capture) = transition_capture.as_mut() {
                     triggers.capture_insert_row(capture, &values);
                 }
@@ -13345,7 +13458,7 @@ pub(crate) fn execute_insert_rows(
             )?;
         }
 
-        if let Some(triggers) = &triggers {
+        if fire_statement_triggers && let Some(triggers) = triggers {
             if let Some(capture) = transition_capture.as_ref() {
                 triggers.after_transition_rows(capture, ctx)?;
                 triggers.after_statement(Some(capture), ctx)?;
@@ -13416,28 +13529,21 @@ fn coerce_user_defined_base_assignments(
     Ok(())
 }
 
-fn insert_partition_constraint_recheck(
+fn insert_partition_check_mode(
     relation_oid: u32,
     ctx: &ExecutorContext,
-) -> Option<(crate::backend::executor::ExecutorCatalog, BoundRelation)> {
-    let catalog = ctx.catalog.as_deref()?;
-    let target = catalog.relation_by_oid(relation_oid)?;
-    target
-        .relispartition
-        .then(|| (ctx.catalog.as_ref().unwrap().clone(), target))
-}
-
-fn enforce_partition_constraint_after_before_insert(
-    partition_recheck: Option<&(crate::backend::executor::ExecutorCatalog, BoundRelation)>,
-    values: &[Value],
-    ctx: &mut ExecutorContext,
-) -> Result<(), ExecError> {
-    let Some((catalog, target)) = partition_recheck else {
-        return Ok(());
+) -> Result<PartitionInsertCheckMode, ExecError> {
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return Ok(PartitionInsertCheckMode::None);
     };
-    let mut proute = exec_setup_partition_tuple_routing(catalog.as_ref(), target)?;
-    exec_find_partition(catalog.as_ref(), &mut proute, target, values, ctx)?;
-    Ok(())
+    let Some(target) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(PartitionInsertCheckMode::None);
+    };
+    if !target.relispartition {
+        return Ok(PartitionInsertCheckMode::None);
+    }
+    let check_state = PartitionCheckState::new(catalog, &target)?;
+    Ok(PartitionInsertCheckMode::direct(check_state))
 }
 
 pub(crate) fn execute_insert_values(

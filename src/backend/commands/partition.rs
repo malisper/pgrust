@@ -114,6 +114,110 @@ struct PartitionDescEntry {
     is_leaf: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PartitionCheckState {
+    relation_name: String,
+    steps: Vec<PartitionCheckStep>,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionCheckStep {
+    parent: BoundRelation,
+    child: BoundRelation,
+    child_bound: PartitionBoundSpec,
+    parent_key: CachedPartitionKey,
+    explicit_sibling_bounds: Vec<PartitionBoundSpec>,
+}
+
+impl PartitionCheckState {
+    pub(crate) fn new(
+        catalog: &dyn CatalogLookup,
+        relation: &BoundRelation,
+    ) -> Result<Option<Self>, ExecError> {
+        if !relation.relispartition {
+            return Ok(None);
+        }
+
+        let relation_name = relation_name_for_oid(catalog, relation.relation_oid);
+        let mut steps = Vec::new();
+        let mut child = relation.clone();
+        while let Some(parent) = declarative_parent(catalog, &child)? {
+            let child_bound = child_partition_bound(&child)?;
+            let parent_key = cached_partition_key(catalog, &parent)?;
+            let explicit_sibling_bounds = if child_bound.is_default() {
+                direct_partition_children(catalog, parent.relation_oid)?
+                    .into_iter()
+                    .filter(|sibling| sibling.relation_oid != child.relation_oid)
+                    .map(|sibling| child_partition_bound(&sibling))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .filter(|bound| !bound.is_default())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            steps.push(PartitionCheckStep {
+                parent: parent.clone(),
+                child: child.clone(),
+                child_bound,
+                parent_key,
+                explicit_sibling_bounds,
+            });
+            child = parent;
+        }
+
+        Ok(Some(Self {
+            relation_name,
+            steps,
+        }))
+    }
+
+    pub(crate) fn check(&self, row: &[Value], ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        let mut current_row = row.to_vec();
+        for step in &self.steps {
+            let parent_row = remap_partition_row_to_parent_layout(
+                &current_row,
+                &step.child.desc,
+                &step.parent.desc,
+            )?;
+            let matches_bound = if step.child_bound.is_default() {
+                row_matches_cached_default_bound(step, &parent_row, ctx)?
+            } else {
+                row_matches_explicit_bound(
+                    &step.parent,
+                    &step.parent_key,
+                    &step.child_bound,
+                    &parent_row,
+                    ctx,
+                )?
+            };
+            if !matches_bound {
+                return Err(partition_constraint_violation(
+                    &self.relation_name,
+                    row,
+                    &ctx.datetime_config,
+                ));
+            }
+            current_row = parent_row;
+        }
+        Ok(())
+    }
+}
+
+fn row_matches_cached_default_bound(
+    step: &PartitionCheckStep,
+    parent_row: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let keys = key_values(&step.parent, &step.parent_key.spec, parent_row, ctx)?;
+    for bound in &step.explicit_sibling_bounds {
+        if row_matches_explicit_bound_with_keys(&step.parent_key, bound, &keys, ctx)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 #[derive(Debug, Clone, Default)]
 struct PartitionBoundInfo {
     indexes: Vec<usize>,

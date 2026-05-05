@@ -137,6 +137,12 @@ impl RuntimeTriggers {
         })
     }
 
+    pub(crate) fn has_before_row_insert(&self) -> bool {
+        self.triggers.iter().any(|trigger| {
+            trigger_is_before(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype)
+        })
+    }
+
     pub(crate) fn before_row_insert(
         &self,
         mut new_row: Vec<Value>,
