@@ -10106,11 +10106,21 @@ fn execute_insert_rows_with_routing(
             } else {
                 PartitionInsertCheckMode::direct(result_rel_info.partition_check_state.clone())
             };
-            for (parent_row, leaf_input_row) in result_rel_info
+            for (_parent_row, leaf_input_row) in result_rel_info
                 .parent_rows
                 .iter()
                 .zip(result_rel_info.rows.iter())
             {
+                let error_detail_remapper =
+                    |leaf_values: &[Value], err: ExecError, ctx: &ExecutorContext| {
+                        remap_routed_leaf_insert_error_detail(
+                            err,
+                            leaf_values,
+                            &result_rel_info.relation.desc,
+                            desc,
+                            ctx,
+                        )
+                    };
                 let leaf_inserted_rows = execute_insert_rows_inner(
                     &result_rel_info.relation_name,
                     relation_name,
@@ -10128,13 +10138,11 @@ fn execute_insert_rows_with_routing(
                     Some(leaf_insert_triggers),
                     true,
                     partition_check_mode.clone(),
+                    Some(&error_detail_remapper),
                     ctx,
                     xid,
                     cid,
-                )
-                .map_err(|err| {
-                    remap_routed_insert_error_detail(err, parent_row, Some(desc), ctx)
-                })?;
+                )?;
                 if let Some(returning) = returning {
                     for leaf_row in leaf_inserted_rows.iter() {
                         let projected_row = remap_partition_row_to_parent_layout(
@@ -10220,6 +10228,21 @@ fn remap_routed_insert_error_detail(
             sqlstate: "23514",
         },
         other => other,
+    }
+}
+
+fn remap_routed_leaf_insert_error_detail(
+    err: ExecError,
+    leaf_row: &[Value],
+    leaf_desc: &RelationDesc,
+    parent_desc: &RelationDesc,
+    ctx: &ExecutorContext,
+) -> ExecError {
+    match remap_partition_row_to_parent_layout(leaf_row, leaf_desc, parent_desc) {
+        Ok(parent_row) => {
+            remap_routed_insert_error_detail(err, &parent_row, Some(parent_desc), ctx)
+        }
+        Err(_) => err,
     }
 }
 
@@ -13381,6 +13404,7 @@ pub(crate) fn execute_insert_rows(
         triggers.as_ref(),
         true,
         partition_check_mode,
+        None,
         ctx,
         xid,
         cid,
@@ -13405,6 +13429,7 @@ fn execute_insert_rows_inner(
     triggers: Option<&RuntimeTriggers>,
     fire_statement_triggers: bool,
     partition_check_mode: PartitionInsertCheckMode,
+    error_detail_remapper: Option<&dyn Fn(&[Value], ExecError, &ExecutorContext) -> ExecError>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -13428,6 +13453,7 @@ fn execute_insert_rows_inner(
     let mut inserted_tids = Vec::new();
     let mut returned_rows = Vec::new();
     for (row_index, values) in rows.iter().enumerate() {
+        let mut error_values = None;
         let row_result = (|| -> Result<(), ExecError> {
             let Some(mut values) = (match triggers {
                 Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
@@ -13435,6 +13461,7 @@ fn execute_insert_rows_inner(
             }) else {
                 return Ok(());
             };
+            error_values = Some(values.clone());
             capture_copy_to_dml_notices();
             materialize_generated_columns_with_tableoid(
                 desc,
@@ -13442,7 +13469,9 @@ fn execute_insert_rows_inner(
                 Some(relation_oid),
                 ctx,
             )?;
+            error_values = Some(values.clone());
             coerce_user_defined_base_assignments(desc, &mut values, ctx)?;
+            error_values = Some(values.clone());
             enforce_insert_domain_constraints(desc, &values, ctx)?;
             partition_check_mode.check(triggers, &values, ctx)?;
             enforce_exclusion_constraints_against_values(
@@ -13499,6 +13528,10 @@ fn execute_insert_rows_inner(
             for heap_tid in inserted_tids.iter().rev().copied() {
                 let _ = rollback_inserted_row(rel, toast, desc, heap_tid, ctx, xid);
             }
+            let err = match (error_detail_remapper, error_values.as_deref()) {
+                (Some(remapper), Some(values)) => remapper(values, err, ctx),
+                _ => err,
+            };
             return Err(match row_error_context {
                 Some(context) => ExecError::WithContext {
                     context: context(row_index, &err),
