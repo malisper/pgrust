@@ -294,12 +294,12 @@ pub fn lower_create_table(
         .rsplit('.')
         .next()
         .unwrap_or(&stmt.table_name);
-    canonicalize_stored_sql_json_defaults(&mut relation_desc, relation_name, catalog);
+    canonicalize_stored_defaults(&mut relation_desc, relation_name, catalog);
     let check_actions = normalized
         .checks
         .into_iter()
         .map(|mut action| {
-            if let Some(canonical) = canonicalize_stored_sql_json_relation_expr(
+            if let Some(canonical) = canonicalize_stored_relation_expr(
                 &action.expr_sql,
                 relation_name,
                 &relation_desc,
@@ -329,7 +329,7 @@ pub fn lower_create_table(
     })
 }
 
-fn canonicalize_stored_sql_json_defaults(
+fn canonicalize_stored_defaults(
     desc: &mut RelationDesc,
     relation_name: &str,
     catalog: &dyn CatalogLookup,
@@ -340,34 +340,22 @@ fn canonicalize_stored_sql_json_defaults(
             continue;
         };
         if let Some(canonical) =
-            canonicalize_stored_sql_json_relation_expr(&expr_sql, relation_name, &snapshot, catalog)
+            canonicalize_stored_relation_expr(&expr_sql, relation_name, &snapshot, catalog)
         {
             column.default_expr = Some(canonical);
         }
     }
 }
 
-fn canonicalize_stored_sql_json_relation_expr(
+fn canonicalize_stored_relation_expr(
     expr_sql: &str,
     relation_name: &str,
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Option<String> {
-    if !contains_sql_json_query_function(expr_sql) {
-        return None;
-    }
     let bound = bind_relation_expr(expr_sql, Some(relation_name), desc, catalog).ok()?;
-    Some(render_relation_expr_sql(
-        &bound,
-        Some(relation_name),
-        desc,
-        catalog,
-    ))
-}
-
-fn contains_sql_json_query_function(expr_sql: &str) -> bool {
-    let upper = expr_sql.to_ascii_uppercase();
-    upper.contains("JSON_QUERY(") || upper.contains("JSON_VALUE(") || upper.contains("JSON_EXISTS(")
+    let rendered = render_relation_expr_sql(&bound, Some(relation_name), desc, catalog);
+    (rendered != expr_sql).then_some(rendered)
 }
 
 fn expand_create_table_of_type(

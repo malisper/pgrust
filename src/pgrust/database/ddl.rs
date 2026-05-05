@@ -12,6 +12,7 @@ use crate::backend::parser::{
     is_collatable_type, normalize_alter_table_add_column_constraints, parse_expr,
     raw_type_name_hint, resolve_collation_oid, resolve_raw_type_name, sql_type_name,
 };
+use crate::backend::rewrite::render_relation_expr_sql;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
@@ -1433,6 +1434,16 @@ pub(super) fn validate_alter_table_add_column(
         {
             crate::backend::parser::validate_column_default_expr(sql, catalog)
                 .map_err(ExecError::Parse)?;
+            if desc.default_expr.is_some()
+                && let Ok(parsed) = parse_expr(sql)
+                && let Ok((bound, _)) = bind_scalar_expr_in_scope(&parsed, &[], catalog)
+            {
+                let empty_desc = RelationDesc {
+                    columns: Vec::new(),
+                };
+                desc.default_expr =
+                    Some(render_relation_expr_sql(&bound, None, &empty_desc, catalog));
+            }
         }
     }
     if let Some(storage) = column.storage {
@@ -1866,8 +1877,13 @@ pub(super) fn validate_alter_table_alter_column_default(
                 default_sequence_oid: None,
             });
         }
-        let (_bound, default_type) =
+        let (bound, default_type) =
             bind_scalar_expr_in_scope(expr, &[], catalog).map_err(ExecError::Parse)?;
+        let empty_desc = RelationDesc {
+            columns: Vec::new(),
+        };
+        normalized_default_expr_sql =
+            Some(render_relation_expr_sql(&bound, None, &empty_desc, catalog));
         if !automatic_alter_type_cast_allowed(catalog, default_type, current_column.sql_type) {
             if let Some(sql) = default_expr_sql
                 && let Some(value) = literal_default_cast_input(expr)

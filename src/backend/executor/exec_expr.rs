@@ -4387,13 +4387,6 @@ fn eval_pg_get_expr_text(
         }
     }
     let catalog = executor_catalog(ctx)?;
-    if catalog
-        .constraint_rows_for_relation(relation_oid)
-        .into_iter()
-        .any(|row| row.contype == CONSTRAINT_CHECK && row.conbin.as_deref() == Some(text))
-    {
-        return Ok(Value::Text(normalize_check_expr_sql(text).into()));
-    }
     Ok(Value::Text(
         canonicalize_catalog_expr_sql(text, relation_oid, catalog)
             .unwrap_or_else(|| text.to_string())

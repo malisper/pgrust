@@ -27034,6 +27034,106 @@ fn alter_table_add_column_reads_old_rows_with_null_or_default() {
             vec![Value::Bool(false), Value::Bool(true)],
         ]
     );
+
+    db.execute(1, "create table random_not_null (id int4)")
+        .unwrap();
+    db.execute(1, "insert into random_not_null values (1)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table random_not_null
+           add column b float8 not null default random(),
+           add primary key(id)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select b is not null from random_not_null where id = 1"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn stored_expression_deparse_matches_pg_for_checks_and_defaults() {
+    let base = temp_dir("stored_expression_deparse_matches_pg");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table deparse_checks (
+            d date check (d between '2001-01-01'::date and '2099-12-31'::date),
+            a float8 check (a > 10.2)
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table deparse_defaults (b integer default random()::int)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(conbin, conrelid)
+               from pg_constraint
+              where conrelid = 'deparse_checks'::regclass and conname = 'deparse_checks_d_check'",
+        ),
+        vec![vec![Value::Text(
+            "d >= '01-01-2001'::date AND d <= '12-31-2099'::date".into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid, true)
+               from pg_constraint
+              where conrelid = 'deparse_checks'::regclass and conname = 'deparse_checks_d_check'",
+        ),
+        vec![vec![Value::Text(
+            "CHECK (d >= '01-01-2001'::date AND d <= '12-31-2099'::date)".into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(adbin, adrelid)
+               from pg_attrdef
+              where adrelid = 'deparse_defaults'::regclass",
+        ),
+        vec![vec![Value::Text("random()::integer".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select check_clause
+               from information_schema.check_constraints
+              where constraint_name = 'deparse_checks_a_check'",
+        ),
+        vec![vec![Value::Text("(a > 10.2::double precision)".into())]]
+    );
+
+    db.execute(1, "alter table deparse_checks alter column a type numeric")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid, true)
+               from pg_constraint
+              where conrelid = 'deparse_checks'::regclass and conname = 'deparse_checks_a_check'",
+        ),
+        vec![vec![Value::Text(
+            "CHECK (a::double precision > 10.2::double precision)".into()
+        )]]
+    );
 }
 
 #[test]
@@ -36699,7 +36799,7 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
                 Value::Text("items_note_nonempty".into()),
                 Value::Text("c".into()),
                 Value::Bool(true),
-                Value::Text("note <> ''".into()),
+                Value::Text("note <> ''::text".into()),
             ],
             vec![
                 Value::Text("items_note_required".into()),
