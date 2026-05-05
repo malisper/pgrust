@@ -50,9 +50,9 @@ use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::{
     BTREE_AM_OID, C_COLLATION_OID, DATE_TYPE_OID, DEFAULT_COLLATION_OID, GIST_AM_OID,
-    GIST_TSQUERY_FAMILY_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PG_NAMESPACE_RELATION_OID,
-    PG_SUBSCRIPTION_RELATION_OID, POSIX_COLLATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID,
+    GIST_CIRCLE_FAMILY_OID, GIST_POLY_FAMILY_OID, GIST_TSQUERY_FAMILY_OID,
+    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PG_NAMESPACE_RELATION_OID, PG_SUBSCRIPTION_RELATION_OID,
+    POSIX_COLLATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::{ArrayValue, Value};
@@ -1032,6 +1032,34 @@ fn recheck_lossy_index_only_scan_tuple(
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
     recheck_lossy_index_scan_keys(&state.keys, &state.index_meta, &mut state.slot, ctx)
+}
+
+fn index_scan_needs_order_by_recheck(
+    scan: &crate::include::access::relscan::IndexScanDesc,
+    order_by_keys: &[IndexScanKey],
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+) -> bool {
+    if scan.number_of_order_bys > 0 && scan.xs_recheck_order_by {
+        return true;
+    }
+    order_by_keys.iter().any(|key| {
+        key.attribute_number
+            .checked_sub(1)
+            .and_then(|attno| usize::try_from(attno).ok())
+            .and_then(|index_pos| index_meta.opfamily_oids.get(index_pos).copied())
+            .is_some_and(|opfamily| {
+                matches!(opfamily, GIST_POLY_FAMILY_OID | GIST_CIRCLE_FAMILY_OID)
+            })
+    })
+}
+
+fn lossy_distance_index_only_scan_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "lossy distance functions are not supported in index-only scans".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
 }
 
 fn recheck_lossy_index_scan_keys(
@@ -3178,7 +3206,7 @@ impl PlanNode for IndexOnlyScanState {
                 return Ok(None);
             }
 
-            let (tid, index_tuple, needs_index_recheck) = {
+            let (tid, index_tuple, needs_index_recheck, needs_order_by_recheck) = {
                 let scan = self
                     .scan
                     .as_ref()
@@ -3188,6 +3216,7 @@ impl PlanNode for IndexOnlyScanState {
                         .expect("index-only scan tuple must set heap tid"),
                     scan.xs_itup.clone(),
                     scan.xs_recheck,
+                    index_scan_needs_order_by_recheck(scan, &self.order_by_keys, &self.index_meta),
                 )
             };
             if !self.array_scan_seen_tids.insert(tid) {
@@ -3242,6 +3271,9 @@ impl PlanNode for IndexOnlyScanState {
                 if needs_index_recheck && !recheck_lossy_index_only_scan_tuple(self, ctx)? {
                     note_filtered_row(&mut self.stats);
                     continue;
+                }
+                if needs_order_by_recheck {
+                    return Err(lossy_distance_index_only_scan_error());
                 }
 
                 if let Some(qual) = &self.qual {
@@ -3324,6 +3356,9 @@ impl PlanNode for IndexOnlyScanState {
             if needs_index_recheck && !recheck_lossy_index_only_scan_tuple(self, ctx)? {
                 note_filtered_row(&mut self.stats);
                 continue;
+            }
+            if needs_order_by_recheck {
+                return Err(lossy_distance_index_only_scan_error());
             }
 
             if let Some(qual) = &self.qual {
@@ -3863,6 +3898,21 @@ impl PlanNode for IndexScanState {
                 .as_ref()
                 .and_then(|scan| scan.xs_heaptid)
                 .expect("index scan tuple must set heap tid");
+            let (needs_index_recheck, needs_order_by_recheck) = {
+                let scan = self
+                    .scan
+                    .as_ref()
+                    .expect("index scan must exist after tuple fetch");
+                (
+                    scan.xs_recheck,
+                    self.index_only
+                        && index_scan_needs_order_by_recheck(
+                            scan,
+                            &self.order_by_keys,
+                            &self.index_meta,
+                        ),
+                )
+            };
             if !self.array_scan_seen_tids.insert(tid) {
                 continue;
             }
@@ -3916,6 +3966,14 @@ impl PlanNode for IndexScanState {
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
                     ctx.predicate_lock_tuple(self.relation_oid, tid)?;
+
+                    if needs_index_recheck && !recheck_lossy_index_scan_tuple(self, ctx)? {
+                        note_filtered_row(&mut self.stats);
+                        continue;
+                    }
+                    if needs_order_by_recheck {
+                        return Err(lossy_distance_index_only_scan_error());
+                    }
 
                     if let Some(qual) = &self.qual {
                         let outer_values = materialize_slot_values(&mut self.slot)?;
@@ -3996,10 +4054,12 @@ impl PlanNode for IndexScanState {
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
-            let needs_index_recheck = self.scan.as_ref().is_some_and(|scan| scan.xs_recheck);
             if needs_index_recheck && !recheck_lossy_index_scan_tuple(self, ctx)? {
                 note_filtered_row(&mut self.stats);
                 continue;
+            }
+            if needs_order_by_recheck {
+                return Err(lossy_distance_index_only_scan_error());
             }
 
             if let Some(qual) = &self.qual {
