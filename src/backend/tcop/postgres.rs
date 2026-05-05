@@ -13451,20 +13451,11 @@ fn rewrite_hex_bit_literals(sql: &str) -> String {
 
 fn rewrite_shobj_description_calls(sql: &str) -> String {
     static SHOBJ_RE: OnceLock<regex::Regex> = OnceLock::new();
-    static REGROLE_LITERAL_RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = SHOBJ_RE.get_or_init(|| {
         regex::Regex::new(r"(?i)shobj_description\(([^,]+),\s*'pg_authid'\)").unwrap()
     });
-    let regrole_re = REGROLE_LITERAL_RE
-        .get_or_init(|| regex::Regex::new(r"(?i)^'((?:[^']|'')+)'\s*::\s*regrole$").unwrap());
     re.replace_all(sql, |captures: &regex::Captures<'_>| {
         let objoid = captures[1].trim();
-        let objoid = if let Some(regrole) = regrole_re.captures(objoid) {
-            let role_name = &regrole[1];
-            format!("(select oid from pg_authid where rolname = '{role_name}')")
-        } else {
-            objoid.to_string()
-        };
         format!(
             "(select description from pg_description where objoid = ({objoid}) and classoid = 1260 and objsubid = 0)"
         )
@@ -15964,8 +15955,9 @@ mod tests {
         let rewritten =
             rewrite_regression_sql("select shobj_description('app_role'::regrole, 'pg_authid')")
                 .into_owned();
-        assert!(rewritten.contains("select oid from pg_authid where rolname = 'app_role'"));
-        assert!(!rewritten.contains("::regrole"));
+        assert!(rewritten.contains("from pg_description"));
+        assert!(rewritten.contains("'app_role'::regrole"));
+        assert!(!rewritten.contains("from pg_authid"));
     }
 
     #[test]

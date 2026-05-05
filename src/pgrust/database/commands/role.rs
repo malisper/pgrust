@@ -48,6 +48,10 @@ impl RoleCommandNotices for RootRoleCommandNotices {
             None,
         );
     }
+
+    fn sysid(&self) {
+        crate::backend::utils::misc::notices::push_notice("SYSID can no longer be specified");
+    }
 }
 
 struct RootRoleAuthorization<'a> {
@@ -442,6 +446,10 @@ impl Database {
                 let spec = build_alter_role_spec(stmt, &existing, password_settings)
                     .map_err(ExecError::Parse)?
                     .unwrap();
+                if let Some(error) = restricted_alter_role_option_error(&auth, &auth_catalog, stmt)
+                {
+                    return Err(error);
+                }
                 if !auth.can_alter_role_attrs(existing.oid, &spec.attrs, &auth_catalog) {
                     return Err(alter_role_permission_error(
                         &auth,
@@ -1672,7 +1680,10 @@ fn alter_role_permission_error(
             } else if changes_password && auth.current_user_oid() != existing.oid {
                 Some("To change another role's password, the current user must have the CREATEROLE attribute and the ADMIN option on the role.".to_string())
             } else {
-                None
+                Some(format!(
+                    "Only roles with the CREATEROLE attribute and the ADMIN option on role \"{}\" may alter this role.",
+                    existing.rolname
+                ))
             }
         })
         .flatten();
@@ -1682,6 +1693,38 @@ fn alter_role_permission_error(
         hint: None,
         sqlstate: "42501",
     }
+}
+
+fn restricted_alter_role_option_error(
+    auth: &crate::pgrust::auth::AuthState,
+    catalog: &crate::pgrust::auth::AuthCatalog,
+    stmt: &AlterRoleStatement,
+) -> Option<ExecError> {
+    let current = catalog.role_by_oid(auth.current_user_oid())?;
+    let AlterRoleAction::Options(options) = &stmt.action else {
+        return None;
+    };
+    let detail = options.iter().find_map(|option| match option {
+        RoleOption::Superuser(_) if !current.rolsuper => {
+            Some("Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.")
+        }
+        RoleOption::Replication(_) if !current.rolreplication => {
+            Some("Only roles with the REPLICATION attribute may change the REPLICATION attribute.")
+        }
+        RoleOption::BypassRls(_) if !current.rolbypassrls => {
+            Some("Only roles with the BYPASSRLS attribute may change the BYPASSRLS attribute.")
+        }
+        RoleOption::CreateDb(_) if !current.rolcreatedb => {
+            Some("Only roles with the CREATEDB attribute may change the CREATEDB attribute.")
+        }
+        _ => None,
+    })?;
+    Some(ExecError::DetailedError {
+        message: "permission denied to alter role".into(),
+        detail: Some(detail.into()),
+        hint: None,
+        sqlstate: "42501",
+    })
 }
 
 fn alter_role_changes_password(stmt: &AlterRoleStatement) -> bool {
