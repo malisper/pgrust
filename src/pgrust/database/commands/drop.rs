@@ -4934,6 +4934,28 @@ mod tests {
     }
 
     #[test]
+    fn drop_table_removes_commented_relation() {
+        let base = temp_dir("drop_commented_table");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table commented_drop (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "comment on table commented_drop is 'drop me'")
+            .unwrap();
+
+        session.execute(&db, "drop table commented_drop").unwrap();
+
+        assert!(
+            db.backend_catcache(1, None)
+                .unwrap()
+                .class_by_name("commented_drop")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn drop_table_restrict_reports_pg_style_foreign_key_dependency() {
         let base = temp_dir("table_fk_restrict");
         let db = Database::open(&base, 16).unwrap();

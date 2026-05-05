@@ -7460,8 +7460,6 @@ impl CatalogStore {
             effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgClass]);
         }
         for entry in &dropped {
-            let comment_effect = self.comment_relation_mvcc(entry.relation_oid, None, ctx)?;
-            effect_record_catalog_kinds(&mut effect, &comment_effect.touched_catalogs);
             effect_record_rel(&mut effect.dropped_rels, entry.rel);
             effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
             effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
