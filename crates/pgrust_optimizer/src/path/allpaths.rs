@@ -1511,7 +1511,7 @@ fn relation_display_name(
             catalog
                 .namespace_row_by_oid(row.relnamespace)
                 .map(|namespace| {
-                    if matches!(namespace.nspname.as_str(), "public" | "pg_catalog")
+                    if relation_visible_in_search_path(catalog, row)
                         || namespace.nspname.starts_with("pg_temp_")
                     {
                         row.relname.clone()
@@ -1535,6 +1535,32 @@ fn relation_display_name(
         }
         _ => base_name,
     }
+}
+
+fn relation_visible_in_search_path(
+    catalog: &dyn CatalogLookup,
+    row: &pgrust_catalog_data::PgClassRow,
+) -> bool {
+    let Some(namespace) = catalog.namespace_row_by_oid(row.relnamespace) else {
+        return false;
+    };
+    if matches!(namespace.nspname.as_str(), "pg_catalog" | "public") {
+        return true;
+    }
+
+    let class_rows = catalog.class_rows();
+    let first_visible = catalog.search_path().into_iter().find_map(|schema| {
+        let namespace = catalog.namespace_row_by_name(&schema)?;
+        class_rows
+            .iter()
+            .find(|candidate| {
+                candidate.relnamespace == namespace.oid
+                    && candidate.relname.eq_ignore_ascii_case(&row.relname)
+                    && candidate.relkind == row.relkind
+            })
+            .map(|candidate| candidate.relnamespace)
+    });
+    first_visible == Some(row.relnamespace)
 }
 
 fn access_method_supports_index_scan(am_oid: u32) -> bool {
@@ -7798,4 +7824,190 @@ pub(super) fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup)
         return build_set_operation_rel(root, catalog);
     }
     make_one_rel(root, catalog)
+}
+
+#[cfg(test)]
+mod tests {
+    use pgrust_analyze::{BoundRelation, CatalogLookup};
+    use pgrust_catalog_data::{PgClassRow, PgNamespaceRow};
+    use pgrust_core::RelFileLocator;
+    use pgrust_nodes::parsenodes::{RangeTblEntry, RangeTblEntryKind, RangeTblEref};
+    use pgrust_nodes::primnodes::RelationDesc;
+
+    use super::relation_display_name;
+
+    #[derive(Default)]
+    struct MockCatalog {
+        search_path: Vec<String>,
+        namespaces: Vec<PgNamespaceRow>,
+        classes: Vec<PgClassRow>,
+    }
+
+    impl CatalogLookup for MockCatalog {
+        fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+            None
+        }
+
+        fn search_path(&self) -> Vec<String> {
+            self.search_path.clone()
+        }
+
+        fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
+            self.namespaces
+                .iter()
+                .find(|namespace| namespace.oid == oid)
+                .cloned()
+        }
+
+        fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
+            self.namespaces.clone()
+        }
+
+        fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
+            self.classes
+                .iter()
+                .find(|class| class.oid == relation_oid)
+                .cloned()
+        }
+
+        fn class_rows(&self) -> Vec<PgClassRow> {
+            self.classes.clone()
+        }
+    }
+
+    #[test]
+    fn relation_display_name_omits_visible_search_path_schema() {
+        let visible_namespace = namespace_row(42, "explain_visible");
+        let visible_relation = class_row(1, visible_namespace.oid, "visible_plan");
+        let catalog = MockCatalog {
+            search_path: vec![
+                "pg_catalog".into(),
+                visible_namespace.nspname.clone(),
+                "public".into(),
+            ],
+            namespaces: vec![namespace_row(11, "pg_catalog"), visible_namespace],
+            classes: vec![visible_relation],
+        };
+
+        assert_eq!(
+            relation_display_name(&catalog, &relation_rte(None, 1), 1, rel_locator(1)),
+            "visible_plan"
+        );
+    }
+
+    #[test]
+    fn relation_display_name_keeps_schema_for_shadowed_search_path_relation() {
+        let earlier_namespace = namespace_row(41, "earlier");
+        let visible_namespace = namespace_row(42, "explain_visible");
+        let catalog = MockCatalog {
+            search_path: vec![
+                earlier_namespace.nspname.clone(),
+                visible_namespace.nspname.clone(),
+                "public".into(),
+            ],
+            namespaces: vec![earlier_namespace.clone(), visible_namespace.clone()],
+            classes: vec![
+                class_row(2, earlier_namespace.oid, "visible_plan"),
+                class_row(1, visible_namespace.oid, "visible_plan"),
+            ],
+        };
+
+        assert_eq!(
+            relation_display_name(&catalog, &relation_rte(None, 1), 1, rel_locator(1)),
+            "explain_visible.visible_plan"
+        );
+    }
+
+    #[test]
+    fn relation_display_name_appends_user_alias_to_visible_relation() {
+        let visible_namespace = namespace_row(42, "explain_visible");
+        let visible_relation = class_row(1, visible_namespace.oid, "visible_plan");
+        let catalog = MockCatalog {
+            search_path: vec![visible_namespace.nspname.clone()],
+            namespaces: vec![visible_namespace],
+            classes: vec![visible_relation],
+        };
+
+        assert_eq!(
+            relation_display_name(&catalog, &relation_rte(Some("vp"), 1), 1, rel_locator(1)),
+            "visible_plan vp"
+        );
+    }
+
+    fn namespace_row(oid: u32, name: &str) -> PgNamespaceRow {
+        PgNamespaceRow {
+            oid,
+            nspname: name.into(),
+            nspowner: 10,
+            nspacl: None,
+        }
+    }
+
+    fn class_row(oid: u32, relnamespace: u32, relname: &str) -> PgClassRow {
+        PgClassRow {
+            oid,
+            relname: relname.into(),
+            relnamespace,
+            reltype: 0,
+            relowner: 10,
+            relam: 0,
+            relfilenode: 0,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relpersistence: 'p',
+            relkind: 'r',
+            relnatts: 0,
+            relhassubclass: false,
+            relhastriggers: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
+            relispopulated: true,
+            relispartition: false,
+            relfrozenxid: 0,
+            relpartbound: None,
+            reloptions: None,
+            relacl: None,
+            relreplident: 'd',
+            reloftype: 0,
+        }
+    }
+
+    fn relation_rte(alias: Option<&str>, relation_oid: u32) -> RangeTblEntry {
+        RangeTblEntry {
+            alias: alias.map(str::to_string),
+            alias_is_user_defined: alias.is_some(),
+            alias_preserves_source_names: true,
+            eref: RangeTblEref {
+                aliasname: alias.unwrap_or("visible_plan").into(),
+                colnames: Vec::new(),
+            },
+            desc: RelationDesc {
+                columns: Vec::new(),
+            },
+            inh: false,
+            security_quals: Vec::new(),
+            permission: None,
+            kind: RangeTblEntryKind::Relation {
+                rel: rel_locator(relation_oid),
+                relation_oid,
+                relkind: 'r',
+                relispopulated: true,
+                toast: None,
+                tablesample: None,
+            },
+        }
+    }
+
+    fn rel_locator(rel_number: u32) -> RelFileLocator {
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number,
+        }
+    }
 }
