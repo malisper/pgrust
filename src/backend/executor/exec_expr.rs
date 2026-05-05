@@ -1282,7 +1282,7 @@ fn function_definition_text(
         return format!("{signature}\n{body}\n");
     }
     if let Some(body) = format_sql_standard_return_body(proc_row, catalog) {
-        return format!("{signature}\n {body}\n");
+        return format!("{signature}\n{body}\n");
     }
     let tag = if proc_row.prokind == 'p' {
         "$procedure$"
@@ -2625,6 +2625,18 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
                 .into(),
         ));
     }
+    if name == "work_mem" {
+        let value = ctx
+            .gucs
+            .get("work_mem")
+            .map(String::as_str)
+            .unwrap_or("4MB");
+        return Ok(Value::Text(
+            format_memory_guc_current_setting(value)
+                .unwrap_or_else(|| value.to_string())
+                .into(),
+        ));
+    }
     if name == "datestyle" {
         return Ok(Value::Text(
             crate::backend::utils::misc::guc_datetime::format_datestyle(&ctx.datetime_config)
@@ -2666,6 +2678,29 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
     Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
         name,
     )))
+}
+
+fn format_memory_guc_current_setting(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let unit_start = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    if unit_start == 0 {
+        return None;
+    }
+    let amount = trimmed[..unit_start].parse::<u64>().ok()?;
+    let unit = trimmed[unit_start..].trim().to_ascii_lowercase();
+    let kb = match unit.as_str() {
+        "" | "kb" => amount,
+        "mb" => amount.checked_mul(1024)?,
+        "gb" => amount.checked_mul(1024)?.checked_mul(1024)?,
+        _ => return None,
+    };
+    if kb % 1024 == 0 {
+        Some(format!("{}MB", kb / 1024))
+    } else {
+        Some(format!("{kb}kB"))
+    }
 }
 
 fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecError> {

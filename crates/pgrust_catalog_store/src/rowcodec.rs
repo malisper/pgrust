@@ -2792,6 +2792,16 @@ fn vector_dimensions(length: usize) -> Vec<ArrayDimension> {
 }
 
 fn text_array_value(values: Vec<String>) -> ArrayValue {
+    if values.is_empty() {
+        return ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 1,
+                length: 0,
+            }],
+            Vec::new(),
+        )
+        .with_element_type_oid(pgrust_catalog_data::TEXT_TYPE_OID);
+    }
     ArrayValue::from_1d(
         values
             .into_iter()

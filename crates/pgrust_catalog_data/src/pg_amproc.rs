@@ -27,7 +27,7 @@ pub fn pg_amproc_desc() -> RelationDesc {
             column_desc("amproclefttype", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("amprocrighttype", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("amprocnum", SqlType::new(SqlTypeKind::Int2), false),
-            column_desc("amproc", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("amproc", SqlType::new(SqlTypeKind::RegProc), false),
         ],
     }
 }
@@ -56,7 +56,18 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         ),
         (BTREE_DATETIME_FAMILY_OID, DATE_TYPE_OID, 1092),
         (BTREE_MONEY_FAMILY_OID, MONEY_TYPE_OID, 377),
-        (BTREE_INTEGER_FAMILY_OID, XID8_TYPE_OID, 5096),
+        (BTREE_XID8_FAMILY_OID, XID8_TYPE_OID, 5096),
+        (
+            BTREE_FLOAT_FAMILY_OID,
+            FLOAT4_TYPE_OID,
+            BTFLOAT4_CMP_PROC_OID,
+        ),
+        (
+            BTREE_FLOAT_FAMILY_OID,
+            FLOAT8_TYPE_OID,
+            BTFLOAT8_CMP_PROC_OID,
+        ),
+        (BTREE_TIME_FAMILY_OID, TIME_TYPE_OID, TIME_CMP_PROC_OID),
         (
             BTREE_BYTEA_FAMILY_OID,
             BYTEA_TYPE_OID,
@@ -104,6 +115,80 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         amproc: BTINT4_SORTSUPPORT_PROC_OID,
     });
     oid = oid.saturating_add(1);
+    for (type_oid, proc_oid) in [
+        (FLOAT4_TYPE_OID, BTFLOAT4_SORTSUPPORT_PROC_OID),
+        (FLOAT8_TYPE_OID, BTFLOAT8_SORTSUPPORT_PROC_OID),
+    ] {
+        rows.push(PgAmprocRow {
+            oid,
+            amprocfamily: BTREE_FLOAT_FAMILY_OID,
+            amproclefttype: type_oid,
+            amprocrighttype: type_oid,
+            amprocnum: 2,
+            amproc: proc_oid,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (left_type, right_type, procnum, proc_oid) in [
+        (
+            FLOAT8_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            3_i16,
+            IN_RANGE_FLOAT8_FLOAT8_PROC_OID,
+        ),
+        (
+            FLOAT8_TYPE_OID,
+            FLOAT4_TYPE_OID,
+            1_i16,
+            BTFLOAT84_CMP_PROC_OID,
+        ),
+        (
+            FLOAT4_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            1_i16,
+            BTFLOAT48_CMP_PROC_OID,
+        ),
+        (
+            FLOAT4_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            3_i16,
+            IN_RANGE_FLOAT4_FLOAT8_PROC_OID,
+        ),
+        (
+            TIME_TYPE_OID,
+            INTERVAL_TYPE_OID,
+            3_i16,
+            IN_RANGE_TIME_INTERVAL_PROC_OID,
+        ),
+    ] {
+        rows.push(PgAmprocRow {
+            oid,
+            amprocfamily: if left_type == TIME_TYPE_OID {
+                BTREE_TIME_FAMILY_OID
+            } else {
+                BTREE_FLOAT_FAMILY_OID
+            },
+            amproclefttype: left_type,
+            amprocrighttype: right_type,
+            amprocnum: procnum,
+            amproc: proc_oid,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (procnum, proc_oid) in [
+        (2_i16, UUID_SORTSUPPORT_PROC_OID),
+        (6_i16, UUID_SKIPSUPPORT_PROC_OID),
+    ] {
+        rows.push(PgAmprocRow {
+            oid,
+            amprocfamily: BTREE_UUID_FAMILY_OID,
+            amproclefttype: UUID_TYPE_OID,
+            amprocrighttype: UUID_TYPE_OID,
+            amprocnum: procnum,
+            amproc: proc_oid,
+        });
+        oid = oid.saturating_add(1);
+    }
     for (family, type_oid, proc_oid) in [
         (BTREE_BOOL_FAMILY_OID, BOOL_TYPE_OID, BTEQUALIMAGE_PROC_OID),
         (
@@ -121,16 +206,13 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
             INT8_TYPE_OID,
             BTEQUALIMAGE_PROC_OID,
         ),
-        (
-            BTREE_INTEGER_FAMILY_OID,
-            XID8_TYPE_OID,
-            BTEQUALIMAGE_PROC_OID,
-        ),
+        (BTREE_XID8_FAMILY_OID, XID8_TYPE_OID, BTEQUALIMAGE_PROC_OID),
         (
             BTREE_DATETIME_FAMILY_OID,
             DATE_TYPE_OID,
             BTEQUALIMAGE_PROC_OID,
         ),
+        (BTREE_TIME_FAMILY_OID, TIME_TYPE_OID, BTEQUALIMAGE_PROC_OID),
         (
             BTREE_MONEY_FAMILY_OID,
             MONEY_TYPE_OID,
@@ -684,7 +766,7 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         (HASH_INTEGER_FAMILY_OID, INT2_TYPE_OID, HASH_INT2_PROC_OID),
         (HASH_INTEGER_FAMILY_OID, INT4_TYPE_OID, HASH_INT4_PROC_OID),
         (HASH_INTEGER_FAMILY_OID, INT8_TYPE_OID, HASH_INT8_PROC_OID),
-        (HASH_INTEGER_FAMILY_OID, XID8_TYPE_OID, HASH_INT8_PROC_OID),
+        (HASH_XID8_FAMILY_OID, XID8_TYPE_OID, HASH_INT8_PROC_OID),
         (HASH_OID_FAMILY_OID, OID_TYPE_OID, HASH_OID_PROC_OID),
         (HASH_ENUM_FAMILY_OID, ANYENUMOID, HASH_ENUM_PROC_OID),
         (
@@ -807,6 +889,17 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
                 amprocrighttype: type_oid,
                 amprocnum: 2,
                 amproc: HASH_JSONB_EXTENDED_PROC_OID,
+            });
+            oid = oid.saturating_add(1);
+        }
+        if family == HASH_UUID_FAMILY_OID {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: type_oid,
+                amprocrighttype: type_oid,
+                amprocnum: 2,
+                amproc: HASH_UUID_EXTENDED_PROC_OID,
             });
             oid = oid.saturating_add(1);
         }

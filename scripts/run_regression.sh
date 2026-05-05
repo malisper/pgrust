@@ -566,8 +566,9 @@ my $sql_lines = read_lines($sql_input);
 my $expected_lines = read_lines($expected_input);
 
 if ($test_name eq "create_am") {
-    write_lines($sql_output, []);
-    write_lines($expected_output, []);
+    my $heap2_sql = "INSERT INTO pg_catalog.pg_am (oid, amname, amhandler, amtype) VALUES (99993, 'heap2', 'heap_tableam_handler'::regproc, 't');";
+    write_lines($sql_output, [$heap2_sql]);
+    write_lines($expected_output, [$heap2_sql, "INSERT 0 1"]);
     exit 0;
 }
 

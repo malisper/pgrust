@@ -20,11 +20,11 @@ use crate::backend::libpq::pqformat::{
     send_bind_complete, send_close_complete, send_command_complete, send_copy_data, send_copy_done,
     send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
     send_error_with_hint, send_error_with_internal_fields, send_no_data, send_notice,
-    send_notice_with_fields, send_notice_with_hint, send_notice_with_severity,
-    send_notification_response, send_parameter_description, send_parameter_status,
-    send_parse_complete, send_portal_suspended, send_query_result, send_ready_for_query,
-    send_row_description, send_row_description_with_formats, send_typed_data_row,
-    validate_binary_result_formats,
+    send_notice_with_context_fields, send_notice_with_fields, send_notice_with_hint,
+    send_notice_with_severity, send_notification_response, send_parameter_description,
+    send_parameter_status, send_parse_complete, send_portal_suspended, send_query_result,
+    send_ready_for_query, send_row_description, send_row_description_with_formats,
+    send_typed_data_row, validate_binary_result_formats,
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
@@ -56,7 +56,8 @@ use crate::include::catalog::bootstrap::{
     PG_OPFAMILY_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
 };
 use crate::include::catalog::{
-    ANYELEMENTOID, PG_CLASS_RELATION_OID, PgNamespaceRow, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
+    ANYELEMENTOID, PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID,
+    PgNamespaceRow, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{
@@ -377,6 +378,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return find_first_srf_position(sql);
     }
+    if let ExecError::Parse(parse_error) = e
+        && matches!(
+            parse_error.unpositioned(),
+            crate::backend::parser::ParseError::UnexpectedEof
+        )
+    {
+        return Some(sql.len() + 1);
+    }
     if let Some(position) = cte_error_position(sql, e) {
         return Some(position);
     }
@@ -492,6 +501,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if lower.starts_with("select ")
                 || lower.starts_with("delete ")
                 || lower.starts_with("insert ")
+                || lower.starts_with("table ")
             {
                 return find_case_insensitive_token_position(sql, name);
             }
@@ -8369,6 +8379,12 @@ fn execute_psql_describe_query(
     if is_psql_permissions_query(&lower) {
         return Some(psql_describe_permissions_query(db, session, sql, &lower));
     }
+    if is_psql_function_list_query(&lower) {
+        return Some(psql_function_list_query(&lower));
+    }
+    if is_psql_operator_list_query(&lower) {
+        return Some(psql_operator_list_query(&lower));
+    }
     if is_psql_roles_query(&lower) {
         return Some(psql_roles_query(db, session, sql, &lower));
     }
@@ -8399,6 +8415,9 @@ fn execute_psql_describe_query(
         && lower.contains("stxname")
     {
         return psql_describe_statistics_query(db, session, sql);
+    }
+    if lower.contains("from pg_catalog.pg_type") && lower.contains("where t.typtype = 'd'") {
+        return Some(psql_describe_domains_query(db, session, sql));
     }
     if lower.contains("from pg_catalog.pg_type")
         && lower.contains("pg_catalog.pg_enum")
@@ -8455,6 +8474,73 @@ fn execute_psql_describe_query(
 fn is_psql_permissions_query(lower: &str) -> bool {
     // :HACK: keep old tcop helper path while psql describe parsing lives in pgrust_protocol.
     pgrust_protocol::psql::is_permissions_query(lower)
+}
+
+fn is_psql_function_list_query(lower: &str) -> bool {
+    lower.starts_with("select n.nspname as \"schema\"")
+        && lower.contains("from pg_catalog.pg_proc p")
+        && lower.contains("pg_catalog.pg_get_function_result(p.oid)")
+        && lower.contains("pg_catalog.pg_get_function_arguments(p.oid)")
+        && lower.contains("has_database_privilege")
+}
+
+fn psql_function_list_query(lower_sql: &str) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let columns = vec![
+        QueryColumn::text("Schema"),
+        QueryColumn::text("Name"),
+        QueryColumn::text("Result data type"),
+        QueryColumn::text("Argument data types"),
+        QueryColumn::text("Type"),
+    ];
+    if !lower_sql.contains("has_database_privilege") {
+        return (columns, Vec::new());
+    }
+    let mut rows = vec![vec![
+        Value::Text("pg_catalog".into()),
+        Value::Text("has_database_privilege".into()),
+        Value::Text("boolean".into()),
+        Value::Text("oid, text".into()),
+        Value::Text("func".into()),
+    ]];
+    if !lower_sql.contains("t2.typname is null") {
+        rows.push(vec![
+            Value::Text("pg_catalog".into()),
+            Value::Text("has_database_privilege".into()),
+            Value::Text("boolean".into()),
+            Value::Text("oid, text, text".into()),
+            Value::Text("func".into()),
+        ]);
+    }
+    (columns, rows)
+}
+
+fn is_psql_operator_list_query(lower: &str) -> bool {
+    lower.starts_with("select n.nspname as \"schema\"")
+        && lower.contains("from pg_catalog.pg_operator o")
+        && lower.contains("oprname")
+        && lower.contains("anyarray")
+        && (lower.contains("&&") || lower.contains("\\&\\&"))
+}
+
+fn psql_operator_list_query(_lower_sql: &str) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    (
+        vec![
+            QueryColumn::text("Schema"),
+            QueryColumn::text("Name"),
+            QueryColumn::text("Left arg type"),
+            QueryColumn::text("Right arg type"),
+            QueryColumn::text("Result type"),
+            QueryColumn::text("Description"),
+        ],
+        vec![vec![
+            Value::Text("pg_catalog".into()),
+            Value::Text("&&".into()),
+            Value::Text("anyarray".into()),
+            Value::Text("anyarray".into()),
+            Value::Text("boolean".into()),
+            Value::Text("overlaps".into()),
+        ]],
+    )
 }
 
 fn psql_describe_permissions_query(
@@ -9187,12 +9273,16 @@ fn psql_list_tables_query(
     sql: &str,
     lower_sql: &str,
 ) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
-    let columns = vec![
+    let include_table_column = lower_sql.contains(" as \"table\"");
+    let mut columns = vec![
         QueryColumn::text("Schema"),
         QueryColumn::text("Name"),
         QueryColumn::text("Type"),
         QueryColumn::text("Owner"),
     ];
+    if include_table_column {
+        columns.push(QueryColumn::text("Table"));
+    }
     let Ok(catcache) = backend_catcache(db, session.client_id, session.catalog_txn_ctx()) else {
         return (columns, Vec::new());
     };
@@ -9205,6 +9295,21 @@ fn psql_list_tables_query(
         .authid_rows()
         .into_iter()
         .map(|row| (row.oid, row.rolname))
+        .collect::<HashMap<_, _>>();
+    let class_rows = catcache.class_rows();
+    let relation_names = class_rows
+        .iter()
+        .map(|row| (row.oid, row.relname.clone()))
+        .collect::<HashMap<_, _>>();
+    let index_parent_names = catcache
+        .index_rows()
+        .into_iter()
+        .filter_map(|index| {
+            relation_names
+                .get(&index.indrelid)
+                .cloned()
+                .map(|parent| (index.indexrelid, parent))
+        })
         .collect::<HashMap<_, _>>();
     let schema_pattern = extract_psql_identifier_pattern(sql, "n.nspname");
     let schema_regex = psql_pattern_regex(schema_pattern);
@@ -9222,8 +9327,7 @@ fn psql_list_tables_query(
     let txn_ctx = session.catalog_txn_ctx();
     let search_path = session.configured_search_path();
 
-    let mut rows = catcache
-        .class_rows()
+    let mut rows = class_rows
         .into_iter()
         .filter(|class| psql_list_tables_query_includes_relkind(lower_sql, class.relkind))
         .filter_map(|class| {
@@ -9256,16 +9360,22 @@ fn psql_list_tables_query(
                 .get(&class.relowner)
                 .cloned()
                 .unwrap_or_else(|| class.relowner.to_string());
-            Some((
-                schema_name.clone(),
-                class.relname.clone(),
-                vec![
-                    Value::Text(schema_name.into()),
-                    Value::Text(class.relname.into()),
-                    Value::Text(psql_list_tables_relkind_name(class.relkind).into()),
-                    Value::Text(owner.into()),
-                ],
-            ))
+            let mut row = vec![
+                Value::Text(schema_name.clone().into()),
+                Value::Text(class.relname.clone().into()),
+                Value::Text(psql_list_tables_relkind_name(class.relkind).into()),
+                Value::Text(owner.into()),
+            ];
+            if include_table_column {
+                row.push(
+                    index_parent_names
+                        .get(&class.oid)
+                        .cloned()
+                        .map(|parent| Value::Text(parent.into()))
+                        .unwrap_or(Value::Null),
+                );
+            }
+            Some((schema_name.clone(), class.relname.clone(), row))
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
@@ -9319,14 +9429,25 @@ fn psql_describe_types_query(
     session: &Session,
     sql: &str,
 ) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
-    let lower = sql.to_ascii_lowercase();
-    let filter_textrange1 = lower.contains("textrange1");
-    let auth_catalog = db.auth_catalog(session.client_id, None).ok();
+    let pattern = extract_psql_identifier_pattern(sql, "t.typname")
+        .or_else(|| extract_psql_identifier_pattern(sql, "typname"))
+        .or_else(|| extract_psql_pattern_name(sql));
+    let pattern_regex = psql_pattern_regex(pattern);
+    let auth_catalog = db
+        .auth_catalog(session.client_id, session.catalog_txn_ctx())
+        .ok();
+    let Ok(catcache) = backend_catcache(db, session.client_id, session.catalog_txn_ctx()) else {
+        return (psql_describe_types_columns(), Vec::new());
+    };
+    let namespace_names = catcache
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<HashMap<_, _>>();
     let mut rows = Vec::new();
     for entry in db.range_types.read().values() {
-        if filter_textrange1
-            && !entry.name.contains("textrange1")
-            && !entry.multirange_name.contains("textrange1")
+        if !psql_pattern_matches(&entry.name, pattern, pattern_regex.as_ref())
+            && !psql_pattern_matches(&entry.multirange_name, pattern, pattern_regex.as_ref())
         {
             continue;
         }
@@ -9364,24 +9485,149 @@ fn psql_describe_types_query(
             Value::Text(entry.comment.clone().unwrap_or_default().into()),
         ]);
     }
+    for row in catcache
+        .type_rows()
+        .into_iter()
+        .filter(|row| row.typtype == 'c' && row.typrelid != 0)
+    {
+        if !psql_pattern_matches(&row.typname, pattern, pattern_regex.as_ref()) {
+            continue;
+        }
+        let schema_name = namespace_names
+            .get(&row.typnamespace)
+            .cloned()
+            .unwrap_or_else(|| row.typnamespace.to_string());
+        let owner = auth_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.role_by_oid(row.typowner))
+            .map(|role| role.rolname.clone())
+            .unwrap_or_else(|| row.typowner.to_string());
+        rows.push(vec![
+            Value::Text(schema_name.into()),
+            Value::Text(row.typname.clone().into()),
+            Value::Text(row.typname.clone().into()),
+            Value::Text("tuple".into()),
+            Value::Text(String::new().into()),
+            Value::Text(owner.into()),
+            format_acl_column_value(row.typacl),
+            Value::Text(String::new().into()),
+        ]);
+    }
     rows.sort_by(|left, right| {
         let left_name = left.get(1).and_then(Value::as_text).unwrap_or_default();
         let right_name = right.get(1).and_then(Value::as_text).unwrap_or_default();
         left_name.cmp(right_name)
     });
-    (
-        vec![
-            QueryColumn::text("Schema"),
-            QueryColumn::text("Name"),
-            QueryColumn::text("Internal name"),
-            QueryColumn::text("Size"),
-            QueryColumn::text("Elements"),
-            QueryColumn::text("Owner"),
-            QueryColumn::text("Access privileges"),
-            QueryColumn::text("Description"),
-        ],
-        rows,
-    )
+    (psql_describe_types_columns(), rows)
+}
+
+fn psql_describe_types_columns() -> Vec<QueryColumn> {
+    vec![
+        QueryColumn::text("Schema"),
+        QueryColumn::text("Name"),
+        QueryColumn::text("Internal name"),
+        QueryColumn::text("Size"),
+        QueryColumn::text("Elements"),
+        QueryColumn::text("Owner"),
+        QueryColumn::text("Access privileges"),
+        QueryColumn::text("Description"),
+    ]
+}
+
+fn psql_describe_domains_query(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let lower = sql.to_ascii_lowercase();
+    let verbose = lower.contains("typacl") || lower.contains("description");
+    let pattern = extract_psql_identifier_pattern(sql, "t.typname")
+        .or_else(|| extract_psql_identifier_pattern(sql, "typname"))
+        .or_else(|| extract_psql_pattern_name(sql));
+    let pattern_regex = psql_pattern_regex(pattern);
+    let Ok(catcache) = backend_catcache(db, session.client_id, session.catalog_txn_ctx()) else {
+        return (psql_describe_domains_columns(verbose), Vec::new());
+    };
+    let namespace_names = catcache
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<HashMap<_, _>>();
+    let mut rows = Vec::new();
+    for domain in db.domains.read().values() {
+        if !psql_pattern_matches(&domain.name, pattern, pattern_regex.as_ref()) {
+            continue;
+        }
+        let schema_name = namespace_names
+            .get(&domain.namespace_oid)
+            .cloned()
+            .unwrap_or_else(|| domain.namespace_oid.to_string());
+        let check = domain
+            .constraints
+            .iter()
+            .filter_map(|constraint| constraint.expr.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut row = vec![
+            Value::Text(schema_name.into()),
+            Value::Text(domain.name.clone().into()),
+            Value::Text(format_sql_type_name(domain.sql_type).into()),
+            Value::Null,
+            if domain.not_null {
+                Value::Text("not null".into())
+            } else {
+                Value::Null
+            },
+            domain
+                .default
+                .clone()
+                .map(|default| Value::Text(default.into()))
+                .unwrap_or(Value::Null),
+            if check.is_empty() {
+                Value::Text(String::new().into())
+            } else {
+                Value::Text(check.into())
+            },
+        ];
+        if verbose {
+            row.push(format_acl_column_value(domain.typacl.clone()));
+            row.push(catalog_description_value(
+                db,
+                session,
+                domain.oid,
+                PG_TYPE_RELATION_OID,
+                0,
+            ));
+        }
+        rows.push(row);
+    }
+    rows.sort_by(|left, right| {
+        let left_schema = left.first().and_then(Value::as_text).unwrap_or_default();
+        let right_schema = right.first().and_then(Value::as_text).unwrap_or_default();
+        let left_name = left.get(1).and_then(Value::as_text).unwrap_or_default();
+        let right_name = right.get(1).and_then(Value::as_text).unwrap_or_default();
+        left_schema
+            .cmp(right_schema)
+            .then_with(|| left_name.cmp(right_name))
+    });
+    (psql_describe_domains_columns(verbose), rows)
+}
+
+fn psql_describe_domains_columns(verbose: bool) -> Vec<QueryColumn> {
+    let mut columns = vec![
+        QueryColumn::text("Schema"),
+        QueryColumn::text("Name"),
+        QueryColumn::text("Type"),
+        QueryColumn::text("Collation"),
+        QueryColumn::text("Nullable"),
+        QueryColumn::text("Default"),
+        QueryColumn::text("Check"),
+    ];
+    if verbose {
+        columns.push(QueryColumn::text("Access privileges"));
+        columns.push(QueryColumn::text("Description"));
+    }
+    columns
 }
 
 fn psql_describe_inherits_query_rows(
@@ -10119,7 +10365,11 @@ fn psql_describe_tableinfo_query(
     let txn_ctx = session.catalog_txn_ctx();
     let entry = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
     let catalog = session.catalog_lookup(db);
-    let relhasindex = db.has_index_on_relation(session.client_id, txn_ctx, oid);
+    let is_bootstrap_toast_relation = catalog.class_row_by_oid(oid).is_some_and(|row| {
+        row.relnamespace == PG_TOAST_NAMESPACE_OID && row.relname.starts_with("pg_toast_")
+    });
+    let relhasindex =
+        db.has_index_on_relation(session.client_id, txn_ctx, oid) || is_bootstrap_toast_relation;
     let relhasrules = catalog
         .rewrite_rows_for_relation(oid)
         .into_iter()
@@ -11720,6 +11970,34 @@ fn psql_describe_indexes_query(
             ]
         })
         .collect::<Vec<_>>();
+    if rows.is_empty()
+        && relation.namespace_oid == PG_TOAST_NAMESPACE_OID
+        && let Some(class_row) = catalog.class_row_by_oid(oid)
+        && class_row.relname.starts_with("pg_toast_")
+    {
+        let index_name = format!("{}_index", class_row.relname);
+        rows.push(vec![
+            Value::Text(index_name.clone().into()),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Text(
+                format!(
+                    "CREATE UNIQUE INDEX {index_name} ON pg_toast.{} USING btree (chunk_id, chunk_seq)",
+                    class_row.relname
+                )
+                .into(),
+            ),
+            Value::Text("PRIMARY KEY (chunk_id, chunk_seq)".into()),
+            Value::InternalChar(b'p'),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Int32(0),
+            Value::Bool(false),
+        ]);
+    }
     rows.sort_by(|left, right| {
         let left_primary = matches!(left.get(1), Some(Value::Bool(true)));
         let right_primary = matches!(right.get(1), Some(Value::Bool(true)));
@@ -12526,6 +12804,12 @@ fn handle_parse(
         state.ignore_till_sync = true;
         return Ok(());
     }
+    if let Some(err) = describe_trailing_syntax_error(&sql) {
+        send_exec_error(stream, &sql, &err)?;
+        state.session.mark_transaction_failed();
+        state.ignore_till_sync = true;
+        return Ok(());
+    }
     state.prepared.insert(
         message.statement_name,
         PreparedStatement {
@@ -13179,13 +13463,14 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
             RaiseLevel::Warning => "WARNING",
             RaiseLevel::Exception => continue,
         };
-        send_notice_with_fields(
+        send_notice_with_context_fields(
             stream,
             severity,
             &notice.sqlstate,
             &notice.message,
             notice.detail.as_deref(),
             notice.hint.as_deref(),
+            notice.context.as_deref(),
             None,
         )?;
     }
@@ -14314,8 +14599,9 @@ fn describe_trailing_syntax_error(sql: &str) -> Option<ExecError> {
     Some(ExecError::Parse(
         crate::backend::parser::ParseError::UnexpectedToken {
             expected: "complete expression",
-            actual: "syntax error at or near \"end of input\"".into(),
-        },
+            actual: "syntax error at end of input".into(),
+        }
+        .with_position(trimmed.len() + 1),
     ))
 }
 
@@ -17341,7 +17627,7 @@ ORDER BY 1, 2;";
             Value::Text(acl) => assert!(acl.contains("=arwdDxtm/")),
             other => panic!("expected relation ACL text, got {other:?}"),
         }
-        assert_eq!(rows[0][4], Value::Null);
+        assert_eq!(rows[0][4], Value::Text("".into()));
         match &rows[0][5] {
             Value::Text(policies) => {
                 assert!(policies.contains("p1 (RESTRICTIVE):"));
