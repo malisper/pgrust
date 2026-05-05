@@ -153,7 +153,9 @@ pub fn derive_expr_collation(expr: &Expr, sql_type: SqlType) -> DerivedCollation
             .collation_oid
             .map(DerivedCollation::Implicit)
             .unwrap_or(DerivedCollation::Default(DEFAULT_COLLATION_OID)),
-        Expr::Cast(inner, target_type) => derive_expr_collation(inner, *target_type),
+        Expr::Cast(inner, target_type) => {
+            default_if_no_collation(derive_expr_collation(inner, *target_type))
+        }
         Expr::Coalesce(left, right) => combine_expr_collations(
             derive_expr_collation(left, expr_sql_type_hint(left).unwrap_or(sql_type)),
             derive_expr_collation(right, expr_sql_type_hint(right).unwrap_or(sql_type)),
@@ -469,6 +471,19 @@ mod tests {
             display_args: None,
             args: vec![Expr::Const(Value::Int32(1))],
         }));
+
+        assert_eq!(
+            derive_expr_collation(&expr, SqlType::new(SqlTypeKind::Text)),
+            DerivedCollation::Default(DEFAULT_COLLATION_OID)
+        );
+    }
+
+    #[test]
+    fn text_cast_from_noncollatable_type_uses_default_collation() {
+        let expr = Expr::Cast(
+            Box::new(Expr::Const(Value::Int32(1))),
+            SqlType::new(SqlTypeKind::Text),
+        );
 
         assert_eq!(
             derive_expr_collation(&expr, SqlType::new(SqlTypeKind::Text)),
