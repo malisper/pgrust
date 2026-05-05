@@ -622,6 +622,67 @@ fn validate_foreign_key_persistence(
     }
 }
 
+fn validate_generated_foreign_key_actions(
+    columns: &[pgrust_nodes::parsenodes::ColumnDef],
+    column_lookup: &BTreeMap<String, usize>,
+    local_columns: &[String],
+    on_delete: ForeignKeyAction,
+    on_update: ForeignKeyAction,
+) -> Result<(), ParseError> {
+    let mut contains_generated = false;
+    for column_name in local_columns {
+        let Some(column) = column_lookup
+            .get(&column_name.to_ascii_lowercase())
+            .and_then(|index| columns.get(*index))
+        else {
+            continue;
+        };
+        let Some(generated) = column.generated.as_ref() else {
+            continue;
+        };
+        contains_generated = true;
+        if generated.kind == pgrust_nodes::parsenodes::ColumnGeneratedKind::Virtual {
+            return Err(ParseError::DetailedError {
+                message: "foreign key constraints on virtual generated columns are not supported"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+    }
+    if !contains_generated {
+        return Ok(());
+    }
+    if matches!(
+        on_update,
+        ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault | ForeignKeyAction::Cascade
+    ) {
+        return Err(ParseError::DetailedError {
+            message:
+                "invalid ON UPDATE action for foreign key constraint containing generated column"
+                    .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    if matches!(
+        on_delete,
+        ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault
+    ) {
+        return Err(ParseError::DetailedError {
+            message:
+                "invalid ON DELETE action for foreign key constraint containing generated column"
+                    .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    Ok(())
+}
+
 pub fn normalize_create_table_constraints(
     stmt: &CreateTableStatement,
     catalog: &dyn super::CatalogLookup,
@@ -1133,6 +1194,13 @@ pub fn normalize_create_table_constraints(
         .into_iter()
         .map(|constraint| {
             let local_columns = constraint.columns.clone();
+            validate_generated_foreign_key_actions(
+                &columns,
+                &column_lookup,
+                &local_columns,
+                constraint.on_delete,
+                constraint.on_update,
+            )?;
             let child_types = local_columns
                 .iter()
                 .map(|column| {
@@ -2167,9 +2235,17 @@ pub fn normalize_alter_table_add_constraint(
 pub fn normalize_alter_table_add_column_constraints(
     table_name: &str,
     column: &pgrust_nodes::parsenodes::ColumnDef,
+    relation_desc: &RelationDesc,
     existing_constraints: &[PgConstraintRow],
 ) -> Result<NormalizedAddColumnConstraints, ParseError> {
     let column_lookup = BTreeMap::from([(column.name.to_ascii_lowercase(), 0usize)]);
+    let mut relation_columns = relation_desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    relation_columns.push(column.name.clone());
     let mut not_nulls = BTreeMap::<String, PendingNotNullConstraint>::new();
     let mut checks = Vec::new();
 
@@ -2195,7 +2271,8 @@ pub fn normalize_alter_table_add_column_constraints(
                     explicit_name: attributes.name.clone(),
                     generated_base: GeneratedConstraintName::new(
                         table_name,
-                        Some(column.name.clone()),
+                        check_constraint_name_column(expr_sql, &relation_columns)
+                            .or_else(|| Some(column.name.clone())),
                         "check",
                     ),
                     expr_sql: expr_sql.clone(),

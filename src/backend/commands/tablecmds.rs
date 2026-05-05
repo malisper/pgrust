@@ -44,7 +44,7 @@ use crate::backend::parser::{
     ParseError, RuleEvent, SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType,
     TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table, bind_delete,
     bind_generated_expr, bind_insert, bind_referenced_by_foreign_keys, bind_relation_constraints,
-    bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update,
+    bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update, expr_references_column,
     rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
     rewrite_bound_update_auto_view_target, rewrite_local_vars_for_output_exprs,
     rewrite_planned_local_vars_for_output_exprs,
@@ -9570,10 +9570,8 @@ fn execute_partitioned_insert_on_conflict_rows(
 
     let parent_update_triggers =
         if let BoundOnConflictAction::Update { assignments, .. } = &on_conflict.action {
-            let modified_attnums = assignments
-                .iter()
-                .map(|assignment| user_attrno(assignment.column_index) as i16)
-                .collect::<Vec<_>>();
+            let modified_attnums =
+                modified_attnums_for_update_with_generated(&stmt.desc, assignments, catalog)?;
             Some(RuntimeTriggers::load(
                 catalog,
                 stmt.relation_oid,
@@ -10762,19 +10760,17 @@ impl MergeRuntimeTriggers {
             .iter()
             .any(|clause| matches!(clause.action, BoundMergeAction::Update { .. }))
         {
-            let modified_attnums = stmt
-                .when_clauses
-                .iter()
-                .filter_map(|clause| match &clause.action {
-                    BoundMergeAction::Update { assignments } => {
-                        Some(modified_attnums_for_update(assignments))
-                    }
-                    _ => None,
-                })
-                .flatten()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
+            let mut modified_attnums = BTreeSet::new();
+            for clause in &stmt.when_clauses {
+                if let BoundMergeAction::Update { assignments } = &clause.action {
+                    modified_attnums.extend(modified_attnums_for_update_with_generated(
+                        &stmt.desc,
+                        assignments,
+                        catalog,
+                    )?);
+                }
+            }
+            let modified_attnums = modified_attnums.into_iter().collect::<Vec<_>>();
             let triggers = RuntimeTriggers::load(
                 catalog,
                 stmt.relation_oid,
@@ -12467,6 +12463,20 @@ fn enforce_insert_domain_constraints(
     Ok(())
 }
 
+fn enforce_insert_domain_constraints_for_user_values(
+    desc: &RelationDesc,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for (column, value) in desc.columns.iter().zip(values.iter()) {
+        if column.dropped || column.generated.is_some() {
+            continue;
+        }
+        enforce_domain_constraints_for_value_ref(value, column.sql_type, ctx)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn materialize_insert_rows(
     stmt: &BoundInsertStatement,
     catalog: &dyn CatalogLookup,
@@ -12496,7 +12506,7 @@ pub(crate) fn materialize_insert_rows(
                     &mut slot,
                     ctx,
                 )?;
-                enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
+                enforce_insert_domain_constraints_for_user_values(&stmt.desc, &values, ctx)?;
                 Ok(values)
             })
             .collect::<Result<Vec<_>, ExecError>>(),
@@ -12525,7 +12535,7 @@ pub(crate) fn materialize_insert_rows(
                         ctx,
                     )?;
                     apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
-                    enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
+                    enforce_insert_domain_constraints_for_user_values(&stmt.desc, &values, ctx)?;
                     materialized.push(values);
                 }
             }
@@ -12538,7 +12548,7 @@ pub(crate) fn materialize_insert_rows(
                 let value = eval_expr(expr, &mut slot, ctx)?;
                 apply_assignment_target(&stmt.desc, &mut values, target, value, &mut slot, ctx)?;
             }
-            enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
+            enforce_insert_domain_constraints_for_user_values(&stmt.desc, &values, ctx)?;
             Ok(vec![values])
         }
         BoundInsertSource::Select(query) => {
@@ -12593,7 +12603,7 @@ pub(crate) fn materialize_insert_rows(
                         ctx,
                     )?;
                     apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
-                    enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
+                    enforce_insert_domain_constraints_for_user_values(&stmt.desc, &values, ctx)?;
                     rows.push(values);
                 }
                 Ok(rows)
@@ -13130,6 +13140,37 @@ fn assignment_record_descriptor(
 
 fn modified_attnums_for_update(assignments: &[BoundAssignment]) -> Vec<i16> {
     pgrust_commands::tablecmds::modified_attnums_for_update(assignments)
+}
+
+fn modified_attnums_for_update_with_generated(
+    desc: &RelationDesc,
+    assignments: &[BoundAssignment],
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<i16>, ExecError> {
+    let mut attnums = modified_attnums_for_update(assignments)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let assigned_indices = assignments
+        .iter()
+        .map(|assignment| assignment.column_index)
+        .collect::<BTreeSet<_>>();
+    for (generated_index, column) in desc.columns.iter().enumerate() {
+        if column.dropped || column.generated.is_none() {
+            continue;
+        }
+        let Some(expr) =
+            bind_generated_expr(desc, generated_index, catalog).map_err(ExecError::Parse)?
+        else {
+            continue;
+        };
+        if assigned_indices
+            .iter()
+            .any(|column_index| expr_references_column(&expr, *column_index))
+        {
+            attnums.insert(generated_index as i16 + 1);
+        }
+    }
+    Ok(attnums.into_iter().collect())
 }
 
 fn returning_result_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
@@ -13811,7 +13852,14 @@ pub fn execute_update_with_waiter(
                 let modified_attnums = stmt
                     .targets
                     .first()
-                    .map(|target| modified_attnums_for_update(&target.assignments))
+                    .map(|target| {
+                        modified_attnums_for_update_with_generated(
+                            &root.desc,
+                            &target.assignments,
+                            catalog,
+                        )
+                    })
+                    .transpose()?
                     .unwrap_or_default();
                 RuntimeTriggers::load(
                     catalog,
@@ -13832,11 +13880,15 @@ pub fn execute_update_with_waiter(
             .map(|triggers| triggers.new_transition_capture());
 
         for target in &stmt.targets {
-            let modified_attnums = modified_attnums_for_update(&target.assignments);
             let triggers = ctx
                 .catalog
                 .as_deref()
                 .map(|catalog| {
+                    let modified_attnums = modified_attnums_for_update_with_generated(
+                        &target.desc,
+                        &target.assignments,
+                        catalog,
+                    )?;
                     RuntimeTriggers::load(
                         catalog,
                         target.relation_oid,
@@ -14303,10 +14355,14 @@ fn execute_update_from_joined_input(
         .targets
         .iter()
         .map(|target| {
-            let modified_attnums = modified_attnums_for_update(&target.assignments);
             ctx.catalog
                 .as_deref()
                 .map(|catalog| {
+                    let modified_attnums = modified_attnums_for_update_with_generated(
+                        &target.desc,
+                        &target.assignments,
+                        catalog,
+                    )?;
                     RuntimeTriggers::load(
                         catalog,
                         target.relation_oid,

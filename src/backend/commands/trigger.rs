@@ -148,6 +148,7 @@ impl RuntimeTriggers {
         mut new_row: Vec<Value>,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<Vec<Value>>, ExecError> {
+        self.clear_generated_columns(&mut new_row);
         for trigger in self.triggers.iter().filter(|trigger| {
             trigger_is_before(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype)
         }) {
@@ -197,6 +198,7 @@ impl RuntimeTriggers {
         mut new_row: Vec<Value>,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<Vec<Value>>, ExecError> {
+        self.clear_generated_columns(&mut new_row);
         for trigger in self.triggers.iter().filter(|trigger| {
             trigger_is_before(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype)
         }) {
@@ -208,6 +210,7 @@ impl RuntimeTriggers {
                 TriggerFunctionResult::ReturnNew(values)
                 | TriggerFunctionResult::ReturnOld(values) => new_row = values,
             }
+            self.clear_generated_columns(&mut new_row);
         }
         Ok(Some(new_row))
     }
@@ -456,6 +459,16 @@ impl RuntimeTriggers {
         };
         ctx.trigger_depth = ctx.trigger_depth.saturating_sub(1);
         result
+    }
+
+    fn clear_generated_columns(&self, row: &mut [Value]) {
+        for (index, column) in self.relation_desc.columns.iter().enumerate() {
+            if column.generated.is_some()
+                && let Some(value) = row.get_mut(index)
+            {
+                *value = Value::Null;
+            }
+        }
     }
 
     fn trigger_call_context(

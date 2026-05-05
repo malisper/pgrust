@@ -24850,7 +24850,7 @@ fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions
                     .map(|expr| expr.as_str().trim().to_string());
             }
             Rule::column_generated => {
-                set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
+                set_column_generated(&mut generated, build_column_generated(flag)?, &name, None)?;
             }
             Rule::column_identity => {
                 set_column_identity(&mut identity, build_column_identity(flag)?, &name, None)?;
@@ -24872,6 +24872,7 @@ fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions
                         &mut generated,
                         build_column_generated(generated_part)?,
                         &name,
+                        None,
                     )?;
                 } else if let Some(identity_part) = flag
                     .clone()
@@ -28335,7 +28336,12 @@ fn build_column_def_for_table(
                     .map(|expr| expr.as_str().trim().to_string());
             }
             Rule::column_generated => {
-                set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
+                set_column_generated(
+                    &mut generated,
+                    build_column_generated(flag)?,
+                    &name,
+                    table_name,
+                )?;
             }
             Rule::column_identity => {
                 set_column_identity(
@@ -28364,6 +28370,7 @@ fn build_column_def_for_table(
                         &mut generated,
                         build_column_generated(generated_part)?,
                         &name,
+                        table_name,
                     )?;
                 } else if let Some(identity_part) = flag
                     .clone()
@@ -28408,8 +28415,19 @@ fn set_column_generated(
     target: &mut Option<ColumnGeneratedDef>,
     value: ColumnGeneratedDef,
     column_name: &str,
+    table_name: Option<&str>,
 ) -> Result<(), ParseError> {
     if target.is_some() {
+        if let Some(table_name) = table_name {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "multiple generation clauses specified for column \"{column_name}\" of table \"{table_name}\""
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
         return Err(ParseError::UnexpectedToken {
             expected: "single generation clause",
             actual: format!("multiple generation clauses specified for column \"{column_name}\""),
@@ -28573,9 +28591,11 @@ fn build_column_generated(pair: Pair<'_, Rule>) -> Result<ColumnGeneratedDef, Pa
         }
     }
     if when.as_deref() != Some("always") {
-        return Err(ParseError::UnexpectedToken {
-            expected: "GENERATED ALWAYS",
-            actual: "for a generated column, GENERATED ALWAYS must be specified".into(),
+        return Err(ParseError::DetailedError {
+            message: "for a generated column, GENERATED ALWAYS must be specified".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
         });
     }
     Ok(ColumnGeneratedDef {

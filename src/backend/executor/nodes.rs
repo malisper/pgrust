@@ -4246,11 +4246,7 @@ fn render_index_scan_key(
     .or_else(|| fallback_index_scan_operator(index_meta.am_oid, key.strategy))?;
     let value_sql = match &key.argument {
         IndexScanKeyArgument::Const(value) => match display_type {
-            Some(sql_type) => format!(
-                "{}::{}",
-                render_explain_typed_literal(value, sql_type),
-                render_explain_sql_type_name(sql_type)
-            ),
+            Some(sql_type) => render_index_scan_const_value(value, sql_type),
             None => render_explain_literal(value),
         },
         IndexScanKeyArgument::Runtime(expr) => runtime_renderer
@@ -4268,6 +4264,28 @@ fn render_index_scan_key(
         return Some(format!("{left_sql} {operator_name} ANY ({value_sql})"));
     }
     Some(format!("{left_sql} {operator_name} {value_sql}"))
+}
+
+fn render_index_scan_const_value(value: &Value, sql_type: SqlType) -> String {
+    if matches!(
+        sql_type.kind,
+        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+    ) {
+        let literal = render_explain_literal(value).trim_matches('\'').to_string();
+        if literal
+            .strip_prefix('-')
+            .unwrap_or(&literal)
+            .chars()
+            .all(|ch| ch.is_ascii_digit())
+        {
+            return literal;
+        }
+    }
+    format!(
+        "{}::{}",
+        render_explain_typed_literal(value, sql_type),
+        render_explain_sql_type_name(sql_type)
+    )
 }
 
 fn expression_index_key_needs_parens(expr: &str) -> bool {

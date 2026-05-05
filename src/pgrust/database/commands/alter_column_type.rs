@@ -11,11 +11,12 @@ use crate::backend::executor::value_io::{
 };
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
 use crate::backend::parser::{RawTypeName, SequenceOptionsPatchSpec, SqlTypeKind};
+use crate::backend::rewrite::render_relation_expr_sql;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
-    BTREE_AM_OID, CONSTRAINT_CHECK, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow, PgStatisticRow,
-    default_btree_opclass_oid,
+    BTREE_AM_OID, CONSTRAINT_CHECK, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_TYPE_RELATION_OID, PgStatisticExtRow, PgStatisticRow, default_btree_opclass_oid,
 };
 use crate::include::nodes::primnodes::{expr_sql_type_hint, user_attrno};
 use crate::pgrust::database::ddl::{
@@ -161,6 +162,17 @@ fn batchable_alter_table_actions(
     }
     (saw_batch_action && (saw_rewrite_action || (saw_generated_add && flattened.len() > 1)))
         .then_some(flattened)
+}
+
+fn is_single_drop_expression_action(actions: &[crate::backend::parser::Statement]) -> bool {
+    matches!(
+        actions,
+        [crate::backend::parser::Statement::AlterTableAlterColumnExpression(stmt)]
+            if matches!(
+                stmt.action,
+                crate::backend::parser::AlterColumnExpressionAction::Drop { .. }
+            )
+    )
 }
 
 fn batch_action_table_target(
@@ -317,6 +329,38 @@ fn materialize_generated_columns_for_batch_validation(
         validation_values[column_index] = eval_expr(&expr, &mut slot, ctx)?.to_owned_value();
     }
     Ok(validation_values)
+}
+
+fn canonicalize_staged_generated_exprs(
+    desc: &mut RelationDesc,
+    relation_name: &str,
+    catalog: &dyn CatalogLookup,
+    generated_column_indices: &BTreeSet<usize>,
+) {
+    let snapshot = desc.clone();
+    for (column_index, column) in desc.columns.iter_mut().enumerate() {
+        if !generated_column_indices.contains(&column_index) {
+            continue;
+        }
+        if column.dropped || column.generated.is_none() {
+            continue;
+        }
+        let Some(expr_sql) = column.default_expr.clone() else {
+            continue;
+        };
+        let Ok(bound) = crate::backend::parser::bind_relation_expr(
+            &expr_sql,
+            Some(relation_name),
+            &snapshot,
+            catalog,
+        ) else {
+            continue;
+        };
+        let rendered = render_relation_expr_sql(&bound, Some(relation_name), &snapshot, catalog);
+        if rendered != expr_sql {
+            column.default_expr = Some(rendered);
+        }
+    }
 }
 
 fn plan_rewritten_rows_for_alter_table_batch(
@@ -722,7 +766,7 @@ fn reject_recursive_composite_column_type(
     })
 }
 
-fn reject_row_type_dependents_for_column_type_change(
+pub(super) fn reject_row_type_dependents_for_column_type_change(
     catalog: &dyn CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
 ) -> Result<(), ExecError> {
@@ -747,18 +791,39 @@ fn reject_row_type_dependents_for_column_type_change(
         let Some(dependent_relation) = catalog.lookup_relation_by_oid(class_row.oid) else {
             continue;
         };
+        let relation_depends_on_row_type = catalog.depend_rows().into_iter().any(|row| {
+            row.classid == PG_CLASS_RELATION_OID
+                && row.objid == class_row.oid
+                && row.refclassid == PG_TYPE_RELATION_OID
+                && row.refobjid == row_type_oid
+        });
         let Some(dependent_column) = dependent_relation.desc.columns.iter().find(|column| {
             !column.dropped
-                && (catalog.type_oid_for_sql_type(column.sql_type) == Some(row_type_oid)
+                && (sql_type_contains_relation_rowtype(
+                    catalog,
+                    column.sql_type,
+                    relation.relation_oid,
+                ) || catalog.type_oid_for_sql_type(column.sql_type) == Some(row_type_oid)
                     || column.sql_type.type_oid == row_type_oid
-                    || column.sql_type.typrelid == relation.relation_oid)
+                    || column.sql_type.typrelid == relation.relation_oid
+                    || (relation_depends_on_row_type
+                        && matches!(
+                            column.sql_type.kind,
+                            crate::backend::parser::SqlTypeKind::Composite
+                                | crate::backend::parser::SqlTypeKind::Record
+                        )))
         }) else {
             continue;
+        };
+        let relation_kind = if relation.relkind == 'p' {
+            "table"
+        } else {
+            relation_kind_name(relation.relkind)
         };
         return Err(ExecError::DetailedError {
             message: format!(
                 "cannot alter {} \"{}\" because column \"{}.{}\" uses its row type",
-                relation_kind_name(relation.relkind),
+                relation_kind,
                 relation_name_for_error(catalog, relation.relation_oid),
                 class_row.relname,
                 dependent_column.name
@@ -1101,6 +1166,9 @@ impl Database {
         configured_search_path: Option<&[String]>,
         datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
     ) -> Result<Option<StatementResult>, ExecError> {
+        if is_single_drop_expression_action(actions) {
+            return Ok(None);
+        }
         let Some(actions) = batchable_alter_table_actions(actions) else {
             return Ok(None);
         };
@@ -1198,6 +1266,9 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<Option<StatementResult>, ExecError> {
+        if is_single_drop_expression_action(actions) {
+            return Ok(None);
+        }
         let Some(actions) = batchable_alter_table_actions(actions) else {
             return Ok(None);
         };
@@ -1251,6 +1322,7 @@ impl Database {
         let original_desc = relation.desc.clone();
         let mut staged_desc = relation.desc.clone();
         let mut rewrite_exprs = Vec::new();
+        let mut added_generated_column_indices = BTreeSet::new();
         let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
 
         for action in actions {
@@ -1299,6 +1371,9 @@ impl Database {
                                 .map(|option| format!("{}={}", option.name, option.value))
                                 .collect(),
                         );
+                    }
+                    if column.generated.is_some() {
+                        added_generated_column_indices.insert(staged_desc.columns.len());
                     }
                     staged_desc.columns.push(column);
                 }
@@ -1359,6 +1434,14 @@ impl Database {
                     });
                 }
                 crate::backend::parser::Statement::AlterTableAlterColumnExpression(alter_stmt) => {
+                    if matches!(
+                        alter_stmt.action,
+                        crate::backend::parser::AlterColumnExpressionAction::Set { .. }
+                    ) && relation.relkind != 'p'
+                        && !relation.relispartition
+                    {
+                        reject_row_type_dependents_for_column_type_change(&catalog, &relation)?;
+                    }
                     let plan = validate_alter_table_alter_column_expression(
                         &catalog,
                         relation.relation_oid,
@@ -1392,13 +1475,19 @@ impl Database {
 
         crate::backend::parser::validate_generated_columns(&staged_desc, &catalog)
             .map_err(ExecError::Parse)?;
+        let relation_name = relation_name_for_error(&catalog, relation.relation_oid);
+        canonicalize_staged_generated_exprs(
+            &mut staged_desc,
+            &relation_name,
+            &catalog,
+            &added_generated_column_indices,
+        );
         let check_expr_updates = check_constraint_expr_updates_for_alter_column_types(
             &catalog,
             relation.relation_oid,
             &original_desc,
             &staged_desc,
         );
-        let relation_name = relation_name_for_error(&catalog, relation.relation_oid);
         let relation_constraints = crate::backend::parser::bind_relation_constraints(
             Some(&relation_name),
             relation.relation_oid,
