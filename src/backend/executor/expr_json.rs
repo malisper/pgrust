@@ -6,7 +6,6 @@ use super::expr_casts::{
 };
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
-use crate::backend::executor::expr_datetime::render_json_datetime_value_text_with_config;
 use crate::backend::executor::jsonb::{
     JsonbValue, RawJsonValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value,
     jsonb_get, jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value,
@@ -50,6 +49,7 @@ use pgrust_expr::executor::expr_json::{
     render_serde_json_value_text_with_jsonb_spacing, set_jsonb_path, strip_json_nulls,
     strip_jsonb_nulls,
 };
+use pgrust_expr::expr_datetime::render_json_datetime_value_text_with_config;
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Value as SerdeJsonValue;
 

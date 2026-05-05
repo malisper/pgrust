@@ -8466,14 +8466,14 @@ fn timestamp_precision_preserves_infinity_sentinels() {
     );
 
     assert_eq!(
-        expr_datetime::apply_time_precision(
+        pgrust_expr::expr_datetime::apply_time_precision(
             Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOBEGIN)),
             Some(2)
         ),
         Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOBEGIN))
     );
     assert_eq!(
-        expr_datetime::apply_time_precision(
+        pgrust_expr::expr_datetime::apply_time_precision(
             Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOEND)),
             Some(2)
         ),

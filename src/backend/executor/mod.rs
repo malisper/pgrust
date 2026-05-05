@@ -11,7 +11,6 @@ mod expr_async;
 mod expr_casts;
 mod expr_compile;
 mod expr_date;
-mod expr_datetime;
 mod expr_json;
 mod expr_locks;
 mod expr_math;
@@ -87,8 +86,6 @@ pub(crate) use expr_casts::{
     parse_text_array_literal_with_catalog_and_op,
     parse_text_array_literal_with_catalog_op_and_explicit,
 };
-pub(crate) use expr_datetime::current_timestamp_value;
-pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_json::apply_jsonb_subscript_assignment;
 pub(crate) use expr_multirange::{
     compare_multirange_values, decode_multirange_bytes, encode_multirange_bytes,
@@ -115,6 +112,7 @@ pub(crate) use nodes::{
     render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
 };
 pub use pgrust_executor::ScalarFunctionCallInfo;
+pub(crate) use pgrust_expr::current_timestamp_value;
 pub use pgrust_expr::money_format_text;
 pub(crate) use pgrust_expr::money_parse_text;
 pub(crate) use pgrust_expr::render_bit_text;
@@ -123,6 +121,7 @@ pub(crate) use pgrust_expr::{
     network_contains, network_merge, network_prefix, parse_cidr_bytes, parse_cidr_text,
     parse_inet_bytes, parse_inet_text, render_network_text,
 };
+pub use pgrust_expr::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub use pgrust_expr::{render_macaddr_text, render_macaddr8_text};
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};

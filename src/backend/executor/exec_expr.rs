@@ -22,6 +22,12 @@ use pgrust_expr::{
         substring as eval_bit_substring,
     },
     expr_bool,
+    expr_datetime::{
+        current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
+        current_time_value_from_timestamp_with_config, current_timestamp_value,
+        current_timestamp_value_from_timestamp_with_config, current_timestamp_value_with_config,
+        render_datetime_value_text_with_config,
+    },
     expr_mac::eval_macaddr_function,
     expr_money::{cash_words_text, money_larger, money_smaller},
 };
@@ -49,12 +55,6 @@ use super::expr_date::{
     eval_make_timestamptz_function, eval_timestamptz_constructor_function,
     eval_timezone_function as eval_timetz_timezone_function, eval_to_date_function,
     eval_to_timestamp_function, timezone_interval_seconds, timezone_target_offset_seconds,
-};
-use super::expr_datetime::{
-    current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
-    current_time_value_from_timestamp_with_config, current_timestamp_value,
-    current_timestamp_value_from_timestamp_with_config, current_timestamp_value_with_config,
-    render_datetime_value_text_with_config,
 };
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
