@@ -1331,6 +1331,80 @@ fn collect_visible_page_offsets(
     Ok(offsets)
 }
 
+fn collect_exact_bitmap_visible_offsets(
+    page: &crate::backend::storage::buffer::Page,
+    block: u32,
+    exact_offsets: &std::collections::BTreeSet<u16>,
+    snapshot: &crate::backend::utils::time::snapmgr::Snapshot,
+    txns: &parking_lot::RwLock<crate::backend::access::transam::xact::TransactionManager>,
+) -> Result<Vec<u16>, ExecError> {
+    let max_offset =
+        page_get_max_offset_number(page).map_err(crate::include::access::htup::TupleError::from)?;
+    let txns_guard = txns.read();
+    let mut offsets = Vec::new();
+    let mut returned_offsets = Vec::new();
+
+    for &root_offset in exact_offsets {
+        if root_offset == 0 || root_offset > max_offset || returned_offsets.contains(&root_offset) {
+            continue;
+        }
+
+        if let Some(visible_offset) = visible_bitmap_chain_offset(
+            page,
+            block,
+            root_offset,
+            max_offset,
+            snapshot,
+            &*txns_guard,
+        )? && !returned_offsets.contains(&visible_offset)
+        {
+            offsets.push(visible_offset);
+            returned_offsets.push(visible_offset);
+        }
+    }
+
+    Ok(offsets)
+}
+
+fn visible_bitmap_chain_offset(
+    page: &crate::backend::storage::buffer::Page,
+    block: u32,
+    root_offset: u16,
+    max_offset: u16,
+    snapshot: &crate::backend::utils::time::snapmgr::Snapshot,
+    txns: &crate::backend::access::transam::xact::TransactionManager,
+) -> Result<Option<u16>, ExecError> {
+    let mut offset = root_offset;
+
+    for _ in 0..64 {
+        let item_id = page_get_item_id_unchecked(page, offset);
+        if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
+            return Ok(None);
+        }
+        let tuple_bytes = page_get_item_unchecked(page, offset);
+        if snapshot.tuple_bytes_visible(txns, tuple_bytes) {
+            return Ok(Some(offset));
+        }
+
+        // :HACK: PostgreSQL's exact bitmap heap scan preserves the index TID
+        // stream and follows HOT chains before emitting a visible tuple. pgrust
+        // does not track HOT/non-HOT bits yet, so follow same-page update links
+        // and rely on the bitmap recheck qual to reject incompatible versions.
+        let tuple = HeapTuple::parse(tuple_bytes)?;
+        let next_tid = tuple.header.ctid;
+        if next_tid.block_number != block
+            || next_tid.offset_number == offset
+            || next_tid.offset_number == 0
+            || next_tid.offset_number > max_offset
+        {
+            return Ok(None);
+        }
+        offset = next_tid.offset_number;
+    }
+
+    Ok(None)
+}
+
 fn set_op_result_rows(
     op: crate::include::nodes::parsenodes::SetOperator,
     children: &mut [PlanState],
@@ -5085,7 +5159,8 @@ impl BitmapHeapScanState {
                 continue;
             }
 
-            let (pin, mut offsets) = if ctx.relation_uses_local_buffers(self.relation_oid) {
+            let exact_offsets = self.bitmapqual.bitmap().exact_offsets(block);
+            let (pin, offsets) = if ctx.relation_uses_local_buffers(self.relation_oid) {
                 let local = ctx.local_buffer_manager()?;
                 let pin = local
                     .pin_existing_block(ctx.client_id, self.rel, ForkNumber::Main, block)
@@ -5103,10 +5178,18 @@ impl BitmapHeapScanState {
                 let guard = local.lock_buffer_shared(buffer_id).map_err(|err| {
                     internal_exec_error(format!("bitmap heap local shared lock failed: {err:?}"))
                 })?;
-                (
-                    VisiblePinnedBuffer::Local(Rc::new(owned_pin)),
-                    collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?,
-                )
+                let offsets = if let Some(exact_offsets) = exact_offsets {
+                    collect_exact_bitmap_visible_offsets(
+                        &guard,
+                        block,
+                        exact_offsets,
+                        &ctx.snapshot,
+                        &ctx.txns,
+                    )?
+                } else {
+                    collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?
+                };
+                (VisiblePinnedBuffer::Local(Rc::new(owned_pin)), offsets)
             } else {
                 let pin = ctx
                     .pool
@@ -5123,14 +5206,19 @@ impl BitmapHeapScanState {
                 let guard = ctx.pool.lock_buffer_shared(buffer_id).map_err(|err| {
                     internal_exec_error(format!("bitmap heap shared lock failed: {err:?}"))
                 })?;
-                (
-                    VisiblePinnedBuffer::Shared(Rc::new(owned_pin)),
-                    collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?,
-                )
+                let offsets = if let Some(exact_offsets) = exact_offsets {
+                    collect_exact_bitmap_visible_offsets(
+                        &guard,
+                        block,
+                        exact_offsets,
+                        &ctx.snapshot,
+                        &ctx.txns,
+                    )?
+                } else {
+                    collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?
+                };
+                (VisiblePinnedBuffer::Shared(Rc::new(owned_pin)), offsets)
             };
-            if let Some(exact_offsets) = self.bitmapqual.bitmap().exact_offsets(block) {
-                offsets.retain(|offset| exact_offsets.contains(offset));
-            }
 
             if offsets.is_empty() {
                 continue;

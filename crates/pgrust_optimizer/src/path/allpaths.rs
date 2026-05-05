@@ -6468,6 +6468,17 @@ fn rel_matches_special_join(
     }
 }
 
+fn query_is_merge_input(root: &PlannerInfo) -> bool {
+    // :HACK: MERGE lowers to a SELECT-like hidden input query today. PostgreSQL
+    // keeps the target relation on the left side of that join, and MERGE
+    // RETURNING order follows the executor stream. Preserve that orientation
+    // until MERGE has an explicit planner command tag.
+    root.parse
+        .target_list
+        .iter()
+        .any(|target| target.name == "__merge_source_present")
+}
+
 fn relids_match_ojrelid(root: &PlannerInfo, relids: &[usize], ojrelid: usize) -> bool {
     root.join_info_list
         .iter()
@@ -6582,6 +6593,9 @@ fn join_is_legal(
     }
 
     if let Some((sjinfo, reversed)) = matched_sj {
+        if reversed && query_is_merge_input(root) {
+            return None;
+        }
         return Some(join_spec_for_special_join(sjinfo, reversed));
     }
 

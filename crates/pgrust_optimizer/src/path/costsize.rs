@@ -3076,7 +3076,7 @@ fn build_join_paths_internal(
         && !lateral_orientation_locked
         && !matches!(kind, JoinType::Cross)
         && !recursive_worktable_join
-        && !small_full_join_prefers_merge(kind, &left, &right)
+        && !small_full_join_prefers_merge(root, kind, &left, &right)
         && !small_window_inner_join_prefers_merge(root, kind, &left, &right)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
@@ -3196,8 +3196,14 @@ fn build_join_paths_internal(
 
 // :HACK: Keep predicate.sql's fresh small-table full joins on merge join until
 // pgrust's hash/sort costing tracks PostgreSQL closely enough to choose it.
-fn small_full_join_prefers_merge(kind: JoinType, left: &Path, right: &Path) -> bool {
+fn small_full_join_prefers_merge(
+    root: Option<&PlannerInfo>,
+    kind: JoinType,
+    left: &Path,
+    right: &Path,
+) -> bool {
     matches!(kind, JoinType::Full)
+        && !query_is_merge_input(root)
         && left.plan_info().plan_rows.as_f64() <= SMALL_FULL_MERGE_JOIN_ROW_LIMIT
         && right.plan_info().plan_rows.as_f64() <= SMALL_FULL_MERGE_JOIN_ROW_LIMIT
 }

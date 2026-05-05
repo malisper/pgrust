@@ -1479,6 +1479,7 @@ fn reject_merge_when_system_columns(expr: &SqlExpr) -> Result<(), ParseError> {
 
 fn merge_input_planner_config(
     force_target_driven_order: bool,
+    input_join_type: JoinType,
 ) -> pgrust_nodes::pathnodes::PlannerConfig {
     let mut config = pgrust_nodes::pathnodes::PlannerConfig::default();
     if force_target_driven_order {
@@ -1486,6 +1487,13 @@ fn merge_input_planner_config(
         // predicates before action predicates in target scan order. PostgreSQL
         // plans these cases as target-driven nested loops.
         config.enable_hashjoin = false;
+        config.enable_mergejoin = false;
+    } else if matches!(input_join_type, JoinType::Full) {
+        // :HACK: Full MERGE RETURNING order follows PostgreSQL's target-left
+        // full-join stream. Favor bitmap/index-backed target scans and avoid a
+        // sorted merge join so the hidden input query keeps PostgreSQL's row
+        // stream for matched/source-only/target-only rows.
+        config.enable_seqscan = false;
         config.enable_mergejoin = false;
     }
     config
@@ -3681,7 +3689,7 @@ pub fn plan_merge_with_outer_scopes_and_ctes(
             crate::runtime::planner_with_config(
                 query,
                 catalog,
-                merge_input_planner_config(force_target_driven_order),
+                merge_input_planner_config(force_target_driven_order, input_join_type),
             )
         })??,
     })
@@ -5299,7 +5307,7 @@ pub fn rewrite_bound_insert_auto_view_target(
                     &target.indirection,
                     &resolved.visible_output_exprs,
                 ),
-                target_sql_type: resolved.base_relation.desc.columns[column_index].sql_type,
+                target_sql_type: target.target_sql_type,
             })
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
