@@ -13,7 +13,8 @@ use pgrust_catalog_data::{BTREE_AM_OID, builtin_aggregate_function_for_proc_oid}
 use pgrust_nodes::CommandType;
 use pgrust_nodes::datum::Value;
 use pgrust_nodes::parsenodes::{
-    Query, QueryRowMark, RangeTblEntryKind, SqlTypeKind, SubqueryComparisonOp, TableSampleClause,
+    Query, QueryRowMark, RangeTblEntryKind, SqlType, SqlTypeKind, SubqueryComparisonOp,
+    TableSampleClause,
 };
 use pgrust_nodes::pathnodes::{Path, PathTarget, PlannerInfo, PlannerSubroot, RestrictInfo};
 use pgrust_nodes::plannodes::{
@@ -24,12 +25,19 @@ use pgrust_nodes::plannodes::{
 use pgrust_nodes::primnodes::{
     AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, Expr,
     ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
-    Param, ParamKind, QueryColumn, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr,
-    ScalarFunctionImpl, SetReturningCall, SubLinkType, SubPlan, TargetEntry, Var, WindowClause,
-    WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index, is_executor_special_varno,
-    is_rule_pseudo_varno, is_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
+    Param, ParamKind, ProjectSetTarget, QueryColumn, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO,
+    ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SubLinkType, SubPlan, TargetEntry,
+    Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
+    is_executor_special_varno, is_rule_pseudo_varno, is_special_varno, is_system_attr,
+    set_returning_call_exprs, user_attrno,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+const MEMOIZE_CPU_TUPLE_COST: f64 = 0.01;
+const MEMOIZE_CPU_OPERATOR_COST: f64 = 0.0025;
+const MEMOIZE_DEFAULT_HASH_MEM_BYTES: f64 = 4096.0 * 1024.0 * 2.0;
+const MEMOIZE_ENTRY_OVERHEAD_BYTES: f64 = 64.0;
+const MEMOIZE_TUPLE_OVERHEAD_BYTES: f64 = 16.0;
 
 #[derive(Clone, Debug)]
 struct IndexedTlistEntry {
@@ -8635,8 +8643,14 @@ fn set_nested_loop_join_references(
             predicate: Expr::Const(Value::Bool(false)),
         };
     }
-    right_plan =
-        maybe_wrap_nested_loop_inner_plan(ctx.root, kind, right_plan, &nest_params, left_rows);
+    right_plan = maybe_wrap_nested_loop_inner_plan(
+        ctx.root,
+        ctx.catalog,
+        kind,
+        right_plan,
+        &nest_params,
+        left_rows,
+    );
     Plan::NestedLoopJoin {
         plan_info,
         left: Box::new(left_plan),
@@ -8650,10 +8664,11 @@ fn set_nested_loop_join_references(
 
 fn maybe_wrap_nested_loop_inner_plan(
     root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
     kind: pgrust_nodes::primnodes::JoinType,
     mut right_plan: Plan,
     nest_params: &[ExecParamSource],
-    _outer_rows: f64,
+    outer_rows: f64,
 ) -> Plan {
     let enable_material = root.is_none_or(|root| root.config.enable_material);
     if enable_material
@@ -8699,13 +8714,70 @@ fn maybe_wrap_nested_loop_inner_plan(
         };
     }
 
-    if !root.is_some_and(|root| root.config.enable_memoize) || nest_params.is_empty() {
+    let param_labels = nest_params
+        .iter()
+        .filter_map(|source| source.label.clone().map(|label| (source.paramid, label)))
+        .collect::<BTreeMap<_, _>>();
+    annotate_runtime_index_labels(&mut right_plan, &param_labels);
+
+    let Some(decision) =
+        memoize_inner_plan_decision(root, catalog, kind, &right_plan, nest_params, outer_rows)
+    else {
         return right_plan;
+    };
+
+    Plan::Memoize {
+        plan_info: right_plan.plan_info(),
+        input: Box::new(right_plan),
+        cache_keys: decision.cache_keys,
+        cache_key_labels: decision.cache_key_labels,
+        key_paramids: decision.key_paramids,
+        dependent_paramids: decision.dependent_paramids,
+        binary_mode: decision.binary_mode,
+        single_row: false,
+        est_entries: decision.est_entries,
     }
-    if memoize_inner_plan_is_trivial_or_function(&right_plan)
-        || plan_contains_sql_xml_table_scan(&right_plan)
+}
+
+#[derive(Debug)]
+struct MemoizeDecision {
+    cache_keys: Vec<Expr>,
+    cache_key_labels: Vec<String>,
+    key_paramids: Vec<usize>,
+    dependent_paramids: Vec<usize>,
+    binary_mode: bool,
+    est_entries: usize,
+}
+
+#[derive(Debug)]
+struct MemoizeCost {
+    rescan_total_cost: f64,
+    est_entries: usize,
+}
+
+fn memoize_inner_plan_decision(
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+    kind: pgrust_nodes::primnodes::JoinType,
+    right_plan: &Plan,
+    nest_params: &[ExecParamSource],
+    outer_rows: f64,
+) -> Option<MemoizeDecision> {
+    if !root.is_some_and(|root| root.config.enable_memoize)
+        || outer_rows < 2.0
+        || nest_params.is_empty()
+        || matches!(
+            kind,
+            pgrust_nodes::primnodes::JoinType::Semi | pgrust_nodes::primnodes::JoinType::Anti
+        )
     {
-        return right_plan;
+        return None;
+    }
+    if memoize_inner_plan_is_trivial_or_function(right_plan)
+        || plan_contains_sql_xml_table_scan(right_plan)
+        || plan_contains_volatile_expr(right_plan, catalog)
+    {
+        return None;
     }
     if plan_contains_tid_range_scan(&right_plan) {
         // :HACK: PostgreSQL exposes parameterized Tid Range Scan rescans
@@ -8715,22 +8787,34 @@ fn maybe_wrap_nested_loop_inner_plan(
     // :HACK: PostgreSQL avoids wrapping the whole lateral VALUES branch in
     // Memoize when the outer key has little reuse; keeping the inner index
     // Memoize visible lets repeated VALUES constants share one cache.
-    if _outer_rows > 5000.0 && plan_contains_values_scan(&right_plan) {
-        return right_plan;
+    if outer_rows > 5000.0 && plan_contains_values_scan(right_plan) {
+        return None;
     }
     if root.is_some_and(planner_query_is_dml_row_source)
-        && plan_is_append_like_under_passthrough(&right_plan)
+        && plan_is_append_like_under_passthrough(right_plan)
     {
         // :HACK: PostgreSQL keeps partitioned DML targets visible as target
         // append paths instead of wrapping the target side in Memoize. The
         // long-term fix is a target-aware join path role during planning.
-        return right_plan;
+        return None;
     }
+    if plan_is_partitioned_runtime_index_append_under_passthrough(right_plan)
+        || plan_is_tprt_runtime_index_append_under_passthrough(right_plan)
+    {
+        // :HACK: PostgreSQL's partition_prune tprt joins expose the
+        // parameterized partition Append directly. pgrust currently treats
+        // the whole Append as memoizable, but the longer-term planner shape
+        // should cost per-child rescans and runtime partition pruning before
+        // adding Memoize.
+        return None;
+    }
+
     let mut dependent_paramids = BTreeSet::new();
-    collect_plan_exec_paramids(&right_plan, &mut dependent_paramids);
+    collect_plan_exec_paramids(right_plan, &mut dependent_paramids);
     if dependent_paramids.is_empty() {
-        return right_plan;
+        return None;
     }
+
     let mut seen_key_paramids = BTreeSet::new();
     let mut seen_key_exprs = Vec::new();
     let key_paramids = nest_params
@@ -8747,8 +8831,9 @@ fn maybe_wrap_nested_loop_inner_plan(
         })
         .collect::<Vec<_>>();
     if key_paramids.is_empty() {
-        return right_plan;
+        return None;
     }
+
     let cache_keys = key_paramids
         .iter()
         .filter_map(|paramid| {
@@ -8758,21 +8843,18 @@ fn maybe_wrap_nested_loop_inner_plan(
                 .map(|source| source.expr.clone())
         })
         .collect::<Vec<_>>();
+    if cache_keys.len() != key_paramids.len()
+        || cache_keys.iter().any(|expr| {
+            expr_contains_volatile(expr, catalog) || !memoize_cache_key_is_hashable(expr)
+        })
+    {
+        return None;
+    }
+
     let param_labels = nest_params
         .iter()
         .filter_map(|source| source.label.clone().map(|label| (source.paramid, label)))
         .collect::<BTreeMap<_, _>>();
-    annotate_runtime_index_labels(&mut right_plan, &param_labels);
-    if plan_is_partitioned_runtime_index_append_under_passthrough(&right_plan)
-        || plan_is_tprt_runtime_index_append_under_passthrough(&right_plan)
-    {
-        // :HACK: PostgreSQL's partition_prune tprt joins expose the
-        // parameterized partition Append directly. pgrust currently treats
-        // the whole Append as memoizable, but the longer-term planner shape
-        // should cost per-child rescans and runtime partition pruning before
-        // adding Memoize.
-        return right_plan;
-    }
     let cache_key_labels = key_paramids
         .iter()
         .filter_map(|paramid| {
@@ -8780,24 +8862,667 @@ fn maybe_wrap_nested_loop_inner_plan(
                 .iter()
                 .find(|source| source.paramid == *paramid)
                 .map(|source| {
-                    runtime_label_for_single_param(&right_plan, *paramid, &param_labels)
+                    runtime_label_for_single_param(right_plan, *paramid, &param_labels)
                         .or_else(|| source.label.clone())
                         .unwrap_or_else(|| format!("${}", source.paramid))
                 })
         })
         .collect::<Vec<_>>();
-    let binary_mode = memoize_uses_binary_mode(&right_plan);
-    Plan::Memoize {
-        plan_info: right_plan.plan_info(),
-        input: Box::new(right_plan),
+    let binary_mode = memoize_uses_binary_mode(right_plan);
+    let cost = cost_memoize_rescan(root, catalog, right_plan, &cache_keys, outer_rows)?;
+    let plain_rescan_cost = right_plan.plan_info().total_cost.as_f64();
+    if cost.rescan_total_cost >= plain_rescan_cost {
+        return None;
+    }
+
+    Some(MemoizeDecision {
         cache_keys,
         cache_key_labels,
         key_paramids,
         dependent_paramids: dependent_paramids.into_iter().collect(),
         binary_mode,
-        single_row: false,
-        est_entries: 0,
+        est_entries: cost.est_entries,
+    })
+}
+
+fn cost_memoize_rescan(
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+    inner_plan: &Plan,
+    cache_keys: &[Expr],
+    calls: f64,
+) -> Option<MemoizeCost> {
+    let calls = calls.max(1.0);
+    let info = inner_plan.plan_info();
+    let tuples = info.plan_rows.as_f64().max(1.0);
+    let width = info.plan_width.max(1) as f64;
+    let key_width = cache_keys
+        .iter()
+        .map(|expr| estimate_memoize_expr_width(expr) as f64)
+        .sum::<f64>();
+    let entry_bytes = (tuples * width)
+        + MEMOIZE_ENTRY_OVERHEAD_BYTES
+        + (tuples * MEMOIZE_TUPLE_OVERHEAD_BYTES)
+        + key_width;
+    let est_cache_entries = (MEMOIZE_DEFAULT_HASH_MEM_BYTES / entry_bytes.max(1.0))
+        .floor()
+        .max(1.0);
+    let (mut ndistinct, used_default) =
+        estimate_memoize_distinct_keys(root, catalog, cache_keys, calls, inner_plan);
+    if used_default {
+        ndistinct = calls;
     }
+    ndistinct = ndistinct.clamp(1.0, calls);
+    let est_entries = ndistinct.min(est_cache_entries).min(u32::MAX as f64) as usize;
+    let evict_ratio = 1.0 - est_cache_entries.min(ndistinct) / ndistinct;
+    let hit_ratio =
+        ((calls - ndistinct) / calls) * (est_cache_entries / ndistinct.max(est_cache_entries));
+    let input_startup_cost = info.startup_cost.as_f64();
+    let input_total_cost = info.total_cost.as_f64();
+    let startup_cost = input_startup_cost * (1.0 - hit_ratio)
+        + MEMOIZE_CPU_TUPLE_COST
+        + evict_ratio * MEMOIZE_CPU_TUPLE_COST;
+    let total_cost = input_total_cost * (1.0 - hit_ratio)
+        + MEMOIZE_CPU_OPERATOR_COST * tuples
+        + MEMOIZE_CPU_TUPLE_COST
+        + evict_ratio * MEMOIZE_CPU_TUPLE_COST;
+    Some(MemoizeCost {
+        rescan_total_cost: startup_cost.max(0.0) + total_cost.max(0.0),
+        est_entries: est_entries.max(1),
+    })
+}
+
+fn estimate_memoize_distinct_keys(
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+    cache_keys: &[Expr],
+    calls: f64,
+    inner_plan: &Plan,
+) -> (f64, bool) {
+    let mut estimate = 1.0;
+    let mut used_default = false;
+    for key in cache_keys {
+        match estimate_memoize_key_distinct(root, catalog, key, calls) {
+            Some(distinct) => estimate *= distinct,
+            None if plan_contains_runtime_index_scan(inner_plan) => {
+                estimate *= (calls * 0.1).max(1.0);
+            }
+            None => {
+                estimate *= calls;
+                used_default = true;
+            }
+        }
+    }
+    (estimate.clamp(1.0, calls), used_default)
+}
+
+fn estimate_memoize_key_distinct(
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+    expr: &Expr,
+    calls: f64,
+) -> Option<f64> {
+    let expr = strip_memoize_estimate_casts(expr);
+    let Expr::Var(var) = expr else {
+        return None;
+    };
+    if var.varno == 0 || is_special_varno(var.varno) {
+        return None;
+    }
+    let root = root?;
+    let rte = root.parse.rtable.get(var.varno - 1)?;
+    let RangeTblEntryKind::Relation { relation_oid, .. } = &rte.kind else {
+        return None;
+    };
+    let reltuples = catalog?
+        .class_row_by_oid(*relation_oid)
+        .map(|row| row.reltuples)
+        .filter(|rows| rows.is_finite() && *rows > 0.0)?;
+    Some((reltuples * 0.1).clamp(1.0, calls))
+}
+
+fn strip_memoize_estimate_casts(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            strip_memoize_estimate_casts(inner)
+        }
+        other => other,
+    }
+}
+
+fn estimate_memoize_expr_width(expr: &Expr) -> usize {
+    estimate_memoize_type_width(expr_sql_type(expr))
+}
+
+fn estimate_memoize_type_width(sql_type: SqlType) -> usize {
+    if sql_type.is_array {
+        return 32;
+    }
+    match sql_type.kind {
+        SqlTypeKind::Bool | SqlTypeKind::InternalChar | SqlTypeKind::Char => 1,
+        SqlTypeKind::Int2 => 2,
+        SqlTypeKind::Int4
+        | SqlTypeKind::Oid
+        | SqlTypeKind::RegProc
+        | SqlTypeKind::RegClass
+        | SqlTypeKind::RegType
+        | SqlTypeKind::RegRole
+        | SqlTypeKind::RegNamespace
+        | SqlTypeKind::RegOper
+        | SqlTypeKind::RegOperator
+        | SqlTypeKind::RegProcedure
+        | SqlTypeKind::RegCollation
+        | SqlTypeKind::Xid
+        | SqlTypeKind::Date
+        | SqlTypeKind::Float4 => 4,
+        SqlTypeKind::Int8
+        | SqlTypeKind::Money
+        | SqlTypeKind::Float8
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::TimestampTz
+        | SqlTypeKind::Time
+        | SqlTypeKind::PgLsn => 8,
+        SqlTypeKind::Uuid
+        | SqlTypeKind::Numeric
+        | SqlTypeKind::Interval
+        | SqlTypeKind::TimeTz
+        | SqlTypeKind::Tid => 16,
+        _ => 32,
+    }
+}
+
+fn memoize_cache_key_is_hashable(expr: &Expr) -> bool {
+    let sql_type = expr_sql_type(expr);
+    if sql_type.is_array {
+        return true;
+    }
+    !matches!(
+        sql_type.kind,
+        SqlTypeKind::AnyArray
+            | SqlTypeKind::AnyElement
+            | SqlTypeKind::AnyRange
+            | SqlTypeKind::AnyMultirange
+            | SqlTypeKind::AnyCompatible
+            | SqlTypeKind::AnyCompatibleArray
+            | SqlTypeKind::AnyCompatibleRange
+            | SqlTypeKind::AnyCompatibleMultirange
+            | SqlTypeKind::AnyEnum
+            | SqlTypeKind::Record
+            | SqlTypeKind::Composite
+            | SqlTypeKind::Shell
+            | SqlTypeKind::Void
+            | SqlTypeKind::Trigger
+            | SqlTypeKind::EventTrigger
+            | SqlTypeKind::FdwHandler
+            | SqlTypeKind::Internal
+            | SqlTypeKind::Cstring
+    )
+}
+
+fn plan_contains_volatile_expr(plan: &Plan, catalog: Option<&dyn CatalogLookup>) -> bool {
+    match plan {
+        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => false,
+        Plan::TidScan {
+            tid_cond, filter, ..
+        } => {
+            tid_cond.sources.iter().any(|source| match source {
+                TidScanSource::Scalar(expr) | TidScanSource::Array(expr) => {
+                    expr_contains_volatile(expr, catalog)
+                }
+            }) || filter
+                .as_ref()
+                .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => keys
+            .iter()
+            .chain(order_by_keys)
+            .any(|key| index_scan_key_contains_volatile(key, catalog)),
+        Plan::BitmapIndexScan {
+            keys, index_quals, ..
+        } => {
+            keys.iter()
+                .any(|key| index_scan_key_contains_volatile(key, catalog))
+                || index_quals
+                    .iter()
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            filter_qual,
+            ..
+        } => {
+            plan_contains_volatile_expr(bitmapqual, catalog)
+                || recheck_qual
+                    .iter()
+                    .chain(filter_qual)
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::Hash {
+            input, hash_keys, ..
+        } => {
+            plan_contains_volatile_expr(input, catalog)
+                || hash_keys
+                    .iter()
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children
+            .iter()
+            .any(|child| plan_contains_volatile_expr(child, catalog)),
+        Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_contains_volatile_expr(input, catalog),
+        Plan::Limit {
+            input,
+            limit,
+            offset,
+            ..
+        } => {
+            plan_contains_volatile_expr(input, catalog)
+                || limit
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+                || offset
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            nest_params,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_contains_volatile_expr(left, catalog)
+                || plan_contains_volatile_expr(right, catalog)
+                || nest_params
+                    .iter()
+                    .any(|param| expr_contains_volatile(&param.expr, catalog))
+                || join_qual
+                    .iter()
+                    .chain(qual)
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_contains_volatile_expr(left, catalog)
+                || plan_contains_volatile_expr(right, catalog)
+                || hash_clauses
+                    .iter()
+                    .chain(hash_keys)
+                    .chain(join_qual)
+                    .chain(qual)
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_contains_volatile_expr(left, catalog)
+                || plan_contains_volatile_expr(right, catalog)
+                || merge_clauses
+                    .iter()
+                    .chain(outer_merge_keys)
+                    .chain(inner_merge_keys)
+                    .chain(join_qual)
+                    .chain(qual)
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::Projection { input, targets, .. } => {
+            plan_contains_volatile_expr(input, catalog)
+                || targets
+                    .iter()
+                    .any(|target| expr_contains_volatile(&target.expr, catalog))
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            semantic_accumulators,
+            having,
+            ..
+        } => {
+            plan_contains_volatile_expr(input, catalog)
+                || group_by
+                    .iter()
+                    .chain(passthrough_exprs)
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+                || accumulators
+                    .iter()
+                    .chain(semantic_accumulators.iter().flatten())
+                    .any(|accum| agg_accum_contains_volatile(accum, catalog))
+                || having
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
+            plan_contains_volatile_expr(input, catalog)
+                || clause
+                    .spec
+                    .partition_by
+                    .iter()
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+                || clause
+                    .spec
+                    .order_by
+                    .iter()
+                    .any(|entry| expr_contains_volatile(&entry.expr, catalog))
+                || run_condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+                || top_qual
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Plan::FunctionScan { call, .. } => set_returning_call_contains_volatile(call, catalog),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            plan_contains_volatile_expr(anchor, catalog)
+                || plan_contains_volatile_expr(recursive, catalog)
+        }
+        Plan::Values { rows, .. } => rows
+            .iter()
+            .flatten()
+            .any(|expr| expr_contains_volatile(expr, catalog)),
+        Plan::ProjectSet { input, targets, .. } => {
+            plan_contains_volatile_expr(input, catalog)
+                || targets.iter().any(|target| match target {
+                    ProjectSetTarget::Scalar(target) => {
+                        expr_contains_volatile(&target.expr, catalog)
+                    }
+                    ProjectSetTarget::Set {
+                        source_expr, call, ..
+                    } => {
+                        expr_contains_volatile(source_expr, catalog)
+                            || set_returning_call_contains_volatile(call, catalog)
+                    }
+                })
+        }
+    }
+}
+
+fn index_scan_key_contains_volatile(
+    key: &IndexScanKey,
+    catalog: Option<&dyn CatalogLookup>,
+) -> bool {
+    match &key.argument {
+        IndexScanKeyArgument::Const(_) => false,
+        IndexScanKeyArgument::Runtime(expr) => expr_contains_volatile(expr, catalog),
+    }
+}
+
+fn agg_accum_contains_volatile(accum: &AggAccum, catalog: Option<&dyn CatalogLookup>) -> bool {
+    accum
+        .direct_args
+        .iter()
+        .chain(&accum.args)
+        .any(|expr| expr_contains_volatile(expr, catalog))
+        || accum
+            .order_by
+            .iter()
+            .any(|entry| expr_contains_volatile(&entry.expr, catalog))
+        || accum
+            .filter
+            .as_ref()
+            .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+}
+
+fn set_returning_call_contains_volatile(
+    call: &SetReturningCall,
+    catalog: Option<&dyn CatalogLookup>,
+) -> bool {
+    match call {
+        SetReturningCall::GenerateSeries {
+            start,
+            stop,
+            step,
+            timezone,
+            ..
+        } => {
+            [start, stop, step]
+                .into_iter()
+                .any(|expr| expr_contains_volatile(expr, catalog))
+                || timezone
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            expr_contains_volatile(array, catalog)
+                || expr_contains_volatile(dimension, catalog)
+                || reverse
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonRecordFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. } => args
+            .iter()
+            .any(|expr| expr_contains_volatile(expr, catalog)),
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => {
+            expr_contains_volatile(relid, catalog)
+        }
+        SetReturningCall::TxidSnapshotXip { arg, .. } => expr_contains_volatile(arg, catalog),
+        SetReturningCall::UserDefined {
+            proc_oid,
+            args,
+            inlined_expr,
+            ..
+        } => {
+            proc_is_volatile(catalog, *proc_oid)
+                || args
+                    .iter()
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+                || inlined_expr
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        SetReturningCall::RowsFrom { items, .. } => items.iter().any(|item| match &item.source {
+            RowsFromSource::Function(call) => set_returning_call_contains_volatile(call, catalog),
+            RowsFromSource::Project { output_exprs, .. } => output_exprs
+                .iter()
+                .any(|expr| expr_contains_volatile(expr, catalog)),
+        }),
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => true,
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => false,
+    }
+}
+
+fn expr_contains_volatile(expr: &Expr, catalog: Option<&dyn CatalogLookup>) -> bool {
+    match expr {
+        Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Func(func) => {
+            scalar_function_is_volatile(func, catalog)
+                || func.display_args.as_ref().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| expr_contains_volatile(&arg.expr, catalog))
+                })
+                || func
+                    .args
+                    .iter()
+                    .any(|arg| expr_contains_volatile(arg, catalog))
+        }
+        Expr::Op(op) => {
+            (op.opfuncid != 0 && proc_is_volatile(catalog, op.opfuncid))
+                || op
+                    .args
+                    .iter()
+                    .any(|arg| expr_contains_volatile(arg, catalog))
+        }
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .chain(&aggref.args)
+                .any(|arg| expr_contains_volatile(arg, catalog))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|entry| expr_contains_volatile(&entry.expr, catalog))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(|arg| expr_contains_volatile(arg, catalog)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_contains_volatile(arg, catalog)),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_volatile(inner, catalog)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_volatile(expr, catalog)
+                || expr_contains_volatile(pattern, catalog)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_volatile(inner, catalog),
+        Expr::GroupingKey(grouping_key) => expr_contains_volatile(&grouping_key.expr, catalog),
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_contains_volatile(left, catalog) || expr_contains_volatile(right, catalog)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_volatile(&saop.left, catalog)
+                || expr_contains_volatile(&saop.right, catalog)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_contains_volatile(expr, catalog)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_volatile(expr, catalog)),
+        Expr::FieldSelect { expr, .. } => expr_contains_volatile(expr, catalog),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_volatile(array, catalog)
+                || subscripts.iter().any(|item| {
+                    item.lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+                        || item
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+                })
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_volatile(&arm.expr, catalog)
+                        || expr_contains_volatile(&arm.result, catalog)
+                })
+                || expr_contains_volatile(&case_expr.defresult, catalog)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_contains_volatile(expr, catalog)),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_volatile(expr, catalog))
+                || subplan
+                    .args
+                    .iter()
+                    .any(|expr| expr_contains_volatile(expr, catalog))
+        }
+        Expr::SubLink(_) | Expr::SetReturning(_) | Expr::SqlJsonQueryFunction(_) => true,
+        _ => false,
+    }
+}
+
+fn scalar_function_is_volatile(func: &FuncExpr, catalog: Option<&dyn CatalogLookup>) -> bool {
+    match func.implementation {
+        ScalarFunctionImpl::Builtin(
+            BuiltinScalarFunction::Random
+            | BuiltinScalarFunction::RandomNormal
+            | BuiltinScalarFunction::GenRandomUuid,
+        ) => true,
+        ScalarFunctionImpl::UserDefined { proc_oid } => proc_is_volatile(catalog, proc_oid),
+        ScalarFunctionImpl::Builtin(_) => {
+            func.funcid != 0 && proc_is_volatile(catalog, func.funcid)
+        }
+    }
+}
+
+fn proc_is_volatile(catalog: Option<&dyn CatalogLookup>, proc_oid: u32) -> bool {
+    catalog
+        .and_then(|catalog| catalog.proc_row_by_oid(proc_oid))
+        .is_none_or(|row| row.provolatile == 'v')
 }
 
 fn planner_query_is_dml_row_source(root: &PlannerInfo) -> bool {

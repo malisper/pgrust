@@ -2022,7 +2022,67 @@ fn collect_required_index_only_attrs_for_root(
     let mut parent_attrs = BTreeSet::new();
     let append_info = append_translation(root, rtindex);
     let parent_rtindex = append_info.map(|info| info.parent_relid);
-    let targets = if root.parse.window_clauses.is_empty() {
+    if !root.parse.accumulators.is_empty() {
+        for expr in root
+            .aggregate_layout
+            .group_by
+            .iter()
+            .chain(root.aggregate_layout.passthrough_exprs.iter())
+        {
+            collect_expr_attrs_for_rel(expr, rtindex, &mut attrs);
+            if let Some(parent_rtindex) = parent_rtindex {
+                collect_expr_attrs_for_rel(expr, parent_rtindex, &mut parent_attrs);
+            }
+        }
+        for accum in &root.parse.accumulators {
+            for expr in accum
+                .args
+                .iter()
+                .chain(accum.direct_args.iter())
+                .chain(accum.order_by.iter().map(|item| &item.expr))
+            {
+                collect_expr_attrs_for_rel(expr, rtindex, &mut attrs);
+                if let Some(parent_rtindex) = parent_rtindex {
+                    collect_expr_attrs_for_rel(expr, parent_rtindex, &mut parent_attrs);
+                }
+            }
+            if let Some(expr) = accum.filter.as_ref() {
+                collect_expr_attrs_for_rel(expr, rtindex, &mut attrs);
+                if let Some(parent_rtindex) = parent_rtindex {
+                    collect_expr_attrs_for_rel(expr, parent_rtindex, &mut parent_attrs);
+                }
+            }
+        }
+        if let Some(filter) = filter {
+            collect_expr_attrs_for_rel(filter, rtindex, &mut attrs);
+            if let Some(parent_rtindex) = parent_rtindex {
+                collect_expr_attrs_for_rel(filter, parent_rtindex, &mut parent_attrs);
+            }
+        }
+        if let Some(order_items) = order_items {
+            for item in order_items {
+                collect_expr_attrs_for_rel(&item.expr, rtindex, &mut attrs);
+                if let Some(parent_rtindex) = parent_rtindex {
+                    collect_expr_attrs_for_rel(&item.expr, parent_rtindex, &mut parent_attrs);
+                }
+            }
+        }
+        for restrict in &root.inner_join_clauses {
+            collect_expr_attrs_for_rel(&restrict.clause, rtindex, &mut attrs);
+            if let Some(parent_rtindex) = parent_rtindex {
+                collect_expr_attrs_for_rel(&restrict.clause, parent_rtindex, &mut parent_attrs);
+            }
+        }
+        if let Some(append_info) = append_info {
+            for parent_attr in parent_attrs {
+                if let Some(translated) = append_info.translated_vars.get(parent_attr) {
+                    collect_expr_attrs_for_rel(translated, rtindex, &mut attrs);
+                }
+            }
+        }
+        return attrs.into_iter().collect();
+    }
+    let targets = if root.parse.window_clauses.is_empty() && root.parse.accumulators.is_empty() {
         vec![
             &root.scanjoin_target,
             &root.final_target,

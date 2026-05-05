@@ -139,7 +139,7 @@ direct_test_dependencies() {
         multirangetypes) echo "rangetypes" ;;
         geometry) echo "point lseg line box path polygon circle" ;;
         horology) echo "date time timetz timestamp timestamptz interval" ;;
-        aggregates) echo "create_aggregate" ;;
+        aggregates) echo "create_index create_aggregate" ;;
         numeric_big) echo "numeric" ;;
         join) echo "create_index create_misc" ;;
         memoize) echo "create_index" ;;

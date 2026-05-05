@@ -19,8 +19,9 @@ use pgrust_nodes::datum::{ArrayValue, Value};
 use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use pgrust_nodes::primnodes::{
     BuiltinScalarFunction, CMAX_ATTR_NO, CMIN_ATTR_NO, CaseExpr, Expr, FuncExpr, INDEX_VAR,
-    INNER_VAR, OUTER_VAR, ParamKind, SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SubLinkType,
-    TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, expr_sql_type_hint,
+    INNER_VAR, OUTER_VAR, ParamKind, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl,
+    SetReturningCall, SubLinkType, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO,
+    attrno_index, expr_sql_type_hint,
 };
 
 thread_local! {
@@ -462,6 +463,9 @@ pub fn render_explain_expr_inner_with_qualifier(
             render_explain_distinctness_expr(left, right, false, qualifier, column_names)
         }
         Expr::Func(func) => render_explain_func_expr(func, qualifier, column_names),
+        Expr::SetReturning(srf) => {
+            render_explain_set_returning_call(&srf.call, qualifier, column_names)
+        }
         Expr::ScalarArrayOp(saop) => render_explain_scalar_array_op(saop, qualifier, column_names),
         Expr::Case(case_expr) => render_explain_whole_row_case(case_expr, qualifier, column_names)
             .unwrap_or_else(|| format!("{expr:?}")),
@@ -489,6 +493,8 @@ pub fn render_explain_expr_inner_with_qualifier(
         Expr::SubPlan(subplan) => {
             if subplan.renders_as_initplan() {
                 format!("(InitPlan {}).col1", subplan.plan_id + 1)
+            } else if matches!(subplan.sublink_type, SubLinkType::ArraySubLink) {
+                format!("ARRAY(SubPlan {})", subplan.plan_id + 1)
             } else {
                 format!("(SubPlan {})", subplan.plan_id + 1)
             }
@@ -539,6 +545,170 @@ pub fn render_explain_expr_inner_with_qualifier(
             render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
         }),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_set_returning_call(
+    call: &SetReturningCall,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    if let SetReturningCall::RowsFrom { items, .. } = call {
+        let rendered_items = items
+            .iter()
+            .map(|item| match &item.source {
+                RowsFromSource::Function(call) => {
+                    render_explain_set_returning_call(call, qualifier, column_names)
+                }
+                RowsFromSource::Project { output_exprs, .. } => output_exprs
+                    .iter()
+                    .map(|expr| {
+                        render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("ROWS FROM({rendered_items})");
+    }
+
+    let name = set_returning_call_label(call);
+    let args = match call {
+        SetReturningCall::GenerateSeries {
+            start,
+            stop,
+            step,
+            timezone,
+            ..
+        } => {
+            let mut args = vec![
+                render_explain_expr_inner_with_qualifier(start, qualifier, column_names),
+                render_explain_expr_inner_with_qualifier(stop, qualifier, column_names),
+            ];
+            if !matches!(
+                step,
+                Expr::Const(Value::Int32(1)) | Expr::Const(Value::Int64(1))
+            ) {
+                args.push(render_explain_expr_inner_with_qualifier(
+                    step,
+                    qualifier,
+                    column_names,
+                ));
+            }
+            if let Some(timezone) = timezone {
+                args.push(render_explain_expr_inner_with_qualifier(
+                    timezone,
+                    qualifier,
+                    column_names,
+                ));
+            }
+            args
+        }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            let mut args = vec![
+                render_explain_expr_inner_with_qualifier(array, qualifier, column_names),
+                render_explain_expr_inner_with_qualifier(dimension, qualifier, column_names),
+            ];
+            if let Some(reverse) = reverse {
+                args.push(render_explain_expr_inner_with_qualifier(
+                    reverse,
+                    qualifier,
+                    column_names,
+                ));
+            }
+            args
+        }
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => {
+            vec![render_explain_expr_inner_with_qualifier(
+                relid,
+                qualifier,
+                column_names,
+            )]
+        }
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => Vec::new(),
+        SetReturningCall::TxidSnapshotXip { arg, .. } => {
+            vec![render_explain_expr_inner_with_qualifier(
+                arg,
+                qualifier,
+                column_names,
+            )]
+        }
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonRecordFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. }
+        | SetReturningCall::UserDefined { args, .. } => args
+            .iter()
+            .map(|expr| render_explain_expr_inner_with_qualifier(expr, qualifier, column_names))
+            .collect(),
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => Vec::new(),
+        SetReturningCall::RowsFrom { .. } => unreachable!("handled above"),
+    };
+    format!("{name}({})", args.join(", "))
+}
+
+fn set_returning_call_label(call: &SetReturningCall) -> &str {
+    match call {
+        SetReturningCall::RowsFrom { .. } => "rows from",
+        SetReturningCall::GenerateSeries { .. } => "generate_series",
+        SetReturningCall::GenerateSubscripts { .. } => "generate_subscripts",
+        SetReturningCall::Unnest { .. } => "unnest",
+        SetReturningCall::JsonTableFunction { kind, .. } => match kind {
+            pgrust_nodes::primnodes::JsonTableFunction::ObjectKeys => "json_object_keys",
+            pgrust_nodes::primnodes::JsonTableFunction::Each => "json_each",
+            pgrust_nodes::primnodes::JsonTableFunction::EachText => "json_each_text",
+            pgrust_nodes::primnodes::JsonTableFunction::ArrayElements => "json_array_elements",
+            pgrust_nodes::primnodes::JsonTableFunction::ArrayElementsText => {
+                "json_array_elements_text"
+            }
+            pgrust_nodes::primnodes::JsonTableFunction::JsonbPathQuery => "jsonb_path_query",
+            pgrust_nodes::primnodes::JsonTableFunction::JsonbPathQueryTz => "jsonb_path_query_tz",
+            pgrust_nodes::primnodes::JsonTableFunction::JsonbObjectKeys => "jsonb_object_keys",
+            pgrust_nodes::primnodes::JsonTableFunction::JsonbEach => "jsonb_each",
+            pgrust_nodes::primnodes::JsonTableFunction::JsonbEachText => "jsonb_each_text",
+            pgrust_nodes::primnodes::JsonTableFunction::JsonbArrayElements => {
+                "jsonb_array_elements"
+            }
+            pgrust_nodes::primnodes::JsonTableFunction::JsonbArrayElementsText => {
+                "jsonb_array_elements_text"
+            }
+        },
+        SetReturningCall::SqlJsonTable(_) => "json_table",
+        SetReturningCall::SqlXmlTable(_) => "xmltable",
+        SetReturningCall::JsonRecordFunction { kind, .. } => kind.name(),
+        SetReturningCall::RegexTableFunction { kind, .. } => match kind {
+            pgrust_nodes::primnodes::RegexTableFunction::Matches => "regexp_matches",
+            pgrust_nodes::primnodes::RegexTableFunction::SplitToTable => "regexp_split_to_table",
+        },
+        SetReturningCall::StringTableFunction { kind, .. } => match kind {
+            pgrust_nodes::primnodes::StringTableFunction::StringToTable => "string_to_table",
+        },
+        SetReturningCall::PartitionTree { .. } => "pg_partition_tree",
+        SetReturningCall::PartitionAncestors { .. } => "pg_partition_ancestors",
+        SetReturningCall::PgLockStatus { .. } => "pg_lock_status",
+        SetReturningCall::PgStatProgressCopy { .. } => "pg_stat_progress_copy",
+        SetReturningCall::PgSequences { .. } => "pg_sequences",
+        SetReturningCall::InformationSchemaSequences { .. } => "information_schema.sequences",
+        SetReturningCall::TxidSnapshotXip { .. } => "txid_snapshot_xip",
+        SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
+            pgrust_nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
+            pgrust_nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
+            pgrust_nodes::primnodes::TextSearchTableFunction::Debug => "ts_debug",
+            pgrust_nodes::primnodes::TextSearchTableFunction::Stat => "ts_stat",
+        },
+        SetReturningCall::UserDefined { function_name, .. } => function_name.as_str(),
     }
 }
 
@@ -2324,6 +2494,7 @@ pub fn render_explain_join_expr_inner(
         Expr::Func(func) => render_explain_join_func_expr(func, outer_names, inner_names),
         Expr::SubPlan(subplan) => match subplan.sublink_type {
             SubLinkType::ExistsSubLink => format!("EXISTS(SubPlan {})", subplan.plan_id + 1),
+            SubLinkType::ArraySubLink => format!("ARRAY(SubPlan {})", subplan.plan_id + 1),
             _ if subplan.renders_as_initplan() => {
                 format!("(InitPlan {}).col1", subplan.plan_id + 1)
             }

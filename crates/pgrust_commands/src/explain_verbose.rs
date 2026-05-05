@@ -199,7 +199,7 @@ fn subplan_explain_context(
     subplan: &SubPlan,
     ctx: &VerboseExplainContext,
 ) -> VerboseExplainContext {
-    if subplan.renders_as_initplan() || subplan.args.is_empty() {
+    if subplan.args.is_empty() {
         return ctx.clone();
     }
     let mut child_ctx = ctx.clone();
@@ -799,6 +799,9 @@ fn sort_item_needs_extra_expression_parens(expr: &Expr, rendered: &str) -> bool 
     if is_geo_distance || rendered.contains(" <-> ") {
         // :HACK: PostgreSQL's ruleutils keeps an extra paren layer around
         // ORDER BY distance operators. This is EXPLAIN text only.
+        return !(rendered.starts_with("((") && rendered.ends_with("))"));
+    }
+    if rendered.contains("InitPlan ") && matches!(expr, Expr::Op(_)) {
         return !(rendered.starts_with("((") && rendered.ends_with("))"));
     }
     let already_wrapped = rendered.starts_with('(') && rendered.ends_with(')');
@@ -1437,10 +1440,7 @@ pub fn render_nonverbose_group_key_expr(
         && rendered.starts_with('(')
         && rendered.ends_with(')')
     {
-        if rendered.starts_with("((") {
-            return rendered;
-        }
-        return format!("({rendered})");
+        return rendered;
     }
     rendered
 }
@@ -3630,7 +3630,15 @@ pub fn push_verbose_plan_details(
             if !group_by.is_empty() || !grouping_sets.is_empty() {
                 let mut group_items_full = Vec::new();
                 for expr in group_by {
-                    let rendered = render_verbose_expr(expr, &input_names, ctx);
+                    let mut rendered = render_verbose_expr(expr, &input_names, ctx);
+                    if *strategy == AggregateStrategy::Sorted
+                        && matches!(expr, Expr::Op(_))
+                        && rendered.starts_with('(')
+                        && rendered.ends_with(')')
+                        && !rendered.starts_with("((")
+                    {
+                        rendered = format!("({rendered})");
+                    }
                     group_items_full.push(rendered);
                 }
                 let mut group_items = Vec::new();
@@ -5021,7 +5029,7 @@ pub fn plan_join_output_exprs(
         Plan::Aggregate {
             semantic_output_names: Some(names),
             ..
-        } if !context_has_relation_aliases(ctx) => names.clone(),
+        } if !context_has_relation_aliases(ctx) && ctx.exec_params.is_empty() => names.clone(),
         Plan::Aggregate {
             input,
             group_by,
@@ -5556,7 +5564,7 @@ pub fn verbose_plan_output_exprs(
         Plan::Aggregate {
             semantic_output_names: Some(names),
             ..
-        } => names.clone(),
+        } if !context_has_relation_aliases(ctx) && ctx.exec_params.is_empty() => names.clone(),
         Plan::Aggregate {
             input,
             group_by,
@@ -5627,7 +5635,7 @@ pub fn verbose_plan_output_exprs(
             nest_params,
             ..
         } => {
-            let mut output = verbose_plan_output_exprs(left, ctx, for_parent_ref);
+            let mut output = plan_join_output_exprs(left, ctx, true);
             let mut right_ctx = ctx.clone();
             right_ctx
                 .exec_params
@@ -5636,7 +5644,7 @@ pub fn verbose_plan_output_exprs(
                     expr: source.expr.clone(),
                     column_names: output.clone(),
                 }));
-            output.extend(verbose_plan_output_exprs(right, &right_ctx, for_parent_ref));
+            output.extend(plan_join_output_exprs(right, &right_ctx, true));
             output
         }
         Plan::HashJoin { left, right, .. } | Plan::MergeJoin { left, right, .. } => {

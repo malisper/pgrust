@@ -2954,6 +2954,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         | "enable_material"
         | "enable_partition_pruning"
         | "enable_hashagg"
+        | "enable_presorted_aggregate"
         | "enable_sort"
         | "enable_parallel_append"
         | "enable_parallel_hash"
@@ -3696,6 +3697,11 @@ impl Session {
             enable_hashagg: self
                 .gucs
                 .get("enable_hashagg")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_presorted_aggregate: self
+                .gucs
+                .get("enable_presorted_aggregate")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
             enable_sort: self
@@ -20246,6 +20252,7 @@ impl Session {
                 | "enable_memoize"
                 | "enable_material"
                 | "enable_hashagg"
+                | "enable_presorted_aggregate"
                 | "enable_sort"
                 | "enable_parallel_append"
                 | "enable_parallel_hash"
@@ -22629,6 +22636,7 @@ fn apply_guc_value_to_state(
         | "enable_material"
         | "enable_partition_pruning"
         | "enable_hashagg"
+        | "enable_presorted_aggregate"
         | "enable_sort"
         | "enable_parallel_append"
         | "enable_parallel_hash"

@@ -4166,7 +4166,10 @@ fn render_index_scan_key(
     if purpose == 's' && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null)) {
         match key.strategy {
             0 | 3 => return Some(format!("{column_name} IS NULL")),
-            1 => return Some(format!("{column_name} IS NOT NULL")),
+            1 if !index_predicate_covers_not_null(index_meta, &column_name) => {
+                return Some(format!("{column_name} IS NOT NULL"));
+            }
+            1 => return None,
             _ => {}
         }
     }
@@ -4213,10 +4216,10 @@ fn render_index_scan_key(
             ),
             None => render_explain_literal(value),
         },
-        IndexScanKeyArgument::Runtime(expr) => key
-            .runtime_label
-            .clone()
-            .or_else(|| runtime_renderer.map(|render| render(expr)))
+        IndexScanKeyArgument::Runtime(expr) => runtime_renderer
+            .map(|render| render(expr))
+            .filter(|label| !label.starts_with('$'))
+            .or_else(|| key.runtime_label.clone())
             .unwrap_or_else(|| render_explain_expr(expr, &[])),
     };
     if key.strategy == 3
@@ -4418,6 +4421,23 @@ fn fallback_index_scan_operator(am_oid: u32, strategy: u16) -> Option<String> {
         ),
         _ => None,
     }
+}
+
+fn index_predicate_covers_not_null(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    column_name: &str,
+) -> bool {
+    let Some(predicate) = index_meta.indpred.as_deref() else {
+        return false;
+    };
+    let normalized = predicate.to_ascii_lowercase();
+    let column = column_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(column_name)
+        .trim_matches('"')
+        .to_ascii_lowercase();
+    normalized.contains(&column) && normalized.contains("is not null")
 }
 
 fn index_key_argument_display_type(

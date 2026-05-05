@@ -18839,6 +18839,11 @@ fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
                 rendered.join("\n")
             );
             assert!(
+                !rendered.iter().any(|line| line.trim() == "->  Memoize"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
                 rendered
                     .iter()
                     .any(|line| line.trim() == "->  Function Scan on pg_catalog.generate_series s1"),
@@ -18863,6 +18868,13 @@ fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
                 rendered
                     .iter()
                     .any(|line| line.trim() == "Output: s1.s1, s2.s2, (sum((s1.s1 + s2.s2)))"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                !rendered
+                    .iter()
+                    .any(|line| line.trim() == "Output: s1.s1, s2, (sum((s1 + s2)))"),
                 "{}",
                 rendered.join("\n")
             );
