@@ -15,7 +15,13 @@ use crate::include::nodes::datetime::{
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use pgrust_expr::{
-    eval_geometry_function, expr_bool,
+    eval_geometry_function,
+    expr_bit::{
+        bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
+        overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
+        substring as eval_bit_substring,
+    },
+    expr_bool,
     expr_mac::eval_macaddr_function,
     expr_money::{cash_words_text, money_larger, money_smaller},
 };
@@ -26,11 +32,6 @@ use super::expr_agg_support::{
     execute_scalar_function_value_call,
 };
 use super::expr_async::{eval_pg_notification_queue_usage_function, eval_pg_notify_function};
-use super::expr_bit::{
-    bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
-    overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
-    substring as eval_bit_substring,
-};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
     cast_value_with_source_type_catalog_and_config, parse_text_array_literal_with_catalog_and_op,

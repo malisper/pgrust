@@ -8,7 +8,6 @@ pub mod exec_expr;
 pub(crate) mod exec_tuples;
 mod expr_agg_support;
 mod expr_async;
-mod expr_bit;
 mod expr_casts;
 mod expr_compile;
 mod expr_date;
@@ -75,7 +74,6 @@ pub(crate) use exec_expr::clear_subquery_eval_cache;
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_agg_support::build_aggregate_runtime;
 pub(crate) use expr_agg_support::execute_scalar_function_value_call;
-pub(crate) use expr_bit::render_bit_text;
 pub(crate) use expr_casts::cast_value_with_source_type_catalog_and_config;
 pub(crate) use expr_casts::parse_bytea_text;
 pub(crate) use expr_casts::parse_interval_text_value;
@@ -119,6 +117,7 @@ pub(crate) use nodes::{
 pub use pgrust_executor::ScalarFunctionCallInfo;
 pub use pgrust_expr::money_format_text;
 pub(crate) use pgrust_expr::money_parse_text;
+pub(crate) use pgrust_expr::render_bit_text;
 pub(crate) use pgrust_expr::{
     compare_network_values, encode_network_bytes, eval_network_function, network_btree_upper_bound,
     network_contains, network_merge, network_prefix, parse_cidr_bytes, parse_cidr_text,

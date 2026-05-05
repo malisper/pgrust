@@ -2,7 +2,6 @@
 
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
-use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
     cast_numeric_value, cast_text_value_with_catalog_and_config, cast_text_value_with_config,
     cast_value, cast_value_with_config, parse_text_array_literal_with_catalog_op_and_explicit,
@@ -28,13 +27,14 @@ use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::primnodes::ColumnDesc;
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
+use pgrust_expr::expr_bit::coerce_bit_string;
 use pgrust_expr::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
 };
 use pgrust_expr::{
     encode_network_bytes, parse_cidr_bytes, parse_inet_bytes, parse_macaddr_bytes,
-    parse_macaddr8_bytes, render_macaddr_text, render_macaddr8_text,
+    parse_macaddr8_bytes, render_bit_text, render_macaddr_text, render_macaddr8_text,
 };
 
 mod array;
