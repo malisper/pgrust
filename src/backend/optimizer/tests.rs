@@ -813,6 +813,7 @@ fn plan_has_gather(plan: &Plan) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -2069,6 +2070,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -2096,6 +2098,7 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
     match plan {
         Plan::SeqScan { relation_name, .. }
         | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. } => names.push(
             relation_name
@@ -2516,6 +2519,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -2723,6 +2727,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -3010,6 +3015,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         Plan::Result { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
@@ -3026,6 +3032,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -5341,6 +5348,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             Plan::Result { .. }
             | Plan::SeqScan { .. }
             | Plan::TidScan { .. }
+            | Plan::TidRangeScan { .. }
             | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }
@@ -5428,6 +5436,7 @@ fn grouped_target_srf_uses_project_set_before_aggregate() {
             Plan::Result { .. }
             | Plan::SeqScan { .. }
             | Plan::TidScan { .. }
+            | Plan::TidRangeScan { .. }
             | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }
