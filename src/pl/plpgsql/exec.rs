@@ -975,20 +975,7 @@ fn execute_compiled_function_for_call(
     expected_record_shape: Option<&[QueryColumn]>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    let saved_snapshot_cid = if compiled.provolatile == 'v' {
-        let saved = (ctx.snapshot.current_cid, ctx.snapshot.heap_current_cid);
-        ctx.snapshot.current_cid = CommandId::MAX;
-        ctx.snapshot.heap_current_cid = None;
-        Some(saved)
-    } else {
-        None
-    };
-    let result = execute_compiled_function(compiled, arg_values, expected_record_shape, ctx);
-    if let Some((current_cid, heap_current_cid)) = saved_snapshot_cid {
-        ctx.snapshot.current_cid = current_cid;
-        ctx.snapshot.heap_current_cid = heap_current_cid;
-    }
-    result
+    execute_compiled_function(compiled, arg_values, expected_record_shape, ctx)
 }
 
 fn exec_do_block(
