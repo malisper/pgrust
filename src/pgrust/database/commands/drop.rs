@@ -24,7 +24,9 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::pgrust::auth::AuthCatalog;
 use crate::pgrust::database::ddl::format_sql_type_name;
-use crate::pgrust::database::{DomainEntry, save_range_type_entries};
+use crate::pgrust::database::{
+    DomainEntry, default_sequence_oid_from_default_expr, save_range_type_entries,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
@@ -656,6 +658,12 @@ fn sequence_is_owned_by_relation_in_schema(
     owned_sequence_owner_relation_oid(catcache, sequence_oid)
         .and_then(|relation_oid| catcache.class_by_oid(relation_oid))
         .is_some_and(|row| row.relnamespace == schema_oid)
+        || catcache.attrdef_rows().into_iter().any(|row| {
+            default_sequence_oid_from_default_expr(&row.adbin) == Some(sequence_oid)
+                && catcache
+                    .class_by_oid(row.adrelid)
+                    .is_some_and(|class| class.relnamespace == schema_oid)
+        })
 }
 
 fn partition_has_parent_in_schema(catcache: &CatCache, relation_oid: u32, schema_oid: u32) -> bool {
@@ -1452,7 +1460,7 @@ fn drop_table_direct_dependencies(
                 let Some(class) = ctx.catalog.class_row_by_oid(row.objid) else {
                     continue;
                 };
-                if !matches!(class.relkind, 'r' | 'p' | 'S' | 'v' | 'm') {
+                if !matches!(class.relkind, 'r' | 'p' | 'f' | 'S' | 'v' | 'm') {
                     continue;
                 }
                 deps.push(DropTableDependency::Relation {
@@ -5258,6 +5266,78 @@ mod tests {
         let catcache = db.backend_catcache(1, None).unwrap();
         assert!(catcache.class_by_name("p1").is_none());
         assert!(catcache.class_by_name("c1").is_none());
+    }
+
+    #[test]
+    fn drop_foreign_table_cascade_drops_regular_and_foreign_inherited_children() {
+        let base = temp_dir("foreign_table_inherit_cascade");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create foreign data wrapper fdw")
+            .unwrap();
+        session
+            .execute(&db, "create server srv foreign data wrapper fdw")
+            .unwrap();
+        session
+            .execute(&db, "create foreign table ft_parent (id int4) server srv")
+            .unwrap();
+        session
+            .execute(&db, "create table ct_child () inherits (ft_parent)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create foreign table ft_child () inherits (ft_parent) server srv",
+            )
+            .unwrap();
+
+        clear_backend_notices();
+        session
+            .execute(&db, "drop foreign table ft_parent cascade")
+            .unwrap();
+
+        assert_eq!(
+            take_backend_notices_with_detail(),
+            vec![(
+                String::from("drop cascades to 2 other objects"),
+                Some(String::from(
+                    "drop cascades to table ct_child\n\
+                     drop cascades to foreign table ft_child"
+                ))
+            )]
+        );
+        let catcache = db.backend_catcache(1, None).unwrap();
+        assert!(catcache.class_by_name("ft_parent").is_none());
+        assert!(catcache.class_by_name("ct_child").is_none());
+        assert!(catcache.class_by_name("ft_child").is_none());
+    }
+
+    #[test]
+    fn drop_foreign_table_drops_owned_serial_sequence() {
+        let base = temp_dir("foreign_table_serial_drop");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create foreign data wrapper fdw")
+            .unwrap();
+        session
+            .execute(&db, "create server srv foreign data wrapper fdw")
+            .unwrap();
+        session
+            .execute(&db, "create foreign table ft_serial (a int4) server srv")
+            .unwrap();
+        session
+            .execute(&db, "alter foreign table ft_serial add column id serial")
+            .unwrap();
+
+        session
+            .execute(&db, "drop foreign table ft_serial")
+            .unwrap();
+
+        let catcache = db.backend_catcache(1, None).unwrap();
+        assert!(catcache.class_by_name("ft_serial").is_none());
+        assert!(catcache.class_by_name("ft_serial_id_seq").is_none());
     }
 
     #[test]
