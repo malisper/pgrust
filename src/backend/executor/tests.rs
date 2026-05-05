@@ -16233,6 +16233,22 @@ fn select_list_srf_inside_scalar_function_expands_rows() {
 }
 
 #[test]
+fn select_list_srf_inside_int4mul_expands_rows() {
+    let base = temp_dir("project_set_int4mul");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select int4mul(generate_series(1, 2), 10)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(10)], vec![Value::Int32(20)]],
+    );
+}
+
+#[test]
 fn select_list_nested_srf_uses_multiple_project_set_levels() {
     let base = temp_dir("project_set_nested_srf");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -16303,27 +16319,115 @@ fn select_list_srf_mixes_with_window_output() {
 }
 
 #[test]
+fn select_distinct_on_with_target_srf_matches_postgres_placement() {
+    let base = temp_dir("project_set_distinct_on");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let input = "(values (3, 2), (3, 1), (1, 1), (1, 4), (5, 3), (5, 1)) as t(a, b)";
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            &format!("select distinct on (a) a, b, generate_series(1, 3) g from {input}"),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(3), Value::Int32(2), Value::Int32(1)],
+            vec![Value::Int32(5), Value::Int32(3), Value::Int32(1)],
+        ],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            &format!(
+                "select distinct on (a) a, b, generate_series(1, 3) g from {input} order by a, b desc"
+            ),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(4), Value::Int32(1)],
+            vec![Value::Int32(1), Value::Int32(4), Value::Int32(2)],
+            vec![Value::Int32(1), Value::Int32(4), Value::Int32(3)],
+            vec![Value::Int32(3), Value::Int32(2), Value::Int32(1)],
+            vec![Value::Int32(3), Value::Int32(2), Value::Int32(2)],
+            vec![Value::Int32(3), Value::Int32(2), Value::Int32(3)],
+            vec![Value::Int32(5), Value::Int32(3), Value::Int32(1)],
+            vec![Value::Int32(5), Value::Int32(3), Value::Int32(2)],
+            vec![Value::Int32(5), Value::Int32(3), Value::Int32(3)],
+        ],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            &format!(
+                "select distinct on (a) a, b, generate_series(1, 3) g from {input} order by a, b desc, g desc"
+            ),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(4), Value::Int32(3)],
+            vec![Value::Int32(3), Value::Int32(2), Value::Int32(3)],
+            vec![Value::Int32(5), Value::Int32(3), Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn prefix_operator_returning_set_expands_rows() {
+    let db = Database::open(temp_dir("prefix_operator_srf"), 16).unwrap();
+    db.execute(
+        1,
+        "create operator |@| (procedure = unnest, rightarg = anyarray)",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select |@|array[1, 2, 3]").unwrap(),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
 fn srf_rejected_in_case_and_aggregate_arguments() {
     let base = temp_dir("project_set_invalid_contexts");
     let txns = TransactionManager::new_durable(&base).unwrap();
-    assert!(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select case when true then generate_series(1, 2) else 0 end",
-        )
-        .is_err()
-    );
-    assert!(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select sum(generate_series(1, 2))",
-        )
-        .is_err()
-    );
+    let case_err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select case when true then generate_series(1, 2) else 0 end",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        case_err,
+        ExecError::Parse(ParseError::DetailedError { message, hint: Some(_), sqlstate: "0A000", .. })
+            if message == "set-returning functions are not allowed in CASE"
+    ));
+
+    let agg_err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select sum(generate_series(1, 2))",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        agg_err,
+        ExecError::Parse(ParseError::DetailedError { message, hint: Some(_), sqlstate: "0A000", .. })
+            if message == "aggregate function calls cannot contain set-returning function calls"
+    ));
 }
 
 #[test]

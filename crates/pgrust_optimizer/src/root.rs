@@ -2265,6 +2265,9 @@ fn make_sort_input_target(
     }
 
     if parse.has_target_srfs {
+        if parse.sort_clause.is_empty() && !parse.distinct_on.is_empty() {
+            return PathTarget::from_target_list(processed_tlist);
+        }
         let have_srf_sortcols = processed_tlist
             .iter()
             .any(|target| target.ressortgroupref != 0 && expr_contains_set_returning(&target.expr));

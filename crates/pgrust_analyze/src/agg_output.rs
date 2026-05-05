@@ -215,34 +215,7 @@ fn select_nested_cte_declaration(select: &SelectStatement) -> Option<String> {
 }
 
 fn set_returning_not_allowed_error(context: &'static str) -> ParseError {
-    let message = match context {
-        "aggregate arguments" => {
-            "aggregate function calls cannot contain set-returning function calls"
-        }
-        "window aggregate arguments" => {
-            "window function calls cannot contain set-returning function calls"
-        }
-        _ => return set_returning_not_allowed_in_context_error(context),
-    };
-    ParseError::DetailedError {
-        message: message.into(),
-        detail: None,
-        hint: Some(
-            "You might be able to move the set-returning function into a LATERAL FROM item.".into(),
-        ),
-        sqlstate: "0A000",
-    }
-}
-
-fn set_returning_not_allowed_in_context_error(context: &'static str) -> ParseError {
-    ParseError::DetailedError {
-        message: format!("set-returning functions are not allowed in {context}"),
-        detail: None,
-        hint: Some(
-            "You might be able to move the set-returning function into a LATERAL FROM item.".into(),
-        ),
-        sqlstate: "0A000",
-    }
+    crate::srf_not_allowed_error(context)
 }
 
 fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -> Option<String> {

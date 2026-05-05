@@ -11709,6 +11709,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::Int4Pl
         | BuiltinScalarFunction::Int4Mi
+        | BuiltinScalarFunction::Int4Mul
         | BuiltinScalarFunction::Int4Smaller
         | BuiltinScalarFunction::Int4Sum
         | BuiltinScalarFunction::Int8Inc
@@ -13911,6 +13912,7 @@ pub(crate) fn eval_builtin_function(
         },
         BuiltinScalarFunction::Int4Pl
         | BuiltinScalarFunction::Int4Mi
+        | BuiltinScalarFunction::Int4Mul
         | BuiltinScalarFunction::Int4Smaller
         | BuiltinScalarFunction::Int4Sum
         | BuiltinScalarFunction::Int8Inc

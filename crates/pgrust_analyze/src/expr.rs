@@ -239,34 +239,7 @@ fn scalar_function_needs_raw_arg_binding(func: BuiltinScalarFunction) -> bool {
 }
 
 fn set_returning_not_allowed_error(context: &'static str) -> ParseError {
-    let message = match context {
-        "aggregate arguments" => {
-            "aggregate function calls cannot contain set-returning function calls"
-        }
-        "window aggregate arguments" => {
-            "window function calls cannot contain set-returning function calls"
-        }
-        _ => return set_returning_not_allowed_in_context_error(context),
-    };
-    ParseError::DetailedError {
-        message: message.into(),
-        detail: None,
-        hint: Some(
-            "You might be able to move the set-returning function into a LATERAL FROM item.".into(),
-        ),
-        sqlstate: "0A000",
-    }
-}
-
-fn set_returning_not_allowed_in_context_error(context: &'static str) -> ParseError {
-    ParseError::DetailedError {
-        message: format!("set-returning functions are not allowed in {context}"),
-        detail: None,
-        hint: Some(
-            "You might be able to move the set-returning function into a LATERAL FROM item.".into(),
-        ),
-        sqlstate: "0A000",
-    }
+    crate::srf_not_allowed_error(context)
 }
 
 pub(super) fn build_bound_order_by_entry(

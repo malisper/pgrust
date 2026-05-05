@@ -19658,14 +19658,24 @@ fn build_plan_for_order_by_only_generate_series_uses_project_set() {
 }
 
 #[test]
-fn build_plan_rejects_distinct_on_with_target_srf_before_planning() {
+fn build_plan_for_distinct_on_with_target_srf_uses_project_set() {
+    fn plan_contains_project_set(plan: &Plan) -> bool {
+        match plan {
+            Plan::ProjectSet { .. } => true,
+            Plan::Limit { input, .. }
+            | Plan::Unique { input, .. }
+            | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
+            | Plan::Projection { input, .. } => plan_contains_project_set(input),
+            _ => false,
+        }
+    }
+
     let stmt =
         parse_select("select distinct on (id) id, generate_series(1, 3) from people").unwrap();
-    assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::FeatureNotSupportedMessage(message))
-            if message == "SELECT DISTINCT ON with set-returning functions is not supported"
-    ));
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+
+    assert!(plan_contains_project_set(&plan), "plan was {plan:?}");
 }
 
 #[test]
