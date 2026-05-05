@@ -107,19 +107,31 @@ pub(crate) fn pg_aggregate_row_for_proc_row(row: &PgProcRow) -> PgAggregateRow {
         // Builtin aggregates still execute through the existing fast path.
         // Use catalog-only transition functions so opr_sanity can validate
         // PostgreSQL-shaped aggregate metadata without changing execution.
-        aggtransfn: if ordered_set {
+        aggtransfn: if row.oid == NUMERIC_AVG_AGG_PROC_OID {
+            NUMERIC_AVG_ACCUM_PROC_OID
+        } else if ordered_set {
             ORDERED_SET_TRANSITION_PROC_OID
         } else {
             aggregate_transition_proc_oid(row.oid)
         },
-        aggfinalfn: if ordered_set {
+        aggfinalfn: if row.oid == NUMERIC_AVG_AGG_PROC_OID {
+            NUMERIC_AVG_PROC_OID
+        } else if ordered_set {
             ordered_set_final_proc_oid(row.oid)
         } else {
             0
         },
         aggcombinefn: aggregate_combine_proc_oid(row),
-        aggserialfn: 0,
-        aggdeserialfn: 0,
+        aggserialfn: if row.oid == NUMERIC_AVG_AGG_PROC_OID {
+            NUMERIC_AVG_SERIALIZE_PROC_OID
+        } else {
+            0
+        },
+        aggdeserialfn: if row.oid == NUMERIC_AVG_AGG_PROC_OID {
+            NUMERIC_AVG_DESERIALIZE_PROC_OID
+        } else {
+            0
+        },
         aggmtransfn: 0,
         aggminvtransfn: 0,
         aggmfinalfn: 0,
@@ -128,12 +140,16 @@ pub(crate) fn pg_aggregate_row_for_proc_row(row: &PgProcRow) -> PgAggregateRow {
         aggfinalmodify: if ordered_set { 's' } else { 'r' },
         aggmfinalmodify: 'r',
         aggsortop,
-        aggtranstype: if ordered_set {
+        aggtranstype: if row.oid == NUMERIC_AVG_AGG_PROC_OID || ordered_set {
             INTERNAL_TYPE_OID
         } else {
             row.prorettype
         },
-        aggtransspace: 0,
+        aggtransspace: if row.oid == NUMERIC_AVG_AGG_PROC_OID {
+            128
+        } else {
+            0
+        },
         aggmtranstype: 0,
         aggmtransspace: 0,
         agginitval: None,
@@ -142,7 +158,12 @@ pub(crate) fn pg_aggregate_row_for_proc_row(row: &PgProcRow) -> PgAggregateRow {
 }
 
 const INT8PL_PROC_OID: u32 = 463;
+const NUMERIC_AVG_AGG_PROC_OID: u32 = 6221;
+const NUMERIC_AVG_PROC_OID: u32 = 1837;
+const NUMERIC_AVG_ACCUM_PROC_OID: u32 = 2858;
 const NUMERIC_AVG_COMBINE_PROC_OID: u32 = 3337;
+const NUMERIC_AVG_SERIALIZE_PROC_OID: u32 = 2740;
+const NUMERIC_AVG_DESERIALIZE_PROC_OID: u32 = 2741;
 
 fn aggregate_combine_proc_oid(row: &PgProcRow) -> u32 {
     match builtin_aggregate_function_for_proc_oid(row.oid) {
@@ -238,5 +259,21 @@ mod tests {
             rows.iter()
                 .all(|row| matches!(row.aggkind, 'n' | 'h' | 'o'))
         );
+    }
+
+    #[test]
+    fn numeric_avg_aggregate_metadata_matches_postgres() {
+        let row = bootstrap_pg_aggregate_rows()
+            .into_iter()
+            .find(|row| row.aggfnoid == NUMERIC_AVG_AGG_PROC_OID)
+            .expect("numeric avg aggregate row");
+
+        assert_eq!(row.aggtransfn, NUMERIC_AVG_ACCUM_PROC_OID);
+        assert_eq!(row.aggfinalfn, NUMERIC_AVG_PROC_OID);
+        assert_eq!(row.aggcombinefn, NUMERIC_AVG_COMBINE_PROC_OID);
+        assert_eq!(row.aggserialfn, NUMERIC_AVG_SERIALIZE_PROC_OID);
+        assert_eq!(row.aggdeserialfn, NUMERIC_AVG_DESERIALIZE_PROC_OID);
+        assert_eq!(row.aggtranstype, INTERNAL_TYPE_OID);
+        assert_eq!(row.aggtransspace, 128);
     }
 }
