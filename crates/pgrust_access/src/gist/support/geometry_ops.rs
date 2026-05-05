@@ -50,10 +50,6 @@ fn circle_contains_circle(outer: &GeoCircle, inner: &GeoCircle) -> bool {
     )
 }
 
-fn circle_point_distance(circle: &GeoCircle, point: &GeoPoint) -> f64 {
-    (point_distance(&circle.center, point) - circle.radius).max(0.0)
-}
-
 pub fn circle_bound_box(circle: &GeoCircle) -> GeoBox {
     let radius = circle.radius.abs();
     GeoBox {
@@ -409,7 +405,7 @@ pub fn distance(
     key: &Value,
     query: &Value,
     _is_leaf: bool,
-    services: &dyn AccessScalarServices,
+    _services: &dyn AccessScalarServices,
 ) -> AccessResult<GistDistanceResult> {
     if matches!(key, Value::Null) || matches!(query, Value::Null) {
         return Ok(GistDistanceResult {
@@ -422,15 +418,13 @@ pub fn distance(
             "unsupported GiST geometry distance query",
         ));
     };
-    let value = match (kind, key) {
-        (GeometryKind::Polygon, Value::Polygon(poly)) => {
-            services.point_polygon_distance(query, poly)
+    let value = match kind {
+        GeometryKind::Polygon | GeometryKind::Circle => {
+            box_point_distance(&bounding_box(key)?, query)
         }
-        (GeometryKind::Circle, Value::Circle(circle)) => circle_point_distance(circle, query),
-        _ => box_point_distance(&bounding_box(key)?, query),
     };
     Ok(GistDistanceResult {
         value: Some(value),
-        recheck: false,
+        recheck: true,
     })
 }

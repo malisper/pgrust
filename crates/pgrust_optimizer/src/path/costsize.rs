@@ -11936,11 +11936,11 @@ fn gist_order_match(
         if item.descending {
             return (Vec::new(), None);
         }
-        let Some((column, proc_oid, argument)) = gist_order_item(item) else {
+        let Some((key_expr, proc_oid, argument)) = gist_order_item(item) else {
             return (Vec::new(), None);
         };
         let Some((index_pos, strategy)) = (0..index_key_count(index)).find_map(|index_pos| {
-            if simple_index_column(index, index_pos) != Some(column) {
+            if !order_expr_matches_index_key(index, index_pos, key_expr) {
                 return None;
             }
             let right_type_oid = index_argument_type_oid(&argument);
@@ -12002,21 +12002,16 @@ fn index_operator_type_oid(index: &BoundIndexRelation, index_pos: usize) -> Opti
         })
 }
 
-fn gist_order_item(item: &OrderByEntry) -> Option<(usize, u32, IndexScanKeyArgument)> {
+fn gist_order_item(item: &OrderByEntry) -> Option<(&Expr, u32, IndexScanKeyArgument)> {
     match strip_casts(&item.expr) {
         Expr::Func(func) if func.args.len() == 2 => {
             let left = strip_casts(&func.args[0]);
-            let right = &func.args[1];
-            if let (Some(column), Some(argument)) =
-                (expr_column_index(left), gist_order_argument(right))
-            {
-                return Some((column, func.funcid, argument));
+            let right = strip_casts(&func.args[1]);
+            if let Some(argument) = gist_order_argument(right) {
+                return Some((left, func.funcid, argument));
             }
-            if let (Some(argument), Some(column)) = (
-                gist_order_argument(&func.args[0]),
-                expr_column_index(strip_casts(&func.args[1])),
-            ) {
-                return Some((column, commuted_function_proc_oid(func.funcid)?, argument));
+            if let Some(argument) = gist_order_argument(&func.args[0]) {
+                return Some((right, commuted_function_proc_oid(func.funcid)?, argument));
             }
             None
         }
