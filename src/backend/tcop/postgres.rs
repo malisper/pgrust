@@ -600,6 +600,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = window_error_position(sql, message) {
                 return Some(position);
             }
+            if let Some(position) = aggregate_error_position(sql, message) {
+                return Some(position);
+            }
             if message
                 == "aggregate functions are not allowed in FROM clause of their own query level"
             {
@@ -1284,24 +1287,173 @@ fn check_constraint_system_column_error_name(message: &str) -> Option<&str> {
 }
 
 fn find_aggregate_call_position(sql: &str) -> Option<usize> {
-    [
+    find_aggregate_call_positions(sql, 0, sql.len())
+        .into_iter()
+        .next()
+}
+
+fn find_aggregate_call_positions(sql: &str, start: usize, end: usize) -> Vec<usize> {
+    const AGGREGATE_NAMES: &[&str] = &[
         "array_agg",
-        "string_agg",
-        "json_agg",
-        "sum",
-        "count",
         "avg",
+        "bit_and",
+        "bit_or",
+        "bit_xor",
+        "bool_and",
+        "bool_or",
+        "count",
+        "cume_dist",
+        "dense_rank",
+        "every",
+        "json_agg",
+        "jsonb_agg",
         "min",
         "max",
-    ]
-    .into_iter()
-    .find_map(|name| find_function_call_position(sql, name))
+        "mode",
+        "percent_rank",
+        "percentile_cont",
+        "percentile_disc",
+        "rank",
+        "stddev",
+        "stddev_pop",
+        "stddev_samp",
+        "string_agg",
+        "sum",
+        "variance",
+        "var_pop",
+        "var_samp",
+    ];
+    let mut positions = AGGREGATE_NAMES
+        .iter()
+        .flat_map(|name| find_function_call_positions(sql, name, start, end))
+        .collect::<Vec<_>>();
+    positions.sort_unstable();
+    positions.dedup();
+    positions
 }
 
 fn find_function_call_position(sql: &str, name: &str) -> Option<usize> {
+    find_function_call_positions(sql, name, 0, sql.len())
+        .into_iter()
+        .next()
+}
+
+fn find_function_call_positions(sql: &str, name: &str, start: usize, end: usize) -> Vec<usize> {
     let lower = sql.to_ascii_lowercase();
     let needle = format!("{name}(");
-    lower.find(&needle).map(|index| index + 1)
+    let mut positions = Vec::new();
+    let mut search_from = start.min(lower.len());
+    let end = end.min(lower.len());
+    while search_from < end {
+        let Some(relative) = lower[search_from..end].find(&needle) else {
+            break;
+        };
+        let index = search_from + relative;
+        let before = index.checked_sub(1).and_then(|idx| sql.as_bytes().get(idx));
+        if !before.is_some_and(|byte| is_sql_identifier_byte(*byte)) {
+            positions.push(index + 1);
+        }
+        search_from = index + needle.len();
+    }
+    positions
+}
+
+fn aggregate_error_position(sql: &str, message: &str) -> Option<usize> {
+    match message {
+        "aggregate functions are not allowed in FILTER" => find_filter_aggregate_call_position(sql),
+        "aggregate function calls cannot be nested" => find_nested_aggregate_call_position(sql),
+        "outer-level aggregate cannot contain a lower-level variable in its direct arguments" => {
+            find_within_group_direct_arg_position(sql)
+        }
+        message
+            if message.starts_with("WITHIN GROUP types ")
+                && message.ends_with(" cannot be matched") =>
+        {
+            find_within_group_direct_arg_position(sql)
+        }
+        "cannot use multiple ORDER BY clauses with WITHIN GROUP"
+        | "cannot use DISTINCT with WITHIN GROUP"
+        | "cannot use VARIADIC with WITHIN GROUP" => {
+            find_case_insensitive_token_position(sql, "WITHIN GROUP")
+        }
+        message if message.starts_with("WITHIN GROUP is required for ordered-set aggregate ") => {
+            message
+                .strip_prefix("WITHIN GROUP is required for ordered-set aggregate ")
+                .and_then(|name| find_function_call_position(sql, name))
+        }
+        message
+            if message
+                .ends_with(" is not an ordered-set aggregate, so it cannot have WITHIN GROUP") =>
+        {
+            message
+                .strip_suffix(" is not an ordered-set aggregate, so it cannot have WITHIN GROUP")
+                .and_then(|name| find_function_call_position(sql, name))
+        }
+        _ => None,
+    }
+}
+
+fn find_filter_aggregate_call_position(sql: &str) -> Option<usize> {
+    let filter_position = find_case_insensitive_token_position(sql, "FILTER")?;
+    find_aggregate_call_positions(sql, filter_position - 1, sql.len())
+        .into_iter()
+        .next()
+}
+
+fn find_nested_aggregate_call_position(sql: &str) -> Option<usize> {
+    find_filter_aggregate_call_position(sql).or_else(|| {
+        find_aggregate_call_positions(sql, 0, sql.len())
+            .into_iter()
+            .nth(1)
+    })
+}
+
+fn find_within_group_direct_arg_position(sql: &str) -> Option<usize> {
+    let open = find_within_group_function_open_paren(sql)?;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    let arg_start = skip_ascii_whitespace(sql, open + 1, close);
+    (arg_start < close).then_some(arg_start + 1)
+}
+
+fn find_within_group_function_open_paren(sql: &str) -> Option<usize> {
+    let within_group = find_case_insensitive_token_position(sql, "WITHIN GROUP")? - 1;
+    let bytes = sql.as_bytes();
+    let mut index = within_group;
+    while index > 0 && bytes[index - 1].is_ascii_whitespace() {
+        index -= 1;
+    }
+    if index == 0 || bytes[index - 1] != b')' {
+        return None;
+    }
+    find_matching_open_delimiter(sql, index - 1, b'(', b')')
+}
+
+fn find_matching_open_delimiter(
+    sql: &str,
+    close: usize,
+    open_byte: u8,
+    close_byte: u8,
+) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    if bytes.get(close) != Some(&close_byte) {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut index = close;
+    while index > 0 {
+        index -= 1;
+        match bytes[index] {
+            byte if byte == close_byte => depth += 1,
+            byte if byte == open_byte => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn find_grouping_call_argument_position(sql: &str) -> Option<usize> {
@@ -4864,6 +5016,26 @@ fn apply_final_exec_error_response_compat(sql: &str, response: &mut ExecErrorRes
     apply_error_detail_regression_compat(sql, response);
     apply_collate_regression_error_compat(sql, response);
     apply_privileges_regression_error_compat(sql, response);
+    apply_aggregates_regression_error_compat(sql, response);
+}
+
+fn apply_aggregates_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
+    if response.detail.is_some()
+        || !response
+            .message
+            .contains("must appear in the GROUP BY clause or be used in an aggregate function")
+    {
+        return;
+    }
+    if let (Some(position), Some(direct_arg_position)) = (
+        response.position,
+        find_within_group_direct_arg_position(sql),
+    ) && position == direct_arg_position
+    {
+        response.detail = Some(
+            "Direct arguments of an ordered-set aggregate must use only grouped columns.".into(),
+        );
+    }
 }
 
 fn apply_collate_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -18628,6 +18800,91 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_aggregate_diagnostics() {
+        for (sql, message, needle) in [
+            (
+                "select max(unique1) filter (where sum(ten) > 0) from tenk1;",
+                "aggregate functions are not allowed in FILTER",
+                "sum(",
+            ),
+            (
+                "select (select max(unique1) filter (where sum(ten) > 0) from int8_tbl) from tenk1;",
+                "aggregate function calls cannot be nested",
+                "sum(",
+            ),
+            (
+                "select p, percentile_cont(p order by p) within group (order by x) from generate_series(1,5) x;",
+                "cannot use multiple ORDER BY clauses with WITHIN GROUP",
+                "within group",
+            ),
+            (
+                "select p, sum() within group (order by x::float8) from generate_series(1,5) x;",
+                "sum is not an ordered-set aggregate, so it cannot have WITHIN GROUP",
+                "sum(",
+            ),
+            (
+                "select p, percentile_cont(p,p) from generate_series(1,5) x;",
+                "WITHIN GROUP is required for ordered-set aggregate percentile_cont",
+                "percentile_cont",
+            ),
+            (
+                "select rank(sum(x)) within group (order by x) from generate_series(1,5) x;",
+                "aggregate function calls cannot be nested",
+                "sum(",
+            ),
+            (
+                "select rank(3) within group (order by x) from (values ('fred'),('jim')) v(x);",
+                "WITHIN GROUP types text and integer cannot be matched",
+                "3",
+            ),
+        ] {
+            let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+                message: message.into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42803",
+            });
+            assert_eq!(
+                exec_error_position(sql, &err),
+                sql.to_ascii_lowercase()
+                    .find(&needle.to_ascii_lowercase())
+                    .map(|index| index + 1)
+            );
+        }
+
+        let sql = "select array(select percentile_disc(a) within group (order by x) from (values (0.3),(0.7)) v(a) group by a) from generate_series(1,5) g(x);";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message:
+                "outer-level aggregate cannot contain a lower-level variable in its direct arguments"
+                    .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42803",
+        });
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("(a)").map(|index| index + 2)
+        );
+    }
+
+    #[test]
+    fn exec_error_detail_marks_ordered_set_direct_arg_grouping_errors() {
+        let sql = "select rank(x) within group (order by x) from generate_series(1,5) x;";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn {
+            display_name: "x.x".into(),
+            token: "x".into(),
+            clause: UngroupedColumnClause::SelectTarget,
+        });
+        let mut response = exec_error_response(sql, &err);
+        apply_final_exec_error_response_compat(sql, &mut response);
+
+        assert_eq!(
+            response.detail.as_deref(),
+            Some("Direct arguments of an ordered-set aggregate must use only grouped columns.")
+        );
     }
 
     #[test]
