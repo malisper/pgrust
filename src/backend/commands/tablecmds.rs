@@ -8498,6 +8498,7 @@ pub fn collect_vacuum_stats_with_options(
         index_cleanup,
         truncate,
         default_truncate,
+        false,
     )
 }
 
@@ -8522,6 +8523,7 @@ pub(crate) fn collect_vacuum_stats_for_relations_with_truncate(
         Some(true),
         Some(truncate),
         true,
+        false,
     )
 }
 
@@ -8558,6 +8560,7 @@ pub(crate) fn collect_vacuum_stats_for_relations_with_truncate_policy(
     index_cleanup: Option<bool>,
     truncate: Option<bool>,
     default_truncate: bool,
+    disable_page_skipping: bool,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
     let mut processed = 0u64;
     let mut stats = Vec::with_capacity(relations.len());
@@ -8568,6 +8571,7 @@ pub(crate) fn collect_vacuum_stats_for_relations_with_truncate_policy(
             ctx.client_id,
             entry.rel,
             &ctx.txns,
+            disable_page_skipping,
         )
         .map_err(ExecError::Heap)?;
         let dead_items = &scan.dead_tids;

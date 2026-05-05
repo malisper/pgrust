@@ -3820,6 +3820,7 @@ impl Database {
                 options.index_cleanup,
                 options.truncate,
                 options.default_truncate,
+                options.disable_page_skipping,
             )?
         } else {
             let vacuum_targets = vacuum_relations_for_resolved_targets(
@@ -3835,6 +3836,7 @@ impl Database {
                 options.index_cleanup,
                 options.truncate,
                 options.default_truncate,
+                options.disable_page_skipping,
             )?
         };
         let vacuum_elapsed = vacuum_started.elapsed();

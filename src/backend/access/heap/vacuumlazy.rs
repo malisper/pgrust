@@ -16,9 +16,16 @@ pub fn vacuum_relation_scan(
     client_id: ClientId,
     rel: RelFileLocator,
     txns: &RwLock<TransactionManager>,
+    disable_page_skipping: bool,
 ) -> Result<VacuumScanState, crate::backend::access::heap::heapam::HeapError> {
     let txns_guard = txns.read();
-    pgrust_access::heap::vacuumlazy::vacuum_relation_scan(pool, client_id, rel, &*txns_guard)
+    pgrust_access::heap::vacuumlazy::vacuum_relation_scan(
+        pool,
+        client_id,
+        rel,
+        &*txns_guard,
+        disable_page_skipping,
+    )
 }
 
 // :HACK: Compatibility wrapper preserving the old root transaction-manager
@@ -57,7 +64,7 @@ pub fn vacuum_relation(
     previous_relfrozenxid: Option<TransactionId>,
 ) -> Result<(VacuumScanState, VacuumRelationStats), crate::backend::access::heap::heapam::HeapError>
 {
-    let scan = vacuum_relation_scan(pool, client_id, rel, txns)?;
+    let scan = vacuum_relation_scan(pool, client_id, rel, txns, false)?;
     let stats = vacuum_relation_pages(
         pool,
         client_id,

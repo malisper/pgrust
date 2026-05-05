@@ -1,5 +1,6 @@
 use super::visibilitymap::{
-    VisibilityMapBuffer, VisibilityMapError, visibilitymap_clear_with_wal_policy, visibilitymap_pin,
+    VisibilityMapBuffer, VisibilityMapError, visibilitymap_clear_with_wal_policy,
+    visibilitymap_get_status, visibilitymap_pin,
 };
 use crate::AccessTransactionServices;
 use crate::access::htup::{
@@ -196,6 +197,34 @@ fn clear_page_visibility_if_needed_with_wal_policy(
         wal_policy,
     )?;
     Ok(true)
+}
+
+fn clear_local_page_visibility_for_insert(
+    local: &LocalBufferManager<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    block: u32,
+    page: &mut Page,
+) -> Result<(), HeapError> {
+    let mut vmbuf = None;
+    visibilitymap_pin(local.backing_pool(), rel, block, &mut vmbuf)?;
+    let vm_bits =
+        visibilitymap_get_status(local.backing_pool(), client_id, rel, block, &mut vmbuf)?;
+    if page_is_all_visible(page)? {
+        page_clear_all_visible(page)?;
+    }
+    if vm_bits & (VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN) != 0 {
+        let _ = visibilitymap_clear_with_wal_policy(
+            local.backing_pool(),
+            client_id,
+            rel,
+            block,
+            &vmbuf,
+            VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN,
+            HeapWalPolicy::NoWal,
+        )?;
+    }
+    Ok(())
 }
 
 fn write_heap_page_locked(
@@ -1799,6 +1828,13 @@ fn heap_insert_version_local(
         }
         match heap_page_add_tuple(&mut new_page, target_block, &stored) {
             Ok(offset_number) => {
+                clear_local_page_visibility_for_insert(
+                    local,
+                    client_id,
+                    rel,
+                    target_block,
+                    &mut new_page,
+                )?;
                 *guard = new_page;
                 local
                     .mark_buffer_dirty(buffer_id)

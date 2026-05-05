@@ -10399,6 +10399,61 @@ fn vacuum_truncates_empty_tail_and_skips_catalog_full_rewrite() {
         ),
         vec![vec![Value::Bool(true)]]
     );
+
+    session
+        .execute(
+            &db,
+            "create temp table vac_temp_truncate(i int4 not null, j text)
+             with (vacuum_truncate=false, autovacuum_enabled=false)",
+        )
+        .unwrap();
+    assert!(
+        session
+            .execute(
+                &db,
+                "insert into vac_temp_truncate values (1, null), (null, null)"
+            )
+            .is_err()
+    );
+    session
+        .execute(
+            &db,
+            "vacuum (freeze, disable_page_skipping) vac_temp_truncate",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_relation_size('vac_temp_truncate') > 0"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    session
+        .execute(&db, "alter table vac_temp_truncate reset (vacuum_truncate)")
+        .unwrap();
+    assert!(
+        session
+            .execute(
+                &db,
+                "insert into vac_temp_truncate values (1, null), (null, null)"
+            )
+            .is_err()
+    );
+    session
+        .execute(
+            &db,
+            "vacuum (freeze, disable_page_skipping) vac_temp_truncate",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_relation_size('vac_temp_truncate') = 0"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
 }
 
 #[test]

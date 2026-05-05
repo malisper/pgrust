@@ -44,6 +44,7 @@ pub fn vacuum_relation_scan(
     client_id: ClientId,
     rel: RelFileLocator,
     txns: &dyn AccessTransactionServices,
+    disable_page_skipping: bool,
 ) -> Result<VacuumScanState, HeapError> {
     let nblocks = pool.with_storage_mut(|storage| storage.smgr.nblocks(rel, ForkNumber::Main))?;
     let oldest_xmin = txns.oldest_active_xid();
@@ -58,7 +59,7 @@ pub fn vacuum_relation_scan(
 
     for block in 0..nblocks {
         let vm_bits = visibilitymap_get_status(pool, client_id, rel, block, &mut vmbuf)?;
-        if vm_bits & VISIBILITYMAP_ALL_VISIBLE != 0 {
+        if !disable_page_skipping && vm_bits & VISIBILITYMAP_ALL_VISIBLE != 0 {
             skipped_all_visible += 1;
             if vm_bits & VISIBILITYMAP_ALL_FROZEN != 0 {
                 skipped_all_frozen += 1;
@@ -210,7 +211,7 @@ pub fn vacuum_relation(
     txns: &dyn AccessTransactionServices,
     previous_relfrozenxid: Option<TransactionId>,
 ) -> Result<(VacuumScanState, VacuumRelationStats), HeapError> {
-    let scan = vacuum_relation_scan(pool, client_id, rel, txns)?;
+    let scan = vacuum_relation_scan(pool, client_id, rel, txns, false)?;
     let stats = vacuum_relation_pages(
         pool,
         client_id,

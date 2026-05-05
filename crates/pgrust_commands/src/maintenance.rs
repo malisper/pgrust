@@ -19,6 +19,7 @@ pub enum MaintenanceError {
 pub struct VacuumExecOptions {
     pub analyze: bool,
     pub full: bool,
+    pub disable_page_skipping: bool,
     pub index_cleanup: Option<bool>,
     pub truncate: Option<bool>,
     pub default_truncate: bool,
@@ -234,6 +235,7 @@ pub fn vacuum_exec_options(
     Ok(VacuumExecOptions {
         analyze: stmt.analyze,
         full: stmt.full,
+        disable_page_skipping: stmt.disable_page_skipping,
         index_cleanup,
         truncate: stmt.truncate,
         default_truncate: gucs
