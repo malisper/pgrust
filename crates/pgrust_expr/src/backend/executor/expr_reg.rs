@@ -626,6 +626,15 @@ pub fn format_type_text(oid: u32, typmod: Option<i32>, catalog: &dyn CatalogLook
                 }
                 name
             })
+            .or_else(|| {
+                catalog.domain_by_type_oid(oid).map(|domain| {
+                    if oid == domain.array_oid {
+                        format!("{}[]", quote_identifier_if_needed(&domain.name))
+                    } else {
+                        quote_identifier_if_needed(&domain.name)
+                    }
+                })
+            })
             .unwrap_or_else(|| "???".into()),
     }
 }
@@ -1032,12 +1041,29 @@ fn parse_single_i32_typmod(input: &str, type_name: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::DomainLookup;
     use pgrust_catalog_data::{
         ACLITEM_ARRAY_TYPE_OID, ACLITEM_TYPE_OID, BIT_TYPE_OID,
         INFORMATION_SCHEMA_INDEX_POSITION_PROC_OID, INT4_TYPE_OID, NUMERIC_TYPE_OID,
         POSIX_COLLATION_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID,
         TIMESTAMP_TYPE_OID, VARCHAR_TYPE_OID, VOID_TYPE_OID,
     };
+
+    struct DomainOnlyLookup;
+
+    impl CatalogLookup for DomainOnlyLookup {
+        fn domain_by_type_oid(&self, oid: u32) -> Option<DomainLookup> {
+            matches!(oid, 80_001 | 80_002).then(|| DomainLookup {
+                oid: 80_001,
+                array_oid: 80_002,
+                name: "domainint4".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
+                not_null: false,
+                check: None,
+                constraints: Vec::new(),
+            })
+        }
+    }
 
     #[test]
     fn regproc_regoper_regcollation_helpers_resolve_and_format() {
@@ -1111,6 +1137,18 @@ mod tests {
             "void"
         );
         assert_eq!(format_type_text(9_999_999, None, &BOOTSTRAP_LOOKUP), "???");
+    }
+
+    #[test]
+    fn format_type_uses_dynamic_domain_lookup() {
+        assert_eq!(
+            format_type_text(80_001, None, &DomainOnlyLookup),
+            "domainint4"
+        );
+        assert_eq!(
+            format_type_text(80_002, None, &DomainOnlyLookup),
+            "domainint4[]"
+        );
     }
 
     #[test]

@@ -413,6 +413,8 @@ pub(crate) fn send_query_result(
     relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
+    type_names: Option<&HashMap<u32, String>>,
+    type_catalog: Option<&dyn crate::backend::parser::CatalogLookup>,
     enum_labels: Option<&HashMap<(u32, u32), String>>,
     proc_signatures: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
@@ -433,6 +435,8 @@ pub(crate) fn send_query_result(
                 relation_names,
                 proc_names,
                 namespace_names,
+                type_names,
+                type_catalog,
                 enum_labels,
                 proc_signatures,
             )
@@ -525,6 +529,8 @@ fn format_typed_oid_text(
     proc_names: Option<&HashMap<u32, String>>,
     proc_signatures: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
+    type_names: Option<&HashMap<u32, String>>,
+    type_catalog: Option<&dyn crate::backend::parser::CatalogLookup>,
 ) -> Option<String> {
     match kind? {
         SqlTypeKind::RegRole => Some(format_catalog_oid_text(oid, role_names, true)),
@@ -551,12 +557,19 @@ fn format_typed_oid_text(
             crate::backend::executor::expr_reg::format_regoperator_oid_optional(oid, None)
                 .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
         ),
-        SqlTypeKind::RegType => {
-            match crate::backend::executor::expr_reg::format_type_optional(Some(oid), None, None) {
-                Value::Text(text) => Some(text.to_string()),
-                _ => Some(oid.to_string()),
-            }
-        }
+        SqlTypeKind::RegType => type_catalog
+            .map(|catalog| crate::backend::executor::expr_reg::format_type_text(oid, None, catalog))
+            .or_else(|| type_names.and_then(|names| names.get(&oid).cloned()))
+            .or_else(|| {
+                match crate::backend::executor::expr_reg::format_type_optional(
+                    Some(oid),
+                    None,
+                    None,
+                ) {
+                    Value::Text(text) => Some(text.to_string()),
+                    _ => Some(oid.to_string()),
+                }
+            }),
         SqlTypeKind::RegCollation => Some(
             crate::backend::executor::expr_reg::format_regcollation_oid_optional(oid, None)
                 .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
@@ -596,6 +609,8 @@ pub(crate) fn send_typed_data_row(
     relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
+    type_names: Option<&HashMap<u32, String>>,
+    type_catalog: Option<&dyn crate::backend::parser::CatalogLookup>,
     enum_labels: Option<&HashMap<(u32, u32), String>>,
     proc_signatures: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
@@ -653,6 +668,8 @@ pub(crate) fn send_typed_data_row(
                         proc_names,
                         proc_signatures,
                         namespace_names,
+                        type_names,
+                        type_catalog,
                     )
                 {
                     buf.extend_from_slice(text.as_bytes());
@@ -729,6 +746,8 @@ pub(crate) fn send_typed_data_row(
                         proc_names,
                         proc_signatures,
                         namespace_names,
+                        type_names,
+                        type_catalog,
                     )
                 {
                     buf.extend_from_slice(text.as_bytes());
@@ -1029,6 +1048,8 @@ pub(crate) fn format_text_data_value(
     relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
+    type_names: Option<&HashMap<u32, String>>,
+    type_catalog: Option<&dyn crate::backend::parser::CatalogLookup>,
 ) -> Result<Option<String>, ExecError> {
     let mut row = Vec::new();
     let mut buf = Vec::new();
@@ -1043,6 +1064,8 @@ pub(crate) fn format_text_data_value(
         relation_names,
         proc_names,
         namespace_names,
+        type_names,
+        type_catalog,
         None,
         None,
     )
@@ -1760,6 +1783,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1794,6 +1819,8 @@ mod tests {
             Some(&proc_names),
             None,
             None,
+            None,
+            None,
             Some(&proc_signatures),
         )
         .unwrap();
@@ -1826,6 +1853,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1852,6 +1881,8 @@ mod tests {
             FloatFormatOptions::default(),
             None,
             Some(&relation_names),
+            None,
+            None,
             None,
             None,
             None,
@@ -1889,12 +1920,49 @@ mod tests {
             Some(&namespace_names),
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
 
         assert!(
             out.windows("public".len())
                 .any(|window| window == b"public")
+        );
+    }
+
+    #[test]
+    fn typed_data_row_renders_regtype_with_type_name() {
+        let mut out = Vec::new();
+        let mut row_buf = Vec::new();
+        let mut type_names = HashMap::new();
+        type_names.insert(80_001, "domainint4".to_string());
+
+        send_typed_data_row(
+            &mut out,
+            &[Value::Int64(80_001)],
+            &[QueryColumn {
+                name: "pg_typeof".into(),
+                sql_type: SqlType::new(SqlTypeKind::RegType),
+                wire_type_oid: None,
+            }],
+            &[],
+            &mut row_buf,
+            FloatFormatOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            Some(&type_names),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            out.windows("domainint4".len())
+                .any(|window| window == b"domainint4")
         );
     }
 
@@ -1917,6 +1985,8 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
+            None,
             None,
             None,
             None,
@@ -1950,6 +2020,8 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
+            None,
             None,
             None,
             None,
@@ -2012,6 +2084,8 @@ mod tests {
             &[1, 1],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
+            None,
             None,
             None,
             None,

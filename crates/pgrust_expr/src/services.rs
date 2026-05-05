@@ -35,6 +35,8 @@ pub struct DomainConstraintLookup {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainLookup {
+    pub oid: u32,
+    pub array_oid: u32,
     pub name: String,
     pub sql_type: SqlType,
     pub not_null: bool,

@@ -144,6 +144,8 @@ impl pgrust_expr::ExprCatalogLookup for RootExprCatalog<'_> {
         self.0
             .domain_by_type_oid(domain_oid)
             .map(|domain| pgrust_expr::DomainLookup {
+                oid: domain.oid,
+                array_oid: domain.array_oid,
                 name: domain.name,
                 sql_type: domain.sql_type,
                 not_null: domain.not_null,

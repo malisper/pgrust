@@ -11,6 +11,7 @@ pub struct WireCatalogMaps {
     proc_names: Option<HashMap<u32, String>>,
     proc_signatures: Option<HashMap<u32, String>>,
     namespace_names: Option<HashMap<u32, String>>,
+    type_names: Option<HashMap<u32, String>>,
     enum_labels: Option<HashMap<(u32, u32), String>>,
 }
 
@@ -21,6 +22,7 @@ struct WireCatalogMapNeeds {
     proc_names: bool,
     proc_signatures: bool,
     namespace_names: bool,
+    type_names: bool,
     enum_labels: bool,
 }
 
@@ -43,6 +45,7 @@ impl WireCatalogMaps {
                 .proc_signatures
                 .then(|| proc_signature_map_fn(catalog)),
             namespace_names: needs.namespace_names.then(|| namespace_name_map(catalog)),
+            type_names: needs.type_names.then(|| type_name_map(catalog)),
             enum_labels: needs.enum_labels.then(|| enum_label_map(catalog)),
         }
     }
@@ -65,6 +68,10 @@ impl WireCatalogMaps {
 
     pub fn namespace_names(&self) -> Option<&HashMap<u32, String>> {
         self.namespace_names.as_ref()
+    }
+
+    pub fn type_names(&self) -> Option<&HashMap<u32, String>> {
+        self.type_names.as_ref()
     }
 
     pub fn enum_labels(&self) -> Option<&HashMap<(u32, u32), String>> {
@@ -97,6 +104,7 @@ impl WireCatalogMapNeeds {
                 self.proc_names = true;
                 self.proc_signatures = true;
             }
+            SqlTypeKind::RegType => self.type_names = true,
             SqlTypeKind::RegNamespace => self.namespace_names = true,
             SqlTypeKind::Enum => self.enum_labels = true,
             _ => {}
@@ -163,6 +171,14 @@ pub fn namespace_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
         .collect()
 }
 
+pub fn type_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .type_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.typname))
+        .collect()
+}
+
 pub fn enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
     catalog
         .enum_rows()
@@ -213,12 +229,18 @@ mod tests {
                 sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Enum)),
                 wire_type_oid: None,
             },
+            QueryColumn {
+                name: "typeof".into(),
+                sql_type: SqlType::new(SqlTypeKind::RegType),
+                wire_type_oid: None,
+            },
         ];
         let needs = WireCatalogMapNeeds::for_columns(&columns);
         assert!(needs.role_names);
         assert!(needs.proc_names);
         assert!(needs.proc_signatures);
         assert!(needs.enum_labels);
+        assert!(needs.type_names);
         assert!(!needs.relation_names);
     }
 

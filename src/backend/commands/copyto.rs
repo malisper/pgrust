@@ -79,7 +79,17 @@ pub fn write_copy_to_row<S: CopyToSink + ?Sized>(
         row,
         options,
         |value, column| {
-            format_text_data_value(value, column, float_format.clone(), None, None, None, None)
+            format_text_data_value(
+                value,
+                column,
+                float_format.clone(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
         },
         |value, column| encode_binary_data_row_value(value, column.sql_type),
     )

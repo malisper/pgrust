@@ -2278,6 +2278,8 @@ impl pgrust_expr::ExprCatalogLookup for dyn CatalogLookup + '_ {
     fn domain_by_type_oid(&self, domain_oid: u32) -> Option<pgrust_expr::DomainLookup> {
         CatalogLookup::domain_by_type_oid(self, domain_oid).map(|domain| {
             pgrust_expr::DomainLookup {
+                oid: domain.oid,
+                array_oid: domain.array_oid,
                 name: domain.name,
                 sql_type: domain.sql_type,
                 not_null: domain.not_null,

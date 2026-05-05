@@ -7076,6 +7076,8 @@ fn handle_portal_statement(
                             None,
                             None,
                             None,
+                            None,
+                            Some(&catalog),
                             Some(&enum_labels),
                             None,
                         )?;
@@ -7192,6 +7194,8 @@ fn try_handle_pg_listening_channels_query(
         None,
         None,
         None,
+        None,
+        None,
     )?;
     Ok(true)
 }
@@ -7259,6 +7263,8 @@ fn try_handle_current_schemas_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
+        None,
         None,
         None,
         None,
@@ -7527,6 +7533,8 @@ fn execute_query_statement(
                 catalog_maps.relation_names(),
                 catalog_maps.proc_names(),
                 catalog_maps.namespace_names(),
+                catalog_maps.type_names(),
+                Some(&catalog),
                 catalog_maps.enum_labels(),
                 catalog_maps.proc_signatures(),
             )?;
@@ -7611,6 +7619,8 @@ fn try_handle_nonstandard_backslash_select(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
+        None,
         None,
         None,
         None,
@@ -7771,6 +7781,8 @@ fn execute_streaming_select_statement(
                                     catalog_maps.relation_names(),
                                     catalog_maps.proc_names(),
                                     catalog_maps.namespace_names(),
+                                    catalog_maps.type_names(),
+                                    Some(&catalog),
                                     catalog_maps.enum_labels(),
                                     catalog_maps.proc_signatures(),
                                 )?;
@@ -7871,6 +7883,8 @@ fn try_handle_psql_describe_query(
         catalog_maps.relation_names(),
         catalog_maps.proc_names(),
         catalog_maps.namespace_names(),
+        catalog_maps.type_names(),
+        Some(&catalog),
         catalog_maps.enum_labels(),
         catalog_maps.proc_signatures(),
     )?;
@@ -9451,6 +9465,8 @@ fn try_handle_statistics_catalog_query(
         catalog_maps.relation_names(),
         catalog_maps.proc_names(),
         catalog_maps.namespace_names(),
+        catalog_maps.type_names(),
+        Some(&catalog),
         catalog_maps.enum_labels(),
         catalog_maps.proc_signatures(),
     )?;
@@ -12454,6 +12470,8 @@ fn handle_execute(
                         catalog_maps.relation_names(),
                         catalog_maps.proc_names(),
                         catalog_maps.namespace_names(),
+                        catalog_maps.type_names(),
+                        Some(&catalog),
                         catalog_maps.enum_labels(),
                         catalog_maps.proc_signatures(),
                     )?;
@@ -12524,6 +12542,8 @@ fn try_handle_pipeline_statement_timeout_show(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
+        None,
         None,
         None,
         None,
