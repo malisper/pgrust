@@ -18,8 +18,8 @@ use pgrust_nodes::parsenodes::{
 use pgrust_nodes::pathnodes::{Path, PathTarget, PlannerInfo, PlannerSubroot, RestrictInfo};
 use pgrust_nodes::plannodes::{
     AggregatePhase, AggregateStrategy, ExecParamSource, IndexScanKey, IndexScanKeyArgument,
-    PartitionPruneChildDomain, PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark, TidScanCond,
-    TidScanSource,
+    PartitionPruneChildDomain, PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark,
+    TidRangeScanCond, TidScanCond, TidScanSource,
 };
 use pgrust_nodes::primnodes::{
     AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, Expr,
@@ -566,6 +566,7 @@ fn plan_has_complete_aggregate(plan: &Plan) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -687,6 +688,7 @@ fn parallel_worker_safe_plan_shape(
         | Plan::MergeAppend { .. }
         | Plan::Unique { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::BitmapOr { .. }
         | Plan::BitmapAnd { .. }
         | Plan::Memoize { .. }
@@ -897,6 +899,7 @@ fn mark_parallel_seq_scans_inner(plan: &mut Plan, next_scan_id: &mut usize) {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -950,6 +953,7 @@ fn plan_contains_seqscan(plan: &Plan) -> bool {
         } => plan_contains_seqscan(anchor) || plan_contains_seqscan(recursive),
         Plan::Result { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => false,
@@ -1012,6 +1016,7 @@ fn plan_contains_parallel_aware_seqscan(plan: &Plan) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -1033,6 +1038,7 @@ fn plan_parallel_safe(plan: &Plan, catalog: &dyn CatalogLookup) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { filter: None, .. }
+        | Plan::TidRangeScan { filter: None, .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. } => true,
@@ -1040,6 +1046,16 @@ fn plan_parallel_safe(plan: &Plan, catalog: &dyn CatalogLookup) -> bool {
             filter: Some(filter),
             ..
         } => !expr_parallel_safety(filter, Some(catalog)).is_unsafe(),
+        Plan::TidRangeScan {
+            tid_range_cond,
+            filter,
+            ..
+        } => {
+            !expr_parallel_safety(&tid_range_cond.display_expr, Some(catalog)).is_unsafe()
+                && filter
+                    .as_ref()
+                    .is_none_or(|filter| !expr_parallel_safety(filter, Some(catalog)).is_unsafe())
+        }
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::BitmapOr { children, .. }
@@ -5924,6 +5940,16 @@ fn collect_plan_external_exec_paramids(
         Plan::TidScan {
             tid_cond, filter, ..
         } => collect_tid_scan_external_exec_paramids(tid_cond, filter.as_ref(), bound, out),
+        Plan::TidRangeScan {
+            tid_range_cond,
+            filter,
+            ..
+        } => {
+            collect_external_expr_exec_paramids(&tid_range_cond.display_expr, bound, out);
+            if let Some(filter) = filter {
+                collect_external_expr_exec_paramids(filter, bound, out);
+            }
+        }
         Plan::Append { children, .. }
         | Plan::BitmapOr { children, .. }
         | Plan::BitmapAnd { children, .. }
@@ -6456,6 +6482,21 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
             );
             if let Some(filter) = filter {
                 validate_executable_expr(filter, "TidScan", "filter", allowed_exec_params);
+            }
+        }
+        Plan::TidRangeScan {
+            tid_range_cond,
+            filter,
+            ..
+        } => {
+            validate_executable_expr(
+                &tid_range_cond.display_expr,
+                "TidRangeScan",
+                "display_expr",
+                allowed_exec_params,
+            );
+            if let Some(filter) = filter {
+                validate_executable_expr(filter, "TidRangeScan", "filter", allowed_exec_params);
             }
         }
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
@@ -7359,6 +7400,24 @@ fn set_filter_references(
                     },
                     filter: spec.filter,
                 }
+            } else if tablesample.is_none()
+                && let Some(spec) = extract_tid_range_scan_spec(&predicate, source_id)
+            {
+                Plan::TidRangeScan {
+                    plan_info,
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    relkind,
+                    relispopulated,
+                    toast,
+                    desc,
+                    tid_range_cond: TidRangeScanCond {
+                        display_expr: spec.display_expr,
+                    },
+                    filter: spec.filter,
+                }
             } else {
                 Plan::Filter {
                     plan_info,
@@ -7418,6 +7477,52 @@ struct TidScanBranch {
     sources: Vec<TidScanSource>,
     display_expr: Expr,
     residual: Option<Expr>,
+}
+
+#[derive(Debug)]
+struct TidRangeScanSpec {
+    display_expr: Expr,
+    filter: Option<Expr>,
+}
+
+fn extract_tid_range_scan_spec(predicate: &Expr, source_id: usize) -> Option<TidRangeScanSpec> {
+    let conjuncts = flatten_and_conjuncts(predicate);
+    let mut range_exprs = Vec::new();
+    let mut residual = Vec::new();
+    for conjunct in conjuncts {
+        if is_tid_range_clause(&conjunct, source_id) {
+            range_exprs.push(conjunct);
+        } else {
+            residual.push(conjunct);
+        }
+    }
+    if range_exprs.is_empty() {
+        return None;
+    }
+    let display_expr = combine_bool_exprs(BoolExprType::And, range_exprs);
+    let filter = if residual.is_empty() {
+        None
+    } else {
+        Some(predicate.clone())
+    };
+    Some(TidRangeScanSpec {
+        display_expr,
+        filter,
+    })
+}
+
+fn is_tid_range_clause(expr: &Expr, source_id: usize) -> bool {
+    match expr {
+        Expr::Op(op)
+            if matches!(
+                op.op,
+                OpExprKind::Lt | OpExprKind::LtEq | OpExprKind::Gt | OpExprKind::GtEq
+            ) && op.args.len() == 2 =>
+        {
+            is_ctid_var(&op.args[0], source_id) || is_ctid_var(&op.args[1], source_id)
+        }
+        _ => false,
+    }
 }
 
 fn extract_tid_scan_spec(predicate: &Expr, source_id: usize) -> Option<TidScanSpec> {
@@ -8602,6 +8707,11 @@ fn maybe_wrap_nested_loop_inner_plan(
     {
         return right_plan;
     }
+    if plan_contains_tid_range_scan(&right_plan) {
+        // :HACK: PostgreSQL exposes parameterized Tid Range Scan rescans
+        // directly in tidrangescan instead of wrapping them in Memoize.
+        return right_plan;
+    }
     // :HACK: PostgreSQL avoids wrapping the whole lateral VALUES branch in
     // Memoize when the outer key has little reuse; keeping the inner index
     // Memoize visible lets repeated VALUES constants share one cache.
@@ -8961,12 +9071,63 @@ fn plan_contains_values_scan(plan: &Plan) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::RecursiveUnion { .. } => false,
+    }
+}
+
+fn plan_contains_tid_range_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::TidRangeScan { .. } => true,
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::GatherMerge { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_contains_tid_range_scan(input),
+        Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_contains_tid_range_scan),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_tid_range_scan(left) || plan_contains_tid_range_scan(right)
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => plan_contains_tid_range_scan(anchor) || plan_contains_tid_range_scan(recursive),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => false,
     }
 }
 
@@ -9016,6 +9177,7 @@ fn plan_contains_sql_xml_table_scan(plan: &Plan) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -9089,6 +9251,7 @@ fn annotate_runtime_index_labels(plan: &mut Plan, param_labels: &BTreeMap<usize,
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::Values { .. }
         | Plan::WorkTableScan { .. } => {}
@@ -9161,6 +9324,7 @@ fn runtime_label_for_single_param(
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::Values { .. }
         | Plan::WorkTableScan { .. } => None,

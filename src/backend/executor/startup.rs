@@ -7,8 +7,8 @@ use crate::include::nodes::execnodes::{
     IndexScanState, LimitState, LockRowsState, MaterializeState, MemoizeState, MergeAppendState,
     MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState,
     ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState,
-    SetOpState, SubqueryScanState, TableSampleState, TidScanState, UniqueState, ValuesState,
-    WindowAggState, WorkTableScanState,
+    SetOpState, SubqueryScanState, TableSampleState, TidRangeScanState, TidScanState, UniqueState,
+    ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::Expr;
 use pgrust_executor::{
@@ -204,6 +204,68 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 current_page_pin: None,
                 plan_info,
                 stats: NodeExecStats::default(),
+            })
+        }
+        Plan::TidRangeScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_range_cond,
+            filter,
+        } => {
+            let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let desc = Rc::new(desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+            let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
+                &desc,
+                &attr_descs,
+            ));
+            let qual_expr = filter
+                .clone()
+                .unwrap_or_else(|| tid_range_cond.display_expr.clone());
+            let qual = Some(expr::compile_predicate_with_decoder(&qual_expr, &decoder));
+            let ncols = desc.columns.len();
+            let mut slot = TupleSlot::empty(ncols);
+            slot.decoder = Some(decoder);
+            // :HACK: This exposes PostgreSQL's Tid Range Scan plan shape while
+            // reusing the visible heap scan machinery. The long-term executor
+            // should seek directly to the computed TID block bounds.
+            Box::new(TidRangeScanState {
+                scan: SeqScanState {
+                    rel,
+                    relation_name,
+                    relkind,
+                    relispopulated,
+                    disabled: false,
+                    parallel_aware: false,
+                    parallel_scan_id: None,
+                    toast_relation: toast,
+                    column_names,
+                    desc,
+                    attr_descs,
+                    scan: None,
+                    parallel_next_block: 0,
+                    tablesample: None,
+                    scan_rows: Vec::new(),
+                    scan_index: 0,
+                    sequence_emitted: false,
+                    slot,
+                    qual,
+                    qual_expr: Some(qual_expr),
+                    source_id,
+                    relation_oid,
+                    current_bindings: Vec::new(),
+                    plan_info,
+                    stats: NodeExecStats::default(),
+                },
+                tid_range_cond,
+                filter_expr: filter,
             })
         }
         Plan::IndexOnlyScan {

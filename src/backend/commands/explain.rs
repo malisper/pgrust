@@ -449,6 +449,7 @@ fn annotate_modify_subplan_runtime_labels(
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::Values { .. }
         | Plan::WorkTableScan { .. } => {}
@@ -660,6 +661,7 @@ pub(crate) fn apply_runtime_pruning_for_explain_plan(
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -691,6 +693,7 @@ fn renumber_append_child_aliases(plan: &mut Plan, ordinal: usize) {
     match plan {
         Plan::SeqScan { relation_name, .. }
         | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. } => {
             *relation_name = renumber_relation_alias(relation_name, ordinal);
@@ -907,10 +910,14 @@ fn push_verbose_json_plan_with_output(
             lines.push(format!("{pad}]"));
             Some(())
         }
-        Plan::SeqScan { relation_name, .. } | Plan::TidScan { relation_name, .. } => {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. } => {
             let (relation, alias) = explain_relation_and_alias(relation_name);
             let node_type = if matches!(plan, Plan::TidScan { .. }) {
                 "Tid Scan"
+            } else if matches!(plan, Plan::TidRangeScan { .. }) {
+                "Tid Range Scan"
             } else if matches!(
                 plan,
                 Plan::SeqScan {
@@ -1892,6 +1899,7 @@ fn push_nonverbose_plan_details(
             input.as_ref(),
             Plan::SeqScan { .. }
                 | Plan::TidScan { .. }
+                | Plan::TidRangeScan { .. }
                 | Plan::IndexOnlyScan { .. }
                 | Plan::IndexScan { .. }
                 | Plan::BitmapHeapScan { .. }
@@ -2174,6 +2182,7 @@ fn push_nonverbose_plan_details(
             input.as_ref(),
             Plan::SeqScan { .. }
                 | Plan::TidScan { .. }
+                | Plan::TidRangeScan { .. }
                 | Plan::IndexOnlyScan { .. }
                 | Plan::IndexScan { .. }
                 | Plan::BitmapHeapScan { .. }
@@ -2366,6 +2375,32 @@ fn push_nonverbose_plan_details(
                     ctx
                 )
                 .unwrap_or_else(|| render_explain_expr(&tid_cond.display_expr, &column_names))
+            ));
+            if let Some(filter) = filter {
+                let rendered = if expr_contains_exec_param(filter) {
+                    render_nonverbose_expr_with_exec_params(filter, &column_names, ctx)
+                } else {
+                    render_nonverbose_expr_with_dynamic_type_names(filter, &column_names, ctx)
+                        .unwrap_or_else(|| render_explain_expr(filter, &column_names))
+                };
+                lines.push(format!("{prefix}Filter: {rendered}"));
+            }
+            true
+        }
+        Plan::TidRangeScan {
+            tid_range_cond,
+            filter,
+            desc,
+            ..
+        } => {
+            let column_names = desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            lines.push(format!(
+                "{prefix}TID Cond: {}",
+                render_tid_range_cond(&tid_range_cond.display_expr, &column_names, ctx)
             ));
             if let Some(filter) = filter {
                 let rendered = if expr_contains_exec_param(filter) {
@@ -2613,6 +2648,29 @@ fn push_nonverbose_scan_details(
                 lines.push(format!("{prefix}Filter: {rendered}"));
             }
         }
+        Plan::TidRangeScan {
+            tid_range_cond,
+            filter,
+            desc,
+            ..
+        } => {
+            let prefix = explain_detail_prefix(indent);
+            let column_names = desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            lines.push(format!(
+                "{prefix}TID Cond: {}",
+                render_tid_range_cond(&tid_range_cond.display_expr, &column_names, ctx)
+            ));
+            if let Some(filter) = filter {
+                let rendered =
+                    render_nonverbose_expr_with_dynamic_type_names(filter, &column_names, ctx)
+                        .unwrap_or_else(|| render_explain_expr(filter, &column_names));
+                lines.push(format!("{prefix}Filter: {rendered}"));
+            }
+        }
         Plan::IndexOnlyScan {
             keys,
             order_by_keys,
@@ -2813,6 +2871,7 @@ fn plan_has_explicit_relation_alias(plan: &Plan) -> bool {
     match plan {
         Plan::SeqScan { relation_name, .. }
         | Plan::TidScan { relation_name, .. }
+        | Plan::TidRangeScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => relation_name
@@ -3550,6 +3609,7 @@ fn const_false_filter_input_can_render_as_result(input: &Plan) -> bool {
     match input {
         Plan::SeqScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::Result { .. }
         | Plan::ProjectSet { .. }
         | Plan::CteScan { .. } => true,
@@ -3606,6 +3666,19 @@ fn render_nonverbose_expr_with_exec_params(
         }
     }
     rendered
+}
+
+fn render_tid_range_cond(
+    expr: &Expr,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    if expr_contains_exec_param(expr) {
+        render_nonverbose_expr_with_exec_params(expr, column_names, ctx)
+    } else {
+        render_nonverbose_expr_with_dynamic_type_names(expr, column_names, ctx)
+            .unwrap_or_else(|| render_explain_expr(expr, column_names))
+    }
 }
 
 fn render_reordered_hash_key_scan_filter(expr: &Expr, column_names: &[String]) -> Option<String> {

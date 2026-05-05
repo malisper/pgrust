@@ -64,8 +64,8 @@ use crate::include::nodes::execnodes::{
     MemoizeCacheKey, MemoizeState, MergeAppendState, NestedLoopJoinState, NodeExecStats,
     OrderByState, PlanNode, PlanState, ProjectSetState, ProjectionState, RecursiveUnionState,
     ResultState, SeqScanState, SetOpState, SlotKind, SubqueryScanState, SystemVarBinding,
-    TableSampleMethod, TableSampleState, TidScanState, ToastRelationRef, TupleSlot, UniqueState,
-    ValuesState, WindowAggState, WorkTableScanState,
+    TableSampleMethod, TableSampleState, TidRangeScanState, TidScanState, ToastRelationRef,
+    TupleSlot, UniqueState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan,
@@ -3572,6 +3572,90 @@ impl PlanNode for TidScanState {
             lines.push(format!(
                 "{prefix}Filter: {}",
                 render_explain_expr(filter, &self.column_names)
+            ));
+        }
+    }
+
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _timing: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
+}
+
+impl PlanNode for TidRangeScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        self.scan.exec_proc_node(ctx)
+    }
+
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.scan.rescan(ctx)
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.scan.current_slot()
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        self.scan.current_system_bindings()
+    }
+
+    fn column_names(&self) -> &[String] {
+        self.scan.column_names()
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        self.scan.node_stats()
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        self.scan.node_stats_mut()
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.scan.plan_info()
+    }
+
+    fn node_label(&self) -> String {
+        format!(
+            "Tid Range Scan on {}",
+            explain_relation_name(&self.scan.relation_name)
+        )
+    }
+
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.scan.renumber_append_child_aliases(ordinal);
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = explain_detail_prefix(indent);
+        lines.push(format!(
+            "{prefix}TID Cond: {}",
+            render_explain_expr(&self.tid_range_cond.display_expr, &self.scan.column_names)
+        ));
+        if let Some(filter) = &self.filter_expr {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(filter, &self.scan.column_names)
+            ));
+        }
+        if analyze && self.scan.stats.rows_removed_by_filter > 0 {
+            lines.push(format!(
+                "{prefix}Rows Removed by Filter: {}",
+                self.scan.stats.rows_removed_by_filter
             ));
         }
     }
@@ -9753,6 +9837,7 @@ fn collect_plan_cte_ids(plan: &Plan, cte_ids: &mut std::collections::BTreeSet<us
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::TidScan { .. }
+        | Plan::TidRangeScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
