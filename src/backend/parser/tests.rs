@@ -13307,6 +13307,37 @@ fn bind_update_from_uses_source_columns_in_set_where_and_returning() {
     assert_eq!(bound.returning.len(), 2);
 }
 
+#[test]
+fn bind_update_from_does_not_read_unreferenced_target_for_privileges() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt =
+        match parse_statement("update people set name = 'x' from pets where pets.owner_id = 1")
+            .unwrap()
+        {
+            Statement::Update(stmt) => stmt,
+            other => panic!("expected update statement, got {other:?}"),
+        };
+    let bound = bind_update(&stmt, &catalog).unwrap();
+    let target_oid = bound.targets[0].relation_oid;
+    let target_requirement = bound
+        .required_privileges
+        .iter()
+        .find(|requirement| requirement.relation_oid == target_oid)
+        .expect("target update privilege");
+    assert!(target_requirement.required.update);
+    assert!(!target_requirement.required.select);
+    assert!(
+        bound
+            .input_plan
+            .as_ref()
+            .expect("UPDATE FROM input plan")
+            .relation_privileges
+            .iter()
+            .all(|requirement| requirement.relation_oid != target_oid)
+    );
+}
+
 fn assert_returning_var(expr: &Expr, varno: usize, attno: AttrNumber) {
     match expr {
         Expr::Var(Var {

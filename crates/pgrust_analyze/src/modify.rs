@@ -383,6 +383,23 @@ fn update_privilege_requirement(
     requirement
 }
 
+fn update_from_privilege_requirement(
+    relation: &BoundRelation,
+    relation_name: impl Into<String>,
+    assignments: &[BoundAssignment],
+    predicate: Option<&Expr>,
+    returning: &[TargetEntry],
+    target_visible_count: usize,
+) -> RelationPrivilegeRequirement {
+    let mut requirement =
+        update_privilege_requirement(relation, relation_name, assignments, predicate, returning);
+    requirement
+        .selected_columns
+        .retain(|column_index| *column_index < target_visible_count);
+    requirement.required.select = !requirement.selected_columns.is_empty();
+    requirement
+}
+
 fn assignment_expr_selected_columns(assignments: &[BoundAssignment]) -> Vec<usize> {
     let mut selected = Vec::new();
     for assignment in assignments {
@@ -1969,6 +1986,13 @@ fn with_update_target_identity(
         target_desc.columns.len(),
         target_desc.columns.len() + 1,
     )
+}
+
+fn without_modify_target_relation_permission(mut from: AnalyzedFrom) -> AnalyzedFrom {
+    for rte in &mut from.rtable {
+        rte.permission = None;
+    }
+    from
 }
 
 fn with_merge_source_present(from: AnalyzedFrom) -> (AnalyzedFrom, usize) {
@@ -7045,7 +7069,10 @@ fn bind_update_from(
         entry.desc.clone(),
     );
     target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
-    let (target_from, _, _) = with_update_target_identity(target_base, &entry.desc);
+    let (target_from, _, _) = with_update_target_identity(
+        without_modify_target_relation_permission(target_base),
+        &entry.desc,
+    );
     let source_scope = shift_scope_rtindexes(source_scope_raw, target_from.rtable.len());
     let source_visible_count = source_scope.desc.columns.len();
     let joined = AnalyzedFrom::join(
@@ -7213,12 +7240,13 @@ fn bind_update_from(
         )
     })
     .collect::<Result<Vec<_>, ParseError>>()?;
-    let required_privileges = vec![update_privilege_requirement(
+    let required_privileges = vec![update_from_privilege_requirement(
         &entry,
         &stmt.table_name,
         &assignments,
         predicate.as_ref(),
         &returning,
+        target_visible_count,
     )];
 
     Ok(BoundUpdateStatement {
@@ -7513,7 +7541,10 @@ fn bind_delete_using(
         entry.desc.clone(),
     );
     target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
-    let (target_from, _, _) = with_update_target_identity(target_base, &entry.desc);
+    let (target_from, _, _) = with_update_target_identity(
+        without_modify_target_relation_permission(target_base),
+        &entry.desc,
+    );
     let source_scope = shift_scope_rtindexes(source_scope_raw, target_from.rtable.len());
     let source_visible_count = source_scope.desc.columns.len();
     let joined = AnalyzedFrom::join(
