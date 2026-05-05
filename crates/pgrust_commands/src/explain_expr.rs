@@ -475,6 +475,8 @@ pub fn render_explain_expr_inner_with_qualifier(
             render_explain_set_returning_call(&srf.call, qualifier, column_names)
         }
         Expr::ScalarArrayOp(saop) => render_explain_scalar_array_op(saop, qualifier, column_names),
+        Expr::Case(case_expr) => render_explain_whole_row_case(case_expr, qualifier, column_names)
+            .unwrap_or_else(|| render_explain_case_expr(case_expr, qualifier, column_names)),
         Expr::ArrayLiteral {
             elements,
             array_type,
@@ -489,22 +491,33 @@ pub fn render_explain_expr_inner_with_qualifier(
                 .join(", ");
             format!("ROW({fields})")
         }
-        Expr::Case(case_expr) => render_explain_case_expr(case_expr, qualifier, column_names),
         Expr::FieldSelect {
             expr: inner, field, ..
         } => render_explain_field_select(inner, field, qualifier, column_names),
         Expr::ArraySubscript { array, subscripts } => {
             render_explain_array_subscript(array, subscripts, qualifier, column_names)
         }
-        Expr::SubPlan(subplan) => {
-            if subplan.renders_as_initplan() {
+        Expr::SubPlan(subplan) => match subplan.sublink_type {
+            SubLinkType::RowCompareSubLink(op) => {
+                render_row_compare_subplan_expr(subplan, op, qualifier, column_names)
+            }
+            SubLinkType::AnySubLink(op) => {
+                render_quantified_subplan_expr(subplan, "ANY", op, qualifier, column_names)
+            }
+            SubLinkType::AllSubLink(op) => {
+                render_quantified_subplan_expr(subplan, "ALL", op, qualifier, column_names)
+            }
+            _ if subplan.renders_as_initplan() => {
                 format!("(InitPlan {}).col1", subplan.plan_id + 1)
-            } else if matches!(subplan.sublink_type, SubLinkType::ArraySubLink) {
+            }
+            SubLinkType::ExistsSubLink => format!("EXISTS(SubPlan {})", subplan.plan_id + 1),
+            SubLinkType::ArraySubLink => {
                 format!("ARRAY(SubPlan {})", subplan.plan_id + 1)
-            } else {
+            }
+            _ => {
                 format!("(SubPlan {})", subplan.plan_id + 1)
             }
-        }
+        },
         Expr::CurrentCatalog => "CURRENT_CATALOG".into(),
         Expr::CurrentSchema => "CURRENT_SCHEMA".into(),
         Expr::CurrentDate => "CURRENT_DATE".into(),
@@ -806,6 +819,181 @@ fn render_explain_array_subscript(
         out.push(']');
     }
     out
+}
+
+fn render_row_compare_subplan_expr(
+    subplan: &pgrust_nodes::primnodes::SubPlan,
+    op: SubqueryComparisonOp,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let Some(testexpr) = subplan.testexpr.as_deref() else {
+        return render_subplan_expr_fallback(subplan);
+    };
+    if let (SubqueryComparisonOp::Eq, Expr::Row { fields, .. }) = (op, testexpr)
+        && fields.len() == subplan.target_width
+    {
+        let parts = fields
+            .iter()
+            .enumerate()
+            .map(|(index, (_, expr))| {
+                format!(
+                    "({} = {})",
+                    render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
+                    render_subplan_column_ref(subplan, index + 1)
+                )
+            })
+            .collect::<Vec<_>>();
+        return render_row_compare_subplan_parts(subplan, parts);
+    }
+    if op == SubqueryComparisonOp::Eq
+        && let Some(fields) = const_record_fields(testexpr)
+        && fields.len() == subplan.target_width
+    {
+        let parts = fields
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                format!(
+                    "({} = {})",
+                    render_explain_literal(value),
+                    render_subplan_column_ref(subplan, index + 1)
+                )
+            })
+            .collect::<Vec<_>>();
+        return render_row_compare_subplan_parts(subplan, parts);
+    }
+    format!(
+        "{} {} ROW({})",
+        render_explain_expr_inner_with_qualifier(testexpr, qualifier, column_names),
+        subquery_comparison_op_text(op),
+        (1..=subplan.target_width)
+            .map(|index| render_subplan_column_ref(subplan, index))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn render_quantified_subplan_expr(
+    subplan: &pgrust_nodes::primnodes::SubPlan,
+    quantifier: &str,
+    op: SubqueryComparisonOp,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let Some(testexpr) = subplan.testexpr.as_deref() else {
+        return render_subplan_expr_fallback(subplan);
+    };
+    if let Expr::Row { fields, .. } = testexpr
+        && fields.len() == subplan.target_width
+        && fields.len() > 1
+    {
+        let comparisons = fields
+            .iter()
+            .enumerate()
+            .map(|(index, (_, expr))| {
+                format!(
+                    "({} {} {})",
+                    render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
+                    subquery_comparison_op_text(op),
+                    render_subplan_column_ref(subplan, index + 1)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        return format!("({quantifier} ({comparisons}))");
+    }
+    format!(
+        "({quantifier} ({} {} {}))",
+        render_explain_expr_inner_with_qualifier(testexpr, qualifier, column_names),
+        subquery_comparison_op_text(op),
+        render_subplan_column_ref(subplan, 1)
+    )
+}
+
+fn render_row_compare_subplan_parts(
+    subplan: &pgrust_nodes::primnodes::SubPlan,
+    parts: Vec<String>,
+) -> String {
+    let joined = parts.join(" AND ");
+    if subplan.renders_as_initplan() {
+        format!("({joined})")
+    } else {
+        format!("(({joined}))")
+    }
+}
+
+fn render_subplan_expr_fallback(subplan: &pgrust_nodes::primnodes::SubPlan) -> String {
+    if subplan.renders_as_initplan() {
+        format!("(InitPlan {}).col1", subplan.plan_id + 1)
+    } else {
+        format!("(SubPlan {})", subplan.plan_id + 1)
+    }
+}
+
+fn render_subplan_column_ref(subplan: &pgrust_nodes::primnodes::SubPlan, index: usize) -> String {
+    if subplan.renders_as_initplan() {
+        format!("(InitPlan {}).col{}", subplan.plan_id + 1, index)
+    } else if subplan_renders_as_hashed_any(subplan) {
+        format!("(hashed SubPlan {}).col{}", subplan.plan_id + 1, index)
+    } else {
+        format!("(SubPlan {}).col{}", subplan.plan_id + 1, index)
+    }
+}
+
+fn subplan_renders_as_hashed_any(subplan: &pgrust_nodes::primnodes::SubPlan) -> bool {
+    matches!(
+        subplan.sublink_type,
+        SubLinkType::AnySubLink(SubqueryComparisonOp::Eq)
+    ) && subplan.par_param.is_empty()
+        && subplan.target_width == 1
+        && subplan
+            .testexpr
+            .as_deref()
+            .and_then(expr_sql_type_hint)
+            .is_some_and(sql_type_can_hash_subplan_eq)
+        && subplan
+            .first_col_type
+            .is_some_and(sql_type_can_hash_subplan_eq)
+}
+
+fn sql_type_can_hash_subplan_eq(sql_type: SqlType) -> bool {
+    !sql_type.is_array
+        && !matches!(
+            sql_type.kind,
+            SqlTypeKind::Record
+                | SqlTypeKind::Composite
+                | SqlTypeKind::Json
+                | SqlTypeKind::Jsonb
+                | SqlTypeKind::JsonPath
+                | SqlTypeKind::Xml
+                | SqlTypeKind::Void
+                | SqlTypeKind::Trigger
+                | SqlTypeKind::EventTrigger
+                | SqlTypeKind::FdwHandler
+                | SqlTypeKind::Internal
+                | SqlTypeKind::Cstring
+        )
+}
+
+fn subquery_comparison_op_text(op: SubqueryComparisonOp) -> &'static str {
+    match op {
+        SubqueryComparisonOp::Eq => "=",
+        SubqueryComparisonOp::NotEq => "<>",
+        SubqueryComparisonOp::Lt => "<",
+        SubqueryComparisonOp::LtEq => "<=",
+        SubqueryComparisonOp::Gt => ">",
+        SubqueryComparisonOp::GtEq => ">=",
+        SubqueryComparisonOp::Match => "@@",
+        SubqueryComparisonOp::RegexMatch => "~",
+        SubqueryComparisonOp::NotRegexMatch => "!~",
+        SubqueryComparisonOp::Like => "~~",
+        SubqueryComparisonOp::NotLike => "!~~",
+        SubqueryComparisonOp::ILike => "~~*",
+        SubqueryComparisonOp::NotILike => "!~~*",
+        SubqueryComparisonOp::Similar => "~",
+        SubqueryComparisonOp::NotSimilar => "!~",
+    }
 }
 
 fn render_explain_func_expr_is_infix(func: &FuncExpr) -> bool {
@@ -2526,6 +2714,21 @@ pub fn render_explain_join_expr_inner(
         }),
         Expr::Func(func) => render_explain_join_func_expr(func, outer_names, inner_names),
         Expr::SubPlan(subplan) => match subplan.sublink_type {
+            SubLinkType::RowCompareSubLink(op) => {
+                render_row_compare_subplan_join_expr(subplan, op, outer_names, inner_names)
+            }
+            SubLinkType::AnySubLink(op) => {
+                render_quantified_subplan_join_expr(subplan, "ANY", op, outer_names, inner_names)
+            }
+            SubLinkType::AllSubLink(op) => {
+                render_quantified_subplan_join_expr(subplan, "ALL", op, outer_names, inner_names)
+            }
+            SubLinkType::ExistsSubLink if subplan.renders_as_initplan() => {
+                format!("(InitPlan {}).col1", subplan.plan_id + 1)
+            }
+            SubLinkType::ArraySubLink if subplan.renders_as_initplan() => {
+                format!("(InitPlan {}).col1", subplan.plan_id + 1)
+            }
             SubLinkType::ExistsSubLink => format!("EXISTS(SubPlan {})", subplan.plan_id + 1),
             SubLinkType::ArraySubLink => format!("ARRAY(SubPlan {})", subplan.plan_id + 1),
             _ if subplan.renders_as_initplan() => {
@@ -2548,11 +2751,109 @@ pub fn render_explain_join_expr_inner(
             {
                 rendered
             } else {
-                format!("{expr:?}")
+                render_explain_join_case_expr(case_expr, outer_names, inner_names)
             }
         }
         other => format!("{other:?}"),
     }
+}
+
+fn render_row_compare_subplan_join_expr(
+    subplan: &pgrust_nodes::primnodes::SubPlan,
+    op: SubqueryComparisonOp,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    let Some(testexpr) = subplan.testexpr.as_deref() else {
+        return render_subplan_expr_fallback(subplan);
+    };
+    if let (SubqueryComparisonOp::Eq, Expr::Row { fields, .. }) = (op, testexpr)
+        && fields.len() == subplan.target_width
+    {
+        let parts = fields
+            .iter()
+            .enumerate()
+            .map(|(index, (_, expr))| {
+                format!(
+                    "({} = {})",
+                    render_explain_join_expr_inner(expr, outer_names, inner_names),
+                    render_subplan_column_ref(subplan, index + 1)
+                )
+            })
+            .collect::<Vec<_>>();
+        return render_row_compare_subplan_parts(subplan, parts);
+    }
+    if op == SubqueryComparisonOp::Eq
+        && let Some(fields) = const_record_fields(testexpr)
+        && fields.len() == subplan.target_width
+    {
+        let parts = fields
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                format!(
+                    "({} = {})",
+                    render_explain_literal(value),
+                    render_subplan_column_ref(subplan, index + 1)
+                )
+            })
+            .collect::<Vec<_>>();
+        return render_row_compare_subplan_parts(subplan, parts);
+    }
+    format!(
+        "{} {} ROW({})",
+        render_explain_join_expr_inner(testexpr, outer_names, inner_names),
+        subquery_comparison_op_text(op),
+        (1..=subplan.target_width)
+            .map(|index| render_subplan_column_ref(subplan, index))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn const_record_fields(expr: &Expr) -> Option<&[Value]> {
+    match expr {
+        Expr::Const(Value::Record(record)) => Some(&record.fields),
+        Expr::Cast(inner, _) => const_record_fields(inner),
+        _ => None,
+    }
+}
+
+fn render_quantified_subplan_join_expr(
+    subplan: &pgrust_nodes::primnodes::SubPlan,
+    quantifier: &str,
+    op: SubqueryComparisonOp,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    let Some(testexpr) = subplan.testexpr.as_deref() else {
+        return render_subplan_expr_fallback(subplan);
+    };
+    if let Expr::Row { fields, .. } = testexpr
+        && fields.len() == subplan.target_width
+        && fields.len() > 1
+    {
+        let comparisons = fields
+            .iter()
+            .enumerate()
+            .map(|(index, (_, expr))| {
+                format!(
+                    "({} {} {})",
+                    render_explain_join_expr_inner(expr, outer_names, inner_names),
+                    subquery_comparison_op_text(op),
+                    render_subplan_column_ref(subplan, index + 1)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        return format!("({quantifier} ({comparisons}))");
+    }
+    format!(
+        "({quantifier} ({} {} {}))",
+        render_explain_join_expr_inner(testexpr, outer_names, inner_names),
+        subquery_comparison_op_text(op),
+        render_subplan_column_ref(subplan, 1)
+    )
 }
 
 fn render_explain_join_whole_row_case(
@@ -2570,6 +2871,44 @@ fn render_explain_join_whole_row_case(
         return None;
     };
     render_explain_join_whole_row(fields, outer_names, inner_names)
+}
+
+fn render_explain_join_case_expr(
+    case_expr: &pgrust_nodes::primnodes::CaseExpr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    let mut rendered = String::from("CASE");
+    if let Some(arg) = &case_expr.arg {
+        rendered.push(' ');
+        rendered.push_str(&render_explain_join_expr_inner(
+            arg,
+            outer_names,
+            inner_names,
+        ));
+    }
+    for arm in &case_expr.args {
+        rendered.push_str(" WHEN ");
+        rendered.push_str(&render_explain_join_expr_inner(
+            &arm.expr,
+            outer_names,
+            inner_names,
+        ));
+        rendered.push_str(" THEN ");
+        rendered.push_str(&render_explain_join_expr_inner(
+            &arm.result,
+            outer_names,
+            inner_names,
+        ));
+    }
+    rendered.push_str(" ELSE ");
+    rendered.push_str(&render_explain_join_expr_inner(
+        &case_expr.defresult,
+        outer_names,
+        inner_names,
+    ));
+    rendered.push_str(" END");
+    rendered
 }
 
 fn render_explain_join_whole_row(
@@ -3364,6 +3703,48 @@ fn render_explain_array_quoted_value(text: &str) -> String {
     let mut out = String::new();
     push_explain_array_quoted_element(&mut out, text);
     out
+}
+
+fn render_explain_whole_row_case(
+    case_expr: &pgrust_nodes::primnodes::CaseExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
+    if case_expr.arg.is_some() || case_expr.args.len() != 1 {
+        return None;
+    }
+    if !matches!(&case_expr.args.first()?.result, Expr::Const(Value::Null)) {
+        return None;
+    }
+    let Expr::Row { fields, .. } = case_expr.defresult.as_ref() else {
+        return None;
+    };
+    let rendered_fields = fields
+        .iter()
+        .map(|(_, expr)| {
+            let Expr::Var(var) = expr else {
+                return None;
+            };
+            render_explain_var_name(var, column_names)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if rendered_fields.is_empty() {
+        return None;
+    }
+    if let Some(qualifier) = qualifier {
+        return Some(format!("{qualifier}.*"));
+    }
+    let prefix = rendered_fields
+        .iter()
+        .filter_map(|name| name.rsplit_once('.').map(|(prefix, _)| prefix))
+        .next()?;
+    rendered_fields
+        .iter()
+        .all(|name| {
+            name.rsplit_once('.')
+                .is_some_and(|(candidate, _)| candidate == prefix)
+        })
+        .then(|| format!("{prefix}.*"))
 }
 
 fn render_explain_row_comparison_operand(

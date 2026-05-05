@@ -12561,9 +12561,10 @@ pub(crate) fn materialize_insert_rows(
             let planned = planner(query, catalog).map_err(ExecError::Parse)?;
             check_planned_stmt_select_privileges(&planned, ctx)?;
             let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
-            let saved_exec_params = match (|| {
+            let saved_exec_params = ctx.expr_bindings.exec_params.clone();
+            if let Err(err) = (|| {
                 if planned.ext_params.is_empty() {
-                    return Ok(Vec::new());
+                    return Ok(());
                 }
                 let mut param_slot = ctx
                     .expr_bindings
@@ -12571,20 +12572,16 @@ pub(crate) fn materialize_insert_rows(
                     .clone()
                     .map(TupleSlot::virtual_row)
                     .unwrap_or_else(|| TupleSlot::empty(0));
-                let mut saved = Vec::with_capacity(planned.ext_params.len());
                 for param in &planned.ext_params {
                     let value = eval_expr(&param.expr, &mut param_slot, ctx)?;
-                    let old = ctx.expr_bindings.exec_params.insert(param.paramid, value);
-                    saved.push((param.paramid, old));
+                    ctx.expr_bindings.exec_params.insert(param.paramid, value);
                 }
-                Ok(saved)
+                Ok(())
             })() {
-                Ok(saved) => saved,
-                Err(err) => {
-                    ctx.subplans = saved_subplans;
-                    return Err(err);
-                }
-            };
+                ctx.expr_bindings.exec_params = saved_exec_params;
+                ctx.subplans = saved_subplans;
+                return Err(err);
+            }
             let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
                 let mut state = executor_start(planned.plan_tree.clone());
                 let mut rows = Vec::new();
@@ -12608,13 +12605,7 @@ pub(crate) fn materialize_insert_rows(
                 }
                 Ok(rows)
             })();
-            for (paramid, old) in saved_exec_params {
-                if let Some(value) = old {
-                    ctx.expr_bindings.exec_params.insert(paramid, value);
-                } else {
-                    ctx.expr_bindings.exec_params.remove(&paramid);
-                }
-            }
+            ctx.expr_bindings.exec_params = saved_exec_params;
             ctx.subplans = saved_subplans;
             result
         }
