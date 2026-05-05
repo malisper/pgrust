@@ -1,5 +1,7 @@
 use super::paths::choose_modify_row_source;
-use super::query::rewrite_local_vars_for_output_exprs;
+use super::query::{
+    rewrite_local_vars_for_output_exprs, rewrite_local_vars_for_output_exprs_with_whole_row_width,
+};
 use super::*;
 use pgrust_catalog_data::PolicyCommand;
 use pgrust_nodes::CommandType;
@@ -4461,17 +4463,16 @@ fn rewrite_auto_view_returning_targets(
         view_returning_pseudo_output_exprs(view_output_exprs, base_desc, INNER_VAR);
     targets
         .into_iter()
-        .map(|target| TargetEntry {
-            expr: rewrite_local_vars_for_output_exprs(
-                rewrite_local_vars_for_output_exprs(
-                    rewrite_local_vars_for_output_exprs(target.expr, 1, local_output_exprs),
-                    OUTER_VAR,
-                    &old_view_output_exprs,
-                ),
-                INNER_VAR,
-                &new_view_output_exprs,
-            ),
-            ..target
+        .map(|target| {
+            let expr = rewrite_local_vars_for_output_exprs_with_whole_row_width(
+                target.expr,
+                1,
+                local_output_exprs,
+                view_output_exprs.len(),
+            );
+            let expr = rewrite_local_vars_for_output_exprs(expr, OUTER_VAR, &old_view_output_exprs);
+            let expr = rewrite_local_vars_for_output_exprs(expr, INNER_VAR, &new_view_output_exprs);
+            TargetEntry { expr, ..target }
         })
         .collect()
 }
@@ -5629,6 +5630,7 @@ pub fn rewrite_bound_update_auto_view_target(
     );
     let input_output_exprs =
         update_auto_view_input_output_exprs(&stmt, &resolved.visible_output_exprs);
+    let view_whole_row_width = resolved.visible_output_exprs.len();
     reject_local_non_updatable_auto_view_targets(
         &target.desc,
         &resolved,
@@ -5658,10 +5660,11 @@ pub fn rewrite_bound_update_auto_view_target(
                     &input_output_exprs,
                 ),
                 target_sql_type: assignment.target_sql_type,
-                expr: rewrite_local_vars_for_output_exprs(
+                expr: rewrite_local_vars_for_output_exprs_with_whole_row_width(
                     assignment.expr.clone(),
                     1,
                     &input_output_exprs,
+                    view_whole_row_width,
                 ),
             })
         })
@@ -5700,10 +5703,14 @@ pub fn rewrite_bound_update_auto_view_target(
     )?;
     let predicate = auto_view_mutation_predicate(
         &resolved,
-        target
-            .predicate
-            .as_ref()
-            .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &input_output_exprs)),
+        target.predicate.as_ref().map(|expr| {
+            rewrite_local_vars_for_output_exprs_with_whole_row_width(
+                expr.clone(),
+                1,
+                &input_output_exprs,
+                view_whole_row_width,
+            )
+        }),
     );
     let predicate = prepend_visibility_quals(base_rls.visibility_quals.clone(), predicate);
     let rls_write_checks = base_rls

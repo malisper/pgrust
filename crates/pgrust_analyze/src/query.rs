@@ -7,9 +7,9 @@ use pgrust_nodes::parsenodes::{
 use pgrust_nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
     RelationPrivilegeMask, RelationPrivilegeRequirement, RowsFromItem, RowsFromSource,
-    ScalarArrayOpExpr, SetReturningExpr, SubLink, SubPlan, WindowClause, WindowFrame,
-    WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec, attrno_index, is_special_varno,
-    is_system_attr, user_attrno,
+    ScalarArrayOpExpr, SetReturningExpr, SubLink, SubPlan, WHOLE_ROW_ATTR_NO, WindowClause,
+    WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec, attrno_index,
+    is_special_varno, is_system_attr, user_attrno,
 };
 use pgrust_nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -1288,7 +1288,23 @@ pub fn rewrite_local_vars_for_output_exprs(
     source_varno: usize,
     output_exprs: &[Expr],
 ) -> Expr {
-    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, false, 0)
+    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, false, 0, None)
+}
+
+pub fn rewrite_local_vars_for_output_exprs_with_whole_row_width(
+    expr: Expr,
+    source_varno: usize,
+    output_exprs: &[Expr],
+    whole_row_width: usize,
+) -> Expr {
+    rewrite_local_vars_for_output_exprs_impl(
+        expr,
+        source_varno,
+        output_exprs,
+        false,
+        0,
+        Some(whole_row_width),
+    )
 }
 
 pub fn rewrite_planned_local_vars_for_output_exprs(
@@ -1296,7 +1312,7 @@ pub fn rewrite_planned_local_vars_for_output_exprs(
     source_varno: usize,
     output_exprs: &[Expr],
 ) -> Expr {
-    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, true, 0)
+    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, true, 0, None)
 }
 
 fn rewrite_local_vars_for_output_exprs_impl(
@@ -1305,6 +1321,7 @@ fn rewrite_local_vars_for_output_exprs_impl(
     output_exprs: &[Expr],
     allow_planned_subqueries: bool,
     source_varlevelsup: usize,
+    whole_row_width: Option<usize>,
 ) -> Expr {
     let rewrite_local_vars_for_output_exprs = |expr, source_varno, output_exprs| {
         rewrite_local_vars_for_output_exprs_impl(
@@ -1313,6 +1330,7 @@ fn rewrite_local_vars_for_output_exprs_impl(
             output_exprs,
             allow_planned_subqueries,
             source_varlevelsup,
+            whole_row_width,
         )
     };
     match expr {
@@ -1450,6 +1468,14 @@ fn rewrite_local_vars_for_output_exprs_impl(
                 && var.varno == source_varno
                 && !is_system_attr(var.varattno) =>
         {
+            if var.varattno == WHOLE_ROW_ATTR_NO {
+                return whole_row_replacement_from_output_exprs(
+                    var,
+                    output_exprs,
+                    source_varlevelsup,
+                    whole_row_width,
+                );
+            }
             let replacement = output_exprs
                 .get(attrno_index(var.varattno).unwrap_or(usize::MAX))
                 .cloned()
@@ -1621,6 +1647,7 @@ fn rewrite_local_vars_for_output_exprs_impl(
                 output_exprs,
                 allow_planned_subqueries,
                 source_varlevelsup + 1,
+                whole_row_width,
             )),
             sublink_type: sublink.sublink_type,
             comparison: sublink.comparison,
@@ -1717,12 +1744,78 @@ fn rewrite_local_vars_for_output_exprs_impl(
     }
 }
 
+fn whole_row_replacement_from_output_exprs(
+    var: Var,
+    output_exprs: &[Expr],
+    source_varlevelsup: usize,
+    whole_row_width: Option<usize>,
+) -> Expr {
+    let output_exprs = whole_row_width
+        .map(|width| &output_exprs[..width.min(output_exprs.len())])
+        .unwrap_or(output_exprs);
+    let descriptor_fields = output_exprs
+        .iter()
+        .enumerate()
+        .map(|(index, expr)| {
+            (
+                whole_row_replacement_field_name(&var, index),
+                expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let descriptor = if !var.vartype.is_array
+        && matches!(var.vartype.kind, SqlTypeKind::Composite)
+        && var.vartype.typrelid != 0
+    {
+        pgrust_nodes::datum::RecordDescriptor::named(
+            var.vartype.type_oid,
+            var.vartype.typrelid,
+            var.vartype.typmod,
+            descriptor_fields,
+        )
+    } else {
+        pgrust_nodes::record::assign_anonymous_record_descriptor(descriptor_fields)
+    };
+
+    // PostgreSQL's ReplaceVarFromTargetList handles InvalidAttrNumber by
+    // expanding the target RTE into a RowExpr and replacing each generated
+    // field Var from the targetlist. Do the same here instead of indexing the
+    // targetlist with attno 0.
+    Expr::Row {
+        descriptor,
+        fields: output_exprs
+            .iter()
+            .enumerate()
+            .map(|(index, expr)| {
+                (
+                    whole_row_replacement_field_name(&var, index),
+                    raise_expr_varlevels(expr.clone(), source_varlevelsup),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn whole_row_replacement_field_name(var: &Var, index: usize) -> String {
+    if !var.vartype.is_array
+        && matches!(var.vartype.kind, SqlTypeKind::Record)
+        && var.vartype.typmod > 0
+        && let Some(descriptor) =
+            pgrust_nodes::record::lookup_anonymous_record_descriptor(var.vartype.typmod)
+        && let Some(field) = descriptor.fields.get(index)
+    {
+        return field.name.clone();
+    }
+    format!("f{}", index + 1)
+}
+
 fn rewrite_query_local_vars_for_output_exprs(
     mut query: Query,
     source_varno: usize,
     output_exprs: &[Expr],
     allow_planned_subqueries: bool,
     source_varlevelsup: usize,
+    whole_row_width: Option<usize>,
 ) -> Query {
     let rewrite_expr = |expr| {
         rewrite_local_vars_for_output_exprs_impl(
@@ -1731,6 +1824,7 @@ fn rewrite_query_local_vars_for_output_exprs(
             output_exprs,
             allow_planned_subqueries,
             source_varlevelsup,
+            whole_row_width,
         )
     };
 
@@ -1860,6 +1954,7 @@ fn rewrite_query_local_vars_for_output_exprs(
                         output_exprs,
                         allow_planned_subqueries,
                         source_varlevelsup + 1,
+                        whole_row_width,
                     )),
                 },
                 RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery {
@@ -1869,6 +1964,7 @@ fn rewrite_query_local_vars_for_output_exprs(
                         output_exprs,
                         allow_planned_subqueries,
                         source_varlevelsup + 1,
+                        whole_row_width,
                     )),
                 },
                 kind @ (RangeTblEntryKind::Result | RangeTblEntryKind::WorkTable { .. }) => kind,
@@ -1887,6 +1983,7 @@ fn rewrite_query_local_vars_for_output_exprs(
                     output_exprs,
                     allow_planned_subqueries,
                     source_varlevelsup + 1,
+                    whole_row_width,
                 )),
                 ..cte
             })
@@ -1901,6 +1998,7 @@ fn rewrite_query_local_vars_for_output_exprs(
                 output_exprs,
                 allow_planned_subqueries,
                 source_varlevelsup,
+                whole_row_width,
             ),
             recursive: rewrite_query_local_vars_for_output_exprs(
                 union.recursive,
@@ -1908,6 +2006,7 @@ fn rewrite_query_local_vars_for_output_exprs(
                 output_exprs,
                 allow_planned_subqueries,
                 source_varlevelsup,
+                whole_row_width,
             ),
             ..*union
         })
@@ -1924,6 +2023,7 @@ fn rewrite_query_local_vars_for_output_exprs(
                         output_exprs,
                         allow_planned_subqueries,
                         source_varlevelsup,
+                        whole_row_width,
                     )
                 })
                 .collect(),
@@ -2235,5 +2335,45 @@ fn raise_expr_varlevels(expr: Expr, delta: usize) -> Expr {
             defresult: Box::new(raise_expr_varlevels(*case_expr.defresult, delta)),
             ..*case_expr
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind};
+
+    fn var(varno: usize, varattno: i32, vartype: SqlType) -> Expr {
+        Expr::Var(Var {
+            varno,
+            varattno,
+            varlevelsup: 0,
+            vartype,
+            collation_oid: None,
+        })
+    }
+
+    #[test]
+    fn rewrite_whole_row_var_expands_visible_output_fields() {
+        let row_type = SqlType::named_composite(12_345, 67_890);
+        let first = var(2, 1, SqlType::new(SqlTypeKind::Int4));
+        let second = var(2, 2, SqlType::new(SqlTypeKind::Text));
+        let junk = var(2, 3, SqlType::new(SqlTypeKind::Tid));
+
+        let rewritten = rewrite_local_vars_for_output_exprs_with_whole_row_width(
+            var(1, WHOLE_ROW_ATTR_NO, row_type),
+            1,
+            &[first.clone(), second.clone(), junk],
+            2,
+        );
+
+        let Expr::Row { descriptor, fields } = rewritten else {
+            panic!("whole-row Var should rewrite to a row expression");
+        };
+        assert_eq!(descriptor.type_oid, row_type.type_oid);
+        assert_eq!(descriptor.typrelid, row_type.typrelid);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].1, first);
+        assert_eq!(fields[1].1, second);
     }
 }

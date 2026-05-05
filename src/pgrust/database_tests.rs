@@ -65399,6 +65399,56 @@ fn explain_whole_row_scalar_array_filter_deparses_alias_star() {
 }
 
 #[test]
+fn update_view_can_pass_whole_row_to_sql_function() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(
+        1,
+        "create table view_whole_row_base (a int4 primary key, b text default 'Unspecified')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into view_whole_row_base
+         select i, 'Row ' || i from generate_series(-2, 2) g(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view view_whole_row_v as
+         select b as bb, a as aa from view_whole_row_base",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function view_whole_row_aa(x view_whole_row_v)
+         returns int4 as $$ select x.aa $$ language sql",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update view_whole_row_v v
+             set bb = 'Updated row 2'
+             where view_whole_row_aa(v) = 2
+             returning view_whole_row_aa(v), v.bb",
+        ),
+        vec![vec![Value::Int32(2), Value::Text("Updated row 2".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from view_whole_row_base order by a",),
+        vec![
+            vec![Value::Int32(-2), Value::Text("Row -2".into())],
+            vec![Value::Int32(-1), Value::Text("Row -1".into())],
+            vec![Value::Int32(0), Value::Text("Row 0".into())],
+            vec![Value::Int32(1), Value::Text("Row 1".into())],
+            vec![Value::Int32(2), Value::Text("Updated row 2".into())],
+        ]
+    );
+}
+
+#[test]
 fn restrict_nonsystem_relation_kind_blocks_view_select() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
