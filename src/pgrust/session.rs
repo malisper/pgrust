@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::backend::access::heap::heapam::heap_fetch;
+use crate::backend::access::heap::heapam::{heap_fetch, heap_fetch_local};
 use crate::backend::access::transam::xact::{
     CommandId, INVALID_TRANSACTION_ID, Snapshot, TransactionId,
 };
@@ -3014,6 +3014,57 @@ fn cursor_not_positioned(name: &str) -> ExecError {
     })
 }
 
+fn held_cursor_current_of_error(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("cursor \"{name}\" is held from a previous transaction"),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    })
+}
+
+fn cursor_not_simply_updatable_error(name: &str, relation_name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!(
+            "cursor \"{name}\" is not a simply updatable scan of table \"{relation_name}\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    })
+}
+
+fn cursor_missing_for_update_reference_error(name: &str, relation_name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!(
+            "cursor \"{name}\" does not have a FOR UPDATE/SHARE reference to table \"{relation_name}\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    })
+}
+
+fn cursor_multiple_for_update_references_error(name: &str, relation_name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!(
+            "cursor \"{name}\" has multiple FOR UPDATE/SHARE references to table \"{relation_name}\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    })
+}
+
+fn current_of_view_error() -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: "WHERE CURRENT OF on a view is not implemented".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })
+}
+
 fn locate_current_of_clause(sql: &str) -> Option<(usize, usize, String)> {
     let lower = sql.to_ascii_lowercase();
     let marker = "current of";
@@ -3040,11 +3091,132 @@ fn locate_current_of_clause(sql: &str) -> Option<(usize, usize, String)> {
     Some((start, cursor_end, sql[cursor_start..cursor_end].to_string()))
 }
 
+fn unqualified_relation_name(name: &str) -> String {
+    name.rsplit('.')
+        .next()
+        .unwrap_or(name)
+        .trim_matches('"')
+        .to_string()
+}
+
+fn cursor_query_from_source_text(source_text: &str) -> Option<SelectStatement> {
+    let source_text = source_text.trim().trim_end_matches(';').trim();
+    match crate::backend::parser::parse_statement(source_text).ok()? {
+        Statement::DeclareCursor(stmt) => Some(stmt.query),
+        Statement::Select(stmt) => Some(stmt),
+        _ => None,
+    }
+}
+
+fn query_is_simple_current_of_scan(query: &SelectStatement) -> bool {
+    !query.distinct
+        && query.distinct_on.is_empty()
+        && query.group_by.is_empty()
+        && query.having.is_none()
+        && query.set_operation.is_none()
+}
+
+fn cursor_relation_refs(
+    query: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+) -> Vec<CursorRelationRef> {
+    let mut refs = Vec::new();
+    if let Some(from) = &query.from {
+        collect_cursor_relation_refs(from, catalog, &mut refs);
+    }
+    refs
+}
+
+fn collect_cursor_relation_refs(
+    from: &FromItem,
+    catalog: &dyn CatalogLookup,
+    refs: &mut Vec<CursorRelationRef>,
+) {
+    match from {
+        FromItem::Table { name, .. } => push_cursor_relation_ref(name, None, catalog, refs),
+        FromItem::Alias { source, alias, .. } => match source.as_ref() {
+            FromItem::Table { name, .. } => {
+                push_cursor_relation_ref(name, Some(alias.clone()), catalog, refs);
+            }
+            inner => collect_cursor_relation_refs(inner, catalog, refs),
+        },
+        FromItem::Join { left, right, .. } => {
+            collect_cursor_relation_refs(left, catalog, refs);
+            collect_cursor_relation_refs(right, catalog, refs);
+        }
+        FromItem::TableSample { source, .. } | FromItem::Lateral(source) => {
+            collect_cursor_relation_refs(source, catalog, refs);
+        }
+        FromItem::Values { .. }
+        | FromItem::Expression { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_)
+        | FromItem::DerivedTable(_) => {}
+    }
+}
+
+fn push_cursor_relation_ref(
+    name: &str,
+    alias: Option<String>,
+    catalog: &dyn CatalogLookup,
+    refs: &mut Vec<CursorRelationRef>,
+) {
+    let Some(relation) = catalog.lookup_any_relation(name) else {
+        return;
+    };
+    refs.push(CursorRelationRef {
+        rtindex: refs.len() + 1,
+        relation_oid: relation.relation_oid,
+        relation_name: unqualified_relation_name(name),
+        alias,
+    });
+}
+
+fn cursor_ref_is_locked_by_query(reference: &CursorRelationRef, query: &SelectStatement) -> bool {
+    if query.locking_targets.is_empty() {
+        return true;
+    }
+    query.locking_targets.iter().any(|target| {
+        target.eq_ignore_ascii_case(&reference.relation_name)
+            || reference
+                .alias
+                .as_ref()
+                .is_some_and(|alias| target.eq_ignore_ascii_case(alias))
+    })
+}
+
+fn positioned_row_for_reference(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    reference: &CursorRelationRef,
+    target_oids: &BTreeSet<u32>,
+) -> Option<PositionedCursorRow> {
+    let binding = bindings
+        .iter()
+        .find(|binding| binding.varno == reference.rtindex)?;
+    let tid = binding.tid?;
+    target_oids
+        .contains(&binding.table_oid)
+        .then_some(PositionedCursorRow {
+            table_oid: binding.table_oid,
+            tid,
+        })
+}
+
 #[derive(Debug, Clone)]
 struct CurrentOfRewrite {
     sql: String,
     cursor_name: String,
     row: PositionedCursorRow,
+}
+
+#[derive(Debug, Clone)]
+struct CursorRelationRef {
+    rtindex: usize,
+    relation_oid: u32,
+    relation_name: String,
+    alias: Option<String>,
 }
 
 fn statement_result_processed_rows(result: &StatementResult) -> usize {
@@ -4931,6 +5103,19 @@ impl Session {
                     .then_some((INVALID_TRANSACTION_ID, cid))
             })
         })
+    }
+
+    pub(crate) fn advance_active_transaction_heap_command_boundary(&mut self) {
+        if let Some(txn) = self.active_txn.as_mut() {
+            txn.next_heap_command_id = txn.next_heap_command_id.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn advance_active_transaction_portal_command_boundary(&mut self) {
+        if let Some(txn) = self.active_txn.as_mut() {
+            txn.next_command_id = txn.next_command_id.saturating_add(1);
+            txn.next_heap_command_id = txn.next_heap_command_id.saturating_add(1);
+        }
     }
 
     fn active_advisory_scope_id(&self) -> Option<u64> {
@@ -7096,8 +7281,10 @@ impl Session {
             txn.catalog_effects.extend(catalog_effects);
             txn.temp_effects.extend(temp_effects);
             txn.next_command_id = txn.next_command_id.max(next_command_id);
-            if let Some(next_heap_command_id) = ctx.snapshot.heap_current_cid() {
-                txn.next_heap_command_id = txn.next_heap_command_id.max(next_heap_command_id);
+            if let Some(last_heap_command_id) = ctx.snapshot.heap_current_cid() {
+                txn.next_heap_command_id = txn
+                    .next_heap_command_id
+                    .max(last_heap_command_id.saturating_add(1));
             }
             for rel in pending_table_locks {
                 txn.held_table_locks
@@ -8421,7 +8608,7 @@ impl Session {
                 CopyExecutionResult::Output { rows, .. } => Ok(StatementResult::AffectedRows(rows)),
             };
         }
-        let current_of_rewrite = self.rewrite_current_of_sql(sql)?;
+        let current_of_rewrite = self.rewrite_current_of_sql(db, sql)?;
         let sql = current_of_rewrite
             .as_ref()
             .map(|rewrite| rewrite.sql.as_str())
@@ -10964,7 +11151,10 @@ impl Session {
                 if result.is_err() {
                     self.mark_transaction_failed();
                 }
-                result.map(|_| StatementResult::AffectedRows(0))
+                result.map(|_| {
+                    self.advance_active_transaction_heap_command_boundary();
+                    StatementResult::AffectedRows(0)
+                })
             }
             Statement::Fetch(ref fetch_stmt) => {
                 let result = self.fetch_cursor(
@@ -10975,10 +11165,13 @@ impl Session {
                 if result.is_err() {
                     self.mark_transaction_failed();
                 }
-                result.map(|result| StatementResult::Query {
-                    columns: result.columns,
-                    column_names: result.column_names,
-                    rows: result.rows,
+                result.map(|result| {
+                    self.advance_active_transaction_portal_command_boundary();
+                    StatementResult::Query {
+                        columns: result.columns,
+                        column_names: result.column_names,
+                        rows: result.rows,
+                    }
                 })
             }
             Statement::Move(ref fetch_stmt) => {
@@ -10990,7 +11183,10 @@ impl Session {
                 if result.is_err() {
                     self.mark_transaction_failed();
                 }
-                result.map(|result| StatementResult::AffectedRows(result.processed))
+                result.map(|result| {
+                    self.advance_active_transaction_portal_command_boundary();
+                    StatementResult::AffectedRows(result.processed)
+                })
             }
             Statement::ClosePortal(ref close_stmt) => {
                 let result = if let Some(name) = &close_stmt.name {
@@ -11052,6 +11248,10 @@ impl Session {
                 let result = self
                     .validate_constraints_for_active_txn(db, false)
                     .and_then(|_| self.validate_temp_on_commit_for_active_txn(db))
+                    .and_then(|_| {
+                        self.portals
+                            .materialize_holdable_portals_created_in_transaction()
+                    })
                     .map(|_| StatementResult::AffectedRows(0));
                 let txn = self.active_txn.take().unwrap();
                 let chained_options = options.chain.then(|| txn.chained_options());
@@ -11388,18 +11588,50 @@ impl Session {
         }
     }
 
-    fn rewrite_current_of_sql(&self, sql: &str) -> Result<Option<CurrentOfRewrite>, ExecError> {
+    fn rewrite_current_of_sql(
+        &self,
+        db: &Database,
+        sql: &str,
+    ) -> Result<Option<CurrentOfRewrite>, ExecError> {
         let Some((start, end, cursor_name)) = locate_current_of_clause(sql) else {
             return Ok(None);
         };
-        let row = self.positioned_cursor_row(&cursor_name)?;
+        let original_stmt = self.parse_session_statement(db, sql)?;
+        let (target_table_name, cursor_name) = match &original_stmt {
+            Statement::Update(stmt) => (
+                stmt.table_name.as_str(),
+                stmt.current_of.as_deref().unwrap_or(cursor_name.as_str()),
+            ),
+            Statement::Delete(stmt) => (
+                stmt.table_name.as_str(),
+                stmt.current_of.as_deref().unwrap_or(cursor_name.as_str()),
+            ),
+            _ => return Ok(None),
+        };
+        let catalog = self.catalog_lookup(db);
+        let target_relation = catalog
+            .lookup_any_relation(target_table_name)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnknownTable(target_table_name.to_string()))
+            })?;
+        let target_display_name = unqualified_relation_name(target_table_name);
+        if target_relation.relkind == 'v' {
+            return Err(current_of_view_error());
+        }
+        let row = self.resolve_current_of_row(
+            cursor_name,
+            target_relation.relation_oid,
+            &target_display_name,
+            &catalog,
+        )?;
         // :HACK: Lower positioned UPDATE/DELETE to the equivalent physical
         // tuple predicate. A native plan node can later render `TID Cond:
         // CURRENT OF ...` for exact EXPLAIN parity.
         let predicate = format!(
-            "ctid = '({},{})'::tid AND '__pgrust_current_of:{}' = '__pgrust_current_of:{}'",
+            "ctid = '({},{})'::tid AND tableoid = '{}'::oid AND '__pgrust_current_of:{}' = '__pgrust_current_of:{}'",
             row.tid.block_number,
             row.tid.offset_number,
+            row.table_oid,
             cursor_name.replace('\'', "''"),
             cursor_name.replace('\'', "''")
         );
@@ -11409,7 +11641,7 @@ impl Session {
         rewritten.push_str(&sql[end..]);
         Ok(Some(CurrentOfRewrite {
             sql: rewritten,
-            cursor_name,
+            cursor_name: cursor_name.to_string(),
             row,
         }))
     }
@@ -11424,7 +11656,19 @@ impl Session {
         let Some(relation) = catalog.relation_by_oid(old_row.table_oid) else {
             return Ok(());
         };
-        let old_tuple = heap_fetch(&*db.pool, self.client_id, relation.rel, old_row.tid)?;
+        let old_tuple = if relation.relpersistence == 't' {
+            let local = db
+                .existing_local_buffer_manager(self.client_id)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "temporary buffers are not initialized".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            heap_fetch_local(&local, self.client_id, relation.rel, old_row.tid)?
+        } else {
+            heap_fetch(&*db.pool, self.client_id, relation.rel, old_row.tid)?
+        };
         let new_row = PositionedCursorRow {
             table_oid: old_row.table_oid,
             tid: old_tuple.header.ctid,
@@ -11444,7 +11688,13 @@ impl Session {
         Ok(())
     }
 
-    fn positioned_cursor_row(&self, name: &str) -> Result<PositionedCursorRow, ExecError> {
+    fn resolve_current_of_row(
+        &self,
+        name: &str,
+        target_relation_oid: u32,
+        target_relation_name: &str,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<PositionedCursorRow, ExecError> {
         let portal = self
             .portals
             .get(name)
@@ -11453,8 +11703,69 @@ impl Session {
         if !portal.options.visible {
             return Err(undefined_cursor(name));
         }
-        portal
-            .current_positioned_row()
+        if portal.options.holdable && !portal.created_in_transaction {
+            return Err(held_cursor_current_of_error(name));
+        }
+
+        let target_oids = catalog
+            .find_all_inheritors(target_relation_oid)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let current_bindings = portal.current_system_bindings();
+        let cursor_query = cursor_query_from_source_text(&portal.source_text);
+        let Some(query) = cursor_query.as_ref() else {
+            return portal
+                .current_positioned_row()
+                .filter(|row| target_oids.contains(&row.table_oid))
+                .ok_or_else(|| cursor_not_positioned(name));
+        };
+        let relation_refs = cursor_relation_refs(query, catalog);
+        if query.locking_clause.is_some() {
+            let locked_matching_refs = relation_refs
+                .iter()
+                .filter(|reference| cursor_ref_is_locked_by_query(reference, query))
+                .filter(|reference| target_oids.contains(&reference.relation_oid))
+                .collect::<Vec<_>>();
+            if locked_matching_refs.is_empty() {
+                return Err(cursor_missing_for_update_reference_error(
+                    name,
+                    target_relation_name,
+                ));
+            }
+            if locked_matching_refs.len() > 1 {
+                return Err(cursor_multiple_for_update_references_error(
+                    name,
+                    target_relation_name,
+                ));
+            }
+            let reference = locked_matching_refs[0];
+            return positioned_row_for_reference(current_bindings, reference, &target_oids)
+                .ok_or_else(|| cursor_not_positioned(name));
+        }
+
+        if !query_is_simple_current_of_scan(query) {
+            return Err(cursor_not_simply_updatable_error(
+                name,
+                target_relation_name,
+            ));
+        }
+        if relation_refs.len() != 1 {
+            return Err(cursor_not_simply_updatable_error(
+                name,
+                target_relation_name,
+            ));
+        }
+        let matching_refs = relation_refs
+            .iter()
+            .filter(|reference| reference.relation_oid == target_relation_oid)
+            .collect::<Vec<_>>();
+        if matching_refs.len() != 1 {
+            return Err(cursor_not_simply_updatable_error(
+                name,
+                target_relation_name,
+            ));
+        }
+        positioned_row_for_reference(current_bindings, matching_refs[0], &target_oids)
             .ok_or_else(|| cursor_not_positioned(name))
     }
 
@@ -15527,17 +15838,25 @@ impl Session {
     ) -> Result<(), ExecError> {
         let guard = self.execute_streaming(db, query)?;
         let created_savepoint_depth = self.current_savepoint_depth();
+        let created_in_transaction = self.active_txn.is_some();
         let mut portal = Portal::streaming_select(
             name.to_string(),
             source_text,
             None,
             Vec::new(),
             options,
-            true,
+            created_in_transaction,
             created_savepoint_depth,
             guard,
         );
-        if portal.options.scroll || portal.options.holdable {
+        if portal.options.scroll {
+            // :HACK: Immediate SCROLL materialization should see all writes
+            // completed before DECLARE.  The session currently tracks heap and
+            // catalog command IDs separately, and inherited-table setup can
+            // otherwise leave earlier own rows hidden until later commands.
+            portal.make_snapshot_see_prior_own_writes();
+        }
+        if portal.options.scroll || (portal.options.holdable && self.active_txn.is_none()) {
             portal.materialize_all()?;
         }
         self.portals.insert(portal, false, false)
@@ -15568,10 +15887,12 @@ impl Session {
                     {
                         portal.command_tag = tag;
                     }
+                    let row_bindings = vec![Vec::new(); rows.len()];
                     portal.execution = crate::pgrust::portal::PortalExecution::Materialized {
                         columns,
                         column_names,
                         row_positions: vec![None; rows.len()],
+                        row_bindings,
                         rows,
                         pos: 0,
                     };
@@ -15589,6 +15910,7 @@ impl Session {
                         completed: true,
                         command_tag: Some(tag),
                         current_row: None,
+                        current_bindings: Vec::new(),
                     }
                 }
             }

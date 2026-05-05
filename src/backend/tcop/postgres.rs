@@ -7039,7 +7039,12 @@ fn handle_portal_statement(
                 &declare_stmt.query,
                 options,
             ) {
-                Ok(()) => send_command_complete(stream, "DECLARE CURSOR")?,
+                Ok(()) => {
+                    state
+                        .session
+                        .advance_active_transaction_heap_command_boundary();
+                    send_command_complete(stream, "DECLARE CURSOR")?;
+                }
                 Err(e) => {
                     state.session.mark_transaction_failed();
                     send_exec_error(stream, sql, &e)?;
@@ -7056,6 +7061,9 @@ fn handle_portal_statement(
                 move_only,
             ) {
                 Ok(mut result) => {
+                    state
+                        .session
+                        .advance_active_transaction_portal_command_boundary();
                     if move_only {
                         send_command_complete(stream, &format!("MOVE {}", result.processed))?;
                     } else {
@@ -7099,7 +7107,12 @@ fn handle_portal_statement(
                 Ok(())
             };
             match result {
-                Ok(()) => send_command_complete(stream, "CLOSE CURSOR")?,
+                Ok(()) => {
+                    state
+                        .session
+                        .advance_active_transaction_portal_command_boundary();
+                    send_command_complete(stream, "CLOSE CURSOR")?;
+                }
                 Err(e) => {
                     state.session.mark_transaction_failed();
                     send_exec_error(stream, sql, &e)?;

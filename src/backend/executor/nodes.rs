@@ -955,6 +955,43 @@ fn lock_current_row_marks(
     Ok(())
 }
 
+fn row_mark_modified_after_snapshot(
+    ctx: &ExecutorContext,
+    row_marks: &[crate::include::nodes::plannodes::PlanRowMark],
+    bindings: &[SystemVarBinding],
+) -> bool {
+    if row_marks.is_empty() {
+        return false;
+    }
+    let snapshot_cid = ctx
+        .snapshot
+        .heap_current_cid()
+        .unwrap_or(ctx.snapshot.current_cid);
+    let txns = ctx.txns.read();
+    row_marks.iter().any(|row_mark| {
+        let Some(binding) = bindings
+            .iter()
+            .find(|binding| binding.varno == row_mark.rtindex)
+        else {
+            return false;
+        };
+        let Some(xmax) = binding.xmax else {
+            return false;
+        };
+        if !ctx.snapshot.transaction_is_own(xmax) {
+            return false;
+        }
+        let Some(cid) = binding.cmin else {
+            return false;
+        };
+        let cmax = txns
+            .combo_command_pair(xmax, cid)
+            .map(|(_cmin, cmax)| cmax)
+            .unwrap_or(cid);
+        cmax >= snapshot_cid
+    })
+}
+
 fn internal_exec_error(message: impl Into<String>) -> ExecError {
     ExecError::DetailedError {
         message: message.into(),
@@ -7803,6 +7840,9 @@ impl PlanNode for LockRowsState {
                 return Ok(None);
             };
             self.current_bindings = self.input.current_system_bindings().to_vec();
+            if row_mark_modified_after_snapshot(ctx, &self.row_marks, &self.current_bindings) {
+                continue;
+            }
             lock_current_row_marks(ctx, &self.row_marks, &self.current_bindings)?;
             set_active_system_bindings(ctx, &self.current_bindings);
             finish_row(&mut self.stats, start);
