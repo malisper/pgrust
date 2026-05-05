@@ -308,6 +308,19 @@ pub fn split_cte_prefixed_select_into_target(sql: &str) -> Option<(String, Strin
     Some((target, select_sql))
 }
 
+pub fn split_cte_prefixed_select_with_into_targets(
+    sql: &str,
+) -> Option<(Vec<String>, String, bool)> {
+    let trimmed = sql.trim_start();
+    if !keyword_at(trimmed, 0, "with") {
+        return None;
+    }
+    let select_idx = find_next_top_level_keyword(trimmed, &["select"])?;
+    let (targets, select_sql, strict) = split_select_with_into_targets(&trimmed[select_idx..])?;
+    let rewritten = format!("{} {}", trimmed[..select_idx].trim_end(), select_sql);
+    Some((targets, rewritten, strict))
+}
+
 fn split_leading_select_into_target(rest: &str) -> Option<(String, &str)> {
     let mut chars = rest.char_indices();
     let end = if rest.starts_with('"') {
@@ -1286,6 +1299,9 @@ pub struct PlpgsqlNotice {
     pub detail: Option<String>,
     pub hint: Option<String>,
     pub context: Option<String>,
+    pub position: Option<usize>,
+    pub internal_query: Option<String>,
+    pub internal_position: Option<usize>,
 }
 
 impl PlpgsqlNotice {
@@ -1301,6 +1317,9 @@ impl PlpgsqlNotice {
             detail: None,
             hint: None,
             context: None,
+            position: None,
+            internal_query: None,
+            internal_position: None,
         }
     }
 }
@@ -2258,6 +2277,16 @@ mod tests {
                 vec!["x".into(), "y".into()],
                 "select a, b from t".into(),
                 true
+            ))
+        );
+        assert_eq!(
+            split_cte_prefixed_select_with_into_targets(
+                "with p as (select a from t) select a into x from p"
+            ),
+            Some((
+                vec!["x".into()],
+                "with p as (select a from t) select a from p".into(),
+                false
             ))
         );
         assert_eq!(

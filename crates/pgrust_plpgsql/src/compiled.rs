@@ -140,6 +140,7 @@ pub enum CompiledExpr {
         expr: Expr,
         subplans: Vec<Plan>,
         source: String,
+        nonstandard_string_warning: bool,
     },
     QueryCompare {
         plan: PlannedStmt,
@@ -202,6 +203,10 @@ pub struct RuntimeSqlScope {
 pub enum CompiledForQuerySource {
     Static {
         plan: PlannedStmt,
+    },
+    DeferredError {
+        sql: String,
+        err: pgrust_nodes::parsenodes::ParseError,
     },
     Runtime {
         sql: String,

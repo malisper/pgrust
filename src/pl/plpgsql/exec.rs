@@ -17,19 +17,18 @@ use crate::backend::executor::function_guc::{
 };
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
-    TupleSlot, Value, cast_value, cast_value_with_config,
-    cast_value_with_source_type_catalog_and_config, compare_order_values,
-    enforce_domain_constraints_for_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
-    execute_readonly_statement_with_config, execute_user_defined_sql_scalar_function_values,
-    executor_start, render_interval_text,
+    TupleSlot, Value, cast_value, cast_value_with_source_type_catalog_and_config,
+    compare_order_values, enforce_domain_constraints_for_value, eval_expr, eval_plpgsql_expr,
+    execute_planned_stmt, execute_readonly_statement_with_config,
+    execute_user_defined_sql_scalar_function_values, executor_start, render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::libpq::pqformat::{format_exec_error, format_exec_error_hint};
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{
-    Catalog, CatalogLookup, ParseError, PreparedExternalParam, SqlType, SqlTypeKind, Statement,
-    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
-    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_statement,
+    BoundCte, Catalog, CatalogLookup, ParseError, PreparedExternalParam, SqlType, SqlTypeKind,
+    Statement, bind_delete_with_outer_scopes_and_ctes, bind_insert_with_outer_scopes_and_ctes,
+    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes_and_ctes, parse_statement,
     pg_plan_query_with_outer_scopes_and_ctes_config,
     pg_plan_values_query_with_outer_scopes_and_ctes_config, plan_merge_with_outer_scopes_and_ctes,
     resolve_raw_type_name, with_external_param_types,
@@ -69,10 +68,11 @@ use pgrust_plpgsql::{
     foreach_iteration_values, is_catalog_foreign_key_check_sql, is_catalog_foreign_key_query_sql,
     parse_proc_argtype_oids, plpgsql_extra_check_level, plpgsql_query_column, push_context_frame,
     push_event_trigger_ddl_commands, push_event_trigger_dropped_objects,
-    push_event_trigger_table_rewrite, push_plpgsql_notice, queue_plpgsql_warning, quote_identifier,
-    quote_sql_string, resolve_raise_sqlstate, runtime_sql_param_id,
-    split_plpgsql_statement_line_context, transition_table_visible_rows, trigger_return_bindings,
-    validate_foreach_target, validate_plpgsql_function_row as validate_plpgsql_function_row_impl,
+    push_event_trigger_table_rewrite, push_plpgsql_notice, queue_plpgsql_warning,
+    queue_plpgsql_warning_with_internal_query, quote_identifier, quote_sql_string,
+    resolve_raise_sqlstate, runtime_sql_param_id, split_plpgsql_statement_line_context,
+    transition_table_visible_rows, trigger_return_bindings, validate_foreach_target,
+    validate_plpgsql_function_row as validate_plpgsql_function_row_impl,
     validate_plpgsql_procedure_row as validate_plpgsql_procedure_row_impl,
     validate_scalar_call_return_contract,
 };
@@ -1492,7 +1492,7 @@ fn exec_function_block(
     for local in &block.local_slots {
         let (value, source_type) = match &local.default_expr {
             Some(expr) => (
-                eval_function_expr(expr, &state.values, ctx)
+                eval_function_local_init_expr(expr, &state.values, ctx)
                     .map_err(|err| with_plpgsql_local_init_context(err, compiled, local.line))?,
                 compiled_expr_sql_type_hint(expr),
             ),
@@ -2886,6 +2886,14 @@ fn execute_for_query_source(
         CompiledForQuerySource::Static { plan } => {
             execute_function_query_result(plan, compiled, state, ctx)
         }
+        CompiledForQuerySource::DeferredError { sql, err } => {
+            Err(ExecError::WithInternalQueryContext {
+                source: Box::new(ExecError::Parse(err.clone())),
+                context: String::new(),
+                query: sql.clone(),
+                position: err.position(),
+            })
+        }
         CompiledForQuerySource::Runtime { sql, scope } => {
             if is_catalog_foreign_key_query_sql(sql) {
                 return Ok(catalog_foreign_key_query_result());
@@ -2948,14 +2956,13 @@ fn assign_foreach_value_to_targets(
     value: Value,
     target: &CompiledForQueryTarget,
     state: &mut FunctionState,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     if let [target] = target.targets.as_slice() {
         if target.ty.kind == SqlTypeKind::Record {
             state.values[target.slot] = value;
         } else {
-            state.values[target.slot] =
-                cast_value_with_config(value, target.ty, &ctx.datetime_config)?;
+            state.values[target.slot] = cast_function_value(value, None, target.ty, ctx)?;
         }
         return Ok(());
     }
@@ -2975,7 +2982,7 @@ fn assign_foreach_value_to_targets(
         ));
     }
     for (target, value) in target.targets.iter().zip(record.fields) {
-        state.values[target.slot] = cast_value_with_config(value, target.ty, &ctx.datetime_config)?;
+        state.values[target.slot] = cast_function_value(value, None, target.ty, ctx)?;
     }
     Ok(())
 }
@@ -3713,6 +3720,26 @@ fn execute_dynamic_statement(
     execute_dynamic_sql_statement(&sql, false, None, compiled, state, ctx)
 }
 
+fn reject_transition_table_modify_target(
+    table_name: &str,
+    local_ctes: &[BoundCte],
+) -> Result<(), ExecError> {
+    if table_name.contains('.') {
+        return Ok(());
+    }
+    if local_ctes
+        .iter()
+        .any(|cte| cte.name.eq_ignore_ascii_case(table_name))
+    {
+        return Err(function_runtime_error(
+            &format!("relation \"{table_name}\" cannot be the target of a modifying statement"),
+            None,
+            "0A000",
+        ));
+    }
+    Ok(())
+}
+
 fn eval_dynamic_sql(
     sql_expr: &CompiledExpr,
     using_exprs: &[CompiledExpr],
@@ -3829,11 +3856,16 @@ fn execute_dynamic_sql_statement(
                     Err(select_into_no_tuples_error())
                 }
                 crate::backend::parser::Statement::Insert(stmt) => {
+                    reject_transition_table_modify_target(&stmt.table_name, &compiled.local_ctes)?;
                     let xid = ctx.ensure_write_xid()?;
                     let cid = ctx.next_command_id;
-                    let stmt =
-                        bind_insert_with_outer_scopes(&stmt, catalog.as_ref(), &outer_scopes)
-                            .map_err(ExecError::Parse)?;
+                    let stmt = bind_insert_with_outer_scopes_and_ctes(
+                        &stmt,
+                        catalog.as_ref(),
+                        &outer_scopes,
+                        &compiled.local_ctes,
+                    )
+                    .map_err(ExecError::Parse)?;
                     let result = execute_insert(stmt, catalog.as_ref(), ctx, xid, cid);
                     if result.is_ok() {
                         advance_plpgsql_command_id(ctx);
@@ -3841,11 +3873,16 @@ fn execute_dynamic_sql_statement(
                     result
                 }
                 crate::backend::parser::Statement::Update(stmt) => {
+                    reject_transition_table_modify_target(&stmt.table_name, &compiled.local_ctes)?;
                     let xid = ctx.ensure_write_xid()?;
                     let cid = ctx.next_command_id;
-                    let stmt =
-                        bind_update_with_outer_scopes(&stmt, catalog.as_ref(), &outer_scopes)
-                            .map_err(ExecError::Parse)?;
+                    let stmt = bind_update_with_outer_scopes_and_ctes(
+                        &stmt,
+                        catalog.as_ref(),
+                        &outer_scopes,
+                        &compiled.local_ctes,
+                    )
+                    .map_err(ExecError::Parse)?;
                     let stmt = bind_update_current_of(&stmt, compiled, state)?;
                     let result = execute_update(stmt, catalog.as_ref(), ctx, xid, cid);
                     if result.is_ok() {
@@ -3854,10 +3891,15 @@ fn execute_dynamic_sql_statement(
                     result
                 }
                 crate::backend::parser::Statement::Delete(stmt) => {
+                    reject_transition_table_modify_target(&stmt.table_name, &compiled.local_ctes)?;
                     let xid = ctx.ensure_write_xid()?;
-                    let stmt =
-                        bind_delete_with_outer_scopes(&stmt, catalog.as_ref(), &outer_scopes)
-                            .map_err(ExecError::Parse)?;
+                    let stmt = bind_delete_with_outer_scopes_and_ctes(
+                        &stmt,
+                        catalog.as_ref(),
+                        &outer_scopes,
+                        &compiled.local_ctes,
+                    )
+                    .map_err(ExecError::Parse)?;
                     let stmt = bind_delete_current_of(&stmt, compiled, state)?;
                     let result = execute_delete(stmt, catalog.as_ref(), ctx, xid);
                     if result.is_ok() {
@@ -3866,6 +3908,10 @@ fn execute_dynamic_sql_statement(
                     result
                 }
                 crate::backend::parser::Statement::Merge(stmt) => {
+                    reject_transition_table_modify_target(
+                        &stmt.target_table,
+                        &compiled.local_ctes,
+                    )?;
                     let xid = ctx.ensure_write_xid()?;
                     let cid = ctx.next_command_id;
                     if let Some(scope) = runtime_scope {
@@ -3948,6 +3994,15 @@ fn execute_dynamic_sql_statement(
                 }
                 crate::backend::parser::Statement::DeclareCursor(stmt) => {
                     exec_dynamic_declare_cursor(&stmt, sql, ctx)
+                }
+                crate::backend::parser::Statement::Explain(stmt) => {
+                    crate::backend::commands::tablecmds::execute_explain_with_outer_ctes(
+                        stmt,
+                        catalog.as_ref(),
+                        ctx,
+                        planner_config,
+                        &compiled.local_ctes,
+                    )
                 }
                 crate::backend::parser::Statement::Fetch(stmt) => {
                     exec_dynamic_fetch_cursor(&stmt, false, ctx)
@@ -6488,6 +6543,16 @@ fn eval_function_expr(
         .map_err(|err| with_plpgsql_expression_context(err, source))
 }
 
+fn eval_function_local_init_expr(
+    expr: &CompiledExpr,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let source = compiled_expr_source(expr);
+    eval_function_expr_inner(expr, values, ctx)
+        .map_err(|err| with_plpgsql_local_init_expression_context(err, source))
+}
+
 fn eval_function_raise_expr(
     expr: &CompiledExpr,
     values: &[Value],
@@ -6504,8 +6569,17 @@ fn eval_function_return_expr(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     let source = compiled_expr_source(expr);
-    eval_function_expr_inner(expr, values, ctx)
-        .map_err(|err| with_plpgsql_expression_context(err, source))
+    let result = eval_function_expr_inner(expr, values, ctx)
+        .map_err(|err| with_plpgsql_expression_context(err, source));
+    if result.is_ok() && compiled_expr_nonstandard_string_warning(expr) {
+        queue_plpgsql_warning_with_internal_query(
+            r"nonstandard use of \\ in a string literal",
+            Some(r"Use the escape string syntax for backslashes, e.g., E'\\'.".into()),
+            source.to_string(),
+            Some(1),
+        );
+    }
+    result
 }
 
 fn eval_function_expr_inner(
@@ -6559,6 +6633,16 @@ fn compiled_expr_source(expr: &CompiledExpr) -> &str {
         | CompiledExpr::QueryCompare { source, .. }
         | CompiledExpr::DeferredError { source, .. } => source,
     }
+}
+
+fn compiled_expr_nonstandard_string_warning(expr: &CompiledExpr) -> bool {
+    matches!(
+        expr,
+        CompiledExpr::Scalar {
+            nonstandard_string_warning: true,
+            ..
+        }
+    )
 }
 
 fn eval_query_compare(op: QueryCompareOp, left: &Value, right: &Value) -> Result<bool, ExecError> {
@@ -7153,6 +7237,22 @@ fn with_plpgsql_expression_context(err: ExecError, source: &str) -> ExecError {
 }
 
 fn with_plpgsql_raise_expression_context(err: ExecError, source: &str) -> ExecError {
+    let source = source.trim();
+    if source.is_empty() || has_any_context(&err) {
+        return err;
+    }
+    if plpgsql_expression_uses_internal_query(&err) {
+        return ExecError::WithInternalQueryContext {
+            position: plpgsql_expression_error_position(source, &err),
+            query: source.to_string(),
+            source: Box::new(err),
+            context: String::new(),
+        };
+    }
+    err
+}
+
+fn with_plpgsql_local_init_expression_context(err: ExecError, source: &str) -> ExecError {
     let source = source.trim();
     if source.is_empty() || has_any_context(&err) {
         return err;

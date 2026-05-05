@@ -33,7 +33,7 @@ use crate::backend::optimizer::partition_prune::{
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
-    BoundAssignmentTargetIndirection, BoundDeleteStatement, BoundDeleteTarget,
+    BoundAssignmentTargetIndirection, BoundCte, BoundDeleteStatement, BoundDeleteTarget,
     BoundExclusionConstraint, BoundForeignKeyConstraint, BoundIndexRelation, BoundInsertSource,
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
@@ -535,6 +535,16 @@ pub(crate) fn execute_explain(
     ctx: &mut ExecutorContext,
     planner_config: PlannerConfig,
 ) -> Result<StatementResult, ExecError> {
+    execute_explain_with_outer_ctes(stmt, catalog, ctx, planner_config, &[])
+}
+
+pub(crate) fn execute_explain_with_outer_ctes(
+    stmt: ExplainStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+    outer_ctes: &[BoundCte],
+) -> Result<StatementResult, ExecError> {
     let ExplainStatement {
         analyze,
         buffers,
@@ -649,9 +659,11 @@ pub(crate) fn execute_explain(
     let (query_desc, merge_target_name, check_select_privileges) = match explain_target {
         EitherExplainTarget::Select(select) => (
             create_query_desc(
-                crate::backend::parser::pg_plan_query_with_config(
+                crate::backend::parser::pg_plan_query_with_outer_scopes_and_ctes_config(
                     &select,
                     catalog,
+                    &[],
+                    outer_ctes,
                     planner_config,
                 )?,
                 None,
@@ -699,7 +711,7 @@ pub(crate) fn execute_explain(
         }
         EitherExplainTarget::CreateTableAs(create_table_as) => (
             create_query_desc(
-                crate::backend::parser::pg_plan_query_with_config(
+                crate::backend::parser::pg_plan_query_with_outer_scopes_and_ctes_config(
                     match &create_table_as.query {
                         crate::include::nodes::parsenodes::CreateTableAsQuery::Select(query) => {
                             query
@@ -717,6 +729,8 @@ pub(crate) fn execute_explain(
                         }
                     },
                     catalog,
+                    &[],
+                    outer_ctes,
                     planner_config,
                 )?,
                 None,

@@ -4638,8 +4638,22 @@ fn query_text_column(session: &mut Session, db: &Database, sql: &str) -> Vec<Str
 
 fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
     match err {
-        ExecError::WithContext { source, .. } => {
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => {
             assert_sqlstate(*source, expected_sqlstate, expected_message_part)
+        }
+        ExecError::Parse(ParseError::Positioned { source, .. }) => assert_sqlstate(
+            ExecError::Parse(*source),
+            expected_sqlstate,
+            expected_message_part,
+        ),
+        ExecError::Parse(ParseError::UnknownColumn(name)) => {
+            assert_eq!(expected_sqlstate, "42703");
+            let message = format!("column \"{name}\" does not exist");
+            assert!(
+                message.contains(expected_message_part),
+                "expected message to contain {expected_message_part:?}, got {message:?}"
+            );
         }
         ExecError::DetailedError {
             message, sqlstate, ..
@@ -4669,6 +4683,17 @@ fn exec_error_context_contains(err: &ExecError, needle: &str) -> bool {
         ExecError::WithContext { source, context } => {
             context.contains(needle) || exec_error_context_contains(source, needle)
         }
+        ExecError::WithInternalQueryContext {
+            source, context, ..
+        } => context.contains(needle) || exec_error_context_contains(source, needle),
+        _ => false,
+    }
+}
+
+fn exec_error_internal_query_contains(err: &ExecError, needle: &str) -> bool {
+    match err {
+        ExecError::WithInternalQueryContext { query, .. } => query.contains(needle),
+        ExecError::WithContext { source, .. } => exec_error_internal_query_contains(source, needle),
         _ => false,
     }
 }
@@ -24180,6 +24205,50 @@ fn plpgsql_declare_default_scope_matches_declaration_order() {
 }
 
 #[test]
+fn plpgsql_declare_default_scope_rejects_self_and_later_vars() {
+    let base = temp_dir("plpgsql_declare_default_scope_errors");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "do $$
+             declare x int := x + 1;
+             begin
+               raise notice 'x = %', x;
+             end
+             $$",
+        )
+        .unwrap_err();
+    assert!(exec_error_internal_query_contains(&err, "x + 1"));
+    assert!(exec_error_context_contains(
+        &err,
+        "during statement block local variable initialization"
+    ));
+    assert_sqlstate(err, "42703", "column \"x\" does not exist");
+
+    let err = session
+        .execute(
+            &db,
+            "do $$
+             declare y int := x + 1;
+                     x int := 42;
+             begin
+               raise notice 'x = %, y = %', x, y;
+             end
+             $$",
+        )
+        .unwrap_err();
+    assert!(exec_error_internal_query_contains(&err, "x + 1"));
+    assert!(exec_error_context_contains(
+        &err,
+        "during statement block local variable initialization"
+    ));
+    assert_sqlstate(err, "42703", "column \"x\" does not exist");
+}
+
+#[test]
 fn plpgsql_variable_conflict_modes_control_static_select_resolution() {
     let base = temp_dir("plpgsql_variable_conflict_modes");
     let db = Database::open(&base, 16).unwrap();
@@ -24212,13 +24281,15 @@ fn plpgsql_variable_conflict_modes_control_static_select_resolution() {
         )
         .unwrap();
 
-    assert_sqlstate(
-        session
-            .execute(&db, "select plpgsql_conflict_test()")
-            .unwrap_err(),
-        "42702",
-        "column reference \"q1\" is ambiguous",
-    );
+    let err = session
+        .execute(&db, "select plpgsql_conflict_test()")
+        .unwrap_err();
+    assert!(exec_error_context_contains(&err, "at FOR over SELECT rows"));
+    assert!(exec_error_internal_query_contains(
+        &err,
+        "select q1, q2 from plpgsql_conflict_src"
+    ));
+    assert_sqlstate(err, "42702", "column reference \"q1\" is ambiguous");
 
     session
         .execute(
@@ -24264,6 +24335,51 @@ fn plpgsql_variable_conflict_modes_control_static_select_resolution() {
     assert_eq!(
         session_query_rows(&mut session, &db, "select plpgsql_conflict_test()"),
         vec![vec![Value::Text("10,20".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_foreach_slice_assigns_composite_array_target() {
+    let base = temp_dir("plpgsql_foreach_composite_array_slice");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type plpgsql_xy_tuple as (x int4, y int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_foreach_composite_slice(anyarray) returns text language plpgsql as $$
+         declare
+           x plpgsql_xy_tuple[];
+           out_text text := '';
+         begin
+           foreach x slice 1 in array $1 loop
+             out_text := out_text || case when out_text = '' then '' else ';' end || x::text;
+           end loop;
+           return out_text;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select plpgsql_foreach_composite_slice(ARRAY[(10,20),(40,69),(35,78)]::plpgsql_xy_tuple[])"
+        ),
+        vec![vec![Value::Text(
+            "{\"(10,20)\",\"(40,69)\",\"(35,78)\"}".into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select plpgsql_foreach_composite_slice(ARRAY[[(10,20),(40,69)],[(35,78),(88,76)]]::plpgsql_xy_tuple[])"
+        ),
+        vec![vec![Value::Text(
+            "{\"(10,20)\",\"(40,69)\"};{\"(35,78)\",\"(88,76)\"}".into()
+        )]]
     );
 }
 
@@ -66233,7 +66349,13 @@ fn plpgsql_nonstandard_string_literals_decode_backslashes() {
         panic!("expected query result");
     };
     assert_eq!(rows, vec![vec![Value::Text("foo\\bar!baz".into())]]);
-    assert_eq!(take_notice_messages(), vec!["foo\\bar!baz".to_string()]);
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "foo\\bar!baz".to_string(),
+            r"nonstandard use of \\ in a string literal".to_string(),
+        ]
+    );
 }
 
 #[test]
