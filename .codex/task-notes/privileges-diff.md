@@ -46,3 +46,25 @@ the diff. Remaining mismatches are unrelated privilege/function/operator/large
 object gaps; latest run matched 960/1295 queries with 2332 diff lines.
 PR #324 CI had one failing lib test in `cargo-test-run (2/2)`; the local
 targeted rerun now passes.
+
+Follow-up diagnosis 2026-05-05:
+The added error after
+`UPDATE atest2 SET col2 = true FROM atest1 WHERE atest1.a = 5` is caused by
+pgrust requiring SELECT on the UPDATE target relation while planning/executing
+the joined row source. PostgreSQL allows this statement for
+`regress_priv_user3`: that role has UPDATE on `atest2` and SELECT on `atest1`,
+and the target table is not read by the assignment or WHERE expression. The
+likely code path is `bind_update_from` in `crates/pgrust_analyze/src/modify.rs`,
+which builds the input plan as a projected query over target + source, then
+`collect_query_relation_privileges` gives relation RTEs SELECT permissions by
+default. `execute_update_with_waiter` tries to skip target OIDs when checking
+input-plan privileges; inspect why the target `atest2` requirement is not
+excluded or why it is also present in `stmt.required_privileges`.
+
+Fix implemented:
+`bind_update_from` and `bind_delete_using` now strip generic relation SELECT
+permissions from the internal DML target row-source before wrapping it with
+hidden `ctid`/`tableoid` identity columns. The explicit DML privilege
+requirements still decide whether target columns require SELECT because they
+appear in SET/WHERE/RETURNING. Added a binder regression test for UPDATE FROM
+where the target is written but not read.
