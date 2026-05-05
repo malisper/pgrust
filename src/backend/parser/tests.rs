@@ -11607,6 +11607,54 @@ fn build_plan_rejects_invalid_collation_usage() {
                 == "collation mismatch between explicit collations \"C\" and \"POSIX\""
                 && sqlstate == "42P21"
     ));
+
+    let mut collated_desc = desc();
+    collated_desc.columns[1].collation_oid = crate::include::catalog::C_COLLATION_OID;
+    collated_desc.columns[2].collation_oid = crate::include::catalog::POSIX_COLLATION_OID;
+    let mut collated_catalog = Catalog::default();
+    collated_catalog.insert("people", test_catalog_entry(15000, collated_desc));
+
+    let stmt = parse_select("select name = note from people").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &collated_catalog),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message
+                == "collation mismatch between implicit collations \"C\" and \"POSIX\""
+                && sqlstate == "42P21"
+    ));
+
+    let stmt = parse_select("select name, note from people order by name || note").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &collated_catalog),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message
+                == "collation mismatch between implicit collations \"C\" and \"POSIX\""
+                && sqlstate == "42P21"
+    ));
+
+    let stmt =
+        parse_select("select name from people union select note from people order by 1").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &collated_catalog),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message
+                == "collation mismatch between implicit collations \"C\" and \"POSIX\""
+                && sqlstate == "42P21"
+    ));
+
+    let stmt = parse_select(
+        "select name from people where (name, note) not in (select note, name from people)",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &collated_catalog),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "could not determine which collation to use for string hashing"
+                && sqlstate == "42P22"
+    ));
+
+    let stmt = parse_select("select name from people union all select note from people").unwrap();
+    assert!(build_plan(&stmt, &collated_catalog).is_ok());
 }
 
 #[test]

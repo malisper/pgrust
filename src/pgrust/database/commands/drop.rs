@@ -2757,6 +2757,11 @@ impl Database {
             .into_iter()
             .filter(|row| row.pronamespace == schema_oid)
             .collect::<Vec<_>>();
+        let collation_rows = catcache
+            .collation_rows()
+            .into_iter()
+            .filter(|row| row.collnamespace == schema_oid)
+            .collect::<Vec<_>>();
         let mut next_cid = cid;
 
         let mut relation_rows_by_drop_order = relation_rows.clone();
@@ -2834,6 +2839,25 @@ impl Database {
                 .write()
                 .drop_proc_by_oid_mvcc(proc_row.oid, &ctx)
                 .map(|(_, effect)| effect)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
+
+        for collation_row in collation_rows {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .drop_collation_mvcc(&collation_row, &ctx)
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             next_cid = next_cid.saturating_add(1);
@@ -3825,7 +3849,11 @@ impl Database {
                 .proc_rows()
                 .into_iter()
                 .any(|row| row.pronamespace == schema.oid);
-            if (has_relations || has_procs) && !drop_stmt.cascade {
+            let has_collations = catcache
+                .collation_rows()
+                .into_iter()
+                .any(|row| row.collnamespace == schema.oid);
+            if (has_relations || has_procs || has_collations) && !drop_stmt.cascade {
                 return Err(ExecError::DetailedError {
                     message: format!(
                         "cannot drop schema {schema_name} because other objects depend on it"
@@ -4129,6 +4157,24 @@ impl Database {
                         ),
                     ));
                 }
+                for row in catcache
+                    .collation_rows()
+                    .into_iter()
+                    .filter(|row| row.collnamespace == schema.oid)
+                {
+                    tail_notices.push((
+                        row.oid,
+                        format!(
+                            "drop cascades to collation {}",
+                            drop_schema_display_object_name(
+                                &catcache,
+                                &visible_namespaces,
+                                row.collnamespace,
+                                &row.collname
+                            )
+                        ),
+                    ));
+                }
                 for proc_row in catcache
                     .proc_rows()
                     .into_iter()
@@ -4211,7 +4257,7 @@ impl Database {
                 }
                 namespace_cid = next_cid;
             }
-            if has_relations || has_procs {
+            if has_relations || has_procs || has_collations {
                 namespace_cid = self.drop_schema_owned_objects_in_transaction(
                     client_id,
                     schema.oid,

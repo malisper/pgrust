@@ -266,12 +266,12 @@ pub(super) fn bind_grouped_quantified_array(
     );
     let collation_oid = consumer_for_subquery_comparison_op(op)
         .map(|consumer| {
-            derive_consumer_collation(
+            derive_consumer_collation_from_exprs(
                 catalog,
                 consumer,
                 &[
-                    (left_type, left_explicit_collation),
-                    (array_type.element_type(), None),
+                    (&left, left_type, left_explicit_collation),
+                    (&right, array_type.element_type(), None),
                 ],
             )
         })

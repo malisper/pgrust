@@ -97,8 +97,8 @@ pub use coerce::sql_type_name;
 use coerce::*;
 pub use collation::{
     CollationConsumer, bind_explicit_collation, consumer_for_subquery_comparison_op,
-    derive_consumer_collation, finalize_order_by_expr, is_collatable_type, resolve_collation_oid,
-    strip_explicit_collation,
+    derive_consumer_collation, derive_consumer_collation_from_exprs, finalize_order_by_expr,
+    is_collatable_type, resolve_collation_oid, strip_explicit_collation,
 };
 pub use constraints::*;
 pub use constraints::{
@@ -1084,12 +1084,12 @@ fn coerce_hypothetical_aggregate_inputs(
         let (direct_expr, direct_explicit_collation) = strip_explicit_collation(bound_direct_arg);
         let (arg_expr, _) = strip_explicit_collation(bound_arg);
         let (order_expr, order_explicit_collation) = strip_explicit_collation(bound_order_expr);
-        let collation_oid = derive_consumer_collation(
+        let collation_oid = derive_consumer_collation_from_exprs(
             catalog,
             CollationConsumer::OrderBy,
             &[
-                (common_type, direct_explicit_collation),
-                (common_type, order_explicit_collation),
+                (&direct_expr, common_type, direct_explicit_collation),
+                (&order_expr, common_type, order_explicit_collation),
             ],
         )?;
         coerced_direct_args.push(coerce_bound_expr(direct_expr, direct_type, common_type));
@@ -4001,9 +4001,21 @@ fn positioned_if_available(err: ParseError, position: Option<usize>) -> ParseErr
 fn cte_query_desc(query: &Query) -> RelationDesc {
     RelationDesc {
         columns: query
-            .columns()
-            .into_iter()
-            .map(|col| column_desc(col.name, col.sql_type, true))
+            .target_list
+            .iter()
+            .filter(|target| !target.resjunk)
+            .map(|target| {
+                let mut desc = column_desc(target.name.clone(), target.sql_type, true);
+                desc.collation_oid =
+                    match collation::derive_expr_collation(&target.expr, target.sql_type) {
+                        collation::DerivedCollation::None => 0,
+                        collation::DerivedCollation::Default(oid)
+                        | collation::DerivedCollation::Implicit(oid)
+                        | collation::DerivedCollation::Explicit(oid) => oid,
+                        collation::DerivedCollation::Conflict { .. } => 0,
+                    };
+                desc
+            })
             .collect(),
     }
 }
@@ -4462,6 +4474,30 @@ fn bind_ctes(
                                 cte_body_target_location(anchor, index),
                             ));
                         }
+                    }
+                    if collation::is_collatable_type(left.sql_type)
+                        && left.collation_oid != 0
+                        && right.collation_oid != 0
+                        && left.collation_oid != right.collation_oid
+                    {
+                        return Err(positioned_if_available(
+                            ParseError::DetailedError {
+                                message: format!(
+                                    "recursive query \"{}\" column {} has collation \"{}\" in non-recursive term but collation \"{}\" overall",
+                                    cte.name,
+                                    index + 1,
+                                    collation::collation_name(catalog, left.collation_oid),
+                                    collation::collation_name(catalog, right.collation_oid)
+                                ),
+                                detail: None,
+                                hint: Some(
+                                    "Use the COLLATE clause to set the collation of the non-recursive term."
+                                        .into(),
+                                ),
+                                sqlstate: "42P21",
+                            },
+                            cte_body_target_location(anchor, index),
+                        ));
                     }
                 }
                 let recursive_plan = AnalyzedFrom::worktable(worktable_id, output_columns.clone());
@@ -9017,6 +9053,25 @@ fn bind_set_operation_query_with_outer(
         }
     }
 
+    let must_resolve_output_collations = !set_operation.op.all() || !stmt.order_by.is_empty();
+    let mut output_collations = vec![0; width];
+    if must_resolve_output_collations {
+        for (index, common_type) in output_types.iter().copied().enumerate() {
+            output_collations[index] = derive_consumer_collation_from_exprs(
+                catalog,
+                CollationConsumer::StringComparison,
+                &inputs
+                    .iter()
+                    .map(|query| {
+                        let target = &query.target_list[index];
+                        (&target.expr, common_type, None)
+                    })
+                    .collect::<Vec<_>>(),
+            )?
+            .unwrap_or(0);
+        }
+    }
+
     let output_columns = output_names
         .into_iter()
         .zip(output_types.iter().copied())
@@ -9035,7 +9090,10 @@ fn bind_set_operation_query_with_outer(
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
-                collation_oid: None,
+                collation_oid: output_collations
+                    .get(index)
+                    .copied()
+                    .filter(|oid| *oid != 0),
             })
         })
         .collect::<Vec<_>>();
@@ -9043,7 +9101,12 @@ fn bind_set_operation_query_with_outer(
     let desc = RelationDesc {
         columns: output_columns
             .iter()
-            .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+            .enumerate()
+            .map(|(index, column)| {
+                let mut desc = column_desc(column.name.clone(), column.sql_type, true);
+                desc.collation_oid = output_collations[index];
+                desc
+            })
             .collect(),
     };
     let scope = scope_for_relation(None, &desc);

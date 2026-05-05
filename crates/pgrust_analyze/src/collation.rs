@@ -1,7 +1,7 @@
 use super::coerce::{is_text_like_type, sql_type_name};
 use super::*;
 use pgrust_catalog_data::DEFAULT_COLLATION_OID;
-use pgrust_nodes::primnodes::expr_sql_type_hint;
+use pgrust_nodes::primnodes::{OpExprKind, expr_sql_type_hint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollationConsumer {
@@ -90,6 +90,174 @@ pub fn strip_explicit_collation(expr: Expr) -> (Expr, Option<u32>) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedCollation {
+    None,
+    Default(u32),
+    Implicit(u32),
+    Explicit(u32),
+    Conflict {
+        left: u32,
+        right: u32,
+        explicit: bool,
+    },
+}
+
+fn combine_expr_collations(left: DerivedCollation, right: DerivedCollation) -> DerivedCollation {
+    use DerivedCollation::*;
+
+    match (left, right) {
+        (conflict @ Conflict { .. }, _) | (_, conflict @ Conflict { .. }) => conflict,
+        (Explicit(left), Explicit(right)) if left != right => Conflict {
+            left,
+            right,
+            explicit: true,
+        },
+        (Explicit(oid), _) | (_, Explicit(oid)) => Explicit(oid),
+        (Implicit(left), Implicit(right)) if left == DEFAULT_COLLATION_OID => Implicit(right),
+        (Implicit(left), Implicit(right)) if right == DEFAULT_COLLATION_OID => Implicit(left),
+        (Implicit(left), Implicit(right)) if left != right => Conflict {
+            left,
+            right,
+            explicit: false,
+        },
+        (Implicit(oid), _) | (_, Implicit(oid)) => Implicit(oid),
+        (Default(oid), Default(_)) | (Default(oid), None) | (None, Default(oid)) => Default(oid),
+        (None, None) => None,
+    }
+}
+
+fn combine_many_expr_collations(
+    collations: impl IntoIterator<Item = DerivedCollation>,
+) -> DerivedCollation {
+    collations
+        .into_iter()
+        .fold(DerivedCollation::None, combine_expr_collations)
+}
+
+fn default_if_no_collation(collation: DerivedCollation) -> DerivedCollation {
+    match collation {
+        DerivedCollation::None => DerivedCollation::Default(DEFAULT_COLLATION_OID),
+        other => other,
+    }
+}
+
+pub fn derive_expr_collation(expr: &Expr, sql_type: SqlType) -> DerivedCollation {
+    if !is_collatable_type(sql_type) {
+        return DerivedCollation::None;
+    }
+
+    match expr {
+        Expr::Collate { collation_oid, .. } => DerivedCollation::Explicit(*collation_oid),
+        Expr::Var(var) => var
+            .collation_oid
+            .map(DerivedCollation::Implicit)
+            .unwrap_or(DerivedCollation::Default(DEFAULT_COLLATION_OID)),
+        Expr::Cast(inner, target_type) => {
+            default_if_no_collation(derive_expr_collation(inner, *target_type))
+        }
+        Expr::Coalesce(left, right) => combine_expr_collations(
+            derive_expr_collation(left, expr_sql_type_hint(left).unwrap_or(sql_type)),
+            derive_expr_collation(right, expr_sql_type_hint(right).unwrap_or(sql_type)),
+        ),
+        Expr::Case(case_expr) => combine_many_expr_collations(
+            case_expr
+                .args
+                .iter()
+                .map(|when| {
+                    derive_expr_collation(
+                        &when.result,
+                        expr_sql_type_hint(&when.result).unwrap_or(case_expr.casetype),
+                    )
+                })
+                .chain(std::iter::once(derive_expr_collation(
+                    &case_expr.defresult,
+                    expr_sql_type_hint(&case_expr.defresult).unwrap_or(case_expr.casetype),
+                ))),
+        ),
+        Expr::Func(func) => func
+            .collation_oid
+            .map(DerivedCollation::Implicit)
+            .unwrap_or_else(|| {
+                default_if_no_collation(combine_many_expr_collations(func.args.iter().map(|arg| {
+                    derive_expr_collation(arg, expr_sql_type_hint(arg).unwrap_or(sql_type))
+                })))
+            }),
+        Expr::Op(op) => op
+            .collation_oid
+            .map(DerivedCollation::Implicit)
+            .unwrap_or_else(|| {
+                if matches!(
+                    op.op,
+                    OpExprKind::Concat | OpExprKind::JsonGetText | OpExprKind::JsonPathText
+                ) {
+                    default_if_no_collation(combine_many_expr_collations(op.args.iter().map(
+                        |arg| {
+                            derive_expr_collation(arg, expr_sql_type_hint(arg).unwrap_or(sql_type))
+                        },
+                    )))
+                } else {
+                    DerivedCollation::Default(DEFAULT_COLLATION_OID)
+                }
+            }),
+        Expr::SubLink(sublink) => sublink
+            .subselect
+            .target_list
+            .first()
+            .map(|target| derive_expr_collation(&target.expr, target.sql_type))
+            .unwrap_or(DerivedCollation::Default(DEFAULT_COLLATION_OID)),
+        Expr::FieldSelect {
+            expr, field_type, ..
+        } => derive_expr_collation(expr, *field_type),
+        Expr::ArraySubscript { array, .. } => {
+            derive_expr_collation(array, expr_sql_type_hint(array).unwrap_or(sql_type))
+        }
+        _ => DerivedCollation::Default(DEFAULT_COLLATION_OID),
+    }
+}
+
+pub fn derive_consumer_collation_from_exprs(
+    catalog: &dyn CatalogLookup,
+    consumer: CollationConsumer,
+    inputs: &[(&Expr, SqlType, Option<u32>)],
+) -> Result<Option<u32>, ParseError> {
+    let derived = inputs.iter().fold(DerivedCollation::None, |acc, input| {
+        let (expr, sql_type, explicit_oid) = *input;
+        let input_collation = explicit_oid
+            .map(DerivedCollation::Explicit)
+            .unwrap_or_else(|| derive_expr_collation(expr, sql_type));
+        combine_expr_collations(acc, input_collation)
+    });
+
+    match derived {
+        DerivedCollation::None => Ok(None),
+        DerivedCollation::Default(oid)
+        | DerivedCollation::Implicit(oid)
+        | DerivedCollation::Explicit(oid) => Ok(Some(oid)),
+        DerivedCollation::Conflict {
+            left,
+            right,
+            explicit,
+        } => Err(collation_mismatch_error(catalog, left, right, explicit)),
+    }
+    .and_then(|oid| {
+        if oid.is_none()
+            && inputs
+                .iter()
+                .any(|(_, sql_type, _)| default_collation_oid_for_type(*sql_type).is_some())
+        {
+            Err(ParseError::DetailedError {
+                message: no_collation_message(consumer).into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P22",
+            })
+        } else {
+            Ok(oid)
+        }
+    })
+}
+
 pub fn derive_consumer_collation(
     catalog: &dyn CatalogLookup,
     consumer: CollationConsumer,
@@ -164,17 +332,38 @@ pub fn finalize_order_by_expr(
     expr: Expr,
     catalog: &dyn CatalogLookup,
 ) -> Result<(Expr, Option<u32>), ParseError> {
-    let expr_type = expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text));
     let (expr, explicit_collation_oid) = strip_explicit_collation(expr);
-    let collation_oid = derive_consumer_collation(
+    let Some(expr_type) = expr_sql_type_hint(&expr) else {
+        return Ok((expr, explicit_collation_oid));
+    };
+    let collation_oid = derive_consumer_collation_from_exprs(
         catalog,
         CollationConsumer::OrderBy,
-        &[(expr_type, explicit_collation_oid)],
+        &[(&expr, expr_type, explicit_collation_oid)],
     )?;
     Ok((expr, collation_oid))
 }
 
-fn collation_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
+fn collation_mismatch_error(
+    catalog: &dyn CatalogLookup,
+    left: u32,
+    right: u32,
+    explicit: bool,
+) -> ParseError {
+    ParseError::DetailedError {
+        message: format!(
+            "collation mismatch between {} collations \"{}\" and \"{}\"",
+            if explicit { "explicit" } else { "implicit" },
+            collation_name(catalog, left),
+            collation_name(catalog, right)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42P21",
+    }
+}
+
+pub fn collation_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
     catalog
         .collation_rows()
         .into_iter()
@@ -203,6 +392,7 @@ mod tests {
     use pgrust_catalog_data::{C_COLLATION_OID, POSIX_COLLATION_OID};
     use pgrust_nodes::datum::Value;
     use pgrust_nodes::parsenodes::ParseError;
+    use pgrust_nodes::primnodes::{FuncExpr, ScalarFunctionImpl};
 
     struct TestCatalog;
 
@@ -267,5 +457,47 @@ mod tests {
                     == "collation mismatch between explicit collations \"C\" and \"POSIX\""
                     && sqlstate == "42P21"
         ));
+    }
+
+    #[test]
+    fn text_function_without_collatable_args_uses_default_collation() {
+        let expr = Expr::Func(Box::new(FuncExpr {
+            funcid: 1,
+            funcname: Some("test_text_func".into()),
+            funcresulttype: Some(SqlType::new(SqlTypeKind::Text)),
+            funcvariadic: false,
+            implementation: ScalarFunctionImpl::UserDefined { proc_oid: 1 },
+            collation_oid: None,
+            display_args: None,
+            args: vec![Expr::Const(Value::Int32(1))],
+        }));
+
+        assert_eq!(
+            derive_expr_collation(&expr, SqlType::new(SqlTypeKind::Text)),
+            DerivedCollation::Default(DEFAULT_COLLATION_OID)
+        );
+    }
+
+    #[test]
+    fn text_cast_from_noncollatable_type_uses_default_collation() {
+        let expr = Expr::Cast(
+            Box::new(Expr::Const(Value::Int32(1))),
+            SqlType::new(SqlTypeKind::Text),
+        );
+
+        assert_eq!(
+            derive_expr_collation(&expr, SqlType::new(SqlTypeKind::Text)),
+            DerivedCollation::Default(DEFAULT_COLLATION_OID)
+        );
+    }
+
+    #[test]
+    fn order_by_finalization_does_not_invent_text_type() {
+        let catalog = TestCatalog;
+
+        assert_eq!(
+            finalize_order_by_expr(Expr::Random, &catalog).unwrap(),
+            (Expr::Random, None)
+        );
     }
 }
