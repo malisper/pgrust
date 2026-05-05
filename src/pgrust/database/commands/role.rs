@@ -8,9 +8,15 @@ use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,
     DropOwnedStatement, DropRoleStatement, ParseError, ReassignOwnedStatement, RoleOption,
 };
+use crate::backend::utils::cache::syscache::{
+    SearchSysCache1, SearchSysCacheList2, SysCacheId, SysCacheTuple, oid_key,
+    shared_dependencies_for_referenced_role,
+};
 use crate::include::catalog::{
-    BootstrapCatalogKind, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_POLICY_RELATION_OID,
-    PgAuthIdRow,
+    BootstrapCatalogKind, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_EVENT_TRIGGER_RELATION_OID,
+    PG_FOREIGN_SERVER_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_POLICY_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_TYPE_RELATION_OID, PgAuthIdRow,
+    SHARED_DEPENDENCY_OWNER, SHARED_DEPENDENCY_POLICY,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
@@ -998,14 +1004,12 @@ impl Database {
             current_cid = current_cid.saturating_add(1);
         }
 
-        let catcache = self
-            .txn_backend_catcache(client_id, xid, current_cid)
-            .map_err(map_role_catalog_error)?;
-        let mut policy_rows = catcache
-            .policy_rows()
-            .into_iter()
-            .filter(|row| row.polroles.iter().any(|oid| role_oids.contains(oid)))
-            .collect::<Vec<_>>();
+        let mut policy_rows = policy_rows_for_role_dependencies(
+            self,
+            client_id,
+            Some((xid, current_cid)),
+            &role_oids,
+        )?;
         policy_rows.sort_by(|left, right| {
             left.polrelid
                 .cmp(&right.polrelid)
@@ -1034,8 +1038,13 @@ impl Database {
                     .drop_policy_mvcc(policy.polrelid, &policy.polname, &ctx)
                     .map(|(_, effect)| effect)
             } else {
-                let referenced_relation_oids =
-                    policy_normal_relation_dependencies(&catcache, policy.oid, policy.polrelid);
+                let referenced_relation_oids = policy_normal_relation_dependencies_syscache(
+                    self,
+                    client_id,
+                    Some((xid, current_cid)),
+                    policy.oid,
+                    policy.polrelid,
+                )?;
                 let updated = crate::include::catalog::PgPolicyRow {
                     polroles: retained_roles,
                     ..policy.clone()
@@ -1819,108 +1828,368 @@ fn owned_objects_for_roles(
     role_oids: &[u32],
 ) -> Result<Vec<OwnedObject>, ExecError> {
     let role_oids = role_oids.iter().copied().collect::<BTreeSet<_>>();
-    let catcache = match txn_ctx {
-        Some((xid, cid)) => db.txn_backend_catcache(client_id, xid, cid),
-        None => db.backend_catcache(client_id, None),
+    let mut objects = Vec::new();
+    for role_oid in &role_oids {
+        let dependencies =
+            shared_dependencies_for_referenced_role(db, client_id, txn_ctx, *role_oid)
+                .map_err(map_role_catalog_error)?;
+        for dependency in dependencies {
+            if dependency.deptype != SHARED_DEPENDENCY_OWNER
+                || dependency.dbid != db.database_oid
+                || !role_oids.contains(&dependency.refobjid)
+            {
+                continue;
+            }
+            if let Some(object) = owned_object_for_dependency(
+                db,
+                client_id,
+                txn_ctx,
+                dependency.classid,
+                dependency.objid,
+            )? {
+                objects.push(object);
+            }
+        }
     }
-    .map_err(map_role_catalog_error)?;
-    let namespaces = catcache
-        .namespace_rows()
-        .into_iter()
-        .map(|row| (row.oid, row.nspname))
-        .collect::<BTreeMap<_, _>>();
-    let mut objects = catcache
-        .class_rows()
-        .into_iter()
-        .filter(|row| role_oids.contains(&row.relowner))
-        .filter(|row| row.relpersistence != 't')
-        .filter(|row| matches!(row.relkind, 'r' | 'v' | 'i' | 'S' | 'c'))
-        .map(|row| OwnedObject {
-            oid: row.oid,
-            kind: match row.relkind {
-                'c' => OwnedObjectKind::CompositeType,
-                'i' => OwnedObjectKind::Index,
-                'S' => OwnedObjectKind::Sequence,
-                'v' => OwnedObjectKind::View,
-                _ => OwnedObjectKind::Table,
-            },
-            name: match namespaces.get(&row.relnamespace).map(String::as_str) {
-                Some("public") | Some("pg_catalog") | None => row.relname,
-                Some(schema) => format!("{schema}.{}", row.relname),
-            },
-        })
-        .collect::<Vec<_>>();
-    objects.extend(
-        catcache
-            .proc_rows()
-            .into_iter()
-            .filter(|row| role_oids.contains(&row.proowner))
-            .map(|row| OwnedObject {
-                oid: row.oid,
-                kind: OwnedObjectKind::Function,
-                name: function_owned_object_name(&catcache, &row),
-            }),
-    );
-    objects.extend(
-        catcache
-            .type_rows()
-            .into_iter()
-            .filter(|row| role_oids.contains(&row.typowner))
-            .filter(|row| matches!(row.typtype, 'e' | 'r'))
-            .map(|row| OwnedObject {
-                oid: row.oid,
-                kind: OwnedObjectKind::Type,
-                name: type_owned_object_name(&catcache, &row),
-            }),
-    );
-    objects.extend(
-        catcache
-            .namespace_rows()
-            .into_iter()
-            .filter(|row| role_oids.contains(&row.nspowner))
-            .filter(|row| !matches!(row.nspname.as_str(), "pg_catalog" | "information_schema"))
-            .filter(|row| !is_temp_namespace_owned_object(&row.nspname))
-            .map(|row| OwnedObject {
-                oid: row.oid,
-                kind: OwnedObjectKind::Schema,
-                name: row.nspname,
-            }),
-    );
-    objects.extend(
-        catcache
-            .event_trigger_rows()
-            .into_iter()
-            .filter(|row| role_oids.contains(&row.evtowner))
-            .map(|row| OwnedObject {
-                oid: row.oid,
-                kind: OwnedObjectKind::EventTrigger,
-                name: row.evtname,
-            }),
-    );
-    objects.extend(
-        catcache
-            .publication_rows()
-            .into_iter()
-            .filter(|row| role_oids.contains(&row.pubowner))
-            .map(|row| OwnedObject {
-                oid: row.oid,
-                kind: OwnedObjectKind::Publication,
-                name: row.pubname,
-            }),
-    );
-    objects.extend(
-        catcache
-            .foreign_server_rows()
-            .into_iter()
-            .filter(|row| role_oids.contains(&row.srvowner))
-            .map(|row| OwnedObject {
-                oid: row.oid,
-                kind: OwnedObjectKind::ForeignServer,
-                name: row.srvname,
-            }),
-    );
+    append_dynamic_type_owned_objects(db, client_id, txn_ctx, &role_oids, &mut objects)?;
     objects.sort_by(|left, right| left.oid.cmp(&right.oid).then(left.kind.cmp(&right.kind)));
+    objects.dedup_by(|left, right| left.oid == right.oid && left.kind == right.kind);
     Ok(objects)
+}
+
+fn append_dynamic_type_owned_objects(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    role_oids: &BTreeSet<u32>,
+    objects: &mut Vec<OwnedObject>,
+) -> Result<(), ExecError> {
+    for entry in db.enum_types.read().values() {
+        if role_oids.contains(&entry.owner_oid) {
+            objects.push(OwnedObject {
+                oid: entry.oid,
+                kind: OwnedObjectKind::Type,
+                name: schema_qualified_name_for_role_deps_syscache(
+                    db,
+                    client_id,
+                    txn_ctx,
+                    entry.namespace_oid,
+                    &entry.name,
+                )?,
+            });
+        }
+    }
+    for entry in db.range_types.read().values() {
+        if role_oids.contains(&entry.owner_oid) {
+            objects.push(OwnedObject {
+                oid: entry.oid,
+                kind: OwnedObjectKind::Type,
+                name: schema_qualified_name_for_role_deps_syscache(
+                    db,
+                    client_id,
+                    txn_ctx,
+                    entry.namespace_oid,
+                    &entry.name,
+                )?,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn owned_object_for_dependency(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    class_oid: u32,
+    object_oid: u32,
+) -> Result<Option<OwnedObject>, ExecError> {
+    match class_oid {
+        PG_CLASS_RELATION_OID => class_owned_object(db, client_id, txn_ctx, object_oid),
+        PG_PROC_RELATION_OID => proc_owned_object(db, client_id, txn_ctx, object_oid),
+        PG_TYPE_RELATION_OID => type_owned_object(db, client_id, txn_ctx, object_oid),
+        PG_NAMESPACE_RELATION_OID => namespace_owned_object(db, client_id, txn_ctx, object_oid),
+        PG_EVENT_TRIGGER_RELATION_OID => {
+            event_trigger_owned_object(db, client_id, txn_ctx, object_oid)
+        }
+        PG_PUBLICATION_RELATION_OID => publication_owned_object(db, client_id, txn_ctx, object_oid),
+        PG_FOREIGN_SERVER_RELATION_OID => {
+            foreign_server_owned_object(db, client_id, txn_ctx, object_oid)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn class_owned_object(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    object_oid: u32,
+) -> Result<Option<OwnedObject>, ExecError> {
+    let Some(row) = search_one_syscache(db, client_id, txn_ctx, SysCacheId::RELOID, object_oid)?
+        .and_then(|tuple| match tuple {
+            SysCacheTuple::Class(row) => Some(row),
+            _ => None,
+        })
+    else {
+        return Ok(None);
+    };
+    if row.relpersistence == 't' || !matches!(row.relkind, 'r' | 'v' | 'i' | 'S' | 'c') {
+        return Ok(None);
+    }
+    Ok(Some(OwnedObject {
+        oid: row.oid,
+        kind: match row.relkind {
+            'c' => OwnedObjectKind::CompositeType,
+            'i' => OwnedObjectKind::Index,
+            'S' => OwnedObjectKind::Sequence,
+            'v' => OwnedObjectKind::View,
+            _ => OwnedObjectKind::Table,
+        },
+        name: schema_qualified_name_for_role_deps_syscache(
+            db,
+            client_id,
+            txn_ctx,
+            row.relnamespace,
+            &row.relname,
+        )?,
+    }))
+}
+
+fn proc_owned_object(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    object_oid: u32,
+) -> Result<Option<OwnedObject>, ExecError> {
+    let Some(row) = search_one_syscache(db, client_id, txn_ctx, SysCacheId::PROCOID, object_oid)?
+        .and_then(|tuple| match tuple {
+            SysCacheTuple::Proc(row) => Some(row),
+            _ => None,
+        })
+    else {
+        return Ok(None);
+    };
+    let name = function_owned_object_name_syscache(db, client_id, txn_ctx, &row)?;
+    Ok(Some(OwnedObject {
+        oid: row.oid,
+        kind: OwnedObjectKind::Function,
+        name,
+    }))
+}
+
+fn type_owned_object(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    object_oid: u32,
+) -> Result<Option<OwnedObject>, ExecError> {
+    let Some(row) = search_one_syscache(db, client_id, txn_ctx, SysCacheId::TYPEOID, object_oid)?
+        .and_then(|tuple| match tuple {
+            SysCacheTuple::Type(row) => Some(row),
+            _ => None,
+        })
+    else {
+        return Ok(None);
+    };
+    if !matches!(row.typtype, 'e' | 'r') {
+        return Ok(None);
+    }
+    Ok(Some(OwnedObject {
+        oid: row.oid,
+        kind: OwnedObjectKind::Type,
+        name: type_owned_object_name_syscache(db, client_id, txn_ctx, &row)?,
+    }))
+}
+
+fn namespace_owned_object(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    object_oid: u32,
+) -> Result<Option<OwnedObject>, ExecError> {
+    let Some(row) =
+        search_one_syscache(db, client_id, txn_ctx, SysCacheId::NAMESPACEOID, object_oid)?
+            .and_then(|tuple| match tuple {
+                SysCacheTuple::Namespace(row) => Some(row),
+                _ => None,
+            })
+    else {
+        return Ok(None);
+    };
+    if matches!(row.nspname.as_str(), "pg_catalog" | "information_schema")
+        || is_temp_namespace_owned_object(&row.nspname)
+    {
+        return Ok(None);
+    }
+    Ok(Some(OwnedObject {
+        oid: row.oid,
+        kind: OwnedObjectKind::Schema,
+        name: row.nspname,
+    }))
+}
+
+fn event_trigger_owned_object(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    object_oid: u32,
+) -> Result<Option<OwnedObject>, ExecError> {
+    Ok(search_one_syscache(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::EventTriggerOid,
+        object_oid,
+    )?
+    .and_then(|tuple| match tuple {
+        SysCacheTuple::EventTrigger(row) => Some(OwnedObject {
+            oid: row.oid,
+            kind: OwnedObjectKind::EventTrigger,
+            name: row.evtname,
+        }),
+        _ => None,
+    }))
+}
+
+fn publication_owned_object(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    object_oid: u32,
+) -> Result<Option<OwnedObject>, ExecError> {
+    Ok(search_one_syscache(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PUBLICATIONOID,
+        object_oid,
+    )?
+    .and_then(|tuple| match tuple {
+        SysCacheTuple::Publication(row) => Some(OwnedObject {
+            oid: row.oid,
+            kind: OwnedObjectKind::Publication,
+            name: row.pubname,
+        }),
+        _ => None,
+    }))
+}
+
+fn foreign_server_owned_object(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    object_oid: u32,
+) -> Result<Option<OwnedObject>, ExecError> {
+    Ok(search_one_syscache(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::FOREIGNSERVEROID,
+        object_oid,
+    )?
+    .and_then(|tuple| match tuple {
+        SysCacheTuple::ForeignServer(row) => Some(OwnedObject {
+            oid: row.oid,
+            kind: OwnedObjectKind::ForeignServer,
+            name: row.srvname,
+        }),
+        _ => None,
+    }))
+}
+
+fn search_one_syscache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    object_oid: u32,
+) -> Result<Option<SysCacheTuple>, ExecError> {
+    SearchSysCache1(db, client_id, txn_ctx, cache_id, oid_key(object_oid))
+        .map_err(map_role_catalog_error)
+        .map(|tuples| tuples.into_iter().next())
+}
+
+fn function_owned_object_name_syscache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    row: &crate::include::catalog::PgProcRow,
+) -> Result<String, ExecError> {
+    let mut args = Vec::new();
+    for oid in row
+        .proargtypes
+        .split_whitespace()
+        .filter_map(|oid| oid.parse::<u32>().ok())
+    {
+        args.push(type_name_by_oid_syscache(db, client_id, txn_ctx, oid)?);
+    }
+    Ok(format!(
+        "{}({})",
+        schema_qualified_name_for_role_deps_syscache(
+            db,
+            client_id,
+            txn_ctx,
+            row.pronamespace,
+            &row.proname,
+        )?,
+        args.join(", ")
+    ))
+}
+
+fn type_owned_object_name_syscache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    row: &crate::include::catalog::PgTypeRow,
+) -> Result<String, ExecError> {
+    schema_qualified_name_for_role_deps_syscache(
+        db,
+        client_id,
+        txn_ctx,
+        row.typnamespace,
+        &row.typname,
+    )
+}
+
+fn type_name_by_oid_syscache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    type_oid: u32,
+) -> Result<String, ExecError> {
+    Ok(
+        search_one_syscache(db, client_id, txn_ctx, SysCacheId::TYPEOID, type_oid)?
+            .and_then(|tuple| match tuple {
+                SysCacheTuple::Type(row) => Some(row.typname),
+                _ => None,
+            })
+            .unwrap_or_else(|| type_oid.to_string()),
+    )
+}
+
+fn schema_qualified_name_for_role_deps_syscache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    namespace_oid: u32,
+    object_name: &str,
+) -> Result<String, ExecError> {
+    let namespace = search_one_syscache(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::NAMESPACEOID,
+        namespace_oid,
+    )?
+    .and_then(|tuple| match tuple {
+        SysCacheTuple::Namespace(row) => Some(row.nspname),
+        _ => None,
+    });
+    Ok(match namespace.as_deref() {
+        Some("public") | Some("pg_catalog") | None => object_name.to_string(),
+        Some(schema_name) => format!("{schema_name}.{object_name}"),
+    })
 }
 
 fn is_temp_namespace_owned_object(namespace: &str) -> bool {
@@ -2302,26 +2571,70 @@ fn default_acl_object_kind_for_role_deps(objtype: char) -> &'static str {
     }
 }
 
-fn policy_normal_relation_dependencies(
-    catcache: &crate::backend::utils::cache::catcache::CatCache,
+fn policy_rows_for_role_dependencies(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    role_oids: &BTreeSet<u32>,
+) -> Result<Vec<crate::include::catalog::PgPolicyRow>, ExecError> {
+    let mut policy_oids = BTreeSet::new();
+    for role_oid in role_oids {
+        for dependency in shared_dependencies_for_referenced_role(db, client_id, txn_ctx, *role_oid)
+            .map_err(map_role_catalog_error)?
+        {
+            if dependency.deptype == SHARED_DEPENDENCY_POLICY
+                && dependency.dbid == db.database_oid
+                && dependency.classid == PG_POLICY_RELATION_OID
+            {
+                policy_oids.insert(dependency.objid);
+            }
+        }
+    }
+
+    let mut policies = Vec::new();
+    for policy_oid in policy_oids {
+        if let Some(SysCacheTuple::Policy(row)) =
+            search_one_syscache(db, client_id, txn_ctx, SysCacheId::POLICYOID, policy_oid)?
+        {
+            policies.push(row);
+        }
+    }
+    Ok(policies)
+}
+
+fn policy_normal_relation_dependencies_syscache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
     policy_oid: u32,
     policy_relation_oid: u32,
-) -> Vec<u32> {
-    let mut relation_oids = catcache
-        .depend_rows()
-        .into_iter()
-        .filter(|row| {
-            row.classid == PG_POLICY_RELATION_OID
+) -> Result<Vec<u32>, ExecError> {
+    let mut relation_oids = SearchSysCacheList2(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::DEPENDDEPENDER,
+        oid_key(PG_POLICY_RELATION_OID),
+        oid_key(policy_oid),
+    )
+    .map_err(map_role_catalog_error)?
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::Depend(row)
+            if row.classid == PG_POLICY_RELATION_OID
                 && row.objid == policy_oid
                 && row.refclassid == PG_CLASS_RELATION_OID
                 && row.refobjid != policy_relation_oid
-                && row.deptype == DEPENDENCY_NORMAL
-        })
-        .map(|row| row.refobjid)
-        .collect::<Vec<_>>();
+                && row.deptype == DEPENDENCY_NORMAL =>
+        {
+            Some(row.refobjid)
+        }
+        _ => None,
+    })
+    .collect::<Vec<_>>();
     relation_oids.sort_unstable();
     relation_oids.dedup();
-    relation_oids
+    Ok(relation_oids)
 }
 
 fn relation_kind_name_for_role_deps(relkind: char) -> &'static str {

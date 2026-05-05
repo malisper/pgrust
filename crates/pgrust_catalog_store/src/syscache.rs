@@ -5,24 +5,25 @@ use crate::rowcodec::{
     pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
     pg_cast_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
     pg_constraint_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
-    pg_event_trigger_row_from_values, pg_index_row_from_values, pg_inherits_row_from_values,
-    pg_language_row_from_values, pg_opclass_row_from_values, pg_operator_row_from_values,
-    pg_opfamily_row_from_values, pg_partitioned_table_row_from_values, pg_policy_row_from_values,
-    pg_proc_row_from_values, pg_publication_namespace_row_from_values,
+    pg_event_trigger_row_from_values, pg_foreign_server_row_from_values, pg_index_row_from_values,
+    pg_inherits_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
+    pg_operator_row_from_values, pg_opfamily_row_from_values, pg_partitioned_table_row_from_values,
+    pg_policy_row_from_values, pg_proc_row_from_values, pg_publication_namespace_row_from_values,
     pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
-    pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
-    pg_statistic_row_from_values, pg_trigger_row_from_values, pg_type_row_from_values,
+    pg_shdepend_row_from_values, pg_statistic_ext_data_row_from_values,
+    pg_statistic_ext_row_from_values, pg_statistic_row_from_values, pg_trigger_row_from_values,
+    pg_type_row_from_values,
 };
 use crate::rows::PhysicalCatalogRows;
 use pgrust_catalog_data::{
     BootstrapCatalogKind, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow,
-    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
-    PgTriggerRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
-    system_catalog_index_by_oid,
+    PgConstraintRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgForeignServerRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgShdependRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_composite_type_rows,
+    builtin_type_rows, system_catalog_index_by_oid,
 };
 use pgrust_nodes::{ScanKeyData, Value};
 
@@ -43,6 +44,8 @@ pub const PG_AUTH_MEMBERS_OID_INDEX_OID: u32 = 6303;
 pub const PG_AUTH_MEMBERS_ROLE_MEMBER_INDEX_OID: u32 = 2694;
 pub const PG_AUTH_MEMBERS_MEMBER_ROLE_INDEX_OID: u32 = 2695;
 pub const PG_AUTH_MEMBERS_GRANTOR_INDEX_OID: u32 = 6302;
+pub const PG_SHDEPEND_DEPENDER_INDEX_OID: u32 = 1232;
+pub const PG_SHDEPEND_REFERENCE_INDEX_OID: u32 = 1233;
 pub const PG_CAST_OID_INDEX_OID: u32 = 2660;
 pub const PG_CAST_SOURCE_TARGET_INDEX_OID: u32 = 2661;
 pub const PG_CLASS_OID_INDEX_OID: u32 = 2662;
@@ -53,6 +56,8 @@ pub const PG_CONSTRAINT_OID_INDEX_OID: u32 = 2667;
 pub const PG_DEPEND_DEPENDER_INDEX_OID: u32 = 2673;
 pub const PG_DEPEND_REFERENCE_INDEX_OID: u32 = 2674;
 pub const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
+pub const PG_FOREIGN_SERVER_OID_INDEX_OID: u32 = 113;
+pub const PG_FOREIGN_SERVER_NAME_INDEX_OID: u32 = 549;
 pub const PG_INDEX_INDRELID_INDEX_OID: u32 = 2678;
 pub const PG_INDEX_INDEXRELID_INDEX_OID: u32 = 2679;
 pub const PG_INHERITS_RELID_SEQNO_INDEX_OID: u32 = 2680;
@@ -122,6 +127,14 @@ pub enum SysCacheId {
     AuthMembersMemberRole,
     // PostgreSQL systable scan index: AuthMemGrantorIndexId.
     AuthMembersGrantor,
+    // PostgreSQL systable scan index: SharedDependDependerIndexId.
+    ShdependDepender,
+    // PostgreSQL systable scan index: SharedDependReferenceIndexId.
+    ShdependReference,
+    // PostgreSQL syscache name: FOREIGNSERVEROID.
+    ForeignServerOid,
+    // PostgreSQL syscache name: FOREIGNSERVERNAME.
+    ForeignServerName,
     // PostgreSQL systable scan index: AttrDefaultIndexId.
     AttrDefault,
     // PostgreSQL systable scan index: AttrDefaultOidIndexId.
@@ -305,6 +318,10 @@ impl SysCacheId {
     pub const AUTHMEMROLEMEM: Self = Self::AuthMembersRoleMember;
     pub const AUTHMEMMEMROLE: Self = Self::AuthMembersMemberRole;
     pub const AUTHMEMGRANTOR: Self = Self::AuthMembersGrantor;
+    pub const SHDEPENDDEPENDER: Self = Self::ShdependDepender;
+    pub const SHDEPENDREFERENCE: Self = Self::ShdependReference;
+    pub const FOREIGNSERVEROID: Self = Self::ForeignServerOid;
+    pub const FOREIGNSERVERNAME: Self = Self::ForeignServerName;
     pub const ATTRDEFAULT: Self = Self::AttrDefault;
     pub const ATTRDEFOID: Self = Self::AttrDefaultOid;
     pub const CASTOID: Self = Self::CastOid;
@@ -367,6 +384,10 @@ impl SysCacheId {
             Self::AuthMembersRoleMember => PG_AUTH_MEMBERS_ROLE_MEMBER_INDEX_OID,
             Self::AuthMembersMemberRole => PG_AUTH_MEMBERS_MEMBER_ROLE_INDEX_OID,
             Self::AuthMembersGrantor => PG_AUTH_MEMBERS_GRANTOR_INDEX_OID,
+            Self::ShdependDepender => PG_SHDEPEND_DEPENDER_INDEX_OID,
+            Self::ShdependReference => PG_SHDEPEND_REFERENCE_INDEX_OID,
+            Self::ForeignServerOid => PG_FOREIGN_SERVER_OID_INDEX_OID,
+            Self::ForeignServerName => PG_FOREIGN_SERVER_NAME_INDEX_OID,
             Self::AttrName => PG_ATTRIBUTE_RELID_ATTNAM_INDEX_OID,
             Self::AttrNum => PG_ATTRIBUTE_RELID_ATTNUM_INDEX_OID,
             Self::AttrDefault => PG_ATTRDEF_ADRELID_ADNUM_INDEX_OID,
@@ -461,12 +482,15 @@ impl SysCacheId {
             | Self::TriggerOid
             | Self::EventTriggerName
             | Self::EventTriggerOid
+            | Self::ForeignServerOid
+            | Self::ForeignServerName
             | Self::TypeOid => 1,
             Self::AttrDefault
             | Self::AttrName
             | Self::AttrNum
             | Self::CastSourceTarget
             | Self::InheritsRelIdSeqNo
+            | Self::ShdependReference
             | Self::PolicyPolrelidPolname
             | Self::PublicationRelMap
             | Self::PublicationNamespaceMap
@@ -483,7 +507,7 @@ impl SysCacheId {
             | Self::StatRelAttInh => 3,
             Self::AuthMembersRoleMember | Self::AuthMembersMemberRole => 3,
             Self::ClaAmNameNsp => 3,
-            Self::AmprocNum | Self::OperNameNsp => 4,
+            Self::ShdependDepender | Self::AmprocNum | Self::OperNameNsp => 4,
             Self::AmopStrategy => 5,
         }
     }
@@ -509,6 +533,7 @@ pub enum SysCacheTuple {
     Constraint(PgConstraintRow),
     Depend(PgDependRow),
     Description(PgDescriptionRow),
+    ForeignServer(PgForeignServerRow),
     Index(PgIndexRow),
     Inherits(PgInheritsRow),
     Language(PgLanguageRow),
@@ -523,6 +548,7 @@ pub enum SysCacheTuple {
     PublicationRel(PgPublicationRelRow),
     PublicationNamespace(PgPublicationNamespaceRow),
     Rewrite(PgRewriteRow),
+    Shdepend(PgShdependRow),
     Statistic(PgStatisticRow),
     StatisticExt(PgStatisticExtRow),
     StatisticExtData(PgStatisticExtDataRow),
@@ -548,6 +574,7 @@ impl SysCacheTuple {
             Self::Constraint(row) => Some(row.oid),
             Self::Depend(_) => None,
             Self::Description(_) => None,
+            Self::ForeignServer(row) => Some(row.oid),
             Self::Index(row) => Some(row.indexrelid),
             Self::Inherits(_) => None,
             Self::Language(row) => Some(row.oid),
@@ -562,6 +589,7 @@ impl SysCacheTuple {
             Self::PublicationRel(row) => Some(row.oid),
             Self::PublicationNamespace(row) => Some(row.oid),
             Self::Rewrite(row) => Some(row.oid),
+            Self::Shdepend(_) => None,
             Self::Statistic(_) => None,
             Self::StatisticExt(row) => Some(row.oid),
             Self::StatisticExtData(row) => Some(row.stxoid),
@@ -675,6 +703,21 @@ pub fn syscache_invalidation_keys_for_tuple(tuple: &SysCacheTuple) -> Vec<SysCac
             ),
             key(SysCacheId::AuthMembersGrantor, vec![oid_part(row.grantor)]),
         ],
+        SysCacheTuple::Shdepend(row) => vec![
+            key(
+                SysCacheId::ShdependDepender,
+                vec![
+                    oid_part(row.dbid),
+                    oid_part(row.classid),
+                    oid_part(row.objid),
+                    int32_part(row.objsubid),
+                ],
+            ),
+            key(
+                SysCacheId::ShdependReference,
+                vec![oid_part(row.refclassid), oid_part(row.refobjid)],
+            ),
+        ],
         SysCacheTuple::Cast(row) => vec![
             key(SysCacheId::CastOid, vec![oid_part(row.oid)]),
             key(
@@ -727,6 +770,10 @@ pub fn syscache_invalidation_keys_for_tuple(tuple: &SysCacheTuple) -> Vec<SysCac
                 int32_part(row.objsubid),
             ],
         )],
+        SysCacheTuple::ForeignServer(row) => vec![
+            key(SysCacheId::ForeignServerOid, vec![oid_part(row.oid)]),
+            key(SysCacheId::ForeignServerName, vec![name_part(&row.srvname)]),
+        ],
         SysCacheTuple::Index(row) => vec![
             key(SysCacheId::IndexRelId, vec![oid_part(row.indexrelid)]),
             key(SysCacheId::IndexIndRelId, vec![oid_part(row.indrelid)]),
@@ -882,6 +929,7 @@ pub fn relcache_oids_for_tuple(tuple: &SysCacheTuple) -> Vec<u32> {
         SysCacheTuple::Statistic(row) => vec![row.starelid],
         SysCacheTuple::StatisticExt(row) => vec![row.stxrelid],
         SysCacheTuple::PublicationRel(row) => vec![row.prrelid],
+        SysCacheTuple::Shdepend(_) => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -964,6 +1012,13 @@ pub fn catalog_row_invalidations_for_rows(
             &mut relcache_oids,
         );
     }
+    for row in &rows.shdepends {
+        extend_tuple_invalidations(
+            SysCacheTuple::Shdepend(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
     for row in &rows.casts {
         extend_tuple_invalidations(
             SysCacheTuple::Cast(row.clone()),
@@ -1002,6 +1057,13 @@ pub fn catalog_row_invalidations_for_rows(
     for row in &rows.descriptions {
         extend_tuple_invalidations(
             SysCacheTuple::Description(row.clone()),
+            &mut keys,
+            &mut relcache_oids,
+        );
+    }
+    for row in &rows.foreign_servers {
+        extend_tuple_invalidations(
+            SysCacheTuple::ForeignServer(row.clone()),
             &mut keys,
             &mut relcache_oids,
         );
@@ -1264,6 +1326,9 @@ pub fn sys_cache_tuple_from_values(
         | SysCacheId::AuthMembersGrantor => {
             pg_auth_members_row_from_values(values).map(SysCacheTuple::AuthMembers)
         }
+        SysCacheId::ShdependDepender | SysCacheId::ShdependReference => {
+            pg_shdepend_row_from_values(values).map(SysCacheTuple::Shdepend)
+        }
         SysCacheId::CastOid | SysCacheId::CastSourceTarget => {
             pg_cast_row_from_values(values).map(SysCacheTuple::Cast)
         }
@@ -1276,6 +1341,9 @@ pub fn sys_cache_tuple_from_values(
         }
         SysCacheId::DescriptionObj => {
             pg_description_row_from_values(values).map(SysCacheTuple::Description)
+        }
+        SysCacheId::ForeignServerOid | SysCacheId::ForeignServerName => {
+            pg_foreign_server_row_from_values(values).map(SysCacheTuple::ForeignServer)
         }
         SysCacheId::IndexRelId | SysCacheId::IndexIndRelId => {
             pg_index_row_from_values(values).map(SysCacheTuple::Index)

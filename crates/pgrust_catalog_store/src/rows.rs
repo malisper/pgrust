@@ -82,6 +82,7 @@ pub fn create_table_sync_kinds(entry: &CatalogEntry) -> Vec<BootstrapCatalogKind
         BootstrapCatalogKind::PgType,
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgShdepend,
         BootstrapCatalogKind::PgInherits,
     ];
     if entry
@@ -112,6 +113,7 @@ pub fn create_index_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgIndex,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgShdepend,
     ]
 }
 
@@ -121,6 +123,7 @@ pub fn create_view_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgType,
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgShdepend,
         BootstrapCatalogKind::PgRewrite,
     ]
 }
@@ -131,6 +134,7 @@ pub fn create_composite_type_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgType,
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgShdepend,
     ]
 }
 
@@ -142,6 +146,7 @@ pub fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgAttrdef,
         BootstrapCatalogKind::PgConstraint,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgShdepend,
         BootstrapCatalogKind::PgInherits,
         BootstrapCatalogKind::PgPartitionedTable,
         BootstrapCatalogKind::PgForeignTable,

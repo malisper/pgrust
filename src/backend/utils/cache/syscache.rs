@@ -20,12 +20,13 @@ use crate::backend::utils::cache::relcache::{
 use crate::backend::utils::time::snapmgr::{Snapshot, get_catalog_snapshot};
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
-    PG_CONSTRAINT_RELATION_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDependRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    PG_AUTHID_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAmRow, PgAmopRow, PgAmprocRow,
+    PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
+    PgCollationRow, PgConstraintRow, PgDependRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgShdependRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow,
+    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -1616,6 +1617,63 @@ pub(crate) fn SearchSysCacheList3(
     key3: Value,
 ) -> Result<Vec<SysCacheTuple>, CatalogError> {
     SearchSysCacheList(db, client_id, txn_ctx, cache_id, vec![key1, key2, key3])
+}
+
+pub(crate) fn shared_dependencies_for_referenced_role(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    role_oid: u32,
+) -> Result<Vec<PgShdependRow>, CatalogError> {
+    SearchSysCacheList2(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::SHDEPENDREFERENCE,
+        oid_key(PG_AUTHID_RELATION_OID),
+        oid_key(role_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Shdepend(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+pub(crate) fn shared_dependencies_for_object(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    db_oid: u32,
+    class_oid: u32,
+    object_oid: u32,
+    object_subid: i32,
+) -> Result<Vec<PgShdependRow>, CatalogError> {
+    SearchSysCacheList(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::SHDEPENDDEPENDER,
+        vec![
+            oid_key(db_oid),
+            oid_key(class_oid),
+            oid_key(object_oid),
+            Value::Int32(object_subid),
+        ],
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Shdepend(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
 }
 
 fn search_sys_cache_list_db(
