@@ -26474,6 +26474,43 @@ fn create_type_base_completes_shell_and_applies_type_default() {
 }
 
 #[test]
+fn create_type_base_like_copies_physical_metadata() {
+    let base = temp_dir("base_type_create_like");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type int8alias").unwrap();
+    db.execute(
+        1,
+        "create function int8aliasin(cstring) returns int8alias strict immutable language internal as 'int8in'",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function int8aliasout(int8alias) returns cstring strict immutable language internal as 'int8out'",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create type int8alias (input = int8aliasin, output = int8aliasout, like = int8)",
+    )
+    .unwrap();
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let int8_type = catalog.type_by_name("int8").expect("int8 type row");
+    let alias_type = catalog
+        .type_by_name("int8alias")
+        .expect("int8alias type row");
+    assert_eq!(alias_type.typlen, int8_type.typlen);
+    assert_eq!(alias_type.typbyval, int8_type.typbyval);
+    assert_eq!(alias_type.typalign, int8_type.typalign);
+    assert_eq!(alias_type.typstorage, int8_type.typstorage);
+    drop(catalog);
+
+    db.execute(1, "create cast (int8 as int8alias) without function")
+        .unwrap();
+}
+
+#[test]
 fn drop_base_type_cascade_drops_support_functions_without_catalog_error() {
     let base = temp_dir("base_type_drop_cascade");
     let db = Database::open(&base, 16).unwrap();
