@@ -623,6 +623,8 @@ dependencies = [
  "pgrust_nodes",
  "pgrust_storage",
  "rand",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

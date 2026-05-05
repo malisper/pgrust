@@ -25,6 +25,7 @@ pub mod services;
 pub mod sqlfunc;
 pub mod srf;
 pub mod startup;
+pub mod statistics;
 pub mod stats;
 pub mod transaction;
 pub mod txid;
