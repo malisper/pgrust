@@ -1590,9 +1590,6 @@ pub fn heap_update_with_waiter_with_snapshot_local(
     loop {
         let old = heap_fetch_local(local, client_id, rel, tid)?;
         let snapshot = relation_snapshot(snapshot, rel);
-        if !snapshot.tuple_visible(txns, &old) {
-            return Err(HeapError::TupleNotVisible(tid));
-        }
         let xmax = old.header.xmax;
         if xmax != 0 {
             match txns.transaction_status(xmax) {

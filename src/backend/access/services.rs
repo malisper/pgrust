@@ -32,6 +32,13 @@ pub(crate) struct RootAccessRuntime<'a> {
             crate::BufferPool<crate::backend::storage::buffer::storage_backend::SmgrStorageBackend>,
         >,
     >,
+    pub local_buffer_manager: Option<
+        &'a Arc<
+            crate::backend::storage::buffer::LocalBufferManager<
+                crate::backend::storage::buffer::storage_backend::SmgrStorageBackend,
+            >,
+        >,
+    >,
     pub txns:
         Option<&'a parking_lot::RwLock<crate::backend::access::transam::xact::TransactionManager>>,
     pub txn_waiter: Option<&'a crate::pgrust::database::TransactionWaiter>,
@@ -54,6 +61,7 @@ impl<'a> RootAccessRuntime<'a> {
     ) -> Self {
         Self {
             pool: None,
+            local_buffer_manager: None,
             txns: Some(txns),
             txn_waiter,
             interrupts,
@@ -71,6 +79,7 @@ impl<'a> RootAccessRuntime<'a> {
     ) -> Self {
         Self {
             pool: Some(pool),
+            local_buffer_manager: None,
             txns: Some(txns),
             txn_waiter: None,
             interrupts,
@@ -86,6 +95,7 @@ impl<'a> RootAccessRuntime<'a> {
     ) -> Self {
         Self {
             pool: Some(pool),
+            local_buffer_manager: None,
             txns: None,
             txn_waiter: None,
             interrupts: None,
@@ -236,6 +246,15 @@ impl AccessHeapServices for RootAccessRuntime<'_> {
         rel: RelFileLocator,
         tid: ItemPointerData,
     ) -> AccessResult<HeapTuple> {
+        if let Some(local) = self.local_buffer_manager {
+            return crate::backend::access::heap::heapam::heap_fetch_local(
+                local,
+                self.client_id,
+                rel,
+                tid,
+            )
+            .map_err(|err| AccessError::Scalar(format!("local heap fetch failed: {err:?}")));
+        }
         let pool = self.pool.ok_or_else(|| {
             AccessError::Unsupported("access heap fetch missing buffer pool".into())
         })?;

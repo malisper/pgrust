@@ -6,6 +6,7 @@ use crate::backend::access::transam::xact::Snapshot;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::ExecutorCatalog;
+use crate::backend::storage::buffer::LocalBufferManager;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::AdvisoryLockManager;
 use crate::backend::storage::smgr::RelFileLocator;
@@ -86,6 +87,7 @@ impl IndexBuildContext {
 #[derive(Clone)]
 pub struct IndexInsertContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
+    pub local_buffer_manager: Option<Arc<LocalBufferManager<SmgrStorageBackend>>>,
     pub txns: Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<Arc<TransactionWaiter>>,
     pub client_id: ClientId,
