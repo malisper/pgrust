@@ -39,6 +39,7 @@ use crate::backend::utils::cache::system_views::{
     build_pg_user_mappings_rows, build_pg_views_rows_with_definition_formatter,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
+use crate::backend::utils::time::snapmgr::get_catalog_snapshot;
 use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
@@ -47,14 +48,14 @@ use crate::include::catalog::{
     CONSTRAINT_NOTNULL, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
     PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgConversionRow, PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
-    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_class_rows, bootstrap_relation_desc,
-    system_catalog_index_by_oid, system_catalog_index_is_primary, system_catalog_indexes,
-    system_catalog_indexes_for_heap,
+    PgConversionRow, PgDatabaseRow, PgDefaultAclRow, PgDependRow, PgEnumRow, PgEventTriggerRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
+    PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
+    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_class_rows,
+    bootstrap_relation_desc, system_catalog_index_by_oid, system_catalog_index_is_primary,
+    system_catalog_indexes, system_catalog_indexes_for_heap,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -2201,6 +2202,16 @@ impl CatalogLookup for LazyCatalogLookup {
         self.db
             .auth_catalog(self.client_id, self.txn_ctx)
             .map(|catalog| catalog.memberships().to_vec())
+            .unwrap_or_default()
+    }
+
+    fn default_acl_rows(&self) -> Vec<PgDefaultAclRow> {
+        get_catalog_snapshot(&self.db, self.client_id, self.txn_ctx, None)
+            .and_then(|snapshot| {
+                self.db
+                    .scan_default_acl_rows(self.client_id, &snapshot)
+                    .ok()
+            })
             .unwrap_or_default()
     }
 
