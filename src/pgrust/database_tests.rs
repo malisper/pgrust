@@ -22185,6 +22185,27 @@ fn create_builtin_provider_collations_from_options() {
 }
 
 #[test]
+fn collation_duplicate_option_reports_second_option_position() {
+    let dir = temp_dir("collation_duplicate_option_position");
+    let db = Database::open(&dir, 64).unwrap();
+    let sql = "create collation coll_dup_chk (lc_collate = 'POSIX', lc_collate = 'NONSENSE', lc_ctype = 'POSIX')";
+
+    let err = db.execute(1, sql).unwrap_err();
+    let ExecError::Parse(parse_err) = err else {
+        panic!("expected positioned parse-style error, got {err:?}");
+    };
+    assert_eq!(
+        parse_err.position(),
+        sql.rfind("lc_collate").map(|index| index + 1)
+    );
+    assert!(matches!(
+        parse_err.unpositioned(),
+        ParseError::DetailedError { message, sqlstate: "42601", .. }
+            if message == "conflicting or redundant options"
+    ));
+}
+
+#[test]
 fn builtin_utf8_collations_drive_text_and_regex_functions() {
     let dir = temp_dir("builtin_collation_text_runtime");
     let db = Database::open(&dir, 64).unwrap();

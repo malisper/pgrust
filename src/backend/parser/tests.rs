@@ -16,23 +16,23 @@ use crate::include::nodes::parsenodes::{
     AlterSubscriptionAction, AlterSubscriptionStatement, AlterTableSetWithoutClusterStatement,
     AlterTableTriggerMode, AlterTableTriggerStateStatement, AlterTableTriggerTarget,
     AlterTriggerRenameStatement, AlterTypeSetOptionsStatement, CastContext, ClusterStatement,
-    ColumnConstraint, ColumnGeneratedKind, ColumnIdentityKind, CommentOnAggregateStatement,
-    CommentOnColumnStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
-    CommentOnSubscriptionStatement, CommentOnTypeStatement, CommentOnViewStatement,
-    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
-    CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement, CreateCollationKind,
-    CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, CursorScrollOption, DeclareCursorStatement, DomainConstraintSpecKind,
-    DropAggregateStatement, DropCastStatement, DropSubscriptionStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
-    GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
-    LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy, PublicationObjectSpec,
-    PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
-    RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, RelOption,
-    ReturningAliasKind, SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs,
-    SqlExpr, SubscriptionOptionValue, TableConstraint, TransactionEndOptions, TriggerEvent,
-    TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser,
-    ViewCheckOption,
+    CollationOption, ColumnConstraint, ColumnGeneratedKind, ColumnIdentityKind,
+    CommentOnAggregateStatement, CommentOnColumnStatement, CommentOnFunctionStatement,
+    CommentOnOperatorStatement, CommentOnSubscriptionStatement, CommentOnTypeStatement,
+    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
+    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
+    CreateCollationKind, CreateCompositeTypeStatement, CreateShellTypeStatement,
+    CreateTriggerStatement, CreateTypeStatement, CursorScrollOption, DeclareCursorStatement,
+    DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement, DropSubscriptionStatement,
+    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
+    GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy,
+    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
+    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    RelOption, ReturningAliasKind, SetSessionAuthorizationStatement, SetTransactionScope,
+    SqlCallArgs, SqlExpr, SubscriptionOptionValue, TableConstraint, TransactionEndOptions,
+    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
+    UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var,
@@ -700,22 +700,23 @@ fn parse_create_collation_from_source() {
 
 #[test]
 fn parse_create_collation_builtin_options() {
-    match parse_statement("create collation regress_builtin_c (provider = builtin, locale = 'C')")
-        .unwrap()
-    {
+    let sql = "create collation regress_builtin_c (provider = builtin, locale = 'C')";
+    match parse_statement(sql).unwrap() {
         Statement::CreateCollation(stmt) => {
             assert_eq!(stmt.collation_name, "regress_builtin_c");
             assert_eq!(
                 stmt.kind,
                 CreateCollationKind::Options {
                     options: vec![
-                        RelOption {
+                        CollationOption {
                             name: "provider".into(),
                             value: "builtin".into(),
+                            position: sql.find("provider").map(|index| index + 1),
                         },
-                        RelOption {
+                        CollationOption {
                             name: "locale".into(),
                             value: "C".into(),
+                            position: sql.find("locale").map(|index| index + 1),
                         },
                     ]
                 }
@@ -727,24 +728,23 @@ fn parse_create_collation_builtin_options() {
 
 #[test]
 fn parse_create_collation_builtin_locale_alias() {
-    match parse_statement(
-        "create collation regress_builtin_c_utf8 (provider=builtin, locale='C.UTF8')",
-    )
-    .unwrap()
-    {
+    let sql = "create collation regress_builtin_c_utf8 (provider=builtin, locale='C.UTF8')";
+    match parse_statement(sql).unwrap() {
         Statement::CreateCollation(stmt) => {
             assert_eq!(stmt.collation_name, "regress_builtin_c_utf8");
             assert_eq!(
                 stmt.kind,
                 CreateCollationKind::Options {
                     options: vec![
-                        RelOption {
+                        CollationOption {
                             name: "provider".into(),
                             value: "builtin".into(),
+                            position: sql.find("provider").map(|index| index + 1),
                         },
-                        RelOption {
+                        CollationOption {
                             name: "locale".into(),
                             value: "C.UTF8".into(),
+                            position: sql.find("locale").map(|index| index + 1),
                         },
                     ]
                 }
