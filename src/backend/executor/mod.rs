@@ -17,7 +17,6 @@ mod expr_json;
 mod expr_locks;
 mod expr_mac;
 mod expr_math;
-mod expr_money;
 pub(crate) mod expr_multirange;
 mod expr_network;
 pub(crate) mod expr_numeric;
@@ -100,8 +99,6 @@ pub(crate) use expr_mac::{
     parse_macaddr_text, parse_macaddr8_bytes, parse_macaddr8_text,
 };
 pub use expr_mac::{render_macaddr_text, render_macaddr8_text};
-pub use expr_money::money_format_text;
-pub(crate) use expr_money::money_parse_text;
 pub(crate) use expr_multirange::{
     compare_multirange_values, decode_multirange_bytes, encode_multirange_bytes,
     eval_multirange_function, multirange_intersection_agg_transition, parse_multirange_text,
@@ -132,6 +129,8 @@ pub(crate) use nodes::{
     render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
 };
 pub use pgrust_executor::ScalarFunctionCallInfo;
+pub use pgrust_expr::money_format_text;
+pub(crate) use pgrust_expr::money_parse_text;
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
 pub(crate) use srf::set_returning_call_label;

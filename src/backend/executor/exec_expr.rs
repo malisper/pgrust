@@ -14,7 +14,10 @@ use crate::include::nodes::datetime::{
     MAX_TIME_PRECISION, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-use pgrust_expr::{eval_geometry_function, expr_bool};
+use pgrust_expr::{
+    eval_geometry_function, expr_bool,
+    expr_money::{cash_words_text, money_larger, money_smaller},
+};
 
 use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
 use super::expr_agg_support::{
@@ -64,7 +67,6 @@ use super::expr_math::{
     eval_erf, eval_erfc, eval_float_send_function, eval_gamma, eval_gcd_function,
     eval_lcm_function, eval_lgamma, eval_unary_float_function, sind, snap_degree, tand,
 };
-use super::expr_money::{cash_words_text, money_larger, money_smaller};
 use super::expr_multirange::eval_multirange_function;
 use super::expr_numeric::{
     eval_ceil_function, eval_div_function, eval_exp_function, eval_factorial_function,
