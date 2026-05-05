@@ -51078,6 +51078,43 @@ fn pg_temp_function_drop_and_operator_create_reject_prepare() {
 }
 
 #[test]
+fn temp_relation_access_rejects_prepare_transaction() {
+    let base = temp_dir("temp_relation_access_prepare");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table twophase_tab (a int4)")
+        .unwrap();
+
+    for (sql, gid) in [
+        ("select a from twophase_tab", "twophase_select"),
+        ("insert into twophase_tab values (1)", "twophase_insert"),
+        (
+            "lock twophase_tab in access exclusive mode",
+            "twophase_lock",
+        ),
+        (
+            "declare twophase_cur cursor for select a from twophase_tab",
+            "twophase_cursor",
+        ),
+        ("drop table twophase_tab", "twophase_drop"),
+    ] {
+        session.execute(&db, "begin").unwrap();
+        session.execute(&db, sql).unwrap();
+        let err = session
+            .execute(&db, &format!("prepare transaction '{gid}'"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError { message, .. }
+                if message == "cannot PREPARE a transaction that has operated on temporary objects"
+        ));
+        assert!(!session.in_transaction());
+    }
+}
+
+#[test]
 fn create_language_c_function_uses_link_symbol_as_rust_backing_function() {
     let base = temp_dir("language_c_function_link_symbol");
     let db = Database::open(&base, 16).unwrap();
