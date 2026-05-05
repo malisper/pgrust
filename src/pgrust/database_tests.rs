@@ -53284,6 +53284,38 @@ fn create_table_as_is_visible_in_same_txn_before_commit() {
 }
 
 #[test]
+fn same_txn_reloptions_update_keeps_ctas_rows_visible() {
+    let base = temp_dir("ctas_reloptions_combo_cid_visibility");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "select 1").unwrap();
+    session
+        .execute(
+            &db,
+            "create table reloption_ctas_items as select generate_series(1, 3) as id",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table reloption_ctas_items set (parallel_workers = 2)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from reloption_ctas_items",
+        ),
+        vec![vec![Value::Int64(3)]]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn rollback_to_savepoint_restores_catalog_effects() {
     let base = temp_dir("rollback_to_savepoint_catalog_effects");
     let db = Database::open(&base, 16).unwrap();
