@@ -11485,6 +11485,9 @@ fn format_check_expr_for_constraint_display(
     if let Some(rendered) = format_simple_stale_float8_check(&normalized, relation) {
         return rendered;
     }
+    if let Some(rendered) = format_whole_row_cast_check(&normalized, relation) {
+        return rendered;
+    }
     if expr_sql.contains("::") {
         return normalized;
     }
@@ -11525,6 +11528,125 @@ fn format_check_expr_for_constraint_display(
         }
     }
     normalized
+}
+
+fn format_whole_row_cast_check(
+    expr_sql: &str,
+    relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
+) -> Option<String> {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    let mut search = 0usize;
+    let mut changed = false;
+    while let Some(row_start) = find_row_constructor_after(expr_sql, search) {
+        let open = skip_ascii_whitespace(expr_sql, row_start + "ROW".len(), expr_sql.len());
+        let Some(close) = find_matching_delimiter(expr_sql, open, b'(', b')') else {
+            break;
+        };
+        let cast_start = skip_ascii_whitespace(expr_sql, close + 1, expr_sql.len());
+        if expr_sql.as_bytes().get(cast_start..cast_start + 2) != Some(b"::") {
+            search = close + 1;
+            continue;
+        }
+        let Some((type_end, type_sql)) = parse_cast_type_name(expr_sql, cast_start + "::".len())
+        else {
+            search = close + 1;
+            continue;
+        };
+        if !row_fields_match_relation_columns(&expr_sql[open + 1..close], relation) {
+            search = close + 1;
+            continue;
+        }
+        out.push_str(&expr_sql[cursor..row_start]);
+        out.push_str(type_sql);
+        out.push_str(".*");
+        cursor = type_end;
+        search = type_end;
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    out.push_str(&expr_sql[cursor..]);
+    Some(out)
+}
+
+fn find_row_constructor_after(sql: &str, start: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = start;
+    while index + "ROW".len() <= bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_single_quoted_sql_string(bytes, index, bytes.len()),
+            b'"' => index = skip_double_quoted_sql_identifier(bytes, index, bytes.len()),
+            _ if bytes
+                .get(index..index + "ROW".len())
+                .is_some_and(|word| word.eq_ignore_ascii_case(b"ROW")) =>
+            {
+                let end = index + "ROW".len();
+                if (index == 0 || !is_sql_identifier_continue_byte(bytes[index - 1]))
+                    && (end == bytes.len() || !is_sql_identifier_continue_byte(bytes[end]))
+                {
+                    let open = skip_ascii_whitespace(sql, end, sql.len());
+                    if bytes.get(open) == Some(&b'(') {
+                        return Some(index);
+                    }
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn parse_cast_type_name(sql: &str, start: usize) -> Option<(usize, &str)> {
+    let mut index = skip_ascii_whitespace(sql, start, sql.len());
+    let type_start = index;
+    loop {
+        index = parse_sql_identifier_segment(sql, index)?;
+        let after_segment = skip_ascii_whitespace(sql, index, sql.len());
+        if sql.as_bytes().get(after_segment) != Some(&b'.') {
+            break;
+        }
+        index = skip_ascii_whitespace(sql, after_segment + 1, sql.len());
+    }
+    Some((index, sql[type_start..index].trim()))
+}
+
+fn parse_sql_identifier_segment(sql: &str, start: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    match bytes.get(start) {
+        Some(b'"') => Some(skip_double_quoted_sql_identifier(bytes, start, bytes.len())),
+        Some(byte) if is_sql_identifier_start_byte(*byte) => {
+            let mut index = start + 1;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| is_sql_identifier_continue_byte(*byte))
+            {
+                index += 1;
+            }
+            Some(index)
+        }
+        _ => None,
+    }
+}
+
+fn row_fields_match_relation_columns(
+    fields_sql: &str,
+    relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
+) -> bool {
+    let fields = split_top_level_commas(fields_sql);
+    let columns = relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .collect::<Vec<_>>();
+    fields.len() == columns.len()
+        && fields
+            .iter()
+            .zip(columns)
+            .all(|(field, column)| check_expr_column_matches(field.trim(), &column.name))
 }
 
 fn format_simple_stale_float8_check(
@@ -13514,13 +13636,14 @@ fn send_queued_notices_with_sql_and_min_messages(
         let position = notice.position.or_else(|| {
             sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message, *occurrence))
         });
-        send_notice_with_fields(
+        send_notice_with_context_fields(
             stream,
             notice.severity,
             notice.sqlstate,
             &notice.message,
             notice.detail.as_deref(),
             notice.hint.as_deref(),
+            notice.context.as_deref(),
             position,
         )?;
     }

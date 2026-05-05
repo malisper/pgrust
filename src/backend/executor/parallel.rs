@@ -157,6 +157,7 @@ impl WorkerContextSeed {
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             pending_portals: Vec::new(),
+            copy_freeze_relation_oids: Vec::new(),
             catalog: self.catalog.clone(),
             scalar_function_cache: HashMap::new(),
             proc_execute_acl_cache: std::collections::HashSet::new(),

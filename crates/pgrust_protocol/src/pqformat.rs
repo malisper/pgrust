@@ -725,14 +725,7 @@ pub fn send_notice_with_fields(
     hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    let mut body = Vec::new();
-    push_diagnostic_header(&mut body, severity, sqlstate, message);
-    push_optional_diagnostic_fields(&mut body, detail, hint, None, position, None, None);
-
-    w.write_all(&[b'N'])?;
-    w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
-    w.write_all(&body)?;
-    Ok(())
+    send_notice_with_context_fields(w, severity, sqlstate, message, detail, hint, None, position)
 }
 
 pub fn send_notice_with_context_fields(

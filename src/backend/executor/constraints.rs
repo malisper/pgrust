@@ -4,7 +4,7 @@ use crate::backend::parser::BoundRelationConstraints;
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::include::access::htup::ItemPointerData;
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::execnodes::TupleSlot;
+use crate::include::nodes::execnodes::{SystemVarBinding, TupleSlot};
 use crate::include::nodes::primnodes::RelationDesc;
 use pgrust_executor::{
     BooleanConstraintResult, NotNullConstraintDescriptor, RlsDetailSource, RlsWriteCheckSource,
@@ -48,43 +48,60 @@ pub(crate) fn enforce_relation_constraints(
         return Ok(());
     }
 
-    let mut slot =
-        TupleSlot::virtual_row_with_metadata(values.to_vec(), None, constraints.relation_oid);
-    for check in &constraints.checks {
-        if !check.enforced {
-            continue;
-        }
-        match eval_expr(&check.expr, &mut slot, ctx)? {
-            Value::Null | Value::Bool(true) => {}
-            Value::Bool(false) => {
-                return Err(ExecError::CheckViolation {
-                    relation: relation_name.to_string(),
-                    constraint: check.constraint_name.clone(),
-                    detail: Some(format_failing_row_detail_for_columns(
-                        values,
-                        &desc.columns,
-                        &ctx.datetime_config,
-                    )),
-                });
-            }
-            _ => {
-                let failure = check_constraint_failure(
-                    relation_name,
-                    &check.constraint_name,
-                    BooleanConstraintResult::NonBool,
-                )
-                .expect("non-boolean check result must produce a failure");
-                return Err(ExecError::DetailedError {
-                    message: failure.message,
-                    detail: failure.detail,
-                    hint: None,
-                    sqlstate: failure.sqlstate,
-                });
-            }
-        }
+    let saved_system_binding_len = ctx.system_bindings.len();
+    if let Some(table_oid) = constraints.relation_oid
+        && !ctx.system_bindings.iter().any(|binding| binding.varno == 1)
+    {
+        ctx.system_bindings.push(SystemVarBinding {
+            varno: 1,
+            table_oid,
+            tid: None,
+            xmin: None,
+            cmin: None,
+            xmax: None,
+        });
     }
 
-    Ok(())
+    let result = (|| {
+        let mut slot =
+            TupleSlot::virtual_row_with_metadata(values.to_vec(), None, constraints.relation_oid);
+        for check in &constraints.checks {
+            if !check.enforced {
+                continue;
+            }
+            match eval_expr(&check.expr, &mut slot, ctx)? {
+                Value::Null | Value::Bool(true) => {}
+                Value::Bool(false) => {
+                    return Err(ExecError::CheckViolation {
+                        relation: relation_name.to_string(),
+                        constraint: check.constraint_name.clone(),
+                        detail: Some(format_failing_row_detail_for_columns(
+                            values,
+                            &desc.columns,
+                            &ctx.datetime_config,
+                        )),
+                    });
+                }
+                _ => {
+                    let failure = check_constraint_failure(
+                        relation_name,
+                        &check.constraint_name,
+                        BooleanConstraintResult::NonBool,
+                    )
+                    .expect("non-boolean check result must produce a failure");
+                    return Err(ExecError::DetailedError {
+                        message: failure.message,
+                        detail: failure.detail,
+                        hint: None,
+                        sqlstate: failure.sqlstate,
+                    });
+                }
+            }
+        }
+        Ok(())
+    })();
+    ctx.system_bindings.truncate(saved_system_binding_len);
+    result
 }
 
 pub(crate) fn enforce_row_security_write_checks(
