@@ -25778,6 +25778,45 @@ fn auto_view_do_also_rule_default_new_rows_match_pg() {
 }
 
 #[test]
+fn auto_view_update_whole_row_var_matches_pg() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table whole_row_base (a int4 primary key, b text default 'Unspecified')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into whole_row_base values (-2, 'Row -2'), (-1, 'Row -1'), \
+         (0, 'Row 0'), (1, 'Row 1'), (2, 'Row 2')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view whole_row_view as select b as bb, a as aa from whole_row_base",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function whole_row_view_aa(x whole_row_view) returns int4 \
+         as $$ select x.aa $$ language sql",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update whole_row_view v set bb = 'Updated row 2' \
+             where whole_row_view_aa(v) = 2 \
+             returning whole_row_view_aa(v), v.bb",
+        ),
+        vec![vec![Value::Int32(2), Value::Text("Updated row 2".into())]]
+    );
+}
+
+#[test]
 fn view_instead_insert_explicit_defaults_use_view_defaults() {
     fn insert_explicit_default_rows(db: &Database) {
         db.execute(

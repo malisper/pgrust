@@ -7,9 +7,9 @@ use pgrust_nodes::parsenodes::{
 use pgrust_nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
     RelationPrivilegeMask, RelationPrivilegeRequirement, RowsFromItem, RowsFromSource,
-    ScalarArrayOpExpr, SetReturningExpr, SubLink, SubPlan, WindowClause, WindowFrame,
-    WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec, attrno_index, is_special_varno,
-    is_system_attr, user_attrno,
+    ScalarArrayOpExpr, SetReturningExpr, SubLink, SubPlan, WHOLE_ROW_ATTR_NO, WindowClause,
+    WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec, attrno_index,
+    is_special_varno, is_system_attr, user_attrno,
 };
 use pgrust_nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -1445,6 +1445,42 @@ fn rewrite_local_vars_for_output_exprs_impl(
             )),
             ..*saop
         })),
+        Expr::Var(var)
+            if var.varlevelsup == source_varlevelsup
+                && var.varno == source_varno
+                && var.varattno == WHOLE_ROW_ATTR_NO =>
+        {
+            let fields = output_exprs
+                .iter()
+                .enumerate()
+                .map(|(index, expr)| {
+                    (
+                        format!("f{}", index + 1),
+                        raise_expr_varlevels(expr.clone(), source_varlevelsup),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let descriptor_fields = fields
+                .iter()
+                .map(|(name, expr)| {
+                    (
+                        name.clone(),
+                        expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    )
+                })
+                .collect();
+            let descriptor = if matches!(var.vartype.kind, SqlTypeKind::Composite) {
+                pgrust_nodes::datum::RecordDescriptor::named(
+                    var.vartype.type_oid,
+                    var.vartype.typrelid,
+                    var.vartype.typmod,
+                    descriptor_fields,
+                )
+            } else {
+                pgrust_nodes::datum::RecordDescriptor::anonymous(descriptor_fields, -1)
+            };
+            Expr::Row { descriptor, fields }
+        }
         Expr::Var(var)
             if var.varlevelsup == source_varlevelsup
                 && var.varno == source_varno

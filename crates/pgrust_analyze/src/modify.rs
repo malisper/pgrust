@@ -4463,6 +4463,8 @@ fn rewrite_auto_view_returning_targets(
     view_output_exprs: &[Expr],
     base_desc: &RelationDesc,
 ) -> Vec<TargetEntry> {
+    let local_visible_output_exprs =
+        &local_output_exprs[..local_output_exprs.len().min(view_output_exprs.len())];
     let old_view_output_exprs =
         view_returning_pseudo_output_exprs(view_output_exprs, base_desc, OUTER_VAR);
     let new_view_output_exprs =
@@ -4472,7 +4474,7 @@ fn rewrite_auto_view_returning_targets(
         .map(|target| TargetEntry {
             expr: rewrite_local_vars_for_output_exprs(
                 rewrite_local_vars_for_output_exprs(
-                    rewrite_local_vars_for_output_exprs(target.expr, 1, local_output_exprs),
+                    rewrite_local_vars_for_output_exprs(target.expr, 1, local_visible_output_exprs),
                     OUTER_VAR,
                     &old_view_output_exprs,
                 ),
