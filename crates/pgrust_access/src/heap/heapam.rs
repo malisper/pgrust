@@ -1862,20 +1862,21 @@ fn heap_page_has_fillfactor_space(
     fillfactor: u16,
 ) -> Result<bool, HeapError> {
     let fillfactor = fillfactor.clamp(10, 100);
-    if fillfactor == 100 {
-        return Ok(true);
-    }
     let header = page_header(page).map_err(TupleError::from)?;
-    let required = max_align(tuple_len) + ITEM_ID_SIZE;
-    if header.free_space() < required {
+    let tuple_len = max_align(tuple_len);
+    let heap_free_space = header.free_space().saturating_sub(ITEM_ID_SIZE);
+    if heap_free_space < tuple_len {
         return Ok(false);
     }
-    if page_get_max_offset_number(page).map_err(TupleError::from)? == 0 {
-        return Ok(true);
-    }
-    let free_after = header.free_space() - required;
-    let reserved = pgrust_storage::BLCKSZ * usize::from(100 - fillfactor) / 100;
-    Ok(free_after >= reserved)
+    let save_free_space = pgrust_storage::BLCKSZ * usize::from(100 - fillfactor) / 100;
+    let nearly_empty_free_space =
+        MAX_HEAP_TUPLE_SIZE - (MAX_HEAP_TUPLES_PER_PAGE / 8 * ITEM_ID_SIZE);
+    let target_free_space = if tuple_len + save_free_space > nearly_empty_free_space {
+        tuple_len.max(nearly_empty_free_space)
+    } else {
+        tuple_len + save_free_space
+    };
+    Ok(heap_free_space >= target_free_space)
 }
 
 fn extend_heap_relation_local(

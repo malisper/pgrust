@@ -3912,6 +3912,8 @@ mod tests {
             target_width: 1,
             target_attnos: Vec::new(),
             plan_id: 7,
+            is_initplan: false,
+            set_params: Vec::new(),
             par_param: Vec::new(),
             args: Vec::new(),
         }));

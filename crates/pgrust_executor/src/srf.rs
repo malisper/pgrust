@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+
 use pgrust_catalog_data::statistics_payload::decode_pg_mcv_list_payload;
 use pgrust_catalog_data::{
     BOOL_TYPE_OID, CURRENT_DATABASE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID,
@@ -798,15 +801,31 @@ pub fn pg_hba_file_rule_rows() -> Vec<Vec<Value>> {
 
 pub fn pg_show_all_settings_rows(
     wal_segment_size: &str,
+    gucs: &HashMap<String, String>,
     output_columns: &[QueryColumn],
 ) -> Vec<Vec<Value>> {
-    let mut settings = vec![(
-        "wal_segment_size",
-        wal_segment_size,
-        "Write-Ahead Log / Settings",
-        "Sets the size of WAL files held for WAL records.",
-        "integer",
-    )];
+    let work_mem_setting = gucs
+        .get("work_mem")
+        .and_then(|value| normalize_memory_guc_kb(value))
+        .unwrap_or_else(|| "4096".into());
+    let mut settings = vec![
+        (
+            "wal_segment_size",
+            Cow::Borrowed(wal_segment_size),
+            None,
+            "Write-Ahead Log / Settings",
+            "Sets the size of WAL files held for WAL records.",
+            "integer",
+        ),
+        (
+            "work_mem",
+            Cow::Owned(work_mem_setting),
+            Some("kB"),
+            "Resource Usage / Memory",
+            "Sets the maximum memory to be used for query workspaces.",
+            "integer",
+        ),
+    ];
     const ENABLE_SETTINGS: &[(&str, &str, &str, &str, &str)] = &[
         (
             "default_statistics_target",
@@ -984,16 +1003,29 @@ pub fn pg_show_all_settings_rows(
             "bool",
         ),
     ];
-    settings.extend(ENABLE_SETTINGS.iter().copied());
+    settings.extend(ENABLE_SETTINGS.iter().map(
+        |(name, setting, category, description, vartype)| {
+            (
+                *name,
+                Cow::Borrowed(*setting),
+                None,
+                *category,
+                *description,
+                *vartype,
+            )
+        },
+    ));
     settings
         .iter()
-        .map(|(name, setting, category, description, vartype)| {
+        .map(|(name, setting, unit, category, description, vartype)| {
             output_columns
                 .iter()
                 .map(|column| match column.name.as_str() {
                     "name" => Value::Text((*name).into()),
-                    "setting" => Value::Text((*setting).into()),
-                    "unit" => Value::Null,
+                    "setting" => Value::Text(setting.as_ref().into()),
+                    "unit" => unit
+                        .map(|unit| Value::Text(unit.into()))
+                        .unwrap_or(Value::Null),
                     "category" => Value::Text((*category).into()),
                     "short_desc" => Value::Text((*description).into()),
                     "extra_desc" => Value::Null,
@@ -1003,8 +1035,8 @@ pub fn pg_show_all_settings_rows(
                     "min_val" => Value::Null,
                     "max_val" => Value::Null,
                     "enumvals" => Value::Null,
-                    "boot_val" => Value::Text((*setting).into()),
-                    "reset_val" => Value::Text((*setting).into()),
+                    "boot_val" => Value::Text(setting.as_ref().into()),
+                    "reset_val" => Value::Text(setting.as_ref().into()),
                     "sourcefile" => Value::Null,
                     "sourceline" => Value::Null,
                     "pending_restart" => Value::Bool(false),
@@ -1013,6 +1045,26 @@ pub fn pg_show_all_settings_rows(
                 .collect()
         })
         .collect()
+}
+
+fn normalize_memory_guc_kb(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_matches('\'').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let split_at = trimmed
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .unwrap_or(trimmed.len());
+    let number = trimmed[..split_at].trim();
+    let unit = trimmed[split_at..].trim().to_ascii_lowercase();
+    let number = number.parse::<f64>().ok()?;
+    let multiplier = match unit.as_str() {
+        "" | "kb" => 1.0,
+        "mb" => 1024.0,
+        "gb" => 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some(((number * multiplier).round() as u64).to_string())
 }
 
 pub fn event_trigger_dropped_object_rows(
@@ -1980,7 +2032,7 @@ mod tests {
             column("name", SqlTypeKind::Text),
             column("setting", SqlTypeKind::Text),
         ];
-        let rows = pg_show_all_settings_rows("16777216", &columns);
+        let rows = pg_show_all_settings_rows("16777216", &HashMap::new(), &columns);
         assert!(rows.contains(&vec![
             Value::Text("wal_segment_size".into()),
             Value::Text("16777216".into()),
@@ -1991,6 +2043,22 @@ mod tests {
                 Value::Text("on".into()),
             ]
         }));
+    }
+
+    #[test]
+    fn pg_show_all_settings_uses_work_mem_guc() {
+        let columns = vec![
+            column("name", SqlTypeKind::Text),
+            column("setting", SqlTypeKind::Text),
+            column("unit", SqlTypeKind::Text),
+        ];
+        let gucs = HashMap::from([("work_mem".into(), "10MB".into())]);
+        let rows = pg_show_all_settings_rows("16777216", &gucs, &columns);
+        assert!(rows.contains(&vec![
+            Value::Text("work_mem".into()),
+            Value::Text("10240".into()),
+            Value::Text("kB".into()),
+        ]));
     }
 
     #[test]

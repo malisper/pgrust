@@ -5,11 +5,11 @@ use pgrust_nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
 };
 use pgrust_nodes::primnodes::{
-    Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, FuncExpr,
-    GroupingFuncExpr, GroupingKeyExpr, JoinType, OpExpr, OpExprKind, OrderByEntry, RelationDesc,
-    ScalarArrayOpExpr, SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink,
-    SubLinkType, Var, WindowFuncExpr, WindowFuncKind, XmlExpr, is_special_varno,
-    set_returning_call_exprs, user_attrno,
+    Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, CaseExpr, CaseWhen, Expr,
+    ExprArraySubscript, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, JoinType, OpExpr, OpExprKind,
+    OrderByEntry, RelationDesc, ScalarArrayOpExpr, ScalarFunctionImpl, SqlJsonQueryFunction,
+    SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, SubLinkType, Var, WindowFuncExpr,
+    WindowFuncKind, XmlExpr, is_special_varno, set_returning_call_exprs, user_attrno,
 };
 
 use super::{and_exprs, expr_relids, flatten_and_conjuncts, joininfo, relids_subset};
@@ -166,6 +166,18 @@ fn convert_any_sublink_to_join(
     if levels_to_parent != 0 || expr_contains_outer_var(&testexpr) {
         return false;
     }
+    let available_relids = query
+        .jointree
+        .as_ref()
+        .map(jointree_relids)
+        .unwrap_or_default();
+    let testexpr_relids = expr_relids(&testexpr);
+    if testexpr_relids.is_empty() || !relids_subset(&testexpr_relids, &available_relids) {
+        return false;
+    }
+    if expr_contains_volatile_for_pullup(&testexpr, catalog) {
+        return false;
+    }
     if subquery.target_list.len() != 1 {
         return false;
     }
@@ -277,7 +289,7 @@ fn convert_exists_sublink_to_join(
         return false;
     }
     let mut subquery = *sublink.subselect;
-    if !simple_exists_query(&subquery) {
+    if !simplify_exists_query(&mut subquery) {
         return false;
     }
 
@@ -311,6 +323,9 @@ fn convert_exists_sublink_to_join(
     if !where_qual_references_pullup_parent(&working, where_qual, levels_to_parent)
         && !expr_contains_outer_var(where_qual)
     {
+        return false;
+    }
+    if expr_contains_volatile_for_pullup(where_qual, catalog) {
         return false;
     }
 
@@ -356,13 +371,15 @@ fn where_qual_references_pullup_parent(
 }
 
 fn simple_exists_query(query: &Query) -> bool {
+    simple_sublink_query(query) && query.sort_clause.is_empty() && query.limit_count.is_none()
+}
+
+fn simple_sublink_query(query: &Query) -> bool {
     matches!(query.command_type, CommandType::Select)
         && query.group_by.is_empty()
         && query.accumulators.is_empty()
         && query.window_clauses.is_empty()
         && query.having_qual.is_none()
-        && query.sort_clause.is_empty()
-        && query.limit_count.is_none()
         && query.limit_offset.is_none()
         && query.locking_clause.is_none()
         && query.row_marks.is_empty()
@@ -371,6 +388,33 @@ fn simple_exists_query(query: &Query) -> bool {
         && query.set_operation.is_none()
         && query.jointree.is_some()
         && query.rtable.iter().all(supported_pulled_up_rte)
+}
+
+fn simplify_exists_query(query: &mut Query) -> bool {
+    if !simple_sublink_query(query) {
+        return false;
+    }
+    if query
+        .limit_count
+        .as_ref()
+        .is_some_and(|limit| !exists_limit_can_be_ignored(limit))
+    {
+        return false;
+    }
+    query.limit_count = None;
+    query.sort_clause.clear();
+    true
+}
+
+fn exists_limit_can_be_ignored(limit: &Expr) -> bool {
+    match limit {
+        Expr::Const(Value::Null) => true,
+        Expr::Const(Value::Int16(value)) => *value > 0,
+        Expr::Const(Value::Int32(value)) => *value > 0,
+        Expr::Const(Value::Int64(value)) => *value > 0,
+        Expr::Cast(inner, _) => exists_limit_can_be_ignored(inner),
+        _ => false,
+    }
 }
 
 fn simple_any_query(query: &Query) -> bool {
@@ -1086,6 +1130,181 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => false,
     }
+}
+
+fn expr_contains_volatile_for_pullup(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
+    match expr {
+        Expr::Random => true,
+        Expr::Func(func) => {
+            scalar_function_is_volatile_for_pullup(func, catalog)
+                || func.display_args.as_ref().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| expr_contains_volatile_for_pullup(&arg.expr, catalog))
+                })
+                || func
+                    .args
+                    .iter()
+                    .any(|arg| expr_contains_volatile_for_pullup(arg, catalog))
+        }
+        Expr::Op(op) => {
+            (op.opfuncid != 0 && proc_is_volatile_for_pullup(catalog, op.opfuncid))
+                || op
+                    .args
+                    .iter()
+                    .any(|arg| expr_contains_volatile_for_pullup(arg, catalog))
+        }
+        Expr::GroupingKey(grouping_key) => {
+            expr_contains_volatile_for_pullup(&grouping_key.expr, catalog)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|arg| expr_contains_volatile_for_pullup(arg, catalog)),
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .chain(&aggref.args)
+                .any(|arg| expr_contains_volatile_for_pullup(arg, catalog))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|entry| expr_contains_volatile_for_pullup(&entry.expr, catalog))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile_for_pullup(expr, catalog))
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(|arg| expr_contains_volatile_for_pullup(arg, catalog)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_contains_volatile_for_pullup(arg, catalog)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_volatile_for_pullup(expr, catalog))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_volatile_for_pullup(&arm.expr, catalog)
+                        || expr_contains_volatile_for_pullup(&arm.result, catalog)
+                })
+                || expr_contains_volatile_for_pullup(&case_expr.defresult, catalog)
+        }
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|expr| expr_contains_volatile_for_pullup(expr, catalog)),
+        Expr::SetReturning(_) | Expr::SubLink(_) => true,
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_volatile_for_pullup(expr, catalog))
+                || subplan
+                    .args
+                    .iter()
+                    .any(|expr| expr_contains_volatile_for_pullup(expr, catalog))
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_volatile_for_pullup(&saop.left, catalog)
+                || expr_contains_volatile_for_pullup(&saop.right, catalog)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_contains_volatile_for_pullup(expr, catalog)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => {
+            expr_contains_volatile_for_pullup(inner, catalog)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_volatile_for_pullup(expr, catalog)
+                || expr_contains_volatile_for_pullup(pattern, catalog)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_volatile_for_pullup(expr, catalog))
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_volatile_for_pullup(left, catalog)
+                || expr_contains_volatile_for_pullup(right, catalog)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_contains_volatile_for_pullup(expr, catalog)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_volatile_for_pullup(expr, catalog)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_volatile_for_pullup(array, catalog)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_contains_volatile_for_pullup(expr, catalog))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_contains_volatile_for_pullup(expr, catalog))
+                })
+        }
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn scalar_function_is_volatile_for_pullup(func: &FuncExpr, catalog: &dyn CatalogLookup) -> bool {
+    match func.implementation {
+        ScalarFunctionImpl::Builtin(
+            BuiltinScalarFunction::Random
+            | BuiltinScalarFunction::RandomNormal
+            | BuiltinScalarFunction::GenRandomUuid,
+        ) => true,
+        ScalarFunctionImpl::UserDefined { proc_oid } => {
+            proc_is_volatile_for_pullup(catalog, proc_oid)
+        }
+        ScalarFunctionImpl::Builtin(_) => {
+            func.funcid != 0 && proc_is_volatile_for_pullup(catalog, func.funcid)
+        }
+    }
+}
+
+fn proc_is_volatile_for_pullup(catalog: &dyn CatalogLookup, proc_oid: u32) -> bool {
+    catalog
+        .proc_row_by_oid(proc_oid)
+        .is_none_or(|row| row.provolatile == 'v')
 }
 
 fn expr_contains_outer_var(expr: &Expr) -> bool {

@@ -16467,9 +16467,11 @@ impl Session {
                     .map(StatementResult::AffectedRows),
                 Statement::CreateDomain(ref create_stmt) => {
                     let search_path = self.configured_search_path();
-                    db.execute_create_domain_stmt_with_search_path(
+                    db.execute_create_domain_stmt_in_transaction_with_search_path(
                         client_id,
                         create_stmt,
+                        xid,
+                        cid,
                         search_path.as_deref(),
                     )
                 }

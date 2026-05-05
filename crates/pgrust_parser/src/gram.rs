@@ -310,7 +310,8 @@ fn parse_statement_with_options_inner(
     match pgrust_sql_grammar::parse_rule(Rule::statement, &sql) {
         Ok(mut pairs) => build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?),
         Err(err) => {
-            if is_select_with_trailing_operator(&sql) {
+            if is_select_with_trailing_operator(&sql) || is_select_with_trailing_set_operator(&sql)
+            {
                 return Err(ParseError::UnexpectedToken {
                     expected: "statement",
                     actual: "syntax error at or near \";\"".into(),
@@ -1060,6 +1061,24 @@ fn is_select_with_trailing_operator(sql: &str) -> bool {
             | '^'
             | '|'
             | '~'
+    )
+}
+
+fn is_select_with_trailing_set_operator(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("select ") && !lowered.starts_with("with ") {
+        return false;
+    }
+    let words = lowered.split_whitespace().collect::<Vec<_>>();
+    matches!(
+        words.as_slice(),
+        [.., "union"]
+            | [.., "intersect"]
+            | [.., "except"]
+            | [.., "union", "all" | "distinct"]
+            | [.., "intersect", "all" | "distinct"]
+            | [.., "except", "all" | "distinct"]
     )
 }
 
@@ -11283,9 +11302,9 @@ fn normalize_grantee_identifier(input: &str) -> Result<String, ParseError> {
     } else if keyword_at_start(trimmed, "current_user")
         && consume_keyword(trimmed, "current_user").trim().is_empty()
     {
-        // :HACK: GRANT stores grantees as names today; resolve CURRENT_USER to
-        // the bootstrap role until privilege statements carry RoleSpec values.
-        Ok("postgres".into())
+        // :HACK: GRANT stores grantees as names today; preserve CURRENT_USER
+        // as a sentinel until privilege statements carry RoleSpec values.
+        Ok("current_user".into())
     } else {
         normalize_simple_identifier(trimmed)
     }
@@ -33194,6 +33213,18 @@ mod tests {
             "select sum(id) over (rows between unbounded preceding and current row exclude ties) from people",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn trailing_set_operator_reports_syntax_error() {
+        let err = parse_statement("SELECT 1 UNION;").unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::UnexpectedToken {
+                actual,
+                ..
+            } if actual == "syntax error at or near \";\""
+        ));
     }
 
     #[test]

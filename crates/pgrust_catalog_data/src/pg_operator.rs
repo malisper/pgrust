@@ -1325,6 +1325,9 @@ fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
     rows.extend(brin_scalar_comparison_operator_rows(
         &bootstrap_pg_proc_rows(),
     ));
+    rows.extend(float_cross_comparison_operator_rows(
+        &bootstrap_pg_proc_rows(),
+    ));
     rows
 }
 
@@ -5374,12 +5377,180 @@ fn brin_scalar_comparison_operator_rows(proc_rows: &[crate::PgProcRow]) -> Vec<P
     rows
 }
 
+fn float_cross_comparison_operator_rows(proc_rows: &[crate::PgProcRow]) -> Vec<PgOperatorRow> {
+    [
+        (
+            1120,
+            "=",
+            FLOAT4_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            1130,
+            1121,
+            "float48eq",
+            true,
+            true,
+        ),
+        (
+            1121,
+            "<>",
+            FLOAT4_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            1131,
+            1120,
+            "float48ne",
+            false,
+            false,
+        ),
+        (
+            1122,
+            "<",
+            FLOAT4_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            1133,
+            1125,
+            "float48lt",
+            false,
+            false,
+        ),
+        (
+            1123,
+            ">",
+            FLOAT4_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            1132,
+            1124,
+            "float48gt",
+            false,
+            false,
+        ),
+        (
+            1124,
+            "<=",
+            FLOAT4_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            1135,
+            1123,
+            "float48le",
+            false,
+            false,
+        ),
+        (
+            1125,
+            ">=",
+            FLOAT4_TYPE_OID,
+            FLOAT8_TYPE_OID,
+            1134,
+            1122,
+            "float48ge",
+            false,
+            false,
+        ),
+        (
+            1130,
+            "=",
+            FLOAT8_TYPE_OID,
+            FLOAT4_TYPE_OID,
+            1120,
+            1131,
+            "float84eq",
+            true,
+            true,
+        ),
+        (
+            1131,
+            "<>",
+            FLOAT8_TYPE_OID,
+            FLOAT4_TYPE_OID,
+            1121,
+            1130,
+            "float84ne",
+            false,
+            false,
+        ),
+        (
+            1132,
+            "<",
+            FLOAT8_TYPE_OID,
+            FLOAT4_TYPE_OID,
+            1123,
+            1135,
+            "float84lt",
+            false,
+            false,
+        ),
+        (
+            1133,
+            ">",
+            FLOAT8_TYPE_OID,
+            FLOAT4_TYPE_OID,
+            1122,
+            1134,
+            "float84gt",
+            false,
+            false,
+        ),
+        (
+            1134,
+            "<=",
+            FLOAT8_TYPE_OID,
+            FLOAT4_TYPE_OID,
+            1125,
+            1133,
+            "float84le",
+            false,
+            false,
+        ),
+        (
+            1135,
+            ">=",
+            FLOAT8_TYPE_OID,
+            FLOAT4_TYPE_OID,
+            1124,
+            1132,
+            "float84ge",
+            false,
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(oid, name, left, right, commutator, negate, proc_name, can_merge, can_hash)| {
+            operator_row_full(
+                oid,
+                name,
+                'b',
+                left,
+                right,
+                BOOL_TYPE_OID,
+                commutator,
+                negate,
+                proc_oid_for_signature(proc_rows, proc_name, &[left, right]),
+                can_merge,
+                can_hash,
+            )
+        },
+    )
+    .collect()
+}
+
 fn comparison_proc_oid(rows: &[crate::PgProcRow], name: &str, type_oid: u32) -> u32 {
     let proargtypes = format!("{type_oid} {type_oid}");
     rows.iter()
         .find(|row| row.proname == name && row.proargtypes == proargtypes)
         .map(|row| row.oid)
         .unwrap_or_else(|| panic!("missing bootstrap comparison proc {name}({type_oid})"))
+}
+
+fn proc_oid_for_signature(rows: &[crate::PgProcRow], name: &str, arg_oids: &[u32]) -> u32 {
+    let proargtypes = arg_oids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    rows.iter()
+        .find(|row| row.proname == name && row.proargtypes == proargtypes)
+        .map(|row| row.oid)
+        .unwrap_or_else(|| panic!("missing bootstrap proc {name}({proargtypes})"))
 }
 
 fn operator_row_full(

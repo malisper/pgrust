@@ -1247,6 +1247,7 @@ pub struct PlpgsqlNotice {
     pub message: String,
     pub detail: Option<String>,
     pub hint: Option<String>,
+    pub context: Option<String>,
 }
 
 impl PlpgsqlNotice {
@@ -1261,6 +1262,7 @@ impl PlpgsqlNotice {
             message: message.into(),
             detail: None,
             hint: None,
+            context: None,
         }
     }
 }

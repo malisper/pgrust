@@ -7,6 +7,7 @@ use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind};
 use pgrust_nodes::primnodes::RelationDesc;
 
 pub const BTREE_INTEGER_FAMILY_OID: u32 = 1976;
+pub const BTREE_XID8_FAMILY_OID: u32 = 5067;
 pub const BTREE_ARRAY_FAMILY_OID: u32 = 397;
 pub const BTREE_CHAR_FAMILY_OID: u32 = 429;
 pub const BTREE_OIDVECTOR_FAMILY_OID: u32 = 1991;
@@ -28,6 +29,7 @@ pub const BTREE_MACADDR_FAMILY_OID: u32 = 76040;
 pub const BTREE_MACADDR8_FAMILY_OID: u32 = 76041;
 pub const BTREE_DATETIME_FAMILY_OID: u32 = 434;
 pub const BTREE_FLOAT_FAMILY_OID: u32 = 1970;
+pub const BTREE_TIME_FAMILY_OID: u32 = 1996;
 pub const BTREE_VARBIT_FAMILY_OID: u32 = 2002;
 pub const BTREE_RECORD_FAMILY_OID: u32 = 2994;
 pub const BTREE_RECORD_IMAGE_FAMILY_OID: u32 = 3194;
@@ -119,6 +121,7 @@ pub const HASH_CHAR_FAMILY_OID: u32 = 431;
 pub const HASH_DATE_FAMILY_OID: u32 = 435;
 pub const HASH_FLOAT_FAMILY_OID: u32 = 1971;
 pub const HASH_INTEGER_FAMILY_OID: u32 = 1977;
+pub const HASH_XID8_FAMILY_OID: u32 = 5032;
 pub const HASH_INTERVAL_FAMILY_OID: u32 = 1983;
 pub const HASH_NUMERIC_FAMILY_OID: u32 = 1998;
 pub const HASH_OID_FAMILY_OID: u32 = 1990;
@@ -246,9 +249,23 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
         PgOpfamilyRow {
+            oid: BTREE_TIME_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "time_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
             oid: BTREE_INTEGER_FAMILY_OID,
             opfmethod: BTREE_AM_OID,
             opfname: "integer_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: BTREE_XID8_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "xid8_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
@@ -543,6 +560,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_DATE_FAMILY_OID, "date_ops"),
         hash_row(HASH_FLOAT_FAMILY_OID, "float_ops"),
         hash_row(HASH_INTEGER_FAMILY_OID, "integer_ops"),
+        hash_row(HASH_XID8_FAMILY_OID, "xid8_ops"),
         hash_row(HASH_INTERVAL_FAMILY_OID, "interval_ops"),
         hash_row(HASH_NUMERIC_FAMILY_OID, "numeric_ops"),
         hash_row(HASH_OID_FAMILY_OID, "oid_ops"),

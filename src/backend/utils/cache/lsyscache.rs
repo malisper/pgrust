@@ -1475,6 +1475,18 @@ pub fn default_opclass_for_am_and_type(
             .into_iter()
             .find(|row| row.oid == crate::include::catalog::VARCHAR_BTREE_OPCLASS_OID);
     }
+    if am_oid == crate::include::catalog::SPGIST_AM_OID
+        && matches!(
+            input_type_oid,
+            crate::include::catalog::NAME_TYPE_OID
+                | crate::include::catalog::BPCHAR_TYPE_OID
+                | crate::include::catalog::VARCHAR_TYPE_OID
+        )
+    {
+        return opclasses
+            .into_iter()
+            .find(|row| row.oid == crate::include::catalog::TEXT_SPGIST_OPCLASS_OID);
+    }
     let range_rows = db.range_rows();
     if range_rows.iter().any(|row| row.rngtypid == input_type_oid) {
         let opclass_oid = match am_oid {

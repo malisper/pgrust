@@ -437,7 +437,7 @@ fn execute_native_set_returning_function(
         }
         "pg_get_backend_memory_contexts" => Some(eval_pg_backend_memory_contexts()),
         "pg_config" => Some(eval_pg_config()),
-        "show_all_settings" => Some(eval_pg_show_all_settings(output_columns)),
+        "show_all_settings" => Some(eval_pg_show_all_settings(ctx, output_columns)),
         "show_all_file_settings" => Some(Vec::new()),
         "pg_hba_file_rules" => Some(eval_pg_hba_file_rules()),
         "pg_ident_file_mappings" => Some(Vec::new()),
@@ -769,10 +769,11 @@ fn eval_pg_timezone_abbrevs() -> Vec<TupleSlot> {
 }
 
 fn eval_pg_show_all_settings(
+    ctx: &ExecutorContext,
     output_columns: &[crate::include::nodes::primnodes::QueryColumn],
 ) -> Vec<TupleSlot> {
     let wal_segment_size = crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES.to_string();
-    pgrust_executor::pg_show_all_settings_rows(&wal_segment_size, output_columns)
+    pgrust_executor::pg_show_all_settings_rows(&wal_segment_size, &ctx.gucs, output_columns)
         .into_iter()
         .map(TupleSlot::virtual_row)
         .collect()
@@ -1801,7 +1802,14 @@ mod tests {
             },
         ];
 
-        let rows = eval_pg_show_all_settings(&output_columns);
+        let rows = pgrust_executor::pg_show_all_settings_rows(
+            &crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES.to_string(),
+            &std::collections::HashMap::new(),
+            &output_columns,
+        )
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect::<Vec<_>>();
         let expected_setting = Value::Text(
             crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES
                 .to_string()

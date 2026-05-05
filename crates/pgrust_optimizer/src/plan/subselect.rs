@@ -30,16 +30,10 @@ pub(super) fn append_uncorrelated_planned_subquery(
     planned_stmt: PlannedStmt,
     subplans: &mut Vec<Plan>,
 ) -> usize {
-    if planned_stmt.ext_params.is_empty()
-        && !planned_stmt
-            .subplans
-            .iter()
-            .chain(std::iter::once(&planned_stmt.plan_tree))
-            .any(plan_contains_volatile_expr)
-        && let Some(plan_id) = find_existing_uncorrelated_subquery_bundle(&planned_stmt, subplans)
-    {
-        return plan_id;
-    }
+    // PostgreSQL's build_subplan appends a new SubPlan node for each planned
+    // SubLink occurrence.  Even stable, parameterless subqueries are not
+    // globally deduplicated; copied expressions can therefore produce distinct
+    // InitPlan numbers in EXPLAIN and distinct execution slots.
     append_planned_subquery(planned_stmt, subplans)
 }
 
@@ -235,6 +229,8 @@ fn lower_sublink_to_subplan(
         target_width,
         target_attnos,
         plan_id,
+        is_initplan: false,
+        set_params: Vec::new(),
         par_param,
         args,
     }))
@@ -1032,6 +1028,8 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
             plan_id: subplan.plan_id + base,
             sublink_type: subplan.sublink_type,
             comparison: subplan.comparison,
+            is_initplan: subplan.is_initplan,
+            set_params: subplan.set_params,
             par_param: subplan.par_param,
         })),
         Expr::ScalarArrayOp(saop) => {

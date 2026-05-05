@@ -636,6 +636,44 @@ fn bind_subplan_params(
     Ok(())
 }
 
+fn initplan_value(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    ctx: &ExecutorContext,
+) -> Option<Value> {
+    if !subplan.is_initplan {
+        return None;
+    }
+    let paramid = *subplan.set_params.first()?;
+    ctx.expr_bindings.exec_params.get(&paramid).cloned()
+}
+
+fn initplan_row_values(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    ctx: &ExecutorContext,
+) -> Option<Vec<Value>> {
+    if !subplan.is_initplan || subplan.set_params.is_empty() {
+        return None;
+    }
+    subplan
+        .set_params
+        .iter()
+        .map(|paramid| ctx.expr_bindings.exec_params.get(paramid).cloned())
+        .collect()
+}
+
+fn store_initplan_values(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    values: Vec<Value>,
+    ctx: &mut ExecutorContext,
+) {
+    if !subplan.is_initplan {
+        return;
+    }
+    for (paramid, value) in subplan.set_params.iter().copied().zip(values) {
+        ctx.expr_bindings.exec_params.insert(paramid, value);
+    }
+}
+
 fn with_scoped_subquery_runtime<T>(
     ctx: &mut ExecutorContext,
     f: impl FnOnce(&mut ExecutorContext) -> Result<T, ExecError>,
@@ -672,9 +710,7 @@ pub(super) fn eval_scalar_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    if subplan.par_param.is_empty()
-        && let Some(value) = ctx.expr_bindings.initplan_values.get(&subplan.plan_id)
-    {
+    if let Some(value) = initplan_value(subplan, ctx) {
         return Ok(value.clone());
     }
 
@@ -704,7 +740,7 @@ pub(super) fn eval_scalar_subquery(
             }
             first_value = Some(value);
         }
-        if subplan.par_param.is_empty() {
+        if subplan.is_initplan {
             crate::backend::commands::explain::record_explain_analyze_initplan(
                 subplan.plan_id,
                 state.as_ref(),
@@ -712,11 +748,7 @@ pub(super) fn eval_scalar_subquery(
         }
         Ok(first_value.unwrap_or(Value::Null))
     })?;
-    if subplan.par_param.is_empty() {
-        ctx.expr_bindings
-            .initplan_values
-            .insert(subplan.plan_id, result.clone());
-    }
+    store_initplan_values(subplan, vec![result.clone()], ctx);
     Ok(result)
 }
 
@@ -738,8 +770,17 @@ pub(super) fn eval_row_compare_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if let Some(values) = initplan_row_values(subplan, ctx) {
+        return compare_subquery_values(
+            left_value,
+            &record_value_from_row(values),
+            op,
+            collation_oid,
+        );
+    }
+
     let plan = planned_subquery_plan(subplan, ctx)?.clone();
-    with_scoped_subquery_runtime(ctx, |ctx| {
+    let result = with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan);
         let mut first_value = None;
@@ -752,15 +793,27 @@ pub(super) fn eval_row_compare_subquery(
                     hint: None,
                 });
             }
-            first_value = Some(record_value_from_row(values));
+            first_value = Some(values);
         }
-        match first_value {
-            Some(right_value) => {
-                compare_subquery_values(left_value, &right_value, op, collation_oid)
-            }
-            None => Ok(Value::Null),
+        if subplan.is_initplan {
+            crate::backend::commands::explain::record_explain_analyze_initplan(
+                subplan.plan_id,
+                state.as_ref(),
+            );
         }
-    })
+        Ok(first_value)
+    })?;
+    let Some(values) = result else {
+        store_initplan_values(subplan, vec![Value::Null; subplan.set_params.len()], ctx);
+        return Ok(Value::Null);
+    };
+    store_initplan_values(subplan, values.clone(), ctx);
+    compare_subquery_values(
+        left_value,
+        &record_value_from_row(values),
+        op,
+        collation_oid,
+    )
 }
 
 pub(super) fn eval_array_subquery(
@@ -768,8 +821,12 @@ pub(super) fn eval_array_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if let Some(value) = initplan_value(subplan, ctx) {
+        return Ok(value);
+    }
+
     let plan = planned_subquery_plan(subplan, ctx)?.clone();
-    with_scoped_subquery_runtime(ctx, |ctx| {
+    let result = with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan);
         let mut values = Vec::new();
@@ -790,8 +847,16 @@ pub(super) fn eval_array_subquery(
         {
             array = array.with_element_type_oid(element_type_oid);
         }
+        if subplan.is_initplan {
+            crate::backend::commands::explain::record_explain_analyze_initplan(
+                subplan.plan_id,
+                state.as_ref(),
+            );
+        }
         Ok(Value::PgArray(array))
-    })
+    })?;
+    store_initplan_values(subplan, vec![result.clone()], ctx);
+    Ok(result)
 }
 
 pub(super) fn eval_exists_subquery(
@@ -799,14 +864,13 @@ pub(super) fn eval_exists_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    if subplan.par_param.is_empty()
-        && let Some(value) = ctx.expr_bindings.initplan_values.get(&subplan.plan_id)
-    {
+    if let Some(value) = initplan_value(subplan, ctx) {
         return Ok(value.clone());
     }
 
     let plan = planned_subquery_plan(subplan, ctx)?.clone();
-    let cache_result = subplan.par_param.is_empty() && exists_plan_result_cacheable(&plan);
+    let cache_result =
+        !subplan.is_initplan && subplan.par_param.is_empty() && exists_plan_result_cacheable(&plan);
     if cache_result
         && let Some(value) =
             EXISTS_RESULT_CACHE.with(|cache| cache.borrow().get(&subplan.plan_id).cloned())
@@ -826,13 +890,16 @@ pub(super) fn eval_exists_subquery(
             return Ok(value);
         }
         let mut state = executor_start(plan);
-        Ok(Value::Bool(exec_next(&mut state, ctx)?.is_some()))
+        let result = Value::Bool(exec_next(&mut state, ctx)?.is_some());
+        if subplan.is_initplan {
+            crate::backend::commands::explain::record_explain_analyze_initplan(
+                subplan.plan_id,
+                state.as_ref(),
+            );
+        }
+        Ok(result)
     })?;
-    if subplan.par_param.is_empty() {
-        ctx.expr_bindings
-            .initplan_values
-            .insert(subplan.plan_id, result.clone());
-    }
+    store_initplan_values(subplan, vec![result.clone()], ctx);
     if cache_result {
         EXISTS_RESULT_CACHE.with(|cache| {
             cache.borrow_mut().insert(subplan.plan_id, result.clone());
@@ -874,6 +941,7 @@ pub(super) fn eval_quantified_subquery(
     if matches!(op, SubqueryComparisonOp::Eq)
         && !is_all
         && subplan.par_param.is_empty()
+        && !matches!(left_value, Value::Record(_))
         && !subplan
             .comparison
             .as_ref()
@@ -1128,6 +1196,9 @@ fn quantified_subquery_right_value(
         if values.len() == 1
             && let Some(Value::Record(_)) = values.first()
         {
+            if matches!(record.fields.first(), Some(Value::Record(_))) {
+                return Ok(record_value_matching_left_shape(record, values));
+            }
             return Ok(values.into_iter().next().unwrap_or(Value::Null));
         }
         if values.len() != record.fields.len() {
@@ -1136,10 +1207,7 @@ fn quantified_subquery_right_value(
                 hint: None,
             });
         }
-        return Ok(Value::Record(RecordValue::from_descriptor(
-            record.descriptor.clone(),
-            values,
-        )));
+        return Ok(record_value_matching_left_shape(record, values));
     }
     if values.len() != 1 {
         return Err(ExecError::CardinalityViolation {
@@ -1148,6 +1216,27 @@ fn quantified_subquery_right_value(
         });
     }
     Ok(values.into_iter().next().unwrap_or(Value::Null))
+}
+
+fn record_value_matching_left_shape(left_record: &RecordValue, values: Vec<Value>) -> Value {
+    let fields = left_record
+        .fields
+        .iter()
+        .zip(values)
+        .map(
+            |(left_field, right_value)| match (left_field, right_value) {
+                (Value::Record(_), Value::Record(nested_right)) => Value::Record(nested_right),
+                (Value::Record(nested_left), right_value) if nested_left.fields.len() == 1 => {
+                    record_value_matching_left_shape(nested_left, vec![right_value])
+                }
+                (_, right_value) => right_value,
+            },
+        )
+        .collect();
+    Value::Record(RecordValue::from_descriptor(
+        left_record.descriptor.clone(),
+        fields,
+    ))
 }
 
 fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {

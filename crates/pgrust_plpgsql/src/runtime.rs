@@ -103,6 +103,7 @@ pub fn push_plpgsql_notice(
             message: message.into(),
             detail,
             hint,
+            context: current_plpgsql_context(),
         })
     });
 }

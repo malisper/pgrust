@@ -1560,6 +1560,21 @@ pub(crate) fn send_notice_with_fields(
     )
 }
 
+pub(crate) fn send_notice_with_context_fields(
+    w: &mut impl Write,
+    severity: &str,
+    sqlstate: &str,
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+    context: Option<&str>,
+    position: Option<usize>,
+) -> io::Result<()> {
+    pgrust_protocol::pqformat::send_notice_with_context_fields(
+        w, severity, sqlstate, message, detail, hint, context, position,
+    )
+}
+
 pub(crate) fn send_notice_with_hint(
     w: &mut impl Write,
     severity: &str,

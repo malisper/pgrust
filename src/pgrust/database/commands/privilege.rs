@@ -1896,7 +1896,7 @@ impl Database {
                             xid,
                             cid: current_cid,
                             client_id,
-                            waiter: None,
+                            waiter: Some(self.txn_waiter.clone()),
                             interrupts: self.interrupt_state(client_id),
                         };
                         let effect = self
@@ -2008,7 +2008,7 @@ impl Database {
                             xid,
                             cid: current_cid,
                             client_id,
-                            waiter: None,
+                            waiter: Some(self.txn_waiter.clone()),
                             interrupts: self.interrupt_state(client_id),
                         };
                         let effect = self
@@ -2799,7 +2799,7 @@ impl Database {
                             xid,
                             cid: current_cid,
                             client_id,
-                            waiter: None,
+                            waiter: Some(self.txn_waiter.clone()),
                             interrupts: self.interrupt_state(client_id),
                         };
                         let effect = self
@@ -2822,7 +2822,7 @@ impl Database {
                         xid,
                         cid: current_cid,
                         client_id,
-                        waiter: None,
+                        waiter: Some(self.txn_waiter.clone()),
                         interrupts: self.interrupt_state(client_id),
                     };
                     let effect = self
@@ -2913,7 +2913,7 @@ impl Database {
                 xid,
                 cid: current_cid,
                 client_id,
-                waiter: None,
+                waiter: Some(self.txn_waiter.clone()),
                 interrupts: self.interrupt_state(client_id),
             };
             let effect = self
@@ -3010,19 +3010,8 @@ impl Database {
                             .entry(attnum)
                             .or_insert_with(|| column.attacl.clone().unwrap_or_default());
                         for grantee_name in &stmt.grantee_names {
-                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                                String::new()
-                            } else {
-                                auth_catalog
-                                    .role_by_name(grantee_name)
-                                    .map(|row| row.rolname.clone())
-                                    .ok_or_else(|| {
-                                        ExecError::Parse(role_management_error(format!(
-                                            "role \"{}\" does not exist",
-                                            grantee_name
-                                        )))
-                                    })?
-                            };
+                            let grantee_acl_name =
+                                resolve_acl_grantee_name(&auth, &auth_catalog, grantee_name)?;
                             let grantor_name = if current_user_can_revoke_as_owner {
                                 owner_name.as_str()
                             } else {
@@ -3066,7 +3055,7 @@ impl Database {
                     xid,
                     cid: current_cid,
                     client_id,
-                    waiter: None,
+                    waiter: Some(self.txn_waiter.clone()),
                     interrupts: self.interrupt_state(client_id),
                 };
                 let effect = self
@@ -3119,19 +3108,8 @@ impl Database {
                 current_user_name.as_str()
             };
             for grantee_name in &stmt.grantee_names {
-                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                    String::new()
-                } else {
-                    auth_catalog
-                        .role_by_name(grantee_name)
-                        .map(|row| row.rolname.clone())
-                        .ok_or_else(|| {
-                            ExecError::Parse(role_management_error(format!(
-                                "role \"{}\" does not exist",
-                                grantee_name
-                            )))
-                        })?
-                };
+                let grantee_acl_name =
+                    resolve_acl_grantee_name(&auth, &auth_catalog, grantee_name)?;
                 revoke_table_acl_entry_by_grantor(
                     &mut acl,
                     &grantee_acl_name,
@@ -3148,7 +3126,7 @@ impl Database {
                 xid,
                 cid: current_cid,
                 client_id,
-                waiter: None,
+                waiter: Some(self.txn_waiter.clone()),
                 interrupts: self.interrupt_state(client_id),
             };
             let effect = self
@@ -3363,7 +3341,7 @@ impl Database {
             xid,
             cid,
             client_id,
-            waiter: None,
+            waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
         };
         for object_name in object_names {
@@ -3546,7 +3524,7 @@ impl Database {
             xid,
             cid,
             client_id,
-            waiter: None,
+            waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
         };
         for object_name in object_names {
@@ -3663,19 +3641,8 @@ impl Database {
                 });
             }
             for grantee_name in grantee_names {
-                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                    String::new()
-                } else {
-                    auth_catalog
-                        .role_by_name(grantee_name)
-                        .map(|entry| entry.rolname.clone())
-                        .ok_or_else(|| {
-                            ExecError::Parse(role_management_error(format!(
-                                "role \"{}\" does not exist",
-                                grantee_name
-                            )))
-                        })?
-                };
+                let grantee_acl_name =
+                    resolve_acl_grantee_name(&auth, &auth_catalog, grantee_name)?;
                 if revoke {
                     if current_user_can_grant_as_owner {
                         revoke_acl_entry(
@@ -3935,7 +3902,7 @@ impl Database {
             xid,
             cid,
             client_id,
-            waiter: None,
+            waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
         };
         let routine_kind = match privilege {
@@ -3978,19 +3945,8 @@ impl Database {
                 .clone()
                 .unwrap_or_else(|| function_owner_default_acl(&owner_name));
             for grantee_name in grantee_names {
-                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                    String::new()
-                } else {
-                    auth_catalog
-                        .role_by_name(grantee_name)
-                        .map(|entry| entry.rolname.clone())
-                        .ok_or_else(|| {
-                            ExecError::Parse(role_management_error(format!(
-                                "role \"{}\" does not exist",
-                                grantee_name
-                            )))
-                        })?
-                };
+                let grantee_acl_name =
+                    resolve_acl_grantee_name(&auth, &auth_catalog, grantee_name)?;
                 if revoke {
                     revoke_acl_entry(
                         &mut acl,
@@ -4140,7 +4096,7 @@ impl Database {
                 xid,
                 cid: current_cid,
                 client_id,
-                waiter: None,
+                waiter: Some(self.txn_waiter.clone()),
                 interrupts: self.interrupt_state(client_id),
             };
             match kind {
@@ -4412,7 +4368,7 @@ impl Database {
                     xid,
                     cid: current_cid,
                     client_id,
-                    waiter: None,
+                    waiter: Some(self.txn_waiter.clone()),
                     interrupts: interrupts.clone(),
                 };
                 upsert_role_membership_in_transaction(
@@ -4507,7 +4463,7 @@ impl Database {
                         xid,
                         cid: current_cid,
                         client_id,
-                        waiter: None,
+                        waiter: Some(self.txn_waiter.clone()),
                         interrupts: interrupts.clone(),
                     };
                     match action {
@@ -5412,6 +5368,44 @@ fn role_name_for_oid(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) 
         .role_by_oid(role_oid)
         .map(|row| row.rolname.clone())
         .unwrap_or_else(|| role_oid.to_string())
+}
+
+fn resolve_acl_grantee_name(
+    auth: &crate::pgrust::auth::AuthState,
+    auth_catalog: &AuthCatalog,
+    grantee_name: &str,
+) -> Result<String, ExecError> {
+    if grantee_name.eq_ignore_ascii_case("public") {
+        return Ok(String::new());
+    }
+    let role = if grantee_name.eq_ignore_ascii_case("current_user")
+        || grantee_name.eq_ignore_ascii_case("current_role")
+    {
+        auth_catalog.role_by_oid(auth.current_user_oid())
+    } else {
+        auth_catalog.role_by_name(grantee_name)
+    };
+    role.map(|row| row.rolname.clone())
+        .ok_or_else(|| role_does_not_exist_error(grantee_name))
+}
+
+fn resolve_acl_grantee_oid(
+    auth: &crate::pgrust::auth::AuthState,
+    auth_catalog: &AuthCatalog,
+    grantee_name: &str,
+) -> Result<Option<u32>, ExecError> {
+    if grantee_name.eq_ignore_ascii_case("public") {
+        return Ok(None);
+    }
+    let role = if grantee_name.eq_ignore_ascii_case("current_user")
+        || grantee_name.eq_ignore_ascii_case("current_role")
+    {
+        auth_catalog.role_by_oid(auth.current_user_oid())
+    } else {
+        auth_catalog.role_by_name(grantee_name)
+    };
+    role.map(|row| Some(row.oid))
+        .ok_or_else(|| role_does_not_exist_error(grantee_name))
 }
 
 fn member_name(db: &Database, auth_catalog: &AuthCatalog, member_oid: u32) -> String {
