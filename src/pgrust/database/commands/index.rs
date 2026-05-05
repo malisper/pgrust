@@ -2773,6 +2773,7 @@ impl Database {
                 crate::backend::access::index::indexam::index_insert_stub(
                     &IndexInsertContext {
                         pool: self.pool.clone(),
+                        local_buffer_manager: None,
                         txns: self.txns.clone(),
                         txn_waiter: Some(self.txn_waiter.clone()),
                         client_id,

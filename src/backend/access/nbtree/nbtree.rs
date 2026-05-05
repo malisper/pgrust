@@ -107,6 +107,7 @@ fn btbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
 fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
     let runtime = RootAccessRuntime {
         pool: Some(&ctx.pool),
+        local_buffer_manager: ctx.local_buffer_manager.as_ref(),
         txns: Some(&ctx.txns),
         txn_waiter: ctx.txn_waiter.as_deref(),
         interrupts: Some(ctx.interrupts.as_ref()),

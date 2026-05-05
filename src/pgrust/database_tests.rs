@@ -8008,6 +8008,58 @@ fn statement_timeout_interrupts_generate_series_query() {
 }
 
 #[test]
+fn array_on_conflict_update_after_prior_update_finishes() {
+    let dir = temp_dir("array_on_conflict_update_after_prior_update");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set statement_timeout = '500ms'")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table arr_pk_tbl (pk int4 primary key, f1 int[])",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into arr_pk_tbl values (1, '{1,2,3}')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into arr_pk_tbl values (1, '{3,4,5}') on conflict (pk)
+             do update set f1[1] = excluded.f1[1], f1[3] = excluded.f1[3]",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "insert into arr_pk_tbl(pk, f1[1:2]) values (1, '{6,7,8}') on conflict (pk)
+             do update set f1[1] = excluded.f1[1],
+               f1[2] = excluded.f1[2],
+               f1[3] = excluded.f1[3]",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select pk, f1 from arr_pk_tbl"),
+        vec![vec![
+            Value::Int32(1),
+            Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                    Value::Int32(6),
+                    Value::Int32(7),
+                    Value::Null,
+                ])
+                .with_element_type_oid(INT4_TYPE_OID)
+            ),
+        ]]
+    );
+}
+
+#[test]
 fn statement_timeout_interrupts_recursive_cte_query() {
     let dir = temp_dir("statement_timeout_recursive_cte");
     let db = Database::open(&dir, 64).unwrap();

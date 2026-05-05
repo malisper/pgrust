@@ -49,6 +49,7 @@ pub fn index_insert_stub(ctx: &IndexInsertContext, am_oid: u32) -> Result<bool, 
         // root-owned transaction wait and interrupt services.
         let runtime = RootAccessRuntime {
             pool: Some(&ctx.pool),
+            local_buffer_manager: ctx.local_buffer_manager.as_ref(),
             txns: Some(&ctx.txns),
             txn_waiter: ctx.txn_waiter.as_deref(),
             interrupts: Some(ctx.interrupts.as_ref()),

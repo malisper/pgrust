@@ -295,6 +295,7 @@ pub(crate) fn catalog_index_insert_state_for_db(
     let contexts = system_catalog_indexes_for_heap(heap_kind)
         .map(|descriptor| IndexInsertContext {
             pool: ctx.pool.clone(),
+            local_buffer_manager: None,
             txns: ctx.txns.clone(),
             txn_waiter: ctx.waiter.clone(),
             client_id: ctx.client_id,

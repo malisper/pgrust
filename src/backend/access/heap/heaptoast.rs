@@ -60,6 +60,7 @@ pub(crate) fn store_external_value(
             indexam::index_insert_stub(
                 &crate::include::access::amapi::IndexInsertContext {
                     pool: ctx.pool.clone(),
+                    local_buffer_manager: None,
                     txns: ctx.txns.clone(),
                     txn_waiter: ctx.txn_waiter.clone(),
                     client_id: ctx.client_id,

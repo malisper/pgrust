@@ -4581,6 +4581,12 @@ pub(crate) fn build_index_insert_context(
     index_meta.indexprs = None;
     crate::include::access::amapi::IndexInsertContext {
         pool: ctx.pool.clone(),
+        local_buffer_manager: ctx
+            .relation_uses_local_buffers(index.index_meta.indrelid)
+            .then(|| ctx.local_buffer_manager())
+            .transpose()
+            .ok()
+            .flatten(),
         txns: ctx.txns.clone(),
         txn_waiter: ctx.txn_waiter.clone(),
         client_id: ctx.client_id,
