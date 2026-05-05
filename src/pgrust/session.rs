@@ -7971,15 +7971,33 @@ impl Session {
         let Some(txn) = self.active_txn.as_mut() else {
             return;
         };
-        let consumed_catalog_cids = txn
-            .catalog_effects
-            .len()
-            .saturating_sub(effect_start)
-            .max(1);
+        let consumed_catalog_cids =
+            Self::consumed_catalog_command_ids(txn.catalog_effects.len(), effect_start).max(1);
         let next_cid = base_cid
             .saturating_add(consumed_catalog_cids as u32)
             .saturating_add(1);
         txn.next_command_id = txn.next_command_id.max(next_cid);
+    }
+
+    fn consumed_catalog_command_ids(effect_len: usize, effect_start: usize) -> CommandId {
+        effect_len.saturating_sub(effect_start) as CommandId
+    }
+
+    fn event_trigger_command_id_after_statement(
+        &self,
+        base_cid: CommandId,
+        effect_start: usize,
+    ) -> CommandId {
+        let consumed_catalog_cids = self
+            .active_txn
+            .as_ref()
+            .map(|txn| Self::consumed_catalog_command_ids(txn.catalog_effects.len(), effect_start))
+            .unwrap_or(0);
+        if consumed_catalog_cids == 0 {
+            base_cid
+        } else {
+            base_cid.saturating_add(consumed_catalog_cids)
+        }
     }
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
@@ -19914,35 +19932,38 @@ impl Session {
             }
         };
 
-        if result.is_ok()
-            && !event_trigger_dropped_objects.is_empty()
-            && let Some(tag) = event_trigger_tag.as_deref()
-            && let Err(err) = self.fire_event_trigger_event_with_dropped_objects(
-                db,
-                xid,
-                cid,
-                _statement_lock_scope_id,
-                "sql_drop",
-                tag,
-                event_trigger_dropped_objects,
-            )
-        {
-            result = Err(err);
-        }
+        if result.is_ok() {
+            let event_trigger_cid =
+                self.event_trigger_command_id_after_statement(cid, effect_start);
+            if !event_trigger_dropped_objects.is_empty()
+                && let Some(tag) = event_trigger_tag.as_deref()
+                && let Err(err) = self.fire_event_trigger_event_with_dropped_objects(
+                    db,
+                    xid,
+                    event_trigger_cid,
+                    _statement_lock_scope_id,
+                    "sql_drop",
+                    tag,
+                    event_trigger_dropped_objects,
+                )
+            {
+                result = Err(err);
+            }
 
-        if result.is_ok()
-            && let Some(tag) = event_trigger_tag.as_deref()
-            && let Err(err) = self.fire_event_trigger_event_with_ddl_commands(
-                db,
-                xid,
-                cid,
-                _statement_lock_scope_id,
-                "ddl_command_end",
-                tag,
-                event_trigger_end_commands,
-            )
-        {
-            result = Err(err);
+            if result.is_ok()
+                && let Some(tag) = event_trigger_tag.as_deref()
+                && let Err(err) = self.fire_event_trigger_event_with_ddl_commands(
+                    db,
+                    xid,
+                    cid,
+                    _statement_lock_scope_id,
+                    "ddl_command_end",
+                    tag,
+                    event_trigger_end_commands,
+                )
+            {
+                result = Err(err);
+            }
         }
 
         if result.is_ok() {
