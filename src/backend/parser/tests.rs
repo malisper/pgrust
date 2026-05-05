@@ -21256,7 +21256,12 @@ fn parse_dml_returning_targets() {
 #[test]
 fn parse_create_table_column_defaults() {
     let stmt = parse_statement(
-        "create table bit_defaults (b1 bit(4) default '1001', b2 bit varying(5) default B'0101')",
+        "create table bit_defaults (
+            b1 bit(4) default '1001',
+            b2 bit(4) default B'0101',
+            b3 bit varying(5) default '1001',
+            b4 bit varying(5) default B'0101'
+        )",
     )
     .unwrap();
     let Statement::CreateTable(ct) = stmt else {
@@ -21265,6 +21270,26 @@ fn parse_create_table_column_defaults() {
     let columns = ct.columns().collect::<Vec<_>>();
     assert_eq!(columns[0].default_expr.as_deref(), Some("'1001'"));
     assert_eq!(columns[1].default_expr.as_deref(), Some("B'0101'"));
+
+    let lowered = crate::backend::parser::analyze::with_root_analyze_services(|| {
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+    })
+    .expect("lower create table");
+    let lowered_defaults = lowered
+        .relation_desc
+        .columns
+        .iter()
+        .map(|column| column.default_expr.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lowered_defaults,
+        vec![
+            Some("'1001'"),
+            Some("B'0101'"),
+            Some("'1001'"),
+            Some("B'0101'")
+        ]
+    );
 }
 
 #[test]

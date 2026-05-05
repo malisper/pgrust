@@ -5767,6 +5767,7 @@ fn render_literal(value: &Value) -> String {
             .map(|text| format!("'{}'::jsonb", text.replace('\'', "''")))
             .unwrap_or_else(|_| "'null'::jsonb".into()),
         Value::Bytea(bytes) => render_bytea_literal(bytes),
+        Value::Bit(bits) => format!("B'{}'", bits.render()),
         Value::Numeric(numeric) => numeric.render(),
         Value::Interval(interval) => {
             format!(
@@ -5810,7 +5811,6 @@ fn render_literal(value: &Value) -> String {
         | Value::TimeTz(_)
         | Value::Timestamp(_)
         | Value::TimestampTz(_)
-        | Value::Bit(_)
         | Value::Uuid(_)
         | Value::Inet(_)
         | Value::Cidr(_)
