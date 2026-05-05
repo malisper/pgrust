@@ -1131,7 +1131,6 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         || (!query.grouping_sets.is_empty() && !scalar_empty_grouping_set)
         || query.having_qual.is_some()
         || !query.window_clauses.is_empty()
-        || query.has_target_srfs
         || query.recursive_union.is_some()
         || query.set_operation.is_some()
         || query.accumulators.is_empty()
@@ -1158,9 +1157,22 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         })
         .collect::<Vec<_>>();
 
+    let sort_clause = query
+        .sort_clause
+        .iter()
+        .cloned()
+        .map(|mut clause| {
+            clause.expr = rewrite_minmax_aggrefs(clause.expr, &rewritten_aggs);
+            clause
+        })
+        .collect::<Vec<_>>();
+
     if target_list
         .iter()
         .any(|target| expr_contains_local_var_outside_subquery(&target.expr))
+        || sort_clause
+            .iter()
+            .any(|clause| expr_contains_local_var_outside_subquery(&clause.expr))
     {
         return query;
     }
@@ -1180,9 +1192,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,
-        // Ungrouped aggregate queries always produce at most one row, so any
-        // outer ORDER BY is semantically redundant after the rewrite.
-        sort_clause: Vec::new(),
+        sort_clause,
         constraint_deps: query.constraint_deps,
         limit_count: query.limit_count,
         limit_offset: query.limit_offset,
@@ -1190,7 +1200,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         locking_targets: query.locking_targets,
         locking_nowait: query.locking_nowait,
         row_marks: query.row_marks,
-        has_target_srfs: false,
+        has_target_srfs: query.has_target_srfs,
         recursive_union: None,
         set_operation: None,
     }
@@ -1582,10 +1592,11 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
 }
 
 fn is_minmax_indexable_arg(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Var(var) if var.varlevelsup == 0 && !is_system_attr(var.varattno)
-    )
+    match expr {
+        Expr::Const(_) => true,
+        Expr::Var(var) => var.varlevelsup == 0 && !is_system_attr(var.varattno),
+        _ => false,
+    }
 }
 
 fn raise_outer_varlevels_for_minmax_rewrite(expr: Expr) -> Expr {

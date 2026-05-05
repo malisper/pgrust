@@ -473,6 +473,7 @@ mod tests {
         let plan = Plan::SeqScan {
             plan_info: pgrust_nodes::plannodes::PlanEstimate::default(),
             source_id: 0,
+            parallel_scan_id: None,
             rel: pgrust_storage::RelFileLocator {
                 spc_oid: 0,
                 db_oid: 0,

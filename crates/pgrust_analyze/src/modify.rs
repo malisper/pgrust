@@ -4317,6 +4317,7 @@ fn rewrite_auto_view_scan_plan(
             let base_scan = Plan::SeqScan {
                 plan_info,
                 source_id,
+                parallel_scan_id: None,
                 rel: resolved.base_relation.rel,
                 relation_name: base_relation_name.to_string(),
                 relation_oid: resolved.base_relation.relation_oid,

@@ -20,7 +20,7 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::{
     ArrayValue, BitString, IntervalValue, NumericValue, RecordValue,
 };
-use crate::include::nodes::parsenodes::MaintenanceTarget;
+use crate::include::nodes::parsenodes::{AnalyzeStatement, MaintenanceTarget, VacuumStatement};
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
 use std::collections::HashMap;
@@ -20386,6 +20386,154 @@ fn simple_select_uses_keyed_catalog_without_broad_catcache() {
 }
 
 #[test]
+fn partition_ddl_uses_keyed_catalog_without_broad_catcache() {
+    let base = temp_dir("partition_ddl_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table keyed_part (id int4 not null) partition by range (id)",
+    )
+    .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
+
+    db.execute(
+        1,
+        "create table keyed_part_0 partition of keyed_part for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(1, "create index keyed_part_0_id_idx on keyed_part_0 (id)")
+        .unwrap();
+    db.execute(1, "explain select * from keyed_part where id = 1")
+        .unwrap();
+
+    assert_no_broad_catalog_loads(&db, "partition DDL and EXPLAIN");
+}
+
+#[test]
+fn maintenance_explicit_analyze_and_vacuum_use_keyed_catalog_without_broad_catcache() {
+    let base = temp_dir("maintenance_explicit_analyze_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table maintenance_analyze_target (id int4)")
+        .unwrap();
+    db.execute(1, "insert into maintenance_analyze_target values (1), (2)")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
+    crate::backend::utils::cache::syscache::reset_class_scan_count_for_tests();
+
+    db.execute(1, "analyze maintenance_analyze_target").unwrap();
+    db.execute(1, "vacuum maintenance_analyze_target").unwrap();
+
+    assert_eq!(
+        crate::backend::utils::cache::syscache::class_scan_count_for_tests(),
+        0,
+        "explicit maintenance targets should resolve through RELNAMENSP/RELOID, not pg_class scans"
+    );
+    assert_no_broad_catalog_loads(&db, "explicit ANALYZE/VACUUM maintenance setup");
+}
+
+#[test]
+fn maintenance_no_target_analyze_and_vacuum_use_class_scan_without_broad_catcache() {
+    let base = temp_dir("maintenance_no_target_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table maintenance_no_target (id int4)")
+        .unwrap();
+    db.execute(1, "insert into maintenance_no_target values (1), (2)")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
+    crate::backend::utils::cache::syscache::reset_class_scan_count_for_tests();
+
+    let analyze_targets = db
+        .effective_analyze_targets_with_search_path(
+            1,
+            None,
+            None,
+            &AnalyzeStatement {
+                targets: Vec::new(),
+                verbose: false,
+                skip_locked: false,
+                buffer_usage_limit: None,
+            },
+        )
+        .unwrap();
+    let vacuum_targets = db
+        .effective_vacuum_targets_with_search_path(
+            1,
+            None,
+            None,
+            &VacuumStatement {
+                targets: Vec::new(),
+                analyze: false,
+                full: false,
+                freeze: false,
+                verbose: false,
+                skip_locked: false,
+                buffer_usage_limit: None,
+                disable_page_skipping: false,
+                index_cleanup: None,
+                truncate: None,
+                parallel: None,
+                parallel_specified: false,
+                process_main: None,
+                process_toast: None,
+                skip_database_stats: false,
+                only_database_stats: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        crate::backend::utils::cache::syscache::class_scan_count_for_tests(),
+        2,
+        "database-wide maintenance should enumerate pg_class once per ANALYZE/VACUUM target collection"
+    );
+    assert!(
+        analyze_targets
+            .iter()
+            .any(|target| target.table_name == "maintenance_no_target")
+    );
+    assert!(
+        vacuum_targets
+            .iter()
+            .any(|target| target.table_name == "maintenance_no_target")
+    );
+
+    assert_no_broad_catalog_loads(&db, "no-target ANALYZE/VACUUM maintenance setup");
+}
+
+#[test]
+fn maintenance_alter_table_set_tablespace_uses_reloid_without_broad_catcache() {
+    let base = temp_dir("maintenance_set_tablespace_keyed_catalog");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set allow_in_place_tablespaces = true")
+        .unwrap();
+    session
+        .execute(&db, "create tablespace maintenance_tblspace location ''")
+        .unwrap();
+    session
+        .execute(&db, "create table maintenance_set_ts (id int4)")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+    reset_broad_catalog_load_counters(&db);
+
+    session
+        .execute(
+            &db,
+            "alter table maintenance_set_ts set tablespace maintenance_tblspace",
+        )
+        .unwrap();
+
+    assert_no_broad_catalog_loads(&db, "ALTER TABLE SET TABLESPACE");
+}
+
+#[test]
 fn broad_catalog_load_counters_are_database_scoped() {
     let left = Database::open(temp_dir("broad_counter_left"), 16).unwrap();
     let right = Database::open(temp_dir("broad_counter_right"), 16).unwrap();
@@ -20408,6 +20556,8 @@ fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table relcache_lifetime (id int4 not null)")
+        .unwrap();
+    db.execute(1, "create table relcache_lifetime_other (id int4)")
         .unwrap();
     let xid = db.txns.write().begin();
     let cid = 1;
@@ -20432,17 +20582,29 @@ fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
         .relation_by_oid(relation_oid)
         .unwrap();
     assert_eq!(cached_with_later_cid.relation_oid, relation_oid);
+    let other_relation = db
+        .lazy_catalog_lookup(1, Some((xid, cid.saturating_add(1))), None)
+        .lookup_any_relation("relcache_lifetime_other")
+        .unwrap();
+    let other_relation_oid = other_relation.relation_oid;
+    assert!(
+        db.backend_cache_states
+            .read()
+            .get(&1)
+            .unwrap()
+            .relation_cache
+            .contains_key(&other_relation_oid)
+    );
     db.txns.write().abort(xid).unwrap();
 
     let mut invalidation = crate::backend::utils::cache::inval::CatalogInvalidation::default();
-    invalidation
-        .touched_catalogs
-        .insert(BootstrapCatalogKind::PgClass);
+    invalidation.relation_oids.insert(relation_oid);
     crate::backend::utils::cache::inval::apply_backend_cache_invalidation(&db, 1, &invalidation);
 
     let states = db.backend_cache_states.read();
     let state = states.get(&1).unwrap();
-    assert!(state.relation_cache.is_empty());
+    assert!(!state.relation_cache.contains_key(&relation_oid));
+    assert!(state.relation_cache.contains_key(&other_relation_oid));
     assert!(state.catcache.is_none());
 }
 
@@ -61722,6 +61884,137 @@ fn aggregate_regress_create_aggregate_support_signatures_and_final_extra() {
             "select finalextraagg(v) from (values (1), (2), (null)) s(v)"
         ),
         vec![vec![Value::Int64(102)]]
+    );
+}
+
+#[test]
+fn custom_aggregate_with_combine_uses_parallel_partial_aggregate() {
+    let dir = temp_dir("custom_aggregate_parallel_partial");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table custom_partial_input(v int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into custom_partial_input select g from generate_series(1, 300) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function custom_partial_combine(int8, int8) returns int8
+         as 'select coalesce($1, 0) + coalesce($2, 0)'
+         language sql immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate custom_partial_sum(int4) (
+             sfunc = int4_sum(int8, int4),
+             stype = int8,
+             combinefunc = custom_partial_combine(int8, int8),
+             initcond = '0',
+             parallel = safe
+         )",
+    )
+    .unwrap();
+    db.execute(1, "set parallel_setup_cost = 0").unwrap();
+    db.execute(1, "set parallel_tuple_cost = 0").unwrap();
+    db.execute(1, "set min_parallel_table_scan_size = 0")
+        .unwrap();
+    db.execute(1, "set max_parallel_workers_per_gather = 2")
+        .unwrap();
+
+    let plan = query_rows(
+        &db,
+        1,
+        "explain (costs off)
+         select custom_partial_sum(v) from custom_partial_input",
+    )
+    .into_iter()
+    .map(|row| match &row[0] {
+        Value::Text(text) => text.to_string(),
+        other => panic!("expected text explain line, got {other:?}"),
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        plan.iter().any(|line| line.contains("Finalize Aggregate")),
+        "expected finalize aggregate in plan, got {plan:?}"
+    );
+    assert!(
+        plan.iter().any(|line| line.contains("Partial Aggregate")),
+        "expected partial aggregate in plan, got {plan:?}"
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select custom_partial_sum(v) from custom_partial_input"
+        ),
+        vec![vec![Value::Int64(45150)]]
+    );
+}
+
+#[test]
+fn custom_parallel_combine_returning_null_finalizes_to_null() {
+    let dir = temp_dir("custom_parallel_combine_null");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table custom_partial_null_input(v int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into custom_partial_null_input select g from generate_series(1, 300) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function custom_partial_null_combine(int8, int8) returns int8
+         as 'select null::int8'
+         language sql immutable strict",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate custom_partial_null_sum(int4) (
+             sfunc = int4_sum(int8, int4),
+             stype = int8,
+             combinefunc = custom_partial_null_combine(int8, int8),
+             initcond = '0',
+             parallel = safe
+         )",
+    )
+    .unwrap();
+    db.execute(1, "set parallel_setup_cost = 0").unwrap();
+    db.execute(1, "set parallel_tuple_cost = 0").unwrap();
+    db.execute(1, "set min_parallel_table_scan_size = 0")
+        .unwrap();
+    db.execute(1, "set max_parallel_workers_per_gather = 2")
+        .unwrap();
+
+    let plan = query_rows(
+        &db,
+        1,
+        "explain (costs off)
+         select custom_partial_null_sum(v) from custom_partial_null_input",
+    )
+    .into_iter()
+    .map(|row| match &row[0] {
+        Value::Text(text) => text.to_string(),
+        other => panic!("expected text explain line, got {other:?}"),
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        plan.iter().any(|line| line.contains("Finalize Aggregate"))
+            && plan.iter().any(|line| line.contains("Partial Aggregate")),
+        "expected partial/finalize aggregate in plan, got {plan:?}"
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select custom_partial_null_sum(v) from custom_partial_null_input"
+        ),
+        vec![vec![Value::Null]]
     );
 }
 

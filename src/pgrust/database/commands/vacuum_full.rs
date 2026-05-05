@@ -1,4 +1,5 @@
 use super::super::*;
+use super::maintenance::ResolvedMaintenanceTarget;
 use crate::backend::access::heap::heapam::heap_insert_mvcc_with_cid;
 use crate::backend::access::heap::vacuumlazy::VacuumRelationStats;
 use crate::backend::commands::tablecmds::{
@@ -22,14 +23,50 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<Vec<VacuumRelationStats>, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let resolved = targets
+            .iter()
+            .map(|target| {
+                let Some(relation) = catalog.lookup_any_relation(&target.table_name) else {
+                    return Err(ExecError::Parse(ParseError::UnknownTable(
+                        target.table_name.clone(),
+                    )));
+                };
+                Ok(ResolvedMaintenanceTarget {
+                    relation,
+                    columns: target.columns.clone(),
+                    only: target.only,
+                    original_name: target.table_name.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.execute_vacuum_full_resolved_targets_with_search_path(
+            client_id,
+            &resolved,
+            xid,
+            cid,
+            configured_search_path,
+            process_main,
+            ctx,
+            catalog_effects,
+        )
+    }
+
+    pub(crate) fn execute_vacuum_full_resolved_targets_with_search_path(
+        &self,
+        client_id: ClientId,
+        targets: &[ResolvedMaintenanceTarget],
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        process_main: bool,
+        ctx: &mut ExecutorContext,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<Vec<VacuumRelationStats>, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let mut stats_targets = Vec::new();
 
         for target in targets {
-            let Some(relation) = catalog.lookup_any_relation(&target.table_name) else {
-                return Err(ExecError::Parse(ParseError::UnknownTable(
-                    target.table_name.clone(),
-                )));
-            };
+            let relation = target.relation.clone();
             if is_pg_catalog_relation(&catalog, &relation) {
                 continue;
             }

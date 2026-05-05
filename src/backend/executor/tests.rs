@@ -432,6 +432,7 @@ fn people_scan_plan() -> Plan {
     Plan::SeqScan {
         plan_info: PlanEstimate::default(),
         source_id: 1,
+        parallel_scan_id: None,
         rel: rel(),
         relation_name: "people".into(),
         relation_oid: 0,
@@ -449,6 +450,7 @@ fn pets_scan_plan() -> Plan {
     Plan::SeqScan {
         plan_info: PlanEstimate::default(),
         source_id: 2,
+        parallel_scan_id: None,
         rel: pets_rel(),
         relation_name: "pets".into(),
         relation_oid: 0,
@@ -1919,6 +1921,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
             input: Box::new(Plan::SeqScan {
                 plan_info: crate::backend::executor::PlanEstimate::default(),
                 source_id: 1,
+                parallel_scan_id: None,
                 rel: rel(),
                 relation_name: "people".into(),
                 relation_oid: 0,
@@ -2010,6 +2013,78 @@ fn parallel_gather_seqscan_returns_each_row_once() {
 }
 
 #[test]
+fn parallel_append_repeated_seqscan_returns_each_child_rows() {
+    let base = temp_dir("parallel_append_repeated_seqscan");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let pool = test_pool(&base);
+    let xid = txns.begin();
+    let mut blocks = Vec::new();
+    for id in 1..=1000 {
+        let row = tuple(id, &format!("p{id}"), Some("parallel"));
+        let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &row).unwrap();
+        blocks.push(tid.block_number);
+    }
+    txns.commit(xid).unwrap();
+    blocks.sort();
+    blocks.dedup();
+    for block in blocks {
+        heap_flush(&*pool, 1, rel(), block).unwrap();
+    }
+    drop(pool);
+
+    let mut left = people_scan_plan();
+    let Plan::SeqScan {
+        parallel_aware,
+        parallel_scan_id,
+        ..
+    } = &mut left
+    else {
+        unreachable!()
+    };
+    *parallel_aware = true;
+    *parallel_scan_id = Some(1);
+
+    let mut right = people_scan_plan();
+    let Plan::SeqScan {
+        parallel_aware,
+        parallel_scan_id,
+        ..
+    } = &mut right
+    else {
+        unreachable!()
+    };
+    *parallel_aware = true;
+    *parallel_scan_id = Some(2);
+
+    let plan = Plan::Gather {
+        plan_info: crate::backend::executor::PlanEstimate::default(),
+        input: Box::new(Plan::Append {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
+            source_id: 1,
+            desc: relation_desc(),
+            parallel_aware: true,
+            partition_prune: None,
+            children: vec![left, right],
+        }),
+        workers_planned: 2,
+        single_copy: false,
+    };
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    let mut ids = rows
+        .into_iter()
+        .map(|(_, values)| match values.first() {
+            Some(Value::Int32(id)) => *id,
+            other => panic!("expected int4 id, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    let expected = (1..=1000)
+        .flat_map(|id| std::iter::repeat_n(id, 2))
+        .collect::<Vec<_>>();
+    assert_eq!(ids, expected);
+}
+
+#[test]
 fn forced_parallel_count_sql_returns_serial_count() {
     let base = temp_dir("parallel_count_sql");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
@@ -2043,6 +2118,51 @@ fn forced_parallel_count_sql_returns_serial_count() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(300)]]),
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn forced_parallel_variance_and_regr_count_return_serial_results() {
+    let base = temp_dir("parallel_variance_regr_count_sql");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    let values = (1..=300)
+        .map(|id| format!("({id}, 'p{id}', 'parallel')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        &format!("insert into people (id, name, note) values {values}"),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_readonly_sql_with_config(
+        &base,
+        &txns,
+        "select variance(id::float8), regr_count(id::float8, id::float8) from people",
+        catalog(),
+        PlannerConfig {
+            min_parallel_table_scan_size: 0,
+            parallel_setup_cost: crate::include::nodes::plannodes::EstimateValue(0.0),
+            parallel_tuple_cost: crate::include::nodes::plannodes::EstimateValue(0.0),
+            max_parallel_workers_per_gather: 2,
+            ..PlannerConfig::default()
+        },
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            let Value::Float64(variance) = rows[0][0] else {
+                panic!("expected float8 variance, got {:?}", rows[0][0]);
+            };
+            assert!((variance - 7525.0).abs() < 0.000001, "{variance}");
+            assert_eq!(rows[0][1], Value::Int64(300));
+        }
         other => panic!("expected query result, got {other:?}"),
     }
 }
@@ -2082,6 +2202,7 @@ fn seqscan_skips_superseded_versions() {
     let plan = Plan::SeqScan {
         plan_info: crate::backend::executor::PlanEstimate::default(),
         source_id: 1,
+        parallel_scan_id: None,
         rel: rel(),
         relation_name: "people".into(),
         relation_oid: 0,
@@ -4742,6 +4863,84 @@ fn explain_rewritten_max_aggregate_uses_backward_index_only_scan() {
     }
 }
 
+#[test]
+fn explain_rewritten_min_aggregate_preserves_outer_order_by() {
+    let mut harness = SeededSqlHarness::new(
+        "explain_rewritten_min_aggregate_preserves_outer_order_by",
+        catalog_with_people_primary_key(),
+    );
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null)",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off) select min(id) from people order by 1",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.trim() == "Sort"),
+                "expected preserved outer ORDER BY to produce a Sort, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().any(|line| line.trim() == "InitPlan 1"),
+                "expected rewritten min aggregate to keep initplan shape, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn rewritten_min_aggregate_supports_constant_arg_and_target_srf() {
+    let base = temp_dir("rewritten_min_constant_srf");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table minmax_constant_srf (id int4)")
+        .unwrap();
+    db.execute(1, "insert into minmax_constant_srf values (10), (20)")
+        .unwrap();
+
+    match db
+        .execute(
+            1,
+            "select generate_series(1, 2), min(7)
+             from minmax_constant_srf
+             order by 1",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let values = rows
+                .into_iter()
+                .map(|row| (row[0].clone(), row[1].clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                values,
+                vec![
+                    (Value::Int32(1), Value::Int32(7)),
+                    (Value::Int32(2), Value::Int32(7)),
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 fn seed_tenk1_minmax_rows(harness: &mut SeededSqlHarness, row_count: i32) {
     let xid = harness.txns.begin();
     let values = (0..row_count)
@@ -6082,6 +6281,223 @@ fn explain_uses_query_aliases_in_sort_key_and_scan_label() {
                     .iter()
                     .any(|line| line.contains("Seq Scan on people_alias t")),
                 "expected scan label to keep base relation name and alias, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_plain_ordered_aggregate_uses_input_sort() {
+    let base = temp_dir("explain_plain_ordered_agg_sort");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table ordered_agg_plain (id int4, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into ordered_agg_plain values (2, 'bob'), (1, 'alice'), (3, 'carol')",
+    )
+    .unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (costs off)
+             select jsonb_agg(name order by id)
+             from ordered_agg_plain",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.trim() == "Aggregate"),
+                "expected aggregate node, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().any(|line| line.starts_with("  ->  Sort")),
+                "expected ordered aggregate input sort, got {rendered:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim().starts_with("Sort Key:") && line.contains("id")),
+                "expected aggregate input sort key to include id, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_grouped_ordered_aggregates_share_best_input_sort() {
+    let base = temp_dir("explain_grouped_ordered_agg_sort");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table ordered_agg_grouped (grp int4, id int4, name text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into ordered_agg_grouped values
+         (2, 2, 'b2'), (1, 2, 'a2'), (1, 1, 'a1'), (2, 1, 'b1')",
+    )
+    .unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (costs off)
+             select grp,
+                    jsonb_agg(name order by id),
+                    jsonb_agg(id order by id)
+             from ordered_agg_grouped
+             group by grp",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            let sort_key = rendered
+                .iter()
+                .find(|line| line.trim().starts_with("Sort Key:"))
+                .map(|line| line.to_string())
+                .unwrap_or_default();
+            assert!(
+                rendered.iter().any(|line| line.starts_with("  ->  Sort")),
+                "expected grouped ordered aggregate input sort, got {rendered:?}"
+            );
+            assert!(
+                sort_key.contains("grp") && sort_key.contains("id"),
+                "expected shared aggregate sort to include group key and aggregate order key, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_group_by_reorders_keys_for_outer_order_by_prefix() {
+    let base = temp_dir("explain_group_by_order_prefix");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table group_order_prefix (a int4, b int4, v int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into group_order_prefix values
+         (1, 2, 10), (1, 1, 20), (2, 1, 30), (2, 2, 40)",
+    )
+    .unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (costs off)
+             select a, b, count(*)
+             from group_order_prefix
+             group by a, b
+             order by b, a",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            let sort_key = rendered
+                .iter()
+                .find(|line| line.trim().starts_with("Sort Key:"))
+                .map(|line| line.to_string())
+                .unwrap_or_default();
+            let b_pos = sort_key
+                .find('b')
+                .unwrap_or_else(|| panic!("expected b in sort key, got {rendered:?}"));
+            let a_pos = sort_key
+                .find('a')
+                .unwrap_or_else(|| panic!("expected a in sort key, got {rendered:?}"));
+            assert!(
+                b_pos < a_pos,
+                "expected grouping input sort to follow ORDER BY prefix b, a, got {rendered:?}"
+            );
+            assert_eq!(
+                rendered
+                    .iter()
+                    .filter(|line| line.trim().starts_with("Sort Key:"))
+                    .count(),
+                1,
+                "expected reordered group aggregate to avoid a second final sort, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_group_by_uses_matching_index_key_order() {
+    let base = temp_dir("explain_group_by_index_order");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table group_index_order (a int4, b int4, v int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into group_index_order values
+         (1, 2, 10), (1, 1, 20), (2, 1, 30), (2, 2, 40)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index group_index_order_b_a on group_index_order (b, a)",
+    )
+    .unwrap();
+    db.execute(1, "set enable_hashagg = off").unwrap();
+    db.execute(1, "set enable_seqscan = off").unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (costs off)
+             select a, b, count(*)
+             from group_index_order
+             group by a, b",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Index Scan")),
+                "expected grouping path to use the b, a index, got {rendered:?}"
+            );
+            assert!(
+                !rendered.iter().any(|line| line.starts_with("  ->  Sort")
+                    || line.starts_with("  ->  Incremental Sort")),
+                "expected index order to satisfy grouping without an extra sort, got {rendered:?}"
             );
         }
         other => panic!("expected query result, got {:?}", other),

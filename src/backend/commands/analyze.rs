@@ -44,6 +44,13 @@ struct InheritanceAnalyzeStats {
     statistics_ext_data: Vec<PgStatisticExtDataRow>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedAnalyzeTarget {
+    pub relation: BoundRelation,
+    pub columns: Vec<String>,
+    pub only: bool,
+}
+
 pub(crate) fn collect_analyze_stats(
     targets: &[MaintenanceTarget],
     catalog: &dyn CatalogLookup,
@@ -58,6 +65,27 @@ pub(crate) fn collect_analyze_stats(
         let selected = selected_columns(&relation, target)?;
         collect_analyze_stats_for_relation(
             &relation,
+            selected,
+            target.only,
+            catalog,
+            ctx,
+            &mut out,
+        )?;
+    }
+    Ok(out)
+}
+
+pub(crate) fn collect_analyze_stats_for_resolved_targets(
+    targets: &[ResolvedAnalyzeTarget],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<AnalyzeRelationStats>, ExecError> {
+    let mut out = Vec::with_capacity(targets.len());
+    for target in targets {
+        ctx.check_for_interrupts()?;
+        let selected = selected_columns_for_names(&target.relation, &target.columns)?;
+        collect_analyze_stats_for_relation(
+            &target.relation,
             selected,
             target.only,
             catalog,
@@ -155,6 +183,20 @@ fn selected_columns(
     target: &MaintenanceTarget,
 ) -> Result<Vec<usize>, ExecError> {
     pgrust_commands::analyze::selected_columns(relation, target).map_err(analyze_error_to_exec)
+}
+
+fn selected_columns_for_names(
+    relation: &BoundRelation,
+    columns: &[String],
+) -> Result<Vec<usize>, ExecError> {
+    selected_columns(
+        relation,
+        &MaintenanceTarget {
+            table_name: String::new(),
+            columns: columns.to_vec(),
+            only: false,
+        },
+    )
 }
 
 fn relation_nblocks_or_zero(

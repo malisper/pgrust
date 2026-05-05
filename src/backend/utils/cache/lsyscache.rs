@@ -26,7 +26,7 @@ use crate::backend::utils::cache::syscache::{
     ensure_policy_rows, ensure_proc_rows, ensure_publication_namespace_rows,
     ensure_publication_rel_rows, ensure_publication_rows, ensure_rewrite_rows,
     ensure_statistic_ext_data_rows, ensure_statistic_ext_rows, ensure_statistic_rows,
-    ensure_trigger_rows, ensure_type_rows, scan_class_rows_without_catcache,
+    ensure_trigger_rows, ensure_type_rows,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
@@ -345,19 +345,6 @@ fn class_row_by_name_namespace(
                 }
                 _ => None,
             })
-        })
-        .or_else(|| {
-            // :HACK: Heavy partitioned-index DDL can currently leave
-            // pg_class_relname_nsp_index missing a visible pg_class row. Keep
-            // SQL name lookup PostgreSQL-compatible while catalog index
-            // maintenance converges without forcing a full backend catcache.
-            scan_class_rows_without_catcache(db, client_id, txn_ctx)
-                .into_iter()
-                .find(|row| {
-                    row.relnamespace == namespace_oid
-                        && lookup_names.iter().any(|name| row.relname == *name)
-                        && !db.other_session_temp_namespace_oid(client_id, row.relnamespace)
-                })
         })
         .or_else(|| bootstrap_class_row_by_name_namespace(relname, namespace_oid))
 }
@@ -1827,21 +1814,54 @@ pub fn relation_entry_by_oid(
     bootstrap_relation_entry_by_oid(db, relation_oid)
 }
 
-fn relation_entry_by_name_namespace(
+pub fn resolve_relation_name_to_oid(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
-    relname: &str,
-    namespace_oid: u32,
-) -> Option<RelCacheEntry> {
-    if owned_temp_namespace(db, client_id).is_some_and(|namespace| namespace.oid == namespace_oid)
-        && let Some(entry) = temp_relation_entry_by_name(db, client_id, relname)
-    {
-        return Some(entry);
+    search_path: &[String],
+    name: &str,
+) -> Option<u32> {
+    let catalog_name = normalize_catalog_name(name);
+    let temp_namespace = owned_temp_namespace(db, client_id);
+    if let Some((schema, relname)) = catalog_name.split_once('.') {
+        if let Some(temp_namespace) = temp_namespace.as_ref()
+            && (schema.eq_ignore_ascii_case("pg_temp")
+                || temp_namespace.name.eq_ignore_ascii_case(schema))
+        {
+            return temp_namespace
+                .tables
+                .get(&normalize_catalog_name(relname).to_ascii_lowercase())
+                .map(|entry| entry.entry.relation_oid);
+        }
+        let namespace_oid = namespace_row_by_name(db, client_id, txn_ctx, schema)?.oid;
+        return class_row_by_name_namespace(db, client_id, txn_ctx, relname, namespace_oid)
+            .map(|row| row.oid);
     }
 
-    let class = class_row_by_name_namespace(db, client_id, txn_ctx, relname, namespace_oid)?;
-    relation_entry_by_oid(db, client_id, txn_ctx, class.oid)
+    for namespace_name in search_path {
+        if let Some(temp_namespace) = temp_namespace.as_ref()
+            && (namespace_name.eq_ignore_ascii_case("pg_temp")
+                || temp_namespace.name.eq_ignore_ascii_case(namespace_name))
+        {
+            if let Some(entry) = temp_relation_entry_by_name(db, client_id, &catalog_name) {
+                return Some(entry.relation_oid);
+            }
+            continue;
+        }
+        let Some(namespace_oid) =
+            namespace_row_by_name(db, client_id, txn_ctx, namespace_name).map(|row| row.oid)
+        else {
+            continue;
+        };
+        if let Some(oid) =
+            class_row_by_name_namespace(db, client_id, txn_ctx, &catalog_name, namespace_oid)
+                .map(|row| row.oid)
+        {
+            return Some(oid);
+        }
+    }
+
+    None
 }
 
 fn temp_relation_entry_by_name(
@@ -1907,39 +1927,9 @@ pub fn lookup_any_relation(
     search_path: &[String],
     name: &str,
 ) -> Option<BoundRelation> {
-    let catalog_name = normalize_catalog_name(name);
-    if let Some((schema, relname)) = catalog_name.split_once('.') {
-        if let Some(temp_namespace) = owned_temp_namespace(db, client_id)
-            && (schema.eq_ignore_ascii_case("pg_temp")
-                || temp_namespace.name.eq_ignore_ascii_case(schema))
-        {
-            return temp_namespace
-                .tables
-                .get(&normalize_catalog_name(relname).to_ascii_lowercase())
-                .map(|entry| {
-                    bound_relation_from_entry(db, client_id, txn_ctx, entry.entry.clone())
-                });
-        }
-        let namespace_oid = namespace_row_by_name(db, client_id, txn_ctx, schema)?.oid;
-        let entry =
-            relation_entry_by_name_namespace(db, client_id, txn_ctx, relname, namespace_oid)?;
-        return Some(bound_relation_from_entry(db, client_id, txn_ctx, entry));
-    }
-
-    for namespace_name in search_path {
-        let Some(namespace_oid) =
-            namespace_row_by_name(db, client_id, txn_ctx, namespace_name).map(|row| row.oid)
-        else {
-            continue;
-        };
-        if let Some(entry) =
-            relation_entry_by_name_namespace(db, client_id, txn_ctx, catalog_name, namespace_oid)
-        {
-            return Some(bound_relation_from_entry(db, client_id, txn_ctx, entry));
-        }
-    }
-
-    None
+    let relation_oid = resolve_relation_name_to_oid(db, client_id, txn_ctx, search_path, name)?;
+    relation_entry_by_oid(db, client_id, txn_ctx, relation_oid)
+        .map(|entry| bound_relation_from_entry(db, client_id, txn_ctx, entry))
 }
 
 pub fn describe_relation_by_oid(
@@ -2394,12 +2384,20 @@ impl CatalogLookup for LazyCatalogLookup {
         ensure_opclass_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
+    fn opclass_row_by_oid(&self, oid: u32) -> Option<PgOpclassRow> {
+        opclass_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid)
+    }
+
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
         ensure_opfamily_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn amproc_rows(&self) -> Vec<PgAmprocRow> {
         ensure_amproc_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn amproc_rows_for_family(&self, family_oid: u32) -> Vec<PgAmprocRow> {
+        amproc_rows_for_family(&self.db, self.client_id, self.txn_ctx, family_oid)
     }
 
     fn amop_rows(&self) -> Vec<PgAmopRow> {

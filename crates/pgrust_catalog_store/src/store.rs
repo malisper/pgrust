@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::rows::PhysicalCatalogRows;
+use crate::syscache::SysCacheInvalidationKey;
 use crate::toasting::ToastCatalogChanges;
 use crate::{Catalog, CatalogEntry};
 use pgrust_catalog_data::PgTypeRow;
@@ -72,6 +73,7 @@ pub struct CatalogStoreSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CatalogMutationEffect {
     pub touched_catalogs: Vec<BootstrapCatalogKind>,
+    pub syscache_keys: Vec<SysCacheInvalidationKey>,
     pub created_rels: Vec<RelFileLocator>,
     pub dropped_rels: Vec<RelFileLocator>,
     pub relation_oids: Vec<u32>,

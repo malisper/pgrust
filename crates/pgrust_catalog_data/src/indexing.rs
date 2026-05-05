@@ -54,6 +54,8 @@ const PG_AUTH_MEMBERS_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_AUTH_MEMBERS_ROLE_MEMBER_INDEX_KEYS: [i16; 3] = [2, 3, 4];
 const PG_AUTH_MEMBERS_MEMBER_ROLE_INDEX_KEYS: [i16; 3] = [3, 2, 4];
 const PG_AUTH_MEMBERS_GRANTOR_INDEX_KEYS: [i16; 1] = [4];
+const PG_SHDEPEND_DEPENDER_INDEX_KEYS: [i16; 4] = [1, 2, 3, 4];
+const PG_SHDEPEND_REFERENCE_INDEX_KEYS: [i16; 2] = [5, 6];
 const PG_CAST_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_CAST_SOURCE_TARGET_INDEX_KEYS: [i16; 2] = [2, 3];
 const PG_CONVERSION_OID_INDEX_KEYS: [i16; 1] = [1];
@@ -191,6 +193,12 @@ const OID_OID_OID_INT2_OPCLASS_4: [u32; 4] = [
     OID_BTREE_OPCLASS_OID,
     INT2_BTREE_OPCLASS_OID,
 ];
+const OID_OID_OID_INT4_OPCLASS_4: [u32; 4] = [
+    OID_BTREE_OPCLASS_OID,
+    OID_BTREE_OPCLASS_OID,
+    OID_BTREE_OPCLASS_OID,
+    INT4_BTREE_OPCLASS_OID,
+];
 const OID_BOOL_OPCLASS_2: [u32; 2] = [OID_BTREE_OPCLASS_OID, BOOL_BTREE_OPCLASS_OID];
 const OID_OID_OID_INT2_CHAR_OPCLASS_5: [u32; 5] = [
     OID_BTREE_OPCLASS_OID,
@@ -205,7 +213,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 110] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 112] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -530,6 +538,22 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 110] = [
         unique: false,
         key_attnums: &PG_AUTH_MEMBERS_GRANTOR_INDEX_KEYS,
         opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 1232,
+        relation_name: "pg_shdepend_depender_index",
+        heap_kind: BootstrapCatalogKind::PgShdepend,
+        unique: false,
+        key_attnums: &PG_SHDEPEND_DEPENDER_INDEX_KEYS,
+        opclass_oids: &OID_OID_OID_INT4_OPCLASS_4,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 1233,
+        relation_name: "pg_shdepend_reference_index",
+        heap_kind: BootstrapCatalogKind::PgShdepend,
+        unique: false,
+        key_attnums: &PG_SHDEPEND_REFERENCE_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_2,
     },
     CatalogIndexDescriptor {
         relation_oid: 2660,

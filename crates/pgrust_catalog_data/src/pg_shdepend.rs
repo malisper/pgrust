@@ -34,6 +34,24 @@ pub fn sort_pg_shdepend_rows(rows: &mut [PgShdependRow]) {
     });
 }
 
+pub fn owner_shdepend_row(
+    dbid: u32,
+    classid: u32,
+    objid: u32,
+    objsubid: i32,
+    owner_oid: u32,
+) -> Option<PgShdependRow> {
+    (owner_oid != 0).then_some(PgShdependRow {
+        dbid,
+        classid,
+        objid,
+        objsubid,
+        refclassid: PG_AUTHID_RELATION_OID,
+        refobjid: owner_oid,
+        deptype: SHARED_DEPENDENCY_OWNER,
+    })
+}
+
 pub fn policy_shdepend_rows(dbid: u32, policy_oid: u32, role_oids: &[u32]) -> Vec<PgShdependRow> {
     let mut rows = role_oids
         .iter()

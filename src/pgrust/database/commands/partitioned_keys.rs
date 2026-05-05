@@ -767,13 +767,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
             .db
             .catalog
             .write()
-            .replace_relation_partitioning_mvcc(
-                child_index_oid,
-                true,
-                child_index.relpartbound.clone(),
-                child_index.partitioned_table.clone(),
-                &ctx,
-            )
+            .set_relation_is_partition_mvcc(child_index_oid, true, &ctx)
             .map_err(map_catalog_error)?;
         self.apply_effect(effect)
     }

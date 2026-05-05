@@ -841,6 +841,7 @@ fn finalize_agg_accum(
         order_by,
         filter,
         distinct,
+        presorted,
         sql_type,
     } = accum;
     AggAccum {
@@ -863,6 +864,7 @@ fn finalize_agg_accum(
             .collect(),
         filter: filter.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
         distinct,
+        presorted,
         sql_type,
     }
 }

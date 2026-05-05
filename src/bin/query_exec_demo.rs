@@ -170,6 +170,7 @@ fn main() -> Result<(), ExecError> {
             input: Box::new(Plan::SeqScan {
                 plan_info: pgrust::backend::executor::PlanEstimate::default(),
                 source_id: 1,
+                parallel_scan_id: None,
                 rel: rel(),
                 relation_name: "items".into(),
                 relation_oid: 0,

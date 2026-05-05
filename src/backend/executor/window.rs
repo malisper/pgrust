@@ -1534,6 +1534,7 @@ fn window_aggref_accum(aggref: &Aggref) -> AggAccum {
         order_by: aggref.aggorder.clone(),
         filter: aggref.aggfilter.clone(),
         distinct: aggref.aggdistinct,
+        presorted: false,
         sql_type: aggref.aggtype,
     }
 }

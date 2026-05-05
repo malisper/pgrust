@@ -448,6 +448,7 @@ pub struct SeqScanState {
     pub(crate) qual: Option<crate::backend::executor::expr::CompiledPredicate>,
     pub(crate) qual_expr: Option<Expr>,
     pub(crate) source_id: usize,
+    pub(crate) parallel_scan_id: Option<usize>,
     pub(crate) relation_oid: u32,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,

@@ -4,10 +4,12 @@ use crate::{
     PERCENTILE_CONT_FLOAT8_FINAL_PROC_OID, PERCENTILE_CONT_FLOAT8_MULTI_FINAL_PROC_OID,
     PERCENTILE_CONT_INTERVAL_FINAL_PROC_OID, PERCENTILE_CONT_INTERVAL_MULTI_FINAL_PROC_OID,
     PERCENTILE_DISC_FINAL_PROC_OID, PERCENTILE_DISC_MULTI_FINAL_PROC_OID, PgProcRow, TEXT_TYPE_OID,
-    aggregate_transition_proc_oid, bootstrap_pg_proc_rows,
+    aggregate_transition_proc_oid, bootstrap_pg_proc_rows, builtin_aggregate_function_for_proc_oid,
     builtin_hypothetical_aggregate_function_for_proc_oid,
-    builtin_ordered_set_aggregate_function_for_proc_oid,
+    builtin_ordered_set_aggregate_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
 };
+use pgrust_catalog_ids::AggFunc;
+use pgrust_catalog_ids::BuiltinScalarFunction;
 use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind};
 use pgrust_nodes::primnodes::RelationDesc;
 
@@ -115,7 +117,7 @@ pub(crate) fn pg_aggregate_row_for_proc_row(row: &PgProcRow) -> PgAggregateRow {
         } else {
             0
         },
-        aggcombinefn: 0,
+        aggcombinefn: aggregate_combine_proc_oid(row),
         aggserialfn: 0,
         aggdeserialfn: 0,
         aggmtransfn: 0,
@@ -136,6 +138,37 @@ pub(crate) fn pg_aggregate_row_for_proc_row(row: &PgProcRow) -> PgAggregateRow {
         aggmtransspace: 0,
         agginitval: None,
         aggminitval: None,
+    }
+}
+
+const INT8PL_PROC_OID: u32 = 463;
+const NUMERIC_AVG_COMBINE_PROC_OID: u32 = 3337;
+
+fn aggregate_combine_proc_oid(row: &PgProcRow) -> u32 {
+    match builtin_aggregate_function_for_proc_oid(row.oid) {
+        Some(AggFunc::Count) => INT8PL_PROC_OID,
+        Some(AggFunc::Avg) => NUMERIC_AVG_COMBINE_PROC_OID,
+        Some(AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp) => {
+            proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Float8Combine)
+                .unwrap_or_default()
+        }
+        Some(
+            AggFunc::RegrCount
+            | AggFunc::RegrSxx
+            | AggFunc::RegrSyy
+            | AggFunc::RegrSxy
+            | AggFunc::RegrAvgX
+            | AggFunc::RegrAvgY
+            | AggFunc::RegrR2
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::Corr,
+        ) => proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Float8RegrCombine)
+            .unwrap_or_default(),
+        Some(AggFunc::Sum | AggFunc::Min | AggFunc::Max) => aggregate_transition_proc_oid(row.oid),
+        _ => 0,
     }
 }
 

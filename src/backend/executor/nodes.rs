@@ -2882,8 +2882,9 @@ impl PlanNode for SeqScanState {
                 && self.tablesample.is_none()
                 && let Some(runtime) = super::parallel::current_runtime()
             {
+                let scan_id = self.parallel_scan_id.unwrap_or(self.source_id);
                 loop {
-                    let block = runtime.next_seq_scan_block(self.source_id);
+                    let block = runtime.next_seq_scan_block(scan_id);
                     if block >= scan.nblocks() {
                         break Ok(None);
                     }
@@ -8025,6 +8026,7 @@ fn custom_aggregate_states_are_shareable(
         && left_accum.order_by == right_accum.order_by
         && left_accum.filter == right_accum.filter
         && left_accum.distinct == right_accum.distinct
+        && left_accum.presorted == right_accum.presorted
         && left_accum.agg_variadic == right_accum.agg_variadic
 }
 
@@ -8189,8 +8191,10 @@ fn advance_aggregate_group(
             runtimes[i].combine_partial(accum, &mut group.accum_states[i], &partial, ctx)?;
             continue;
         }
-        let can_use_custom_combine_state =
-            accum.order_by.is_empty() && !accum.distinct && accum.filter.is_none();
+        let can_use_custom_combine_state = phase == AggregatePhase::Complete
+            && accum.order_by.is_empty()
+            && !accum.distinct
+            && accum.filter.is_none();
         if let Some(filter) = accum.filter.as_ref() {
             match eval_expr(filter, slot, ctx)? {
                 Value::Bool(true) => {}
@@ -8223,7 +8227,7 @@ fn advance_aggregate_group(
         } else {
             &mut group.accum_states[i]
         };
-        if accum.order_by.is_empty() {
+        if accum.order_by.is_empty() || accum.presorted {
             runtimes[i].transition(target_state, &values, ctx)?;
         } else {
             let sort_keys = accum
@@ -8282,7 +8286,7 @@ fn finish_ordered_aggregate_inputs(
         if state_share_owners[i] != i {
             continue;
         }
-        if accum.order_by.is_empty() {
+        if accum.order_by.is_empty() || accum.presorted {
             continue;
         }
         let inputs = &mut group.ordered_inputs[i];

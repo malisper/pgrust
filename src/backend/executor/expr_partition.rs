@@ -182,17 +182,13 @@ fn hash_support_proc(
     catalog: &dyn CatalogLookup,
 ) -> Option<u32> {
     let opclass_oid = *spec.partclass.get(key_index)?;
-    let opclass = catalog
-        .opclass_rows()
-        .into_iter()
-        .find(|row| row.oid == opclass_oid)?;
+    let opclass = catalog.opclass_row_by_oid(opclass_oid)?;
     let key_type_oid = sql_type_oid(*spec.key_types.get(key_index)?);
     catalog
-        .amproc_rows()
+        .amproc_rows_for_family(opclass.opcfamily)
         .into_iter()
         .find(|row| {
-            row.amprocfamily == opclass.opcfamily
-                && row.amprocnum == 2
+            row.amprocnum == 2
                 && (row.amproclefttype == key_type_oid || row.amproclefttype == ANYOID)
                 && (row.amprocrighttype == key_type_oid || row.amprocrighttype == ANYOID)
         })

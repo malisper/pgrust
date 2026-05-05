@@ -13,8 +13,11 @@ use crate::backend::parser::{
     deserialize_partition_bound, partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::include::catalog::{ANYARRAYOID, ANYOID, BOOTSTRAP_SUPERUSER_OID};
+use crate::include::catalog::{
+    ANYARRAYOID, ANYOID, BOOTSTRAP_SUPERUSER_OID, builtin_scalar_function_for_proc_oid,
+};
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::primnodes::BuiltinScalarFunction;
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
     pgrust_commands::partition::relation_name_for_oid(catalog, relation_oid)
@@ -59,8 +62,20 @@ impl PartitionTupleRouting {
 #[derive(Debug, Clone)]
 struct PartitionDispatch {
     reldesc: BoundRelation,
-    key: LoweredPartitionSpec,
+    key: CachedPartitionKey,
     partdesc: PartitionDesc,
+}
+
+#[derive(Debug, Clone)]
+struct CachedPartitionKey {
+    spec: LoweredPartitionSpec,
+    hash_support: Vec<Option<PartitionHashSupport>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PartitionHashSupport {
+    proc_oid: u32,
+    direct_hash_value_extended: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +114,110 @@ struct PartitionDescEntry {
     is_leaf: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PartitionCheckState {
+    relation_name: String,
+    steps: Vec<PartitionCheckStep>,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionCheckStep {
+    parent: BoundRelation,
+    child: BoundRelation,
+    child_bound: PartitionBoundSpec,
+    parent_key: CachedPartitionKey,
+    explicit_sibling_bounds: Vec<PartitionBoundSpec>,
+}
+
+impl PartitionCheckState {
+    pub(crate) fn new(
+        catalog: &dyn CatalogLookup,
+        relation: &BoundRelation,
+    ) -> Result<Option<Self>, ExecError> {
+        if !relation.relispartition {
+            return Ok(None);
+        }
+
+        let relation_name = relation_name_for_oid(catalog, relation.relation_oid);
+        let mut steps = Vec::new();
+        let mut child = relation.clone();
+        while let Some(parent) = declarative_parent(catalog, &child)? {
+            let child_bound = child_partition_bound(&child)?;
+            let parent_key = cached_partition_key(catalog, &parent)?;
+            let explicit_sibling_bounds = if child_bound.is_default() {
+                direct_partition_children(catalog, parent.relation_oid)?
+                    .into_iter()
+                    .filter(|sibling| sibling.relation_oid != child.relation_oid)
+                    .map(|sibling| child_partition_bound(&sibling))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .filter(|bound| !bound.is_default())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            steps.push(PartitionCheckStep {
+                parent: parent.clone(),
+                child: child.clone(),
+                child_bound,
+                parent_key,
+                explicit_sibling_bounds,
+            });
+            child = parent;
+        }
+
+        Ok(Some(Self {
+            relation_name,
+            steps,
+        }))
+    }
+
+    pub(crate) fn check(&self, row: &[Value], ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        let mut current_row = row.to_vec();
+        for step in &self.steps {
+            let parent_row = remap_partition_row_to_parent_layout(
+                &current_row,
+                &step.child.desc,
+                &step.parent.desc,
+            )?;
+            let matches_bound = if step.child_bound.is_default() {
+                row_matches_cached_default_bound(step, &parent_row, ctx)?
+            } else {
+                row_matches_explicit_bound(
+                    &step.parent,
+                    &step.parent_key,
+                    &step.child_bound,
+                    &parent_row,
+                    ctx,
+                )?
+            };
+            if !matches_bound {
+                return Err(partition_constraint_violation(
+                    &self.relation_name,
+                    row,
+                    &ctx.datetime_config,
+                ));
+            }
+            current_row = parent_row;
+        }
+        Ok(())
+    }
+}
+
+fn row_matches_cached_default_bound(
+    step: &PartitionCheckStep,
+    parent_row: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let keys = key_values(&step.parent, &step.parent_key.spec, parent_row, ctx)?;
+    for bound in &step.explicit_sibling_bounds {
+        if row_matches_explicit_bound_with_keys(&step.parent_key, bound, &keys, ctx)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 #[derive(Debug, Clone, Default)]
 struct PartitionBoundInfo {
     indexes: Vec<usize>,
@@ -120,7 +239,7 @@ fn exec_init_partition_dispatch_info(
     catalog: &dyn CatalogLookup,
     relation: &BoundRelation,
 ) -> Result<PartitionDispatch, ExecError> {
-    let key = relation_partition_spec(relation).map_err(ExecError::Parse)?;
+    let key = cached_partition_key(catalog, relation)?;
     let mut children = Vec::new();
     let mut boundinfo = PartitionBoundInfo::default();
     for child in direct_partition_children(catalog, relation.relation_oid)? {
@@ -150,6 +269,52 @@ fn exec_init_partition_dispatch_info(
             last_found_count: 0,
         },
     })
+}
+
+fn cached_partition_key(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+) -> Result<CachedPartitionKey, ExecError> {
+    let spec = relation_partition_spec(relation).map_err(ExecError::Parse)?;
+    Ok(CachedPartitionKey {
+        hash_support: partition_hash_support(catalog, &spec),
+        spec,
+    })
+}
+
+fn partition_hash_support(
+    catalog: &dyn CatalogLookup,
+    spec: &LoweredPartitionSpec,
+) -> Vec<Option<PartitionHashSupport>> {
+    if spec.strategy != PartitionStrategy::Hash {
+        return Vec::new();
+    }
+
+    spec.key_types
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(key_index, key_type)| {
+            let opclass_oid = *spec.partclass.get(key_index)?;
+            let opclass = catalog.opclass_row_by_oid(opclass_oid)?;
+            let key_type_oid = crate::backend::utils::cache::catcache::sql_type_oid(key_type);
+            catalog
+                .amproc_rows_for_family(opclass.opcfamily)
+                .into_iter()
+                .find(|row| {
+                    row.amprocnum == 2
+                        && hash_amproc_type_matches(row.amproclefttype, key_type_oid, key_type)
+                        && hash_amproc_type_matches(row.amprocrighttype, key_type_oid, key_type)
+                })
+                .map(|row| PartitionHashSupport {
+                    proc_oid: row.amproc,
+                    direct_hash_value_extended: matches!(
+                        builtin_scalar_function_for_proc_oid(row.amproc),
+                        Some(BuiltinScalarFunction::HashValueExtended(_))
+                    ),
+                })
+        })
+        .collect()
 }
 
 pub(crate) use pgrust_commands::partition::PartitionTreeEntry;
@@ -601,14 +766,14 @@ fn compare_range_bounds(
 
 fn partition_hash_value(
     values: &[Value],
-    spec: &LoweredPartitionSpec,
+    key: &CachedPartitionKey,
     ctx: &mut ExecutorContext,
 ) -> Result<u64, ExecError> {
     let mut row_hash = 0_u64;
     for (index, value) in values.iter().enumerate() {
-        let opclass = spec.partclass.get(index).copied();
-        let value_hash = if let Some(proc_oid) = hash_support_proc(index, spec, ctx) {
-            execute_partition_hash_support_proc(proc_oid, value, ctx)?
+        let opclass = key.spec.partclass.get(index).copied();
+        let value_hash = if let Some(support) = key.hash_support.get(index).copied().flatten() {
+            execute_partition_hash_support_proc(support, opclass, value, ctx)?
         } else {
             crate::backend::access::hash::hash_value_extended(
                 value,
@@ -633,31 +798,6 @@ fn unsupported_hash_key_error(message: String) -> ExecError {
     }
 }
 
-fn hash_support_proc(
-    key_index: usize,
-    spec: &LoweredPartitionSpec,
-    ctx: &ExecutorContext,
-) -> Option<u32> {
-    let catalog = ctx.catalog.as_deref()?;
-    let opclass_oid = *spec.partclass.get(key_index)?;
-    let opclass = catalog
-        .opclass_rows()
-        .into_iter()
-        .find(|row| row.oid == opclass_oid)?;
-    let key_type = *spec.key_types.get(key_index)?;
-    let key_type_oid = crate::backend::utils::cache::catcache::sql_type_oid(key_type);
-    catalog
-        .amproc_rows()
-        .into_iter()
-        .find(|row| {
-            row.amprocfamily == opclass.opcfamily
-                && row.amprocnum == 2
-                && hash_amproc_type_matches(row.amproclefttype, key_type_oid, key_type)
-                && hash_amproc_type_matches(row.amprocrighttype, key_type_oid, key_type)
-        })
-        .map(|row| row.amproc)
-}
-
 fn hash_amproc_type_matches(proc_type_oid: u32, key_type_oid: u32, key_type: SqlType) -> bool {
     proc_type_oid == key_type_oid
         || proc_type_oid == ANYOID
@@ -665,15 +805,24 @@ fn hash_amproc_type_matches(proc_type_oid: u32, key_type_oid: u32, key_type: Sql
 }
 
 fn execute_partition_hash_support_proc(
-    proc_oid: u32,
+    support: PartitionHashSupport,
+    opclass: Option<u32>,
     value: &Value,
     ctx: &mut ExecutorContext,
 ) -> Result<Option<u64>, ExecError> {
     if matches!(value, Value::Null) {
         return Ok(None);
     }
+    if support.direct_hash_value_extended {
+        return crate::backend::access::hash::hash_value_extended(
+            value,
+            opclass,
+            crate::backend::access::hash::HASH_PARTITION_SEED,
+        )
+        .map_err(unsupported_hash_key_error);
+    }
     let result = execute_scalar_function_value_call(
-        proc_oid,
+        support.proc_oid,
         &[
             value.clone(),
             Value::Int64(crate::backend::access::hash::HASH_PARTITION_SEED as i64),
@@ -696,32 +845,36 @@ fn execute_partition_hash_support_proc(
 
 fn row_matches_explicit_bound(
     relation: &BoundRelation,
-    spec: &LoweredPartitionSpec,
+    key: &CachedPartitionKey,
     bound: &PartitionBoundSpec,
     row: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
-    let keys = key_values(relation, spec, row, ctx)?;
-    row_matches_explicit_bound_with_keys(spec, bound, &keys, ctx)
+    let keys = key_values(relation, &key.spec, row, ctx)?;
+    row_matches_explicit_bound_with_keys(key, bound, &keys, ctx)
 }
 
 fn row_matches_explicit_bound_with_keys(
-    spec: &LoweredPartitionSpec,
+    key: &CachedPartitionKey,
     bound: &PartitionBoundSpec,
     keys: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
     match bound {
         PartitionBoundSpec::List { values, .. } => {
-            let key = keys.first().unwrap_or(&Value::Null);
+            let datum = keys.first().unwrap_or(&Value::Null);
             values.iter().try_fold(false, |matched, value| {
                 if matched {
                     return Ok(true);
                 }
                 Ok(compare_order_values(
-                    key,
+                    datum,
                     &partition_value_to_value(value),
-                    spec.partcollation.first().copied().filter(|oid| *oid != 0),
+                    key.spec
+                        .partcollation
+                        .first()
+                        .copied()
+                        .filter(|oid| *oid != 0),
                     None,
                     false,
                 )? == Ordering::Equal)
@@ -732,13 +885,14 @@ fn row_matches_explicit_bound_with_keys(
                 return Ok(false);
             }
             Ok(
-                compare_partition_key_to_bound(keys, from, &spec.partcollation)? != Ordering::Less
-                    && compare_partition_key_to_bound(keys, to, &spec.partcollation)?
+                compare_partition_key_to_bound(keys, from, &key.spec.partcollation)?
+                    != Ordering::Less
+                    && compare_partition_key_to_bound(keys, to, &key.spec.partcollation)?
                         == Ordering::Less,
             )
         }
         PartitionBoundSpec::Hash { modulus, remainder } => {
-            Ok(partition_hash_value(keys, spec, ctx)? % (*modulus as u64) == *remainder as u64)
+            Ok(partition_hash_value(keys, key, ctx)? % (*modulus as u64) == *remainder as u64)
         }
     }
 }
@@ -748,9 +902,9 @@ fn get_partition_for_tuple(
     row: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Option<usize>, ExecError> {
-    let keys = key_values(&dispatch.reldesc, &dispatch.key, row, ctx)?;
+    let keys = key_values(&dispatch.reldesc, &dispatch.key.spec, row, ctx)?;
     if matches!(
-        dispatch.key.strategy,
+        dispatch.key.spec.strategy,
         PartitionStrategy::List | PartitionStrategy::Range
     ) && let Some(part_index) = dispatch.partdesc.cached_partition_index()
     {
@@ -783,7 +937,7 @@ fn find_explicit_partition_match(
     skip_child_oid: Option<u32>,
     ctx: &mut ExecutorContext,
 ) -> Result<Option<BoundRelation>, ExecError> {
-    let spec = relation_partition_spec(parent).map_err(ExecError::Parse)?;
+    let key = cached_partition_key(catalog, parent)?;
     for child in direct_partition_children(catalog, parent.relation_oid)? {
         if skip_child_oid.is_some_and(|oid| oid == child.relation_oid) {
             continue;
@@ -792,7 +946,7 @@ fn find_explicit_partition_match(
         if bound.is_default() {
             continue;
         }
-        if row_matches_explicit_bound(parent, &spec, &bound, row, ctx)? {
+        if row_matches_explicit_bound(parent, &key, &bound, row, ctx)? {
             return Ok(Some(child.clone()));
         }
     }
@@ -828,8 +982,8 @@ fn candidate_row_matches_partition(
             find_explicit_partition_match(catalog, parent, row, skip_child_oid, ctx)?.is_none(),
         );
     }
-    let spec = relation_partition_spec(parent).map_err(ExecError::Parse)?;
-    row_matches_explicit_bound(parent, &spec, bound, row, ctx)
+    let key = cached_partition_key(catalog, parent)?;
+    row_matches_explicit_bound(parent, &key, bound, row, ctx)
 }
 
 fn bounds_overlap(
@@ -1211,7 +1365,7 @@ pub(crate) fn exec_find_partition(
             let dispatch = proute.dispatch_info_for_relation(catalog, &current)?;
             return Err(no_partition_for_row(
                 &relation_name_for_oid(catalog, current.relation_oid),
-                no_partition_detail(catalog, &current, &dispatch.key, &current_row, ctx)?,
+                no_partition_detail(catalog, &current, &dispatch.key.spec, &current_row, ctx)?,
             ));
         };
         if selected.is_leaf {

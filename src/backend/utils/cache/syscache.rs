@@ -1,15 +1,23 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, OnceLock};
 
-use crate::ClientId;
-use crate::backend::access::transam::xact::{CommandId, TransactionId};
+use parking_lot::RwLock;
+
+use crate::backend::access::transam::xact::{CommandId, TransactionId, TransactionManager};
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
+use crate::backend::catalog::indexing::{
+    CatalogScannedTuple, CatalogTupleIdentity, probe_system_catalog_rows_visible_in_db,
+    probe_system_catalog_tuples_visible_in_db,
+};
 use crate::backend::catalog::rowcodec::{
     pg_auth_members_row_from_values, pg_authid_row_from_values,
     pg_publication_namespace_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::catalog::store::{CatalogStore, CatalogWriteContext};
+use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::evtcache::EventTriggerCache;
 use crate::backend::utils::cache::inval::CatalogInvalidation;
@@ -18,20 +26,38 @@ use crate::backend::utils::cache::relcache::{
     relation_locator_for_class_row,
 };
 use crate::backend::utils::time::snapmgr::{Snapshot, get_catalog_snapshot};
+use crate::include::access::htup::HeapTuple;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
-    PG_CONSTRAINT_RELATION_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDependRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    PG_AUTHID_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAmRow, PgAmopRow, PgAmprocRow,
+    PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
+    PgCollationRow, PgConstraintRow, PgDependRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgShdependRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow,
+    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::pgrust::database::Database;
+use crate::{BufferPool, ClientId};
 
 pub use pgrust_catalog_store::syscache::*;
+
+#[cfg(test)]
+thread_local! {
+    static CLASS_SCAN_COUNT_FOR_TESTS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_class_scan_count_for_tests() {
+    CLASS_SCAN_COUNT_FOR_TESTS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn class_scan_count_for_tests() -> usize {
+    CLASS_SCAN_COUNT_FOR_TESTS.with(Cell::get)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ResolvedIndexSupportMetadata {
@@ -256,44 +282,6 @@ fn shared_catcache_context(cache_ctx: BackendCacheContext) -> BackendCacheContex
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum SysCacheKeyPart {
-    Int16(i16),
-    Int32(i32),
-    Int64(i64),
-    Text(String),
-    InternalChar(u8),
-    Bool(bool),
-    Array(Vec<SysCacheKeyPart>),
-    Null,
-}
-
-impl SysCacheKeyPart {
-    fn from_value(value: &Value) -> Option<Self> {
-        match value.to_owned_value() {
-            Value::Int16(value) => Some(Self::Int16(value)),
-            Value::Int32(value) => Some(Self::Int32(value)),
-            Value::Int64(value) => Some(Self::Int64(value)),
-            Value::Text(value) => Some(Self::Text(value.to_string())),
-            Value::InternalChar(value) => Some(Self::InternalChar(value)),
-            Value::Bool(value) => Some(Self::Bool(value)),
-            Value::Array(values) => values
-                .iter()
-                .map(Self::from_value)
-                .collect::<Option<Vec<_>>>()
-                .map(Self::Array),
-            Value::PgArray(array) => array
-                .elements
-                .iter()
-                .map(Self::from_value)
-                .collect::<Option<Vec<_>>>()
-                .map(Self::Array),
-            Value::Null => Some(Self::Null),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SysCacheQueryKey {
     cache_id: SysCacheId,
     keys: Vec<SysCacheKeyPart>,
@@ -307,16 +295,24 @@ impl SysCacheQueryKey {
             .map(|keys| Self { cache_id, keys })
     }
 
-    fn invalidated_by(&self, invalidation: &CatalogInvalidation) -> bool {
+    fn as_invalidation_key(&self) -> SysCacheInvalidationKey {
+        SysCacheInvalidationKey::new(self.cache_id, self.keys.clone())
+    }
+
+    fn invalidated_by(&self, invalidation: &CatalogInvalidation, mode: SysCacheLookupMode) -> bool {
         if invalidation.full_reset {
             return true;
         }
-        if invalidation.touched_catalogs.is_empty() {
-            return !invalidation.is_empty();
+        let query_key = self.as_invalidation_key();
+        if invalidation.syscache_keys.iter().any(|key| match mode {
+            SysCacheLookupMode::Exact => key == &query_key,
+            SysCacheLookupMode::List => key.matches_prefix(&query_key),
+        }) {
+            return true;
         }
         self.cache_id
             .catalog_kind()
-            .is_none_or(|kind| invalidation.touched_catalogs.contains(&kind))
+            .is_some_and(|kind| invalidation.syscache_flush_catalogs.contains(&kind))
     }
 }
 
@@ -326,14 +322,75 @@ enum SysCacheLookupMode {
     List,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CachedSysCacheTuple {
+    pub(crate) identity: Option<CatalogTupleIdentity>,
+    pub(crate) heap_tuple: Option<HeapTuple>,
+    decoded: Arc<OnceLock<SysCacheTuple>>,
+}
+
+impl PartialEq for CachedSysCacheTuple {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && self.heap_tuple == other.heap_tuple
+            && self.decoded() == other.decoded()
+    }
+}
+
+impl Eq for CachedSysCacheTuple {}
+
+impl CachedSysCacheTuple {
+    fn from_decoded(tuple: SysCacheTuple) -> Self {
+        let decoded = OnceLock::new();
+        let _ = decoded.set(tuple);
+        Self {
+            identity: None,
+            heap_tuple: None,
+            decoded: Arc::new(decoded),
+        }
+    }
+
+    fn from_scanned(scanned: CatalogScannedTuple) -> Self {
+        Self {
+            identity: Some(scanned.identity),
+            heap_tuple: Some(scanned.tuple),
+            decoded: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn decoded(&self) -> Option<SysCacheTuple> {
+        self.decoded.get().cloned()
+    }
+
+    pub(crate) fn decode_with_context(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+    ) -> Result<SysCacheTuple, CatalogError> {
+        let snapshot = ctx.snapshot_for_command()?;
+        decode_cached_syscache_entry(
+            self,
+            cache_id,
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+        )
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct BackendSysCacheMaps {
-    exact: HashMap<SysCacheQueryKey, Vec<SysCacheTuple>>,
-    list: HashMap<SysCacheQueryKey, Vec<SysCacheTuple>>,
+    exact: HashMap<SysCacheQueryKey, Vec<CachedSysCacheTuple>>,
+    list: HashMap<SysCacheQueryKey, Vec<CachedSysCacheTuple>>,
 }
 
 impl BackendSysCacheMaps {
-    fn get(&self, mode: SysCacheLookupMode, key: &SysCacheQueryKey) -> Option<Vec<SysCacheTuple>> {
+    fn get(
+        &self,
+        mode: SysCacheLookupMode,
+        key: &SysCacheQueryKey,
+    ) -> Option<Vec<CachedSysCacheTuple>> {
         match mode {
             SysCacheLookupMode::Exact => self.exact.get(key),
             SysCacheLookupMode::List => self.list.get(key),
@@ -345,7 +402,7 @@ impl BackendSysCacheMaps {
         &mut self,
         mode: SysCacheLookupMode,
         key: SysCacheQueryKey,
-        value: Vec<SysCacheTuple>,
+        value: Vec<CachedSysCacheTuple>,
     ) {
         match mode {
             SysCacheLookupMode::Exact => self.exact.insert(key, value),
@@ -355,8 +412,9 @@ impl BackendSysCacheMaps {
 
     fn invalidate(&mut self, invalidation: &CatalogInvalidation) {
         self.exact
-            .retain(|key, _| !key.invalidated_by(invalidation));
-        self.list.retain(|key, _| !key.invalidated_by(invalidation));
+            .retain(|key, _| !key.invalidated_by(invalidation, SysCacheLookupMode::Exact));
+        self.list
+            .retain(|key, _| !key.invalidated_by(invalidation, SysCacheLookupMode::List));
     }
 
     fn clear(&mut self) {
@@ -391,7 +449,7 @@ impl BackendSysCache {
         cache_ctx: BackendCacheContext,
         mode: SysCacheLookupMode,
         key: &SysCacheQueryKey,
-    ) -> Option<Vec<SysCacheTuple>> {
+    ) -> Option<Vec<CachedSysCacheTuple>> {
         self.maps_mut(cache_ctx).get(mode, key)
     }
 
@@ -400,7 +458,7 @@ impl BackendSysCache {
         cache_ctx: BackendCacheContext,
         mode: SysCacheLookupMode,
         key: SysCacheQueryKey,
-        value: Vec<SysCacheTuple>,
+        value: Vec<CachedSysCacheTuple>,
     ) {
         self.maps_mut(cache_ctx).insert(mode, key, value);
     }
@@ -432,32 +490,87 @@ pub struct BackendCacheState {
     pub pending_invalidations: Vec<CatalogInvalidation>,
 }
 
+fn decode_cached_syscache_entry(
+    entry: &CachedSysCacheTuple,
+    cache_id: SysCacheId,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &RwLock<TransactionManager>,
+    snapshot: &Snapshot,
+    client_id: ClientId,
+) -> Result<SysCacheTuple, CatalogError> {
+    if let Some(decoded) = entry.decoded() {
+        return Ok(decoded);
+    }
+
+    let identity = entry.identity.as_ref().ok_or(CatalogError::Corrupt(
+        "syscache tuple has no catalog identity",
+    ))?;
+    let heap_tuple = entry
+        .heap_tuple
+        .as_ref()
+        .ok_or(CatalogError::Corrupt("syscache tuple has no heap tuple"))?;
+    let heap_desc = crate::include::catalog::bootstrap_relation_desc(identity.kind);
+    let txns_guard = txns.read();
+    let values = crate::backend::catalog::rowcodec::decode_catalog_tuple_values_with_toast(
+        pool,
+        &txns_guard,
+        snapshot,
+        client_id,
+        identity.kind,
+        identity.db_oid,
+        &heap_desc,
+        heap_tuple,
+    )?;
+    let decoded = sys_cache_tuple_from_values(cache_id, values)?;
+    let _ = entry.decoded.set(decoded);
+    entry
+        .decoded()
+        .ok_or(CatalogError::Corrupt("syscache tuple decode cache failed"))
+}
+
+fn decode_cached_syscache_entries(
+    entries: Vec<CachedSysCacheTuple>,
+    cache_id: SysCacheId,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &RwLock<TransactionManager>,
+    snapshot: &Snapshot,
+    client_id: ClientId,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    entries
+        .iter()
+        .map(|entry| decode_cached_syscache_entry(entry, cache_id, pool, txns, snapshot, client_id))
+        .collect()
+}
+
 pub fn invalidate_backend_cache_state(db: &Database, client_id: ClientId) {
     db.backend_cache_states.write().remove(&client_id);
 }
 
 impl CatalogStore {
-    pub(crate) fn search_sys_cache(
+    pub(crate) fn search_sys_cache_entries(
         &self,
         ctx: &CatalogWriteContext,
         cache_id: SysCacheId,
         keys: Vec<Value>,
-    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    ) -> Result<Vec<CachedSysCacheTuple>, CatalogError> {
         if keys.len() != cache_id.expected_keys() {
             return Err(CatalogError::Corrupt("syscache key count mismatch"));
         }
 
         if let Some(tuple) = bootstrap_sys_cache_tuple(cache_id, &keys) {
-            return Ok(vec![tuple]);
+            return Ok(vec![CachedSysCacheTuple::from_decoded(tuple)]);
         }
 
         let extra_tuples = extra_type_sys_cache_tuples(self.extra_type_rows(), cache_id, &keys);
         if !extra_tuples.is_empty() {
-            return Ok(extra_tuples);
+            return Ok(extra_tuples
+                .into_iter()
+                .map(CachedSysCacheTuple::from_decoded)
+                .collect());
         }
 
         let snapshot = ctx.snapshot_for_command()?;
-        let rows = probe_system_catalog_rows_visible_in_db(
+        let tuples = probe_system_catalog_tuples_visible_in_db(
             &ctx.pool,
             &ctx.txns,
             &snapshot,
@@ -467,9 +580,28 @@ impl CatalogStore {
             equality_scan_keys(&keys),
         )?;
 
-        rows.into_iter()
-            .map(|values| sys_cache_tuple_from_values(cache_id, values))
-            .collect()
+        Ok(tuples
+            .into_iter()
+            .map(CachedSysCacheTuple::from_scanned)
+            .collect())
+    }
+
+    pub(crate) fn search_sys_cache(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        keys: Vec<Value>,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        let entries = self.search_sys_cache_entries(ctx, cache_id, keys)?;
+        let snapshot = ctx.snapshot_for_command()?;
+        decode_cached_syscache_entries(
+            entries,
+            cache_id,
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+        )
     }
 
     #[allow(non_snake_case)]
@@ -1341,7 +1473,7 @@ fn backend_syscache_get(
     cache_ctx: BackendCacheContext,
     mode: SysCacheLookupMode,
     key: &SysCacheQueryKey,
-) -> Option<Vec<SysCacheTuple>> {
+) -> Option<Vec<CachedSysCacheTuple>> {
     db.backend_cache_states
         .write()
         .entry(client_id)
@@ -1356,7 +1488,7 @@ fn backend_syscache_insert(
     cache_ctx: BackendCacheContext,
     mode: SysCacheLookupMode,
     key: SysCacheQueryKey,
-    value: Vec<SysCacheTuple>,
+    value: Vec<CachedSysCacheTuple>,
 ) {
     db.backend_cache_states
         .write()
@@ -1366,19 +1498,19 @@ fn backend_syscache_insert(
         .insert(cache_ctx, mode, key, value);
 }
 
-pub(crate) fn search_sys_cache_db(
+pub(crate) fn search_sys_cache_entries_db(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
     cache_id: SysCacheId,
     keys: Vec<Value>,
-) -> Result<Vec<SysCacheTuple>, CatalogError> {
+) -> Result<Vec<CachedSysCacheTuple>, CatalogError> {
     if keys.len() != cache_id.expected_keys() {
         return Err(CatalogError::Corrupt("syscache key count mismatch"));
     }
 
     if let Some(tuple) = bootstrap_sys_cache_tuple(cache_id, &keys) {
-        return Ok(vec![tuple]);
+        return Ok(vec![CachedSysCacheTuple::from_decoded(tuple)]);
     }
 
     if matches!(cache_id, SysCacheId::TypeOid | SysCacheId::TypeNameNsp) {
@@ -1386,7 +1518,10 @@ pub(crate) fn search_sys_cache_db(
         let dynamic_type_rows = db.dynamic_type_rows_for_search_path(&search_path);
         let extra_tuples = extra_type_sys_cache_tuples(&dynamic_type_rows, cache_id, &keys);
         if !extra_tuples.is_empty() {
-            return Ok(extra_tuples);
+            return Ok(extra_tuples
+                .into_iter()
+                .map(CachedSysCacheTuple::from_decoded)
+                .collect());
         }
     }
 
@@ -1404,7 +1539,7 @@ pub(crate) fn search_sys_cache_db(
 
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
-    let rows = probe_system_catalog_rows_visible_in_db(
+    let tuples = probe_system_catalog_tuples_visible_in_db(
         &db.pool,
         &db.txns,
         &snapshot,
@@ -1414,10 +1549,10 @@ pub(crate) fn search_sys_cache_db(
         equality_scan_keys(&keys),
     )?;
 
-    let tuples = rows
+    let entries = tuples
         .into_iter()
-        .map(|values| sys_cache_tuple_from_values(cache_id, values))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(CachedSysCacheTuple::from_scanned)
+        .collect::<Vec<_>>();
     if let Some(key) = cache_key {
         backend_syscache_insert(
             db,
@@ -1425,9 +1560,25 @@ pub(crate) fn search_sys_cache_db(
             cache_ctx,
             SysCacheLookupMode::Exact,
             key,
-            tuples.clone(),
+            entries.clone(),
         );
     }
+    Ok(entries)
+}
+
+pub(crate) fn search_sys_cache_db(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    keys: Vec<Value>,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    let entries = search_sys_cache_entries_db(db, client_id, txn_ctx, cache_id, keys)?;
+    let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
+        .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
+    let tuples = decode_cached_syscache_entries(
+        entries, cache_id, &db.pool, &db.txns, &snapshot, client_id,
+    )?;
     Ok(tuples)
 }
 
@@ -1440,6 +1591,29 @@ pub(crate) fn SearchSysCache(
     keys: Vec<Value>,
 ) -> Result<Vec<SysCacheTuple>, CatalogError> {
     search_sys_cache_db(db, client_id, txn_ctx, cache_id, keys)
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCacheEntries(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    keys: Vec<Value>,
+) -> Result<Vec<CachedSysCacheTuple>, CatalogError> {
+    search_sys_cache_entries_db(db, client_id, txn_ctx, cache_id, keys)
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCacheCopy1(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+) -> Result<Option<CachedSysCacheTuple>, CatalogError> {
+    let mut tuples = SearchSysCacheEntries(db, client_id, txn_ctx, cache_id, vec![key1])?;
+    Ok(tuples.pop())
 }
 
 pub(crate) fn search_sys_cache1_db(
@@ -1589,6 +1763,17 @@ pub(crate) fn SearchSysCacheList(
 }
 
 #[allow(non_snake_case)]
+pub(crate) fn SearchSysCacheListEntries(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    keys: Vec<Value>,
+) -> Result<Vec<CachedSysCacheTuple>, CatalogError> {
+    search_sys_cache_list_entries_db(db, client_id, txn_ctx, cache_id, keys)
+}
+
+#[allow(non_snake_case)]
 pub(crate) fn SearchSysCacheList1(
     db: &Database,
     client_id: ClientId,
@@ -1647,13 +1832,70 @@ pub(crate) fn SearchSysCacheList3(
     SearchSysCacheList(db, client_id, txn_ctx, cache_id, vec![key1, key2, key3])
 }
 
-fn search_sys_cache_list_db(
+pub(crate) fn shared_dependencies_for_referenced_role(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    role_oid: u32,
+) -> Result<Vec<PgShdependRow>, CatalogError> {
+    SearchSysCacheList2(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::SHDEPENDREFERENCE,
+        oid_key(PG_AUTHID_RELATION_OID),
+        oid_key(role_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Shdepend(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+pub(crate) fn shared_dependencies_for_object(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    db_oid: u32,
+    class_oid: u32,
+    object_oid: u32,
+    object_subid: i32,
+) -> Result<Vec<PgShdependRow>, CatalogError> {
+    SearchSysCacheList(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::SHDEPENDDEPENDER,
+        vec![
+            oid_key(db_oid),
+            oid_key(class_oid),
+            oid_key(object_oid),
+            Value::Int32(object_subid),
+        ],
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Shdepend(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+fn search_sys_cache_list_entries_db(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
     cache_id: SysCacheId,
     keys: Vec<Value>,
-) -> Result<Vec<SysCacheTuple>, CatalogError> {
+) -> Result<Vec<CachedSysCacheTuple>, CatalogError> {
     if keys.is_empty() || keys.len() > cache_id.expected_keys() {
         return Err(CatalogError::Corrupt("syscache list key count mismatch"));
     }
@@ -1672,7 +1914,7 @@ fn search_sys_cache_list_db(
 
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
-    let rows = probe_system_catalog_rows_visible_in_db(
+    let tuples = probe_system_catalog_tuples_visible_in_db(
         &db.pool,
         &db.txns,
         &snapshot,
@@ -1682,10 +1924,10 @@ fn search_sys_cache_list_db(
         equality_scan_keys(&keys),
     )?;
 
-    let tuples = rows
+    let entries = tuples
         .into_iter()
-        .map(|values| sys_cache_tuple_from_values(cache_id, values))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(CachedSysCacheTuple::from_scanned)
+        .collect::<Vec<_>>();
     if let Some(key) = cache_key {
         backend_syscache_insert(
             db,
@@ -1693,9 +1935,25 @@ fn search_sys_cache_list_db(
             cache_ctx,
             SysCacheLookupMode::List,
             key,
-            tuples.clone(),
+            entries.clone(),
         );
     }
+    Ok(entries)
+}
+
+fn search_sys_cache_list_db(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    keys: Vec<Value>,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    let entries = search_sys_cache_list_entries_db(db, client_id, txn_ctx, cache_id, keys)?;
+    let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
+        .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
+    let tuples = decode_cached_syscache_entries(
+        entries, cache_id, &db.pool, &db.txns, &snapshot, client_id,
+    )?;
     Ok(tuples)
 }
 
@@ -1954,6 +2212,8 @@ pub fn scan_class_rows_without_catcache(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgClassRow> {
+    #[cfg(test)]
+    CLASS_SCAN_COUNT_FOR_TESTS.with(|count| count.set(count.get() + 1));
     scan_syscache_rows_without_catcache(db, client_id, txn_ctx, SysCacheId::RELOID)
         .into_iter()
         .filter_map(|tuple| match tuple {
@@ -2368,7 +2628,9 @@ pub fn ensure_statistic_ext_data_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::include::catalog::{BootstrapCatalogKind, PUBLIC_NAMESPACE_OID};
+    use crate::include::catalog::{
+        BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PUBLIC_NAMESPACE_OID, PgDatabaseRow,
+    };
 
     #[test]
     fn postgres_syscache_names_map_to_catalog_indexes() {
@@ -2390,6 +2652,18 @@ mod tests {
         assert_eq!(
             SysCacheId::CONSTROID.index_oid(),
             PG_CONSTRAINT_OID_INDEX_OID
+        );
+        assert_eq!(
+            SysCacheId::DATABASEOID.index_oid(),
+            PG_DATABASE_OID_INDEX_OID
+        );
+        assert_eq!(
+            SysCacheId::TABLESPACEOID.index_oid(),
+            PG_TABLESPACE_OID_INDEX_OID
+        );
+        assert_eq!(
+            SysCacheId::TABLESPACENAME.index_oid(),
+            PG_TABLESPACE_SPCNAME_INDEX_OID
         );
     }
 
@@ -2455,7 +2729,7 @@ mod tests {
 
         let mut invalidation = CatalogInvalidation::default();
         invalidation
-            .touched_catalogs
+            .syscache_flush_catalogs
             .insert(BootstrapCatalogKind::PgClass);
         cache.invalidate(&invalidation);
 
@@ -2472,6 +2746,108 @@ mod tests {
                 BackendCacheContext::Autocommit,
                 SysCacheLookupMode::Exact,
                 &type_key
+            ),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn backend_syscache_invalidates_exact_negative_entry_by_key() {
+        let mut cache = BackendSysCache::default();
+        let rel_key = SysCacheQueryKey::new(
+            SysCacheId::RELNAMENSP,
+            &[
+                Value::Text("created_later".into()),
+                oid_key(PUBLIC_NAMESPACE_OID),
+            ],
+        )
+        .unwrap();
+        let other_key = SysCacheQueryKey::new(
+            SysCacheId::RELNAMENSP,
+            &[
+                Value::Text("unrelated".into()),
+                oid_key(PUBLIC_NAMESPACE_OID),
+            ],
+        )
+        .unwrap();
+
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::Exact,
+            rel_key.clone(),
+            Vec::new(),
+        );
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::Exact,
+            other_key.clone(),
+            Vec::new(),
+        );
+
+        let mut invalidation = CatalogInvalidation::default();
+        invalidation
+            .syscache_keys
+            .insert(rel_key.as_invalidation_key());
+        cache.invalidate(&invalidation);
+
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &rel_key
+            ),
+            None
+        );
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &other_key
+            ),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn backend_syscache_invalidates_list_prefix_by_full_key() {
+        let mut cache = BackendSysCache::default();
+        let rel42_attrs = SysCacheQueryKey::new(SysCacheId::ATTNUM, &[oid_key(42)]).unwrap();
+        let rel43_attrs = SysCacheQueryKey::new(SysCacheId::ATTNUM, &[oid_key(43)]).unwrap();
+        let full_attnum =
+            SysCacheQueryKey::new(SysCacheId::ATTNUM, &[oid_key(42), Value::Int16(1)]).unwrap();
+
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::List,
+            rel42_attrs.clone(),
+            Vec::new(),
+        );
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::List,
+            rel43_attrs.clone(),
+            Vec::new(),
+        );
+
+        let mut invalidation = CatalogInvalidation::default();
+        invalidation
+            .syscache_keys
+            .insert(full_attnum.as_invalidation_key());
+        cache.invalidate(&invalidation);
+
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::List,
+                &rel42_attrs
+            ),
+            None
+        );
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::List,
+                &rel43_attrs
             ),
             Some(Vec::new())
         );
@@ -2539,14 +2915,17 @@ mod tests {
         {
             let mut states = db.backend_cache_states.write();
             let state = states.get_mut(&client_id).unwrap();
-            assert_eq!(
-                state.syscache.get(
+            let cached = state
+                .syscache
+                .get(
                     BackendCacheContext::Autocommit,
                     SysCacheLookupMode::Exact,
-                    &rel_key
-                ),
-                Some(vec![SysCacheTuple::Class(class_row)])
-            );
+                    &rel_key,
+                )
+                .unwrap();
+            assert_eq!(cached.len(), 1);
+            assert!(cached[0].identity.is_some());
+            assert_eq!(cached[0].decoded(), Some(SysCacheTuple::Class(class_row)));
             assert!(state.catcache.is_none());
             assert!(state.relation_cache.is_empty());
         }
@@ -2556,8 +2935,8 @@ mod tests {
             .unwrap();
         assert_eq!(entry.relation_oid, relation_oid);
 
-        let states = db.backend_cache_states.read();
-        let state = states.get(&client_id).unwrap();
+        let mut states = db.backend_cache_states.write();
+        let state = states.get_mut(&client_id).unwrap();
         assert!(state.catcache.is_none());
         assert_eq!(state.relation_cache.len(), 1);
         assert!(state.relation_cache.contains_key(&relation_oid));
@@ -2590,16 +2969,253 @@ mod tests {
 
         let mut states = db.backend_cache_states.write();
         let state = states.get_mut(&client_id).unwrap();
+        let cached = state
+            .syscache
+            .get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::List,
+                &proc_key,
+            )
+            .unwrap();
+        let cached_rows = cached
+            .iter()
+            .filter_map(CachedSysCacheTuple::decoded)
+            .collect::<Vec<_>>();
+        assert_eq!(cached_rows, rows);
+        assert!(cached.iter().all(|entry| entry.identity.is_some()));
+        assert!(state.catcache.is_none());
+        assert!(state.relation_cache.is_empty());
+    }
+
+    #[test]
+    fn database_oid_lookup_uses_keyed_syscache_without_catcache() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "database_oid");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 81;
+        let key =
+            SysCacheQueryKey::new(SysCacheId::DATABASEOID, &[oid_key(db.database_oid)]).unwrap();
+
+        let rows = SearchSysCache1(
+            &db,
+            client_id,
+            None,
+            SysCacheId::DATABASEOID,
+            oid_key(db.database_oid),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            &rows[0],
+            SysCacheTuple::Database(row)
+                if row.oid == db.database_oid && row.datdba == BOOTSTRAP_SUPERUSER_OID
+        ));
+
+        let mut states = db.backend_cache_states.write();
+        let state = states.get_mut(&client_id).unwrap();
+        let cached = state
+            .syscache
+            .get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &key,
+            )
+            .unwrap();
+        let cached_rows = cached
+            .iter()
+            .filter_map(CachedSysCacheTuple::decoded)
+            .collect::<Vec<_>>();
+        assert_eq!(cached_rows, rows);
+        assert!(cached.iter().all(|entry| entry.identity.is_some()));
+        assert!(state.catcache.is_none());
+    }
+
+    #[test]
+    fn database_oid_lookup_caches_negative_entry_without_catcache() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "database_negative");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 82;
+        let missing_oid = db.shared_catalog.read().next_oid().saturating_add(10_000);
+        let key = SysCacheQueryKey::new(SysCacheId::DATABASEOID, &[oid_key(missing_oid)]).unwrap();
+
+        assert!(
+            SearchSysCache1(
+                &db,
+                client_id,
+                None,
+                SysCacheId::DATABASEOID,
+                oid_key(missing_oid),
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        let mut states = db.backend_cache_states.write();
+        let state = states.get_mut(&client_id).unwrap();
         assert_eq!(
             state.syscache.get(
                 BackendCacheContext::Autocommit,
-                SysCacheLookupMode::List,
-                &proc_key
+                SysCacheLookupMode::Exact,
+                &key
             ),
-            Some(rows)
+            Some(Vec::new())
         );
         assert!(state.catcache.is_none());
-        assert!(state.relation_cache.is_empty());
+    }
+
+    #[test]
+    fn create_database_invalidates_negative_database_oid_entry() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "database_create");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 83;
+        let new_database_oid = db.shared_catalog.read().next_oid();
+
+        assert!(
+            SearchSysCache1(
+                &db,
+                client_id,
+                None,
+                SysCacheId::DATABASEOID,
+                oid_key(new_database_oid),
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        db.execute(client_id, "create database syscache_created_db")
+            .unwrap();
+
+        assert!(
+            SearchSysCache1(
+                &db,
+                client_id,
+                None,
+                SysCacheId::DATABASEOID,
+                oid_key(new_database_oid),
+            )
+            .unwrap()
+            .into_iter()
+            .any(|tuple| matches!(tuple, SysCacheTuple::Database(row)
+                    if row.oid == new_database_oid && row.datname == "syscache_created_db"))
+        );
+    }
+
+    #[test]
+    fn alter_database_owner_invalidates_database_oid_entry() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "database_update");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 84;
+        let original = database_row_for_cache_test(&db, client_id, db.database_oid);
+
+        db.execute(client_id, "create role database_cache_owner")
+            .unwrap();
+        let new_owner_oid = SearchSysCache1(
+            &db,
+            client_id,
+            None,
+            SysCacheId::AUTHNAME,
+            Value::Text("database_cache_owner".into()),
+        )
+        .unwrap()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::AuthId(row) => Some(row.oid),
+            _ => None,
+        })
+        .unwrap();
+
+        db.execute(
+            client_id,
+            &format!(
+                "alter database {} owner to database_cache_owner",
+                db.database_name
+            ),
+        )
+        .unwrap();
+
+        let updated = database_row_for_cache_test(&db, client_id, db.database_oid);
+        assert_eq!(updated.datdba, new_owner_oid);
+        assert_ne!(updated.datdba, original.datdba);
+    }
+
+    #[test]
+    fn create_table_invalidates_negative_relname_syscache_entry() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "create_rel");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 79;
+        let name = Value::Text("created_later".into());
+
+        assert!(
+            SearchSysCache2(
+                &db,
+                client_id,
+                None,
+                SysCacheId::RELNAMENSP,
+                name.clone(),
+                oid_key(PUBLIC_NAMESPACE_OID),
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        db.execute(client_id, "create table created_later (id int4)")
+            .unwrap();
+
+        assert!(
+            SearchSysCache2(
+                &db,
+                client_id,
+                None,
+                SysCacheId::RELNAMENSP,
+                name,
+                oid_key(PUBLIC_NAMESPACE_OID),
+            )
+            .unwrap()
+            .into_iter()
+            .any(
+                |tuple| matches!(tuple, SysCacheTuple::Class(row) if row.relname == "created_later")
+            )
+        );
+    }
+
+    #[test]
+    fn create_index_invalidates_heap_relcache_entry() {
+        let base = crate::pgrust::test_support::scratch_temp_dir("syscache", "index_relcache");
+        let db = Database::open(&base, 16).unwrap();
+        let client_id = 80;
+
+        db.execute(client_id, "create table relcache_indexed (id int4)")
+            .unwrap();
+        let relation_oid = SearchSysCache2(
+            &db,
+            client_id,
+            None,
+            SysCacheId::RELNAMENSP,
+            Value::Text("relcache_indexed".into()),
+            oid_key(PUBLIC_NAMESPACE_OID),
+        )
+        .unwrap()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Class(row) => Some(row.oid),
+            _ => None,
+        })
+        .unwrap();
+
+        let before = RelationIdGetRelation(&db, client_id, None, relation_oid)
+            .unwrap()
+            .unwrap();
+        assert!(!before.relhasindex);
+
+        db.execute(
+            client_id,
+            "create index relcache_indexed_id_idx on relcache_indexed (id)",
+        )
+        .unwrap();
+
+        let after = RelationIdGetRelation(&db, client_id, None, relation_oid)
+            .unwrap()
+            .unwrap();
+        assert!(after.relhasindex);
     }
 
     fn class_row_for_cache_test(
@@ -2618,6 +3234,27 @@ mod tests {
         .into_iter()
         .find_map(|tuple| match tuple {
             SysCacheTuple::Class(row) => Some(row),
+            _ => None,
+        })
+        .unwrap()
+    }
+
+    fn database_row_for_cache_test(
+        db: &Database,
+        client_id: ClientId,
+        database_oid: u32,
+    ) -> PgDatabaseRow {
+        SearchSysCache1(
+            db,
+            client_id,
+            None,
+            SysCacheId::DATABASEOID,
+            oid_key(database_oid),
+        )
+        .unwrap()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Database(row) => Some(row),
             _ => None,
         })
         .unwrap()

@@ -37,6 +37,20 @@ use crate::include::nodes::datum::Value;
 
 const SYSTEM_CATALOG_INDEX_SHADOW_REL_NUMBER_BASE: u32 = 0xF000_0000;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogTupleIdentity {
+    pub(crate) db_oid: u32,
+    pub(crate) kind: BootstrapCatalogKind,
+    pub(crate) heap_rel: RelFileLocator,
+    pub(crate) tid: ItemPointerData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogScannedTuple {
+    pub(crate) identity: CatalogTupleIdentity,
+    pub(crate) tuple: crate::include::access::htup::HeapTuple,
+}
+
 pub fn insert_bootstrap_system_indexes(catalog: &mut Catalog) {
     for descriptor in system_catalog_indexes() {
         if catalog.get_by_oid(descriptor.relation_oid).is_some() {
@@ -441,9 +455,19 @@ impl CatalogIndexInsertState {
         heap_tid: ItemPointerData,
         values: &[Value],
     ) -> Result<(), CatalogError> {
+        self.insert_with_old_tid(heap_tid, None, values)
+    }
+
+    pub(crate) fn insert_with_old_tid(
+        &self,
+        heap_tid: ItemPointerData,
+        old_heap_tid: Option<ItemPointerData>,
+        values: &[Value],
+    ) -> Result<(), CatalogError> {
         for template in &self.contexts {
             let mut insert_ctx = template.clone();
             insert_ctx.heap_tid = heap_tid;
+            insert_ctx.old_heap_tid = old_heap_tid;
             insert_ctx.values = values.to_vec();
             crate::backend::access::index::indexam::index_insert_stub(&insert_ctx, BTREE_AM_OID)?;
         }
@@ -516,7 +540,7 @@ pub fn probe_system_catalog_rows_visible(
     )
 }
 
-pub fn probe_system_catalog_rows_visible_in_db(
+pub(crate) fn probe_system_catalog_tuples_visible_in_db(
     pool: &Arc<BufferPool<SmgrStorageBackend>>,
     txns: &RwLock<TransactionManager>,
     snapshot: &Snapshot,
@@ -524,17 +548,17 @@ pub fn probe_system_catalog_rows_visible_in_db(
     db_oid: u32,
     index_relation_oid: u32,
     key_data: Vec<ScanKeyData>,
-) -> Result<Vec<Vec<Value>>, CatalogError> {
+) -> Result<Vec<CatalogScannedTuple>, CatalogError> {
     let descriptor = *system_catalog_index_by_oid(index_relation_oid)
         .ok_or(CatalogError::Corrupt("unknown system catalog index"))?;
-    let heap_desc = crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind);
     let index_desc = system_catalog_index_desc(descriptor);
     let index_meta = system_catalog_index_relcache(descriptor);
+    let heap_relation = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
     let scan_ctx = IndexBeginScanContext {
         pool: Arc::clone(pool),
         client_id,
         snapshot: snapshot.clone(),
-        heap_relation: bootstrap_catalog_rel(descriptor.heap_kind, db_oid),
+        heap_relation,
         index_relation: system_catalog_index_rel(descriptor, db_oid),
         index_desc,
         index_meta,
@@ -544,7 +568,7 @@ pub fn probe_system_catalog_rows_visible_in_db(
         want_itup: false,
     };
     let mut scan = index_beginscan(&scan_ctx, BTREE_AM_OID)?;
-    let mut rows = Vec::new();
+    let mut tuples = Vec::new();
     while index_getnext(&mut scan, BTREE_AM_OID)? {
         let Some(tid) = scan.xs_heaptid else {
             continue;
@@ -561,6 +585,41 @@ pub fn probe_system_catalog_rows_visible_in_db(
         else {
             continue;
         };
+        tuples.push(CatalogScannedTuple {
+            identity: CatalogTupleIdentity {
+                db_oid,
+                kind: descriptor.heap_kind,
+                heap_rel: heap_relation,
+                tid,
+            },
+            tuple,
+        });
+    }
+    index_endscan(scan, BTREE_AM_OID)?;
+    Ok(tuples)
+}
+
+pub fn probe_system_catalog_rows_visible_in_db(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &RwLock<TransactionManager>,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+    db_oid: u32,
+    index_relation_oid: u32,
+    key_data: Vec<ScanKeyData>,
+) -> Result<Vec<Vec<Value>>, CatalogError> {
+    let tuples = probe_system_catalog_tuples_visible_in_db(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        db_oid,
+        index_relation_oid,
+        key_data,
+    )?;
+    let mut rows = Vec::with_capacity(tuples.len());
+    for scanned in tuples {
+        let heap_desc = crate::include::catalog::bootstrap_relation_desc(scanned.identity.kind);
         let txns_guard = txns.read();
         rows.push(
             crate::backend::catalog::rowcodec::decode_catalog_tuple_values_with_toast(
@@ -568,14 +627,13 @@ pub fn probe_system_catalog_rows_visible_in_db(
                 &txns_guard,
                 snapshot,
                 client_id,
-                descriptor.heap_kind,
-                db_oid,
+                scanned.identity.kind,
+                scanned.identity.db_oid,
                 &heap_desc,
-                &tuple,
+                &scanned.tuple,
             )?,
         );
     }
-    index_endscan(scan, BTREE_AM_OID)?;
     Ok(rows)
 }
 
