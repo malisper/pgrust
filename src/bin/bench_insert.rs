@@ -6,9 +6,9 @@ static GLOBAL: MiMalloc = MiMalloc;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use pgrust::executor::Value;
-use pgrust::pgrust::compact_string::CompactString;
-use pgrust::pgrust::database::{Database, Session};
+use pgrust::CompactString;
+use pgrust::Value;
+use pgrust::{Database, Session};
 
 fn main() -> Result<(), String> {
     let args = parse_args()?;

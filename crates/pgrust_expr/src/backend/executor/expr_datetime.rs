@@ -11,11 +11,11 @@ use crate::compat::backend::utils::time::datetime::{
 use crate::compat::backend::utils::time::timestamp::{
     format_timestamp_text, format_timestamptz_text,
 };
-use crate::compat::include::nodes::datetime::{
+use pgrust_nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
     TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY,
 };
-use crate::compat::include::nodes::datum::Value;
+use pgrust_nodes::datum::Value;
 
 pub fn render_datetime_value_text_with_config(
     value: &Value,
@@ -150,28 +150,21 @@ fn rounded_usecs(value: i64, precision: Option<i32>) -> i64 {
 
 pub fn apply_time_precision(value: Value, precision: Option<i32>) -> Value {
     match value {
-        Value::Time(crate::compat::include::nodes::datetime::TimeADT(usecs)) => Value::Time(
-            crate::compat::include::nodes::datetime::TimeADT(rounded_usecs(usecs, precision)),
+        Value::Time(pgrust_nodes::datetime::TimeADT(usecs)) => Value::Time(
+            pgrust_nodes::datetime::TimeADT(rounded_usecs(usecs, precision)),
         ),
         Value::TimeTz(mut timetz) => {
-            timetz.time = crate::compat::include::nodes::datetime::TimeADT(rounded_usecs(
-                timetz.time.0,
-                precision,
-            ));
+            timetz.time = pgrust_nodes::datetime::TimeADT(rounded_usecs(timetz.time.0, precision));
             Value::TimeTz(timetz)
         }
         Value::Timestamp(timestamp) if !timestamp.is_finite() => Value::Timestamp(timestamp),
-        Value::Timestamp(crate::compat::include::nodes::datetime::TimestampADT(usecs)) => {
-            Value::Timestamp(crate::compat::include::nodes::datetime::TimestampADT(
-                rounded_usecs(usecs, precision),
-            ))
-        }
+        Value::Timestamp(pgrust_nodes::datetime::TimestampADT(usecs)) => Value::Timestamp(
+            pgrust_nodes::datetime::TimestampADT(rounded_usecs(usecs, precision)),
+        ),
         Value::TimestampTz(timestamp) if !timestamp.is_finite() => Value::TimestampTz(timestamp),
-        Value::TimestampTz(crate::compat::include::nodes::datetime::TimestampTzADT(usecs)) => {
-            Value::TimestampTz(crate::compat::include::nodes::datetime::TimestampTzADT(
-                rounded_usecs(usecs, precision),
-            ))
-        }
+        Value::TimestampTz(pgrust_nodes::datetime::TimestampTzADT(usecs)) => Value::TimestampTz(
+            pgrust_nodes::datetime::TimestampTzADT(rounded_usecs(usecs, precision)),
+        ),
         other => other,
     }
 }

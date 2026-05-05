@@ -1,6 +1,4 @@
-use crate::compat::include::nodes::tsearch::{
-    TsPosition, TsQuery, TsQueryNode, TsQueryOperand, TsVector, TsWeight,
-};
+use pgrust_nodes::tsearch::{TsPosition, TsQuery, TsQueryNode, TsQueryOperand, TsVector, TsWeight};
 
 const DEFAULT_WEIGHTS: [f64; 4] = [0.1, 0.2, 0.4, 1.0];
 

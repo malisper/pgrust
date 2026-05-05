@@ -416,10 +416,10 @@ pub fn cotd(value: f64) -> f64 {
 }
 
 fn numeric_gcd(
-    left: &crate::compat::include::nodes::datum::NumericValue,
-    right: &crate::compat::include::nodes::datum::NumericValue,
-) -> crate::compat::include::nodes::datum::NumericValue {
-    use crate::compat::include::nodes::datum::NumericValue;
+    left: &pgrust_nodes::datum::NumericValue,
+    right: &pgrust_nodes::datum::NumericValue,
+) -> pgrust_nodes::datum::NumericValue {
+    use pgrust_nodes::datum::NumericValue;
     match (left, right) {
         (NumericValue::NaN, _) | (_, NumericValue::NaN) => NumericValue::NaN,
         (
@@ -449,12 +449,12 @@ fn numeric_gcd(
 }
 
 fn numeric_lcm(
-    left: &crate::compat::include::nodes::datum::NumericValue,
-    right: &crate::compat::include::nodes::datum::NumericValue,
-) -> Result<crate::compat::include::nodes::datum::NumericValue, ExecError> {
-    use crate::compat::include::nodes::datum::NumericValue;
+    left: &pgrust_nodes::datum::NumericValue,
+    right: &pgrust_nodes::datum::NumericValue,
+) -> Result<pgrust_nodes::datum::NumericValue, ExecError> {
     use num_bigint::BigInt;
     use num_traits::Zero;
+    use pgrust_nodes::datum::NumericValue;
     match (left, right) {
         (NumericValue::NaN, _) | (_, NumericValue::NaN) => Ok(NumericValue::NaN),
         (
@@ -496,11 +496,9 @@ fn numeric_lcm(
     }
 }
 
-fn numeric_digits_before_decimal(
-    value: &crate::compat::include::nodes::datum::NumericValue,
-) -> i32 {
-    use crate::compat::include::nodes::datum::NumericValue;
+fn numeric_digits_before_decimal(value: &pgrust_nodes::datum::NumericValue) -> i32 {
     use num_traits::{Signed, Zero};
+    use pgrust_nodes::datum::NumericValue;
     match value {
         NumericValue::Finite { coeff, scale, .. } if !coeff.is_zero() => {
             coeff.abs().to_str_radix(10).len() as i32 - *scale as i32

@@ -367,10 +367,6 @@ pub mod pgrust {
     }
 
     pub mod session {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum ByteaOutputFormat {
-            Hex,
-            Escape,
-        }
+        pub use crate::ByteaOutputFormat;
     }
 }

@@ -42,7 +42,7 @@ use crate::include::nodes::primnodes::{
 use crate::include::nodes::tsearch::{TsLexeme, TsVector};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
-use pgrust_expr::backend::executor::expr_json::{
+use pgrust_expr::executor::expr_json::{
     apply_jsonb_delete, apply_jsonb_subscript_assignment as expr_apply_jsonb_subscript_assignment,
     delete_jsonb_path, float_json_scalar_text, float_json_serde_value, json_lookup_index,
     json_lookup_path, json_value_to_value, parse_json_path_value, raw_json_result_to_value,

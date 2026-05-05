@@ -1,9 +1,9 @@
 use crate::compat::backend::executor::jsonb::{JsonbValue, decode_jsonb};
-use crate::compat::include::catalog::BPCHAR_HASH_OPCLASS_OID;
-use crate::compat::include::nodes::datum::{
+use pgrust_catalog_data::BPCHAR_HASH_OPCLASS_OID;
+use pgrust_nodes::datum::{
     ArrayValue, InetValue, MultirangeValue, RangeBound, RangeValue, RecordValue, Value,
 };
-use crate::compat::include::nodes::parsenodes::{SqlType, SqlTypeKind};
+use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind};
 use std::net::IpAddr;
 
 pub const HASH_PARTITION_SEED: u64 = 0x7A5B_2236_7996_DCFD;
@@ -378,7 +378,7 @@ pub fn hash_values_equal(left: &Value, right: &Value, opclass: Option<u32>) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::include::nodes::datum::NumericValue;
+    use pgrust_nodes::datum::NumericValue;
 
     #[test]
     fn hash_value_normalizes_zero_and_bpchar() {

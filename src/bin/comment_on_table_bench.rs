@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use pgrust::DatabaseOpenOptions;
-use pgrust::executor::{StatementResult, Value};
-use pgrust::pgrust::database::{Database, Session};
+use pgrust::{Database, Session};
+use pgrust::{StatementResult, Value};
 
 struct Args {
     base_dir: PathBuf,

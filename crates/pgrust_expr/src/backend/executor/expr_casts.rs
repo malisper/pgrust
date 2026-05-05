@@ -51,23 +51,21 @@ use crate::compat::backend::utils::time::datetime::{
 use crate::compat::backend::utils::time::timestamp::{
     is_valid_finite_timestamp_usecs, parse_timestamp_text, parse_timestamptz_text,
 };
-use crate::compat::include::catalog::{
-    INT2_TYPE_OID, OID_TYPE_OID, PG_TOAST_NAMESPACE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID,
-    XID8_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
-};
-use crate::compat::include::nodes::datetime::{
-    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
-    USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
-};
-use crate::compat::include::nodes::datum::{
-    ArrayDimension, BitString, RecordDescriptor, RecordValue,
-};
-use crate::compat::pgrust::compact_string::CompactString;
 use crate::compat::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
+use pgrust_catalog_data::{
+    INT2_TYPE_OID, OID_TYPE_OID, PG_TOAST_NAMESPACE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID,
+    XID8_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
+};
+use pgrust_core::CompactString;
+use pgrust_nodes::datetime::{
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
+    USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
+};
+use pgrust_nodes::datum::{ArrayDimension, BitString, RecordDescriptor, RecordValue};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
@@ -170,8 +168,8 @@ fn cannot_cast_type_error(source: &'static str, target: &'static str) -> ExecErr
 fn timestamp_date_part(value: TimestampADT) -> DateADT {
     if !value.is_finite() {
         return DateADT(match value.0 {
-            crate::compat::include::nodes::datetime::TIMESTAMP_NOEND => DATEVAL_NOEND,
-            crate::compat::include::nodes::datetime::TIMESTAMP_NOBEGIN => DATEVAL_NOBEGIN,
+            pgrust_nodes::datetime::TIMESTAMP_NOEND => DATEVAL_NOEND,
+            pgrust_nodes::datetime::TIMESTAMP_NOBEGIN => DATEVAL_NOBEGIN,
             _ => unreachable!("checked finite timestamp above"),
         });
     }
@@ -190,12 +188,8 @@ fn date_out_of_range_for_timestamp_error() -> ExecError {
 
 fn date_timestamp_cast(value: DateADT) -> Result<TimestampADT, ExecError> {
     match value.0 {
-        DATEVAL_NOBEGIN => Ok(TimestampADT(
-            crate::compat::include::nodes::datetime::TIMESTAMP_NOBEGIN,
-        )),
-        DATEVAL_NOEND => Ok(TimestampADT(
-            crate::compat::include::nodes::datetime::TIMESTAMP_NOEND,
-        )),
+        DATEVAL_NOBEGIN => Ok(TimestampADT(pgrust_nodes::datetime::TIMESTAMP_NOBEGIN)),
+        DATEVAL_NOEND => Ok(TimestampADT(pgrust_nodes::datetime::TIMESTAMP_NOEND)),
         days => {
             let usecs = i128::from(days) * i128::from(USECS_PER_DAY);
             let usecs =
@@ -845,9 +839,7 @@ pub fn numeric_input_would_overflow(text: &str) -> bool {
     digits_before_decimal > NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL
 }
 
-fn parse_numeric_input_value(
-    text: &str,
-) -> Result<crate::compat::include::nodes::datum::NumericValue, ExecError> {
+fn parse_numeric_input_value(text: &str) -> Result<pgrust_nodes::datum::NumericValue, ExecError> {
     if numeric_input_would_overflow(text) {
         return Err(ExecError::NumericFieldOverflow);
     }
@@ -3141,7 +3133,7 @@ fn uses_user_defined_input_function(ty: SqlType, catalog: Option<&dyn CatalogLoo
 fn user_defined_base_type_row(
     ty: SqlType,
     catalog: Option<&dyn CatalogLookup>,
-) -> Option<crate::compat::include::catalog::PgTypeRow> {
+) -> Option<pgrust_catalog_data::PgTypeRow> {
     let catalog = catalog?;
     if ty.type_oid == 0 || matches!(ty.kind, SqlTypeKind::Shell) {
         return None;
@@ -7304,13 +7296,13 @@ mod tests {
     use crate::compat::backend::executor::{ExecError, Value};
     use crate::compat::backend::parser::{SqlType, SqlTypeKind};
     use crate::compat::backend::utils::misc::guc_datetime::{DateTimeConfig, IntervalStyle};
-    use crate::compat::include::catalog::{
+    use pgrust_catalog_data::{
         BOOL_TYPE_OID, GTSVECTOR_TYPE_OID, INT4_TYPE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
     };
-    use crate::compat::include::nodes::datetime::{
+    use pgrust_nodes::datetime::{
         DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
     };
-    use crate::compat::include::nodes::datum::{ArrayValue, IntervalValue};
+    use pgrust_nodes::datum::{ArrayValue, IntervalValue};
 
     #[test]
     fn float4_text_input_rounds_at_float4_width() {
@@ -7455,11 +7447,11 @@ mod tests {
             Value::PgArray(
                 ArrayValue::from_dimensions(
                     vec![
-                        crate::compat::include::nodes::datum::ArrayDimension {
+                        pgrust_nodes::datum::ArrayDimension {
                             lower_bound: 1,
                             length: 3,
                         },
-                        crate::compat::include::nodes::datum::ArrayDimension {
+                        pgrust_nodes::datum::ArrayDimension {
                             lower_bound: 1,
                             length: 2,
                         },
@@ -7504,11 +7496,11 @@ mod tests {
             Value::PgArray(
                 ArrayValue::from_dimensions(
                     vec![
-                        crate::compat::include::nodes::datum::ArrayDimension {
+                        pgrust_nodes::datum::ArrayDimension {
                             lower_bound: 1,
                             length: 1,
                         },
-                        crate::compat::include::nodes::datum::ArrayDimension {
+                        pgrust_nodes::datum::ArrayDimension {
                             lower_bound: 1,
                             length: 2,
                         },
@@ -7634,7 +7626,7 @@ mod tests {
                         months: 0,
                     }),
                 ])
-                .with_element_type_oid(crate::compat::include::catalog::INTERVAL_TYPE_OID),
+                .with_element_type_oid(pgrust_catalog_data::INTERVAL_TYPE_OID),
             )
         );
         assert_eq!(
@@ -7649,7 +7641,7 @@ mod tests {
                     days: 0,
                     months: 0,
                 })])
-                .with_element_type_oid(crate::compat::include::catalog::INTERVAL_TYPE_OID),
+                .with_element_type_oid(pgrust_catalog_data::INTERVAL_TYPE_OID),
             )
         );
     }

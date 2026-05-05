@@ -13,13 +13,13 @@ use super::value_io::{
 use crate::compat::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::compat::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::compat::backend::utils::time::datetime::days_from_ymd;
-use crate::compat::include::catalog::{
+use pgrust_catalog_data::{
     ARRAYRANGE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
     INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
     RangeCanonicalization, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID,
     TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, VARBITRANGE_TYPE_OID, range_type_ref_for_sql_type,
 };
-use crate::compat::include::nodes::datetime::DateADT;
+use pgrust_nodes::datetime::DateADT;
 
 const RANGE_EMPTY_FLAG: u8 = 0x01;
 const RANGE_LOWER_INC_FLAG: u8 = 0x02;
@@ -440,7 +440,7 @@ fn coerce_constructor_bound_to_subtype(
         && let Some(catalog) = catalog
         && let Some(relation) = catalog.lookup_relation_by_oid(subtype.typrelid)
     {
-        let descriptor = crate::compat::include::nodes::datum::RecordDescriptor::named(
+        let descriptor = pgrust_nodes::datum::RecordDescriptor::named(
             subtype.type_oid,
             subtype.typrelid,
             subtype.typmod,
@@ -482,7 +482,7 @@ fn coerce_constructor_bound_to_subtype(
             })
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(Value::Record(
-            crate::compat::include::nodes::datum::RecordValue::from_descriptor(descriptor, fields),
+            pgrust_nodes::datum::RecordValue::from_descriptor(descriptor, fields),
         ));
     }
     crate::compat::backend::executor::expr_casts::cast_value_with_source_type_catalog_and_config(
@@ -1128,7 +1128,7 @@ fn render_bound_text(value: &Value, datetime_config: &DateTimeConfig) -> String 
         Value::Bit(bits) => bits.render(),
         Value::PgArray(array) => format_array_value_text_with_config(array, datetime_config),
         Value::Array(items) => format_array_value_text_with_config(
-            &crate::compat::include::nodes::datum::ArrayValue::from_1d(items.clone()),
+            &pgrust_nodes::datum::ArrayValue::from_1d(items.clone()),
             datetime_config,
         ),
         Value::Record(record) => format_record_text_with_config(record, datetime_config),
@@ -1291,7 +1291,7 @@ fn range_bounds_error(_range_type: RangeTypeRef) -> ExecError {
 mod tests {
     use super::*;
     use crate::compat::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat};
-    use crate::compat::include::nodes::datum::NumericValue;
+    use pgrust_nodes::datum::NumericValue;
 
     fn test_range_type(sql_type: SqlType) -> RangeTypeRef {
         range_type_ref_for_sql_type(sql_type).expect("range type")

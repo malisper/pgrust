@@ -1,4 +1,4 @@
-use crate::backend::storage::smgr::BLCKSZ;
+use crate::smgr::BLCKSZ;
 pub use pgrust_core::storage::OffsetNumber;
 
 pub const PG_PAGE_LAYOUT_VERSION: u8 = 4;

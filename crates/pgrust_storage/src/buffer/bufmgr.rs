@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::storage_backend::{SmgrStorageBackend, StorageBackend};
-use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
-use crate::include::storage::buf_internals::*;
+use crate::buf_internals::*;
+use crate::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::wal::{INVALID_LSN, Lsn, RM_BTREE_ID, RM_HEAP_ID, WalSink};
 
 struct BufferFrame {
@@ -1169,7 +1169,7 @@ impl BufferPool<SmgrStorageBackend> {
                     storage.smgr.extend(rel, fork, b, &zero_page, true)?;
                 }
             }
-            Ok::<(), crate::backend::storage::smgr::SmgrError>(())
+            Ok::<(), crate::smgr::SmgrError>(())
         })
         .map_err(|err| Error::Storage(err.to_string()))
     }
@@ -1313,9 +1313,7 @@ impl<S: StorageBackend + Send> std::fmt::Debug for OwnedBufferPin<S> {
 mod tests {
     use super::super::storage_backend::{FakeStorage, SmgrStorageBackend};
     use super::*;
-    use crate::backend::storage::smgr::{
-        ForkNumber, MdStorageManager, RelFileLocator, StorageManager,
-    };
+    use crate::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
     use crate::wal::WalSink;
     use std::fs;
     use std::path::PathBuf;

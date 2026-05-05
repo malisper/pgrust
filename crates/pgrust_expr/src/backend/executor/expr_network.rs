@@ -1,7 +1,7 @@
 use super::ExecError;
-use crate::compat::include::nodes::datum::{InetValue, Value};
-use crate::compat::include::nodes::primnodes::BuiltinScalarFunction;
-use crate::compat::pgrust::compact_string::CompactString;
+use pgrust_core::CompactString;
+use pgrust_nodes::datum::{InetValue, Value};
+use pgrust_nodes::primnodes::BuiltinScalarFunction;
 use std::cmp::Ordering;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

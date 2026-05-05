@@ -5,19 +5,20 @@
 //!   cargo run --bin query_sql_demo -- "select name, note from people where id > 1"
 
 use parking_lot::RwLock;
-use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
-use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::backend::catalog::catalog::column_desc;
-use pgrust::backend::storage::smgr::MdStorageManager;
-use pgrust::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
-use pgrust::backend::utils::misc::interrupts::InterruptState;
-use pgrust::executor::{
+use pgrust::catalog::column_desc;
+use pgrust::plpgsql::{RaiseLevel, clear_notices, take_notices};
+use pgrust::sql::{SqlType, SqlTypeKind, Statement, parse_statement};
+use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
+use pgrust::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
 };
-use pgrust::include::access::htup::{HeapTuple, TupleValue};
-use pgrust::parser::{SqlType, SqlTypeKind, Statement, parse_statement};
-use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, take_notices};
-use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
+use pgrust_access::access::htup::{HeapTuple, TupleValue};
+use pgrust_access::heap::heapam::{heap_flush, heap_insert_mvcc};
+use pgrust_access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
+use pgrust_catalog_store::RelCache;
+use pgrust_core::InterruptState;
+use pgrust_nodes::relcache::RelCacheEntry;
+use pgrust_storage::smgr::MdStorageManager;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,26 +68,22 @@ fn render_value(value: &Value) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Xid8(v) => v.to_string(),
         Value::PgLsn(v) => format!("{:X}/{:X}", v >> 32, v & 0xFFFF_FFFF),
-        Value::Money(v) => pgrust::backend::executor::money_format_text(*v),
+        Value::Money(v) => pgrust_expr::money_format_text(*v),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
         | Value::Timestamp(_)
-        | Value::TimestampTz(_) => {
-            pgrust::backend::executor::render_datetime_value_text(value).unwrap()
-        }
+        | Value::TimestampTz(_) => pgrust_expr::render_datetime_value_text(value).unwrap(),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => format!("{v:?}"),
-        Value::Uuid(v) => pgrust::backend::executor::render_uuid_text(v),
+        Value::Uuid(v) => pgrust_expr::render_uuid_text(v),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),
         Value::Xml(v) => v.to_string(),
-        Value::Range(_) => pgrust::backend::executor::render_range_text(value).unwrap_or_default(),
-        Value::Multirange(_) => {
-            pgrust::backend::executor::render_multirange_text(value).unwrap_or_default()
-        }
+        Value::Range(_) => pgrust_expr::render_range_text(value).unwrap_or_default(),
+        Value::Multirange(_) => pgrust_expr::render_multirange_text(value).unwrap_or_default(),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -97,18 +94,17 @@ fn render_value(value: &Value) -> String {
         Value::TsVector(v) => v.render(),
         Value::TsQuery(v) => v.render(),
         Value::Bit(v) => v.render(),
-        Value::Bytea(v) => pgrust::backend::libpq::pqformat::format_bytea_text(
-            v,
-            pgrust::pgrust::session::ByteaOutputFormat::Hex,
-        ),
+        Value::Bytea(v) => {
+            pgrust_expr::libpq::pqformat::format_bytea_text(v, pgrust::ByteaOutputFormat::Hex)
+        }
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
-        Value::MacAddr(v) => pgrust::backend::executor::render_macaddr_text(v),
-        Value::MacAddr8(v) => pgrust::backend::executor::render_macaddr8_text(v),
+        Value::MacAddr(v) => pgrust_expr::render_macaddr_text(v),
+        Value::MacAddr8(v) => pgrust_expr::render_macaddr8_text(v),
         Value::Tid(v) => format!("({},{})", v.block_number, v.offset_number),
         Value::Text(v) => format!("{:?}", v),
         Value::TextRef(_, _) => format!("{:?}", value.as_text().unwrap()),
-        Value::InternalChar(v) => pgrust::backend::executor::render_internal_char_text(*v),
+        Value::InternalChar(v) => pgrust_expr::render_internal_char_text(*v),
         Value::EnumOid(v) => v.to_string(),
         Value::Bool(v) => v.to_string(),
         Value::Array(items) => format!(
@@ -119,9 +115,10 @@ fn render_value(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        Value::PgArray(array) => pgrust::backend::executor::format_array_value_text(array),
+        Value::PgArray(array) => pgrust_expr::format_array_value_text(array),
         Value::Record(record) => format!("{:?}", record.fields),
         Value::Null => "NULL".into(),
+        _ => format!("{value:?}"),
     }
 }
 
@@ -162,7 +159,7 @@ fn main() -> Result<(), ExecError> {
             rel: rel(),
             relation_oid: 16_384,
             namespace_oid: 11,
-            owner_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            owner_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
             of_type_oid: 0,
             row_type_oid: 16_385,
             array_type_oid: 16_386,
@@ -184,10 +181,10 @@ fn main() -> Result<(), ExecError> {
     );
 
     let stats = std::sync::Arc::new(parking_lot::RwLock::new(
-        pgrust::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+        pgrust::DatabaseStatsStore::with_default_io_rows(),
     ));
     let session_stats = std::sync::Arc::new(parking_lot::RwLock::new(
-        pgrust::pgrust::database::SessionStatsState::default(),
+        pgrust::SessionStatsState::default(),
     ));
     let mut ctx = ExecutorContext {
         pool: std::sync::Arc::clone(&pool),
@@ -199,11 +196,10 @@ fn main() -> Result<(), ExecError> {
         large_objects: None,
         stats_import_runtime: None,
         async_notify_runtime: None,
-        checkpoint_stats:
-            pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
-        datetime_config: pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        checkpoint_stats: pgrust_access::transam::CheckpointStatsSnapshot::default(),
+        datetime_config: pgrust_expr::DateTimeConfig::default(),
         statement_timestamp_usecs:
-            pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+            pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
         interrupts: Arc::new(InterruptState::new()),
         stats,
@@ -212,14 +208,14 @@ fn main() -> Result<(), ExecError> {
         write_xid_override: None,
         transaction_state: None,
         client_id: 11,
-        session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-        current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+        current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
         session_replication_role: Default::default(),
         next_command_id: 0,
-        default_toast_compression: pgrust::include::access::htup::AttributeCompression::Pglz,
-        random_state: pgrust::backend::executor::PgPrngState::shared(),
-        expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+        default_toast_compression: pgrust::AttributeCompression::Pglz,
+        random_state: pgrust_expr::PgPrngState::shared(),
+        expr_bindings: pgrust_executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
         active_grouping_refs: Vec::new(),
@@ -234,12 +230,12 @@ fn main() -> Result<(), ExecError> {
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         pending_portals: Vec::new(),
-        catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+        catalog: Some(pgrust::executor_catalog(relcache.clone())),
         scalar_function_cache: std::collections::HashMap::new(),
         proc_execute_acl_cache: std::collections::HashSet::new(),
         srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
-            pgrust::pl::plpgsql::PlpgsqlFunctionCache::default(),
+            pgrust::plpgsql::PlpgsqlFunctionCache::default(),
         )),
         pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -247,8 +243,8 @@ fn main() -> Result<(), ExecError> {
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
         trigger_depth: 0,
-        advisory_locks: Arc::new(pgrust::backend::storage::lmgr::AdvisoryLockManager::new()),
-        row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+        advisory_locks: Arc::new(pgrust_storage::lmgr::AdvisoryLockManager::new()),
+        row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
         current_database_name: String::new(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
@@ -257,7 +253,7 @@ fn main() -> Result<(), ExecError> {
     let stmt = parse_statement(&sql)?;
     clear_notices();
     let result = match stmt {
-        Statement::Do(stmt) => pgrust::pl::plpgsql::execute_do(&stmt)?,
+        Statement::Do(stmt) => pgrust::plpgsql::execute_do(&stmt)?,
         other => execute_readonly_statement(other, &relcache, &mut ctx)?,
     };
     for notice in take_notices() {

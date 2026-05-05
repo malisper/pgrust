@@ -9,14 +9,12 @@
 //!
 //! Run with: cargo run --bin heap_scan_demo
 
-use pgrust::backend::access::heap::heapam::{
-    heap_flush, heap_insert, heap_scan_begin, heap_scan_next,
-};
-use pgrust::backend::storage::smgr::{MdStorageManager, RelFileLocator};
-use pgrust::include::access::htup::{
+use pgrust::{BufferPool, SmgrStorageBackend};
+use pgrust_access::access::htup::{
     AttributeAlign, AttributeCompression, AttributeDesc, AttributeStorage, HeapTuple, TupleValue,
 };
-use pgrust::{BufferPool, SmgrStorageBackend};
+use pgrust_access::heap::heapam::{heap_flush, heap_insert, heap_scan_begin, heap_scan_next};
+use pgrust_storage::smgr::{MdStorageManager, RelFileLocator};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;

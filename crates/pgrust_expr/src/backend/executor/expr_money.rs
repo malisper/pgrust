@@ -1,5 +1,5 @@
 use super::ExecError;
-use crate::compat::include::nodes::datum::Value;
+use pgrust_nodes::datum::Value;
 
 const MONEY_SCALE: i64 = 100;
 

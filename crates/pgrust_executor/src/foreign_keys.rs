@@ -7,11 +7,11 @@ use pgrust_catalog_data::{
     RI_FKEY_SETNULL_UPD_PROC_OID,
 };
 use pgrust_expr::DateTimeConfig;
-use pgrust_expr::backend::executor::expr_multirange::{
+use pgrust_expr::executor::expr_multirange::{
     multirange_contains_multirange, multirange_contains_range, multirange_from_range,
     multirange_overlaps_multirange, multirange_overlaps_range, normalize_multirange,
 };
-use pgrust_expr::backend::executor::expr_range::{range_contains_range, range_overlap};
+use pgrust_expr::executor::expr_range::{range_contains_range, range_overlap};
 use pgrust_nodes::datum::IndirectVarlenaValue;
 use pgrust_nodes::parsenodes::ForeignKeyAction;
 use pgrust_nodes::primnodes::RelationDesc;
@@ -163,14 +163,12 @@ pub fn render_key_value(value: &Value, ctx: &dyn ForeignKeyValueRenderContext) -
         Value::Array(v) => format!("{v:?}"),
         Value::PgArray(v) => format!("{v:?}"),
         Value::Record(v) => format!("{v:?}"),
-        Value::Range(v) => {
-            pgrust_expr::backend::executor::expr_range::render_range_value_with_config(
-                v,
-                ctx.datetime_config(),
-            )
-        }
+        Value::Range(v) => pgrust_expr::executor::expr_range::render_range_value_with_config(
+            v,
+            ctx.datetime_config(),
+        ),
         Value::Multirange(v) => {
-            pgrust_expr::backend::executor::expr_multirange::render_multirange_with_config(
+            pgrust_expr::executor::expr_multirange::render_multirange_with_config(
                 v,
                 ctx.datetime_config(),
             )

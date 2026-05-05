@@ -1,6 +1,6 @@
 use pgrust_catalog_data::XID_TYPE_OID;
-use pgrust_expr::backend::executor::expr_string::eval_like;
-use pgrust_expr::backend::executor::value_io::format_array_text;
+use pgrust_expr::executor::expr_string::eval_like;
+use pgrust_expr::executor::value_io::format_array_text;
 use pgrust_expr::{
     ExecError, TextCollationSemantics, cast_value, compare_order_values, compare_values,
     eval_regex_match_operator, eval_similar, eval_tsquery_matches_tsvector,

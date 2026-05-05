@@ -4,8 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pgrust::ClientId;
-use pgrust::executor::{StatementResult, Value};
-use pgrust::pgrust::database::Database;
+use pgrust::Database;
+use pgrust::{StatementResult, Value};
 
 struct LoadTestConfig {
     num_writer_threads: usize,

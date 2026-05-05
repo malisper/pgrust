@@ -9,12 +9,11 @@ fn map_expr_error(error: pgrust_expr::ExprError) -> ExecError {
 }
 
 pub(crate) fn is_txid_snapshot_type_oid(type_oid: u32) -> bool {
-    pgrust_expr::backend::executor::expr_txid::is_txid_snapshot_type_oid(type_oid)
+    pgrust_expr::executor::expr_txid::is_txid_snapshot_type_oid(type_oid)
 }
 
 pub(crate) fn cast_text_to_txid_snapshot(text: &str) -> Result<Value, ExecError> {
-    pgrust_expr::backend::executor::expr_txid::cast_text_to_txid_snapshot(text)
-        .map_err(map_expr_error)
+    pgrust_expr::executor::expr_txid::cast_text_to_txid_snapshot(text).map_err(map_expr_error)
 }
 
 pub(crate) fn eval_txid_builtin_function(
@@ -26,8 +25,7 @@ pub(crate) fn eval_txid_builtin_function(
 }
 
 pub(crate) fn eval_txid_snapshot_xip_values(values: &[Value]) -> Result<Vec<Value>, ExecError> {
-    pgrust_expr::backend::executor::expr_txid::eval_txid_snapshot_xip_values(values)
-        .map_err(map_expr_error)
+    pgrust_expr::executor::expr_txid::eval_txid_snapshot_xip_values(values).map_err(map_expr_error)
 }
 
 impl pgrust_executor::TxidRuntime for ExecutorContext {

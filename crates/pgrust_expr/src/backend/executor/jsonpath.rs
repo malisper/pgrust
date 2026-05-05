@@ -20,9 +20,9 @@ use crate::compat::backend::executor::pg_regex::{
 use crate::compat::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::compat::backend::utils::misc::notices::push_warning;
 use crate::compat::backend::utils::time::datetime::timezone_offset_seconds_at_utc;
-use crate::compat::include::nodes::datetime::{TimeTzADT, USECS_PER_SEC};
-use crate::compat::include::nodes::datum::{NumericValue, Value};
-use crate::compat::include::nodes::parsenodes::{SqlType, SqlTypeKind};
+use pgrust_nodes::datetime::{TimeTzADT, USECS_PER_SEC};
+use pgrust_nodes::datum::{NumericValue, Value};
+use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathMode {

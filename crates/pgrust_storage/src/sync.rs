@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use parking_lot::Mutex;
 
-use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
+use crate::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SyncTag {
@@ -73,7 +73,7 @@ mod tests {
     use std::env;
     use std::sync::Arc;
 
-    use crate::backend::storage::smgr::MdStorageManager;
+    use crate::smgr::MdStorageManager;
 
     use super::*;
 

@@ -6,25 +6,25 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
-use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::backend::catalog::{CatalogStore, column_desc};
-use pgrust::backend::commands::tablecmds::{
-    execute_delete_with_waiter, execute_insert, execute_truncate_table, execute_update_with_waiter,
-};
-use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
-use pgrust::backend::utils::cache::relcache::RelCache;
-use pgrust::backend::utils::misc::interrupts::InterruptState;
-use pgrust::executor::{
-    ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
-};
-use pgrust::include::access::htup::{HeapTuple, TupleValue};
-use pgrust::parser::{
+use pgrust::catalog::{CatalogStore, column_desc};
+use pgrust::plpgsql::{RaiseLevel, clear_notices, execute_do, take_notices};
+use pgrust::sql::{
     ParseError, SqlType, SqlTypeKind, Statement, bind_delete, bind_insert, bind_update,
     create_relation_desc, normalize_create_table_name, parse_statement,
 };
-use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, execute_do, take_notices};
+use pgrust::table_commands::{
+    execute_delete_with_waiter, execute_insert, execute_truncate_table, execute_update_with_waiter,
+};
 use pgrust::{BufferPool, SmgrStorageBackend};
+use pgrust::{
+    ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
+};
+use pgrust_access::access::htup::{HeapTuple, TupleValue};
+use pgrust_access::heap::heapam::{heap_flush, heap_insert_mvcc};
+use pgrust_access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
+use pgrust_catalog_store::RelCache;
+use pgrust_core::InterruptState;
+use pgrust_storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 
 struct RawModeGuard {
     fd: i32,
@@ -144,26 +144,22 @@ fn render_value(value: &Value) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Xid8(v) => v.to_string(),
         Value::PgLsn(v) => format!("{:X}/{:X}", v >> 32, v & 0xFFFF_FFFF),
-        Value::Money(v) => pgrust::backend::executor::money_format_text(*v),
+        Value::Money(v) => pgrust_expr::money_format_text(*v),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
         | Value::Timestamp(_)
-        | Value::TimestampTz(_) => {
-            pgrust::backend::executor::render_datetime_value_text(value).unwrap()
-        }
+        | Value::TimestampTz(_) => pgrust_expr::render_datetime_value_text(value).unwrap(),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => format!("{v:?}"),
-        Value::Uuid(v) => pgrust::backend::executor::render_uuid_text(v),
+        Value::Uuid(v) => pgrust_expr::render_uuid_text(v),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),
         Value::Xml(v) => v.to_string(),
-        Value::Range(_) => pgrust::backend::executor::render_range_text(value).unwrap_or_default(),
-        Value::Multirange(_) => {
-            pgrust::backend::executor::render_multirange_text(value).unwrap_or_default()
-        }
+        Value::Range(_) => pgrust_expr::render_range_text(value).unwrap_or_default(),
+        Value::Multirange(_) => pgrust_expr::render_multirange_text(value).unwrap_or_default(),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -174,18 +170,17 @@ fn render_value(value: &Value) -> String {
         Value::TsVector(v) => v.render(),
         Value::TsQuery(v) => v.render(),
         Value::Bit(v) => v.render(),
-        Value::Bytea(v) => pgrust::backend::libpq::pqformat::format_bytea_text(
-            v,
-            pgrust::pgrust::session::ByteaOutputFormat::Hex,
-        ),
+        Value::Bytea(v) => {
+            pgrust_expr::libpq::pqformat::format_bytea_text(v, pgrust::ByteaOutputFormat::Hex)
+        }
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
-        Value::MacAddr(v) => pgrust::backend::executor::render_macaddr_text(v),
-        Value::MacAddr8(v) => pgrust::backend::executor::render_macaddr8_text(v),
+        Value::MacAddr(v) => pgrust_expr::render_macaddr_text(v),
+        Value::MacAddr8(v) => pgrust_expr::render_macaddr8_text(v),
         Value::Tid(v) => format!("({},{})", v.block_number, v.offset_number),
         Value::Text(v) => v.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap().to_string(),
-        Value::InternalChar(v) => pgrust::backend::executor::render_internal_char_text(*v),
+        Value::InternalChar(v) => pgrust_expr::render_internal_char_text(*v),
         Value::EnumOid(v) => v.to_string(),
         Value::Bool(v) => v.to_string(),
         Value::Array(items) => format!(
@@ -196,9 +191,10 @@ fn render_value(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        Value::PgArray(array) => pgrust::backend::executor::format_array_value_text(array),
+        Value::PgArray(array) => pgrust_expr::format_array_value_text(array),
         Value::Record(record) => format!("{:?}", record.fields),
         Value::Null => "NULL".into(),
+        _ => format!("{value:?}"),
     }
 }
 
@@ -467,10 +463,10 @@ fn run_statement(
     let stmt = parse_statement(sql)?;
     let interrupts = Arc::new(InterruptState::new());
     let stats = Arc::new(parking_lot::RwLock::new(
-        pgrust::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+        pgrust::DatabaseStatsStore::with_default_io_rows(),
     ));
     let session_stats = Arc::new(parking_lot::RwLock::new(
-        pgrust::pgrust::database::SessionStatsState::default(),
+        pgrust::SessionStatsState::default(),
     ));
     let relcache = catalog_store.relcache().map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
@@ -483,7 +479,7 @@ fn run_statement(
     let result = match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::SetConstraints(_) => {
-            pgrust::backend::utils::misc::notices::push_warning(
+            pgrust::notices::push_warning(
                 "SET CONSTRAINTS can only be used in transaction blocks",
             );
             Ok(StatementResult::AffectedRows(0))
@@ -729,7 +725,7 @@ fn run_statement(
         Statement::CommentOnTable(stmt) => {
             let xid = txns.write().begin();
             let result = {
-                let ctx = pgrust::backend::catalog::store::CatalogWriteContext {
+                let ctx = pgrust::catalog::CatalogWriteContext {
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     xid,
@@ -782,7 +778,7 @@ fn run_statement(
         Statement::CommentOnColumn(stmt) => {
             let xid = txns.write().begin();
             let result = {
-                let ctx = pgrust::backend::catalog::store::CatalogWriteContext {
+                let ctx = pgrust::catalog::CatalogWriteContext {
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     xid,
@@ -825,7 +821,7 @@ fn run_statement(
                 catalog_store
                     .comment_column_mvcc(
                         relation.relation_oid,
-                        i32::from(pgrust::include::nodes::primnodes::user_attrno(
+                        i32::from(pgrust_nodes::primnodes::user_attrno(
                             column_index,
                         )),
                         stmt.comment.as_deref(),
@@ -885,10 +881,10 @@ fn run_statement(
                 stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
-                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+                    pgrust_access::transam::CheckpointStatsSnapshot::default(),
                 datetime_config:
-                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                statement_timestamp_usecs: pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+                    pgrust_expr::DateTimeConfig::default(),
+                statement_timestamp_usecs: pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
                 gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
@@ -897,15 +893,15 @@ fn run_statement(
                 write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+                current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
                 session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
-                    pgrust::include::access::htup::AttributeCompression::Pglz,
-                random_state: pgrust::backend::executor::PgPrngState::shared(),
-                expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+                    pgrust::AttributeCompression::Pglz,
+                random_state: pgrust_expr::PgPrngState::shared(),
+                expr_bindings: pgrust_executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
                 active_grouping_refs: Vec::new(),
@@ -920,11 +916,11 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 pending_portals: Vec::new(),
-                catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+                catalog: Some(pgrust::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
                 proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
-                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
@@ -932,9 +928,9 @@ fn run_statement(
                 deferred_foreign_keys: None,
                 trigger_depth: 0,
                 advisory_locks: Arc::new(
-                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                    pgrust_storage::lmgr::AdvisoryLockManager::new(),
                 ),
-                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+                row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -953,10 +949,10 @@ fn run_statement(
                 stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
-                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+                    pgrust_access::transam::CheckpointStatsSnapshot::default(),
                 datetime_config:
-                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                statement_timestamp_usecs: pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+                    pgrust_expr::DateTimeConfig::default(),
+                statement_timestamp_usecs: pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
                 gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
@@ -965,15 +961,15 @@ fn run_statement(
                 write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+                current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
                 session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
-                    pgrust::include::access::htup::AttributeCompression::Pglz,
-                random_state: pgrust::backend::executor::PgPrngState::shared(),
-                expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+                    pgrust::AttributeCompression::Pglz,
+                random_state: pgrust_expr::PgPrngState::shared(),
+                expr_bindings: pgrust_executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
                 active_grouping_refs: Vec::new(),
@@ -988,11 +984,11 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 pending_portals: Vec::new(),
-                catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+                catalog: Some(pgrust::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
                 proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
-                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
@@ -1000,9 +996,9 @@ fn run_statement(
                 deferred_foreign_keys: None,
                 trigger_depth: 0,
                 advisory_locks: Arc::new(
-                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                    pgrust_storage::lmgr::AdvisoryLockManager::new(),
                 ),
-                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+                row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -1021,10 +1017,10 @@ fn run_statement(
                 stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
-                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+                    pgrust_access::transam::CheckpointStatsSnapshot::default(),
                 datetime_config:
-                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                statement_timestamp_usecs: pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+                    pgrust_expr::DateTimeConfig::default(),
+                statement_timestamp_usecs: pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
                 gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
@@ -1033,15 +1029,15 @@ fn run_statement(
                 write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+                current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
                 session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
-                    pgrust::include::access::htup::AttributeCompression::Pglz,
-                random_state: pgrust::backend::executor::PgPrngState::shared(),
-                expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+                    pgrust::AttributeCompression::Pglz,
+                random_state: pgrust_expr::PgPrngState::shared(),
+                expr_bindings: pgrust_executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
                 active_grouping_refs: Vec::new(),
@@ -1056,11 +1052,11 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 pending_portals: Vec::new(),
-                catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+                catalog: Some(pgrust::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
                 proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
-                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
@@ -1068,9 +1064,9 @@ fn run_statement(
                 deferred_foreign_keys: None,
                 trigger_depth: 0,
                 advisory_locks: Arc::new(
-                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                    pgrust_storage::lmgr::AdvisoryLockManager::new(),
                 ),
-                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+                row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -1089,10 +1085,10 @@ fn run_statement(
                 stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
-                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+                    pgrust_access::transam::CheckpointStatsSnapshot::default(),
                 datetime_config:
-                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                statement_timestamp_usecs: pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+                    pgrust_expr::DateTimeConfig::default(),
+                statement_timestamp_usecs: pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
                 gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
@@ -1101,15 +1097,15 @@ fn run_statement(
                 write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+                current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
                 session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
-                    pgrust::include::access::htup::AttributeCompression::Pglz,
-                random_state: pgrust::backend::executor::PgPrngState::shared(),
-                expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+                    pgrust::AttributeCompression::Pglz,
+                random_state: pgrust_expr::PgPrngState::shared(),
+                expr_bindings: pgrust_executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
                 active_grouping_refs: Vec::new(),
@@ -1124,11 +1120,11 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 pending_portals: Vec::new(),
-                catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+                catalog: Some(pgrust::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
                 proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
-                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
@@ -1136,9 +1132,9 @@ fn run_statement(
                 deferred_foreign_keys: None,
                 trigger_depth: 0,
                 advisory_locks: Arc::new(
-                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                    pgrust_storage::lmgr::AdvisoryLockManager::new(),
                 ),
-                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+                row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -1185,9 +1181,6 @@ fn run_statement(
         | Statement::DropRule(_)
         | Statement::DropType(_)
         | Statement::DropSequence(_)
-        | Statement::DropTextSearch(_)
-        | Statement::DropExtension(_)
-        | Statement::DropAccessMethod(_)
         | Statement::AlterProcedure(_)
         | Statement::AlterRoutine(_)
         => Err(ExecError::Parse(ParseError::FeatureNotSupported(
@@ -1229,9 +1222,9 @@ fn run_statement(
                         }
                         dropped += 1;
                     }
-                    Err(pgrust::backend::catalog::CatalogError::UnknownTable(_))
+                    Err(pgrust::catalog::CatalogError::UnknownTable(_))
                         if stmt.if_exists => {}
-                    Err(pgrust::backend::catalog::CatalogError::UnknownTable(name)) => {
+                    Err(pgrust::catalog::CatalogError::UnknownTable(name)) => {
                         return Err(ExecError::Parse(ParseError::TableDoesNotExist(name)));
                     }
                     Err(other) => {
@@ -1268,10 +1261,10 @@ fn run_statement(
                 stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
-                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+                    pgrust_access::transam::CheckpointStatsSnapshot::default(),
                 datetime_config:
-                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                statement_timestamp_usecs: pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+                    pgrust_expr::DateTimeConfig::default(),
+                statement_timestamp_usecs: pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
                 gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
@@ -1280,15 +1273,15 @@ fn run_statement(
                 write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+                current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
                 session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
-                    pgrust::include::access::htup::AttributeCompression::Pglz,
-                random_state: pgrust::backend::executor::PgPrngState::shared(),
-                expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+                    pgrust::AttributeCompression::Pglz,
+                random_state: pgrust_expr::PgPrngState::shared(),
+                expr_bindings: pgrust_executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
                 active_grouping_refs: Vec::new(),
@@ -1303,11 +1296,11 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 pending_portals: Vec::new(),
-                catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+                catalog: Some(pgrust::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
                 proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
-                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
@@ -1315,9 +1308,9 @@ fn run_statement(
                 deferred_foreign_keys: None,
                 trigger_depth: 0,
                 advisory_locks: Arc::new(
-                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                    pgrust_storage::lmgr::AdvisoryLockManager::new(),
                 ),
-                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+                row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -1336,10 +1329,10 @@ fn run_statement(
                 stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
-                    pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+                    pgrust_access::transam::CheckpointStatsSnapshot::default(),
                 datetime_config:
-                    pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                statement_timestamp_usecs: pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+                    pgrust_expr::DateTimeConfig::default(),
+                statement_timestamp_usecs: pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
                 gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
@@ -1348,15 +1341,15 @@ fn run_statement(
                 write_xid_override: None,
                 transaction_state: None,
                 client_id: 21,
-                session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+                current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
                 session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
-                    pgrust::include::access::htup::AttributeCompression::Pglz,
-                random_state: pgrust::backend::executor::PgPrngState::shared(),
-                expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+                    pgrust::AttributeCompression::Pglz,
+                random_state: pgrust_expr::PgPrngState::shared(),
+                expr_bindings: pgrust_executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
                 active_grouping_refs: Vec::new(),
@@ -1371,11 +1364,11 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 pending_portals: Vec::new(),
-                catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+                catalog: Some(pgrust::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
                 proc_execute_acl_cache: std::collections::HashSet::new(),
                 srf_rows_cache: std::collections::HashMap::new(),
-                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
@@ -1383,9 +1376,9 @@ fn run_statement(
                 deferred_foreign_keys: None,
                 trigger_depth: 0,
                 advisory_locks: Arc::new(
-                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                    pgrust_storage::lmgr::AdvisoryLockManager::new(),
                 ),
-                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+                row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -1407,10 +1400,10 @@ fn run_statement(
                     stats_import_runtime: None,
                     async_notify_runtime: None,
                     checkpoint_stats:
-                        pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+                        pgrust_access::transam::CheckpointStatsSnapshot::default(),
                     datetime_config:
-                        pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                    statement_timestamp_usecs: pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+                        pgrust_expr::DateTimeConfig::default(),
+                    statement_timestamp_usecs: pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
                     gucs: std::collections::HashMap::new(),
                     interrupts: Arc::clone(&interrupts),
                     stats: Arc::clone(&stats),
@@ -1419,15 +1412,15 @@ fn run_statement(
                     write_xid_override: None,
                     transaction_state: None,
                     client_id: 21,
-                    session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                    current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                    session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+                    current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
                     active_role_oid: None,
                     session_replication_role: Default::default(),
                     next_command_id: 0,
                     default_toast_compression:
-                        pgrust::include::access::htup::AttributeCompression::Pglz,
-                    random_state: pgrust::backend::executor::PgPrngState::shared(),
-                    expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+                        pgrust::AttributeCompression::Pglz,
+                    random_state: pgrust_expr::PgPrngState::shared(),
+                    expr_bindings: pgrust_executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
                     active_grouping_refs: Vec::new(),
@@ -1442,11 +1435,11 @@ fn run_statement(
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     pending_portals: Vec::new(),
-                    catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+                    catalog: Some(pgrust::executor_catalog(relcache.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
                     proc_execute_acl_cache: std::collections::HashSet::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
-                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::plpgsql::PlpgsqlFunctionCache::default())),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
@@ -1454,9 +1447,9 @@ fn run_statement(
                     deferred_foreign_keys: None,
                     trigger_depth: 0,
                     advisory_locks: Arc::new(
-                        pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                        pgrust_storage::lmgr::AdvisoryLockManager::new(),
                     ),
-                    row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+                    row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
                     current_database_name: String::new(),
                     statement_lock_scope_id: None,
                     transaction_lock_scope_id: None,
@@ -1489,10 +1482,10 @@ fn run_statement(
                     stats_import_runtime: None,
                     async_notify_runtime: None,
                     checkpoint_stats:
-                        pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+                        pgrust_access::transam::CheckpointStatsSnapshot::default(),
                     datetime_config:
-                        pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                    statement_timestamp_usecs: pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+                        pgrust_expr::DateTimeConfig::default(),
+                    statement_timestamp_usecs: pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
                     gucs: std::collections::HashMap::new(),
                     interrupts: Arc::clone(&interrupts),
                     stats: Arc::clone(&stats),
@@ -1501,15 +1494,15 @@ fn run_statement(
                     write_xid_override: None,
                     transaction_state: None,
                     client_id: 21,
-                    session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                    current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                    session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+                    current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
                     active_role_oid: None,
                     session_replication_role: Default::default(),
                     next_command_id: 0,
                     default_toast_compression:
-                        pgrust::include::access::htup::AttributeCompression::Pglz,
-                    random_state: pgrust::backend::executor::PgPrngState::shared(),
-                    expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+                        pgrust::AttributeCompression::Pglz,
+                    random_state: pgrust_expr::PgPrngState::shared(),
+                    expr_bindings: pgrust_executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
                     active_grouping_refs: Vec::new(),
@@ -1524,11 +1517,11 @@ fn run_statement(
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     pending_portals: Vec::new(),
-                    catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+                    catalog: Some(pgrust::executor_catalog(relcache.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
                     proc_execute_acl_cache: std::collections::HashSet::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
-                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::plpgsql::PlpgsqlFunctionCache::default())),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
@@ -1536,9 +1529,9 @@ fn run_statement(
                     deferred_foreign_keys: None,
                     trigger_depth: 0,
                     advisory_locks: Arc::new(
-                        pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                        pgrust_storage::lmgr::AdvisoryLockManager::new(),
                     ),
-                    row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+                    row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
                     current_database_name: String::new(),
                     statement_lock_scope_id: None,
                     transaction_lock_scope_id: None,
@@ -1571,10 +1564,10 @@ fn run_statement(
                     stats_import_runtime: None,
                     async_notify_runtime: None,
                     checkpoint_stats:
-                        pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+                        pgrust_access::transam::CheckpointStatsSnapshot::default(),
                     datetime_config:
-                        pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                    statement_timestamp_usecs: pgrust::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+                        pgrust_expr::DateTimeConfig::default(),
+                    statement_timestamp_usecs: pgrust_expr::utils::time::datetime::current_postgres_timestamp_usecs(),
                     gucs: std::collections::HashMap::new(),
                     interrupts: Arc::clone(&interrupts),
                     stats: Arc::clone(&stats),
@@ -1583,15 +1576,15 @@ fn run_statement(
                     write_xid_override: None,
                     transaction_state: None,
                     client_id: 21,
-                    session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-                    current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                    session_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
+                    current_user_oid: pgrust_catalog_data::BOOTSTRAP_SUPERUSER_OID,
                     active_role_oid: None,
                     session_replication_role: Default::default(),
                     next_command_id: 0,
                     default_toast_compression:
-                        pgrust::include::access::htup::AttributeCompression::Pglz,
-                    random_state: pgrust::backend::executor::PgPrngState::shared(),
-                    expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
+                        pgrust::AttributeCompression::Pglz,
+                    random_state: pgrust_expr::PgPrngState::shared(),
+                    expr_bindings: pgrust_executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
                     active_grouping_refs: Vec::new(),
@@ -1606,11 +1599,11 @@ fn run_statement(
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     pending_portals: Vec::new(),
-                    catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+                    catalog: Some(pgrust::executor_catalog(relcache.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
                     proc_execute_acl_cache: std::collections::HashSet::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
-                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::plpgsql::PlpgsqlFunctionCache::default())),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
@@ -1618,9 +1611,9 @@ fn run_statement(
                     deferred_foreign_keys: None,
                     trigger_depth: 0,
                     advisory_locks: Arc::new(
-                        pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                        pgrust_storage::lmgr::AdvisoryLockManager::new(),
                     ),
-                    row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
+                    row_locks: Arc::new(pgrust_storage::lmgr::RowLockManager::new()),
                     current_database_name: String::new(),
                     statement_lock_scope_id: None,
                     transaction_lock_scope_id: None,
@@ -1651,6 +1644,9 @@ fn run_statement(
         | Statement::RollbackTo(_) => {
             Ok(StatementResult::AffectedRows(0))
         }
+        _ => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "statement is not supported in query_repl".into(),
+        ))),
     };
 
     print_plpgsql_notices();

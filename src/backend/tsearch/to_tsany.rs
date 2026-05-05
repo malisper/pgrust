@@ -38,7 +38,7 @@ pub(crate) fn to_tsvector_with_config_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<TsVector, String> {
     adapt_catalog(catalog, |catalog| {
-        pgrust_expr::backend::tsearch::to_tsvector_with_config_name(config_name, text, catalog)
+        pgrust_expr::tsearch::to_tsvector_with_config_name(config_name, text, catalog)
     })
 }
 
@@ -49,7 +49,7 @@ pub(crate) fn tsvector_lexemes_with_config_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<(Vec<TsLexeme>, u16), String> {
     adapt_catalog(catalog, |catalog| {
-        pgrust_expr::backend::tsearch::tsvector_lexemes_with_config_name(
+        pgrust_expr::tsearch::tsvector_lexemes_with_config_name(
             config_name,
             text,
             start_position,
@@ -64,7 +64,7 @@ pub(crate) fn to_tsquery_with_config_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<TsQuery, String> {
     adapt_catalog(catalog, |catalog| {
-        pgrust_expr::backend::tsearch::to_tsquery_with_config_name(config_name, text, catalog)
+        pgrust_expr::tsearch::to_tsquery_with_config_name(config_name, text, catalog)
     })
 }
 
@@ -74,7 +74,7 @@ pub(crate) fn plainto_tsquery_with_config_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<TsQuery, String> {
     adapt_catalog(catalog, |catalog| {
-        pgrust_expr::backend::tsearch::plainto_tsquery_with_config_name(config_name, text, catalog)
+        pgrust_expr::tsearch::plainto_tsquery_with_config_name(config_name, text, catalog)
     })
 }
 
@@ -84,7 +84,7 @@ pub(crate) fn phraseto_tsquery_with_config_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<TsQuery, String> {
     adapt_catalog(catalog, |catalog| {
-        pgrust_expr::backend::tsearch::phraseto_tsquery_with_config_name(config_name, text, catalog)
+        pgrust_expr::tsearch::phraseto_tsquery_with_config_name(config_name, text, catalog)
     })
 }
 
@@ -94,11 +94,7 @@ pub(crate) fn websearch_to_tsquery_with_config_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<TsQuery, String> {
     adapt_catalog(catalog, |catalog| {
-        pgrust_expr::backend::tsearch::websearch_to_tsquery_with_config_name(
-            config_name,
-            text,
-            catalog,
-        )
+        pgrust_expr::tsearch::websearch_to_tsquery_with_config_name(config_name, text, catalog)
     })
 }
 
@@ -108,10 +104,6 @@ pub(crate) fn ts_lexize_with_dictionary_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Option<Vec<String>>, String> {
     adapt_catalog(catalog, |catalog| {
-        pgrust_expr::backend::tsearch::ts_lexize_with_dictionary_name(
-            dictionary_name,
-            text,
-            catalog,
-        )
+        pgrust_expr::tsearch::ts_lexize_with_dictionary_name(dictionary_name, text, catalog)
     })
 }

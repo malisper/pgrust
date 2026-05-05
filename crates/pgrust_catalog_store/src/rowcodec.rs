@@ -19,7 +19,7 @@ use pgrust_catalog_data::{
     PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
 };
 use pgrust_core::{AttributeAlign, AttributeCompression, AttributeStorage};
-use pgrust_expr::backend::executor::value_io::{decode_value, missing_column_value};
+use pgrust_expr::executor::value_io::{decode_value, missing_column_value};
 use pgrust_nodes::datetime::TimestampTzADT;
 use pgrust_nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
 use pgrust_nodes::primnodes::RelationDesc;

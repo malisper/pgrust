@@ -1,1 +1,1 @@
-pub use crate::backend::storage::page::bufpage::*;
+pub use crate::page::bufpage::*;

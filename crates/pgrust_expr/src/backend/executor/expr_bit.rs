@@ -1,6 +1,6 @@
 use super::ExecError;
 use crate::compat::backend::parser::{SqlType, SqlTypeKind};
-use crate::compat::include::nodes::datum::BitString;
+use pgrust_nodes::datum::BitString;
 use std::cmp::Ordering;
 
 pub fn parse_bit_text(text: &str) -> Result<BitString, ExecError> {

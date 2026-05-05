@@ -19,12 +19,10 @@ use crate::compat::backend::utils::misc::stack_depth::stack_depth_limit_error;
 use crate::compat::backend::utils::time::datetime::{
     format_time_usecs, timestamp_parts_from_usecs, ymd_from_days,
 };
-use crate::compat::include::nodes::datetime::{
-    DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
-};
-use crate::compat::include::nodes::execnodes::{NumericValue, Value};
-use crate::compat::pgrust::compact_string::CompactString;
 use crate::compat::pgrust::session::ByteaOutputFormat;
+use pgrust_core::CompactString;
+use pgrust_nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
+use pgrust_nodes::datum::{NumericValue, Value};
 
 const JENTRY_OFFLENMASK: u32 = 0x0FFF_FFFF;
 const JENTRY_TYPEMASK: u32 = 0x7000_0000;

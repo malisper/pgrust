@@ -33,16 +33,16 @@ use crate::compat::backend::utils::time::datetime::{
     timezone_offset_seconds_at_utc, ymd_from_days,
 };
 use crate::compat::backend::utils::time::timestamp::is_valid_finite_timestamp_usecs;
-use crate::compat::include::catalog::{
+use pgrust_catalog_data::{
     C_COLLATION_OID, DEFAULT_COLLATION_OID, PG_C_UTF8_COLLATION_OID, PG_UNICODE_FAST_COLLATION_OID,
     POSIX_COLLATION_OID, UCS_BASIC_COLLATION_OID,
 };
-use crate::compat::include::nodes::datetime::{
+use pgrust_core::CompactString;
+use pgrust_nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
     TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
-use crate::compat::include::nodes::datum::{IntervalValue, RecordValue};
-use crate::compat::pgrust::compact_string::CompactString;
+use pgrust_nodes::datum::{IntervalValue, RecordValue};
 
 static POW10_CACHE: LazyLock<Mutex<HashMap<u32, BigInt>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -2992,11 +2992,9 @@ mod tests {
     use crate::compat::backend::utils::time::timestamp::{
         format_timestamptz_text, parse_timestamptz_text,
     };
-    use crate::compat::include::catalog::{
-        C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID,
-    };
-    use crate::compat::include::nodes::datetime::{TimestampADT, USECS_PER_DAY, USECS_PER_HOUR};
-    use crate::compat::include::nodes::datum::{IntervalValue, NumericValue, Value};
+    use pgrust_catalog_data::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
+    use pgrust_nodes::datetime::{TimestampADT, USECS_PER_DAY, USECS_PER_HOUR};
+    use pgrust_nodes::datum::{IntervalValue, NumericValue, Value};
 
     #[test]
     fn compare_order_values_orders_int64_values_directly() {

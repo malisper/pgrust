@@ -4,8 +4,8 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use pgrust::ClientId;
-use pgrust::executor::{StatementResult, Value};
-use pgrust::pgrust::database::{Database, Session};
+use pgrust::{Database, Session};
+use pgrust::{StatementResult, Value};
 use rand::Rng;
 use std::env;
 use std::path::PathBuf;

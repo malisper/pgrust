@@ -9,7 +9,7 @@ use crate::compat::backend::utils::time::datetime::{
     parse_timezone_spec, postgres_date_from_ymd_i64, split_time_and_offset,
     timezone_offset_seconds, timezone_offset_seconds_at_utc, today_pg_days, ymd_from_days,
 };
-use crate::compat::include::nodes::datetime::{
+use pgrust_nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, POSTGRES_EPOCH_JDATE, TimeADT, TimeTzADT,
     USECS_PER_DAY, USECS_PER_SEC,
 };
@@ -307,12 +307,8 @@ pub fn parse_date_text(text: &str, config: &DateTimeConfig) -> Result<DateADT, D
             DateTimeKeyword::Tomorrow => Ok(DateADT(today_pg_days(config) + 1)),
             DateTimeKeyword::Yesterday => Ok(DateADT(today_pg_days(config) - 1)),
             DateTimeKeyword::Epoch => build_date(1970, 1, 1, false),
-            DateTimeKeyword::Infinity => Ok(DateADT(
-                crate::compat::include::nodes::datetime::DATEVAL_NOEND,
-            )),
-            DateTimeKeyword::NegInfinity => Ok(DateADT(
-                crate::compat::include::nodes::datetime::DATEVAL_NOBEGIN,
-            )),
+            DateTimeKeyword::Infinity => Ok(DateADT(pgrust_nodes::datetime::DATEVAL_NOEND)),
+            DateTimeKeyword::NegInfinity => Ok(DateADT(pgrust_nodes::datetime::DATEVAL_NOBEGIN)),
             DateTimeKeyword::Now => Ok(DateADT(today_pg_days(config))),
         };
     }
@@ -606,9 +602,9 @@ fn parse_time_token(text: &str) -> Result<Option<(i64, Option<TimeZoneSpec>)>, D
     };
 
     let hour = apply_meridiem(components.0, meridiem).ok_or(DateTimeParseError::Invalid)?;
-    let mut usecs = hour as i64 * crate::compat::include::nodes::datetime::USECS_PER_HOUR
-        + components.1 as i64 * crate::compat::include::nodes::datetime::USECS_PER_MINUTE
-        + components.2 as i64 * crate::compat::include::nodes::datetime::USECS_PER_SEC
+    let mut usecs = hour as i64 * pgrust_nodes::datetime::USECS_PER_HOUR
+        + components.1 as i64 * pgrust_nodes::datetime::USECS_PER_MINUTE
+        + components.2 as i64 * pgrust_nodes::datetime::USECS_PER_SEC
         + components.3;
     if components.0 == 24 && (components.1 != 0 || components.2 != 0 || components.3 != 0) {
         return Err(DateTimeParseError::FieldOutOfRange);
@@ -616,12 +612,12 @@ fn parse_time_token(text: &str) -> Result<Option<(i64, Option<TimeZoneSpec>)>, D
     if components.2 == 60 && components.3 != 0 {
         return Err(DateTimeParseError::FieldOutOfRange);
     }
-    if !(0..=crate::compat::include::nodes::datetime::USECS_PER_DAY).contains(&usecs) {
+    if !(0..=pgrust_nodes::datetime::USECS_PER_DAY).contains(&usecs) {
         return Err(DateTimeParseError::FieldOutOfRange);
     }
     if components.2 == 60 {
-        usecs = (hour as i64 * crate::compat::include::nodes::datetime::USECS_PER_HOUR)
-            + (components.1 as i64 + 1) * crate::compat::include::nodes::datetime::USECS_PER_MINUTE;
+        usecs = (hour as i64 * pgrust_nodes::datetime::USECS_PER_HOUR)
+            + (components.1 as i64 + 1) * pgrust_nodes::datetime::USECS_PER_MINUTE;
     }
     let zone = match inline_offset {
         Some(zone_text) => parse_timezone_spec(zone_text)?,
@@ -1294,15 +1290,11 @@ mod tests {
         let config = DateTimeConfig::default();
         assert_eq!(
             parse_time_text("23:59:59.9999999", &config),
-            Ok(TimeADT(
-                crate::compat::include::nodes::datetime::USECS_PER_DAY
-            ))
+            Ok(TimeADT(pgrust_nodes::datetime::USECS_PER_DAY))
         );
         assert_eq!(
             parse_time_text("23:59:60", &config),
-            Ok(TimeADT(
-                crate::compat::include::nodes::datetime::USECS_PER_DAY
-            ))
+            Ok(TimeADT(pgrust_nodes::datetime::USECS_PER_DAY))
         );
         assert_eq!(
             parse_time_text("15:36:39 America/New_York", &config),
@@ -1368,7 +1360,7 @@ mod tests {
             time_zone: "America/Los_Angeles".into(),
             transaction_timestamp_usecs: Some(
                 i64::from(days_from_ymd(2003, 7, 7).unwrap())
-                    * crate::compat::include::nodes::datetime::USECS_PER_DAY,
+                    * pgrust_nodes::datetime::USECS_PER_DAY,
             ),
             ..DateTimeConfig::default()
         };

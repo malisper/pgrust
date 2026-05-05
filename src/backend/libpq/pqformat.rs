@@ -24,7 +24,7 @@ use crate::pgrust::session::ByteaOutputFormat;
 
 // :HACK: Preserve the old root pqformat type path while scalar formatting
 // options live in pgrust_expr.
-pub(crate) type FloatFormatOptions = pgrust_expr::backend::libpq::pqformat::FloatFormatOptions;
+pub(crate) type FloatFormatOptions = pgrust_expr::libpq::pqformat::FloatFormatOptions;
 
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
@@ -1337,7 +1337,7 @@ fn encode_binary_record_array(
 }
 
 pub fn format_bytea_text(bytes: &[u8], output: ByteaOutputFormat) -> String {
-    pgrust_expr::backend::libpq::pqformat::format_bytea_text(bytes, output)
+    pgrust_expr::libpq::pqformat::format_bytea_text(bytes, output)
 }
 
 pub(crate) fn send_command_complete(w: &mut impl Write, tag: &str) -> io::Result<()> {
@@ -1508,11 +1508,11 @@ pub(crate) fn send_notice_with_hint(
 }
 
 pub(crate) fn format_float8_text(value: f64, options: FloatFormatOptions) -> String {
-    pgrust_expr::backend::libpq::pqformat::format_float8_text(value, options)
+    pgrust_expr::libpq::pqformat::format_float8_text(value, options)
 }
 
 pub(crate) fn format_float4_text(value: f64, options: FloatFormatOptions) -> String {
-    pgrust_expr::backend::libpq::pqformat::format_float4_text(value, options)
+    pgrust_expr::libpq::pqformat::format_float4_text(value, options)
 }
 
 #[cfg(test)]

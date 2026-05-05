@@ -4,7 +4,7 @@ use super::expr_ops::TextCollationSemantics;
 use super::node_types::Value;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 
-use pgrust_expr::backend::executor::expr_string;
+use pgrust_expr::executor::expr_string;
 
 fn map_expr_error(error: pgrust_expr::ExprError) -> ExecError {
     error.into()
@@ -12,19 +12,19 @@ fn map_expr_error(error: pgrust_expr::ExprError) -> ExecError {
 
 fn expr_collation(
     collation: TextCollationSemantics,
-) -> pgrust_expr::backend::executor::expr_ops::TextCollationSemantics {
+) -> pgrust_expr::executor::expr_ops::TextCollationSemantics {
     match collation {
         TextCollationSemantics::Default => {
-            pgrust_expr::backend::executor::expr_ops::TextCollationSemantics::Default
+            pgrust_expr::executor::expr_ops::TextCollationSemantics::Default
         }
         TextCollationSemantics::Ascii => {
-            pgrust_expr::backend::executor::expr_ops::TextCollationSemantics::Ascii
+            pgrust_expr::executor::expr_ops::TextCollationSemantics::Ascii
         }
         TextCollationSemantics::PgCUtf8 => {
-            pgrust_expr::backend::executor::expr_ops::TextCollationSemantics::PgCUtf8
+            pgrust_expr::executor::expr_ops::TextCollationSemantics::PgCUtf8
         }
         TextCollationSemantics::PgUnicodeFast => {
-            pgrust_expr::backend::executor::expr_ops::TextCollationSemantics::PgUnicodeFast
+            pgrust_expr::executor::expr_ops::TextCollationSemantics::PgUnicodeFast
         }
     }
 }

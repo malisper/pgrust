@@ -8,11 +8,11 @@ use pgrust_access::access::htup::{
 use pgrust_access::common::toast_compression::{ToastCompressionError, decompress_inline_datum};
 use pgrust_access::varatt::is_compressed_inline_datum;
 use pgrust_core::{CompactString, XID8_TYPE_OID};
-use pgrust_expr::backend::executor::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
-use pgrust_expr::backend::executor::expr_mac::{parse_macaddr_bytes, parse_macaddr8_bytes};
-use pgrust_expr::backend::executor::expr_network::{parse_cidr_bytes, parse_inet_bytes};
-use pgrust_expr::backend::executor::expr_range::decode_range_bytes;
-use pgrust_expr::backend::executor::value_io::{
+use pgrust_expr::executor::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
+use pgrust_expr::executor::expr_mac::{parse_macaddr_bytes, parse_macaddr8_bytes};
+use pgrust_expr::executor::expr_network::{parse_cidr_bytes, parse_inet_bytes};
+use pgrust_expr::executor::expr_range::decode_range_bytes;
+use pgrust_expr::executor::value_io::{
     decode_anyarray_bytes, decode_array_bytes, decode_numeric_storage_bytes, missing_column_value,
 };
 use pgrust_expr::{decode_tsquery_bytes, decode_tsvector_bytes};
@@ -696,7 +696,8 @@ mod tests {
     use super::*;
     use pgrust_access::access::htup::{HeapTuple, TupleValue};
     use pgrust_catalog_data::desc::column_desc;
-    use pgrust_expr::backend::executor::value_io::encode_tuple_values;
+    use pgrust_expr::TupleValue as ExprTupleValue;
+    use pgrust_expr::executor::value_io::encode_tuple_values;
     use pgrust_nodes::datum::{ArrayDimension, ArrayValue};
 
     fn decode_single(desc: &RelationDesc, value: Value) -> Value {
@@ -704,13 +705,9 @@ mod tests {
             .unwrap()
             .into_iter()
             .map(|value| match value {
-                pgrust_expr::compat::include::access::htup::TupleValue::Null => TupleValue::Null,
-                pgrust_expr::compat::include::access::htup::TupleValue::Bytes(bytes) => {
-                    TupleValue::Bytes(bytes)
-                }
-                pgrust_expr::compat::include::access::htup::TupleValue::EncodedVarlena(bytes) => {
-                    TupleValue::EncodedVarlena(bytes)
-                }
+                ExprTupleValue::Null => TupleValue::Null,
+                ExprTupleValue::Bytes(bytes) => TupleValue::Bytes(bytes),
+                ExprTupleValue::EncodedVarlena(bytes) => TupleValue::EncodedVarlena(bytes),
             })
             .collect::<Vec<_>>();
         let tuple = HeapTuple::from_values(&desc.attribute_descs(), &tuple_values).unwrap();
