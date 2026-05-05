@@ -2237,6 +2237,19 @@ fn build_join_tlist(
     let left_tlist = build_path_tlist(root, left);
     let right_tlist = build_path_tlist(root, right);
     let left_physical_width = left.output_vars().len();
+    let right_semi = matches!(
+        path,
+        Path::NestedLoopJoin {
+            kind: JoinType::RightSemi,
+            ..
+        } | Path::HashJoin {
+            kind: JoinType::RightSemi,
+            ..
+        } | Path::MergeJoin {
+            kind: JoinType::RightSemi,
+            ..
+        }
+    );
     let output_target = path.output_target();
     let semantic_target = path.semantic_output_target();
     let mut entries = Vec::with_capacity(semantic_target.exprs.len());
@@ -2254,7 +2267,11 @@ fn build_join_tlist(
                     entry.match_exprs.clone(),
                 ),
                 (None, Some(entry)) => (
-                    left_physical_width + entry.index,
+                    if right_semi {
+                        entry.index
+                    } else {
+                        left_physical_width + entry.index
+                    },
                     entry.sql_type,
                     entry.collation_oid,
                     entry.match_exprs.clone(),
@@ -2280,7 +2297,11 @@ fn build_join_tlist(
                         )
                     } else {
                         (
-                            left_physical_width + right_entry.index,
+                            if right_semi {
+                                right_entry.index
+                            } else {
+                                left_physical_width + right_entry.index
+                            },
                             right_entry.sql_type,
                             right_entry.collation_oid,
                             right_entry.match_exprs.clone(),
@@ -3574,12 +3595,12 @@ fn fix_executor_join_var_for_input(expr: &Expr, input: &Path) -> Option<Expr> {
         | Path::HashJoin { left, kind, .. }
         | Path::MergeJoin { left, kind, .. } => {
             let left_width = left.output_vars().len();
-            let physical_index = if var.varno == OUTER_VAR {
-                index
-            } else if matches!(kind, JoinType::Semi | JoinType::Anti) {
-                return None;
-            } else {
-                left_width + index
+            let physical_index = match (var.varno, kind) {
+                (OUTER_VAR, JoinType::RightSemi) => return None,
+                (OUTER_VAR, _) => index,
+                (_, JoinType::Semi | JoinType::Anti) => return None,
+                (_, JoinType::RightSemi) => index,
+                _ => left_width + index,
             };
             (physical_index < input.output_vars().len()).then(|| {
                 special_slot_var(OUTER_VAR, physical_index, var.vartype, var.collation_oid)
@@ -9062,7 +9083,9 @@ fn memoize_inner_plan_decision(
         || nest_params.is_empty()
         || matches!(
             kind,
-            pgrust_nodes::primnodes::JoinType::Semi | pgrust_nodes::primnodes::JoinType::Anti
+            pgrust_nodes::primnodes::JoinType::Semi
+                | pgrust_nodes::primnodes::JoinType::RightSemi
+                | pgrust_nodes::primnodes::JoinType::Anti
         )
     {
         return None;

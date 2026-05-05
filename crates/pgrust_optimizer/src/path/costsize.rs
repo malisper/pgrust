@@ -3104,6 +3104,35 @@ fn build_join_paths_internal(
 
     if !dml_target_outer_locked
         && !lateral_orientation_locked
+        && matches!(kind, JoinType::Semi)
+        && !recursive_worktable_join
+        && let Some(hash_join) =
+            extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
+        && !path_constrains_hash_keys_to_consts(&left, &hash_join.inner_hash_keys)
+    {
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_hashjoin,
+            estimate_hash_join_internal(
+                root,
+                catalog,
+                right.clone(),
+                left.clone(),
+                JoinType::RightSemi,
+                pathtarget.clone(),
+                output_columns.clone(),
+                hash_join.hash_clauses,
+                hash_join.outer_hash_keys,
+                hash_join.inner_hash_keys,
+                hash_join.join_clauses,
+                restrict_clauses.clone(),
+            ),
+        );
+    }
+
+    if !dml_target_outer_locked
+        && !lateral_orientation_locked
         && !matches!(kind, JoinType::Cross)
         && let Some(merge_join) =
             extract_merge_join_clauses(&restrict_clauses, left_relids, right_relids)
@@ -3192,6 +3221,77 @@ fn build_join_paths_internal(
     } else {
         paths
     }
+}
+
+fn path_constrains_hash_keys_to_consts(path: &Path, keys: &[Expr]) -> bool {
+    !keys.is_empty()
+        && keys
+            .iter()
+            .all(|key| path_constrains_hash_key_to_const(path, key))
+}
+
+fn path_constrains_hash_key_to_const(path: &Path, key: &Expr) -> bool {
+    match path {
+        Path::Filter {
+            predicate, input, ..
+        } => {
+            filter_constrains_hash_key_to_const(predicate, key)
+                || path_constrains_hash_key_to_const(input, key)
+        }
+        Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => path_constrains_hash_key_to_const(input, key),
+        Path::Append { children, .. } | Path::MergeAppend { children, .. } => {
+            !children.is_empty()
+                && children
+                    .iter()
+                    .all(|child| path_constrains_hash_key_to_const(child, key))
+        }
+        _ => false,
+    }
+}
+
+fn filter_constrains_hash_key_to_const(predicate: &Expr, key: &Expr) -> bool {
+    flatten_and_conjuncts(predicate)
+        .iter()
+        .any(|clause| clause_is_hash_key_const_equality(clause, key))
+}
+
+fn clause_is_hash_key_const_equality(clause: &Expr, key: &Expr) -> bool {
+    let Expr::Op(op) = clause else {
+        return false;
+    };
+    if op.op != OpExprKind::Eq {
+        return false;
+    }
+    let [left, right] = op.args.as_slice() else {
+        return false;
+    };
+    (expr_matches_hash_key(left, key)
+        && matches!(right, Expr::Const(value) if !matches!(value, Value::Null)))
+        || (expr_matches_hash_key(right, key)
+            && matches!(left, Expr::Const(value) if !matches!(value, Value::Null)))
+}
+
+fn expr_matches_hash_key(expr: &Expr, key: &Expr) -> bool {
+    if expr == key {
+        return true;
+    }
+    let (Expr::Var(expr_var), Expr::Var(key_var)) = (expr, key) else {
+        return false;
+    };
+    expr_var.varlevelsup == 0
+        && key_var.varlevelsup == 0
+        && expr_var.varattno == key_var.varattno
+        && expr_var.vartype == key_var.vartype
 }
 
 // :HACK: Keep predicate.sql's fresh small-table full joins on merge join until
@@ -6416,10 +6516,10 @@ fn estimate_nested_loop_join_internal(
             left_info.startup_cost.as_f64() + right_info.startup_cost.as_f64(),
             total,
             rows,
-            if matches!(kind, JoinType::Semi | JoinType::Anti) {
-                left_info.plan_width
-            } else {
-                left_info.plan_width + right_info.plan_width
+            match kind {
+                JoinType::Semi | JoinType::Anti => left_info.plan_width,
+                JoinType::RightSemi => right_info.plan_width,
+                _ => left_info.plan_width + right_info.plan_width,
             },
         ),
         pathtarget,
@@ -6738,6 +6838,7 @@ fn estimate_join_rows(left_rows: f64, right_rows: f64, kind: JoinType, join_sel:
         JoinType::Right => inner_rows.max(right_rows),
         JoinType::Full => inner_rows.max(left_rows).max(right_rows),
         JoinType::Semi => inner_rows.min(left_rows),
+        JoinType::RightSemi => inner_rows.min(right_rows),
         JoinType::Anti => (left_rows - inner_rows.min(left_rows)).max(1.0),
     }
 }
@@ -7029,10 +7130,10 @@ fn estimate_hash_join_internal(
             startup,
             total,
             rows,
-            if matches!(kind, JoinType::Semi | JoinType::Anti) {
-                left_info.plan_width
-            } else {
-                left_info.plan_width + right_info.plan_width
+            match kind {
+                JoinType::Semi | JoinType::Anti => left_info.plan_width,
+                JoinType::RightSemi => right_info.plan_width,
+                _ => left_info.plan_width + right_info.plan_width,
             },
         ),
         pathtarget,
@@ -7153,10 +7254,10 @@ fn estimate_merge_join_internal(
             left_info.startup_cost.as_f64() + right_info.startup_cost.as_f64(),
             total,
             rows,
-            if matches!(kind, JoinType::Semi | JoinType::Anti) {
-                left_info.plan_width
-            } else {
-                left_info.plan_width + right_info.plan_width
+            match kind {
+                JoinType::Semi | JoinType::Anti => left_info.plan_width,
+                JoinType::RightSemi => right_info.plan_width,
+                _ => left_info.plan_width + right_info.plan_width,
             },
         ),
         pathtarget,

@@ -5876,7 +5876,7 @@ pub fn rewrite_bound_delete_auto_view_target(
     let targets = auto_view_base_children(&resolved, catalog)?
         .into_iter()
         .map(|child| {
-            build_delete_target(
+            let mut target = build_delete_target(
                 &relation_name,
                 &resolved.base_relation.desc,
                 predicate.as_ref(),
@@ -5885,7 +5885,15 @@ pub fn rewrite_bound_delete_auto_view_target(
                 &child,
                 catalog,
             )
-            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))
+            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?;
+            if resolved.has_security_barrier && resolved.base_inh {
+                // :HACK: PostgreSQL's inherited security-barrier view DELETE
+                // keeps the target scan in heap order for leaky quals. The
+                // longer-term shape is a costed ModifyTable input path instead
+                // of choosing a DML index probe during binding.
+                target.row_source = BoundModifyRowSource::Heap;
+            }
+            Ok(target)
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
 

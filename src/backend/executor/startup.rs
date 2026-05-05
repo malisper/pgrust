@@ -627,14 +627,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 .into_iter()
                 .chain(right_plan.column_names())
                 .collect();
-            let output_names = if matches!(
-                kind,
+            let output_names = match kind {
                 crate::include::nodes::primnodes::JoinType::Semi
-                    | crate::include::nodes::primnodes::JoinType::Anti
-            ) {
-                left.column_names()
-            } else {
-                combined_names.clone()
+                | crate::include::nodes::primnodes::JoinType::Anti => left.column_names(),
+                crate::include::nodes::primnodes::JoinType::RightSemi => {
+                    right_plan.column_names().to_vec()
+                }
+                _ => combined_names.clone(),
             };
             let ncols = output_names.len();
             Box::new(NestedLoopJoinState {
@@ -695,14 +694,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 .into_iter()
                 .chain(hash_input.column_names())
                 .collect();
-            let output_names = if matches!(
-                kind,
+            let output_names = match kind {
                 crate::include::nodes::primnodes::JoinType::Semi
-                    | crate::include::nodes::primnodes::JoinType::Anti
-            ) {
-                left.column_names()
-            } else {
-                combined_names.clone()
+                | crate::include::nodes::primnodes::JoinType::Anti => left.column_names(),
+                crate::include::nodes::primnodes::JoinType::RightSemi => {
+                    hash_input.column_names().to_vec()
+                }
+                _ => combined_names.clone(),
             };
 
             Box::new(HashJoinState {
@@ -727,17 +725,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 current_bucket_index: 0,
                 matched_outer: false,
                 unmatched_inner_index: 0,
-                slot: TupleSlot::empty(
-                    if matches!(
-                        kind,
-                        crate::include::nodes::primnodes::JoinType::Semi
-                            | crate::include::nodes::primnodes::JoinType::Anti
-                    ) {
-                        left_width
-                    } else {
-                        left_width + right_width
-                    },
-                ),
+                slot: TupleSlot::empty(match kind {
+                    crate::include::nodes::primnodes::JoinType::Semi
+                    | crate::include::nodes::primnodes::JoinType::Anti => left_width,
+                    crate::include::nodes::primnodes::JoinType::RightSemi => right_width,
+                    _ => left_width + right_width,
+                }),
                 current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
@@ -766,14 +759,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 .into_iter()
                 .chain(right.column_names())
                 .collect();
-            let output_names = if matches!(
-                kind,
+            let output_names = match kind {
                 crate::include::nodes::primnodes::JoinType::Semi
-                    | crate::include::nodes::primnodes::JoinType::Anti
-            ) {
-                left.column_names()
-            } else {
-                combined_names.clone()
+                | crate::include::nodes::primnodes::JoinType::Anti => left.column_names(),
+                crate::include::nodes::primnodes::JoinType::RightSemi => right.column_names(),
+                _ => combined_names.clone(),
             };
             Box::new(MergeJoinState {
                 left: executor_start(*left),
@@ -793,17 +783,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_rows: None,
                 output_rows: None,
                 next_output_index: 0,
-                slot: TupleSlot::empty(
-                    if matches!(
-                        kind,
-                        crate::include::nodes::primnodes::JoinType::Semi
-                            | crate::include::nodes::primnodes::JoinType::Anti
-                    ) {
-                        left_width
-                    } else {
-                        left_width + right_width
-                    },
-                ),
+                slot: TupleSlot::empty(match kind {
+                    crate::include::nodes::primnodes::JoinType::Semi
+                    | crate::include::nodes::primnodes::JoinType::Anti => left_width,
+                    crate::include::nodes::primnodes::JoinType::RightSemi => right_width,
+                    _ => left_width + right_width,
+                }),
                 current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),

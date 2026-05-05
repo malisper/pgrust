@@ -350,6 +350,9 @@ fn child_join_reltarget(
     right_rel: &RelOptInfo,
     kind: JoinType,
 ) -> PathTarget {
+    if matches!(kind, JoinType::RightSemi) {
+        return right_rel.reltarget.clone();
+    }
     let mut exprs = left_rel.reltarget.exprs.clone();
     let mut sortgrouprefs = left_rel.reltarget.sortgrouprefs.clone();
     if !matches!(kind, JoinType::Semi | JoinType::Anti) {
@@ -364,6 +367,12 @@ fn child_join_output_columns(
     right_rel: &RelOptInfo,
     kind: JoinType,
 ) -> Vec<QueryColumn> {
+    if matches!(kind, JoinType::RightSemi) {
+        return right_rel
+            .cheapest_total_path()
+            .map(Path::columns)
+            .unwrap_or_default();
+    }
     let mut output_columns = left_rel
         .cheapest_total_path()
         .map(Path::columns)

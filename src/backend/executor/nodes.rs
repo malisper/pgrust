@@ -6919,6 +6919,7 @@ impl PlanNode for NestedLoopJoinState {
             JoinType::Right => "Nested Loop Right Join".into(),
             JoinType::Full => "Nested Loop Full Join".into(),
             JoinType::Semi => "Nested Loop Semi Join".into(),
+            JoinType::RightSemi => "Nested Loop Right Semi Join".into(),
             JoinType::Anti => "Nested Loop Anti Join".into(),
             JoinType::Cross => "Nested Loop".into(),
         }
@@ -7203,7 +7204,7 @@ fn prepare_indexed_lateral_right_rows(
 ) -> Result<Option<Vec<MaterializedRow>>, ExecError> {
     if !matches!(
         state.kind,
-        JoinType::Inner | JoinType::Left | JoinType::Semi | JoinType::Anti
+        JoinType::Inner | JoinType::Left | JoinType::Semi | JoinType::RightSemi | JoinType::Anti
     ) || !matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. }))
     {
         return Ok(None);

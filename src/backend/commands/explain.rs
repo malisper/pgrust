@@ -3873,6 +3873,7 @@ fn join_with_const_false_side_can_render_as_result(
     match kind {
         JoinType::Inner | JoinType::Cross => left_false || right_false,
         JoinType::Left | JoinType::Semi | JoinType::Anti => left_false,
+        JoinType::RightSemi => right_false,
         JoinType::Right => right_false,
         JoinType::Full => left_false && right_false,
     }

@@ -19626,6 +19626,172 @@ fn security_barrier_inheritance_view_filters_through_subquery_scan() {
 }
 
 #[test]
+fn security_barrier_inherited_view_dml_order_matches_postgres() {
+    let dir = temp_dir("security_barrier_inherited_view_dml_order");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create function sb_snoop(anyelement) returns boolean language plpgsql cost 0.000001 as $$
+         begin
+           raise notice 'snooped value: %', $1;
+           return true;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function sb_leakproof(anyelement) returns boolean language plpgsql strict immutable leakproof as $$
+         begin
+           return true;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(1, "create table sb_t1(a int4, b int4, c text)")
+        .unwrap();
+    db.execute(1, "create index sb_t1_a_idx on sb_t1(a)")
+        .unwrap();
+    db.execute(1, "create table sb_t11(d text) inherits (sb_t1)")
+        .unwrap();
+    db.execute(1, "create index sb_t11_a_idx on sb_t11(a)")
+        .unwrap();
+    db.execute(1, "create table sb_t12() inherits (sb_t1)")
+        .unwrap();
+    db.execute(1, "create index sb_t12_a_idx on sb_t12(a)")
+        .unwrap();
+    db.execute(1, "create table sb_t111() inherits (sb_t11, sb_t12)")
+        .unwrap();
+    db.execute(1, "create index sb_t111_a_idx on sb_t111(a)")
+        .unwrap();
+
+    let base_values = (1..=10)
+        .map(|value| format!("({value}, {value}, 't1')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into sb_t1 values {base_values}"))
+        .unwrap();
+    db.execute(1, "analyze sb_t1").unwrap();
+    let child_values = (1..=10)
+        .map(|value| format!("({value}, {value}, 't11', 't11d')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into sb_t11 values {child_values}"))
+        .unwrap();
+    db.execute(1, "analyze sb_t11").unwrap();
+    let child_values = (1..=10)
+        .map(|value| format!("({value}, {value}, 't12')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into sb_t12 values {child_values}"))
+        .unwrap();
+    db.execute(1, "analyze sb_t12").unwrap();
+    let child_values = (1..=10)
+        .map(|value| format!("({value}, {value}, 't111', 't11d')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into sb_t111 values {child_values}"))
+        .unwrap();
+    db.execute(1, "analyze sb_t111").unwrap();
+    db.execute(
+        1,
+        "create view sb_v1 with (security_barrier=true) as
+         select *, (select d from sb_t11 where sb_t11.a = sb_t1.a limit 1) as d
+         from sb_t1
+         where a > 5 and exists(select 1 from sb_t12 where sb_t12.a = sb_t1.a)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a, b, c, d from sb_v1 where a = 8"),
+        vec![
+            vec![
+                Value::Int32(8),
+                Value::Int32(8),
+                Value::Text("t1".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Int32(8),
+                Value::Text("t11".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Int32(8),
+                Value::Text("t12".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Int32(8),
+                Value::Text("t111".into()),
+                Value::Text("t11d".into()),
+            ],
+        ]
+    );
+
+    clear_notices();
+    db.execute(
+        1,
+        "update sb_v1 set a = a + 1
+         where sb_snoop(a) and sb_leakproof(a) and a = 8",
+    )
+    .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "snooped value: 8".to_string(),
+            "snooped value: 8".to_string(),
+            "snooped value: 8".to_string(),
+            "snooped value: 8".to_string(),
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, b, c, d from sb_v1 where b = 8"),
+        vec![
+            vec![
+                Value::Int32(9),
+                Value::Int32(8),
+                Value::Text("t111".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Int32(8),
+                Value::Text("t12".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Int32(8),
+                Value::Text("t11".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Int32(8),
+                Value::Text("t1".into()),
+                Value::Text("t11d".into()),
+            ],
+        ]
+    );
+
+    clear_notices();
+    db.execute(1, "delete from sb_v1 where sb_snoop(a) and sb_leakproof(a)")
+        .unwrap();
+    let expected = ["6", "7", "9", "10", "9"]
+        .into_iter()
+        .cycle()
+        .take(20)
+        .map(|value| format!("snooped value: {value}"))
+        .collect::<Vec<_>>();
+    assert_eq!(take_notice_messages(), expected);
+}
+
+#[test]
 fn set_operation_inputs_expand_views() {
     let dir = temp_dir("set_operation_view_inputs");
     let db = Database::open(&dir, 128).unwrap();
