@@ -2421,6 +2421,7 @@ fn lower_create_composite_type_desc(
 
 struct ResolvedBaseTypeSpec {
     typlen: i16,
+    typbyval: bool,
     typalign: AttributeAlign,
     typstorage: AttributeStorage,
     typelem: u32,
@@ -2442,6 +2443,7 @@ fn resolve_base_type_spec(
     catalog: &dyn CatalogLookup,
 ) -> Result<ResolvedBaseTypeSpec, ExecError> {
     let mut typlen = -1;
+    let mut typbyval = false;
     let mut typalign = AttributeAlign::Int;
     let mut typstorage = AttributeStorage::Extended;
     let mut typelem = 0;
@@ -2462,7 +2464,23 @@ fn resolve_base_type_spec(
             push_warning(format!("type attribute \"{option_name}\" not recognized"));
             continue;
         }
+        if normalized == "like" {
+            let like_row = resolve_base_type_like_row(catalog, base_type_option_value(option)?)?;
+            typlen = like_row.typlen;
+            typbyval = like_row.typbyval;
+            typalign = like_row.typalign;
+            typstorage = like_row.typstorage;
+        }
+    }
+
+    for option in &stmt.options {
+        let option_name = option.name.as_str();
+        let normalized = option_name.to_ascii_lowercase();
+        if option_name != normalized {
+            continue;
+        }
         match normalized.as_str() {
+            "like" => {}
             "internallength" => {
                 let value = base_type_option_value(option)?;
                 typlen = parse_base_type_internal_length(value)?;
@@ -2491,7 +2509,7 @@ fn resolve_base_type_spec(
                 })?;
             }
             "default" => default = Some(base_type_option_value(option)?.to_string()),
-            "passedbyvalue" => {}
+            "passedbyvalue" => typbyval = true,
             "category" | "preferred" => {
                 let _ = option.value.as_deref();
             }
@@ -2539,6 +2557,7 @@ fn resolve_base_type_spec(
 
     Ok(ResolvedBaseTypeSpec {
         typlen,
+        typbyval,
         typalign,
         typstorage,
         typelem,
@@ -2562,6 +2581,20 @@ fn resolve_base_type_spec(
         subscript_proc_oid: subscript_proc_oid.unwrap_or(0),
         default,
     })
+}
+
+fn resolve_base_type_like_row(
+    catalog: &dyn CatalogLookup,
+    value: &str,
+) -> Result<PgTypeRow, ExecError> {
+    let raw_type = parse_type_name(value).map_err(ExecError::Parse)?;
+    let sql_type = resolve_raw_type_name(&raw_type, catalog).map_err(ExecError::Parse)?;
+    let type_oid = catalog
+        .type_oid_for_sql_type(sql_type)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("{raw_type:?}"))))?;
+    catalog
+        .type_by_oid(type_oid)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("{raw_type:?}"))))
 }
 
 fn resolve_proc_oid_by_name(catalog: &dyn CatalogLookup, name: &str) -> Option<u32> {
@@ -2883,6 +2916,7 @@ impl Database {
             .complete_shell_base_type_mvcc(
                 shell_row.oid,
                 spec.typlen,
+                spec.typbyval,
                 spec.typalign,
                 spec.typstorage,
                 spec.typelem,
