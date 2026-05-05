@@ -48857,6 +48857,55 @@ fn pg_stat_io_exposes_pg_shaped_rows() {
 }
 
 #[test]
+fn pg_stat_io_tracks_temp_relation_reads_from_local_buffers() {
+    fn temp_relation_reads(session: &mut Session, db: &Database) -> i64 {
+        let rows = session_query_rows(
+            session,
+            db,
+            "select reads from pg_stat_io where backend_type = 'client backend' and object = 'temp relation' and context = 'normal'",
+        );
+        match rows.as_slice() {
+            [row] => match row.as_slice() {
+                [Value::Int64(reads)] => *reads,
+                other => panic!("expected temp relation reads row, got {other:?}"),
+            },
+            other => panic!("expected one temp relation pg_stat_io row, got {other:?}"),
+        }
+    }
+
+    let db = Database::open_ephemeral(256).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set stats_fetch_consistency = none")
+        .unwrap();
+    session.execute(&db, "set temp_buffers = 100").unwrap();
+    session
+        .execute(&db, "create temporary table test_io_local(a int4, b text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into test_io_local select generate_series(1, 5000), repeat('a', 200)",
+        )
+        .unwrap();
+    session_query_rows(&mut session, &db, "select pg_stat_force_next_flush()");
+    let before = temp_relation_reads(&mut session, &db);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from test_io_local"),
+        vec![vec![Value::Int64(5000)]]
+    );
+    session_query_rows(&mut session, &db, "select pg_stat_force_next_flush()");
+    let after = temp_relation_reads(&mut session, &db);
+
+    assert!(
+        after > before,
+        "expected temp relation reads to increase, before={before}, after={after}"
+    );
+}
+
+#[test]
 fn checkpoint_gucs_load_from_postgresql_conf_and_auto_conf() {
     use crate::backend::access::transam::ControlFileStore;
 
@@ -53519,6 +53568,51 @@ fn rollback_to_savepoint_restores_catalog_effects() {
 }
 
 #[test]
+fn drop_table_after_savepoint_rollback_can_be_dropped_again() {
+    let base = temp_dir("drop_after_savepoint_rollback");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table savepoint_drop_items (id int4)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "savepoint s").unwrap();
+    session
+        .execute(&db, "drop table savepoint_drop_items")
+        .unwrap();
+    session.execute(&db, "savepoint after_drop").unwrap();
+    session.execute(&db, "rollback to s").unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    match session
+        .execute(&db, "select count(*) from savepoint_drop_items")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected restored table, got {other:?}"),
+    }
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "savepoint s").unwrap();
+    session
+        .execute(&db, "drop table savepoint_drop_items")
+        .unwrap();
+    session.execute(&db, "savepoint after_drop").unwrap();
+    session.execute(&db, "release savepoint s").unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    match session.execute(&db, "select count(*) from savepoint_drop_items") {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "savepoint_drop_items" => {
+        }
+        other => panic!("expected committed drop to remove table, got {other:?}"),
+    }
+}
+
+#[test]
 fn streaming_select_uses_temp_table_shadowing() {
     let base = temp_dir("streaming_temp_shadowing");
     let db = Database::open(&base, 16).unwrap();
@@ -53593,6 +53687,13 @@ fn temp_buffers_guc_uses_pages_and_rejects_change_after_access() {
     );
 
     session.execute(&db, "set temp_buffers = 100").unwrap();
+    session.execute(&db, "reset temp_buffers").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show temp_buffers"),
+        vec![vec![Value::Text("1024".into())]]
+    );
+    assert_eq!(db.existing_local_buffer_manager(1).unwrap().capacity(), 100);
+    session.execute(&db, "set temp_buffers = 100").unwrap();
     let err = session.execute(&db, "set temp_buffers = 101").unwrap_err();
     match err {
         ExecError::DetailedError {
@@ -53611,6 +53712,11 @@ fn temp_buffers_guc_uses_pages_and_rejects_change_after_access() {
         }
         other => panic!("expected temp_buffers detail error, got {other:?}"),
     }
+    session.execute(&db, "reset all").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show temp_buffers"),
+        vec![vec![Value::Text("1024".into())]]
+    );
 }
 
 #[test]

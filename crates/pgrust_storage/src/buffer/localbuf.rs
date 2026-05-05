@@ -2,6 +2,7 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::bufmgr::BufferPool;
 use super::storage_backend::{SmgrStorageBackend, StorageBackend};
@@ -26,6 +27,7 @@ pub struct LocalBufferManager<S: StorageBackend + Send> {
     frames: Vec<LocalBufferFrame>,
     lookup: Mutex<FxHashMap<BufferTag, BufferId>>,
     strategy: Mutex<LocalStrategyState>,
+    storage_read_count: AtomicU64,
 }
 
 impl<S: StorageBackend + Send> LocalBufferManager<S> {
@@ -48,6 +50,7 @@ impl<S: StorageBackend + Send> LocalBufferManager<S> {
                 free_list,
                 next_victim: 0,
             }),
+            storage_read_count: AtomicU64::new(0),
         }
     }
 
@@ -64,6 +67,10 @@ impl<S: StorageBackend + Send> LocalBufferManager<S> {
 
     pub fn backing_pool(&self) -> &Arc<BufferPool<S>> {
         &self.backing_pool
+    }
+
+    pub fn storage_read_count(&self) -> u64 {
+        self.storage_read_count.load(Ordering::Relaxed)
     }
 
     pub fn lock_buffer_shared(
@@ -168,6 +175,7 @@ impl<S: StorageBackend + Send> LocalBufferManager<S> {
         let page = self
             .backing_pool
             .with_storage_mut(|storage| storage.read_page(tag).map_err(Error::Storage))?;
+        self.storage_read_count.fetch_add(1, Ordering::Relaxed);
         *frame.content_lock.write() = page;
         *frame.tag.lock() = Some(tag);
         frame

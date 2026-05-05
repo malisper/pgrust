@@ -2509,6 +2509,8 @@ fn seq_scan_next_local_buffer_tuple<'a>(
     loop {
         ctx.check_for_interrupts()?;
         let scan = state.scan.as_mut().expect("scan must be initialized");
+        let local = ctx.local_buffer_manager()?;
+        let local_reads_before = local.storage_read_count();
         let next = heap_scan_next_visible_raw::<
             (crate::include::access::itemptr::ItemPointerData, HeapTuple),
             ExecError,
@@ -2519,6 +2521,12 @@ fn seq_scan_next_local_buffer_tuple<'a>(
             scan,
             |tid, tuple_bytes| Ok((tid, HeapTuple::parse(tuple_bytes)?)),
         )?;
+        note_temp_relation_storage_reads(
+            ctx,
+            local
+                .storage_read_count()
+                .saturating_sub(local_reads_before),
+        );
 
         let Some((tid, tuple)) = next else {
             heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
@@ -2571,6 +2579,16 @@ fn seq_scan_next_local_buffer_tuple<'a>(
             .note_relation_tuple_returned(state.relation_oid);
         finish_row(&mut state.stats, start);
         return Ok(Some(&mut state.slot));
+    }
+}
+
+fn note_temp_relation_storage_reads(ctx: &mut ExecutorContext, reads: u64) {
+    if reads == 0 {
+        return;
+    }
+    let mut session_stats = ctx.session_stats.write();
+    for _ in 0..reads {
+        session_stats.note_io_read("client backend", "temp relation", "normal", 8192);
     }
 }
 

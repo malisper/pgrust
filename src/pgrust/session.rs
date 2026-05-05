@@ -6026,14 +6026,9 @@ impl Session {
 
     fn statement_uses_savepoint_subxid(stmt: &Statement) -> bool {
         match stmt {
-            Statement::Insert(_)
-            | Statement::Update(_)
-            | Statement::Delete(_)
-            | Statement::Merge(_)
-            | Statement::CopyFrom(_)
-            | Statement::TruncateTable(_) => true,
+            Statement::CopyTo(_) => false,
             Statement::Select(select) => Self::select_has_writable_ctes(select),
-            _ => false,
+            _ => true,
         }
     }
 
@@ -11227,6 +11222,13 @@ impl Session {
                             })
                         })
                         .flatten();
+                    for xid in &aborted_subxids {
+                        let _ = db.txns.write().abort(*xid);
+                        db.txn_waiter.unregister_holder(*xid);
+                    }
+                    if !aborted_subxids.is_empty() {
+                        db.txn_waiter.notify();
+                    }
                     db.finalize_aborted_catalog_effects(&aborted_catalog_effects);
                     db.finalize_aborted_temp_effects(client_id, &aborted_temp_effects);
                     db.finalize_aborted_sequence_effects(&aborted_sequence_effects);
@@ -11277,11 +11279,6 @@ impl Session {
                     txn.guc_commit_state = savepoint.guc_commit_state.clone();
                     txn.savepoints.truncate(index + 1);
                     txn.failed = false;
-                    for xid in aborted_subxids {
-                        let _ = db.txns.write().abort(xid);
-                        db.txn_waiter.unregister_holder(xid);
-                    }
-                    db.txn_waiter.notify();
                     (
                         savepoint.dynamic_type_snapshot,
                         savepoint.auth_effective_state,
@@ -20000,18 +19997,11 @@ impl Session {
             return Ok(StatementResult::AffectedRows(0));
         }
 
-        if name == "temp_buffers" && db.local_buffers_initialized(self.client_id) {
-            let new_value = stmt
-                .value
-                .clone()
-                .unwrap_or_else(|| TEMP_BUFFERS_DEFAULT_PAGES.to_string());
+        if name == "temp_buffers"
+            && let Some(new_value) = stmt.value.clone()
+            && let Some(current_pages) = initialized_temp_buffers_pages(db, self.client_id)
+        {
             let new_pages = parse_temp_buffers_pages(&new_value)?;
-            let current_pages = self
-                .effective_gucs_for_execution()
-                .get("temp_buffers")
-                .cloned()
-                .map(|value| parse_temp_buffers_pages(&value))
-                .unwrap_or(Ok(TEMP_BUFFERS_DEFAULT_PAGES))?;
             if new_pages != current_pages {
                 return Err(temp_buffers_change_after_init_error(&new_value));
             }
@@ -20182,19 +20172,6 @@ impl Session {
                     sqlstate: "25001",
                 }));
             }
-            if normalized == "temp_buffers" && db.local_buffers_initialized(self.client_id) {
-                let current_pages = self
-                    .effective_gucs_for_execution()
-                    .get("temp_buffers")
-                    .cloned()
-                    .map(|value| parse_temp_buffers_pages(&value))
-                    .unwrap_or(Ok(TEMP_BUFFERS_DEFAULT_PAGES))?;
-                if current_pages != TEMP_BUFFERS_DEFAULT_PAGES {
-                    return Err(temp_buffers_change_after_init_error(
-                        &TEMP_BUFFERS_DEFAULT_PAGES.to_string(),
-                    ));
-                }
-            }
             let mut effective_state = self.capture_guc_state();
             if is_builtin {
                 reset_guc_in_state(
@@ -20226,19 +20203,6 @@ impl Session {
             }
             self.after_guc_change(db, &normalized);
         } else {
-            if db.local_buffers_initialized(self.client_id) {
-                let current_pages = self
-                    .effective_gucs_for_execution()
-                    .get("temp_buffers")
-                    .cloned()
-                    .map(|value| parse_temp_buffers_pages(&value))
-                    .unwrap_or(Ok(TEMP_BUFFERS_DEFAULT_PAGES))?;
-                if current_pages != TEMP_BUFFERS_DEFAULT_PAGES {
-                    return Err(temp_buffers_change_after_init_error(
-                        &TEMP_BUFFERS_DEFAULT_PAGES.to_string(),
-                    ));
-                }
-            }
             let mut effective_state = self.capture_guc_state();
             reset_all_gucs_in_state(&mut effective_state, &self.reset_datetime_config);
             let mut commit_state = self
@@ -23019,6 +22983,11 @@ fn parse_temp_buffers_pages(value: &str) -> Result<usize, ExecError> {
         });
     }
     Ok(pages)
+}
+
+fn initialized_temp_buffers_pages(db: &Database, client_id: ClientId) -> Option<usize> {
+    db.existing_local_buffer_manager(client_id)
+        .map(|local| local.capacity())
 }
 
 fn temp_buffers_change_after_init_error(value: &str) -> ExecError {
