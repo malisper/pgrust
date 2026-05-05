@@ -15500,6 +15500,53 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
 }
 
 #[test]
+fn plpgsql_anyarray_pg_statistic_argument_rejected_at_compile() {
+    let dir = temp_dir("plpgsql_anyarray_pg_statistic_arg");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table anyarray_stats_t(a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into anyarray_stats_t
+             select generate_series(1, 10)",
+        )
+        .unwrap();
+    session.execute(&db, "analyze anyarray_stats_t").unwrap();
+    session
+        .execute(
+            &db,
+            "create function anyarray_identity_for_stats(x anyarray)
+             returns anyarray
+             language plpgsql
+             as $$ begin return x; end $$",
+        )
+        .unwrap();
+
+    let err = session
+        .execute(
+            &db,
+            "select anyarray_identity_for_stats(stavalues1) from pg_statistic",
+        )
+        .unwrap_err();
+    match &err {
+        ExecError::WithContext { context, .. } => assert_eq!(
+            context,
+            "compilation of PL/pgSQL function \"anyarray_identity_for_stats\" near line 1"
+        ),
+        other => panic!("expected PL/pgSQL compile context, got {other:?}"),
+    }
+    assert_sqlstate(
+        err,
+        "0A000",
+        "PL/pgSQL functions cannot accept type anyarray",
+    );
+}
+
+#[test]
 fn pg_stats_hides_rows_when_row_security_is_active() {
     let dir = temp_dir("pg_stats_rls_filter");
     let db = Database::open(&dir, 128).unwrap();

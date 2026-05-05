@@ -47,6 +47,11 @@ use crate::pgrust::portal::{
     PositionedCursorRow,
 };
 use crate::pgrust::session::{ByteaOutputFormat, resolve_thread_prepared_statement};
+use pgrust_catalog_data::{
+    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
+    ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID,
+};
 use pgrust_nodes::{EventTriggerCallContext, TriggerCallContext, TriggerFunctionResult};
 use pgrust_plpgsql::event_trigger_return_bindings;
 use pgrust_plpgsql::{
@@ -463,9 +468,16 @@ fn compiled_function_for_proc(
     if let Some(compiled) = ctx.plpgsql_function_cache.read().get_valid(&key, &row) {
         return Ok(compiled);
     }
-    let compile_row =
+    let compile_row = if plpgsql_call_has_unresolved_pseudo_signature(
+        &row,
+        resolved_result_type,
+        actual_arg_types,
+    ) {
+        row.clone()
+    } else {
         concrete_polymorphic_proc_row(&row, resolved_result_type, actual_arg_types, catalog)
-            .unwrap_or_else(|| row.clone());
+            .unwrap_or_else(|| row.clone())
+    };
     let mut compiled = compile_function_from_proc(&compile_row, catalog, Some(&ctx.gucs))
         .map_err(|err| plpgsql_compile_error(err, &row))?;
     compiled.context_arg_type_names = proc_context_arg_type_names(&row, catalog);
@@ -474,6 +486,65 @@ fn compiled_function_for_proc(
         .write()
         .insert(key, row, Arc::clone(&compiled));
     Ok(compiled)
+}
+
+fn plpgsql_result_type_is_unresolved_pseudo(ty: SqlType) -> bool {
+    if plpgsql_type_oid_is_unresolved_pseudo(ty.type_oid) {
+        return true;
+    }
+    matches!(
+        ty.kind,
+        SqlTypeKind::AnyElement
+            | SqlTypeKind::AnyArray
+            | SqlTypeKind::AnyRange
+            | SqlTypeKind::AnyMultirange
+            | SqlTypeKind::AnyEnum
+            | SqlTypeKind::AnyCompatible
+            | SqlTypeKind::AnyCompatibleArray
+            | SqlTypeKind::AnyCompatibleRange
+            | SqlTypeKind::AnyCompatibleMultirange
+    )
+}
+
+fn plpgsql_call_has_unresolved_pseudo_signature(
+    row: &PgProcRow,
+    resolved_result_type: Option<SqlType>,
+    actual_arg_types: &[Option<SqlType>],
+) -> bool {
+    if plpgsql_type_oid_is_unresolved_pseudo(row.prorettype) && resolved_result_type.is_none() {
+        return true;
+    }
+    if resolved_result_type.is_some_and(plpgsql_result_type_is_unresolved_pseudo) {
+        return true;
+    }
+    let Some(arg_oids) = parse_proc_argtype_oids(&row.proargtypes) else {
+        return false;
+    };
+    arg_oids
+        .into_iter()
+        .zip(actual_arg_types.iter().copied())
+        .any(|(declared_oid, actual_type)| {
+            plpgsql_type_oid_is_unresolved_pseudo(declared_oid)
+                && actual_type.is_some_and(plpgsql_result_type_is_unresolved_pseudo)
+        })
+}
+
+fn plpgsql_type_oid_is_unresolved_pseudo(oid: u32) -> bool {
+    matches!(
+        oid,
+        ANYOID
+            | ANYELEMENTOID
+            | ANYNONARRAYOID
+            | ANYARRAYOID
+            | ANYENUMOID
+            | ANYRANGEOID
+            | ANYMULTIRANGEOID
+            | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLENONARRAYOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+    )
 }
 
 fn proc_context_arg_type_names(row: &PgProcRow, catalog: &dyn CatalogLookup) -> Vec<String> {

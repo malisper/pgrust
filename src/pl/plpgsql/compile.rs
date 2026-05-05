@@ -622,21 +622,13 @@ pub(crate) fn compile_function_from_proc(
         })?;
     let input_types = input_type_oids
         .iter()
-        .map(|oid| {
-            catalog
-                .type_by_oid(*oid)
-                .map(|ty| ty.sql_type)
-                .ok_or_else(|| ParseError::UnsupportedType(oid.to_string()))
-        })
+        .map(|oid| plpgsql_argument_sql_type(*oid, catalog))
         .collect::<Result<Vec<_>, _>>()?;
 
     if let (Some(all_arg_types), Some(arg_modes)) = (&row.proallargtypes, &row.proargmodes) {
         let arg_names = row.proargnames.clone().unwrap_or_default();
         for (index, (type_oid, mode)) in all_arg_types.iter().zip(arg_modes.iter()).enumerate() {
-            let sql_type = catalog
-                .type_by_oid(*type_oid)
-                .map(|ty| ty.sql_type)
-                .ok_or_else(|| ParseError::UnsupportedType(type_oid.to_string()))?;
+            let sql_type = plpgsql_argument_sql_type(*type_oid, catalog)?;
             let name = arg_names
                 .get(index)
                 .cloned()
@@ -729,6 +721,24 @@ pub(crate) fn compile_function_from_proc(
         local_ctes: Vec::new(),
         trigger_transition_ctes: Vec::new(),
     })
+}
+
+fn plpgsql_argument_sql_type(
+    type_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    let type_row = catalog
+        .type_by_oid(type_oid)
+        .ok_or_else(|| ParseError::UnsupportedType(type_oid.to_string()))?;
+    if type_row.typtype == 'p' && type_oid != RECORD_TYPE_OID {
+        return Err(ParseError::DetailedError {
+            message: format!("PL/pgSQL functions cannot accept type {}", type_row.typname),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(type_row.sql_type)
 }
 
 pub(crate) fn compile_trigger_function_from_proc(
