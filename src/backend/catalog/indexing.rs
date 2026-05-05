@@ -481,9 +481,10 @@ pub fn vacuum_system_catalog_indexes_for_kinds_in_db(
                 index_meta: system_catalog_index_relcache(*descriptor),
                 expr_eval: None,
             };
-            let scan = vacuum_relation_scan(pool, 0, ctx.heap_relation, txns).map_err(|err| {
-                CatalogError::Io(format!("catalog heap vacuum scan failed: {err:?}"))
-            })?;
+            let scan =
+                vacuum_relation_scan(pool, 0, ctx.heap_relation, txns, false).map_err(|err| {
+                    CatalogError::Io(format!("catalog heap vacuum scan failed: {err:?}"))
+                })?;
             let dead_item_callback = |tid| scan.dead_tids.contains(&tid);
             let stats = index_bulk_delete(&ctx, BTREE_AM_OID, &dead_item_callback, None)?;
             let _ = index_vacuum_cleanup(&ctx, BTREE_AM_OID, Some(stats))?;
@@ -506,7 +507,7 @@ pub fn vacuum_system_catalog_heaps_and_indexes_for_kinds_in_db(
         }
 
         let heap_relation = bootstrap_catalog_rel(kind, db_oid);
-        let scan = vacuum_relation_scan(pool, 0, heap_relation, txns)
+        let scan = vacuum_relation_scan(pool, 0, heap_relation, txns, false)
             .map_err(|err| CatalogError::Io(format!("catalog heap vacuum scan failed: {err:?}")))?;
         if scan.dead_tids.is_empty() {
             continue;
