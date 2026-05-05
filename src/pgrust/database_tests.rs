@@ -17861,6 +17861,41 @@ fn create_view_referencing_temp_relation_becomes_temp_view() {
 }
 
 #[test]
+fn plpgsql_dynamic_execute_declares_session_cursor() {
+    let dir = temp_dir("plpgsql_dynamic_declare_cursor");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table cursor_items(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into cursor_items values (1), (2), (3)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function open_dynamic_cursor() returns void language plpgsql as $$
+             begin
+                 execute 'declare c_dyn cursor for select id from cursor_items order by id';
+                 execute 'fetch next from c_dyn';
+             end
+             $$",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "select open_dynamic_cursor()")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch next from c_dyn"),
+        vec![vec![Value::Int32(2)]]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn create_view_persists_security_reloptions() {
     let dir = temp_dir("create_view_reloptions");
     let db = Database::open(&dir, 128).unwrap();

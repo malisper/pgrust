@@ -6,7 +6,9 @@ PostgreSQL really raises "unsupported ON COMMIT and foreign key combination" at 
 
 Explicit pg_temp CREATE TYPE now resolves to the session temp namespace, records a temp effect, and marks composite type catalog rows as temp persistence.
 
-Explicit pg_temp CREATE VIEW now follows PostgreSQL's RangeVar creation-namespace behavior: targeting a temp namespace adjusts relation persistence to temporary, so CREATE VIEW succeeds and PREPARE TRANSACTION fails later with the temp-object 2PC error. The remaining pasted diff is PL/pgSQL dynamic EXECUTE of DECLARE CURSOR routing through the read-only executor instead of the session portal path.
+Explicit pg_temp CREATE VIEW now follows PostgreSQL's RangeVar creation-namespace behavior: targeting a temp namespace adjusts relation persistence to temporary, so CREATE VIEW succeeds and PREPARE TRANSACTION fails later with the temp-object 2PC error.
+
+PL/pgSQL dynamic EXECUTE now handles DECLARE/FETCH/MOVE/CLOSE portal commands against executor pending portals instead of routing them into the read-only fallback. The `DeclareCursor(...)` temp diff is gone.
 
 Files touched:
 .codex/task-notes/temp-tests-diff.md
@@ -16,6 +18,7 @@ src/pgrust/database/commands/typecmds.rs
 src/pgrust/database/temp.rs
 src/pgrust/database_tests.rs
 src/pgrust/session.rs
+src/pl/plpgsql/exec.rs
 
 Tests run:
 scripts/cargo_isolated.sh test --lib --quiet temp_on_commit_delete_rejects_foreign_key_with_different_action
@@ -26,6 +29,9 @@ scripts/run_regression.sh --test temp --jobs 1 --timeout 180 --results-dir /tmp/
 scripts/run_regression.sh --test temp --jobs 1 --timeout 180 --results-dir /tmp/diffs/temp-oncommit-fix2 --port 55438
 scripts/run_regression.sh --test temp --jobs 1 --timeout 180 --results-dir /tmp/diffs/temp-temp-type-fix --port 55439
 scripts/run_regression.sh --test temp --jobs 1 --timeout 120 --results-dir /tmp/diffs/temp-view-fix
+scripts/cargo_isolated.sh test --lib --quiet plpgsql_dynamic_execute_declares_session_cursor
+scripts/run_regression.sh --test temp --jobs 1 --timeout 120 --results-dir /tmp/diffs/temp-dynamic-cursor-fix2
+CARGO_INCREMENTAL=0 scripts/cargo_isolated.sh check
 
 Remaining:
-Teach PL/pgSQL dynamic EXECUTE/session path to handle DECLARE/FETCH portal commands if temp buffer pin tests should pass.
+Temp regression still differs on local buffer pin semantics and active-query DROP/TRUNCATE behavior: dynamic cursor creation now succeeds, but pgrust does not exhaust temp local buffers under many open cursors and allows DROP TABLE test_temp before PostgreSQL's active-query guard would reject it. The earlier 2PC `twophase_tab` GID reuse hunk also remains.
