@@ -22041,6 +22041,7 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
     let mut name = None;
     let mut location = None;
     let mut column_names = Vec::new();
+    let mut materialization = CteMaterialization::Default;
     let mut body = None;
     let mut search = None;
     let mut cycle = None;
@@ -22058,6 +22059,18 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
                     column_names = list.into_inner().map(build_identifier).collect();
                 }
             }
+            Rule::cte_materialization => {
+                materialization = if part
+                    .as_str()
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("not")
+                {
+                    CteMaterialization::NotMaterialized
+                } else {
+                    CteMaterialization::Materialized
+                };
+            }
             Rule::cte_body => {
                 body = Some(build_cte_body(
                     part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
@@ -22072,6 +22085,7 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
         name: name.ok_or(ParseError::UnexpectedEof)?,
         location,
         column_names,
+        materialization,
         body: body.ok_or(ParseError::UnexpectedEof)?,
         search,
         cycle,
@@ -24526,6 +24540,7 @@ fn build_recursive_view_query(
                 name: view_name.to_string(),
                 location: None,
                 column_names: column_names.to_vec(),
+                materialization: CteMaterialization::Default,
                 body: select_statement_as_cte_body(body_query),
                 search: None,
                 cycle: None,

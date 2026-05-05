@@ -63036,6 +63036,153 @@ fn pg_get_viewdef_returns_canonical_view_query() {
     );
 }
 
+fn single_text_row(db: &Database, sql: &str) -> String {
+    let rows = query_rows(db, 1, sql);
+    match rows.as_slice() {
+        [row] => match row.as_slice() {
+            [Value::Text(value)] => value.to_string(),
+            other => panic!("expected single text column, got {other:?}"),
+        },
+        other => panic!("expected one row, got {other:?}"),
+    }
+}
+
+#[test]
+fn pg_get_viewdef_deparses_recursive_cte_from_query_tree() {
+    let dir = temp_dir("pg_get_viewdef_recursive_cte");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table department (id int4, parent_department int4, name text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view vsubdepartment as
+         with recursive subdepartment as (
+             select * from department where name = 'A'
+             union all
+             select d.* from department as d, subdepartment as sd
+              where d.parent_department = sd.id
+         )
+         select * from subdepartment",
+    )
+    .unwrap();
+
+    let definition = single_text_row(&db, "select pg_get_viewdef('vsubdepartment'::regclass)");
+    assert!(
+        definition.contains("WITH RECURSIVE subdepartment AS"),
+        "{definition}"
+    );
+    assert!(definition.contains("UNION ALL"), "{definition}");
+    assert!(definition.contains("subdepartment sd"), "{definition}");
+    assert!(definition.contains("parent_department"), "{definition}");
+    assert!(
+        !definition.contains("SELECT * FROM department"),
+        "{definition}"
+    );
+    assert!(
+        !definition.contains("SELECT * FROM subdepartment"),
+        "{definition}"
+    );
+}
+
+#[test]
+fn pg_get_viewdef_deparses_cte_columns_and_materialization() {
+    let dir = temp_dir("pg_get_viewdef_cte_materialization");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create view vcte_options as
+         with recursive nums(n) as (
+             values (1)
+             union all
+             select n + 1 from nums where n < 3
+         ),
+         cte as materialized (select n from nums),
+         cte2 as not materialized (select n + 1 as m from cte)
+         select m from cte2",
+    )
+    .unwrap();
+
+    let definition = single_text_row(&db, "select pg_get_viewdef('vcte_options'::regclass)");
+    assert!(
+        definition.contains("WITH RECURSIVE nums(n) AS"),
+        "{definition}"
+    );
+    assert!(definition.contains("VALUES (1)"), "{definition}");
+    assert!(definition.contains("cte AS MATERIALIZED"), "{definition}");
+    assert!(
+        definition.contains("cte2 AS NOT MATERIALIZED"),
+        "{definition}"
+    );
+}
+
+#[test]
+fn pg_get_viewdef_deparses_search_cycle_ctes_from_source_query() {
+    let dir = temp_dir("pg_get_viewdef_search_cycle_cte");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table graph (f int4, t int4, label text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view v_search_cte as
+         with recursive search_graph(f, t, label) as (
+             select g.f, g.t, g.label from graph g
+             union all
+             select g.f, g.t, g.label
+               from graph g, search_graph sg
+              where g.f = sg.t
+         ) search depth first by f, t set seq
+         select f, t, label from search_graph",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view v_cycle_cte as
+         with recursive search_graph(f, t, label) as (
+             select g.f, g.t, g.label from graph g
+             union all
+             select g.f, g.t, g.label
+               from graph g, search_graph sg
+              where g.f = sg.t
+         ) cycle f, t set is_cycle using path
+         select f, t, label from search_graph",
+    )
+    .unwrap();
+
+    let search_definition = single_text_row(&db, "select pg_get_viewdef('v_search_cte'::regclass)");
+    assert!(
+        search_definition.contains("SEARCH DEPTH FIRST BY f, t SET seq"),
+        "{search_definition}"
+    );
+    assert!(
+        search_definition.contains("search_graph sg"),
+        "{search_definition}"
+    );
+    assert!(
+        !search_definition.contains("__pgrust_sc"),
+        "{search_definition}"
+    );
+
+    let cycle_definition = single_text_row(&db, "select pg_get_viewdef('v_cycle_cte'::regclass)");
+    assert!(
+        cycle_definition.contains("CYCLE f, t SET is_cycle USING path"),
+        "{cycle_definition}"
+    );
+    assert!(
+        cycle_definition.contains("search_graph sg"),
+        "{cycle_definition}"
+    );
+    assert!(
+        !cycle_definition.contains("__pgrust_sc"),
+        "{cycle_definition}"
+    );
+}
+
 #[test]
 fn aggregate_regress_nested_sublink_outer_aggregate() {
     let dir = temp_dir("nested_sublink_outer_aggregate");

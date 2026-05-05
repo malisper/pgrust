@@ -616,6 +616,7 @@ pub struct UnsupportedStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
     pub command_type: CommandType,
+    pub with_clause: Option<QueryWithClause>,
     pub depends_on_row_security: bool,
     pub rtable: Vec<RangeTblEntry>,
     pub jointree: Option<JoinTreeNode>,
@@ -661,6 +662,47 @@ impl Query {
             .map(|column| column.name)
             .collect()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryWithClause {
+    pub recursive: bool,
+    pub ctes: Vec<QueryCte>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryCte {
+    pub name: String,
+    pub cte_id: usize,
+    pub explicit_column_names: Vec<String>,
+    pub materialization: CteMaterialization,
+    pub search: Option<QueryCteSearchClause>,
+    pub cycle: Option<QueryCteCycleClause>,
+    pub query: Box<Query>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CteMaterialization {
+    Default,
+    Materialized,
+    NotMaterialized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryCteSearchClause {
+    pub breadth_first: bool,
+    pub columns: Vec<String>,
+    pub sequence_column: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryCteCycleClause {
+    pub columns: Vec<String>,
+    pub mark_column: String,
+    pub mark_value: Option<SqlExpr>,
+    pub default_value: Option<SqlExpr>,
+    pub mark_type: Option<SqlType>,
+    pub path_column: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1768,6 +1810,7 @@ pub struct CommonTableExpr {
     pub name: String,
     pub location: Option<usize>,
     pub column_names: Vec<String>,
+    pub materialization: CteMaterialization,
     pub body: CteBody,
     pub search: Option<CteSearchClause>,
     pub cycle: Option<CteCycleClause>,

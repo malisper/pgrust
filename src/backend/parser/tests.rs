@@ -22,17 +22,17 @@ use crate::include::nodes::parsenodes::{
     CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
     CreateCollationKind, CreateCompositeTypeStatement, CreateShellTypeStatement,
-    CreateTriggerStatement, CreateTypeStatement, CursorScrollOption, DeclareCursorStatement,
-    DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement, DropSubscriptionStatement,
-    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
-    GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy,
-    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
-    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
-    RelOption, ReturningAliasKind, SetSessionAuthorizationStatement, SetTransactionScope,
-    SqlCallArgs, SqlExpr, SubscriptionOptionValue, TableConstraint, TransactionEndOptions,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
-    UserMappingUser, ViewCheckOption,
+    CreateTriggerStatement, CreateTypeStatement, CteMaterialization, CursorScrollOption,
+    DeclareCursorStatement, DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement,
+    DropSubscriptionStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
+    ForeignKeyMatchType, GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef,
+    InsertSource, InsertStatement, JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind,
+    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
+    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
+    RawPartitionSpec, RawTypeName, RelOption, ReturningAliasKind, SetSessionAuthorizationStatement,
+    SetTransactionScope, SqlCallArgs, SqlExpr, SubscriptionOptionValue, TableConstraint,
+    TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec,
+    TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var,
@@ -15168,6 +15168,29 @@ fn parse_with_recursive_cte_search_and_cycle_clauses() {
             assert_eq!(cycle.path_column, "path");
         }
         other => panic!("expected Select with SEARCH/CYCLE clauses, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_cte_materialization_options() {
+    match parse_statement(
+        "with a as materialized (select 1),
+              b as not materialized (select * from a),
+              c as (select * from b)
+         select * from c",
+    )
+    .unwrap()
+    {
+        Statement::Select(SelectStatement { with, .. }) => {
+            assert_eq!(with.len(), 3);
+            assert_eq!(with[0].materialization, CteMaterialization::Materialized);
+            assert_eq!(with[1].materialization, CteMaterialization::NotMaterialized);
+            assert_eq!(with[2].materialization, CteMaterialization::Default);
+        }
+        other => panic!(
+            "expected Select with CTE materialization options, got {:?}",
+            other
+        ),
     }
 }
 

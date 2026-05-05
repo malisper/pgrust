@@ -454,6 +454,7 @@ mod tests {
             name: "app_view".into(),
             location: None,
             column_names: Vec::new(),
+            materialization: pgrust_nodes::parsenodes::CteMaterialization::Default,
             body: CteBody::Values(pgrust_nodes::parsenodes::ValuesStatement {
                 with_recursive: false,
                 with: Vec::new(),

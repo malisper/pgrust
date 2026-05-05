@@ -3,8 +3,8 @@ use pgrust_catalog_data::builtin_aggregate_function_for_proc_oid;
 use pgrust_nodes::CommandType;
 use pgrust_nodes::datum::Value;
 use pgrust_nodes::parsenodes::{
-    JoinTreeNode, ParseError, Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind,
-    SelectLockingClause,
+    JoinTreeNode, ParseError, Query, QueryCte, QueryRowMark, QueryWithClause, RangeTblEntry,
+    RangeTblEntryKind, SelectLockingClause,
 };
 use pgrust_nodes::pathnodes::{
     AggregateLayout, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo,
@@ -91,6 +91,10 @@ fn prepare_query_for_locking_with_inherited(
         .into_iter()
         .map(prepare_sort_clause_for_locking)
         .collect::<Result<Vec<_>, _>>()?;
+    query.with_clause = query
+        .with_clause
+        .map(prepare_with_clause_for_locking)
+        .transpose()?;
     query.recursive_union = query
         .recursive_union
         .map(|recursive_union| prepare_recursive_union_for_locking(*recursive_union).map(Box::new))
@@ -838,6 +842,26 @@ fn prepare_recursive_union_for_locking(
     })
 }
 
+fn prepare_with_clause_for_locking(
+    with_clause: QueryWithClause,
+) -> Result<QueryWithClause, ParseError> {
+    Ok(QueryWithClause {
+        ctes: with_clause
+            .ctes
+            .into_iter()
+            .map(|cte| {
+                Ok(QueryCte {
+                    query: Box::new(prepare_query_for_locking_with_inherited(
+                        *cte.query, None, false,
+                    )?),
+                    ..cte
+                })
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?,
+        ..with_clause
+    })
+}
+
 fn prepare_set_operation_for_locking(
     set_operation: pgrust_nodes::parsenodes::SetOperationQuery,
 ) -> Result<pgrust_nodes::parsenodes::SetOperationQuery, ParseError> {
@@ -1179,6 +1203,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
 
     Query {
         command_type: query.command_type,
+        with_clause: query.with_clause,
         depends_on_row_security: query.depends_on_row_security,
         rtable: Vec::new(),
         jointree: None,
@@ -1558,6 +1583,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
     ]);
     let subselect = Query {
         command_type: CommandType::Select,
+        with_clause: query.with_clause.clone(),
         depends_on_row_security: query.depends_on_row_security,
         rtable: query.rtable.clone(),
         jointree: query.jointree.clone(),

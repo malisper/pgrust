@@ -1,8 +1,8 @@
 use super::*;
 use pgrust_nodes::CommandType;
 use pgrust_nodes::parsenodes::{
-    JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref, RecursiveUnionQuery,
-    SetOperationQuery, TableSampleClause,
+    JoinTreeNode, Query, QueryCte, QueryWithClause, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
+    RecursiveUnionQuery, SetOperationQuery, TableSampleClause,
 };
 use pgrust_nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
@@ -462,6 +462,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
     });
     Query {
         command_type: CommandType::Select,
+        with_clause: None,
         depends_on_row_security: false,
         rtable,
         jointree,
@@ -1875,6 +1876,23 @@ fn rewrite_query_local_vars_for_output_exprs(
             rte
         })
         .collect();
+    query.with_clause = query.with_clause.map(|with_clause| QueryWithClause {
+        ctes: with_clause
+            .ctes
+            .into_iter()
+            .map(|cte| QueryCte {
+                query: Box::new(rewrite_query_local_vars_for_output_exprs(
+                    *cte.query,
+                    source_varno,
+                    output_exprs,
+                    allow_planned_subqueries,
+                    source_varlevelsup + 1,
+                )),
+                ..cte
+            })
+            .collect(),
+        ..with_clause
+    });
     query.recursive_union = query.recursive_union.map(|union| {
         Box::new(RecursiveUnionQuery {
             anchor: rewrite_query_local_vars_for_output_exprs(
