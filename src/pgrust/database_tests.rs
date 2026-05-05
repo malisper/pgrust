@@ -3799,6 +3799,18 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
     }
 }
 
+fn parse_error_is_unknown_column(err: &ParseError, expected: &str) -> bool {
+    matches!(err.unpositioned(), ParseError::UnknownColumn(name) if name == expected)
+}
+
+fn missing_column_or_token_name(err: &ParseError, expected: &str) -> bool {
+    match err.unpositioned() {
+        ParseError::UnknownColumn(name) => name == expected,
+        ParseError::UnexpectedToken { actual, .. } => actual.contains(expected),
+        _ => false,
+    }
+}
+
 fn return_rule_oid_for_relation(db: &Database, relname: &str) -> u32 {
     let catalog = db.catalog.read();
     let catcache = catalog.catcache().unwrap();
@@ -28736,9 +28748,7 @@ fn alter_table_add_column_uses_command_end_invalidation_and_rolls_back() {
     session.execute(&db, "rollback").unwrap();
 
     match db.execute(1, "select note from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name)))
-        | Err(ExecError::Parse(ParseError::UnexpectedToken { actual: name, .. }))
-            if name.contains("note") => {}
+        Err(ExecError::Parse(err)) if missing_column_or_token_name(&err, "note") => {}
         other => panic!("expected rolled-back column to be absent, got {other:?}"),
     }
 }
@@ -29556,7 +29566,7 @@ fn alter_table_drop_column_hides_column_and_retargets_inserts() {
     );
 
     match db.execute(1, "select a from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "a" => {}
+        Err(ExecError::Parse(err)) if parse_error_is_unknown_column(&err, "a") => {}
         other => panic!("expected dropped column lookup to fail, got {other:?}"),
     }
 
@@ -29819,7 +29829,7 @@ fn alter_table_rename_column_updates_lookup_and_rolls_back() {
         other => panic!("expected query result, got {other:?}"),
     }
     match session.execute(&db, "select note from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "note" => {}
+        Err(ExecError::Parse(err)) if parse_error_is_unknown_column(&err, "note") => {}
         other => panic!("expected old column name to disappear, got {other:?}"),
     }
 
@@ -29830,7 +29840,7 @@ fn alter_table_rename_column_updates_lookup_and_rolls_back() {
         vec![vec![Value::Text("hello".into())]]
     );
     match db.execute(1, "select body from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "body" => {}
+        Err(ExecError::Parse(err)) if parse_error_is_unknown_column(&err, "body") => {}
         other => panic!("expected rollback to restore old column name, got {other:?}"),
     }
 }
@@ -29899,7 +29909,7 @@ fn alter_table_rename_column_persists_after_reopen() {
         vec![vec![Value::Text("hello".into())]]
     );
     match reopened.execute(1, "select note from items") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "note" => {}
+        Err(ExecError::Parse(err)) if parse_error_is_unknown_column(&err, "note") => {}
         other => panic!("expected persisted renamed column to hide old name, got {other:?}"),
     }
 }

@@ -11893,9 +11893,14 @@ fn build_non_equi_join_plan_stays_nested_loop() {
 #[test]
 fn unknown_column_is_rejected() {
     let stmt = parse_select("select missing from people").unwrap();
-    assert!(
-        matches!(build_plan(&stmt, &catalog()), Err(ParseError::UnknownColumn(name)) if name == "missing")
-    );
+    match build_plan(&stmt, &catalog()) {
+        Err(err) => {
+            assert!(
+                matches!(err.unpositioned(), ParseError::UnknownColumn(name) if name == "missing")
+            );
+        }
+        Ok(plan) => panic!("expected unknown column, got plan {plan:?}"),
+    }
 }
 
 #[test]
