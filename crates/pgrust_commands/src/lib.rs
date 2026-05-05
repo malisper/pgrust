@@ -26,6 +26,7 @@ pub mod rolecmds;
 pub mod row_security;
 pub mod schemacmds;
 pub mod sql_deparse;
+pub mod system_views;
 pub mod tablecmds;
 pub mod tablecmds_assignment;
 pub mod tablespace;
