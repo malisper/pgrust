@@ -4220,6 +4220,13 @@ fn cte_body_outer_scopes(outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
     cte_outer_scopes
 }
 
+fn select_target_location_for_column(stmt: &SelectStatement, name: &str) -> Option<usize> {
+    stmt.targets
+        .iter()
+        .find(|target| matches!(&target.expr, SqlExpr::Column(column) if column.eq_ignore_ascii_case(name)))
+        .and_then(|target| target.location)
+}
+
 fn prevalidate_recursive_select_targets(
     stmt: &SelectStatement,
     catalog: &dyn CatalogLookup,
@@ -7625,7 +7632,14 @@ fn bind_select_query_with_outer(
             grouped_outer.as_ref(),
             &visible_ctes,
             expanded_views,
-        )?;
+        )
+        .map_err(|err| match err {
+            ParseError::UnknownColumn(name) => positioned_if_available(
+                unknown_column_error_with_hint(&scope, &name),
+                select_target_location_for_column(stmt, &name),
+            ),
+            other => other,
+        })?;
         if let Some(predicate) = &stmt.where_clause {
             analyze_expr_aggregates_in_clause(
                 predicate,

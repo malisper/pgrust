@@ -545,6 +545,124 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
     Ok(first.0)
 }
 
+pub(super) fn unknown_column_error_with_hint(scope: &BoundScope, name: &str) -> ParseError {
+    let Some(hint) = missing_column_hint(scope, name) else {
+        return ParseError::UnknownColumn(name.to_string());
+    };
+    let message = if name.contains('.') {
+        format!("column {name} does not exist")
+    } else {
+        format!("column \"{name}\" does not exist")
+    };
+    ParseError::DetailedError {
+        message,
+        detail: None,
+        hint: Some(hint),
+        sqlstate: "42703",
+    }
+}
+
+fn missing_column_hint(scope: &BoundScope, name: &str) -> Option<String> {
+    let (requested_relation, column_name) = name
+        .rsplit_once('.')
+        .map(|(relation, column)| (Some(relation), column))
+        .unwrap_or((None, name));
+    if column_name.is_empty() || column_name == "*" {
+        return None;
+    }
+
+    let mut best_distance = 4usize;
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    let mut too_many_at_best_distance = false;
+    for column in &scope.columns {
+        if column.hidden || column.output_name.is_empty() {
+            continue;
+        }
+        if requested_relation.is_none() && column.qualified_only {
+            continue;
+        }
+        let Some(relation_name) = suggestion_relation_name(column, requested_relation) else {
+            continue;
+        };
+        let distance = levenshtein_distance_at_most(
+            &column.output_name.to_ascii_lowercase(),
+            &column_name.to_ascii_lowercase(),
+            best_distance,
+        );
+        if distance > 3 || distance > column_name.chars().count() / 2 {
+            continue;
+        }
+        let candidate = (relation_name.to_string(), column.output_name.clone());
+        if distance < best_distance {
+            best_distance = distance;
+            too_many_at_best_distance = false;
+            candidates.clear();
+            candidates.push(candidate);
+        } else if distance == best_distance
+            && !too_many_at_best_distance
+            && !candidates.iter().any(|existing| existing == &candidate)
+        {
+            if candidates.len() < 2 {
+                candidates.push(candidate);
+            } else {
+                candidates.clear();
+                too_many_at_best_distance = true;
+            }
+        }
+    }
+
+    match candidates.as_slice() {
+        [(relation, column)] => Some(format!(
+            "Perhaps you meant to reference the column \"{relation}.{column}\"."
+        )),
+        [(left_relation, left_column), (right_relation, right_column)] => Some(format!(
+            "Perhaps you meant to reference the column \"{left_relation}.{left_column}\" or the column \"{right_relation}.{right_column}\"."
+        )),
+        _ => None,
+    }
+}
+
+fn suggestion_relation_name<'a>(
+    column: &'a ScopeColumn,
+    requested_relation: Option<&str>,
+) -> Option<&'a str> {
+    if let Some(requested_relation) = requested_relation {
+        column
+            .relation_names
+            .iter()
+            .find(|relation_name| relation_name_matches(relation_name, requested_relation))
+            .map(String::as_str)
+    } else {
+        column.relation_names.first().map(String::as_str)
+    }
+}
+
+fn levenshtein_distance_at_most(left: &str, right: &str, max_distance: usize) -> usize {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    if left.len().abs_diff(right.len()) > max_distance {
+        return max_distance + 1;
+    }
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_char) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        let mut row_min = current[0];
+        for (right_index, right_char) in right.iter().enumerate() {
+            let substitution = usize::from(left_char != right_char);
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + substitution);
+            row_min = row_min.min(current[right_index + 1]);
+        }
+        if row_min > max_distance {
+            return max_distance + 1;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
 fn relation_specific_output_expr(column: &ScopeColumn, relation: Option<&str>) -> Option<Expr> {
     let relation = relation?;
     column

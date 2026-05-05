@@ -172,6 +172,12 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             format_exec_error_hint(&ExecError::Parse((**source).clone()))
         }
+        ExecError::Parse(crate::backend::parser::ParseError::WithContext { source, .. }) => {
+            format_exec_error_hint(&ExecError::Parse((**source).clone()))
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { hint, .. }) => {
+            hint.clone()
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
             actual,

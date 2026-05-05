@@ -3123,6 +3123,7 @@ impl Database {
         if drop_stmt.cascade {
             let interrupts = self.interrupt_state(client_id);
             let mut next_cid = cid;
+            let mut temp_desc_replacements = BTreeMap::new();
             for column in &plan.dependent_columns {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
@@ -3140,6 +3141,15 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+                if let Some(relation) = catalog.lookup_relation_by_oid(column.relation_oid)
+                    && relation.relpersistence == 't'
+                {
+                    let desc = temp_desc_replacements
+                        .entry(column.relation_oid)
+                        .or_insert_with(|| relation.desc.clone());
+                    super::drop_column::mark_column_dropped_in_desc(desc, &column.column_name);
+                    self.replace_temp_entry_desc(client_id, column.relation_oid, desc.clone())?;
+                }
                 next_cid = next_cid.saturating_add(1);
             }
         }
