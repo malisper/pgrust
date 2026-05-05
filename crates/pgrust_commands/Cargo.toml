@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 base64 = "0.22"
 hmac = "0.12"
+parking_lot = "0.12"
 pbkdf2 = "0.12"
 pgrust_catalog_data = { path = "../pgrust_catalog_data" }
 pgrust_catalog_store = { path = "../pgrust_catalog_store" }
