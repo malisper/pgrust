@@ -315,7 +315,11 @@ fn parse_statement_with_options_inner(
                 return Err(ParseError::UnexpectedToken {
                     expected: "statement",
                     actual: "syntax error at or near \";\"".into(),
-                });
+                }
+                .with_position(sql.rfind(';').map_or_else(
+                    || sql.chars().count() + 1,
+                    |index| sql_position_from_byte_offset(&sql, index),
+                )));
             }
             try_parse_unsupported_statement(&sql)
                 .ok_or_else(|| map_pest_error("statement", &sql, err))
@@ -33491,5 +33495,18 @@ mod tests {
             parse_type_name("regoperator").unwrap(),
             RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOperator))
         );
+    }
+
+    #[test]
+    fn parse_trailing_set_operator_reports_syntax_error() {
+        for sql in ["SELECT 1 UNION;", "SELECT 1 UNION"] {
+            let err = parse_statement(sql).unwrap_err();
+            assert!(matches!(
+                err.unpositioned(),
+                ParseError::UnexpectedToken { actual, .. }
+                    if actual == "syntax error at or near \";\""
+            ));
+            assert_eq!(err.position(), Some("SELECT 1 UNION".len() + 1));
+        }
     }
 }

@@ -93,9 +93,14 @@ pub fn push_plpgsql_notice(
     level: RaiseLevel,
     sqlstate: impl Into<String>,
     message: impl Into<String>,
-    detail: Option<String>,
+    mut detail: Option<String>,
     hint: Option<String>,
 ) {
+    if detail.is_none()
+        && let Some(context) = current_plpgsql_context()
+    {
+        detail = Some(format!("__pgrust_plpgsql_context__{context}"));
+    }
     NOTICE_QUEUE.with(|queue| {
         queue.borrow_mut().push(PlpgsqlNotice {
             level,

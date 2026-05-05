@@ -1439,14 +1439,11 @@ impl Database {
             .and_then(|row| row.defaclacl.clone())
             .unwrap_or_else(|| base_acl.clone());
         for grantee_name in grantee_names {
-            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                String::new()
-            } else {
-                auth_catalog
-                    .role_by_name(grantee_name)
-                    .map(|row| row.rolname.clone())
-                    .ok_or_else(|| role_does_not_exist_error(grantee_name))?
-            };
+            let grantee_acl_name = acl_grantee_name(
+                &auth_catalog,
+                self.auth_state(client_id).current_user_oid(),
+                grantee_name,
+            )?;
             if grant_option_for {
                 revoke_acl_grant_options_only(
                     &mut acl,
@@ -1661,15 +1658,22 @@ impl Database {
         let auth_catalog = self
             .auth_catalog(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
-        let owner_name = auth_catalog
-            .role_by_oid(owner_oid)
-            .map(|row| row.rolname.clone())
-            .ok_or_else(|| ExecError::DetailedError {
+        let owner_name = if let Some(row) = auth_catalog.role_by_oid(owner_oid) {
+            row.rolname.clone()
+        } else if owner_oid == self.auth_state(client_id).current_user_oid() {
+            // :HACK: a few non-MVCC CREATE paths, such as dynamic domains,
+            // can ask for default ACLs while the current role was created in
+            // the same transaction but without passing that transaction's xid.
+            // With no custom default ACL visible, PostgreSQL stores a NULL ACL.
+            return Ok(None);
+        } else {
+            return Err(ExecError::DetailedError {
                 message: format!("role with OID {owner_oid} does not exist"),
                 detail: None,
                 hint: None,
                 sqlstate: "42704",
-            })?;
+            });
+        };
         let hardwired = default_acl_hardwired(&owner_name, objtype);
         let rows = self.scan_default_acl_rows(client_id, &snapshot)?;
         let global_acl = rows
@@ -1857,14 +1861,11 @@ impl Database {
                                 .collect()
                         });
                         for grantee_name in grantee_names {
-                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                                String::new()
-                            } else {
-                                auth_catalog
-                                    .role_by_name(grantee_name)
-                                    .map(|role| role.rolname.clone())
-                                    .ok_or_else(|| role_does_not_exist_error(grantee_name))?
-                            };
+                            let grantee_acl_name = acl_grantee_name(
+                                &auth_catalog,
+                                auth.current_user_oid(),
+                                grantee_name,
+                            )?;
                             if grant_option_for {
                                 revoke_acl_grant_options_only(
                                     &mut acl,
@@ -1960,14 +1961,11 @@ impl Database {
                             .clone()
                             .unwrap_or_else(|| function_owner_default_acl(&owner_name));
                         for grantee_name in grantee_names {
-                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                                String::new()
-                            } else {
-                                auth_catalog
-                                    .role_by_name(grantee_name)
-                                    .map(|role| role.rolname.clone())
-                                    .ok_or_else(|| role_does_not_exist_error(grantee_name))?
-                            };
+                            let grantee_acl_name = acl_grantee_name(
+                                &auth_catalog,
+                                auth.current_user_oid(),
+                                grantee_name,
+                            )?;
                             if grant_option_for {
                                 revoke_acl_grant_options_only(
                                     &mut acl,
@@ -2698,19 +2696,11 @@ impl Database {
                             effective_privilege_chars.as_str()
                         };
                         for grantee_name in &stmt.grantee_names {
-                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                                String::new()
-                            } else {
-                                auth_catalog
-                                    .role_by_name(grantee_name)
-                                    .map(|row| row.rolname.clone())
-                                    .ok_or_else(|| {
-                                        ExecError::Parse(role_management_error(format!(
-                                            "role \"{}\" does not exist",
-                                            grantee_name
-                                        )))
-                                    })?
-                            };
+                            let grantee_acl_name = acl_grantee_name(
+                                &auth_catalog,
+                                auth.current_user_oid(),
+                                grantee_name,
+                            )?;
                             grant_table_acl_entry(
                                 acl,
                                 &grantee_acl_name,
@@ -2771,19 +2761,11 @@ impl Database {
                     };
                     if !grant_privilege_chars.is_empty() {
                         for grantee_name in &stmt.grantee_names {
-                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                                String::new()
-                            } else {
-                                auth_catalog
-                                    .role_by_name(grantee_name)
-                                    .map(|row| row.rolname.clone())
-                                    .ok_or_else(|| {
-                                        ExecError::Parse(role_management_error(format!(
-                                            "role \"{}\" does not exist",
-                                            grantee_name
-                                        )))
-                                    })?
-                            };
+                            let grantee_acl_name = acl_grantee_name(
+                                &auth_catalog,
+                                auth.current_user_oid(),
+                                grantee_name,
+                            )?;
                             grant_table_acl_entry(
                                 &mut acl,
                                 &grantee_acl_name,
@@ -2885,19 +2867,8 @@ impl Database {
                 effective_privilege_chars.as_str()
             };
             for grantee_name in &stmt.grantee_names {
-                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                    String::new()
-                } else {
-                    auth_catalog
-                        .role_by_name(grantee_name)
-                        .map(|row| row.rolname.clone())
-                        .ok_or_else(|| {
-                            ExecError::Parse(role_management_error(format!(
-                                "role \"{}\" does not exist",
-                                grantee_name
-                            )))
-                        })?
-                };
+                let grantee_acl_name =
+                    acl_grantee_name(&auth_catalog, auth.current_user_oid(), grantee_name)?;
                 grant_table_acl_entry(
                     &mut acl,
                     &grantee_acl_name,
@@ -3211,19 +3182,8 @@ impl Database {
             let mut acl =
                 bootstrap_language_acl_override(language.oid).unwrap_or_else(|| defaults.clone());
             for grantee_name in grantee_names {
-                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                    String::new()
-                } else {
-                    auth_catalog
-                        .role_by_name(grantee_name)
-                        .map(|row| row.rolname.clone())
-                        .ok_or_else(|| {
-                            ExecError::Parse(role_management_error(format!(
-                                "role \"{}\" does not exist",
-                                grantee_name
-                            )))
-                        })?
-                };
+                let grantee_acl_name =
+                    acl_grantee_name(&auth_catalog, auth.current_user_oid(), grantee_name)?;
                 if grant_option_for {
                     revoke_acl_grant_options_only(
                         &mut acl,
@@ -3380,19 +3340,8 @@ impl Database {
                 .clone()
                 .unwrap_or_else(|| schema_owner_default_acl(&owner_name));
             for grantee_name in grantee_names {
-                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                    String::new()
-                } else {
-                    auth_catalog
-                        .role_by_name(grantee_name)
-                        .map(|row| row.rolname.clone())
-                        .ok_or_else(|| {
-                            ExecError::Parse(role_management_error(format!(
-                                "role \"{}\" does not exist",
-                                grantee_name
-                            )))
-                        })?
-                };
+                let grantee_acl_name =
+                    acl_grantee_name(&auth_catalog, auth.current_user_oid(), grantee_name)?;
                 if revoke {
                     revoke_acl_entry(
                         &mut acl,
@@ -5436,6 +5385,31 @@ fn role_does_not_exist_error(role_name: &str) -> ExecError {
         hint: None,
         sqlstate: "42704",
     }
+}
+
+fn acl_grantee_name(
+    auth_catalog: &crate::pgrust::auth::AuthCatalog,
+    current_user_oid: u32,
+    grantee_name: &str,
+) -> Result<String, ExecError> {
+    if grantee_name.eq_ignore_ascii_case("public") {
+        return Ok(String::new());
+    }
+    if grantee_name.eq_ignore_ascii_case("current_user") {
+        return auth_catalog
+            .role_by_oid(current_user_oid)
+            .map(|row| row.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "current user does not exist".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+    }
+    auth_catalog
+        .role_by_name(grantee_name)
+        .map(|row| row.rolname.clone())
+        .ok_or_else(|| role_does_not_exist_error(grantee_name))
 }
 
 #[cfg(test)]

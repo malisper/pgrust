@@ -9981,7 +9981,7 @@ fn parse_postgres_operator_edge_cases() {
         other => panic!("expected => syntax error, got {other:?}"),
     }
 
-    match parse_statement("select 10 !=-;") {
+    match parse_statement("select 10 !=-;").map_err(|err| err.unpositioned().clone()) {
         Err(ParseError::UnexpectedToken { actual, .. }) => {
             assert_eq!(actual, "syntax error at or near \";\"");
         }

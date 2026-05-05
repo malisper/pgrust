@@ -1255,6 +1255,16 @@ fn unsupported_object_address_ddl(feature: &str, sql: &str) -> ExecError {
     ExecError::Parse(ParseError::FeatureNotSupported(format!("{feature}: {sql}")))
 }
 
+fn unsupported_select_is_trailing_set_operator(sql: &str) -> bool {
+    sql.trim()
+        .trim_end_matches(';')
+        .trim_end()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .last()
+        .is_some_and(|token| matches!(token, "union" | "intersect" | "except"))
+}
+
 pub struct SelectGuard {
     pub state: crate::include::nodes::execnodes::PlanState,
     pub ctx: ExecutorContext,
@@ -18714,6 +18724,16 @@ impl Session {
                             crate::backend::parser::security_label_provider_error(
                                 &unsupported_stmt.sql,
                             ),
+                        ))
+                    } else if unsupported_stmt.feature == "SELECT form"
+                        && unsupported_select_is_trailing_set_operator(&unsupported_stmt.sql)
+                    {
+                        Err(ExecError::Parse(
+                            ParseError::UnexpectedToken {
+                                expected: "statement",
+                                actual: "syntax error at or near \";\"".into(),
+                            }
+                            .with_position(unsupported_stmt.sql.chars().count() + 1),
                         ))
                     } else if unsupported_stmt.feature == "ALTER TABLE form" {
                         let lower = unsupported_stmt.sql.to_ascii_lowercase();
