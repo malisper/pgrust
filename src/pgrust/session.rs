@@ -26770,6 +26770,53 @@ mod tests {
     }
 
     #[test]
+    fn inherited_serial_default_does_not_break_explicit_child_insert() {
+        let base = crate::pgrust::test_support::seeded_temp_dir(
+            "session",
+            "inherited_serial_default_insert",
+        );
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create table parent_serial_insert (a serial primary key, b int4, c text, d text)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table child_serial_insert () inherits (parent_serial_insert)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "insert into child_serial_insert values (0, 100, 'in child table')",
+            )
+            .unwrap();
+
+        match session
+            .execute(&db, "select a, b, c, d from parent_serial_insert")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int32(0),
+                        Value::Int32(100),
+                        Value::Text("in child table".into()),
+                        Value::Null,
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn writable_cte_on_conflict_update_same_row_returns_no_outer_rows() {
         let base =
             crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_on_conflict");
