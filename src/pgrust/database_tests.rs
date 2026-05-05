@@ -5228,6 +5228,46 @@ fn explain_analyze_create_materialized_view_executes_create() {
 }
 
 #[test]
+fn plpgsql_update_assignment_subquery_uses_function_argument() {
+    let dir = temp_dir("plpgsql_update_assignment_subquery_arg");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table t (id int)").unwrap();
+    session.execute(&db, "create table m (id oid)").unwrap();
+    session.execute(&db, "insert into m values (null)").unwrap();
+    session
+        .execute(
+            &db,
+            "create function set_relfilenode(tabname name) returns void language plpgsql as $$
+             begin
+               update m
+               set id = (
+                 select c.relfilenode
+                 from pg_class c, pg_namespace n
+                 where c.relname = tabname
+                   and c.relnamespace = n.oid
+                   and n.nspname = current_schema()
+               );
+             end $$",
+        )
+        .unwrap();
+
+    session.execute(&db, "select set_relfilenode('t')").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select m.id = c.relfilenode
+             from m, pg_class c
+             where c.relname = 't'"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn plpgsql_create_materialized_view_executes_spi_statement() {
     let dir = temp_dir("plpgsql_create_matview");
     let db = Database::open(&dir, 64).unwrap();

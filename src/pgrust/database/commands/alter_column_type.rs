@@ -10,14 +10,14 @@ use crate::backend::executor::value_io::{
     coerce_assignment_value, format_unique_key_detail, tuple_from_values,
 };
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
-use crate::backend::parser::{RawTypeName, SequenceOptionsPatchSpec};
+use crate::backend::parser::{RawTypeName, SequenceOptionsPatchSpec, SqlTypeKind};
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     BTREE_AM_OID, CONSTRAINT_CHECK, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow, PgStatisticRow,
     default_btree_opclass_oid,
 };
-use crate::include::nodes::primnodes::expr_sql_type_hint;
+use crate::include::nodes::primnodes::{expr_sql_type_hint, user_attrno};
 use crate::pgrust::database::ddl::{
     format_sql_type_name, lookup_table_or_partitioned_table_for_alter_table,
     reject_column_type_change_with_rule_dependencies, relation_kind_name,
@@ -839,40 +839,76 @@ fn reject_inherited_type_change_conflicts(
 fn alter_column_type_fires_table_rewrite(
     from: crate::backend::parser::SqlType,
     to: crate::backend::parser::SqlType,
-    has_using_expr: bool,
+    column_generated: Option<crate::include::nodes::parsenodes::ColumnGeneratedKind>,
+    rewrite_expr: &crate::backend::executor::Expr,
+    column_index: usize,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
 ) -> bool {
-    if has_using_expr {
+    if column_generated == Some(crate::include::nodes::parsenodes::ColumnGeneratedKind::Virtual) {
+        return false;
+    }
+    alter_column_type_expr_requires_rewrite(rewrite_expr, column_index, datetime_config, from, to)
+}
+
+fn alter_column_type_expr_requires_rewrite(
+    expr: &crate::backend::executor::Expr,
+    column_index: usize,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    from: crate::backend::parser::SqlType,
+    to: crate::backend::parser::SqlType,
+) -> bool {
+    match expr {
+        crate::backend::executor::Expr::Var(var) if var.varattno == user_attrno(column_index) => {
+            false
+        }
+        crate::backend::executor::Expr::Collate { expr, .. } => {
+            alter_column_type_expr_requires_rewrite(expr, column_index, datetime_config, from, to)
+        }
+        crate::backend::executor::Expr::Cast(inner, target_type)
+            if alter_column_type_cast_is_metadata_only(
+                expr_sql_type_hint(inner).unwrap_or(from),
+                *target_type,
+                datetime_config,
+            ) =>
+        {
+            alter_column_type_expr_requires_rewrite(inner, column_index, datetime_config, from, to)
+        }
+        _ => true,
+    }
+}
+
+fn alter_column_type_cast_is_metadata_only(
+    from: crate::backend::parser::SqlType,
+    to: crate::backend::parser::SqlType,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> bool {
+    if from == to {
         return true;
     }
-    if from == to {
-        return false;
-    }
     if from.is_array || to.is_array {
-        return from != to;
-    }
-    if matches!(
-        (from.kind, to.kind),
-        (
-            crate::backend::parser::SqlTypeKind::Numeric,
-            crate::backend::parser::SqlTypeKind::Numeric
-        )
-    ) {
         return false;
     }
     if matches!(
         (from.kind, to.kind),
-        (
-            crate::backend::parser::SqlTypeKind::Timestamp,
-            crate::backend::parser::SqlTypeKind::TimestampTz,
-        ) | (
-            crate::backend::parser::SqlTypeKind::TimestampTz,
-            crate::backend::parser::SqlTypeKind::Timestamp,
-        )
+        (SqlTypeKind::Numeric, SqlTypeKind::Numeric)
     ) {
-        return !timezone_is_utc_for_alter_column_type(&datetime_config.time_zone);
+        return true;
     }
-    true
+    if matches!(
+        (from.kind, to.kind),
+        (SqlTypeKind::Varchar, SqlTypeKind::Varchar)
+    ) && (to.char_len().is_none() || from.char_len() <= to.char_len())
+    {
+        return true;
+    }
+    if matches!(
+        (from.kind, to.kind),
+        (SqlTypeKind::Timestamp, SqlTypeKind::TimestampTz)
+            | (SqlTypeKind::TimestampTz, SqlTypeKind::Timestamp)
+    ) {
+        return timezone_is_utc_for_alter_column_type(&datetime_config.time_zone);
+    }
+    false
 }
 
 fn timezone_is_utc_for_alter_column_type(time_zone: &str) -> bool {
@@ -1040,7 +1076,9 @@ fn collect_alter_column_type_targets(
             fires_table_rewrite: alter_column_type_fires_table_rewrite(
                 target_relation.desc.columns[plan.column_index].sql_type,
                 new_desc.columns[plan.column_index].sql_type,
-                alter_stmt.using_expr.is_some(),
+                target_relation.desc.columns[plan.column_index].generated,
+                &plan.rewrite_expr,
+                plan.column_index,
                 datetime_config,
             ),
             relation: target_relation,

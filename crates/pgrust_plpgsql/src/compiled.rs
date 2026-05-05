@@ -475,10 +475,12 @@ pub enum CompiledStmt {
     },
     ExecUpdateInto {
         stmt: BoundUpdateStatement,
+        scope: RuntimeSqlScope,
         targets: Vec<CompiledSelectIntoTarget>,
     },
     ExecUpdate {
         stmt: BoundUpdateStatement,
+        scope: RuntimeSqlScope,
     },
     ExecDeleteInto {
         stmt: BoundDeleteStatement,
