@@ -2762,26 +2762,6 @@ fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value,
             Ok(Value::Text(stored_value.into()))
         }
         None => {
-            if name == "temp_buffers"
-                && ctx
-                    .database
-                    .as_ref()
-                    .is_some_and(|database| database.local_buffers_initialized(ctx.client_id))
-                && ctx.temp_buffers_pages()? != TEMP_BUFFERS_DEFAULT_PAGES
-            {
-                return Err(ExecError::DetailedError {
-                    message: format!(
-                        "invalid value for parameter \"temp_buffers\": \"{}\"",
-                        TEMP_BUFFERS_DEFAULT_PAGES
-                    ),
-                    detail: Some(
-                        "\"temp_buffers\" cannot be changed after any temporary tables have been accessed in the session."
-                            .into(),
-                    ),
-                    hint: None,
-                    sqlstate: "22023",
-                });
-            }
             ctx.gucs.remove(&name);
             record_set_config_effect(ctx, &name, None, is_local);
             Ok(Value::Text(String::new().into()))
@@ -2829,12 +2809,7 @@ fn normalize_temp_buffers_set_config_value(
     ctx: &ExecutorContext,
 ) -> Result<String, ExecError> {
     let pages = parse_temp_buffers_set_config_pages(value)?;
-    if ctx
-        .database
-        .as_ref()
-        .is_some_and(|database| database.local_buffers_initialized(ctx.client_id))
-    {
-        let current_pages = ctx.temp_buffers_pages()?;
+    if let Some(current_pages) = initialized_temp_buffers_pages(ctx) {
         if pages != current_pages {
             return Err(ExecError::DetailedError {
                 message: format!("invalid value for parameter \"temp_buffers\": \"{value}\""),
@@ -2848,6 +2823,13 @@ fn normalize_temp_buffers_set_config_value(
         }
     }
     Ok(pages.to_string())
+}
+
+fn initialized_temp_buffers_pages(ctx: &ExecutorContext) -> Option<usize> {
+    ctx.database
+        .as_ref()
+        .and_then(|database| database.existing_local_buffer_manager(ctx.client_id))
+        .map(|local| local.capacity())
 }
 
 fn parse_temp_buffers_set_config_pages(value: &str) -> Result<usize, ExecError> {
