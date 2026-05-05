@@ -172,6 +172,7 @@ use crate::backend::storage::lmgr::{
 };
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
+use crate::backend::utils::misc::guc::{TEMP_BUFFERS_DEFAULT_PAGES, TEMP_BUFFERS_MIN_PAGES};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
@@ -185,7 +186,7 @@ use crate::pgrust::database::{
 };
 use crate::pgrust::portal::Portal;
 use crate::pl::plpgsql::PlpgsqlFunctionCache;
-use crate::{BufferPool, ClientId, SmgrStorageBackend};
+use crate::{BufferPool, ClientId, LocalBufferManager, SmgrStorageBackend};
 
 pub type ExecutorCatalog = std::sync::Arc<dyn CatalogLookup>;
 
@@ -336,6 +337,57 @@ impl ExecutorContext {
             Some(value) if value == "escape" => crate::pgrust::session::ByteaOutputFormat::Escape,
             _ => crate::pgrust::session::ByteaOutputFormat::Hex,
         }
+    }
+
+    pub fn temp_buffers_pages(&self) -> Result<usize, ExecError> {
+        let default_pages = TEMP_BUFFERS_DEFAULT_PAGES.to_string();
+        let value = self
+            .gucs
+            .get("temp_buffers")
+            .map(String::as_str)
+            .unwrap_or(default_pages.as_str())
+            .trim();
+        let pages = value
+            .parse::<usize>()
+            .map_err(|_| ExecError::DetailedError {
+                message: format!("invalid value for parameter \"temp_buffers\": \"{value}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            })?;
+        if pages < TEMP_BUFFERS_MIN_PAGES {
+            return Err(ExecError::DetailedError {
+                message: format!("invalid value for parameter \"temp_buffers\": \"{value}\""),
+                detail: Some(format!(
+                    "\"temp_buffers\" must be at least {TEMP_BUFFERS_MIN_PAGES}."
+                )),
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        Ok(pages)
+    }
+
+    pub fn local_buffer_manager(
+        &self,
+    ) -> Result<Arc<LocalBufferManager<SmgrStorageBackend>>, ExecError> {
+        let database = self
+            .database
+            .as_ref()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "temporary buffers require a database session".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        Ok(database.local_buffer_manager(self.client_id, self.temp_buffers_pages()?))
+    }
+
+    pub fn relation_uses_local_buffers(&self, relation_oid: u32) -> bool {
+        self.catalog
+            .as_deref()
+            .and_then(|catalog| catalog.relation_by_oid(relation_oid))
+            .is_some_and(|relation| relation.relpersistence == 't')
     }
 
     pub fn transaction_xid(&self) -> Option<TransactionId> {

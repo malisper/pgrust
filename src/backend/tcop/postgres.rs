@@ -159,6 +159,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Interrupted(reason) => reason.sqlstate(),
         ExecError::RequestedLengthTooLarge => "54000",
         ExecError::Heap(HeapError::Tuple(TupleError::Oversized { .. })) => "54000",
+        ExecError::Heap(HeapError::NoEmptyLocalBuffer) => "53100",
         ExecError::RaiseException(_) => "P0001",
         ExecError::DivisionByZero(_) => "22012",
         ExecError::GenerateSeriesInvalidArg(_, _) => "22023",

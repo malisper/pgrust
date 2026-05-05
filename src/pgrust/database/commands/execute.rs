@@ -1653,8 +1653,9 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::commands::tablecmds::{
             check_truncate_relation_privileges, fire_after_truncate_triggers,
-            fire_before_truncate_triggers, owned_sequence_oids_for_truncate,
-            reinitialize_index_relation, resolve_truncate_relations,
+            fire_before_truncate_triggers, invalidate_relation_buffers_for_command,
+            owned_sequence_oids_for_truncate, reinitialize_index_relation,
+            resolve_truncate_relations,
         };
 
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
@@ -1666,6 +1667,12 @@ impl Database {
         let mut rewritten_index_oids = Vec::new();
         let mut truncated_relation_oids = Vec::new();
         for target in targets.iter().filter(|target| target.relkind == 'r') {
+            invalidate_relation_buffers_for_command(
+                "TRUNCATE",
+                pgrust_commands::truncate::relation_name_for_oid(&catalog, target.relation_oid),
+                target,
+                ctx,
+            )?;
             if !truncated_relation_oids.contains(&target.relation_oid) {
                 truncated_relation_oids.push(target.relation_oid);
             }

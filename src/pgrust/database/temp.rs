@@ -374,6 +374,52 @@ impl Database {
             .and_then(|ns| ns.tables.get(&normalized).map(|entry| entry.entry.clone()))
     }
 
+    fn invalidate_temp_relation_buffers_for_command(
+        &self,
+        client_id: ClientId,
+        command: &str,
+        relation_name: &str,
+        entry: &RelCacheEntry,
+    ) -> Result<(), ExecError> {
+        if let Some(local) = self.existing_local_buffer_manager(client_id)
+            && let Err(err) = local.invalidate_relation(entry.rel)
+        {
+            return match err {
+                crate::include::storage::buf_internals::Error::BufferPinned => {
+                    Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot {command} \"{relation_name}\" because it is being used by active queries in this session"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "55006",
+                    })
+                }
+                other => Err(ExecError::Heap(
+                    crate::backend::access::heap::heapam::HeapError::Buffer(other),
+                )),
+            };
+        }
+        if let Err(err) = self.pool.invalidate_relation(entry.rel) {
+            return match err {
+                crate::include::storage::buf_internals::Error::BufferPinned => {
+                    Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot {command} \"{relation_name}\" because it is being used by active queries in this session"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "55006",
+                    })
+                }
+                other => Err(ExecError::Heap(
+                    crate::backend::access::heap::heapam::HeapError::Buffer(other),
+                )),
+            };
+        }
+        Ok(())
+    }
+
     pub(super) fn temp_entry_on_commit(
         &self,
         client_id: ClientId,
@@ -960,6 +1006,21 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let temp_backend_id = self.temp_backend_id(client_id);
         let normalized = normalize_temp_lookup_name(table_name);
+        let candidate = {
+            let namespaces = self.temp_relations.read();
+            let namespace = namespaces.get(&temp_backend_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
+            namespace.tables.get(&normalized).cloned().ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?
+        };
+        self.invalidate_temp_relation_buffers_for_command(
+            client_id,
+            "DROP TABLE",
+            &normalized,
+            &candidate.entry,
+        )?;
         let removed = {
             let mut namespaces = self.temp_relations.write();
             let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
@@ -1298,10 +1359,12 @@ impl Database {
         let temp_backend_id = self.temp_backend_id(client_id);
         let Some(_namespace) = self.owned_temp_namespace(client_id) else {
             self.temp_relations.write().remove(&temp_backend_id);
+            self.session_local_buffers.write().remove(&client_id);
             return Ok(());
         };
         let result = self.cleanup_client_temp_relations_once(client_id, temp_backend_id);
         self.temp_relations.write().remove(&temp_backend_id);
+        self.session_local_buffers.write().remove(&client_id);
         self.invalidate_backend_cache_state(client_id);
         result
     }

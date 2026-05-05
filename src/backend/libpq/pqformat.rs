@@ -158,6 +158,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::Heap(HeapError::Tuple(TupleError::Oversized { size, max_size })) => {
             format!("row is too big: size {size}, maximum size {max_size}")
         }
+        ExecError::Heap(HeapError::NoEmptyLocalBuffer) => {
+            "no empty local buffer available".to_string()
+        }
         other => format!("{other:?}"),
     }
 }

@@ -2,9 +2,12 @@ use super::{
     AggGroup, AggregateRuntime, ExecError, ExecutorContext, OrderedAggInput,
     build_aggregate_runtime, executor_start,
 };
+use crate::OwnedLocalBufferPin;
 use crate::backend::access::heap::heapam::{
-    heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end, heap_scan_next_visible,
-    heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_scan_prepare_page_at,
+    HeapError, VisiblePinnedBuffer, heap_fetch_visible_with_txns,
+    heap_fetch_visible_with_txns_local, heap_scan_begin_visible, heap_scan_begin_visible_local,
+    heap_scan_end, heap_scan_next_visible, heap_scan_next_visible_raw, heap_scan_page_next_tuple,
+    heap_scan_prepare_next_page, heap_scan_prepare_page_at,
 };
 use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::access::index::indexam;
@@ -41,6 +44,7 @@ use crate::backend::utils::time::instant::Instant;
 use crate::backend::utils::time::timestamp::{
     format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
 };
+use crate::include::access::htup::HeapTuple;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
@@ -2497,6 +2501,79 @@ fn render_tablesample_explain_arg(
     }
 }
 
+fn seq_scan_next_local_buffer_tuple<'a>(
+    state: &'a mut SeqScanState,
+    ctx: &mut ExecutorContext,
+    start: Option<Instant>,
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    loop {
+        ctx.check_for_interrupts()?;
+        let scan = state.scan.as_mut().expect("scan must be initialized");
+        let next = heap_scan_next_visible_raw::<
+            (crate::include::access::itemptr::ItemPointerData, HeapTuple),
+            ExecError,
+        >(
+            &ctx.pool,
+            ctx.client_id,
+            &ctx.txns,
+            scan,
+            |tid, tuple_bytes| Ok((tid, HeapTuple::parse(tuple_bytes)?)),
+        )?;
+
+        let Some((tid, tuple)) = next else {
+            heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
+            finish_eof(&mut state.stats, start, ctx);
+            return Ok(None);
+        };
+
+        state.slot.kind = SlotKind::HeapTuple {
+            desc: state.desc.clone(),
+            attr_descs: state.attr_descs.clone(),
+            tid,
+            tuple,
+        };
+        state.slot.toast = slot_toast_context(state.toast_relation, ctx);
+        state.slot.tts_nvalid = 0;
+        state.slot.tts_values.clear();
+        state.slot.decode_offset = 0;
+        state.slot.table_oid = Some(state.relation_oid);
+        let xmin = state.slot.xmin();
+        let cmin = state.slot.cmin();
+        let xmax = state.slot.xmax();
+        ctx.check_serializable_visible_tuple_xmax(xmax)?;
+        state.current_bindings = vec![SystemVarBinding {
+            varno: state.source_id,
+            table_oid: state.relation_oid,
+            tid: Some(tid),
+            xmin,
+            cmin,
+            xmax,
+        }];
+        set_active_system_bindings(ctx, &state.current_bindings);
+
+        if !tablesample_accepts_tuple(state.tablesample.as_ref(), tid) {
+            continue;
+        }
+
+        if let Some(qual) = &state.qual {
+            let outer_values = materialize_slot_values(&mut state.slot)?;
+            let current_bindings = state.current_bindings.clone();
+            set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+            clear_inner_expr_bindings(ctx);
+            if !qual(&mut state.slot, ctx)? {
+                note_filtered_row(&mut state.stats);
+                continue;
+            }
+        }
+
+        ctx.session_stats
+            .write()
+            .note_relation_tuple_returned(state.relation_oid);
+        finish_row(&mut state.stats, start);
+        return Ok(Some(&mut state.slot));
+    }
+}
+
 impl PlanNode for SeqScanState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -2706,12 +2783,15 @@ impl PlanNode for SeqScanState {
 
         if self.scan.is_none() {
             ctx.predicate_lock_relation(self.relation_oid)?;
-            self.scan = Some(heap_scan_begin_visible(
-                &ctx.pool,
-                ctx.client_id,
-                self.rel,
-                ctx.snapshot.clone(),
-            )?);
+            self.scan = Some(if ctx.relation_uses_local_buffers(self.relation_oid) {
+                heap_scan_begin_visible_local(
+                    ctx.local_buffer_manager()?,
+                    self.rel,
+                    ctx.snapshot.clone(),
+                )?
+            } else {
+                heap_scan_begin_visible(&ctx.pool, ctx.client_id, self.rel, ctx.snapshot.clone())?
+            });
             ctx.session_stats
                 .write()
                 .note_relation_scan(self.relation_oid);
@@ -2725,6 +2805,14 @@ impl PlanNode for SeqScanState {
         begin_node(&mut self.stats, ctx)?;
         if let Some(sample) = self.tablesample.as_mut() {
             ensure_tablesample_initialized(sample, &mut self.slot, ctx)?;
+        }
+
+        if self
+            .scan
+            .as_ref()
+            .is_some_and(|scan| scan.uses_local_buffers())
+        {
+            return seq_scan_next_local_buffer_tuple(self, ctx, start);
         }
 
         loop {
@@ -3054,6 +3142,7 @@ impl PlanNode for IndexOnlyScanState {
             {
                 continue;
             }
+            self.current_page_pin = None;
             {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
@@ -3115,16 +3204,33 @@ impl PlanNode for IndexOnlyScanState {
             }
 
             self.stats.heap_fetches = self.stats.heap_fetches.saturating_add(1);
-            let visible = heap_fetch_visible_with_txns(
-                &ctx.pool,
-                ctx.client_id,
-                self.rel,
-                tid,
-                &ctx.txns,
-                &ctx.snapshot,
-            )?;
-            let Some(tuple) = visible else {
-                continue;
+            let tuple = if ctx.relation_uses_local_buffers(self.relation_oid) {
+                let Some((tuple, pin)) = heap_fetch_visible_with_txns_local(
+                    ctx.local_buffer_manager()?,
+                    ctx.client_id,
+                    self.rel,
+                    tid,
+                    &ctx.txns,
+                    &ctx.snapshot,
+                )?
+                else {
+                    continue;
+                };
+                self.current_page_pin = Some(pin);
+                tuple
+            } else {
+                let Some(tuple) = heap_fetch_visible_with_txns(
+                    &ctx.pool,
+                    ctx.client_id,
+                    self.rel,
+                    tid,
+                    &ctx.txns,
+                    &ctx.snapshot,
+                )?
+                else {
+                    continue;
+                };
+                tuple
             };
             {
                 let mut session_stats = ctx.session_stats.write();
@@ -3335,16 +3441,34 @@ impl PlanNode for TidScanState {
         while let Some(tid) = self.candidates.get(self.candidate_index).copied() {
             self.candidate_index += 1;
             ctx.check_for_interrupts()?;
-            let Some(tuple) = heap_fetch_visible_with_txns(
-                &ctx.pool,
-                ctx.client_id,
-                self.rel,
-                tid,
-                &ctx.txns,
-                &ctx.snapshot,
-            )?
-            else {
-                continue;
+            self.current_page_pin = None;
+            let tuple = if ctx.relation_uses_local_buffers(self.relation_oid) {
+                let Some((tuple, pin)) = heap_fetch_visible_with_txns_local(
+                    ctx.local_buffer_manager()?,
+                    ctx.client_id,
+                    self.rel,
+                    tid,
+                    &ctx.txns,
+                    &ctx.snapshot,
+                )?
+                else {
+                    continue;
+                };
+                self.current_page_pin = Some(pin);
+                tuple
+            } else {
+                let Some(tuple) = heap_fetch_visible_with_txns(
+                    &ctx.pool,
+                    ctx.client_id,
+                    self.rel,
+                    tid,
+                    &ctx.txns,
+                    &ctx.snapshot,
+                )?
+                else {
+                    continue;
+                };
+                tuple
             };
             {
                 let mut session_stats = ctx.session_stats.write();
@@ -3398,6 +3522,7 @@ impl PlanNode for TidScanState {
             return Ok(Some(&mut self.slot));
         }
 
+        self.current_page_pin = None;
         finish_eof(&mut self.stats, start, ctx);
         Ok(None)
     }
@@ -3606,6 +3731,7 @@ impl PlanNode for IndexScanState {
             {
                 continue;
             }
+            self.current_page_pin = None;
             {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
@@ -3669,16 +3795,33 @@ impl PlanNode for IndexScanState {
             if self.index_only {
                 self.stats.heap_fetches = self.stats.heap_fetches.saturating_add(1);
             }
-            let visible = heap_fetch_visible_with_txns(
-                &ctx.pool,
-                ctx.client_id,
-                self.rel,
-                tid,
-                &ctx.txns,
-                &ctx.snapshot,
-            )?;
-            let Some(tuple) = visible else {
-                continue;
+            let tuple = if ctx.relation_uses_local_buffers(self.relation_oid) {
+                let Some((tuple, pin)) = heap_fetch_visible_with_txns_local(
+                    ctx.local_buffer_manager()?,
+                    ctx.client_id,
+                    self.rel,
+                    tid,
+                    &ctx.txns,
+                    &ctx.snapshot,
+                )?
+                else {
+                    continue;
+                };
+                self.current_page_pin = Some(pin);
+                tuple
+            } else {
+                let Some(tuple) = heap_fetch_visible_with_txns(
+                    &ctx.pool,
+                    ctx.client_id,
+                    self.rel,
+                    tid,
+                    &ctx.txns,
+                    &ctx.snapshot,
+                )?
+                else {
+                    continue;
+                };
+                tuple
             };
             {
                 let mut session_stats = ctx.session_stats.write();
@@ -4704,22 +4847,49 @@ impl BitmapHeapScanState {
                 continue;
             }
 
-            let pin = ctx
-                .pool
-                .pin_existing_block(ctx.client_id, self.rel, ForkNumber::Main, block)
-                .map_err(|err| {
-                    internal_exec_error(format!("bitmap heap pin block failed: {err:?}"))
+            let (pin, mut offsets) = if ctx.relation_uses_local_buffers(self.relation_oid) {
+                let local = ctx.local_buffer_manager()?;
+                let pin = local
+                    .pin_existing_block(ctx.client_id, self.rel, ForkNumber::Main, block)
+                    .map_err(|err| match err {
+                        crate::Error::AllBuffersPinned => {
+                            ExecError::Heap(HeapError::NoEmptyLocalBuffer)
+                        }
+                        other => internal_exec_error(format!(
+                            "bitmap heap local pin block failed: {other:?}"
+                        )),
+                    })?;
+                let buffer_id = pin.into_raw();
+                let owned_pin =
+                    OwnedLocalBufferPin::wrap_existing(std::sync::Arc::clone(&local), buffer_id);
+                let guard = local.lock_buffer_shared(buffer_id).map_err(|err| {
+                    internal_exec_error(format!("bitmap heap local shared lock failed: {err:?}"))
                 })?;
-            let buffer_id = pin.into_raw();
-            let owned_pin =
-                crate::OwnedBufferPin::wrap_existing(std::sync::Arc::clone(&ctx.pool), buffer_id);
-            let pin_rc = Rc::new(owned_pin);
+                (
+                    VisiblePinnedBuffer::Local(Rc::new(owned_pin)),
+                    collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?,
+                )
+            } else {
+                let pin = ctx
+                    .pool
+                    .pin_existing_block(ctx.client_id, self.rel, ForkNumber::Main, block)
+                    .map_err(|err| {
+                        internal_exec_error(format!("bitmap heap pin block failed: {err:?}"))
+                    })?;
+                let buffer_id = pin.into_raw();
+                let owned_pin = crate::OwnedBufferPin::wrap_existing(
+                    std::sync::Arc::clone(&ctx.pool),
+                    buffer_id,
+                );
 
-            let guard = ctx.pool.lock_buffer_shared(buffer_id).map_err(|err| {
-                internal_exec_error(format!("bitmap heap shared lock failed: {err:?}"))
-            })?;
-            let mut offsets = collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?;
-            drop(guard);
+                let guard = ctx.pool.lock_buffer_shared(buffer_id).map_err(|err| {
+                    internal_exec_error(format!("bitmap heap shared lock failed: {err:?}"))
+                })?;
+                (
+                    VisiblePinnedBuffer::Shared(Rc::new(owned_pin)),
+                    collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?,
+                )
+            };
             if let Some(exact_offsets) = self.bitmapqual.bitmap().exact_offsets(block) {
                 offsets.retain(|offset| exact_offsets.contains(offset));
             }
@@ -4735,7 +4905,7 @@ impl BitmapHeapScanState {
                 session_stats.note_io_hit("client backend", "relation", "normal");
             }
 
-            self.current_page_pin = Some(pin_rc);
+            self.current_page_pin = Some(pin);
             self.current_page_offsets = offsets;
             return Ok(true);
         }
@@ -4779,20 +4949,38 @@ impl PlanNode for BitmapHeapScanState {
                 .cloned()
                 .ok_or_else(|| internal_exec_error("bitmap heap scan lost current page pin"))?;
             let buffer_id = pin.buffer_id();
-            let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
-                .ok_or_else(|| internal_exec_error("bitmap heap scan page vanished"))?;
-            let tuple_bytes = page_get_item_unchecked(page, offset);
+            let tid = crate::include::access::itemptr::ItemPointerData {
+                block_number: self.bitmap_pages[self.current_page_index - 1],
+                offset_number: offset,
+            };
+            self.slot.kind = match pin {
+                VisiblePinnedBuffer::Shared(pin) => {
+                    let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
+                        .ok_or_else(|| internal_exec_error("bitmap heap scan page vanished"))?;
+                    let tuple_bytes = page_get_item_unchecked(page, offset);
 
-            self.slot.kind = SlotKind::BufferHeapTuple {
-                desc: self.desc.clone(),
-                attr_descs: self.attr_descs.clone(),
-                tid: crate::include::access::itemptr::ItemPointerData {
-                    block_number: self.bitmap_pages[self.current_page_index - 1],
-                    offset_number: offset,
-                },
-                tuple_ptr: tuple_bytes.as_ptr(),
-                tuple_len: tuple_bytes.len(),
-                pin,
+                    SlotKind::BufferHeapTuple {
+                        desc: self.desc.clone(),
+                        attr_descs: self.attr_descs.clone(),
+                        tid,
+                        tuple_ptr: tuple_bytes.as_ptr(),
+                        tuple_len: tuple_bytes.len(),
+                        pin,
+                    }
+                }
+                VisiblePinnedBuffer::Local(_) => {
+                    let local = ctx.local_buffer_manager()?;
+                    let guard = local.lock_buffer_shared(buffer_id).map_err(|err| {
+                        internal_exec_error(format!("bitmap heap local page vanished: {err:?}"))
+                    })?;
+                    let tuple = HeapTuple::parse(page_get_item_unchecked(&guard, offset))?;
+                    SlotKind::HeapTuple {
+                        desc: self.desc.clone(),
+                        attr_descs: self.attr_descs.clone(),
+                        tid,
+                        tuple,
+                    }
+                }
             };
             self.slot.toast = slot_toast_context(self.toast_relation, ctx);
             self.slot.tts_nvalid = 0;
@@ -4802,10 +4990,6 @@ impl PlanNode for BitmapHeapScanState {
             let xmin = self.slot.xmin();
             let cmin = self.slot.cmin();
             let xmax = self.slot.xmax();
-            let tid = crate::include::access::itemptr::ItemPointerData {
-                block_number: self.bitmap_pages[self.current_page_index - 1],
-                offset_number: offset,
-            };
             ctx.predicate_lock_page(self.relation_oid, tid.block_number)?;
             ctx.predicate_lock_tuple(self.relation_oid, tid)?;
             ctx.check_serializable_visible_tuple_xmax(xmax)?;

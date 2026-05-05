@@ -69,8 +69,8 @@ use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::checkpoint::is_checkpoint_guc;
 use crate::backend::utils::misc::guc::{
-    is_postgres_guc, normalize_function_guc_assignment, normalize_guc_name,
-    plpgsql_guc_default_value,
+    TEMP_BUFFERS_DEFAULT_PAGES, TEMP_BUFFERS_MIN_PAGES, is_postgres_guc,
+    normalize_function_guc_assignment, normalize_guc_name, plpgsql_guc_default_value,
 };
 use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_datetime_config, default_intervalstyle,
@@ -2941,6 +2941,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
+        "temp_buffers" => Some("1024"),
         "restrict_nonsystem_relation_kind" => Some(""),
         "enable_seqscan"
         | "enable_indexscan"
@@ -4687,6 +4688,8 @@ impl Session {
             .or_insert_with(|| bool_guc_value(self.default_transaction_deferrable()).into());
         gucs.entry("search_path".into())
             .or_insert_with(|| "\"$user\", public".into());
+        gucs.entry("temp_buffers".into())
+            .or_insert_with(|| TEMP_BUFFERS_DEFAULT_PAGES.to_string());
         gucs
     }
 
@@ -19976,6 +19979,23 @@ impl Session {
             return Ok(StatementResult::AffectedRows(0));
         }
 
+        if name == "temp_buffers" && db.local_buffers_initialized(self.client_id) {
+            let new_value = stmt
+                .value
+                .clone()
+                .unwrap_or_else(|| TEMP_BUFFERS_DEFAULT_PAGES.to_string());
+            let new_pages = parse_temp_buffers_pages(&new_value)?;
+            let current_pages = self
+                .effective_gucs_for_execution()
+                .get("temp_buffers")
+                .cloned()
+                .map(|value| parse_temp_buffers_pages(&value))
+                .unwrap_or(Ok(TEMP_BUFFERS_DEFAULT_PAGES))?;
+            if new_pages != current_pages {
+                return Err(temp_buffers_change_after_init_error(&new_value));
+            }
+        }
+
         let mut effective_state = self.capture_guc_state();
         let normalized = if let Some(value) = &stmt.value {
             apply_guc_value_to_state(&mut effective_state, &stmt.name, value)?
@@ -20141,6 +20161,19 @@ impl Session {
                     sqlstate: "25001",
                 }));
             }
+            if normalized == "temp_buffers" && db.local_buffers_initialized(self.client_id) {
+                let current_pages = self
+                    .effective_gucs_for_execution()
+                    .get("temp_buffers")
+                    .cloned()
+                    .map(|value| parse_temp_buffers_pages(&value))
+                    .unwrap_or(Ok(TEMP_BUFFERS_DEFAULT_PAGES))?;
+                if current_pages != TEMP_BUFFERS_DEFAULT_PAGES {
+                    return Err(temp_buffers_change_after_init_error(
+                        &TEMP_BUFFERS_DEFAULT_PAGES.to_string(),
+                    ));
+                }
+            }
             let mut effective_state = self.capture_guc_state();
             if is_builtin {
                 reset_guc_in_state(
@@ -20172,6 +20205,19 @@ impl Session {
             }
             self.after_guc_change(db, &normalized);
         } else {
+            if db.local_buffers_initialized(self.client_id) {
+                let current_pages = self
+                    .effective_gucs_for_execution()
+                    .get("temp_buffers")
+                    .cloned()
+                    .map(|value| parse_temp_buffers_pages(&value))
+                    .unwrap_or(Ok(TEMP_BUFFERS_DEFAULT_PAGES))?;
+                if current_pages != TEMP_BUFFERS_DEFAULT_PAGES {
+                    return Err(temp_buffers_change_after_init_error(
+                        &TEMP_BUFFERS_DEFAULT_PAGES.to_string(),
+                    ));
+                }
+            }
             let mut effective_state = self.capture_guc_state();
             reset_all_gucs_in_state(&mut effective_state, &self.reset_datetime_config);
             let mut commit_state = self
@@ -22484,6 +22530,9 @@ fn apply_guc_value_to_state(
         "vacuum_cost_delay" => {
             parse_vacuum_cost_delay_ms(value)?;
         }
+        "temp_buffers" => {
+            stored_value = parse_temp_buffers_pages(value)?.to_string();
+        }
         "password_encryption" => {
             let encryption =
                 PasswordEncryption::parse(value).ok_or_else(|| ExecError::DetailedError {
@@ -22903,6 +22952,64 @@ fn parse_bool_guc(value: &str) -> Option<bool> {
 
 fn bool_guc_value(value: bool) -> &'static str {
     if value { "on" } else { "off" }
+}
+
+fn parse_temp_buffers_pages(value: &str) -> Result<usize, ExecError> {
+    let trimmed = value.trim().trim_matches('\'').trim();
+    if trimmed.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+
+    let split_at = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let (number, suffix) = trimmed.split_at(split_at);
+    if number.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    let amount = number
+        .parse::<usize>()
+        .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
+    let suffix = suffix.trim().to_ascii_lowercase();
+    let pages = match suffix.as_str() {
+        "" => amount,
+        "b" | "kb" | "k" | "mb" | "m" | "gb" | "g" => {
+            let bytes = parse_size_guc_bytes(trimmed)?;
+            bytes.div_ceil(crate::BLCKSZ)
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                value.to_string(),
+            )));
+        }
+    };
+    if pages < TEMP_BUFFERS_MIN_PAGES {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid value for parameter \"temp_buffers\": \"{value}\""),
+            detail: Some(format!(
+                "\"temp_buffers\" must be at least {TEMP_BUFFERS_MIN_PAGES}."
+            )),
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    Ok(pages)
+}
+
+fn temp_buffers_change_after_init_error(value: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid value for parameter \"temp_buffers\": \"{value}\""),
+        detail: Some(
+            "\"temp_buffers\" cannot be changed after any temporary tables have been accessed in the session."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "22023",
+    }
 }
 
 fn parse_size_guc_bytes(value: &str) -> Result<usize, ExecError> {

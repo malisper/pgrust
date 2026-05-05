@@ -168,7 +168,8 @@ use crate::backend::statistics::{
 };
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::backend::utils::misc::guc::{
-    normalize_guc_name, pg_settings_flags, plpgsql_guc_default_value,
+    TEMP_BUFFERS_DEFAULT_PAGES, TEMP_BUFFERS_MIN_PAGES, normalize_guc_name, pg_settings_flags,
+    plpgsql_guc_default_value,
 };
 use crate::include::access::htup::AttributeStorage;
 use crate::include::access::itemptr::ItemPointerData;
@@ -2675,6 +2676,15 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
                 .into(),
         ));
     }
+    if name == "temp_buffers" {
+        return Ok(Value::Text(
+            ctx.gucs
+                .get("temp_buffers")
+                .cloned()
+                .unwrap_or_else(|| TEMP_BUFFERS_DEFAULT_PAGES.to_string())
+                .into(),
+        ));
+    }
     match name.as_str() {
         "block_size" => return Ok(Value::Text("8192".into())),
         "fsync" => return Ok(Value::Text("on".into())),
@@ -2727,6 +2737,7 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
         "application_name" => return Ok(Value::Text(String::new().into())),
         "server_encoding" => return Ok(Value::Text("UTF8".into())),
         "synchronous_commit" => return Ok(Value::Text("on".into())),
+        "temp_buffers" => return Ok(Value::Text(TEMP_BUFFERS_DEFAULT_PAGES.to_string().into())),
         "wal_sync_method" => return Ok(Value::Text("fsync".into())),
         _ => {}
     }
@@ -2785,7 +2796,7 @@ fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value,
 
     match new_value {
         Some(value) => {
-            let stored_value = normalize_set_config_value(&name, &value)?;
+            let stored_value = normalize_set_config_value(&name, &value, ctx)?;
             ctx.gucs.insert(name.clone(), stored_value.clone());
             record_set_config_effect(ctx, &name, Some(&stored_value), is_local);
             if name == "row_security"
@@ -2797,6 +2808,26 @@ fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value,
             Ok(Value::Text(stored_value.into()))
         }
         None => {
+            if name == "temp_buffers"
+                && ctx
+                    .database
+                    .as_ref()
+                    .is_some_and(|database| database.local_buffers_initialized(ctx.client_id))
+                && ctx.temp_buffers_pages()? != TEMP_BUFFERS_DEFAULT_PAGES
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "invalid value for parameter \"temp_buffers\": \"{}\"",
+                        TEMP_BUFFERS_DEFAULT_PAGES
+                    ),
+                    detail: Some(
+                        "\"temp_buffers\" cannot be changed after any temporary tables have been accessed in the session."
+                            .into(),
+                    ),
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
             ctx.gucs.remove(&name);
             record_set_config_effect(ctx, &name, None, is_local);
             Ok(Value::Text(String::new().into()))
@@ -2825,13 +2856,112 @@ fn record_set_config_effect(
     );
 }
 
-fn normalize_set_config_value(name: &str, value: &str) -> Result<String, ExecError> {
+fn normalize_set_config_value(
+    name: &str,
+    value: &str,
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
     match name {
         "row_security" => parse_bool_config_value(value)
             .map(|enabled| if enabled { "on" } else { "off" }.to_string())
             .ok_or_else(|| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))),
+        "temp_buffers" => normalize_temp_buffers_set_config_value(value, ctx),
         _ => Ok(value.to_string()),
     }
+}
+
+fn normalize_temp_buffers_set_config_value(
+    value: &str,
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
+    let pages = parse_temp_buffers_set_config_pages(value)?;
+    if ctx
+        .database
+        .as_ref()
+        .is_some_and(|database| database.local_buffers_initialized(ctx.client_id))
+    {
+        let current_pages = ctx.temp_buffers_pages()?;
+        if pages != current_pages {
+            return Err(ExecError::DetailedError {
+                message: format!("invalid value for parameter \"temp_buffers\": \"{value}\""),
+                detail: Some(
+                    "\"temp_buffers\" cannot be changed after any temporary tables have been accessed in the session."
+                        .into(),
+                ),
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+    }
+    Ok(pages.to_string())
+}
+
+fn parse_temp_buffers_set_config_pages(value: &str) -> Result<usize, ExecError> {
+    let trimmed = value.trim().trim_matches('\'').trim();
+    if trimmed.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    let split_at = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let (number, suffix) = trimmed.split_at(split_at);
+    if number.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    let amount = number
+        .parse::<usize>()
+        .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
+    let pages = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" => amount,
+        "b" | "kb" | "k" | "mb" | "m" | "gb" | "g" => {
+            let bytes = parse_size_guc_bytes_for_set_config(trimmed)?;
+            bytes.div_ceil(crate::BLCKSZ)
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                value.to_string(),
+            )));
+        }
+    };
+    if pages < TEMP_BUFFERS_MIN_PAGES {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid value for parameter \"temp_buffers\": \"{value}\""),
+            detail: Some(format!(
+                "\"temp_buffers\" must be at least {TEMP_BUFFERS_MIN_PAGES}."
+            )),
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    Ok(pages)
+}
+
+fn parse_size_guc_bytes_for_set_config(value: &str) -> Result<usize, ExecError> {
+    let split_at = value
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(value.len());
+    let (number, suffix) = value.split_at(split_at);
+    let amount = number
+        .parse::<usize>()
+        .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
+    let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
+        "b" => 1usize,
+        "kb" | "k" => 1024usize,
+        "mb" | "m" => 1024usize * 1024usize,
+        "gb" | "g" => 1024usize * 1024usize * 1024usize,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                value.to_string(),
+            )));
+        }
+    };
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))
 }
 
 fn parse_bool_config_value(value: &str) -> Option<bool> {

@@ -1,5 +1,7 @@
 use super::super::*;
-use crate::backend::access::heap::heapam::heap_insert_mvcc_with_cid;
+use crate::backend::access::heap::heapam::{
+    heap_insert_mvcc_with_cid, heap_insert_mvcc_with_cid_and_fillfactor_local,
+};
 use crate::backend::access::nbtree::nbtcompare::compare_bt_values_with_options;
 use crate::backend::catalog::CatalogError;
 use crate::backend::commands::tablecmds::{
@@ -575,14 +577,38 @@ impl Database {
                 xid,
                 insert_cid,
             )?;
-            let _ = heap_insert_mvcc_with_cid(
-                &*ctx.pool,
-                ctx.client_id,
-                relation.rel,
-                xid,
-                insert_cid,
-                &tuple,
-            )?;
+            let tid = if relation.relpersistence == 't' {
+                let local = ctx.local_buffer_manager()?;
+                heap_insert_mvcc_with_cid_and_fillfactor_local(
+                    &local,
+                    ctx.client_id,
+                    relation.rel,
+                    xid,
+                    insert_cid,
+                    &tuple,
+                    100,
+                )?
+            } else {
+                heap_insert_mvcc_with_cid(
+                    &*ctx.pool,
+                    ctx.client_id,
+                    relation.rel,
+                    xid,
+                    insert_cid,
+                    &tuple,
+                )?
+            };
+            let _ = tid;
+        }
+        if relation.relpersistence == 't' {
+            if let Some(database) = ctx.database.as_ref()
+                && let Some(local) = database.existing_local_buffer_manager(ctx.client_id)
+            {
+                local
+                    .flush_relation(relation.rel)
+                    .map_err(cluster_local_buffer_error)?;
+            }
+            let _ = ctx.pool.invalidate_relation(relation.rel);
         }
         ctx.snapshot = ctx
             .txns
@@ -600,6 +626,16 @@ impl Database {
     ) -> Result<(), ExecError> {
         for (relation_oid, new_rel) in rewrites {
             if let Ok(old_rel) = self.replace_temp_entry_rel(client_id, *relation_oid, *new_rel) {
+                if let Some(local) = self.existing_local_buffer_manager(client_id) {
+                    local
+                        .invalidate_relation(old_rel)
+                        .map_err(cluster_local_buffer_error)?;
+                    local
+                        .invalidate_relation(*new_rel)
+                        .map_err(cluster_local_buffer_error)?;
+                }
+                let _ = self.pool.invalidate_relation(old_rel);
+                let _ = self.pool.invalidate_relation(*new_rel);
                 temp_effects.push(TempMutationEffect::ReplaceRel {
                     relation_oid: *relation_oid,
                     old_rel,
@@ -608,6 +644,18 @@ impl Database {
             }
         }
         Ok(())
+    }
+}
+
+fn cluster_local_buffer_error(err: crate::Error) -> ExecError {
+    match err {
+        crate::Error::BufferPinned => ExecError::DetailedError {
+            message: "cannot CLUSTER temporary relation because it is being used by active queries in this session".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "55006",
+        },
+        other => ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Buffer(other)),
     }
 }
 

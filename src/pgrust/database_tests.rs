@@ -4322,6 +4322,13 @@ fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_par
                 "expected message to contain {expected_message_part:?}, got {message:?}"
             );
         }
+        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::NoEmptyLocalBuffer) => {
+            assert_eq!(expected_sqlstate, "53100");
+            assert!(
+                "no empty local buffer available".contains(expected_message_part),
+                "expected message to contain {expected_message_part:?}"
+            );
+        }
         other => panic!("expected SQLSTATE {expected_sqlstate}, got {other:?}"),
     }
 }
@@ -53034,6 +53041,126 @@ fn streaming_select_uses_temp_table_shadowing() {
             vec![Value::Int32(30)],
         ]
     );
+}
+
+#[test]
+fn temp_buffers_guc_uses_pages_and_rejects_change_after_access() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select current_setting('temp_buffers')"),
+        vec![vec![Value::Text("1024".into())]]
+    );
+
+    session.execute(&db, "set temp_buffers = 100").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show temp_buffers"),
+        vec![vec![Value::Text("100".into())]]
+    );
+
+    let err = session.execute(&db, "set temp_buffers = 99").unwrap_err();
+    assert_sqlstate(err, "22023", "invalid value for parameter \"temp_buffers\"");
+
+    session
+        .execute(&db, "create temp table temp_buffer_probe(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into temp_buffer_probe values (1)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select id from temp_buffer_probe"),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    session.execute(&db, "set temp_buffers = 100").unwrap();
+    let err = session.execute(&db, "set temp_buffers = 101").unwrap_err();
+    match err {
+        ExecError::DetailedError {
+            sqlstate, detail, ..
+        }
+        | ExecError::Parse(ParseError::DetailedError {
+            sqlstate, detail, ..
+        }) => {
+            assert_eq!(sqlstate, "22023");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "\"temp_buffers\" cannot be changed after any temporary tables have been accessed in the session."
+                )
+            );
+        }
+        other => panic!("expected temp_buffers detail error, got {other:?}"),
+    }
+}
+
+#[test]
+fn temp_cursor_page_pins_exhaust_local_buffers() {
+    let db = Database::open_ephemeral(256).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set temp_buffers = 100").unwrap();
+    session
+        .execute(
+            &db,
+            "create temporary table test_temp(a int not null unique, b text not null, cnt int not null)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into test_temp select generate_series(1, 10000), repeat('a', 200), 0",
+        )
+        .unwrap();
+    assert_eq!(db.existing_local_buffer_manager(1).unwrap().capacity(), 100);
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "select pg_relation_size('test_temp') / current_setting('block_size')::int8",
+        )
+        .unwrap()
+    else {
+        panic!("expected relation size");
+    };
+    assert!(
+        matches!(rows.first().and_then(|row| row.first()), Some(Value::Int64(blocks)) if *blocks > 105),
+        "expected test_temp to span more than 105 blocks, got {rows:?}"
+    );
+    session
+        .execute(
+            &db,
+            r#"
+            create function test_temp_pin(p_start int, p_end int)
+            returns void
+            language plpgsql
+            as $f$
+            declare
+                cursorname text;
+                query text;
+            begin
+                for i in p_start..p_end loop
+                    cursorname = 'c_' || i;
+                    query = format($q$declare %I cursor for select ctid from test_temp where ctid >= '(%s,1)'::tid$q$, cursorname, i);
+                    execute query;
+                    execute 'fetch next from ' || cursorname;
+                end loop;
+            end;
+            $f$;
+            "#,
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "select test_temp_pin(0, 9)").unwrap();
+    assert_eq!(
+        db.existing_local_buffer_manager(1).unwrap().pinned_count(),
+        10
+    );
+    let err = session
+        .execute(&db, "select test_temp_pin(10, 105)")
+        .unwrap_err();
+    assert_sqlstate(err, "53100", "no empty local buffer available");
+    session.execute(&db, "rollback").unwrap();
 }
 
 #[test]

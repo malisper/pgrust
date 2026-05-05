@@ -10,10 +10,11 @@ use pgrust_core::{ClientId, CommandId, RelFileLocator, Snapshot, TransactionId};
 pub use pgrust_access::access::htup::{HeapTuple, ItemPointerData};
 pub use pgrust_access::heap::HeapWalPolicy;
 pub use pgrust_access::heap::heapam::{
-    HeapError, HeapModifyResult, HeapScan, VisibleHeapScan, heap_fetch, heap_flush, heap_insert,
-    heap_insert_mvcc, heap_insert_mvcc_with_cid, heap_insert_mvcc_with_cid_and_fillfactor,
-    heap_scan_begin, heap_scan_begin_visible, heap_scan_end, heap_scan_next,
-    heap_scan_page_next_tuple,
+    HeapError, HeapModifyResult, HeapScan, VisibleHeapScan, VisiblePinnedBuffer, heap_fetch,
+    heap_fetch_local, heap_flush, heap_insert, heap_insert_mvcc, heap_insert_mvcc_with_cid,
+    heap_insert_mvcc_with_cid_and_fillfactor, heap_insert_mvcc_with_cid_and_fillfactor_local,
+    heap_scan_begin, heap_scan_begin_visible, heap_scan_begin_visible_local, heap_scan_end,
+    heap_scan_next, heap_scan_page_next_tuple,
 };
 
 type BufferPool = crate::BufferPool<SmgrStorageBackend>;
@@ -32,6 +33,27 @@ pub fn heap_scan_next_visible(
     scan: &mut VisibleHeapScan,
 ) -> Result<Option<(ItemPointerData, HeapTuple)>, HeapError> {
     access_heapam::heap_scan_next_visible(pool, client_id, txns, scan)
+}
+
+// :HACK: Compatibility wrapper preserving the old root transaction-manager
+// argument while the heap runtime lives in `pgrust_access`.
+pub fn heap_fetch_visible_with_txns_local(
+    local: std::sync::Arc<crate::LocalBufferManager<SmgrStorageBackend>>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    tid: ItemPointerData,
+    txns: &std::sync::Arc<RwLock<TransactionManager>>,
+    snapshot: &Snapshot,
+) -> Result<Option<(HeapTuple, VisiblePinnedBuffer)>, HeapError> {
+    let txns_runtime = RootAccessRuntime::transaction_only(txns, None, None, client_id);
+    access_heapam::heap_fetch_visible_with_txns_local(
+        local,
+        client_id,
+        rel,
+        tid,
+        &txns_runtime,
+        snapshot,
+    )
 }
 
 // :HACK: Compatibility wrapper preserving the old root transaction-manager
@@ -221,6 +243,44 @@ pub fn heap_delete_with_waiter_with_wal_policy(
 
 // :HACK: Compatibility wrapper preserving the old root waiter tuple while the
 // heap runtime lives in `pgrust_access`.
+pub fn heap_delete_with_waiter_local(
+    local: &crate::LocalBufferManager<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    txns: &RwLock<TransactionManager>,
+    xid: TransactionId,
+    tid: ItemPointerData,
+    snapshot: &Snapshot,
+    waiter: WaiterArgs<'_>,
+) -> Result<(), HeapError> {
+    let txns_runtime = RootAccessRuntime::transaction_only(txns, None, None, client_id);
+    let runtime;
+    let waiter_services: Option<&dyn pgrust_access::AccessTransactionServices> =
+        if let Some((txns_lock, txn_waiter, interrupts)) = waiter {
+            runtime = RootAccessRuntime::transaction_only(
+                txns_lock,
+                Some(txn_waiter),
+                Some(interrupts),
+                client_id,
+            );
+            Some(&runtime)
+        } else {
+            None
+        };
+    access_heapam::heap_delete_with_waiter_local(
+        local,
+        client_id,
+        rel,
+        &txns_runtime,
+        xid,
+        tid,
+        snapshot,
+        waiter_services,
+    )
+}
+
+// :HACK: Compatibility wrapper preserving the old root waiter tuple while the
+// heap runtime lives in `pgrust_access`.
 pub fn heap_update_with_waiter(
     pool: &BufferPool,
     client_id: ClientId,
@@ -277,6 +337,48 @@ pub fn heap_update_with_waiter_with_snapshot(
         };
     access_heapam::heap_update_with_waiter_with_snapshot(
         pool,
+        client_id,
+        rel,
+        &txns_runtime,
+        xid,
+        cid,
+        tid,
+        replacement,
+        snapshot,
+        waiter_services,
+    )
+}
+
+// :HACK: Compatibility wrapper preserving the old root waiter tuple while the
+// heap runtime lives in `pgrust_access`.
+pub fn heap_update_with_waiter_with_snapshot_local(
+    local: &crate::LocalBufferManager<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    txns: &RwLock<TransactionManager>,
+    xid: TransactionId,
+    cid: CommandId,
+    tid: ItemPointerData,
+    replacement: &HeapTuple,
+    snapshot: &Snapshot,
+    waiter: WaiterArgs<'_>,
+) -> Result<ItemPointerData, HeapError> {
+    let txns_runtime = RootAccessRuntime::transaction_only(txns, None, None, client_id);
+    let runtime;
+    let waiter_services: Option<&dyn pgrust_access::AccessTransactionServices> =
+        if let Some((txns_lock, txn_waiter, interrupts)) = waiter {
+            runtime = RootAccessRuntime::transaction_only(
+                txns_lock,
+                Some(txn_waiter),
+                Some(interrupts),
+                client_id,
+            );
+            Some(&runtime)
+        } else {
+            None
+        };
+    access_heapam::heap_update_with_waiter_with_snapshot_local(
+        local,
         client_id,
         rel,
         &txns_runtime,

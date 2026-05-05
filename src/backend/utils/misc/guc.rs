@@ -5,6 +5,9 @@ use crate::backend::parser::ParseError;
 
 static POSTGRES_GUCS: OnceLock<HashSet<String>> = OnceLock::new();
 
+pub const TEMP_BUFFERS_DEFAULT_PAGES: usize = 1024;
+pub const TEMP_BUFFERS_MIN_PAGES: usize = 100;
+
 pub fn is_postgres_guc(name: &str) -> bool {
     let normalized = normalize_guc_name(name);
     postgres_gucs().contains(normalized.as_str())

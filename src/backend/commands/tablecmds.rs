@@ -6,10 +6,12 @@ use parking_lot::RwLock;
 
 use crate::backend::access::heap::HeapWalPolicy;
 use crate::backend::access::heap::heapam::{
-    HeapError, heap_delete_with_waiter, heap_delete_with_waiter_with_wal_policy, heap_fetch,
+    HeapError, heap_delete_with_waiter, heap_delete_with_waiter_local,
+    heap_delete_with_waiter_with_wal_policy, heap_fetch, heap_fetch_local,
     heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid_and_fillfactor,
-    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
-    heap_update_with_waiter_with_snapshot,
+    heap_insert_mvcc_with_cid_and_fillfactor_local, heap_scan_begin_visible, heap_scan_end,
+    heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_update_with_waiter_with_snapshot,
+    heap_update_with_waiter_with_snapshot_local,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
@@ -18,7 +20,7 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{
-    INVALID_TRANSACTION_ID, TransactionId, TransactionManager,
+    INVALID_TRANSACTION_ID, MvccError, Snapshot, TransactionId, TransactionManager,
 };
 use crate::backend::executor::value_io::{
     format_failing_row_detail, format_failing_row_detail_for_columns,
@@ -5152,16 +5154,138 @@ pub(crate) fn write_insert_heap_row(
     ctx.check_serializable_write_relation(relation_oid)?;
     let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
     let fillfactor = heap_fillfactor_for_relation(relation_oid, ctx);
-    heap_insert_mvcc_with_cid_and_fillfactor(
-        &*ctx.pool,
-        ctx.client_id,
-        rel,
-        xid,
-        cid,
-        &tuple,
-        fillfactor,
-    )
+    if ctx.relation_uses_local_buffers(relation_oid) {
+        let local = ctx.local_buffer_manager()?;
+        heap_insert_mvcc_with_cid_and_fillfactor_local(
+            &local,
+            ctx.client_id,
+            rel,
+            xid,
+            cid,
+            &tuple,
+            fillfactor,
+        )
+    } else {
+        heap_insert_mvcc_with_cid_and_fillfactor(
+            &*ctx.pool,
+            ctx.client_id,
+            rel,
+            xid,
+            cid,
+            &tuple,
+            fillfactor,
+        )
+    }
     .map_err(Into::into)
+}
+
+fn fetch_heap_row_for_write(
+    ctx: &mut ExecutorContext,
+    relation_oid: u32,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    tid: ItemPointerData,
+) -> Result<crate::include::access::htup::HeapTuple, HeapError> {
+    if ctx.relation_uses_local_buffers(relation_oid) {
+        let local = ctx.local_buffer_manager().map_err(|err| match err {
+            ExecError::Heap(err) => err,
+            other => HeapError::Mvcc(MvccError::Io(format!("{other:?}"))),
+        })?;
+        heap_fetch_local(&local, ctx.client_id, rel, tid)
+    } else {
+        heap_fetch(&*ctx.pool, ctx.client_id, rel, tid)
+    }
+}
+
+fn delete_heap_row_for_write(
+    ctx: &mut ExecutorContext,
+    relation_oid: u32,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    xid: TransactionId,
+    tid: ItemPointerData,
+    snapshot: &Snapshot,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+    wal_policy: HeapWalPolicy,
+) -> Result<(), HeapError> {
+    if ctx.relation_uses_local_buffers(relation_oid) {
+        let local = ctx.local_buffer_manager().map_err(|err| match err {
+            ExecError::Heap(err) => err,
+            other => HeapError::Mvcc(MvccError::Io(format!("{other:?}"))),
+        })?;
+        heap_delete_with_waiter_local(
+            &local,
+            ctx.client_id,
+            rel,
+            &ctx.txns,
+            xid,
+            tid,
+            snapshot,
+            waiter,
+        )
+    } else {
+        heap_delete_with_waiter_with_wal_policy(
+            &*ctx.pool,
+            ctx.client_id,
+            rel,
+            &ctx.txns,
+            xid,
+            tid,
+            snapshot,
+            waiter,
+            wal_policy,
+        )
+    }
+}
+
+fn update_heap_row_for_write(
+    ctx: &mut ExecutorContext,
+    relation_oid: u32,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    xid: TransactionId,
+    cid: CommandId,
+    tid: ItemPointerData,
+    replacement: &crate::include::access::htup::HeapTuple,
+    snapshot: &Snapshot,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<ItemPointerData, HeapError> {
+    if ctx.relation_uses_local_buffers(relation_oid) {
+        let local = ctx.local_buffer_manager().map_err(|err| match err {
+            ExecError::Heap(err) => err,
+            other => HeapError::Mvcc(MvccError::Io(format!("{other:?}"))),
+        })?;
+        heap_update_with_waiter_with_snapshot_local(
+            &local,
+            ctx.client_id,
+            rel,
+            &ctx.txns,
+            xid,
+            cid,
+            tid,
+            replacement,
+            snapshot,
+            waiter,
+        )
+    } else {
+        heap_update_with_waiter_with_snapshot(
+            &*ctx.pool,
+            ctx.client_id,
+            rel,
+            &ctx.txns,
+            xid,
+            cid,
+            tid,
+            replacement,
+            snapshot,
+            waiter,
+        )
+    }
 }
 
 fn heap_fillfactor_for_relation(relation_oid: u32, ctx: &ExecutorContext) -> u16 {
@@ -5594,7 +5718,7 @@ fn move_updated_row_to_partition(
     )?;
 
     let old_tuple = if toast.is_some() {
-        match heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid) {
+        match fetch_heap_row_for_write(ctx, relation_oid, rel, current_tid) {
             Ok(tuple) => Some(tuple),
             Err(HeapError::TupleNotVisible(_) | HeapError::TupleAlreadyModified(_)) => {
                 let _ = rollback_inserted_row(
@@ -5623,15 +5747,15 @@ fn move_updated_row_to_partition(
         None
     };
     let delete_snapshot = ctx.snapshot.clone();
-    match heap_delete_with_waiter(
-        &*ctx.pool,
-        ctx.client_id,
+    match delete_heap_row_for_write(
+        ctx,
+        relation_oid,
         rel,
-        &ctx.txns,
         xid,
         current_tid,
         &delete_snapshot,
         waiter,
+        HeapWalPolicy::Wal,
     ) {
         Ok(()) => {}
         Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
@@ -5783,7 +5907,7 @@ pub(crate) fn write_updated_row(
         )?;
     }
     let old_tuple = if toast.is_some() {
-        match heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid) {
+        match fetch_heap_row_for_write(ctx, relation_oid, rel, current_tid) {
             Ok(tuple) => Some(tuple),
             Err(HeapError::TupleNotVisible(_) | HeapError::TupleAlreadyModified(_)) => {
                 return Ok(WriteUpdatedRowResult::AlreadyModified);
@@ -5933,16 +6057,16 @@ pub(crate) fn write_updated_row(
     let (replacement, toasted) =
         toast_tuple_for_write(desc, &current_values, toast, toast_index, ctx, xid, cid)?;
     ctx.check_serializable_write_tuple(relation_oid, current_tid)?;
-    match heap_update_with_waiter_with_snapshot(
-        &*ctx.pool,
-        ctx.client_id,
+    let update_snapshot = ctx.snapshot.clone();
+    match update_heap_row_for_write(
+        ctx,
+        relation_oid,
         rel,
-        &ctx.txns,
         xid,
         cid,
         current_tid,
         &replacement,
-        &ctx.snapshot,
+        &update_snapshot,
         waiter,
     ) {
         Ok(new_tid) => {
@@ -8368,6 +8492,7 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
     let mut processed = 0u64;
     let mut stats = Vec::with_capacity(relations.len());
     for entry in relations {
+        prepare_temp_relation_for_shared_maintenance(entry, ctx, "VACUUM")?;
         let scan = crate::backend::access::heap::vacuumlazy::vacuum_relation_scan(
             &ctx.pool,
             ctx.client_id,
@@ -8445,11 +8570,78 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
             session_stats.note_io_read("client backend", "relation", "vacuum", 8192);
             session_stats.note_io_reuse("client backend", "relation", "vacuum");
         }
+        finish_temp_relation_after_shared_maintenance(entry, ctx, "VACUUM")?;
         stats.push(relation_stats);
         processed += 1;
     }
     let _ = processed;
     Ok(stats)
+}
+
+fn prepare_temp_relation_for_shared_maintenance(
+    relation: &BoundRelation,
+    ctx: &mut ExecutorContext,
+    command: &'static str,
+) -> Result<(), ExecError> {
+    if relation.relpersistence != 't' {
+        return Ok(());
+    }
+    let _ = ctx.pool.invalidate_relation(relation.rel).map_err(|err| {
+        temp_relation_maintenance_buffer_error(command, relation.relation_oid, err)
+    })?;
+    if let Some(database) = ctx.database.as_ref()
+        && let Some(local) = database.existing_local_buffer_manager(ctx.client_id)
+    {
+        local.flush_relation(relation.rel).map_err(|err| {
+            temp_relation_maintenance_buffer_error(command, relation.relation_oid, err)
+        })?;
+        local.invalidate_relation(relation.rel).map_err(|err| {
+            temp_relation_maintenance_buffer_error(command, relation.relation_oid, err)
+        })?;
+    }
+    Ok(())
+}
+
+fn finish_temp_relation_after_shared_maintenance(
+    relation: &BoundRelation,
+    ctx: &mut ExecutorContext,
+    command: &'static str,
+) -> Result<(), ExecError> {
+    if relation.relpersistence != 't' {
+        return Ok(());
+    }
+    ctx.pool.flush_relation(relation.rel).map_err(|err| {
+        temp_relation_maintenance_buffer_error(command, relation.relation_oid, err)
+    })?;
+    let _ = ctx.pool.invalidate_relation(relation.rel).map_err(|err| {
+        temp_relation_maintenance_buffer_error(command, relation.relation_oid, err)
+    })?;
+    if let Some(database) = ctx.database.as_ref()
+        && let Some(local) = database.existing_local_buffer_manager(ctx.client_id)
+    {
+        local.invalidate_relation(relation.rel).map_err(|err| {
+            temp_relation_maintenance_buffer_error(command, relation.relation_oid, err)
+        })?;
+    }
+    Ok(())
+}
+
+fn temp_relation_maintenance_buffer_error(
+    command: &'static str,
+    relation_oid: u32,
+    err: crate::Error,
+) -> ExecError {
+    match err {
+        crate::Error::BufferPinned => ExecError::DetailedError {
+            message: format!(
+                "cannot {command} relation {relation_oid} because it is being used by active queries in this session"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "55006",
+        },
+        other => ExecError::Heap(HeapError::Buffer(other)),
+    }
 }
 
 pub fn execute_create_table(
@@ -8796,7 +8988,12 @@ pub fn execute_truncate_table(
     let triggers = fire_before_truncate_triggers(&targets, catalog, ctx)?;
     for target in targets.iter().filter(|target| target.relkind == 'r') {
         let indexes = catalog.index_relations_for_heap(target.relation_oid);
-        let _ = ctx.pool.invalidate_relation(target.rel);
+        invalidate_relation_buffers_for_command(
+            "TRUNCATE",
+            relation_name_for_oid(catalog, target.relation_oid),
+            target,
+            ctx,
+        )?;
         ctx.pool
             .with_storage_mut(|s| {
                 s.smgr.truncate(target.rel, ForkNumber::Main, 0)?;
@@ -8886,6 +9083,46 @@ pub(crate) fn owned_sequence_oids_for_truncate(
     catalog: &dyn CatalogLookup,
 ) -> Vec<u32> {
     pgrust_commands::truncate::owned_sequence_oids_for_truncate(targets, catalog)
+}
+
+fn relation_active_query_error(command: &str, relation_name: String) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot {command} \"{relation_name}\" because it is being used by active queries in this session"
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55006",
+    }
+}
+
+pub(crate) fn invalidate_relation_buffers_for_command(
+    command: &str,
+    relation_name: String,
+    relation: &BoundRelation,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    if relation.relpersistence == 't'
+        && let Some(database) = &ctx.database
+        && let Some(local) = database.existing_local_buffer_manager(ctx.client_id)
+        && let Err(err) = local.invalidate_relation(relation.rel)
+    {
+        return match err {
+            crate::include::storage::buf_internals::Error::BufferPinned => {
+                Err(relation_active_query_error(command, relation_name))
+            }
+            other => Err(ExecError::Heap(HeapError::Buffer(other))),
+        };
+    }
+    if let Err(err) = ctx.pool.invalidate_relation(relation.rel) {
+        return match err {
+            crate::include::storage::buf_internals::Error::BufferPinned => {
+                Err(relation_active_query_error(command, relation_name))
+            }
+            other => Err(ExecError::Heap(HeapError::Buffer(other))),
+        };
+    }
+    Ok(())
 }
 
 fn restart_owned_sequences_for_truncate(
@@ -11588,9 +11825,9 @@ fn execute_merge_delete_row(
         None,
     )?;
     let old_tuple = if target_toast.is_some() {
-        Some(heap_fetch(
-            &*ctx.pool,
-            ctx.client_id,
+        Some(fetch_heap_row_for_write(
+            ctx,
+            target_relation_oid,
             target_rel,
             target_tid,
         )?)
@@ -11598,15 +11835,16 @@ fn execute_merge_delete_row(
         None
     };
     ctx.check_serializable_write_tuple(target_relation_oid, target_tid)?;
-    match heap_delete_with_waiter(
-        &*ctx.pool,
-        ctx.client_id,
+    let delete_snapshot = ctx.snapshot.clone();
+    match delete_heap_row_for_write(
+        ctx,
+        target_relation_oid,
         target_rel,
-        &ctx.txns,
         xid,
         target_tid,
-        &ctx.snapshot,
+        &delete_snapshot,
         None,
+        HeapWalPolicy::Wal,
     ) {
         Ok(()) => {
             if let (Some(toast), Some(old_tuple)) = (target_toast, old_tuple.as_ref()) {
@@ -13607,8 +13845,12 @@ pub fn execute_update_with_waiter(
                             break;
                         }
                         Ok(WriteUpdatedRowResult::TupleUpdated(new_ctid)) => {
-                            let new_tuple =
-                                heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
+                            let new_tuple = fetch_heap_row_for_write(
+                                ctx,
+                                target.relation_oid,
+                                target.rel,
+                                new_ctid,
+                            )?;
                             let mut new_slot = TupleSlot::from_heap_tuple(
                                 Rc::clone(&desc),
                                 Rc::clone(&attr_descs),
@@ -13696,7 +13938,7 @@ fn fetch_update_target_values(
 ) -> Result<Vec<Value>, ExecError> {
     let desc = Rc::new(target.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-    let tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, tid)?;
+    let tuple = fetch_heap_row_for_write(ctx, target.relation_oid, target.rel, tid)?;
     let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
     slot.toast = slot_toast_context(target.toast, ctx);
     slot.into_values()
@@ -14127,7 +14369,7 @@ fn fetch_delete_target_values(
 ) -> Result<Vec<Value>, ExecError> {
     let desc = Rc::new(target.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-    let tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, tid)?;
+    let tuple = fetch_heap_row_for_write(ctx, target.relation_oid, target.rel, tid)?;
     let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
     slot.toast = slot_toast_context(target.toast, ctx);
     slot.into_values()
@@ -14356,9 +14598,9 @@ fn execute_delete_from_joined_input(
                     waiter,
                 )?;
                 let old_tuple = if target.toast.is_some() {
-                    Some(heap_fetch(
-                        &*ctx.pool,
-                        ctx.client_id,
+                    Some(fetch_heap_row_for_write(
+                        ctx,
+                        target.relation_oid,
                         target.rel,
                         current_tid,
                     )?)
@@ -14366,11 +14608,10 @@ fn execute_delete_from_joined_input(
                     None
                 };
                 ctx.check_serializable_write_tuple(target.relation_oid, current_tid)?;
-                match heap_delete_with_waiter_with_wal_policy(
-                    &*ctx.pool,
-                    ctx.client_id,
+                match delete_heap_row_for_write(
+                    ctx,
+                    target.relation_oid,
                     target.rel,
-                    &ctx.txns,
                     xid,
                     current_tid,
                     &snapshot,
@@ -14630,9 +14871,9 @@ pub fn execute_delete_with_waiter(
                         waiter,
                     )?;
                     let old_tuple = if target.toast.is_some() {
-                        Some(heap_fetch(
-                            &*ctx.pool,
-                            ctx.client_id,
+                        Some(fetch_heap_row_for_write(
+                            ctx,
+                            target.relation_oid,
                             target.rel,
                             current_tid,
                         )?)
@@ -14640,11 +14881,10 @@ pub fn execute_delete_with_waiter(
                         None
                     };
                     ctx.check_serializable_write_tuple(target.relation_oid, current_tid)?;
-                    match heap_delete_with_waiter_with_wal_policy(
-                        &*ctx.pool,
-                        ctx.client_id,
+                    match delete_heap_row_for_write(
+                        ctx,
+                        target.relation_oid,
                         target.rel,
-                        &ctx.txns,
                         xid,
                         current_tid,
                         &snapshot,
@@ -14730,8 +14970,12 @@ pub fn execute_delete_with_waiter(
                             if ctx.uses_transaction_snapshot() {
                                 return Err(serialization_failure_due_to_concurrent_update());
                             }
-                            let new_tuple =
-                                heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
+                            let new_tuple = fetch_heap_row_for_write(
+                                ctx,
+                                target.relation_oid,
+                                target.rel,
+                                new_ctid,
+                            )?;
                             let mut new_slot = TupleSlot::from_heap_tuple(
                                 Rc::clone(&desc),
                                 Rc::clone(&attr_descs),
@@ -14976,7 +15220,8 @@ pub(crate) fn apply_base_update_row(
                 true,
             )?;
         }
-        let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, current_tid)?;
+        let old_tuple =
+            fetch_heap_row_for_write(ctx, target.relation_oid, target.rel, current_tid)?;
         crate::backend::executor::enforce_row_security_write_checks(
             &target.relation_name,
             &target.desc,
@@ -15040,16 +15285,16 @@ pub(crate) fn apply_base_update_row(
             cid,
         )?;
         ctx.check_serializable_write_tuple(target.relation_oid, current_tid)?;
-        match heap_update_with_waiter_with_snapshot(
-            &*ctx.pool,
-            ctx.client_id,
+        let update_snapshot = ctx.snapshot.clone();
+        match update_heap_row_for_write(
+            ctx,
+            target.relation_oid,
             target.rel,
-            &ctx.txns,
             xid,
             cid,
             current_tid,
             &current_replacement,
-            &ctx.snapshot,
+            &update_snapshot,
             waiter,
         ) {
             Ok(new_tid) => {
@@ -15094,7 +15339,8 @@ pub(crate) fn apply_base_update_row(
                 if ctx.uses_transaction_snapshot() {
                     return Err(serialization_failure_due_to_concurrent_update());
                 }
-                let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
+                let new_tuple =
+                    fetch_heap_row_for_write(ctx, target.relation_oid, target.rel, new_ctid)?;
                 let mut new_slot = TupleSlot::from_heap_tuple(
                     Rc::clone(&desc),
                     Rc::clone(&attr_descs),
@@ -15310,9 +15556,9 @@ pub(crate) fn apply_base_delete_row(
             waiter,
         )?;
         let old_tuple = if target.toast.is_some() {
-            Some(heap_fetch(
-                &*ctx.pool,
-                ctx.client_id,
+            Some(fetch_heap_row_for_write(
+                ctx,
+                target.relation_oid,
                 target.rel,
                 current_tid,
             )?)
@@ -15320,11 +15566,10 @@ pub(crate) fn apply_base_delete_row(
             None
         };
         ctx.check_serializable_write_tuple(target.relation_oid, current_tid)?;
-        match heap_delete_with_waiter_with_wal_policy(
-            &*ctx.pool,
-            ctx.client_id,
+        match delete_heap_row_for_write(
+            ctx,
+            target.relation_oid,
             target.rel,
-            &ctx.txns,
             xid,
             current_tid,
             &snapshot,
@@ -15365,7 +15610,8 @@ pub(crate) fn apply_base_delete_row(
                 if ctx.uses_transaction_snapshot() {
                     return Err(serialization_failure_due_to_concurrent_update());
                 }
-                let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
+                let new_tuple =
+                    fetch_heap_row_for_write(ctx, target.relation_oid, target.rel, new_ctid)?;
                 let mut new_slot = TupleSlot::from_heap_tuple(
                     Rc::clone(&desc),
                     Rc::clone(&attr_descs),

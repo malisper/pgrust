@@ -352,7 +352,7 @@ impl Portal {
                 PortalFetchDirection::Forward(_) | PortalFetchDirection::Next => {}
             }
         }
-        if !self.options.no_scroll {
+        if !self.options.no_scroll && !portal_direction_can_stream_forward(direction) {
             if let Err(err) = self.materialize_all() {
                 self.status = PortalStatus::Failed;
                 self.current_row = None;
@@ -614,6 +614,13 @@ impl Portal {
             }
         }
     }
+}
+
+fn portal_direction_can_stream_forward(direction: PortalFetchDirection) -> bool {
+    matches!(
+        direction,
+        PortalFetchDirection::Forward(_) | PortalFetchDirection::Next
+    )
 }
 
 fn fetch_streaming_forward(
