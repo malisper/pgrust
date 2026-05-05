@@ -77,6 +77,7 @@ pub fn lower_create_table(
     let (expanded, like_post_create_actions) =
         expand_create_table_like_clauses(&typed_stmt, catalog)?;
     let columns = expanded.columns().cloned().collect::<Vec<_>>();
+    reject_duplicate_create_table_columns(&columns)?;
     let normalized = normalize_create_table_constraints(&expanded, catalog)?;
     let constraint_actions = normalized.index_backed.clone();
     let mut owned_sequences = Vec::new();
@@ -327,6 +328,23 @@ pub fn lower_create_table(
         partition_parent_oid: None,
         partition_bound: None,
     })
+}
+
+fn reject_duplicate_create_table_columns(
+    columns: &[pgrust_nodes::parsenodes::ColumnDef],
+) -> Result<(), ParseError> {
+    let mut seen = BTreeSet::new();
+    for column in columns {
+        if !seen.insert(column.name.to_ascii_lowercase()) {
+            return Err(ParseError::DetailedError {
+                message: format!("column \"{}\" specified more than once", column.name),
+                detail: None,
+                hint: None,
+                sqlstate: "42701",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn canonicalize_stored_defaults(

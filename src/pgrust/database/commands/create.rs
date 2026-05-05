@@ -31,9 +31,9 @@ use crate::include::catalog::{
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
     ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL,
     DEPENDENCY_NORMAL, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID,
-    PG_LANGUAGE_SQL_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgDependRow, PgLanguageRow,
-    PgProcRow, RECORD_TYPE_OID, TRIGGER_TYPE_OID, VOID_TYPE_OID,
+    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PG_PROC_RELATION_OID, PgAggregateRow,
+    PgDependRow, PgLanguageRow, PgProcRow, RECORD_TYPE_OID, TRIGGER_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{
     AliasColumnSpec, ForeignKeyAction, ForeignKeyMatchType, FromItem, GroupByItem, Query,
@@ -4571,6 +4571,15 @@ impl Database {
             }
 
             if action.include_comments {
+                let source_relation = self
+                    .lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path)
+                    .lookup_relation_by_oid(action.source_relation_oid)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "CREATE TABLE LIKE source relation",
+                            actual: format!("missing relation oid {}", action.source_relation_oid),
+                        })
+                    })?;
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -4585,14 +4594,65 @@ impl Database {
                     .write()
                     .copy_relation_column_comments_mvcc(
                         action.source_relation_oid,
+                        &source_relation.desc,
                         relation.relation_oid,
-                        i32::try_from(relation.desc.columns.len()).unwrap_or(i32::MAX),
+                        &relation.desc,
                         &ctx,
                     )
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
                 cid = cid.saturating_add(1);
+
+                let constraint_comment_oids = {
+                    let catalog = self.lazy_catalog_lookup(
+                        client_id,
+                        Some((xid, cid)),
+                        configured_search_path,
+                    );
+                    let source_constraints =
+                        catalog.constraint_rows_for_relation(action.source_relation_oid);
+                    let target_constraints =
+                        catalog.constraint_rows_for_relation(relation.relation_oid);
+                    source_constraints
+                        .into_iter()
+                        .filter_map(|source_constraint| {
+                            target_constraints
+                                .iter()
+                                .find(|row| {
+                                    row.conname.eq_ignore_ascii_case(&source_constraint.conname)
+                                })
+                                .map(|target_constraint| {
+                                    (source_constraint.oid, target_constraint.oid)
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                };
+                for (source_constraint_oid, target_constraint_oid) in constraint_comment_oids {
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid,
+                        client_id,
+                        waiter: None,
+                        interrupts: self.interrupt_state(client_id),
+                    };
+                    let effect = self
+                        .catalog
+                        .write()
+                        .copy_object_comment_mvcc(
+                            source_constraint_oid,
+                            PG_CONSTRAINT_RELATION_OID,
+                            target_constraint_oid,
+                            PG_CONSTRAINT_RELATION_OID,
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                    cid = cid.saturating_add(1);
+                }
             }
 
             if action.include_statistics {

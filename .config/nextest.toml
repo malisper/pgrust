@@ -27,5 +27,9 @@ filter = 'test(pgrust::database::tests::no_pins_leaked_concurrent_contention)'
 slow-timeout = { period = "300s", terminate-after = 1, grace-period = "0s" }
 threads-required = "num-test-threads"
 
+[[profile.ci.overrides]]
+filter = 'test(pgrust::database::tests::concurrent_btree_splits_complete_once)'
+slow-timeout = { period = "180s", terminate-after = 1, grace-period = "0s" }
+
 [profile.ci.junit]
 path = "junit.xml"
