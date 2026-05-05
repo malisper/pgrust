@@ -4539,7 +4539,8 @@ fn apply_privileges_regression_error_compat(sql: &str, response: &mut ExecErrorR
     // :HACK: Privilege regressions compare PostgreSQL's SQL-visible type
     // aliases in routine signatures. Normalize only final error text so the
     // routine/catalog behavior stays unchanged.
-    if !response.message.contains("operator family")
+    if !response.message.starts_with("operator ")
+        && !response.message.contains("operator family")
         && !response.message.starts_with("function number ")
         && (response.message.starts_with("function ")
             || response.message.starts_with("procedure ")
