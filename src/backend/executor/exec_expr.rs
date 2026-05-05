@@ -21,7 +21,7 @@ use pgrust_expr::{
         overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
         substring as eval_bit_substring,
     },
-    expr_bool,
+    expr_bool, expr_date,
     expr_datetime::{
         current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
         current_time_value_from_timestamp_with_config, current_timestamp_value,
@@ -47,16 +47,6 @@ use super::expr_casts::{
 };
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
-};
-use super::expr_date::{
-    eval_age_function, eval_date_bin_function, eval_date_part_function_with_config,
-    eval_date_trunc_function, eval_datetime_add_function, eval_extract_function,
-    eval_extract_function_with_config, eval_isfinite_function, eval_justify_days_function,
-    eval_justify_hours_function, eval_justify_interval_function, eval_make_date_function,
-    eval_make_interval_function, eval_make_time_function, eval_make_timestamp_function,
-    eval_make_timestamptz_function, eval_timestamptz_constructor_function,
-    eval_timezone_function as eval_timetz_timezone_function, eval_to_date_function,
-    eval_to_timestamp_function, timezone_interval_seconds, timezone_target_offset_seconds,
 };
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
@@ -11993,16 +11983,22 @@ fn eval_plpgsql_builtin_function(
             &values,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         ),
-        BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
+        BuiltinScalarFunction::ToDate => {
+            expr_date::eval_to_date_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
-        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(
+        BuiltinScalarFunction::ToTimestamp => expr_date::eval_to_timestamp_function(
             &values,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        ),
-        BuiltinScalarFunction::TimestampTzConstructor => eval_timestamptz_constructor_function(
-            &values,
-            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        ),
+        )
+        .map_err(Into::into),
+        BuiltinScalarFunction::TimestampTzConstructor => {
+            expr_date::eval_timestamptz_constructor_function(
+                &values,
+                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            )
+            .map_err(Into::into)
+        }
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
@@ -12039,12 +12035,24 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BoolOrStateFunc => {
             expr_bool::eval_boolor_statefunc(&values).map_err(Into::into)
         }
-        BuiltinScalarFunction::Extract => eval_extract_function(&values),
-        BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
-        BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
-        BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
-        BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
-        BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
+        BuiltinScalarFunction::Extract => {
+            expr_date::eval_extract_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::DateBin => {
+            expr_date::eval_date_bin_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyDays => {
+            expr_date::eval_justify_days_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyHours => {
+            expr_date::eval_justify_hours_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyInterval => {
+            expr_date::eval_justify_interval_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeInterval => {
+            expr_date::eval_make_interval_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::IntervalHash => {
             eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
         }
@@ -12282,15 +12290,15 @@ fn eval_timezone_function(
                 timetz_args.push(zone.clone());
             }
             timetz_args.push(value.clone());
-            eval_timetz_timezone_function(&timetz_args, config)
+            expr_date::eval_timezone_function(&timetz_args, config).map_err(Into::into)
         }
         Value::Time(time) => Ok(Value::TimeTz(TimeTzADT {
             time: *time,
-            offset_seconds: timezone_target_offset_seconds(&zone, config)?,
+            offset_seconds: expr_date::timezone_target_offset_seconds(&zone, config)?,
         })),
         Value::Timestamp(timestamp) => match &zone {
             Value::Interval(interval) => {
-                let micros = timezone_interval_seconds(*interval)?
+                let micros = expr_date::timezone_interval_seconds(*interval)?
                     .checked_mul(USECS_PER_SEC)
                     .ok_or_else(timezone_timestamp_out_of_range)?;
                 if !timestamp.is_finite() {
@@ -12324,7 +12332,7 @@ fn eval_timezone_function(
         },
         Value::TimestampTz(timestamptz) => match &zone {
             Value::Interval(interval) => {
-                let micros = timezone_interval_seconds(*interval)?
+                let micros = expr_date::timezone_interval_seconds(*interval)?
                     .checked_mul(USECS_PER_SEC)
                     .ok_or_else(timezone_timestamp_out_of_range)?;
                 if !timestamptz.is_finite() {
@@ -13876,33 +13884,63 @@ pub(crate) fn eval_builtin_function(
             unreachable!("sequence builtins handled earlier");
         }
         BuiltinScalarFunction::DatePart => {
-            eval_date_part_function_with_config(&values, &ctx.datetime_config)
+            expr_date::eval_date_part_function_with_config(&values, &ctx.datetime_config)
+                .map_err(Into::into)
         }
         BuiltinScalarFunction::Extract => {
-            eval_extract_function_with_config(&values, &ctx.datetime_config)
+            expr_date::eval_extract_function_with_config(&values, &ctx.datetime_config)
+                .map_err(Into::into)
         }
-        BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
-        BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
+        BuiltinScalarFunction::DateTrunc => {
+            expr_date::eval_date_trunc_function(&values, &ctx.datetime_config).map_err(Into::into)
+        }
+        BuiltinScalarFunction::DateBin => {
+            expr_date::eval_date_bin_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::Timezone => eval_timezone_function(&values, &ctx.datetime_config),
-        BuiltinScalarFunction::DateAdd => eval_datetime_add_function(&values, false),
-        BuiltinScalarFunction::DateSubtract => eval_datetime_add_function(&values, true),
-        BuiltinScalarFunction::Age => eval_age_function(&values, &ctx.datetime_config),
-        BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
-        BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
-        BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
-        BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
-        BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
-        BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
-        BuiltinScalarFunction::MakeTime => eval_make_time_function(&values),
-        BuiltinScalarFunction::MakeTimestamp => eval_make_timestamp_function(&values),
+        BuiltinScalarFunction::DateAdd => {
+            expr_date::eval_datetime_add_function(&values, false).map_err(Into::into)
+        }
+        BuiltinScalarFunction::DateSubtract => {
+            expr_date::eval_datetime_add_function(&values, true).map_err(Into::into)
+        }
+        BuiltinScalarFunction::Age => {
+            expr_date::eval_age_function(&values, &ctx.datetime_config).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyDays => {
+            expr_date::eval_justify_days_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyHours => {
+            expr_date::eval_justify_hours_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::JustifyInterval => {
+            expr_date::eval_justify_interval_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::IsFinite => {
+            expr_date::eval_isfinite_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeInterval => {
+            expr_date::eval_make_interval_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeDate => {
+            expr_date::eval_make_date_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeTime => {
+            expr_date::eval_make_time_function(&values).map_err(Into::into)
+        }
+        BuiltinScalarFunction::MakeTimestamp => {
+            expr_date::eval_make_timestamp_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::MakeTimestampTz => {
-            eval_make_timestamptz_function(&values, &ctx.datetime_config)
+            expr_date::eval_make_timestamptz_function(&values, &ctx.datetime_config)
+                .map_err(Into::into)
         }
         BuiltinScalarFunction::TimestampTzConstructor => {
-            eval_timestamptz_constructor_function(&values, &ctx.datetime_config)
+            expr_date::eval_timestamptz_constructor_function(&values, &ctx.datetime_config)
+                .map_err(Into::into)
         }
         BuiltinScalarFunction::ToTimestamp => {
-            eval_to_timestamp_function(&values, &ctx.datetime_config)
+            expr_date::eval_to_timestamp_function(&values, &ctx.datetime_config).map_err(Into::into)
         }
         BuiltinScalarFunction::IntervalHash => {
             eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
@@ -14789,7 +14827,9 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::RegexpSubstr => eval_regexp_substr(&values),
         BuiltinScalarFunction::RegexpSplitToArray => eval_regexp_split_to_array(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values, &ctx.datetime_config),
-        BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
+        BuiltinScalarFunction::ToDate => {
+            expr_date::eval_to_date_function(&values).map_err(Into::into)
+        }
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         BuiltinScalarFunction::PgNumaAvailable => Ok(Value::Bool(false)),
         _ => unreachable!("json builtins handled by expr_json"),

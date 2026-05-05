@@ -10,7 +10,6 @@ mod expr_agg_support;
 mod expr_async;
 mod expr_casts;
 mod expr_compile;
-mod expr_date;
 mod expr_json;
 mod expr_locks;
 mod expr_math;
