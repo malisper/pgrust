@@ -64343,6 +64343,30 @@ fn whole_row_composite_in_values_compares_as_single_value() {
 }
 
 #[test]
+fn explain_whole_row_scalar_array_filter_deparses_alias_star() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "explain (costs off)
+             select * from int8_tbl i8
+             where i8 in (row(123,456)::int8_tbl, '(4567890123456789,123)')",
+        ),
+        vec![
+            vec![Value::Text("Seq Scan on int8_tbl i8".into())],
+            vec![Value::Text(
+                "  Filter: (i8.* = ANY ('{\"(123,456)\",\"(4567890123456789,123)\"}'::int8_tbl[]))"
+                    .into()
+            )],
+        ]
+    );
+}
+
+#[test]
 fn restrict_nonsystem_relation_kind_blocks_view_select() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

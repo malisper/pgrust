@@ -18,10 +18,10 @@ use pgrust_nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampT
 use pgrust_nodes::datum::{ArrayValue, Value};
 use pgrust_nodes::parsenodes::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use pgrust_nodes::primnodes::{
-    BuiltinScalarFunction, CMAX_ATTR_NO, CMIN_ATTR_NO, CaseExpr, Expr, FuncExpr, INDEX_VAR,
-    INNER_VAR, OUTER_VAR, ParamKind, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl,
-    SetReturningCall, SubLinkType, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO,
-    attrno_index, expr_sql_type_hint,
+    BuiltinScalarFunction, CMAX_ATTR_NO, CMIN_ATTR_NO, Expr, FuncExpr, INDEX_VAR, INNER_VAR,
+    OUTER_VAR, ParamKind, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl,
+    SetReturningCall, SubLinkType, TABLE_OID_ATTR_NO, Var, WHOLE_ROW_ATTR_NO, XMAX_ATTR_NO,
+    XMIN_ATTR_NO, attrno_index, expr_sql_type_hint,
 };
 
 thread_local! {
@@ -128,6 +128,10 @@ pub fn render_explain_join_expr(
 }
 
 fn render_explain_var_name(var: &Var, column_names: &[String]) -> Option<String> {
+    if var.varattno == WHOLE_ROW_ATTR_NO {
+        return relation_qualifier_from_column_names(column_names)
+            .map(|qualifier| format!("{qualifier}.*"));
+    }
     attrno_index(var.varattno)
         .and_then(|index| column_names.get(index).cloned())
         .map(normalize_explain_var_name)
@@ -254,6 +258,10 @@ pub fn render_explain_expr_inner_with_qualifier(
                 .join(", ");
             format!("GROUPING({args})")
         }
+        Expr::Var(var) if var.varattno == WHOLE_ROW_ATTR_NO => qualifier
+            .map(|qualifier| format!("{qualifier}.*"))
+            .or_else(|| render_explain_var_name(var, column_names))
+            .unwrap_or_else(|| format!("{expr:?}")),
         Expr::Var(var) => render_explain_var_name(var, column_names)
             .map(|name| match qualifier {
                 Some(qualifier) => format!("{qualifier}.{name}"),
@@ -467,8 +475,6 @@ pub fn render_explain_expr_inner_with_qualifier(
             render_explain_set_returning_call(&srf.call, qualifier, column_names)
         }
         Expr::ScalarArrayOp(saop) => render_explain_scalar_array_op(saop, qualifier, column_names),
-        Expr::Case(case_expr) => render_explain_whole_row_case(case_expr, qualifier, column_names)
-            .unwrap_or_else(|| format!("{expr:?}")),
         Expr::ArrayLiteral {
             elements,
             array_type,
@@ -1082,6 +1088,11 @@ fn render_explain_scalar_array_op(
         Some(SqlType::array_of(SqlType::new(SqlTypeKind::Char)))
     } else if expr_has_varchar_display_type(&saop.left) {
         Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)))
+    } else if let Some(left_type) = expr_sql_type_hint(&saop.left)
+        && !left_type.is_array
+        && matches!(left_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+    {
+        Some(SqlType::array_of(left_type))
     } else if matches!(saop.right.as_ref(), Expr::Const(Value::Null)) {
         pgrust_nodes::primnodes::expr_sql_type_hint(&saop.left).map(SqlType::array_of)
     } else {
@@ -3367,48 +3378,6 @@ fn render_explain_row_comparison_operand(
         }
         _ => None,
     }
-}
-
-fn render_explain_whole_row_case(
-    case_expr: &CaseExpr,
-    qualifier: Option<&str>,
-    column_names: &[String],
-) -> Option<String> {
-    if case_expr.arg.is_some() || case_expr.args.len() != 1 {
-        return None;
-    }
-    if !matches!(&case_expr.args.first()?.result, Expr::Const(Value::Null)) {
-        return None;
-    }
-    let Expr::Row { fields, .. } = case_expr.defresult.as_ref() else {
-        return None;
-    };
-    let rendered_fields = fields
-        .iter()
-        .map(|(_, expr)| {
-            let Expr::Var(var) = expr else {
-                return None;
-            };
-            render_explain_var_name(var, column_names)
-        })
-        .collect::<Option<Vec<_>>>()?;
-    if rendered_fields.is_empty() {
-        return None;
-    }
-    if let Some(qualifier) = qualifier {
-        return Some(format!("{qualifier}.*"));
-    }
-    let prefix = rendered_fields
-        .iter()
-        .filter_map(|name| name.rsplit_once('.').map(|(prefix, _)| prefix))
-        .next()?;
-    rendered_fields
-        .iter()
-        .all(|name| {
-            name.rsplit_once('.')
-                .is_some_and(|(candidate, _)| candidate == prefix)
-        })
-        .then(|| format!("{prefix}.*"))
 }
 
 pub fn render_explain_sql_type_name(ty: SqlType) -> String {

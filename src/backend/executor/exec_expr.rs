@@ -155,8 +155,9 @@ use crate::include::nodes::datum::{
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, CMAX_ATTR_NO, CMIN_ATTR_NO, FuncExpr, HashFunctionKind, INDEX_VAR,
     INNER_VAR, OUTER_VAR, OpExpr, OpExprKind, RULE_NEW_VAR, RULE_OLD_VAR,
-    SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO, XMAX_ATTR_NO,
-    XMIN_ATTR_NO, attrno_index, is_executor_special_varno, is_system_attr,
+    SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
+    WHOLE_ROW_ATTR_NO, XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, is_executor_special_varno,
+    is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::SequenceData;
@@ -9963,6 +9964,21 @@ fn eval_bound_tuple_var(
     var: &crate::include::nodes::primnodes::Var,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if var.varattno == WHOLE_ROW_ATTR_NO {
+        let row = tuple.ok_or_else(|| ExecError::DetailedError {
+            message: "special executor whole-row Var referenced without a bound tuple".into(),
+            detail: Some(format!("varno={}, varattno={}", var.varno, var.varattno)),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+        let descriptor = whole_row_var_descriptor(var, ctx)?;
+        let values = row
+            .iter()
+            .take(descriptor.fields.len())
+            .cloned()
+            .collect::<Vec<_>>();
+        return whole_row_record_value(descriptor, values, Vec::new());
+    }
     let index = attrno_index(var.varattno).ok_or_else(|| ExecError::DetailedError {
         message: "special executor Var referenced an unsupported system attribute".into(),
         detail: Some(format!(
@@ -9997,6 +10013,83 @@ fn eval_bound_tuple_var(
             sqlstate: "XX000",
         })?;
     normalize_composite_value_for_type(value, var.vartype, ctx)
+}
+
+fn whole_row_var_descriptor(
+    var: &crate::include::nodes::primnodes::Var,
+    ctx: &ExecutorContext,
+) -> Result<RecordDescriptor, ExecError> {
+    let mut sql_type = var.vartype;
+    if !matches!(sql_type.kind, SqlTypeKind::Composite) || sql_type.typrelid == 0 {
+        if let Some(catalog) = ctx.catalog.as_ref()
+            && let Some(row) = catalog.type_by_oid(sql_type.type_oid)
+            && row.typrelid != 0
+        {
+            sql_type = sql_type.with_identity(row.oid, row.typrelid);
+        }
+    }
+    if !matches!(sql_type.kind, SqlTypeKind::Composite) || sql_type.typrelid == 0 {
+        return Err(ExecError::DetailedError {
+            message: "whole-row Var has no named composite descriptor".into(),
+            detail: Some(format!("vartype={sql_type:?}")),
+            hint: None,
+            sqlstate: "XX000",
+        });
+    }
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "whole-row Var evaluation requires catalog context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let relation = catalog
+        .lookup_relation_by_oid(sql_type.typrelid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("unknown composite relation oid {}", sql_type.typrelid),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        })?;
+    Ok(RecordDescriptor::named(
+        sql_type.type_oid,
+        sql_type.typrelid,
+        sql_type.typmod,
+        relation
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped)
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+    ))
+}
+
+fn whole_row_record_value(
+    descriptor: RecordDescriptor,
+    values: Vec<Value>,
+    raw_fields: Vec<Option<Arc<[u8]>>>,
+) -> Result<Value, ExecError> {
+    if values.len() != descriptor.fields.len() {
+        return Err(ExecError::DetailedError {
+            message: "whole-row Var tuple shape did not match its descriptor".into(),
+            detail: Some(format!(
+                "descriptor fields={}, tuple fields={}",
+                descriptor.fields.len(),
+                values.len()
+            )),
+            hint: None,
+            sqlstate: "XX000",
+        });
+    }
+    if values.iter().all(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Record(RecordValue::from_descriptor_with_raw_fields(
+        descriptor, values, raw_fields,
+    )))
 }
 
 fn whole_row_relation_varno(fields: &[(String, Expr)]) -> Option<usize> {
@@ -10198,6 +10291,21 @@ pub fn eval_expr(
                     hint: None,
                     sqlstate: "XX000",
                 })
+            } else if var.varattno == WHOLE_ROW_ATTR_NO {
+                let descriptor = whole_row_var_descriptor(var, ctx)?;
+                let values = slot
+                    .values()?
+                    .iter()
+                    .take(descriptor.fields.len())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let raw_fields = (0..descriptor.fields.len())
+                    .map(|index| {
+                        current_slot_raw_attr_bytes(slot, index)
+                            .map(|raw| raw.and_then(raw_varlena_sidecar))
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?;
+                whole_row_record_value(descriptor, values, raw_fields)
             } else if var.varattno == TABLE_OID_ATTR_NO {
                 Ok(slot
                     .table_oid
