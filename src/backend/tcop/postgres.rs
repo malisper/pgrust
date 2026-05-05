@@ -7083,10 +7083,7 @@ fn execute_simple_query_statements(
         .filter(|sql| !sql_is_effectively_empty_after_comments(sql))
         .count()
         > 1;
-    let use_hidden_implicit_txn = multi_statement
-        && !statements
-            .iter()
-            .any(|sql| !matches!(simple_query_txn_control(sql), SimpleQueryTxnControl::Other));
+    let use_hidden_implicit_txn = multi_statement;
     let mut executed_any = false;
     let mut statements = statements.into_iter();
     let mut hidden_implicit_txn = false;
@@ -15418,6 +15415,86 @@ mod tests {
             .map(|row| row.oid)
             .unwrap();
         assert_eq!(state.session.current_user_oid(), tenant_oid);
+    }
+
+    #[test]
+    fn simple_query_implicit_transaction_restarts_after_commit_or_rollback() {
+        let db = Database::open_ephemeral(16).unwrap();
+        db.execute(1, "create table implicit_txn_items (id int4)")
+            .unwrap();
+        let mut state = ConnectionState::new(Session::new(2));
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "insert into implicit_txn_items values (7); \
+             commit; \
+             insert into implicit_txn_items values (8); \
+             select 1/0;",
+        )
+        .unwrap();
+        assert!(output_contains_message(&output, "division by zero"));
+        assert!(output_contains_message(
+            &output,
+            "there is no transaction in progress"
+        ));
+
+        output.clear();
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "insert into implicit_txn_items values (9); rollback; select 2;",
+        )
+        .unwrap();
+        assert!(output_contains_message(
+            &output,
+            "there is no transaction in progress"
+        ));
+
+        output.clear();
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "insert into implicit_txn_items values (11); commit and chain;",
+        )
+        .unwrap();
+        assert!(output_contains_message(
+            &output,
+            "COMMIT AND CHAIN can only be used in transaction blocks"
+        ));
+
+        match state
+            .session
+            .execute(&db, "select id from implicit_txn_items order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(7)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn simple_query_vacuum_after_commit_still_runs_in_implicit_transaction() {
+        let db = Database::open_ephemeral(16).unwrap();
+        let mut state = ConnectionState::new(Session::new(2));
+        let mut output = Vec::new();
+
+        handle_query(&mut output, &db, &mut state, "select 1; commit; vacuum;").unwrap();
+
+        assert!(output_contains_message(
+            &output,
+            "there is no transaction in progress"
+        ));
+        assert!(output_contains_message(
+            &output,
+            "VACUUM cannot run inside a transaction block"
+        ));
     }
 
     #[test]

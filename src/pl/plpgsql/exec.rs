@@ -976,15 +976,17 @@ fn execute_compiled_function_for_call(
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
     let saved_snapshot_cid = if compiled.provolatile == 'v' {
-        let saved = ctx.snapshot.current_cid;
+        let saved = (ctx.snapshot.current_cid, ctx.snapshot.heap_current_cid);
         ctx.snapshot.current_cid = CommandId::MAX;
+        ctx.snapshot.heap_current_cid = None;
         Some(saved)
     } else {
         None
     };
     let result = execute_compiled_function(compiled, arg_values, expected_record_shape, ctx);
-    if let Some(saved) = saved_snapshot_cid {
-        ctx.snapshot.current_cid = saved;
+    if let Some((current_cid, heap_current_cid)) = saved_snapshot_cid {
+        ctx.snapshot.current_cid = current_cid;
+        ctx.snapshot.heap_current_cid = heap_current_cid;
     }
     result
 }
@@ -2243,8 +2245,9 @@ fn exec_function_return_select(
         return exec_function_return(None, compiled, expected_record_shape, state, ctx);
     };
     let saved_snapshot_cid = if compiled.provolatile == 'v' {
-        let saved = ctx.snapshot.current_cid;
-        ctx.snapshot.current_cid = crate::backend::access::transam::xact::CommandId::MAX;
+        let saved = (ctx.snapshot.current_cid, ctx.snapshot.heap_current_cid);
+        ctx.snapshot.current_cid = CommandId::MAX;
+        ctx.snapshot.heap_current_cid = None;
         Some(saved)
     } else {
         None
@@ -2258,8 +2261,9 @@ fn exec_function_return_select(
         execute_function_query_result(plan, compiled, state, ctx)
     }
     .map_err(|err| with_sql_statement_context(err, Some(sql)));
-    if let Some(saved) = saved_snapshot_cid {
-        ctx.snapshot.current_cid = saved;
+    if let Some((current_cid, heap_current_cid)) = saved_snapshot_cid {
+        ctx.snapshot.current_cid = current_cid;
+        ctx.snapshot.heap_current_cid = heap_current_cid;
     }
     let result = result?;
     if result.rows.len() > 1 {
