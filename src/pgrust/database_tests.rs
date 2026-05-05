@@ -31738,6 +31738,31 @@ fn create_spgist_text_index_supports_pattern_and_prefix_ops() {
         query_rows(&db, 1, function_sql),
         vec![vec![Value::Int32(5)], vec![Value::Int32(6)]]
     );
+
+    db.execute(1, "create domain spgist_text_domain as varchar")
+        .unwrap();
+    db.execute(1, "create table domain_texts (t spgist_text_domain)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index domain_texts_t_spgist on domain_texts using spgist (t)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indclass \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'domain_texts_t_spgist')",
+        ),
+        vec![vec![Value::Text(
+            crate::include::catalog::TEXT_SPGIST_OPCLASS_OID
+                .to_string()
+                .into()
+        )]]
+    );
 }
 
 #[test]
