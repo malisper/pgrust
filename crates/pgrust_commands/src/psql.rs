@@ -415,6 +415,10 @@ mod tests {
             format_column_privileges_value(&attrs, 10),
             Value::Text("a:\n  alice=r/postgres".into())
         );
+        assert_eq!(
+            format_column_privileges_value(&attrs, 12),
+            Value::Text("".into())
+        );
     }
 
     #[test]

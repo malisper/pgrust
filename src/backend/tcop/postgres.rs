@@ -17410,7 +17410,7 @@ ORDER BY 1, 2;";
             Value::Text(acl) => assert!(acl.contains("=arwdDxtm/")),
             other => panic!("expected relation ACL text, got {other:?}"),
         }
-        assert_eq!(rows[0][4], Value::Null);
+        assert_eq!(rows[0][4], Value::Text("".into()));
         match &rows[0][5] {
             Value::Text(policies) => {
                 assert!(policies.contains("p1 (RESTRICTIVE):"));
