@@ -59,6 +59,7 @@ pub struct CreateRoleSelfGrant {
 pub trait RoleCommandNotices {
     fn empty_password(&self);
     fn md5_password(&self);
+    fn sysid(&self);
 }
 
 pub struct NoopRoleCommandNotices;
@@ -66,6 +67,7 @@ pub struct NoopRoleCommandNotices;
 impl RoleCommandNotices for NoopRoleCommandNotices {
     fn empty_password(&self) {}
     fn md5_password(&self) {}
+    fn sysid(&self) {}
 }
 
 pub trait RoleAuthorizationContext {
@@ -476,8 +478,7 @@ fn apply_role_options(
             RoleOption::Role(names) => role_members.extend(names.iter().cloned()),
             RoleOption::Admin(names) => admin_members.extend(names.iter().cloned()),
             RoleOption::Sysid(_) => {
-                // :HACK: PostgreSQL emits a NOTICE here. The parser keeps SYSID accepted as a
-                // backwards-compatible noise word, but notice plumbing is deferred.
+                notices.sysid();
                 saw_sysid = true;
             }
         }

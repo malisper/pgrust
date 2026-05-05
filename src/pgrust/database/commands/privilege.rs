@@ -4539,13 +4539,55 @@ impl Database {
                     sqlstate: "42501",
                 });
             }
-            grants.retain(|grant| {
-                grant.grantee_oid != grantee.oid
-                    || (!is_owner_or_superuser && grant.grantor_oid != current_user_oid)
-            });
+            revoke_database_create_grants(
+                &mut grants,
+                grantee.oid,
+                current_user_oid,
+                is_owner_or_superuser,
+                stmt.cascade,
+            );
         }
-        let _ = stmt.cascade;
         Ok(StatementResult::AffectedRows(0))
+    }
+}
+
+fn revoke_database_create_grants(
+    grants: &mut Vec<DatabaseCreateGrant>,
+    grantee_oid: u32,
+    current_user_oid: u32,
+    is_owner_or_superuser: bool,
+    cascade: bool,
+) {
+    let mut removed_grantees = BTreeSet::new();
+    grants.retain(|grant| {
+        let revoke_direct = grant.grantee_oid == grantee_oid
+            && (is_owner_or_superuser || grant.grantor_oid == current_user_oid);
+        if revoke_direct {
+            removed_grantees.insert(grant.grantee_oid);
+            false
+        } else {
+            true
+        }
+    });
+
+    if !cascade {
+        return;
+    }
+
+    loop {
+        let mut changed = false;
+        grants.retain(|grant| {
+            if removed_grantees.contains(&grant.grantor_oid) {
+                removed_grantees.insert(grant.grantee_oid);
+                changed = true;
+                false
+            } else {
+                true
+            }
+        });
+        if !changed {
+            break;
+        }
     }
 }
 

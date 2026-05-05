@@ -2348,6 +2348,9 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     if let Some(cost) = numeric_type_match_cost(actual_type.kind, target_type.kind) {
         return Some(cost);
     }
+    if oid_alias_type_match(actual_type.kind, target_type.kind) {
+        return Some(1);
+    }
     if is_builtin_text_like_type(actual_type) && is_builtin_text_like_type(target_type) {
         return Some(1);
     }
@@ -2361,6 +2364,28 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
         return Some(2);
     }
     None
+}
+
+fn oid_alias_type_match(actual: SqlTypeKind, target: SqlTypeKind) -> bool {
+    fn is_oid_alias(kind: SqlTypeKind) -> bool {
+        matches!(
+            kind,
+            SqlTypeKind::Oid
+                | SqlTypeKind::RegProc
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegOper
+                | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegRole
+                | SqlTypeKind::RegNamespace
+                | SqlTypeKind::RegCollation
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
+        )
+    }
+
+    actual != target && is_oid_alias(actual) && is_oid_alias(target)
 }
 
 fn same_type_ignoring_function_typmod(actual: SqlType, target: SqlType) -> bool {
@@ -6655,6 +6680,24 @@ mod tests {
         assert_eq!(
             pgrust_nodes::primnodes::expr_sql_type_hint(&func.args[7]).map(|ty| ty.kind),
             Some(SqlTypeKind::Float4)
+        );
+    }
+
+    #[test]
+    fn resolve_shobj_description_accepts_regrole_oid_alias() {
+        let resolved = resolve_function_call(
+            &Catalog::default(),
+            "shobj_description",
+            &[
+                SqlType::new(SqlTypeKind::RegRole),
+                SqlType::new(SqlTypeKind::Name),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.scalar_impl,
+            Some(BuiltinScalarFunction::ShobjDescription)
         );
     }
 

@@ -31,12 +31,6 @@ impl AuthCatalog {
     pub fn memberships(&self) -> &[PgAuthMembersRow] {
         &self.memberships
     }
-
-    fn direct_membership(&self, member: u32, roleid: u32) -> Option<&PgAuthMembersRow> {
-        self.memberships
-            .iter()
-            .find(|row| row.member == member && row.roleid == roleid)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,13 +160,31 @@ impl AuthState {
     }
 
     pub fn has_admin_option(&self, target_oid: u32, catalog: &AuthCatalog) -> bool {
-        if self.current_user_oid == target_oid {
+        if self.is_superuser(catalog) {
             return true;
         }
-        self.is_superuser(catalog)
-            || catalog
-                .direct_membership(self.current_user_oid, target_oid)
-                .is_some_and(|row| row.admin_option)
+        if self.current_user_oid == target_oid {
+            return false;
+        }
+
+        let mut pending = VecDeque::from([self.current_user_oid]);
+        let mut visited = BTreeSet::new();
+        while let Some(member) = pending.pop_front() {
+            if !visited.insert(member) {
+                continue;
+            }
+            for edge in catalog
+                .memberships()
+                .iter()
+                .filter(|row| row.member == member)
+            {
+                if edge.roleid == target_oid && edge.admin_option {
+                    return true;
+                }
+                pending.push_back(edge.roleid);
+            }
+        }
+        false
     }
 
     pub fn can_create_role_with_attrs(

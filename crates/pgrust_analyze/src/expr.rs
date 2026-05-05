@@ -7622,40 +7622,35 @@ fn bind_regrole_literal_cast(
 
 fn regrole_literal_text(expr: &SqlExpr) -> Option<&str> {
     match expr {
-        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
-        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        SqlExpr::Const(value @ (Value::Text(_) | Value::TextRef(_, _))) => value.as_text(),
         _ => None,
     }
 }
 
 fn regclass_literal_text(expr: &SqlExpr) -> Option<&str> {
     match expr {
-        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
-        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        SqlExpr::Const(value @ (Value::Text(_) | Value::TextRef(_, _))) => value.as_text(),
         _ => None,
     }
 }
 
 fn regoperator_literal_text(expr: &SqlExpr) -> Option<&str> {
     match expr {
-        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
-        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        SqlExpr::Const(value @ (Value::Text(_) | Value::TextRef(_, _))) => value.as_text(),
         _ => None,
     }
 }
 
 fn regtype_literal_text(expr: &SqlExpr) -> Option<&str> {
     match expr {
-        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
-        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        SqlExpr::Const(value @ (Value::Text(_) | Value::TextRef(_, _))) => value.as_text(),
         _ => None,
     }
 }
 
 fn regprocedure_literal_text(expr: &SqlExpr) -> Option<&str> {
     match expr {
-        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
-        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        SqlExpr::Const(value @ (Value::Text(_) | Value::TextRef(_, _))) => value.as_text(),
         _ => None,
     }
 }
