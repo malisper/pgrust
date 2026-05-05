@@ -39,6 +39,8 @@ use std::collections::{HashMap, HashSet};
 
 const RETURN_RULE_NAME: &str = "_RETURN";
 const MAX_IDENTIFIER_BYTES: usize = 63;
+const NEXTVAL_REGCLASS_PROC_OID: u32 = 6301;
+const NEXTVAL_TEXT_PROC_OID: u32 = 6302;
 
 #[derive(Clone)]
 struct ViewDeparseContext<'a> {
@@ -5143,13 +5145,10 @@ fn render_special_builtin_function(
         BuiltinScalarFunction::RegClassToText if func.args.len() == 1 => Some(
             render_function_cast_arg(&func.args[0], SqlTypeKind::Text, ctx),
         ),
-        BuiltinScalarFunction::NextVal | BuiltinScalarFunction::IdentityNextVal => {
-            (func.args.len() == 1).then(|| {
-                format!(
-                    "nextval({})",
-                    render_function_cast_arg(&func.args[0], SqlTypeKind::RegClass, ctx)
-                )
-            })
+        BuiltinScalarFunction::NextVal | BuiltinScalarFunction::IdentityNextVal
+            if func.args.len() == 1 =>
+        {
+            Some(render_nextval_function(func, ctx))
         }
         BuiltinScalarFunction::CurrVal => (func.args.len() == 1).then(|| {
             format!(
@@ -5178,6 +5177,24 @@ fn render_special_builtin_function(
         }
         _ => None,
     }
+}
+
+fn render_nextval_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
+    let arg = &func.args[0];
+    let rendered_arg = match func.funcid {
+        NEXTVAL_REGCLASS_PROC_OID if string_literal_needs_explicit_cast(arg) => {
+            format!("{}::regclass", render_expr(arg, ctx))
+        }
+        NEXTVAL_TEXT_PROC_OID if string_literal_needs_explicit_cast(arg) => {
+            format!("{}::text", render_expr(arg, ctx))
+        }
+        _ => render_expr(arg, ctx),
+    };
+    format!("nextval({rendered_arg})")
+}
+
+fn string_literal_needs_explicit_cast(expr: &Expr) -> bool {
+    matches!(expr, Expr::Const(Value::Text(_) | Value::TextRef(_, _)))
 }
 
 fn render_function_cast_arg(

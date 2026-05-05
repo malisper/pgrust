@@ -4509,7 +4509,7 @@ impl Database {
                 let pg_sequence_effect = self
                     .catalog
                     .write()
-                    .upsert_sequence_row_mvcc(pg_sequence_row(entry.relation_oid, &data), &ctx)
+                    .insert_sequence_row_mvcc(pg_sequence_row(entry.relation_oid, &data), &ctx)
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&pg_sequence_effect)?;
                 catalog_effects.push(pg_sequence_effect);

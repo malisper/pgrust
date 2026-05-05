@@ -23,8 +23,10 @@ use pgrust_nodes::{SqlType, SqlTypeKind};
 pub fn default_sequence_oid_from_default_expr(default_expr: &str) -> Option<u32> {
     let expr = default_expr.trim();
     let rest = expr.strip_prefix("nextval(")?;
-    if let Some(oid_end) = rest.find("::oid)") {
-        return rest[..oid_end].trim().parse::<u32>().ok();
+    for suffix in ["::oid)", "::regclass)"] {
+        if let Some(oid_end) = rest.find(suffix) {
+            return rest[..oid_end].trim().parse::<u32>().ok();
+        }
     }
     let oid_end = rest.find(')')?;
     rest[..oid_end].trim().parse::<u32>().ok()

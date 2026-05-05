@@ -6,6 +6,7 @@ use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, INT8_TYPE_OID, PG_CLASS_RELATION_OID,
     PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID,
 };
+use crate::include::nodes::primnodes::ColumnDesc;
 use crate::pgrust::database::ddl::{ensure_relation_owner, relation_kind_name};
 use crate::pgrust::database::sequences::{
     apply_sequence_option_patch, initial_sequence_state, pg_sequence_row,
@@ -170,12 +171,26 @@ fn find_sequence_default_refs(
             continue;
         }
         for column in &entry.desc.columns {
-            if !column.dropped && column.default_sequence_oid == Some(sequence_oid) {
+            if !column.dropped && column_default_references_sequence(catalog, column, sequence_oid)
+            {
                 refs.push((entry.relation_oid, column.name.clone()));
             }
         }
     }
     refs
+}
+
+fn column_default_references_sequence(
+    catalog: &dyn CatalogLookup,
+    column: &ColumnDesc,
+    sequence_oid: u32,
+) -> bool {
+    if column.default_sequence_oid == Some(sequence_oid) {
+        return true;
+    }
+    column.default_expr.as_deref().and_then(|expr| {
+        crate::pgrust::database::default_sequence_oid_from_default_expr_with_catalog(expr, catalog)
+    }) == Some(sequence_oid)
 }
 
 fn find_sequence_type_relation_refs(
