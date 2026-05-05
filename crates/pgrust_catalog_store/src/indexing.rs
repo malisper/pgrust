@@ -9,6 +9,7 @@ use pgrust_nodes::primnodes::RelationDesc;
 
 use crate::FROZEN_TRANSACTION_ID;
 use crate::catalog::catalog_attribute_collation_oid;
+use crate::relcache::IndexRelCacheEntry;
 
 pub fn insert_bootstrap_system_indexes(catalog: &mut Catalog) {
     for descriptor in system_catalog_indexes() {
@@ -138,6 +139,48 @@ pub fn system_catalog_index_meta(descriptor: CatalogIndexDescriptor) -> CatalogI
         indoption: vec![0; descriptor.key_attnums.len()],
         indexprs: None,
         indpred: None,
+        btree_options: None,
+        brin_options: None,
+        gist_options: None,
+        gin_options: None,
+        hash_options: None,
+    }
+}
+
+pub fn system_catalog_index_relcache(descriptor: CatalogIndexDescriptor) -> IndexRelCacheEntry {
+    let meta = system_catalog_index_meta(descriptor);
+    IndexRelCacheEntry {
+        indexrelid: descriptor.relation_oid,
+        indrelid: meta.indrelid,
+        indnatts: meta.indkey.len() as i16,
+        indnkeyatts: meta.indclass.len() as i16,
+        indisunique: meta.indisunique,
+        indnullsnotdistinct: false,
+        indisprimary: system_catalog_index_is_primary(&descriptor),
+        indisexclusion: false,
+        indimmediate: true,
+        indisclustered: false,
+        indisvalid: true,
+        indcheckxmin: false,
+        indisready: true,
+        indislive: true,
+        indisreplident: false,
+        am_oid: BTREE_AM_OID,
+        am_handler_oid: None,
+        indkey: meta.indkey,
+        indclass: meta.indclass,
+        indclass_options: meta.indclass_options,
+        indcollation: meta.indcollation,
+        indoption: meta.indoption,
+        opfamily_oids: Vec::new(),
+        opcintype_oids: Vec::new(),
+        opckeytype_oids: Vec::new(),
+        amop_entries: Vec::new(),
+        amproc_entries: Vec::new(),
+        indexprs: None,
+        indpred: None,
+        rd_indexprs: None,
+        rd_indpred: None,
         btree_options: None,
         brin_options: None,
         gist_options: None,

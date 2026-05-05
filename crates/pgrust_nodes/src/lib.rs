@@ -20,7 +20,7 @@ pub use access::{ScanDirection, ScanKeyData};
 pub use command::CommandType;
 pub use copy::{CopyToDmlEvent, CopyToNotice};
 pub use datum::Value;
-pub use exec::SystemVarBinding;
+pub use exec::{QueryDesc, SystemVarBinding, create_query_desc};
 pub use parsenodes::{Query, SqlType, SqlTypeKind};
 pub use plannodes::{Plan, PlannedStmt};
 pub use primnodes::Expr;

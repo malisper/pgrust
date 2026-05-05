@@ -156,7 +156,7 @@ fn normalize_guc_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
 
-fn is_checkpoint_guc(name: &str) -> bool {
+pub fn is_checkpoint_guc(name: &str) -> bool {
     matches!(
         name,
         "checkpoint_timeout"
@@ -787,5 +787,65 @@ fn buffer_error_to_string(err: BufferError) -> String {
         BufferError::InvalidBuffer => "invalid buffer".to_string(),
         BufferError::NotDirty => "buffer not dirty".to_string(),
         BufferError::Storage(message) | BufferError::Wal(message) => message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_show_defaults_match_postgres_shape() {
+        let config = CheckpointConfig::default();
+        assert_eq!(
+            config.value_for_show("checkpoint_timeout").as_deref(),
+            Some("5min")
+        );
+        assert_eq!(
+            config
+                .value_for_show("checkpoint_completion_target")
+                .as_deref(),
+            Some("0.9")
+        );
+        assert_eq!(
+            config.value_for_show("checkpoint_warning").as_deref(),
+            Some("30s")
+        );
+        assert_eq!(
+            config.value_for_show("max_wal_size").as_deref(),
+            Some("1GB")
+        );
+        assert_eq!(
+            config.value_for_show("min_wal_size").as_deref(),
+            Some("80MB")
+        );
+        assert_eq!(config.value_for_show("fsync").as_deref(), Some("on"));
+        assert_eq!(
+            config.value_for_show("full_page_writes").as_deref(),
+            Some("on")
+        );
+    }
+
+    #[test]
+    fn manual_checkpoint_updates_requested_counters() {
+        let mut stats = CheckpointStatsSnapshot::default();
+        stats.record_manual_checkpoint();
+        assert_eq!(stats.num_requested, 1);
+        assert_eq!(stats.num_done, 1);
+    }
+
+    #[test]
+    fn end_of_recovery_checkpoint_only_counts_as_done() {
+        let mut stats = CheckpointStatsSnapshot::default();
+        stats.record_completed_checkpoint(
+            CheckpointCompletionKind::EndOfRecovery,
+            Duration::ZERO,
+            Duration::ZERO,
+            0,
+            0,
+        );
+        assert_eq!(stats.num_requested, 0);
+        assert_eq!(stats.num_timed, 0);
+        assert_eq!(stats.num_done, 1);
     }
 }

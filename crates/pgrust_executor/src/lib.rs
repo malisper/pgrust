@@ -216,9 +216,10 @@ pub use startup::{
 };
 pub use stats::NodeExecStats;
 pub use stats::{
-    FunctionStatsSnapshot, RelationStatsSnapshot, StatsArgError, function_stats_value,
-    function_xact_stats_value, pg_stat_get_backend_pid_value, pg_stat_get_backend_wal_value,
-    relation_stats_value, relation_xact_stats_value, stats_oid_arg,
+    FunctionStatsSnapshot, RelationStatsSnapshot, StatsArgError, checkpoint_stats_value,
+    default_checkpoint_stats_value, function_stats_value, function_xact_stats_value,
+    pg_stat_get_backend_pid_value, pg_stat_get_backend_wal_value, relation_stats_value,
+    relation_xact_stats_value, stats_oid_arg,
 };
 pub use transaction::{ExecutorTransactionState, SharedExecutorTransactionState};
 pub use txid::{

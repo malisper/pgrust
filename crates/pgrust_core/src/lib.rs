@@ -2,6 +2,7 @@ pub mod access;
 pub mod catalog;
 pub mod compact_string;
 pub mod interrupts;
+pub mod notices;
 pub mod stack_depth;
 pub mod storage;
 pub mod transam;
@@ -17,6 +18,7 @@ pub use compact_string::CompactString;
 pub use interrupts::{
     InterruptReason, InterruptState, StatementInterruptGuard, check_for_interrupts,
 };
+pub use notices::BackendNotice;
 pub use storage::{
     BLCKSZ, BlockNumber, BufferId, BufferTag, ClientId, ForkNumber, OffsetNumber, PAGE_SIZE, Page,
     RelFileLocator,
