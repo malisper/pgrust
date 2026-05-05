@@ -27345,6 +27345,180 @@ fn row_compare_scalar_subquery_uses_scalar_cardinality() {
 }
 
 #[test]
+fn row_record_any_subquery_uses_record_comparison_semantics() {
+    let mut harness = SeededSqlHarness::new("row_record_any_subquery", catalog());
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select row(row(row(1))) = any (select row(row(1)))",
+            )
+            .unwrap(),
+        vec![vec![Value::Bool(true)]],
+    );
+}
+
+#[test]
+fn row_valued_not_in_handles_partial_null_matches() {
+    let mut harness = SeededSqlHarness::new("row_not_in_partial_null", catalog());
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create temp table outer_7597 (f1 int4, f2 int4)",
+        )
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "insert into outer_7597 values (0, 0), (1, 0), (0, null), (1, null)",
+        )
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create temp table inner_7597(c1 int8, c2 int8)",
+        )
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "insert into inner_7597 values(0, null)",
+        )
+        .unwrap();
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select * from outer_7597
+                 where (f1, f2) not in (select * from inner_7597)
+                 order by f1, f2 nulls last",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(0)],
+            vec![Value::Int32(1), Value::Null],
+        ],
+    );
+}
+
+#[test]
+fn explain_rowcompare_and_any_subplans_show_parent_testexpr() {
+    let mut harness = SeededSqlHarness::new("explain_rowcompare_any_subplans", catalog());
+    let rowcompare = explain_text_for_harness(
+        &mut harness,
+        "explain (verbose, costs off)
+         select row(1, 2) = (select 3, 4)",
+    );
+    assert!(
+        rowcompare.contains("((1 = (InitPlan 1).col1) AND (2 = (InitPlan 1).col2))"),
+        "expected rowcompare initplan params, got {rowcompare}"
+    );
+
+    let any = explain_text_for_harness(
+        &mut harness,
+        "explain (verbose, costs off)
+         select row(row(row(1))) = any (select row(row(1)))",
+    );
+    assert!(
+        any.contains("ANY") && any.contains("(SubPlan 1).col1"),
+        "expected quantified subplan test expression, got {any}"
+    );
+}
+
+#[test]
+fn explain_correlated_rowcompare_subplan_uses_scan_input_columns() {
+    let mut harness = SeededSqlHarness::new("explain_correlated_rowcompare_subplan", catalog());
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create table subselect_tbl(f1 int, f2 int)",
+        )
+        .unwrap();
+
+    let lines = explain_lines_for_harness(
+        &mut harness,
+        "explain (verbose, costs off)
+         select row(1, 2) = (select f1, f2) as eq from subselect_tbl",
+    );
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim() == "Output: subselect_tbl.f1, subselect_tbl.f2"),
+        "expected subplan child to render scan input columns, got {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("Output: (((1 = (SubPlan 1).col1)")
+                && trimmed.ends_with(", column2")
+        }),
+        "subplan child output leaked the parent rowcompare expression: {lines:#?}"
+    );
+}
+
+#[test]
+fn explain_separate_uncorrelated_sublinks_get_distinct_plan_ids() {
+    let mut harness = SeededSqlHarness::new("explain_distinct_uncorrelated_sublinks", catalog());
+    let explain = explain_text_for_harness(
+        &mut harness,
+        "explain (verbose, costs off)
+         select (select now()), (select now())",
+    );
+
+    assert!(explain.contains("InitPlan 1"), "{explain}");
+    assert!(explain.contains("InitPlan 2"), "{explain}");
+    assert!(
+        explain.contains("(InitPlan 1).col1, (InitPlan 2).col1"),
+        "expected separate SubLink occurrences to use distinct initplans, got {explain}"
+    );
+}
+
+#[test]
+fn explain_case_expr_inside_any_subplan_is_rendered() {
+    let mut harness = SeededSqlHarness::new("explain_case_any_subplan", catalog());
+    harness
+        .execute(INVALID_TRANSACTION_ID, "create table case_outer(f1 int4)")
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create table case_inner(unique1 int4, ten int4)",
+        )
+        .unwrap();
+
+    let explain = explain_text_for_harness(
+        &mut harness,
+        "explain (verbose, costs off)
+         select * from case_outer
+         where (case when f1 in (select unique1 from case_inner a) then f1 else null end)
+               in (select ten from case_inner b)",
+    );
+
+    assert!(
+        explain.contains("CASE WHEN") && !explain.contains("CaseExpr"),
+        "expected SQL CASE rendering in quantified subplan, got {explain}"
+    );
+}
+
+fn explain_text_for_harness(harness: &mut SeededSqlHarness, sql: &str) -> String {
+    explain_lines_for_harness(harness, sql).join("\n")
+}
+
+fn explain_lines_for_harness(harness: &mut SeededSqlHarness, sql: &str) -> Vec<String> {
+    match harness.execute(INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .map(|row| match &row[0] {
+                Value::Text(text) => text.to_string(),
+                other => panic!("expected text explain line, got {:?}", other),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn successive_uncorrelated_initplans_do_not_reuse_exec_params() {
     let mut harness = SeededSqlHarness::new("successive_initplan_exec_params", catalog());
     assert_query_rows(
@@ -27470,6 +27644,38 @@ fn explain_not_exists_where_qual_uses_anti_join() {
             assert!(
                 rendered.iter().any(|line| line.contains("Anti Join")),
                 "expected pulled-up anti join, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_exists_limit_one_uses_semi_join() {
+    let mut harness = seed_people_and_pets("explain_exists_limit_one_semi_join");
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off)
+             select p.id
+             from people p
+             where exists (
+                 select 1 from pets q where q.owner_id = p.id limit 1
+             )",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Semi Join")),
+                "expected LIMIT 1 EXISTS pull-up to use semi join, got {rendered:?}"
             );
         }
         other => panic!("expected query result, got {:?}", other),

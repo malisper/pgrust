@@ -941,6 +941,7 @@ pub(super) fn eval_quantified_subquery(
     if matches!(op, SubqueryComparisonOp::Eq)
         && !is_all
         && subplan.par_param.is_empty()
+        && !matches!(left_value, Value::Record(_))
         && !subplan
             .comparison
             .as_ref()
@@ -1195,6 +1196,9 @@ fn quantified_subquery_right_value(
         if values.len() == 1
             && let Some(Value::Record(_)) = values.first()
         {
+            if matches!(record.fields.first(), Some(Value::Record(_))) {
+                return Ok(record_value_matching_left_shape(record, values));
+            }
             return Ok(values.into_iter().next().unwrap_or(Value::Null));
         }
         if values.len() != record.fields.len() {
@@ -1203,10 +1207,7 @@ fn quantified_subquery_right_value(
                 hint: None,
             });
         }
-        return Ok(Value::Record(RecordValue::from_descriptor(
-            record.descriptor.clone(),
-            values,
-        )));
+        return Ok(record_value_matching_left_shape(record, values));
     }
     if values.len() != 1 {
         return Err(ExecError::CardinalityViolation {
@@ -1215,6 +1216,27 @@ fn quantified_subquery_right_value(
         });
     }
     Ok(values.into_iter().next().unwrap_or(Value::Null))
+}
+
+fn record_value_matching_left_shape(left_record: &RecordValue, values: Vec<Value>) -> Value {
+    let fields = left_record
+        .fields
+        .iter()
+        .zip(values)
+        .map(
+            |(left_field, right_value)| match (left_field, right_value) {
+                (Value::Record(_), Value::Record(nested_right)) => Value::Record(nested_right),
+                (Value::Record(nested_left), right_value) if nested_left.fields.len() == 1 => {
+                    record_value_matching_left_shape(nested_left, vec![right_value])
+                }
+                (_, right_value) => right_value,
+            },
+        )
+        .collect();
+    Value::Record(RecordValue::from_descriptor(
+        left_record.descriptor.clone(),
+        fields,
+    ))
 }
 
 fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {

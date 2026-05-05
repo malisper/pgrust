@@ -5109,7 +5109,7 @@ fn lower_sublink(
         config.max_parallel_workers_per_gather = 0;
         config.force_parallel_gather = false;
     }
-    let (planned_stmt, next_param_id) =
+    let (mut planned_stmt, next_param_id) =
         planner_with_param_base_and_config(*sublink.subselect, catalog, ctx.next_param_id, config)
             .expect("locking validation should complete before setrefs subplan lowering");
     ctx.next_param_id = next_param_id;
@@ -5154,6 +5154,11 @@ fn lower_sublink(
             lower_expr(ctx, expr, mode)
         })
         .collect::<Vec<_>>();
+    if par_param.is_empty()
+        && should_materialize_parameterless_subplan(sublink_type, sublink.testexpr.as_deref())
+    {
+        materialize_planned_subquery(&mut planned_stmt);
+    }
     let plan_id = append_uncorrelated_planned_subquery(planned_stmt, ctx.subplans);
     let initplan_output_count = match sublink_type {
         SubLinkType::ExistsSubLink | SubLinkType::ExprSubLink | SubLinkType::ArraySubLink => 1,
@@ -5187,6 +5192,51 @@ fn allocate_exec_params(ctx: &mut SetRefsContext<'_>, count: usize) -> Vec<usize
     let start = ctx.next_param_id;
     ctx.next_param_id += count;
     (start..start + count).collect()
+}
+
+fn should_materialize_parameterless_subplan(
+    sublink_type: SubLinkType,
+    testexpr: Option<&Expr>,
+) -> bool {
+    match sublink_type {
+        SubLinkType::AllSubLink(_) => true,
+        SubLinkType::AnySubLink(SubqueryComparisonOp::Eq) => !testexpr
+            .and_then(pgrust_nodes::primnodes::expr_sql_type_hint)
+            .is_some_and(sql_type_can_hash_subplan_eq),
+        SubLinkType::AnySubLink(_) => true,
+        _ => false,
+    }
+}
+
+fn materialize_planned_subquery(planned_stmt: &mut pgrust_nodes::plannodes::PlannedStmt) {
+    if matches!(planned_stmt.plan_tree, Plan::Materialize { .. }) {
+        return;
+    }
+    let plan_info = planned_stmt.plan_tree.plan_info();
+    let input = std::mem::replace(&mut planned_stmt.plan_tree, Plan::Result { plan_info });
+    planned_stmt.plan_tree = Plan::Materialize {
+        plan_info,
+        input: Box::new(input),
+    };
+}
+
+fn sql_type_can_hash_subplan_eq(sql_type: SqlType) -> bool {
+    !sql_type.is_array
+        && !matches!(
+            sql_type.kind,
+            SqlTypeKind::Record
+                | SqlTypeKind::Composite
+                | SqlTypeKind::Json
+                | SqlTypeKind::Jsonb
+                | SqlTypeKind::JsonPath
+                | SqlTypeKind::Xml
+                | SqlTypeKind::Void
+                | SqlTypeKind::Trigger
+                | SqlTypeKind::EventTrigger
+                | SqlTypeKind::FdwHandler
+                | SqlTypeKind::Internal
+                | SqlTypeKind::Cstring
+        )
 }
 
 fn subplan_target_attnos(target_list: &[TargetEntry]) -> Vec<Option<usize>> {

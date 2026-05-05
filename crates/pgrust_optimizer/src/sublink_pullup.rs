@@ -289,7 +289,7 @@ fn convert_exists_sublink_to_join(
         return false;
     }
     let mut subquery = *sublink.subselect;
-    if !simple_exists_query(&subquery) {
+    if !simplify_exists_query(&mut subquery) {
         return false;
     }
 
@@ -371,13 +371,15 @@ fn where_qual_references_pullup_parent(
 }
 
 fn simple_exists_query(query: &Query) -> bool {
+    simple_sublink_query(query) && query.sort_clause.is_empty() && query.limit_count.is_none()
+}
+
+fn simple_sublink_query(query: &Query) -> bool {
     matches!(query.command_type, CommandType::Select)
         && query.group_by.is_empty()
         && query.accumulators.is_empty()
         && query.window_clauses.is_empty()
         && query.having_qual.is_none()
-        && query.sort_clause.is_empty()
-        && query.limit_count.is_none()
         && query.limit_offset.is_none()
         && query.locking_clause.is_none()
         && query.row_marks.is_empty()
@@ -386,6 +388,33 @@ fn simple_exists_query(query: &Query) -> bool {
         && query.set_operation.is_none()
         && query.jointree.is_some()
         && query.rtable.iter().all(supported_pulled_up_rte)
+}
+
+fn simplify_exists_query(query: &mut Query) -> bool {
+    if !simple_sublink_query(query) {
+        return false;
+    }
+    if query
+        .limit_count
+        .as_ref()
+        .is_some_and(|limit| !exists_limit_can_be_ignored(limit))
+    {
+        return false;
+    }
+    query.limit_count = None;
+    query.sort_clause.clear();
+    true
+}
+
+fn exists_limit_can_be_ignored(limit: &Expr) -> bool {
+    match limit {
+        Expr::Const(Value::Null) => true,
+        Expr::Const(Value::Int16(value)) => *value > 0,
+        Expr::Const(Value::Int32(value)) => *value > 0,
+        Expr::Const(Value::Int64(value)) => *value > 0,
+        Expr::Cast(inner, _) => exists_limit_can_be_ignored(inner),
+        _ => false,
+    }
 }
 
 fn simple_any_query(query: &Query) -> bool {

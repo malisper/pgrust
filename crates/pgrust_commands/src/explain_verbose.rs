@@ -203,7 +203,7 @@ fn subplan_explain_context(
         return ctx.clone();
     }
     let mut child_ctx = ctx.clone();
-    let column_names = plan_join_output_exprs(parent, ctx, true);
+    let column_names = subplan_arg_column_names(parent, ctx);
     child_ctx.exec_params.extend(
         subplan
             .par_param
@@ -217,6 +217,15 @@ fn subplan_explain_context(
             }),
     );
     child_ctx
+}
+
+fn subplan_arg_column_names(parent: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {
+    match parent {
+        Plan::Projection { input, .. } | Plan::ProjectSet { input, .. } => {
+            plan_join_output_exprs(input, ctx, true)
+        }
+        _ => plan_join_output_exprs(parent, ctx, true),
+    }
 }
 
 fn set_returning_call_label(call: &SetReturningCall) -> &str {
