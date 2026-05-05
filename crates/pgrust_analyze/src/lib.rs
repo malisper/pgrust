@@ -1280,9 +1280,17 @@ fn validate_distinct_aggregate_order_by(
     }
     for item in order_by {
         if !arg_values.iter().any(|arg| arg == &item.expr) {
-            return Err(ParseError::UnexpectedToken {
-                expected: "ORDER BY expressions in DISTINCT aggregate argument list",
-                actual: "ORDER BY expression must appear in argument list".into(),
+            let err = ParseError::DetailedError {
+                message:
+                    "in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list"
+                        .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P10",
+            };
+            return Err(match item.location {
+                Some(position) => err.with_position(position),
+                None => err,
             });
         }
     }
