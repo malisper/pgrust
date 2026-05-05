@@ -6,7 +6,7 @@ use parking_lot::RwLock;
 
 use crate::BufferPool;
 use crate::backend::access::heap::heapam::{
-    heap_delete_with_waiter, heap_fetch_visible_with_txns, heap_flush, heap_insert,
+    HeapError, heap_delete_with_waiter, heap_fetch_visible_with_txns, heap_flush, heap_insert,
     heap_insert_mvcc_with_cid, heap_scan_begin, heap_scan_next, heap_update_with_waiter,
 };
 use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
@@ -615,7 +615,7 @@ fn catalog_tuples_delete_matching(
         .as_deref()
         .map(|waiter| (&*ctx.txns, waiter, ctx.interrupts.as_ref()));
     for tid in wanted.into_iter().filter_map(|wanted| wanted.tid) {
-        heap_delete_with_waiter(
+        match heap_delete_with_waiter(
             &ctx.pool,
             ctx.client_id,
             rel,
@@ -624,8 +624,14 @@ fn catalog_tuples_delete_matching(
             tid,
             snapshot,
             waiter,
-        )
-        .map_err(|e| CatalogError::Io(format!("catalog tuple delete failed: {e:?}")))?;
+        ) {
+            Ok(()) | Err(HeapError::TupleAlreadyModified(_)) => {}
+            Err(e) => {
+                return Err(CatalogError::Io(format!(
+                    "catalog tuple delete failed: {e:?}"
+                )));
+            }
+        }
     }
     Ok(())
 }

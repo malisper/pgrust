@@ -1978,11 +1978,13 @@ fn collect_add_column_targets(
                     actual: format!("column already exists: {}", base_column.name),
                 }));
             }
-            push_notice(format!(
-                "merging definition of column \"{}\" for child \"{}\"",
-                base_column.name,
-                relation_name_for_alter_error(catalog, target_relation.relation_oid)
-            ));
+            if existing.attislocal || direct_parent_count > existing.attinhcount {
+                push_notice(format!(
+                    "merging definition of column \"{}\" for child \"{}\"",
+                    base_column.name,
+                    relation_name_for_alter_error(catalog, target_relation.relation_oid)
+                ));
+            }
             let mut column = existing.clone();
             column.attinhcount = direct_parent_count;
             column.attislocal = existing.attislocal;
