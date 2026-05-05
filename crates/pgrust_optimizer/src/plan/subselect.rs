@@ -235,6 +235,8 @@ fn lower_sublink_to_subplan(
         target_width,
         target_attnos,
         plan_id,
+        is_initplan: false,
+        set_params: Vec::new(),
         par_param,
         args,
     }))
@@ -1032,6 +1034,8 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
             plan_id: subplan.plan_id + base,
             sublink_type: subplan.sublink_type,
             comparison: subplan.comparison,
+            is_initplan: subplan.is_initplan,
+            set_params: subplan.set_params,
             par_param: subplan.par_param,
         })),
         Expr::ScalarArrayOp(saop) => {

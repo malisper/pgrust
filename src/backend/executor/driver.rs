@@ -142,27 +142,23 @@ pub fn execute_query_desc(
     let saved_scalar_function_cache = std::mem::take(&mut ctx.scalar_function_cache);
     let saved_proc_execute_acl_cache = std::mem::take(&mut ctx.proc_execute_acl_cache);
     let saved_initplan_values = std::mem::take(&mut ctx.expr_bindings.initplan_values);
+    let saved_exec_params = ctx.expr_bindings.exec_params.clone();
     let saved_cte_tables = ctx.cte_tables.clone();
     let saved_cte_producers = ctx.cte_producers.clone();
     let saved_recursive_worktables = ctx.recursive_worktables.clone();
     let result = (|| {
-        let saved_exec_params = if planned_stmt.ext_params.is_empty() {
-            Vec::new()
-        } else {
+        if !planned_stmt.ext_params.is_empty() {
             let mut param_slot = ctx
                 .expr_bindings
                 .outer_tuple
                 .clone()
                 .map(TupleSlot::virtual_row)
                 .unwrap_or_else(|| TupleSlot::empty(0));
-            let mut saved = Vec::with_capacity(planned_stmt.ext_params.len());
             for param in &planned_stmt.ext_params {
                 let value = eval_expr(&param.expr, &mut param_slot, ctx)?;
-                let old = ctx.expr_bindings.exec_params.insert(param.paramid, value);
-                saved.push((param.paramid, old));
+                ctx.expr_bindings.exec_params.insert(param.paramid, value);
             }
-            saved
-        };
+        }
         ctx.cte_tables.clear();
         ctx.cte_tables.extend(
             ctx.pinned_cte_tables
@@ -189,18 +185,13 @@ pub fn execute_query_desc(
         ctx.cte_tables.clear();
         ctx.cte_producers.clear();
         ctx.recursive_worktables.clear();
-        for (paramid, old) in saved_exec_params {
-            if let Some(value) = old {
-                ctx.expr_bindings.exec_params.insert(paramid, value);
-            } else {
-                ctx.expr_bindings.exec_params.remove(&paramid);
-            }
-        }
+        ctx.expr_bindings.exec_params = saved_exec_params.clone();
         result
     })();
     ctx.recursive_worktables = saved_recursive_worktables;
     ctx.cte_producers = saved_cte_producers;
     ctx.cte_tables = saved_cte_tables;
+    ctx.expr_bindings.exec_params = saved_exec_params;
     ctx.expr_bindings.initplan_values = saved_initplan_values;
     ctx.proc_execute_acl_cache = saved_proc_execute_acl_cache;
     ctx.scalar_function_cache = saved_scalar_function_cache;

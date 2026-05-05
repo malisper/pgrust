@@ -5155,6 +5155,17 @@ fn lower_sublink(
         })
         .collect::<Vec<_>>();
     let plan_id = append_uncorrelated_planned_subquery(planned_stmt, ctx.subplans);
+    let initplan_output_count = match sublink_type {
+        SubLinkType::ExistsSubLink | SubLinkType::ExprSubLink | SubLinkType::ArraySubLink => 1,
+        SubLinkType::RowCompareSubLink(_) => target_width,
+        SubLinkType::AllSubLink(_) | SubLinkType::AnySubLink(_) => 0,
+    };
+    let is_initplan = par_param.is_empty() && initplan_output_count > 0;
+    let set_params = if is_initplan {
+        allocate_exec_params(ctx, initplan_output_count)
+    } else {
+        Vec::new()
+    };
     Expr::SubPlan(Box::new(SubPlan {
         sublink_type,
         testexpr: sublink
@@ -5165,9 +5176,17 @@ fn lower_sublink(
         target_width,
         target_attnos,
         plan_id,
+        is_initplan,
+        set_params,
         par_param,
         args,
     }))
+}
+
+fn allocate_exec_params(ctx: &mut SetRefsContext<'_>, count: usize) -> Vec<usize> {
+    let start = ctx.next_param_id;
+    ctx.next_param_id += count;
+    (start..start + count).collect()
 }
 
 fn subplan_target_attnos(target_list: &[TargetEntry]) -> Vec<Option<usize>> {
@@ -5331,6 +5350,8 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             target_width: subplan.target_width,
             target_attnos: subplan.target_attnos,
             plan_id: subplan.plan_id,
+            is_initplan: subplan.is_initplan,
+            set_params: subplan.set_params,
             par_param: subplan.par_param,
             args: subplan
                 .args
@@ -8190,6 +8211,8 @@ fn lower_partition_prune_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr 
             target_width: subplan.target_width,
             target_attnos: subplan.target_attnos,
             plan_id: subplan.plan_id,
+            is_initplan: subplan.is_initplan,
+            set_params: subplan.set_params,
             par_param: subplan.par_param,
             args: subplan
                 .args

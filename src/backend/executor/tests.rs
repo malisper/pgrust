@@ -5188,6 +5188,8 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     target_width: 1,
                     target_attnos: vec![Some(0)],
                     plan_id: 0,
+                    is_initplan: true,
+                    set_params: vec![0],
                     par_param: Vec::new(),
                     args: Vec::new(),
                 })),
@@ -27340,6 +27342,32 @@ fn row_compare_scalar_subquery_uses_scalar_cardinality() {
         )
         .unwrap_err();
     assert!(format_exec_error(&err).contains("more than one row returned by a subquery"));
+}
+
+#[test]
+fn successive_uncorrelated_initplans_do_not_reuse_exec_params() {
+    let mut harness = SeededSqlHarness::new("successive_initplan_exec_params", catalog());
+    assert_query_rows(
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select (select 1)")
+            .unwrap(),
+        vec![vec![Value::Int32(1)]],
+    );
+    assert_query_rows(
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select (select 2)")
+            .unwrap(),
+        vec![vec![Value::Int32(2)]],
+    );
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select exists(select 1 where false)",
+            )
+            .unwrap(),
+        vec![vec![Value::Bool(false)]],
+    );
 }
 
 #[test]

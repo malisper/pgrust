@@ -1999,13 +1999,15 @@ pub struct SubPlan {
     pub target_width: usize,
     pub target_attnos: Vec<Option<usize>>,
     pub plan_id: usize,
+    pub is_initplan: bool,
+    pub set_params: Vec<usize>,
     pub par_param: Vec<usize>,
     pub args: Vec<Expr>,
 }
 
 impl SubPlan {
     pub fn renders_as_initplan(&self) -> bool {
-        self.par_param.is_empty() && self.args.is_empty() && self.testexpr.is_none()
+        self.is_initplan
     }
 }
 

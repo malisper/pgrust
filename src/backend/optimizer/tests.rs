@@ -26,7 +26,7 @@ use crate::include::nodes::plannodes::{
 use crate::include::nodes::primnodes::{
     Aggref, AttrNumber, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, INNER_VAR, JoinType,
     OUTER_VAR, OpExpr, OpExprKind, OrderByEntry, Param, ParamKind, QueryColumn, RelationDesc,
-    ScalarFunctionImpl, TargetEntry, Var, WindowFrameBound, user_attrno,
+    ScalarFunctionImpl, SubLinkType, TargetEntry, Var, WindowFrameBound, user_attrno,
 };
 
 fn int4() -> SqlType {
@@ -4002,6 +4002,111 @@ fn planner_pushes_initplan_filter_into_simple_union_all_parent() {
             .iter()
             .any(|line| line.contains("Filter: (b = (InitPlan 1).col1)")),
         "{lines:#?}"
+    );
+}
+
+#[test]
+fn planner_marks_uncorrelated_scalar_sublink_as_initplan_param() {
+    let planned = planned_stmt_for_sql("select (select 1)");
+    let subplans = pgrust_commands::explain::direct_plan_subplans(&planned.plan_tree);
+
+    assert_eq!(subplans.len(), 1, "{subplans:?}");
+    let subplan = subplans[0];
+    assert!(subplan.is_initplan, "{subplan:?}");
+    assert_eq!(subplan.set_params.len(), 1, "{subplan:?}");
+    assert!(subplan.par_param.is_empty(), "{subplan:?}");
+    assert!(matches!(subplan.sublink_type, SubLinkType::ExprSubLink));
+}
+
+#[test]
+fn planner_marks_uncorrelated_exists_sublink_as_initplan_param() {
+    let planned = planned_stmt_for_sql("select exists(select 1)");
+    let subplans = pgrust_commands::explain::direct_plan_subplans(&planned.plan_tree);
+
+    assert_eq!(subplans.len(), 1, "{subplans:?}");
+    let subplan = subplans[0];
+    assert!(subplan.is_initplan, "{subplan:?}");
+    assert_eq!(subplan.set_params.len(), 1, "{subplan:?}");
+    assert!(subplan.par_param.is_empty(), "{subplan:?}");
+    assert!(matches!(subplan.sublink_type, SubLinkType::ExistsSubLink));
+}
+
+#[test]
+fn planner_keeps_any_and_all_sublinks_as_subplans() {
+    for sql in ["select 1 = any(select 1)", "select 1 < all(select 1)"] {
+        let planned = planned_stmt_for_sql(sql);
+        let subplans = pgrust_commands::explain::direct_plan_subplans(&planned.plan_tree);
+
+        assert_eq!(subplans.len(), 1, "{sql}: {subplans:?}");
+        let subplan = subplans[0];
+        assert!(!subplan.is_initplan, "{sql}: {subplan:?}");
+        assert!(subplan.set_params.is_empty(), "{sql}: {subplan:?}");
+        assert!(matches!(
+            subplan.sublink_type,
+            SubLinkType::AnySubLink(_) | SubLinkType::AllSubLink(_)
+        ));
+    }
+}
+
+#[test]
+fn planner_keeps_correlated_scalar_sublink_as_subplan() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select p.id,
+                (select q.owner_id from pets q where q.owner_id = p.id limit 1)
+         from people p",
+        &catalog,
+    );
+    let subplans = pgrust_commands::explain::direct_plan_subplans(&planned.plan_tree);
+
+    assert_eq!(subplans.len(), 1, "{subplans:?}");
+    let subplan = subplans[0];
+    assert!(!subplan.is_initplan, "{subplan:?}");
+    assert!(subplan.set_params.is_empty(), "{subplan:?}");
+    assert!(!subplan.par_param.is_empty(), "{subplan:?}");
+    assert!(matches!(subplan.sublink_type, SubLinkType::ExprSubLink));
+}
+
+#[test]
+fn explain_rowcompare_initplan_uses_output_columns() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select p.id
+         from people p
+         where row(p.id, 2) = (select 3, 4)",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(lines.iter().any(|line| line == "  InitPlan 1"), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| {
+            line.contains("Filter:")
+                && line.contains("(InitPlan 1).col1")
+                && line.contains("(InitPlan 1).col2")
+        }),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn planner_does_not_pull_up_any_without_parent_vars() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select p.id
+         from people p
+         where 1 = any(select q.owner_id from pets q)",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines.iter().any(|line| line.contains("SubPlan 1")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("Semi Join")),
+        "{lines:?}"
     );
 }
 
