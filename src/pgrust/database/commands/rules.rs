@@ -24,11 +24,12 @@ use crate::backend::parser::{
     AlterRuleRenameStatement, AlterTableRuleStateStatement, AlterTableTriggerMode,
     BoundAssignmentTarget, CatalogLookup, CommentOnRuleStatement, CreateRuleStatement, CteBody,
     DropRuleStatement, FromItem, ParseError, RuleDoKind, RuleEvent, SelectItem, SelectStatement,
-    Statement, bind_rule_action_statement, bind_rule_qual, cte_body_references_table,
-    delete_statement_references_table, insert_statement_references_table,
-    merge_statement_references_table, rewrite_bound_delete_auto_view_target,
-    rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
-    select_statement_references_table, update_statement_references_table, validate_rule_definition,
+    Statement, bind_relation_constraints, bind_rule_action_statement, bind_rule_qual,
+    cte_body_references_table, delete_statement_references_table,
+    insert_statement_references_table, merge_statement_references_table,
+    rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
+    rewrite_bound_update_auto_view_target, select_statement_references_table,
+    update_statement_references_table, validate_rule_definition,
 };
 use crate::backend::rewrite::split_stored_rule_action_sql;
 use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError, classify_view_dml_rules};
@@ -720,7 +721,6 @@ struct PreparedRule {
     is_instead: bool,
     owner_oid: u32,
     qual: Option<crate::backend::executor::Expr>,
-    qual_subplans: Vec<Plan>,
     actions: Vec<crate::backend::parser::BoundRuleAction>,
     actions_reference_old_new: bool,
 }
@@ -822,6 +822,12 @@ pub(crate) fn prepare_bound_update_for_execution(
     }
     if relation_has_instead_row_trigger(catalog, view_target.relation_oid, TriggerOperation::Update)
     {
+        return Ok(PreparedBoundStatement {
+            extra_lock_requests: vec![(view_target.rel, TableLockMode::RowExclusive)],
+            stmt,
+        });
+    }
+    if rule_classification.also {
         return Ok(PreparedBoundStatement {
             extra_lock_requests: vec![(view_target.rel, TableLockMode::RowExclusive)],
             stmt,
@@ -1059,6 +1065,13 @@ pub(crate) fn execute_bound_insert_with_rules(
                     expected: "table",
                 }));
             }
+            let relation_constraints = bind_relation_constraints(
+                Some(&stmt.relation_name),
+                stmt.relation_oid,
+                &stmt.desc,
+                catalog,
+            )
+            .map_err(ExecError::Parse)?;
             if stmt.returning.is_empty() {
                 execute_insert_values(
                     &stmt.relation_name,
@@ -1067,7 +1080,7 @@ pub(crate) fn execute_bound_insert_with_rules(
                     stmt.toast,
                     stmt.toast_index.as_ref(),
                     &stmt.desc,
-                    &stmt.relation_constraints,
+                    &relation_constraints,
                     &stmt.rls_write_checks,
                     &stmt.indexes,
                     std::slice::from_ref(&row),
@@ -1087,7 +1100,7 @@ pub(crate) fn execute_bound_insert_with_rules(
                         stmt.toast,
                         stmt.toast_index.as_ref(),
                         &stmt.desc,
-                        &stmt.relation_constraints,
+                        &relation_constraints,
                         &stmt.rls_write_checks,
                         &stmt.indexes,
                         std::slice::from_ref(&row),
@@ -1135,7 +1148,7 @@ fn execute_auto_view_insert_with_do_also_rules(
         .map_err(|err| auto_view_prepare_error(&view_name, ViewDmlEvent::Insert, err))?;
     let stmt = finalize_bound_insert_stmt(stmt, catalog);
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
-    let rule_result: Result<(), ExecError> = (|| {
+    let result = (|| {
         let rules = load_prepared_rules(
             stmt.relation_oid,
             RuleEvent::Insert,
@@ -1144,15 +1157,43 @@ fn execute_auto_view_insert_with_do_also_rules(
             ctx.session_replication_role,
         )?;
         let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
+        let auto_result = execute_bound_insert_with_rules(auto_stmt, catalog, ctx, xid, cid)?;
         let null_old = vec![Value::Null; stmt.desc.columns.len()];
+        let mut query_columns = None;
+        let mut query_column_names = Vec::new();
+        let mut query_rows = Vec::new();
+        ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(cid.saturating_add(1));
         for row in rows {
-            execute_matching_rules(&rules, &null_old, &row, catalog, ctx, xid, cid, None, false)?;
+            let mut outcome = execute_matching_rules(
+                &rules,
+                &null_old,
+                &row,
+                catalog,
+                ctx,
+                xid,
+                cid.saturating_add(1),
+                None,
+                false,
+            )?;
+            append_rule_query_output(
+                &mut query_columns,
+                &mut query_column_names,
+                &mut query_rows,
+                &mut outcome,
+            );
         }
-        Ok(())
+        if let Some(columns) = query_columns {
+            Ok(StatementResult::Query {
+                columns,
+                column_names: query_column_names,
+                rows: query_rows,
+            })
+        } else {
+            Ok(auto_result)
+        }
     })();
     ctx.subplans = saved_subplans;
-    rule_result?;
-    execute_bound_insert_with_rules(auto_stmt, catalog, ctx, xid, cid)
+    result
 }
 
 pub(crate) fn execute_bound_update_with_rules(
@@ -1235,6 +1276,32 @@ pub(crate) fn execute_bound_update_with_rules(
                 catalog,
                 ctx.session_replication_role,
             )?;
+            if let Some(mut outcome) = execute_statement_level_instead_rules(
+                &rules,
+                target.desc.columns.len(),
+                catalog,
+                ctx,
+                xid,
+                cid,
+                waiter,
+                !stmt.returning.is_empty(),
+            )? {
+                append_rule_query_output(
+                    &mut query_columns,
+                    &mut query_column_names,
+                    &mut query_rows,
+                    &mut outcome,
+                );
+                affected_rows += append_statement_level_instead_result(
+                    RuleEvent::Update,
+                    &target.relation_name,
+                    &stmt.returning,
+                    &outcome,
+                    ctx,
+                    &mut returned_rows,
+                )?;
+                continue;
+            }
             if target.relkind == 'v' {
                 if !view_has_user_rules {
                     return Err(missing_view_instead_trigger_error(
@@ -1495,16 +1562,31 @@ pub(crate) fn execute_bound_delete_with_rules(
                     waiter,
                     !stmt.returning.is_empty(),
                 )? {
+                    let mut outcome = outcome;
+                    append_rule_query_output(
+                        &mut query_columns,
+                        &mut query_column_names,
+                        &mut query_rows,
+                        &mut outcome,
+                    );
                     affected_rows += append_statement_level_instead_result(
                         RuleEvent::Delete,
                         &target.relation_name,
                         &stmt.returning,
-                        outcome,
+                        &outcome,
                         ctx,
                         &mut returned_rows,
                     )?;
                     return if stmt.returning.is_empty() {
-                        Ok(StatementResult::AffectedRows(affected_rows))
+                        if let Some(columns) = query_columns {
+                            Ok(StatementResult::Query {
+                                columns,
+                                column_names: query_column_names,
+                                rows: query_rows,
+                            })
+                        } else {
+                            Ok(StatementResult::AffectedRows(affected_rows))
+                        }
                     } else {
                         Ok(build_statement_returning_result(
                             &stmt.returning,
@@ -1627,11 +1709,18 @@ pub(crate) fn execute_bound_delete_with_rules(
                 waiter,
                 !stmt.returning.is_empty(),
             )? {
+                let mut outcome = outcome;
+                append_rule_query_output(
+                    &mut query_columns,
+                    &mut query_column_names,
+                    &mut query_rows,
+                    &mut outcome,
+                );
                 affected_rows += append_statement_level_instead_result(
                     RuleEvent::Delete,
                     &target.relation_name,
                     &stmt.returning,
-                    outcome,
+                    &outcome,
                     ctx,
                     &mut returned_rows,
                 )?;
@@ -1804,14 +1893,7 @@ fn execute_matching_rules(
     let mut outcome = RuleMatchOutcome::default();
     for rule in rules {
         if let Some(qual) = &rule.qual
-            && !evaluate_rule_qual(
-                qual,
-                &rule.qual_subplans,
-                old_values,
-                new_values,
-                rule.owner_oid,
-                ctx,
-            )?
+            && !evaluate_rule_qual(qual, old_values, new_values, rule.owner_oid, catalog, ctx)?
         {
             continue;
         }
@@ -1921,7 +2003,7 @@ fn append_statement_level_instead_result(
     event: RuleEvent,
     relation_name: &str,
     returning: &[TargetEntry],
-    outcome: RuleMatchOutcome,
+    outcome: &RuleMatchOutcome,
     ctx: &mut ExecutorContext,
     returned_rows: &mut Vec<Vec<Value>>,
 ) -> Result<usize, ExecError> {
@@ -2336,17 +2418,23 @@ fn execute_rule_action(
 
 fn evaluate_rule_qual(
     qual: &crate::backend::executor::Expr,
-    subplans: &[Plan],
     old_values: &[Value],
     new_values: &[Value],
     owner_oid: u32,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
-    let saved_subplans = std::mem::replace(&mut ctx.subplans, subplans.to_vec());
+    let mut subplans = Vec::new();
+    let qual = finalize_expr_subqueries(
+        substitute_rule_expr(qual.clone(), old_values, new_values),
+        catalog,
+        &mut subplans,
+    );
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, subplans);
     let result = with_rule_owner(ctx, owner_oid, |ctx| {
         with_rule_bindings(ctx, old_values, new_values, |ctx| {
             let mut slot = TupleSlot::virtual_row(Vec::new());
-            match eval_expr(qual, &mut slot, ctx)? {
+            match eval_expr(&qual, &mut slot, ctx)? {
                 Value::Bool(value) => Ok(value),
                 Value::Null => Ok(false),
                 other => Err(ExecError::NonBoolQual(other)),
@@ -2413,7 +2501,7 @@ fn substitute_rule_expr(expr: Expr, old_values: &[Value], new_values: &[Value]) 
     match expr {
         Expr::Var(var) if var.varlevelsup == 0 => {
             substitute_rule_tuple_var(var.varno, var.varattno, old_values, new_values)
-                .map(Expr::Const)
+                .map(|value| Expr::Cast(Box::new(Expr::Const(value)), var.vartype))
                 .unwrap_or(Expr::Var(var))
         }
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(substitute_rule_aggref(
@@ -4061,10 +4149,14 @@ fn substitute_rule_action(
             ))
         }
         crate::backend::parser::BoundRuleAction::Update(stmt) => {
-            crate::backend::parser::BoundRuleAction::Update(stmt)
+            crate::backend::parser::BoundRuleAction::Update(substitute_rule_update_stmt(
+                stmt, old_values, new_values,
+            ))
         }
         crate::backend::parser::BoundRuleAction::Delete(stmt) => {
-            crate::backend::parser::BoundRuleAction::Delete(stmt)
+            crate::backend::parser::BoundRuleAction::Delete(substitute_rule_delete_stmt(
+                stmt, old_values, new_values,
+            ))
         }
         crate::backend::parser::BoundRuleAction::Select(planned) => {
             crate::backend::parser::BoundRuleAction::Select(substitute_rule_planned_stmt(
@@ -4100,16 +4192,12 @@ fn load_prepared_rules(
                 && rule_enabled_for_session(&row, session_replication_role)
         })
         .map(|row| {
-            let (qual, qual_subplans) = if row.ev_qual.is_empty() {
-                (None, Vec::new())
+            let qual = if row.ev_qual.is_empty() {
+                None
             } else {
                 let parsed = crate::backend::parser::parse_expr(&row.ev_qual)?;
-                let mut subplans = Vec::new();
                 let qual = bind_rule_qual(&parsed, relation_desc, event, catalog)?;
-                (
-                    Some(finalize_expr_subqueries(qual, catalog, &mut subplans)),
-                    subplans,
-                )
+                Some(qual)
             };
             let mut actions = Vec::new();
             let mut actions_reference_old_new = false;
@@ -4126,7 +4214,6 @@ fn load_prepared_rules(
                 is_instead: row.is_instead,
                 owner_oid,
                 qual,
-                qual_subplans,
                 actions,
                 actions_reference_old_new,
             })
