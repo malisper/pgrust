@@ -1,7 +1,4 @@
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::backend::executor::{Value, compare_order_values};
@@ -19,6 +16,10 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::database::DatabaseStatsStore;
+pub use pgrust_executor::{
+    CopyProgressGuard, CopyProgressSnapshot, current_pg_stat_progress_copy_rows,
+    install_copy_progress,
+};
 
 const STATISTIC_KIND_MCV: i16 = 1;
 const STATISTIC_KIND_HISTOGRAM: i16 = 2;
@@ -28,66 +29,6 @@ const STATISTIC_KIND_DECHIST: i16 = 5;
 const STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM: i16 = 6;
 const STATISTIC_KIND_BOUNDS_HISTOGRAM: i16 = 7;
 const REGRESSION_DATABASE_NAME: &str = "regression";
-
-#[derive(Debug, Clone)]
-pub(crate) struct CopyProgressSnapshot {
-    pub pid: i32,
-    pub datid: u32,
-    pub datname: String,
-    pub relid: u32,
-    pub command: &'static str,
-    pub copy_type: &'static str,
-    pub bytes_processed: i64,
-    pub bytes_total: i64,
-    pub tuples_processed: i64,
-    pub tuples_excluded: i64,
-    pub tuples_skipped: i64,
-}
-
-thread_local! {
-    static CURRENT_COPY_PROGRESS: RefCell<Option<CopyProgressSnapshot>> = const { RefCell::new(None) };
-}
-
-pub(crate) struct CopyProgressGuard;
-
-impl Drop for CopyProgressGuard {
-    fn drop(&mut self) {
-        CURRENT_COPY_PROGRESS.with(|progress| {
-            *progress.borrow_mut() = None;
-        });
-    }
-}
-
-pub(crate) fn install_copy_progress(snapshot: CopyProgressSnapshot) -> CopyProgressGuard {
-    CURRENT_COPY_PROGRESS.with(|progress| {
-        *progress.borrow_mut() = Some(snapshot);
-    });
-    CopyProgressGuard
-}
-
-pub(crate) fn current_pg_stat_progress_copy_rows() -> Vec<Vec<Value>> {
-    CURRENT_COPY_PROGRESS.with(|progress| {
-        progress
-            .borrow()
-            .as_ref()
-            .map(|snapshot| {
-                vec![vec![
-                    Value::Int32(snapshot.pid),
-                    Value::Int64(i64::from(snapshot.datid)),
-                    Value::Text(snapshot.datname.clone().into()),
-                    Value::Int64(i64::from(snapshot.relid)),
-                    Value::Text(snapshot.command.into()),
-                    Value::Text(snapshot.copy_type.into()),
-                    Value::Int64(snapshot.bytes_processed),
-                    Value::Int64(snapshot.bytes_total),
-                    Value::Int64(snapshot.tuples_processed),
-                    Value::Int64(snapshot.tuples_excluded),
-                    Value::Int64(snapshot.tuples_skipped),
-                ]]
-            })
-            .unwrap_or_default()
-    })
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PgPublicationTableInfo {

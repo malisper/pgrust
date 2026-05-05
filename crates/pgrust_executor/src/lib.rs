@@ -5,6 +5,7 @@ pub mod async_notify;
 pub mod bindings;
 pub mod catalog_builtins;
 pub mod constraints;
+pub mod copy_progress;
 pub mod domain;
 pub mod driver;
 pub mod exec_tuples;
@@ -82,6 +83,10 @@ pub use constraints::{
     PendingUserConstraintTrigger, RlsDetailSource, RlsWriteCheckFailure, RlsWriteCheckSource,
     check_constraint_failure, find_not_null_violation, rls_write_check_failure,
     row_security_new_row_tid,
+};
+pub use copy_progress::{
+    CopyProgressGuard, CopyProgressSnapshot, current_pg_stat_progress_copy_rows,
+    install_copy_progress,
 };
 pub use domain::{
     DomainConstraintError, DomainConstraintLookup, DomainConstraintLookupKind,

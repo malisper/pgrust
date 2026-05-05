@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod catcache;
 pub mod dependency_drop;
 pub mod indexing;
+pub mod invalidation;
 pub mod materialize;
 pub mod pg_aggregate;
 pub mod pg_am;
@@ -59,6 +60,7 @@ pub use catalog::{
 };
 pub use catcache::CatCache;
 pub use dependency_drop::{CatalogDependencyGraph, DropBehavior, ObjectAddress};
+pub use invalidation::{CatalogInvalidation, catalog_invalidation_from_effect};
 pub use privileges::*;
 pub use relcache::RelCache;
 pub use role_memberships::*;
