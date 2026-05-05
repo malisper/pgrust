@@ -7,6 +7,7 @@ use crate::backend::catalog::catalog::{
 };
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::persistence::{
+    catalog_tuple_delete_by_identity, catalog_tuple_update_by_identity,
     delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
 };
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
@@ -72,7 +73,7 @@ use crate::include::catalog::{
     PgTsTemplateRow, PgTypeRow, PgUserMappingRow, owner_shdepend_row, policy_shdepend_rows,
     relkind_has_storage,
 };
-use crate::include::nodes::datum::Value;
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue, Value};
 
 use super::{
     CatalogControl, CatalogMutationEffect, CatalogStore, CatalogStoreMode, CatalogWriteContext,
@@ -9245,32 +9246,213 @@ impl CatalogStore {
         partitioned_table: Option<PgPartitionedTableRow>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let (old_entry, new_entry, _, kinds) =
-            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                entry.relispartition = relispartition;
-                entry.relpartbound = relpartbound;
-                entry.partitioned_table = partitioned_table;
-                let mut kinds = vec![
-                    BootstrapCatalogKind::PgClass,
-                    BootstrapCatalogKind::PgDepend,
-                ];
-                if entry.partitioned_table.is_some() {
-                    kinds.push(BootstrapCatalogKind::PgPartitionedTable);
-                }
-                Ok(((), kinds))
-            })?;
-
         let mut effect = CatalogMutationEffect::default();
-        let mut touched_kinds = kinds;
-        if old_entry.partitioned_table.is_some() || new_entry.partitioned_table.is_some() {
-            merge_catalog_kinds(
-                &mut touched_kinds,
-                &[BootstrapCatalogKind::PgPartitionedTable],
-            );
+        let old_class = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_class.relispartition != relispartition || old_class.relpartbound != relpartbound {
+            let new_class = PgClassRow {
+                relispartition,
+                relpartbound: relpartbound.clone(),
+                ..old_class.clone()
+            };
+            let identity = self
+                .search_sys_cache_entries(ctx, SysCacheId::RELOID, vec![oid_key(relation_oid)])?
+                .into_iter()
+                .find_map(|entry| entry.identity)
+                .ok_or(CatalogError::Corrupt("missing pg_class tuple identity"))?;
+            let _ = catalog_tuple_update_by_identity(
+                ctx,
+                &identity,
+                &[
+                    ("relispartition", Value::Bool(relispartition)),
+                    (
+                        "relpartbound",
+                        nullable_text_catalog_value(relpartbound.clone()),
+                    ),
+                ],
+            )?;
+            let old_rows = PhysicalCatalogRows {
+                classes: vec![old_class.clone()],
+                ..PhysicalCatalogRows::default()
+            };
+            let new_rows = PhysicalCatalogRows {
+                classes: vec![new_class],
+                ..PhysicalCatalogRows::default()
+            };
+            effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgClass]);
+            effect_record_rows(&mut effect, &old_rows);
+            effect_record_rows(&mut effect, &new_rows);
         }
-        effect_record_catalog_kinds(&mut effect, &touched_kinds);
+
+        let old_partitioned_table = partitioned_table_row_mvcc(self, ctx, relation_oid)?;
+        if old_partitioned_table != partitioned_table {
+            effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgPartitionedTable]);
+            match (old_partitioned_table, partitioned_table.clone()) {
+                (Some(old_row), Some(new_row)) => {
+                    let identity = self
+                        .search_sys_cache_entries(
+                            ctx,
+                            SysCacheId::PARTRELID,
+                            vec![oid_key(relation_oid)],
+                        )?
+                        .into_iter()
+                        .find_map(|entry| entry.identity)
+                        .ok_or(CatalogError::Corrupt(
+                            "missing pg_partitioned_table tuple identity",
+                        ))?;
+                    let replacements = partitioned_table_catalog_replacements(&new_row);
+                    let _ = catalog_tuple_update_by_identity(ctx, &identity, &replacements)?;
+                    let old_rows = PhysicalCatalogRows {
+                        partitioned_tables: vec![old_row],
+                        ..PhysicalCatalogRows::default()
+                    };
+                    let new_rows = PhysicalCatalogRows {
+                        partitioned_tables: vec![new_row],
+                        ..PhysicalCatalogRows::default()
+                    };
+                    effect_record_rows(&mut effect, &old_rows);
+                    effect_record_rows(&mut effect, &new_rows);
+                }
+                (None, Some(new_row)) => {
+                    let new_rows = PhysicalCatalogRows {
+                        partitioned_tables: vec![new_row],
+                        ..PhysicalCatalogRows::default()
+                    };
+                    insert_catalog_rows_subset_mvcc(
+                        ctx,
+                        &new_rows,
+                        self.scope_db_oid(),
+                        &[BootstrapCatalogKind::PgPartitionedTable],
+                    )?;
+                    effect_record_rows(&mut effect, &new_rows);
+                }
+                (Some(old_row), None) => {
+                    let identity = self
+                        .search_sys_cache_entries(
+                            ctx,
+                            SysCacheId::PARTRELID,
+                            vec![oid_key(relation_oid)],
+                        )?
+                        .into_iter()
+                        .find_map(|entry| entry.identity)
+                        .ok_or(CatalogError::Corrupt(
+                            "missing pg_partitioned_table tuple identity",
+                        ))?;
+                    let _ = catalog_tuple_delete_by_identity(ctx, &identity)?;
+                    let old_rows = PhysicalCatalogRows {
+                        partitioned_tables: vec![old_row],
+                        ..PhysicalCatalogRows::default()
+                    };
+                    effect_record_rows(&mut effect, &old_rows);
+                }
+                (None, None) => {}
+            }
+        }
+
+        self.sync_relation_partition_depend_rows_mvcc(
+            relation_oid,
+            &old_class,
+            relispartition,
+            relpartbound,
+            partitioned_table,
+            ctx,
+            &mut effect,
+        )?;
+
+        self.invalidate_relcache_init_for_kinds(&[
+            BootstrapCatalogKind::PgClass,
+            BootstrapCatalogKind::PgDepend,
+            BootstrapCatalogKind::PgPartitionedTable,
+        ]);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         Ok(effect)
+    }
+
+    fn sync_relation_partition_depend_rows_mvcc(
+        &mut self,
+        relation_oid: u32,
+        old_class: &PgClassRow,
+        new_relispartition: bool,
+        new_relpartbound: Option<String>,
+        new_partitioned_table: Option<PgPartitionedTableRow>,
+        ctx: &CatalogWriteContext,
+        effect: &mut CatalogMutationEffect,
+    ) -> Result<(), CatalogError> {
+        let relation = self
+            .RelationIdGetRelation(ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = catalog_entry_from_relation_row(old_class, &relation);
+        let mut new_entry = old_entry.clone();
+        new_entry.relispartition = new_relispartition;
+        new_entry.relpartbound = new_relpartbound;
+        new_entry.partitioned_table = new_partitioned_table;
+
+        let old_rows = rows_for_existing_relation_mvcc(self, ctx, &old_entry)?;
+        let relation_name = old_class.relname.clone();
+        let mut new_rows = {
+            let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
+            rows_for_new_relation_entry(&type_lookup, &relation_name, &new_entry)?
+        };
+        let parent_oids = relation_inherits_mvcc(self, ctx, relation_oid)?
+            .into_iter()
+            .map(|row| row.inhparent)
+            .collect::<Vec<_>>();
+        new_rows
+            .depends
+            .extend(relation_inheritance_depend_rows(&new_entry, &parent_oids));
+        sort_pg_depend_rows(&mut new_rows.depends);
+        new_rows.depends.dedup();
+        preserve_non_derived_relation_rows_mvcc(
+            self,
+            ctx,
+            &old_entry,
+            &[BootstrapCatalogKind::PgDepend],
+            &mut new_rows,
+        )?;
+
+        let old_depends = old_rows.depends;
+        let new_depends = new_rows.depends;
+        let delete_depends = old_depends
+            .iter()
+            .filter(|row| !new_depends.contains(row))
+            .cloned()
+            .collect::<Vec<_>>();
+        let insert_depends = new_depends
+            .iter()
+            .filter(|row| !old_depends.contains(row))
+            .cloned()
+            .collect::<Vec<_>>();
+        let changed = !delete_depends.is_empty() || !insert_depends.is_empty();
+        if !delete_depends.is_empty() {
+            let delete_rows = PhysicalCatalogRows {
+                depends: delete_depends,
+                ..PhysicalCatalogRows::default()
+            };
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &delete_rows,
+                self.scope_db_oid(),
+                &[BootstrapCatalogKind::PgDepend],
+            )?;
+            effect_record_rows(effect, &delete_rows);
+        }
+        if !insert_depends.is_empty() {
+            let insert_rows = PhysicalCatalogRows {
+                depends: insert_depends,
+                ..PhysicalCatalogRows::default()
+            };
+            insert_catalog_rows_subset_mvcc(
+                ctx,
+                &insert_rows,
+                self.scope_db_oid(),
+                &[BootstrapCatalogKind::PgDepend],
+            )?;
+            effect_record_rows(effect, &insert_rows);
+        }
+        if changed {
+            effect_record_catalog_kinds(effect, &[BootstrapCatalogKind::PgDepend]);
+        }
+        Ok(())
     }
 
     pub fn set_relation_is_partition_mvcc(
@@ -9298,8 +9480,16 @@ impl CatalogStore {
         };
         let kinds = [BootstrapCatalogKind::PgClass];
         self.invalidate_relcache_init_for_kinds(&kinds);
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+        let identity = self
+            .search_sys_cache_entries(ctx, SysCacheId::RELOID, vec![oid_key(relation_oid)])?
+            .into_iter()
+            .find_map(|entry| entry.identity)
+            .ok_or(CatalogError::Corrupt("missing pg_class tuple identity"))?;
+        let _ = catalog_tuple_update_by_identity(
+            ctx,
+            &identity,
+            &[("relispartition", Value::Bool(relispartition))],
+        )?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -11791,6 +11981,64 @@ fn index_row_for_entry(entry: &CatalogEntry) -> Option<crate::include::catalog::
 
 fn oid_key(oid: u32) -> Value {
     Value::Int64(i64::from(oid))
+}
+
+fn nullable_text_catalog_value(value: Option<String>) -> Value {
+    value
+        .map(|value| Value::Text(value.into()))
+        .unwrap_or(Value::Null)
+}
+
+fn catalog_vector_dimensions(length: usize) -> Vec<ArrayDimension> {
+    vec![ArrayDimension {
+        lower_bound: 0,
+        length,
+    }]
+}
+
+fn catalog_oid_vector_value(values: Vec<u32>) -> ArrayValue {
+    ArrayValue::from_dimensions(
+        catalog_vector_dimensions(values.len()),
+        values
+            .into_iter()
+            .map(|value| Value::Int32(value as i32))
+            .collect(),
+    )
+    .with_element_type_oid(pgrust_catalog_data::OID_TYPE_OID)
+}
+
+fn catalog_int16_vector_value(values: Vec<i16>) -> ArrayValue {
+    ArrayValue::from_dimensions(
+        catalog_vector_dimensions(values.len()),
+        values.into_iter().map(Value::Int16).collect(),
+    )
+    .with_element_type_oid(pgrust_catalog_data::INT2_TYPE_OID)
+}
+
+fn partitioned_table_catalog_replacements(
+    row: &PgPartitionedTableRow,
+) -> Vec<(&'static str, Value)> {
+    vec![
+        ("partstrat", Value::Text(row.partstrat.to_string().into())),
+        ("partnatts", Value::Int16(row.partnatts)),
+        ("partdefid", Value::Int32(row.partdefid as i32)),
+        (
+            "partattrs",
+            Value::PgArray(catalog_int16_vector_value(row.partattrs.clone())),
+        ),
+        (
+            "partclass",
+            Value::PgArray(catalog_oid_vector_value(row.partclass.clone())),
+        ),
+        (
+            "partcollation",
+            Value::PgArray(catalog_oid_vector_value(row.partcollation.clone())),
+        ),
+        (
+            "partexprs",
+            nullable_text_catalog_value(row.partexprs.clone()),
+        ),
+    ]
 }
 
 fn class_row_by_oid_mvcc(

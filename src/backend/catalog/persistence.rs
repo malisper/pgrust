@@ -6,15 +6,15 @@ use parking_lot::RwLock;
 
 use crate::BufferPool;
 use crate::backend::access::heap::heapam::{
-    heap_delete_with_waiter, heap_flush, heap_insert, heap_insert_mvcc_with_cid, heap_scan_begin,
-    heap_scan_next, heap_update_with_waiter,
+    heap_delete_with_waiter, heap_fetch_visible_with_txns, heap_flush, heap_insert,
+    heap_insert_mvcc_with_cid, heap_scan_begin, heap_scan_next, heap_update_with_waiter,
 };
 use crate::backend::access::heap::heapam_visibility::SnapshotVisibility;
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::catalog::bootstrap::{bootstrap_catalog_rel, bootstrap_catalog_toast_rel};
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::indexing::{
-    catalog_index_insert_state_for_db, rebuild_system_catalog_indexes_for_db,
+    CatalogTupleIdentity, catalog_index_insert_state_for_db, rebuild_system_catalog_indexes_for_db,
 };
 use crate::backend::catalog::rowcodec::catalog_row_values_for_kind;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
@@ -283,6 +283,143 @@ fn catalog_toast_relation(kind: BootstrapCatalogKind, db_oid: u32) -> Option<Toa
         rel,
         relation_oid: kind.toast_relation_oid(),
     })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CatalogTupleUpdateResult {
+    pub(crate) old_values: Vec<Value>,
+    pub(crate) new_values: Vec<Value>,
+    pub(crate) old_tid: ItemPointerData,
+    pub(crate) new_tid: ItemPointerData,
+}
+
+pub(crate) fn catalog_tuple_update_by_identity(
+    ctx: &CatalogWriteContext,
+    identity: &CatalogTupleIdentity,
+    replacements: &[(&str, Value)],
+) -> Result<CatalogTupleUpdateResult, CatalogError> {
+    let snapshot = ctx.snapshot_for_command()?;
+    let tuple = heap_fetch_visible_with_txns(
+        &ctx.pool,
+        ctx.client_id,
+        identity.heap_rel,
+        identity.tid,
+        &ctx.txns,
+        &snapshot,
+    )
+    .map_err(|e| CatalogError::Io(format!("catalog tuple fetch failed: {e:?}")))?
+    .ok_or(CatalogError::Corrupt("missing catalog tuple for update"))?;
+    let desc = bootstrap_relation_desc(identity.kind);
+    let txns_guard = ctx.txns.read();
+    let old_values = crate::backend::catalog::rowcodec::decode_catalog_tuple_values_with_toast(
+        &ctx.pool,
+        &txns_guard,
+        &snapshot,
+        ctx.client_id,
+        identity.kind,
+        identity.db_oid,
+        &desc,
+        &tuple,
+    )?;
+    drop(txns_guard);
+
+    let mut new_values = old_values.clone();
+    for (column_name, value) in replacements {
+        let Some(index) = desc
+            .columns
+            .iter()
+            .position(|column| column.name.eq_ignore_ascii_case(column_name))
+        else {
+            return Err(CatalogError::UnknownColumn((*column_name).to_string()));
+        };
+        new_values[index] = value.clone();
+    }
+
+    let replacement = catalog_tuple_from_values(
+        &ctx.pool,
+        ctx.client_id,
+        identity.kind,
+        identity.db_oid,
+        &desc,
+        &new_values,
+        Some(ctx),
+    )?;
+    let waiter = ctx
+        .waiter
+        .as_deref()
+        .map(|waiter| (&*ctx.txns, waiter, ctx.interrupts.as_ref()));
+    let new_tid = heap_update_with_waiter(
+        &ctx.pool,
+        ctx.client_id,
+        identity.heap_rel,
+        &ctx.txns,
+        ctx.xid,
+        ctx.cid,
+        identity.tid,
+        &replacement,
+        waiter,
+    )
+    .map_err(|e| CatalogError::Io(format!("catalog tuple update failed: {e:?}")))?;
+    catalog_index_insert_state_for_db(ctx, identity.kind, identity.db_oid)?.insert_with_old_tid(
+        new_tid,
+        Some(identity.tid),
+        &new_values,
+    )?;
+
+    Ok(CatalogTupleUpdateResult {
+        old_values,
+        new_values,
+        old_tid: identity.tid,
+        new_tid,
+    })
+}
+
+pub(crate) fn catalog_tuple_delete_by_identity(
+    ctx: &CatalogWriteContext,
+    identity: &CatalogTupleIdentity,
+) -> Result<Vec<Value>, CatalogError> {
+    let snapshot = ctx.snapshot_for_command()?;
+    let tuple = heap_fetch_visible_with_txns(
+        &ctx.pool,
+        ctx.client_id,
+        identity.heap_rel,
+        identity.tid,
+        &ctx.txns,
+        &snapshot,
+    )
+    .map_err(|e| CatalogError::Io(format!("catalog tuple fetch failed: {e:?}")))?
+    .ok_or(CatalogError::Corrupt("missing catalog tuple for delete"))?;
+    let desc = bootstrap_relation_desc(identity.kind);
+    let txns_guard = ctx.txns.read();
+    let old_values = crate::backend::catalog::rowcodec::decode_catalog_tuple_values_with_toast(
+        &ctx.pool,
+        &txns_guard,
+        &snapshot,
+        ctx.client_id,
+        identity.kind,
+        identity.db_oid,
+        &desc,
+        &tuple,
+    )?;
+    drop(txns_guard);
+
+    let waiter = ctx
+        .waiter
+        .as_deref()
+        .map(|waiter| (&*ctx.txns, waiter, ctx.interrupts.as_ref()));
+    heap_delete_with_waiter(
+        &ctx.pool,
+        ctx.client_id,
+        identity.heap_rel,
+        &ctx.txns,
+        ctx.xid,
+        identity.tid,
+        &snapshot,
+        waiter,
+    )
+    .map_err(|e| CatalogError::Io(format!("catalog tuple delete failed: {e:?}")))?;
+
+    Ok(old_values)
 }
 
 fn next_catalog_toast_value_id(
