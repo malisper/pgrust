@@ -14252,14 +14252,16 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
             RaiseLevel::Warning => "WARNING",
             RaiseLevel::Exception => continue,
         };
+        let (detail, context_from_detail) = split_plpgsql_notice_context(notice.detail.as_deref());
+        let context = notice.context.as_deref().or(context_from_detail);
         send_notice_with_internal_fields(
             stream,
             severity,
             &notice.sqlstate,
             &notice.message,
-            notice.detail.as_deref(),
+            detail,
             notice.hint.as_deref(),
-            notice.context.as_deref(),
+            context,
             notice.position,
             notice.internal_query.as_deref(),
             notice.internal_position,
