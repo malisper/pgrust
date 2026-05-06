@@ -116,6 +116,27 @@ That focus should drive both SQLancer and property-test work. We can expand to
 rarer features later; the first objective is "useful Postgres subset for normal
 apps", not "maximal feature exoticism."
 
+## Historical PostgreSQL bug signal
+
+Jason has a local mirror of PostgreSQL mailing-list mbox archives at
+`~/postgres-mail-archives`. As of May 4, 2026, it includes 2,051 monthly mbox
+files from `pgsql-hackers`, `pgsql-bugs`, `pgsql-committers`, `pgsql-patches`,
+`pgsql-docs`, `pgsql-performance`, and `pgsql-general`.
+
+This is not a test harness by itself, but it is useful research input when we
+need real PostgreSQL bug reports, design discussions, or patch rationale. Future
+testing work should mine these archives for:
+
+- historical bugs that became regression tests upstream
+- bug reports with small SQL repros or clear behavioral expectations
+- planner, executor, storage, and concurrency edge cases discussed by
+  PostgreSQL maintainers
+- upstream fixes whose surrounding discussion explains why the test matters
+
+When a mailing-list thread yields a concrete pgrust issue, preserve the relevant
+message-id or thread URL in the issue, repro note, or regression-test comment so
+the source stays traceable.
+
 ## Tier 1 — do first
 
 These are ranked by expected bugs-per-engineer-week for a young Postgres
