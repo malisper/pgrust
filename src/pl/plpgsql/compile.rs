@@ -10,9 +10,9 @@ use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
     AliasColumnSpec, BoundCte, BoundScope, CatalogLookup, FromItem, GroupByItem, ParseError,
     RawWindowFrameBound, RawWindowSpec, SelectStatement, SlotScopeColumn, SqlExpr, SqlType,
-    SqlTypeKind, Statement, TablePersistence, bind_delete_with_outer_scopes,
-    bind_insert_with_outer_scopes, bind_scalar_expr_in_named_slot_scope,
-    bind_update_with_outer_scopes, parse_expr, parse_statement, parse_type_name,
+    SqlTypeKind, Statement, TablePersistence, bind_delete_with_outer_scopes_and_ctes,
+    bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope,
+    bind_update_with_outer_scopes_and_ctes, parse_expr, parse_statement, parse_type_name,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_query_with_outer_scopes_and_ctes_config,
     pg_plan_values_query_with_outer_scopes_and_ctes,
     pg_plan_values_query_with_outer_scopes_and_ctes_config, resolve_raw_type_name,
@@ -43,10 +43,10 @@ use pgrust_plpgsql::{
     plpgsql_label_alias, plpgsql_var_alias, positional_parameter_var_name,
     print_strict_params_directive, rewrite_plpgsql_assignment_query_expr, runtime_sql_param_id,
     should_defer_plpgsql_sql_to_runtime, should_fallback_to_runtime_sql,
-    split_cte_prefixed_select_into_target, split_dml_returning_into_targets,
-    split_select_into_target, split_select_with_into_targets, static_query_source_known_columns,
-    target_entry_query_column, transaction_command_name, variable_conflict_from_gucs,
-    variable_conflict_mode,
+    split_cte_prefixed_select_into_target, split_cte_prefixed_select_with_into_targets,
+    split_dml_returning_into_targets, split_select_into_target, split_select_with_into_targets,
+    static_query_source_known_columns, target_entry_query_column, transaction_command_name,
+    variable_conflict_from_gucs, variable_conflict_mode, with_plpgsql_statement_line_context,
 };
 
 #[cfg(test)]
@@ -622,21 +622,13 @@ pub(crate) fn compile_function_from_proc(
         })?;
     let input_types = input_type_oids
         .iter()
-        .map(|oid| {
-            catalog
-                .type_by_oid(*oid)
-                .map(|ty| ty.sql_type)
-                .ok_or_else(|| ParseError::UnsupportedType(oid.to_string()))
-        })
+        .map(|oid| plpgsql_argument_sql_type(*oid, catalog))
         .collect::<Result<Vec<_>, _>>()?;
 
     if let (Some(all_arg_types), Some(arg_modes)) = (&row.proallargtypes, &row.proargmodes) {
         let arg_names = row.proargnames.clone().unwrap_or_default();
         for (index, (type_oid, mode)) in all_arg_types.iter().zip(arg_modes.iter()).enumerate() {
-            let sql_type = catalog
-                .type_by_oid(*type_oid)
-                .map(|ty| ty.sql_type)
-                .ok_or_else(|| ParseError::UnsupportedType(type_oid.to_string()))?;
+            let sql_type = plpgsql_argument_sql_type(*type_oid, catalog)?;
             let name = arg_names
                 .get(index)
                 .cloned()
@@ -729,6 +721,24 @@ pub(crate) fn compile_function_from_proc(
         local_ctes: Vec::new(),
         trigger_transition_ctes: Vec::new(),
     })
+}
+
+fn plpgsql_argument_sql_type(
+    type_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    let type_row = catalog
+        .type_by_oid(type_oid)
+        .ok_or_else(|| ParseError::UnsupportedType(type_oid.to_string()))?;
+    if type_row.typtype == 'p' && type_oid != RECORD_TYPE_OID {
+        return Err(ParseError::DetailedError {
+            message: format!("PL/pgSQL functions cannot accept type {}", type_row.typname),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(type_row.sql_type)
 }
 
 pub(crate) fn compile_trigger_function_from_proc(
@@ -992,7 +1002,7 @@ fn compile_var_decl(
     let default_expr = decl
         .default_expr
         .as_deref()
-        .map(|expr| compile_assignment_expr_text(expr, catalog, env))
+        .map(|expr| compile_decl_default_expr_text(expr, catalog, env))
         .transpose()?;
     let slot = env.define_var_with_options(&decl.name, ty, decl.constant, decl.strict);
     Ok(CompiledVar {
@@ -1003,6 +1013,227 @@ fn compile_var_decl(
         not_null: decl.strict,
         line: decl.line,
     })
+}
+
+fn compile_decl_default_expr_text(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledExpr, ParseError> {
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+    let assignment_query_expr = rewrite_plpgsql_assignment_query_expr(&rewritten_sql);
+    if assignment_query_expr.is_none()
+        && let Some(deferred) = unresolved_decl_default_column_error(sql, env)
+    {
+        return Ok(CompiledExpr::DeferredError {
+            source: sql.trim().to_string(),
+            err: deferred,
+        });
+    }
+    let rewritten_sql = assignment_query_expr.unwrap_or(rewritten_sql);
+    compile_expr_sql(&rewritten_sql, sql.trim(), catalog, env)
+}
+
+fn unresolved_decl_default_column_error(sql: &str, env: &CompileEnv) -> Option<ParseError> {
+    let parsed = parse_expr(sql).ok()?;
+    let name = first_unresolved_decl_default_column(&parsed, env)?;
+    let position = identifier_position(sql, &name)
+        .map(|position| position + 1)
+        .unwrap_or(1);
+    Some(ParseError::UnknownColumn(name).with_position(position))
+}
+
+fn first_unresolved_decl_default_column(expr: &SqlExpr, env: &CompileEnv) -> Option<String> {
+    match expr {
+        SqlExpr::Column(name) => {
+            if !name.contains('.')
+                && !name.ends_with(".*")
+                && !is_internal_plpgsql_name(name)
+                && env.get_var(name).is_none()
+            {
+                Some(name.clone())
+            } else {
+                None
+            }
+        }
+        SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
+        | SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
+        | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. }
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_) => None,
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            ..
+        } => args
+            .args()
+            .iter()
+            .find_map(|arg| first_unresolved_decl_default_column(&arg.value, env))
+            .or_else(|| {
+                order_by
+                    .iter()
+                    .find_map(|item| first_unresolved_decl_default_column(&item.expr, env))
+            })
+            .or_else(|| {
+                within_group.as_deref().and_then(|items| {
+                    items
+                        .iter()
+                        .find_map(|item| first_unresolved_decl_default_column(&item.expr, env))
+                })
+            })
+            .or_else(|| {
+                filter
+                    .as_deref()
+                    .and_then(|expr| first_unresolved_decl_default_column(expr, env))
+            }),
+        SqlExpr::InSubquery { expr, .. } => first_unresolved_decl_default_column(expr, env),
+        SqlExpr::QuantifiedSubquery { left, .. } => first_unresolved_decl_default_column(left, env),
+        SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
+            first_unresolved_decl_default_column(expr, env)
+        }
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => elements
+            .iter()
+            .find_map(|expr| first_unresolved_decl_default_column(expr, env)),
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            first_unresolved_decl_default_column(array, env).or_else(|| {
+                subscripts.iter().find_map(|subscript| {
+                    subscript
+                        .lower
+                        .as_deref()
+                        .and_then(|expr| first_unresolved_decl_default_column(expr, env))
+                        .or_else(|| {
+                            subscript
+                                .upper
+                                .as_deref()
+                                .and_then(|expr| first_unresolved_decl_default_column(expr, env))
+                        })
+                })
+            })
+        }
+        SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::QuantifiedArray {
+            left, array: right, ..
+        }
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::GeometryBinaryOp { left, right, .. }
+        | SqlExpr::AtTimeZone {
+            expr: left,
+            zone: right,
+        }
+        | SqlExpr::BinaryOperator { left, right, .. } => {
+            first_unresolved_decl_default_column(left, env)
+                .or_else(|| first_unresolved_decl_default_column(right, env))
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => first_unresolved_decl_default_column(expr, env)
+            .or_else(|| first_unresolved_decl_default_column(pattern, env))
+            .or_else(|| {
+                escape
+                    .as_deref()
+                    .and_then(|expr| first_unresolved_decl_default_column(expr, env))
+            }),
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => arg
+            .as_deref()
+            .and_then(|expr| first_unresolved_decl_default_column(expr, env))
+            .or_else(|| {
+                args.iter().find_map(|arm| {
+                    first_unresolved_decl_default_column(&arm.expr, env)
+                        .or_else(|| first_unresolved_decl_default_column(&arm.result, env))
+                })
+            })
+            .or_else(|| {
+                defresult
+                    .as_deref()
+                    .and_then(|expr| first_unresolved_decl_default_column(expr, env))
+            }),
+        SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
+        | SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => {
+            first_unresolved_decl_default_column(inner, env)
+        }
+        SqlExpr::Xml(xml) => xml
+            .child_exprs()
+            .find_map(|expr| first_unresolved_decl_default_column(expr, env)),
+        SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .iter()
+            .find_map(|expr| first_unresolved_decl_default_column(expr, env)),
+    }
 }
 
 fn compile_cursor_decl(
@@ -1135,10 +1366,14 @@ fn compile_stmt(
     return_contract: Option<&FunctionReturnContract>,
 ) -> Result<CompiledStmt, ParseError> {
     Ok(match stmt {
-        Stmt::WithLine { line, stmt } => CompiledStmt::WithLine {
-            line: *line,
-            stmt: Box::new(compile_stmt(stmt, catalog, env, return_contract)?),
-        },
+        Stmt::WithLine { line, stmt } => {
+            let stmt = compile_stmt(stmt, catalog, env, return_contract)
+                .map_err(|err| with_plpgsql_statement_line_context(err, *line))?;
+            CompiledStmt::WithLine {
+                line: *line,
+                stmt: Box::new(stmt),
+            }
+        }
         Stmt::Block(block) => {
             CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
         }
@@ -1390,59 +1625,69 @@ fn compile_raise_stmt(
     let mut datatype_expr = None::<String>;
     let mut table_expr = None::<String>;
     let mut schema_expr = None::<String>;
+    let mut option_error = None::<ParseError>;
     for option in using_options {
         match option.name.to_ascii_lowercase().as_str() {
             "message" => {
                 if message.is_some() || message_expr.is_some() {
-                    return duplicate_raise_option("MESSAGE");
+                    record_duplicate_raise_option(&mut option_error, "MESSAGE");
+                    continue;
                 }
                 message_expr = Some(option.expr.clone());
             }
             "detail" => {
                 if detail_expr.is_some() {
-                    return duplicate_raise_option("DETAIL");
+                    record_duplicate_raise_option(&mut option_error, "DETAIL");
+                    continue;
                 }
                 detail_expr = Some(option.expr.clone());
             }
             "hint" => {
                 if hint_expr.is_some() {
-                    return duplicate_raise_option("HINT");
+                    record_duplicate_raise_option(&mut option_error, "HINT");
+                    continue;
                 }
                 hint_expr = Some(option.expr.clone());
             }
             "errcode" => {
                 if condition_sets_errcode || errcode_expr.is_some() {
-                    return duplicate_raise_option("ERRCODE");
+                    record_duplicate_raise_option(&mut option_error, "ERRCODE");
+                    continue;
                 }
                 errcode_expr = Some(option.expr.clone());
             }
             "column" | "column_name" => {
                 if column_expr.is_some() {
-                    return duplicate_raise_option("COLUMN");
+                    record_duplicate_raise_option(&mut option_error, "COLUMN");
+                    continue;
                 }
                 column_expr = Some(option.expr.clone());
             }
             "constraint" | "constraint_name" => {
                 if constraint_expr.is_some() {
-                    return duplicate_raise_option("CONSTRAINT");
+                    record_duplicate_raise_option(&mut option_error, "CONSTRAINT");
+                    continue;
                 }
                 constraint_expr = Some(option.expr.clone());
             }
             "datatype" | "datatype_name" => {
                 if datatype_expr.is_some() {
-                    return duplicate_raise_option("DATATYPE");
+                    record_duplicate_raise_option(&mut option_error, "DATATYPE");
+                    continue;
                 }
                 datatype_expr = Some(option.expr.clone());
             }
             "table" | "table_name" => {
                 if table_expr.is_some() {
-                    return duplicate_raise_option("TABLE");
+                    record_duplicate_raise_option(&mut option_error, "TABLE");
+                    continue;
                 }
                 table_expr = Some(option.expr.clone());
             }
             "schema" | "schema_name" => {
                 if schema_expr.is_some() {
-                    return duplicate_raise_option("SCHEMA");
+                    record_duplicate_raise_option(&mut option_error, "SCHEMA");
+                    continue;
                 }
                 schema_expr = Some(option.expr.clone());
             }
@@ -1493,52 +1738,89 @@ fn compile_raise_stmt(
         message,
         message_expr: message_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         detail_expr: detail_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         hint_expr: hint_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         errcode_expr: errcode_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         column_expr: column_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         constraint_expr: constraint_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         datatype_expr: datatype_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         table_expr: table_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         schema_expr: schema_expr
             .as_deref()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .transpose()?,
         params: params
             .iter()
-            .map(|expr| compile_expr_text(expr, catalog, env))
+            .map(|expr| compile_raise_expr_text(expr, catalog, env))
             .collect::<Result<_, _>>()?,
+        option_error,
     })
 }
 
-fn duplicate_raise_option<T>(name: &str) -> Result<T, ParseError> {
-    Err(ParseError::UnexpectedToken {
+fn compile_raise_expr_text(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledExpr, ParseError> {
+    match compile_expr_text(sql, catalog, env) {
+        Ok(expr) => Ok(expr),
+        Err(err) if should_defer_raise_expr_error(&err) => Ok(CompiledExpr::DeferredError {
+            source: sql.trim().to_string(),
+            err: position_deferred_raise_expr_error(err, sql),
+        }),
+        Err(err) => Err(err),
+    }
+}
+
+fn should_defer_raise_expr_error(err: &ParseError) -> bool {
+    matches!(err.unpositioned(), ParseError::UnknownColumn(_))
+}
+
+fn position_deferred_raise_expr_error(err: ParseError, source: &str) -> ParseError {
+    if err.position().is_some() {
+        return err;
+    }
+    let ParseError::UnknownColumn(name) = err.unpositioned() else {
+        return err;
+    };
+    let position = identifier_position(source, name)
+        .map(|position| position + 1)
+        .unwrap_or(1);
+    err.with_position(position)
+}
+
+fn record_duplicate_raise_option(option_error: &mut Option<ParseError>, name: &str) {
+    option_error.get_or_insert_with(|| duplicate_raise_option_error(name));
+}
+
+fn duplicate_raise_option_error(name: &str) -> ParseError {
+    ParseError::UnexpectedToken {
         expected: "RAISE option specified once",
         actual: format!("RAISE option already specified: {name}"),
-    })
+    }
 }
 
 fn compile_return_stmt(
@@ -2431,7 +2713,10 @@ fn compile_exec_sql_stmt(
         };
     }
 
-    if let Some((target_names, select_sql, strict)) = split_select_with_into_targets(sql) {
+    if let Some((target_names, select_sql, strict)) =
+        split_cte_prefixed_select_with_into_targets(sql)
+            .or_else(|| split_select_with_into_targets(sql))
+    {
         let targets = target_names
             .iter()
             .map(|target| parse_select_into_assign_target(target))
@@ -2473,10 +2758,11 @@ fn compile_exec_sql_stmt(
             line: 1,
             sql: Some(rewritten_sql.clone()),
         }),
-        Statement::Insert(stmt) => match bind_insert_with_outer_scopes(
+        Statement::Insert(stmt) => match bind_insert_with_outer_scopes_and_ctes(
             &normalize_plpgsql_insert(stmt, env),
             catalog,
             &outer_scopes,
+            &env.local_ctes,
         ) {
             Ok(stmt) => Ok(CompiledStmt::ExecInsert { stmt }),
             Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => Ok(CompiledStmt::RuntimeSql {
@@ -2488,10 +2774,11 @@ fn compile_exec_sql_stmt(
         Statement::Update(stmt) => {
             let scope = runtime_sql_scope(env);
             let param_scope = runtime_sql_param_bound_scope(&scope);
-            match bind_update_with_outer_scopes(
+            match bind_update_with_outer_scopes_and_ctes(
                 &normalize_plpgsql_update(stmt, env),
                 catalog,
                 &[param_scope],
+                &env.local_ctes,
             ) {
                 Ok(stmt) => Ok(CompiledStmt::ExecUpdate { stmt, scope }),
                 Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => {
@@ -2503,10 +2790,11 @@ fn compile_exec_sql_stmt(
                 Err(err) => Err(err),
             }
         }
-        Statement::Delete(stmt) => match bind_delete_with_outer_scopes(
+        Statement::Delete(stmt) => match bind_delete_with_outer_scopes_and_ctes(
             &normalize_plpgsql_delete(stmt, env),
             catalog,
             &outer_scopes,
+            &env.local_ctes,
         ) {
             Ok(stmt) => Ok(CompiledStmt::ExecDelete { stmt }),
             Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => Ok(CompiledStmt::RuntimeSql {
@@ -2971,6 +3259,13 @@ fn compile_for_query_stmt(
                     },
                     static_query_source_known_columns(sql),
                 ),
+                Err(err) if should_defer_static_for_query_error(&err) => (
+                    CompiledForQuerySource::DeferredError {
+                        sql: normalize_sql_context_text(sql),
+                        err: position_static_for_query_error(err, sql),
+                    },
+                    static_query_source_known_columns(sql),
+                ),
                 Err(err) => return Err(err),
             }
         }
@@ -3014,6 +3309,36 @@ fn compile_for_query_stmt(
         source,
         body,
     })
+}
+
+fn should_defer_static_for_query_error(err: &ParseError) -> bool {
+    matches!(
+        err.unpositioned(),
+        ParseError::DetailedError { sqlstate, .. } if *sqlstate == "42702"
+    )
+}
+
+fn position_static_for_query_error(err: ParseError, sql: &str) -> ParseError {
+    if err.position().is_some() {
+        return err;
+    }
+    let Some(name) = ambiguous_column_name(&err) else {
+        return err;
+    };
+    let position = identifier_position(sql, name)
+        .map(|position| position + 1)
+        .unwrap_or(1);
+    err.with_position(position)
+}
+
+fn ambiguous_column_name(err: &ParseError) -> Option<&str> {
+    let ParseError::DetailedError { message, .. } = err.unpositioned() else {
+        return None;
+    };
+    message
+        .strip_prefix("column reference \"")
+        .and_then(|rest| rest.split_once('"'))
+        .map(|(name, _)| name)
 }
 
 fn implicit_query_loop_record_name<'a>(target: &'a ForTarget, env: &CompileEnv) -> Option<&'a str> {
@@ -3118,7 +3443,12 @@ fn compile_exec_returning_into_stmt(
     match stmt {
         Statement::Insert(stmt) => {
             let stmt = normalize_plpgsql_insert(stmt, env);
-            let bound = bind_insert_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
+            let bound = bind_insert_with_outer_scopes_and_ctes(
+                &stmt,
+                catalog,
+                &[outer_scope],
+                &env.local_ctes,
+            )?;
             let targets = compile_dml_into_targets(
                 target_refs,
                 bound
@@ -3137,7 +3467,12 @@ fn compile_exec_returning_into_stmt(
             let scope = runtime_sql_scope(env);
             let param_scope = runtime_sql_param_bound_scope(&scope);
             let stmt = normalize_plpgsql_update(stmt, env);
-            let bound = bind_update_with_outer_scopes(&stmt, catalog, &[param_scope])?;
+            let bound = bind_update_with_outer_scopes_and_ctes(
+                &stmt,
+                catalog,
+                &[param_scope],
+                &env.local_ctes,
+            )?;
             let targets = compile_dml_into_targets(
                 target_refs,
                 bound
@@ -3155,7 +3490,12 @@ fn compile_exec_returning_into_stmt(
         }
         Statement::Delete(stmt) => {
             let stmt = normalize_plpgsql_delete(stmt, env);
-            let bound = bind_delete_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
+            let bound = bind_delete_with_outer_scopes_and_ctes(
+                &stmt,
+                catalog,
+                &[outer_scope],
+                &env.local_ctes,
+            )?;
             let targets = compile_dml_into_targets(
                 target_refs,
                 bound
@@ -3230,39 +3570,48 @@ fn dynamic_sql_literal_result_columns(
         )
         .ok()
         .map(|plan| plan.columns()),
-        Statement::Insert(stmt) => {
-            bind_insert_with_outer_scopes(&stmt, catalog, std::slice::from_ref(&outer_scope))
-                .ok()
-                .map(|bound| {
-                    bound
-                        .returning
-                        .iter()
-                        .map(target_entry_query_column)
-                        .collect()
-                })
-        }
-        Statement::Update(stmt) => {
-            bind_update_with_outer_scopes(&stmt, catalog, std::slice::from_ref(&outer_scope))
-                .ok()
-                .map(|bound| {
-                    bound
-                        .returning
-                        .iter()
-                        .map(target_entry_query_column)
-                        .collect()
-                })
-        }
-        Statement::Delete(stmt) => {
-            bind_delete_with_outer_scopes(&stmt, catalog, std::slice::from_ref(&outer_scope))
-                .ok()
-                .map(|bound| {
-                    bound
-                        .returning
-                        .iter()
-                        .map(target_entry_query_column)
-                        .collect()
-                })
-        }
+        Statement::Insert(stmt) => bind_insert_with_outer_scopes_and_ctes(
+            &stmt,
+            catalog,
+            std::slice::from_ref(&outer_scope),
+            &env.local_ctes,
+        )
+        .ok()
+        .map(|bound| {
+            bound
+                .returning
+                .iter()
+                .map(target_entry_query_column)
+                .collect()
+        }),
+        Statement::Update(stmt) => bind_update_with_outer_scopes_and_ctes(
+            &stmt,
+            catalog,
+            std::slice::from_ref(&outer_scope),
+            &env.local_ctes,
+        )
+        .ok()
+        .map(|bound| {
+            bound
+                .returning
+                .iter()
+                .map(target_entry_query_column)
+                .collect()
+        }),
+        Statement::Delete(stmt) => bind_delete_with_outer_scopes_and_ctes(
+            &stmt,
+            catalog,
+            std::slice::from_ref(&outer_scope),
+            &env.local_ctes,
+        )
+        .ok()
+        .map(|bound| {
+            bound
+                .returning
+                .iter()
+                .map(target_entry_query_column)
+                .collect()
+        }),
         _ => None,
     }
 }
@@ -3336,7 +3685,14 @@ fn compile_expr_sql(
         expr,
         subplans,
         source: source.trim().to_string(),
+        nonstandard_string_warning: env.nonstandard_string_literals
+            && nonstandard_string_warning_source(source),
     })
+}
+
+fn nonstandard_string_warning_source(source: &str) -> bool {
+    let trimmed = source.trim_start();
+    trimmed.starts_with('\'') && trimmed.contains('\\')
 }
 
 fn bind_dynamic_record_field_expr(expr: &SqlExpr, env: &CompileEnv) -> Option<Expr> {
@@ -3400,6 +3756,7 @@ fn compile_condition_text(
                             "query-style PL/pgSQL conditions do not support query comparisons on both sides".into(),
                         ))
                     }
+                    CompiledExpr::DeferredError { err, .. } => return Err(err),
                 };
                 return Ok(CompiledExpr::QueryCompare {
                     plan,

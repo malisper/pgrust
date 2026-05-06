@@ -109,6 +109,30 @@ pub fn push_plpgsql_notice(
             detail,
             hint,
             context: current_plpgsql_context(),
+            position: None,
+            internal_query: None,
+            internal_position: None,
+        })
+    });
+}
+
+pub fn queue_plpgsql_warning_with_internal_query(
+    message: &str,
+    hint: Option<String>,
+    internal_query: String,
+    internal_position: Option<usize>,
+) {
+    NOTICE_QUEUE.with(|queue| {
+        queue.borrow_mut().push(PlpgsqlNotice {
+            level: RaiseLevel::Warning,
+            sqlstate: "01000".into(),
+            message: message.into(),
+            detail: None,
+            hint,
+            context: current_plpgsql_context(),
+            position: None,
+            internal_query: Some(internal_query),
+            internal_position,
         })
     });
 }

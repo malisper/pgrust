@@ -39,18 +39,18 @@ use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
     BoundCte, BoundModifyingCte, BoundWritableCte, CallStatement, CatalogLookup, CommonTableExpr,
     CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
-    CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
-    CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause, DeallocateStatement,
-    DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource,
-    InsertStatement, MergeAction, MergeInsertSource, MergeStatement, OrderByItem, ParseError,
-    ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert, PreparedStatementQuery,
-    RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RuleEvent, SelectItem,
-    SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, SqlType, SqlTypeKind, Statement,
-    TransactionOptions, UpdateStatement, ValuesStatement, analyze_select_query_with_outer,
-    bind_delete, bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
-    bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope, bind_update,
-    bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_columns,
-    cte_body_references_table, delete_statement_references_table,
+    CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionBodyKind,
+    CreateFunctionStatement, CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause,
+    DeallocateStatement, DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem,
+    GroupByItem, InsertSource, InsertStatement, MergeAction, MergeInsertSource, MergeStatement,
+    OrderByItem, ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
+    PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
+    RuleEvent, SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, SqlType,
+    SqlTypeKind, Statement, TransactionOptions, UpdateStatement, ValuesStatement,
+    analyze_select_query_with_outer, bind_delete, bind_delete_with_outer_scopes_and_ctes,
+    bind_insert, bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes,
+    bind_scalar_expr_in_named_slot_scope, bind_update, bind_update_with_outer_scopes_and_ctes,
+    bound_cte_from_query_columns, cte_body_references_table, delete_statement_references_table,
     insert_statement_references_table, merge_statement_references_table, pg_plan_query_with_config,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
     plan_merge, plan_merge_with_outer_ctes, raw_type_name_is_unknown, resolve_raw_type_name,
@@ -81,7 +81,7 @@ use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
 };
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
-use crate::backend::utils::misc::notices::push_warning_with_hint;
+use crate::backend::utils::misc::notices::{push_backend_notice_with_hint, push_warning_with_hint};
 use crate::backend::utils::misc::stack_depth::{
     MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, max_stack_depth_limit_kb,
 };
@@ -3086,6 +3086,9 @@ fn current_of_view_error() -> ExecError {
 }
 
 fn locate_current_of_clause(sql: &str) -> Option<(usize, usize, String)> {
+    if !top_level_statement_can_use_current_of(sql) {
+        return None;
+    }
     let lower = sql.to_ascii_lowercase();
     let marker = "current of";
     let start = lower.find(marker)?;
@@ -3109,6 +3112,18 @@ fn locate_current_of_clause(sql: &str) -> Option<(usize, usize, String)> {
         cursor_end += 1;
     }
     Some((start, cursor_end, sql[cursor_start..cursor_end].to_string()))
+}
+
+fn top_level_statement_can_use_current_of(sql: &str) -> bool {
+    let first_word = sql
+        .trim_start()
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default();
+    matches!(
+        first_word.to_ascii_lowercase().as_str(),
+        "update" | "delete"
+    )
 }
 
 fn unqualified_relation_name(name: &str) -> String {
@@ -3385,6 +3400,76 @@ fn foreign_key_constraint_family_oids(
     family
 }
 
+struct PlpgsqlNonstandardStringWarning {
+    literal_start: usize,
+    duplicate_for_return: bool,
+}
+
+fn plpgsql_nonstandard_string_warnings(body: &str) -> Vec<PlpgsqlNonstandardStringWarning> {
+    let bytes = body.as_bytes();
+    let mut warnings = Vec::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'\'' {
+            idx += 1;
+            continue;
+        }
+        if idx > 0
+            && matches!(bytes[idx - 1], b'e' | b'E')
+            && (idx == 1 || !is_sql_identifier_byte(bytes[idx - 2]))
+        {
+            idx += 1;
+            continue;
+        }
+        let literal_start = idx;
+        idx += 1;
+        let mut has_backslash = false;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'\\' => {
+                    has_backslash = true;
+                    idx += 1;
+                }
+                b'\'' if bytes.get(idx + 1) == Some(&b'\'') => {
+                    idx += 2;
+                }
+                b'\'' => {
+                    idx += 1;
+                    break;
+                }
+                _ => idx += 1,
+            }
+        }
+        if has_backslash {
+            warnings.push(PlpgsqlNonstandardStringWarning {
+                literal_start: body[..literal_start].chars().count(),
+                duplicate_for_return: plpgsql_literal_is_return_expr(body, literal_start),
+            });
+        }
+    }
+    warnings
+}
+
+fn create_function_body_position(sql: &str, body: &str) -> Option<usize> {
+    let byte_offset = sql.find(body)?;
+    Some(sql[..byte_offset].chars().count() + 1)
+}
+
+fn is_sql_identifier_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
+}
+
+fn plpgsql_literal_is_return_expr(body: &str, literal_start: usize) -> bool {
+    let line_start = body[..literal_start]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    body[line_start..literal_start]
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("return")
+}
+
 impl Session {
     const DEFAULT_MAINTENANCE_WORK_MEM_KB: usize = 65_536;
 
@@ -3556,6 +3641,44 @@ impl Session {
                 .as_deref(),
             Some("off" | "false")
         )
+    }
+
+    fn queue_plpgsql_nonstandard_string_warnings(
+        &self,
+        sql: &str,
+        create_stmt: &CreateFunctionStatement,
+    ) {
+        if self.standard_conforming_strings()
+            || !self.escape_string_warning()
+            || !create_stmt.language.eq_ignore_ascii_case("plpgsql")
+            || !matches!(create_stmt.body_kind, CreateFunctionBodyKind::As)
+        {
+            return;
+        }
+        let Some(body_position) = create_function_body_position(sql, &create_stmt.body) else {
+            return;
+        };
+        for warning in plpgsql_nonstandard_string_warnings(&create_stmt.body) {
+            let position = body_position + warning.literal_start;
+            push_backend_notice_with_hint(
+                "WARNING",
+                "01000",
+                r"nonstandard use of \\ in a string literal",
+                None,
+                Some(r"Use the escape string syntax for backslashes, e.g., E'\\'.".into()),
+                Some(position),
+            );
+            if warning.duplicate_for_return {
+                push_backend_notice_with_hint(
+                    "WARNING",
+                    "01000",
+                    r"nonstandard use of \\ in a string literal",
+                    None,
+                    Some(r"Use the escape string syntax for backslashes, e.g., E'\\'.".into()),
+                    Some(position),
+                );
+            }
+        }
     }
 
     pub fn allow_in_place_tablespaces(&self) -> bool {
@@ -8880,6 +9003,7 @@ impl Session {
                 }
             }
             Statement::CreateFunction(ref create_stmt) => {
+                self.queue_plpgsql_nonstandard_string_warnings(sql, create_stmt);
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {

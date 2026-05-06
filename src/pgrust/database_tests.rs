@@ -4638,8 +4638,27 @@ fn query_text_column(session: &mut Session, db: &Database, sql: &str) -> Vec<Str
 
 fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
     match err {
-        ExecError::WithContext { source, .. } => {
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => {
             assert_sqlstate(*source, expected_sqlstate, expected_message_part)
+        }
+        ExecError::Parse(ParseError::Positioned { source, .. }) => assert_sqlstate(
+            ExecError::Parse(*source),
+            expected_sqlstate,
+            expected_message_part,
+        ),
+        ExecError::Parse(ParseError::WithContext { source, .. }) => assert_sqlstate(
+            ExecError::Parse(*source),
+            expected_sqlstate,
+            expected_message_part,
+        ),
+        ExecError::Parse(ParseError::UnknownColumn(name)) => {
+            assert_eq!(expected_sqlstate, "42703");
+            let message = format!("column \"{name}\" does not exist");
+            assert!(
+                message.contains(expected_message_part),
+                "expected message to contain {expected_message_part:?}, got {message:?}"
+            );
         }
         ExecError::DetailedError {
             message, sqlstate, ..
@@ -4669,6 +4688,17 @@ fn exec_error_context_contains(err: &ExecError, needle: &str) -> bool {
         ExecError::WithContext { source, context } => {
             context.contains(needle) || exec_error_context_contains(source, needle)
         }
+        ExecError::WithInternalQueryContext {
+            source, context, ..
+        } => context.contains(needle) || exec_error_context_contains(source, needle),
+        _ => false,
+    }
+}
+
+fn exec_error_internal_query_contains(err: &ExecError, needle: &str) -> bool {
+    match err {
+        ExecError::WithInternalQueryContext { query, .. } => query.contains(needle),
+        ExecError::WithContext { source, .. } => exec_error_internal_query_contains(source, needle),
         _ => false,
     }
 }
@@ -15500,6 +15530,53 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
 }
 
 #[test]
+fn plpgsql_anyarray_pg_statistic_argument_rejected_at_compile() {
+    let dir = temp_dir("plpgsql_anyarray_pg_statistic_arg");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table anyarray_stats_t(a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into anyarray_stats_t
+             select generate_series(1, 10)",
+        )
+        .unwrap();
+    session.execute(&db, "analyze anyarray_stats_t").unwrap();
+    session
+        .execute(
+            &db,
+            "create function anyarray_identity_for_stats(x anyarray)
+             returns anyarray
+             language plpgsql
+             as $$ begin return x; end $$",
+        )
+        .unwrap();
+
+    let err = session
+        .execute(
+            &db,
+            "select anyarray_identity_for_stats(stavalues1) from pg_statistic",
+        )
+        .unwrap_err();
+    match &err {
+        ExecError::WithContext { context, .. } => assert_eq!(
+            context,
+            "compilation of PL/pgSQL function \"anyarray_identity_for_stats\" near line 1"
+        ),
+        other => panic!("expected PL/pgSQL compile context, got {other:?}"),
+    }
+    assert_sqlstate(
+        err,
+        "0A000",
+        "PL/pgSQL functions cannot accept type anyarray",
+    );
+}
+
+#[test]
 fn pg_stats_hides_rows_when_row_security_is_active() {
     let dir = temp_dir("pg_stats_rls_filter");
     let db = Database::open(&dir, 128).unwrap();
@@ -23906,6 +23983,49 @@ fn plpgsql_get_stacked_diagnostics_requires_exception_handler() {
 }
 
 #[test]
+fn plpgsql_raise_sqlstate_outside_exception_errors_at_raise() {
+    let base = temp_dir("plpgsql_raise_sqlstate_outside_exception");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_bad_sqlstate_raise() returns void language plpgsql as $$
+         begin
+           raise notice '%', sqlstate;
+         end
+         $$",
+    )
+    .unwrap();
+
+    match db.execute(1, "select plpgsql_bad_sqlstate_raise()") {
+        Err(ExecError::WithContext { source, context }) => {
+            assert_eq!(
+                context,
+                "PL/pgSQL function plpgsql_bad_sqlstate_raise() line 3 at RAISE"
+            );
+            match source.as_ref() {
+                ExecError::WithInternalQueryContext {
+                    source,
+                    query,
+                    position,
+                    context,
+                } => {
+                    assert_eq!(query, "sqlstate");
+                    assert_eq!(*position, Some(1));
+                    assert!(context.is_empty());
+                    assert!(matches!(
+                        source.as_ref(),
+                        ExecError::Parse(ParseError::Positioned { .. })
+                    ));
+                }
+                other => panic!("expected internal query context, got {other:?}"),
+            }
+        }
+        other => panic!("expected RAISE-time sqlstate error, got {other:?}"),
+    }
+}
+
+#[test]
 fn plpgsql_exception_sqlstate_condition_matches_error_code() {
     let base = temp_dir("plpgsql_exception_sqlstate_condition");
     let db = Database::open(&base, 16).unwrap();
@@ -24090,6 +24210,50 @@ fn plpgsql_declare_default_scope_matches_declaration_order() {
 }
 
 #[test]
+fn plpgsql_declare_default_scope_rejects_self_and_later_vars() {
+    let base = temp_dir("plpgsql_declare_default_scope_errors");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "do $$
+             declare x int := x + 1;
+             begin
+               raise notice 'x = %', x;
+             end
+             $$",
+        )
+        .unwrap_err();
+    assert!(exec_error_internal_query_contains(&err, "x + 1"));
+    assert!(exec_error_context_contains(
+        &err,
+        "during statement block local variable initialization"
+    ));
+    assert_sqlstate(err, "42703", "column \"x\" does not exist");
+
+    let err = session
+        .execute(
+            &db,
+            "do $$
+             declare y int := x + 1;
+                     x int := 42;
+             begin
+               raise notice 'x = %, y = %', x, y;
+             end
+             $$",
+        )
+        .unwrap_err();
+    assert!(exec_error_internal_query_contains(&err, "x + 1"));
+    assert!(exec_error_context_contains(
+        &err,
+        "during statement block local variable initialization"
+    ));
+    assert_sqlstate(err, "42703", "column \"x\" does not exist");
+}
+
+#[test]
 fn plpgsql_variable_conflict_modes_control_static_select_resolution() {
     let base = temp_dir("plpgsql_variable_conflict_modes");
     let db = Database::open(&base, 16).unwrap();
@@ -24122,13 +24286,15 @@ fn plpgsql_variable_conflict_modes_control_static_select_resolution() {
         )
         .unwrap();
 
-    assert_sqlstate(
-        session
-            .execute(&db, "select plpgsql_conflict_test()")
-            .unwrap_err(),
-        "42702",
-        "column reference \"q1\" is ambiguous",
-    );
+    let err = session
+        .execute(&db, "select plpgsql_conflict_test()")
+        .unwrap_err();
+    assert!(exec_error_context_contains(&err, "at FOR over SELECT rows"));
+    assert!(exec_error_internal_query_contains(
+        &err,
+        "select q1, q2 from plpgsql_conflict_src"
+    ));
+    assert_sqlstate(err, "42702", "column reference \"q1\" is ambiguous");
 
     session
         .execute(
@@ -24174,6 +24340,51 @@ fn plpgsql_variable_conflict_modes_control_static_select_resolution() {
     assert_eq!(
         session_query_rows(&mut session, &db, "select plpgsql_conflict_test()"),
         vec![vec![Value::Text("10,20".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_foreach_slice_assigns_composite_array_target() {
+    let base = temp_dir("plpgsql_foreach_composite_array_slice");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type plpgsql_xy_tuple as (x int4, y int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_foreach_composite_slice(anyarray) returns text language plpgsql as $$
+         declare
+           x plpgsql_xy_tuple[];
+           out_text text := '';
+         begin
+           foreach x slice 1 in array $1 loop
+             out_text := out_text || case when out_text = '' then '' else ';' end || x::text;
+           end loop;
+           return out_text;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select plpgsql_foreach_composite_slice(ARRAY[(10,20),(40,69),(35,78)]::plpgsql_xy_tuple[])"
+        ),
+        vec![vec![Value::Text(
+            "{\"(10,20)\",\"(40,69)\",\"(35,78)\"}".into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select plpgsql_foreach_composite_slice(ARRAY[[(10,20),(40,69)],[(35,78),(88,76)]]::plpgsql_xy_tuple[])"
+        ),
+        vec![vec![Value::Text(
+            "{\"(10,20)\",\"(40,69)\"};{\"(35,78)\",\"(88,76)\"}".into()
+        )]]
     );
 }
 
@@ -25228,14 +25439,12 @@ fn transition_tables_cannot_be_referenced_by_persistent_objects() {
     )
     .unwrap();
 
-    match db.execute(1, "insert into items values (42)") {
-        Err(ExecError::Parse(ParseError::DetailedError {
-            message, sqlstate, ..
-        })) if message
-            == "transition table \"new_table\" cannot be referenced in a persistent object"
-            && sqlstate == "0A000" => {}
-        other => panic!("expected persistent transition-table reference error, got {other:?}"),
-    }
+    let err = db.execute(1, "insert into items values (42)").unwrap_err();
+    assert_sqlstate(
+        err,
+        "0A000",
+        "transition table \"new_table\" cannot be referenced in a persistent object",
+    );
 }
 
 #[test]
@@ -27401,17 +27610,26 @@ fn regclass_array_literal_resolves_relation_names() {
 }
 
 #[test]
-fn regclass_cast_reports_missing_relation_for_qualified_name() {
+fn regclass_cast_reports_missing_schema_for_qualified_name() {
     let base = temp_dir("regclass_missing_relation");
     let db = Database::open(&base, 16).unwrap();
 
     let err = db
         .execute(1, "select 'nonexistent.stuffs'::regclass")
         .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::UnknownTable(ref name)) if name == "nonexistent.stuffs"
-    ));
+    match err {
+        ExecError::DetailedError {
+            message,
+            sqlstate: "3F000",
+            ..
+        }
+        | ExecError::Parse(ParseError::DetailedError {
+            message,
+            sqlstate: "3F000",
+            ..
+        }) if message == "schema \"nonexistent\" does not exist" => {}
+        other => panic!("expected missing schema regclass error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -65963,6 +66181,62 @@ fn plpgsql_composite_return_handles_null_and_scalar_mismatch() {
 }
 
 #[test]
+fn plpgsql_named_composite_return_row_requires_exact_field_types() {
+    let dir = temp_dir("plpgsql_composite_return_exact_field_types");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type pl_comp_return_varchar as (i int4, note varchar)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_comp_return_untyped_text() returns pl_comp_return_varchar language plpgsql as $$
+         begin
+           return (1, 'hello');
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db
+        .execute(1, "select pl_comp_return_untyped_text()")
+        .unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "while casting return value to function's return type"
+    ));
+    assert!(
+        format!("{err:?}").contains("returned record type does not match expected record type"),
+        "expected record type mismatch, got {err:?}"
+    );
+    assert!(
+        format!("{err:?}")
+            .contains("Returned type unknown does not match expected type character varying"),
+        "expected unknown/varchar detail, got {err:?}"
+    );
+
+    db.execute(
+        1,
+        "create function pl_comp_return_cast_text() returns pl_comp_return_varchar language plpgsql as $$
+         begin
+           return (1, 'hello'::varchar);
+         end
+         $$",
+    )
+    .unwrap();
+    let rows = query_rows(&db, 1, "select pl_comp_return_cast_text()");
+    let Value::Record(record) = &rows[0][0] else {
+        panic!("expected composite value, got {:?}", rows[0][0]);
+    };
+    assert_eq!(
+        record.fields,
+        vec![Value::Int32(1), Value::Text("hello".into())]
+    );
+}
+
+#[test]
 fn plpgsql_return_query_uses_current_composite_shape() {
     let dir = temp_dir("plpgsql_return_query_current_shape");
     let db = Database::open(&dir, 64).unwrap();
@@ -66128,7 +66402,13 @@ fn plpgsql_nonstandard_string_literals_decode_backslashes() {
         panic!("expected query result");
     };
     assert_eq!(rows, vec![vec![Value::Text("foo\\bar!baz".into())]]);
-    assert_eq!(take_notice_messages(), vec!["foo\\bar!baz".to_string()]);
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "foo\\bar!baz".to_string(),
+            r"nonstandard use of \\ in a string literal".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -66321,7 +66601,7 @@ fn plpgsql_return_expression_errors_include_expression_context() {
     .unwrap();
 
     let err = db.execute(1, "select return_expr_context()").unwrap_err();
-    assert!(!exec_error_context_contains(
+    assert!(exec_error_context_contains(
         &err,
         "PL/pgSQL expression \"1/0\""
     ));
@@ -66380,6 +66660,44 @@ fn plpgsql_return_cast_errors_include_cast_context() {
     assert!(exec_error_context_contains(
         &err,
         "PL/pgSQL function return_cast_context() while casting return value to function's return type"
+    ));
+}
+
+#[test]
+fn plpgsql_return_assignment_cast_preserves_sql_function_context() {
+    let dir = temp_dir("plpgsql_return_assignment_cast_sql_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function sql_to_date(integer) returns date language sql immutable strict as $$
+         select $1::text::date
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create cast (integer as date) with function sql_to_date(integer) as assignment",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function cast_invoker(integer) returns date language plpgsql as $$
+         begin
+           return $1;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select cast_invoker(-1)").unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "SQL function \"sql_to_date\" statement 1"
+    ));
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function cast_invoker(integer) while casting return value to function's return type"
     ));
 }
 
@@ -67320,24 +67638,46 @@ fn plpgsql_raise_placeholder_mismatch_fails_at_create_time() {
     let too_many = db
         .execute(
             1,
-            "create function bad_raise_many(x int4) returns int4 language plpgsql as $$ begin raise notice 'missing placeholder', x; return x; end $$",
+            "create function bad_raise_many(x int4) returns int4 language plpgsql as $$
+             begin
+               raise notice 'missing placeholder', x;
+               return x;
+             end $$",
         )
         .unwrap_err();
     assert!(
         format!("{too_many:?}").contains("too many parameters specified for RAISE"),
         "{too_many:?}"
     );
+    match &too_many {
+        ExecError::WithContext { context, .. } => assert_eq!(
+            context,
+            "compilation of PL/pgSQL function \"bad_raise_many\" near line 3"
+        ),
+        other => panic!("expected PL/pgSQL compile context, got {other:?}"),
+    }
 
     let too_few = db
         .execute(
             1,
-            "create function bad_raise_few(x int4) returns int4 language plpgsql as $$ begin raise notice '%, %', x; return x; end $$",
+            "create function bad_raise_few(x int4) returns int4 language plpgsql as $$
+             begin
+               raise notice '%, %', x;
+               return x;
+             end $$",
         )
         .unwrap_err();
     assert!(
         format!("{too_few:?}").contains("too few parameters specified for RAISE"),
         "{too_few:?}"
     );
+    match &too_few {
+        ExecError::WithContext { context, .. } => assert_eq!(
+            context,
+            "compilation of PL/pgSQL function \"bad_raise_few\" near line 3"
+        ),
+        other => panic!("expected PL/pgSQL compile context, got {other:?}"),
+    }
 }
 
 #[test]

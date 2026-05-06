@@ -21,10 +21,10 @@ use crate::backend::libpq::pqformat::{
     send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
     send_error_with_hint, send_error_with_internal_fields, send_no_data, send_notice,
     send_notice_with_context_fields, send_notice_with_fields, send_notice_with_hint,
-    send_notice_with_severity, send_notification_response, send_parameter_description,
-    send_parameter_status, send_parse_complete, send_portal_suspended, send_query_result,
-    send_ready_for_query, send_row_description, send_row_description_with_formats,
-    send_typed_data_row, validate_binary_result_formats,
+    send_notice_with_internal_fields, send_notice_with_severity, send_notification_response,
+    send_parameter_description, send_parameter_status, send_parse_complete, send_portal_suspended,
+    send_query_result, send_ready_for_query, send_row_description,
+    send_row_description_with_formats, send_typed_data_row, validate_binary_result_formats,
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
@@ -361,6 +361,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return Some(position);
         }
         if context.starts_with("COPY ") {
+            return None;
+        }
+        if context.starts_with("SQL function ") {
             return None;
         }
         return exec_error_position(sql, source);
@@ -14249,7 +14252,7 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
             RaiseLevel::Warning => "WARNING",
             RaiseLevel::Exception => continue,
         };
-        send_notice_with_context_fields(
+        send_notice_with_internal_fields(
             stream,
             severity,
             &notice.sqlstate,
@@ -14257,7 +14260,9 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
             notice.detail.as_deref(),
             notice.hint.as_deref(),
             notice.context.as_deref(),
-            None,
+            notice.position,
+            notice.internal_query.as_deref(),
+            notice.internal_position,
         )?;
     }
     Ok(())

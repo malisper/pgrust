@@ -140,12 +140,17 @@ pub enum CompiledExpr {
         expr: Expr,
         subplans: Vec<Plan>,
         source: String,
+        nonstandard_string_warning: bool,
     },
     QueryCompare {
         plan: PlannedStmt,
         op: QueryCompareOp,
         rhs: Expr,
         source: String,
+    },
+    DeferredError {
+        source: String,
+        err: pgrust_nodes::parsenodes::ParseError,
     },
 }
 
@@ -198,6 +203,10 @@ pub struct RuntimeSqlScope {
 pub enum CompiledForQuerySource {
     Static {
         plan: PlannedStmt,
+    },
+    DeferredError {
+        sql: String,
+        err: pgrust_nodes::parsenodes::ParseError,
     },
     Runtime {
         sql: String,
@@ -379,6 +388,7 @@ pub enum CompiledStmt {
         table_expr: Option<CompiledExpr>,
         schema_expr: Option<CompiledExpr>,
         params: Vec<CompiledExpr>,
+        option_error: Option<pgrust_nodes::parsenodes::ParseError>,
         line: usize,
     },
     Reraise,
