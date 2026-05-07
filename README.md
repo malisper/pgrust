@@ -14,6 +14,8 @@
 
 [**Latest update: 67% Postgres compatibility and accelerating.**](https://malisper.me/pgrust-update-at-67-postgres-compatibility-and-accelerating/)
 
+**Next update:** blog post 3 is coming soon. Link TBD.
+
 ## **Why?**
 
 **PostgreSQL has been in development for 40 years. But some architectural decisions from 80s keep showing up as operational pain:**
