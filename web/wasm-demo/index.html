@@ -57,6 +57,46 @@
         background: var(--terminal-bg);
       }
 
+      .site-links {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 16px;
+        background: #181b22;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .site-mark {
+        color: var(--prompt);
+        font-size: 12px;
+      }
+
+      .site-link-list {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .site-link {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        padding: 6px 10px;
+        border: 1px solid #596173;
+        border-radius: 4px;
+        color: var(--ink);
+        background: #252a34;
+        font-size: 12px;
+        text-decoration: none;
+      }
+
+      .site-link:hover {
+        filter: brightness(1.08);
+      }
+
       .toolbar {
         display: flex;
         align-items: center;
@@ -183,6 +223,15 @@
       }
 
       @media (max-width: 720px) {
+        .site-links {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .site-link-list {
+          justify-content: flex-start;
+        }
+
         .footer {
           align-items: flex-start;
           flex-direction: column;
@@ -193,6 +242,13 @@
   <body>
     <main>
       <section class="terminal">
+        <div class="site-links">
+          <div class="site-mark">pgrust</div>
+          <nav class="site-link-list" aria-label="pgrust links">
+            <a class="site-link" href="https://github.com/malisper/pgrust" target="_blank" rel="noreferrer">GitHub</a>
+            <a class="site-link" href="https://malisper.me/pgrust-update-at-67-postgres-compatibility-and-accelerating/" target="_blank" rel="noreferrer">Latest post</a>
+          </nav>
+        </div>
         <div class="toolbar">
           <div class="title">pgrust wasm demo</div>
           <label for="example-select">example</label>
