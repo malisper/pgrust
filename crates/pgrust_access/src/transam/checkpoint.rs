@@ -709,6 +709,11 @@ impl Checkpointer {
         trigger: CheckpointTrigger,
     ) -> Result<CheckpointExecution, String> {
         let _checkpoint_barrier = self.commit_barrier.begin_checkpoint();
+        let redo_lsn = self
+            .wal
+            .as_ref()
+            .map(|wal| wal.insert_lsn())
+            .unwrap_or(INVALID_LSN);
         let write_start = Instant::now();
         let flush_result = self
             .pool
@@ -727,8 +732,7 @@ impl Checkpointer {
             .map_err(|err| format!("{err}"))?;
         let next_xid = self.txns.read().next_xid();
 
-        let (redo_lsn, end_lsn) = if let Some(wal) = self.wal.as_ref() {
-            let redo_lsn = wal.insert_lsn();
+        let end_lsn = if let Some(wal) = self.wal.as_ref() {
             let checkpoint_record = CheckpointRecord { redo_lsn };
             let end_lsn = wal
                 .write_checkpoint_record(
@@ -738,9 +742,9 @@ impl Checkpointer {
                 .map_err(|err| err.to_string())?;
             wal.flush().map_err(|err| err.to_string())?;
             wal.clear_page_image_tracking();
-            (redo_lsn, end_lsn)
+            end_lsn
         } else {
-            (INVALID_LSN, INVALID_LSN)
+            INVALID_LSN
         };
         let sync_time = sync_start.elapsed();
 
