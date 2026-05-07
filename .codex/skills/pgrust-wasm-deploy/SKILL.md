@@ -23,7 +23,8 @@ That script does the full flow:
 1. `./web/wasm-demo/build.sh` — rebuilds the wasm bundle.
 2. `aws s3 sync web/wasm-demo/ s3://$PGRUST_DEMO_BUCKET/ --delete` — pushes files, excluding scripts and build artifacts.
 3. A second sync pass with `--content-type application/wasm` for `.wasm` files (browsers need this for `WebAssembly.compileStreaming`).
-4. `aws cloudfront create-invalidation --distribution-id $PGRUST_CLOUDFRONT_ID --paths /*` — busts edge caches.
+4. Tags `index.html`, `main.js`, `pkg/pgrust.js`, and `pkg/pgrust_bg.wasm` with `commit` and `built_at` S3 metadata.
+5. `aws cloudfront create-invalidation --distribution-id $PGRUST_CLOUDFRONT_ID --paths /*` — busts edge caches.
 
 ## Required environment
 
