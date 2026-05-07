@@ -58,7 +58,6 @@ export class WasmEngine {
     }
 }
 if (Symbol.dispose) WasmEngine.prototype[Symbol.dispose] = WasmEngine.prototype.free;
-import * as import1 from "../env.js"
 
 function __wbg_get_imports() {
     const import0 = {
@@ -205,7 +204,6 @@ function __wbg_get_imports() {
     return {
         __proto__: null,
         "./pgrust_bg.js": import0,
-        "env": import1,
     };
 }
 

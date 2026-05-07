@@ -41,4 +41,5 @@ unicode-normalization = "0.1.25"
 lz4_flex = { version = "0.11", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+libm = "0.2"
 web-time = "1"
