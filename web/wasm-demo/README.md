@@ -52,7 +52,8 @@ That script:
 1. Runs `build.sh` to rebuild the wasm bundle.
 2. Syncs `web/wasm-demo/` → `s3://$PGRUST_DEMO_BUCKET/` with `--delete` so removed files drop off the live site.
 3. Re-uploads any `.wasm` file with `Content-Type: application/wasm` (critical — browsers block `WebAssembly.compileStreaming` without it).
-4. Invalidates the CloudFront distribution so edge caches pick up the new build.
+4. Tags `index.html`, `main.js`, `pkg/pgrust.js`, and `pkg/pgrust_bg.wasm` with `commit` and `built_at` S3 metadata.
+5. Invalidates the CloudFront distribution so edge caches pick up the new build.
 
 ## Adding files to the site
 
