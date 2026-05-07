@@ -2,7 +2,12 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+#[cfg(target_arch = "wasm32")]
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use pgrust_nodes::datetime::{TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC};

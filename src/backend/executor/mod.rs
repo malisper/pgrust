@@ -121,7 +121,10 @@ pub use pgrust_expr::{render_macaddr_text, render_macaddr8_text};
 pub use pgrust_expr::{render_multirange_text, render_multirange_text_with_config};
 pub use pgrust_expr::{render_range_text, render_range_text_with_config};
 pub use random::PgPrngState;
-pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
+pub(crate) use sqlfunc::{
+    execute_user_defined_sql_scalar_function_values, render_sql_literal, substitute_named_arg,
+    substitute_positional_args,
+};
 pub(crate) use srf::set_returning_call_label;
 pub use startup::executor_start;
 pub(crate) use tsearch::{

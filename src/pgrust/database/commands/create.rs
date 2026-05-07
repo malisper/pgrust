@@ -54,7 +54,9 @@ use crate::pgrust::database::{
     default_sequence_name_base, format_nextval_default_oid, initial_sequence_state,
     resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
-use crate::pl::plpgsql::validate_create_function_body_with_options;
+use crate::pl::plpgsql::{
+    split_plpgsql_statement_line_context, validate_create_function_body_with_options,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CreatedOwnedSequence {
@@ -1669,6 +1671,19 @@ fn cannot_change_routine_kind_error(name: &str, prokind: char, aggkind: Option<c
         detail: Some(routine_kind_detail(name, prokind, aggkind)),
         hint: None,
         sqlstate: "42809",
+    }
+}
+
+fn plpgsql_create_compile_error(err: ParseError, function_name: &str) -> ExecError {
+    let (err, line) = split_plpgsql_statement_line_context(err);
+    match line {
+        Some(line) => ExecError::WithContext {
+            source: Box::new(ExecError::Parse(err)),
+            context: format!(
+                "compilation of PL/pgSQL function \"{function_name}\" near line {line}"
+            ),
+        },
+        None => ExecError::Parse(err),
     }
 }
 
@@ -5652,7 +5667,7 @@ impl Database {
                 &plpgsql_arg_types,
                 gucs,
             )
-            .map_err(ExecError::Parse)?;
+            .map_err(|err| plpgsql_create_compile_error(err, &create_stmt.function_name))?;
             for notice in validation_notices {
                 push_backend_notice(notice.severity, notice.sqlstate, notice.message, None, None);
             }

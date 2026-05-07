@@ -3460,17 +3460,15 @@ pub fn bind_expr_with_outer_and_ctes(
         SqlExpr::Row(items) => {
             let field_exprs =
                 bind_row_expr_fields(items, scope, catalog, outer_scopes, grouped_outer, ctes)?;
-            let descriptor = assign_anonymous_record_descriptor(
-                field_exprs
-                    .iter()
-                    .map(|(name, expr)| {
-                        (
-                            name.clone(),
-                            expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
-                        )
-                    })
-                    .collect(),
-            );
+            let descriptor = assign_anonymous_record_descriptor(row_expr_descriptor_fields(
+                items,
+                &field_exprs,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ));
             Expr::Row {
                 descriptor,
                 fields: field_exprs,
@@ -6982,6 +6980,50 @@ fn record_field_types_compatible(actual: SqlType, declared: SqlType) -> bool {
         && (actual.type_oid == 0 || declared.type_oid == 0 || actual.type_oid == declared.type_oid)
 }
 
+fn row_expr_descriptor_fields(
+    items: &[SqlExpr],
+    field_exprs: &[(String, Expr)],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Vec<(String, SqlType)> {
+    if items.len() != field_exprs.len() {
+        return field_exprs
+            .iter()
+            .map(|(name, expr)| {
+                (
+                    name.clone(),
+                    expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                )
+            })
+            .collect();
+    }
+
+    items
+        .iter()
+        .zip(field_exprs.iter())
+        .map(|(item, (name, expr))| {
+            let sql_type = if is_unknown_literal_expr(item) {
+                unknown_sql_type()
+            } else {
+                expr_sql_type_hint(expr).unwrap_or_else(|| {
+                    infer_sql_expr_type_with_ctes(
+                        item,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+            };
+            (name.clone(), sql_type)
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_bind_functional_field_notation(
     name: &str,
@@ -7712,8 +7754,35 @@ fn bind_regclass_literal_cast(
     )))
 }
 
-fn missing_regclass_literal_error(name: &str, _catalog: &dyn CatalogLookup) -> ParseError {
-    ParseError::UnknownTable(name.to_string())
+fn missing_regclass_literal_error(name: &str, catalog: &dyn CatalogLookup) -> ParseError {
+    let trimmed = name.trim();
+    if let Some(schema) = missing_unquoted_schema_name(trimmed, catalog) {
+        return ParseError::DetailedError {
+            message: format!("schema \"{schema}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "3F000",
+        };
+    }
+    ParseError::UnknownTable(trimmed.to_string())
+}
+
+fn missing_unquoted_schema_name<'a>(
+    input: &'a str,
+    catalog: &dyn CatalogLookup,
+) -> Option<&'a str> {
+    if input.contains('"') {
+        return None;
+    }
+    let (schema, relation) = input.split_once('.')?;
+    if schema.is_empty() || relation.is_empty() || relation.contains('.') {
+        return None;
+    }
+    catalog
+        .namespace_rows()
+        .into_iter()
+        .all(|row| !row.nspname.eq_ignore_ascii_case(schema))
+        .then_some(schema)
 }
 
 fn bind_regtype_literal_cast(

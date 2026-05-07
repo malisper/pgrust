@@ -1,9 +1,9 @@
 use super::*;
 use pgrust_catalog_data::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
-    ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID,
-    ANYRANGEOID, CSTRING_TYPE_OID, OID_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID,
-    TEXT_TYPE_OID, UNKNOWN_TYPE_OID, bootstrap_pg_proc_rows_ref,
+    ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID, CSTRING_TYPE_OID, OID_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_LANGUAGE_SQL_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID, bootstrap_pg_proc_rows_ref,
     builtin_hypothetical_aggregate_function_for_proc_oid, builtin_type_name_for_oid,
     builtin_type_rows, builtin_window_function_for_proc_oid,
 };
@@ -746,6 +746,11 @@ fn anyarray_pseudotype_resolution_error(
     declared_oids: &[u32],
     actual_types: &[SqlType],
 ) -> Option<ParseError> {
+    let family1_polymorphic_arg_count = declared_oids
+        .iter()
+        .copied()
+        .filter(|oid| is_family1_polymorphic_oid(*oid))
+        .count();
     let has_anyarray_argument = declared_oids
         .iter()
         .copied()
@@ -755,7 +760,10 @@ fn anyarray_pseudotype_resolution_error(
                 && (matches!(actual_type.kind, SqlTypeKind::AnyArray)
                     || actual_type.type_oid == ANYARRAYOID)
         });
-    if has_anyarray_argument && matches!(row.prorettype, ANYELEMENTOID | ANYARRAYOID) {
+    if has_anyarray_argument
+        && (family1_polymorphic_arg_count != 1
+            || (row.prorettype != ANYARRAYOID && is_family1_polymorphic_oid(row.prorettype)))
+    {
         return Some(ParseError::DetailedError {
             message: "cannot determine element type of \"anyarray\" argument".into(),
             detail: None,
@@ -764,6 +772,13 @@ fn anyarray_pseudotype_resolution_error(
         });
     }
     None
+}
+
+fn is_family1_polymorphic_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        ANYELEMENTOID | ANYARRAYOID | ANYNONARRAYOID | ANYENUMOID | ANYRANGEOID | ANYMULTIRANGEOID
+    )
 }
 
 fn unknown_polymorphic_resolution_error(
@@ -1024,6 +1039,12 @@ fn ordinary_polymorphic_base_type(declared_oid: u32, actual_type: SqlType) -> Op
     }
     match declared_oid {
         ANYELEMENTOID => Some(actual_type),
+        ANYARRAYOID
+            if matches!(actual_type.kind, SqlTypeKind::AnyArray)
+                || actual_type.type_oid == ANYARRAYOID =>
+        {
+            Some(SqlType::new(SqlTypeKind::AnyElement))
+        }
         ANYARRAYOID if actual_type.is_array => Some(actual_type.element_type()),
         ANYRANGEOID if actual_type.is_range() => {
             range_type_ref_for_sql_type(actual_type).map(|range_type| range_type.subtype)
@@ -1973,6 +1994,12 @@ fn resolve_anyarray_result_type(
     {
         let inferred = match declared_oid {
             _ if is_unknown_sql_type(actual_type) => None,
+            ANYARRAYOID
+                if matches!(actual_type.kind, SqlTypeKind::AnyArray)
+                    || actual_type.type_oid == ANYARRAYOID =>
+            {
+                Some(actual_type)
+            }
             ANYARRAYOID if actual_type.is_array => Some(actual_type),
             ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => {
                 Some(SqlType::array_of(actual_type))
@@ -6566,7 +6593,7 @@ enum ScalarFunctionArity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pgrust_catalog_data::INT4_TYPE_OID;
+    use pgrust_catalog_data::{INT4_TYPE_OID, PG_LANGUAGE_PLPGSQL_OID};
 
     #[test]
     fn resolve_scalar_function_uses_pg_proc_and_filters_non_scalar_rows() {
@@ -6890,6 +6917,100 @@ mod tests {
             ParseError::DetailedError { message, sqlstate, .. }
                 if message == "function unnest(anyarray) does not exist" && sqlstate == "42883"
         ));
+    }
+
+    struct AnyarrayIdentityCatalog;
+
+    impl CatalogLookup for AnyarrayIdentityCatalog {
+        fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+            None
+        }
+
+        fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
+            if !name.eq_ignore_ascii_case("plpgsql_anyarray_identity") {
+                return Catalog::default().proc_rows_by_name(name);
+            }
+            vec![PgProcRow {
+                oid: 990_001,
+                proname: "plpgsql_anyarray_identity".into(),
+                pronamespace: PG_CATALOG_NAMESPACE_OID,
+                proowner: BOOTSTRAP_SUPERUSER_OID,
+                proacl: None,
+                prolang: PG_LANGUAGE_PLPGSQL_OID,
+                procost: 100.0,
+                prorows: 0.0,
+                provariadic: 0,
+                prosupport: 0,
+                prokind: 'f',
+                prosecdef: false,
+                proleakproof: false,
+                proisstrict: false,
+                proretset: false,
+                provolatile: 'v',
+                proparallel: 'u',
+                pronargs: 1,
+                pronargdefaults: 0,
+                prorettype: ANYARRAYOID,
+                proargtypes: ANYARRAYOID.to_string(),
+                proallargtypes: None,
+                proargmodes: None,
+                proargnames: Some(vec!["x".into()]),
+                proargdefaults: None,
+                prosrc: "begin return x; end".into(),
+                probin: None,
+                prosqlbody: None,
+                proconfig: None,
+            }]
+        }
+
+        fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
+            self.proc_rows_by_name("plpgsql_anyarray_identity")
+                .into_iter()
+                .find(|row| row.oid == oid)
+                .or_else(|| Catalog::default().proc_row_by_oid(oid))
+        }
+    }
+
+    #[test]
+    fn resolve_function_call_preserves_anyarray_result_from_anyarray_pseudotype() {
+        let resolved = resolve_function_call(
+            &AnyarrayIdentityCatalog,
+            "plpgsql_anyarray_identity",
+            &[SqlType::new(SqlTypeKind::AnyArray)],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.result_type, SqlType::new(SqlTypeKind::AnyArray));
+        assert_eq!(
+            resolved.declared_arg_types,
+            vec![SqlType::new(SqlTypeKind::AnyArray)]
+        );
+    }
+
+    #[test]
+    fn resolve_function_call_with_defaults_preserves_anyarray_result_from_anyarray_pseudotype() {
+        let args = [SqlFunctionArg {
+            name: None,
+            value: SqlExpr::Column("stavalues1".into()),
+        }];
+        let resolved = resolve_function_call_with_arg_defaults(
+            &AnyarrayIdentityCatalog,
+            "plpgsql_anyarray_identity",
+            &args,
+            &[SqlType::new(SqlTypeKind::AnyArray)],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved.resolved.result_type,
+            SqlType::new(SqlTypeKind::AnyArray)
+        );
+        assert_eq!(
+            resolved.resolved.declared_arg_types,
+            vec![SqlType::new(SqlTypeKind::AnyArray)]
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ use super::expr_casts::cast_value;
 use super::node_types::Value;
 use crate::compat::backend::parser::{SqlType, SqlTypeKind};
 
+#[cfg(not(target_arch = "wasm32"))]
 unsafe extern "C" {
     fn erf(x: f64) -> f64;
     fn erfc(x: f64) -> f64;
@@ -118,11 +119,11 @@ pub fn eval_float_send_function(
 }
 
 pub fn eval_erf(value: f64) -> Result<f64, ExecError> {
-    Ok(unsafe { erf(value) })
+    Ok(raw_erf(value))
 }
 
 pub fn eval_erfc(value: f64) -> Result<f64, ExecError> {
-    Ok(unsafe { erfc(value) })
+    Ok(raw_erfc(value))
 }
 
 pub fn eval_gamma(value: f64) -> Result<f64, ExecError> {
@@ -138,7 +139,7 @@ pub fn eval_gamma(value: f64) -> Result<f64, ExecError> {
     {
         return Err(ExecError::FloatOverflow);
     }
-    let result = unsafe { tgamma(value) };
+    let result = raw_tgamma(value);
     if result.is_nan() {
         return Err(float_domain_error("input is out of range"));
     }
@@ -164,7 +165,7 @@ pub fn eval_lgamma(value: f64) -> Result<f64, ExecError> {
     if value == 0.0 || (value.is_finite() && value < 0.0 && value.fract() == 0.0) {
         return Err(ExecError::FloatOverflow);
     }
-    let result = unsafe { lgamma(value) };
+    let result = raw_lgamma(value);
     if result.is_infinite() {
         return Err(ExecError::FloatOverflow);
     }
@@ -172,6 +173,46 @@ pub fn eval_lgamma(value: f64) -> Result<f64, ExecError> {
         return Err(float_domain_error("input is out of range"));
     }
     Ok(result)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn raw_erf(value: f64) -> f64 {
+    libm::erf(value)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn raw_erf(value: f64) -> f64 {
+    unsafe { erf(value) }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn raw_erfc(value: f64) -> f64 {
+    libm::erfc(value)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn raw_erfc(value: f64) -> f64 {
+    unsafe { erfc(value) }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn raw_tgamma(value: f64) -> f64 {
+    libm::tgamma(value)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn raw_tgamma(value: f64) -> f64 {
+    unsafe { tgamma(value) }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn raw_lgamma(value: f64) -> f64 {
+    libm::lgamma(value)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn raw_lgamma(value: f64) -> f64 {
+    unsafe { lgamma(value) }
 }
 
 pub fn eval_bitcast_integer_to_float4(values: &[Value]) -> Result<Value, ExecError> {

@@ -5,7 +5,7 @@ Key decisions:
 `/tmp/diff` did not exist, so reproduced focused `privileges` regression into `/tmp/diffs/privileges-investigate`.
 Longer baseline completed without timeout: `/tmp/diffs/privileges-investigate-120` had 973/1295 matched queries.
 Primary first slice is PostgreSQL-style relation privilege tracking: mark columns reached by Vars, not every visible column.
-`GRANTED BY` object grantor selection is only minimally handled for current/non-current grantor errors; full grant-option dependency semantics remain.
+`GRANTED BY` object grantor selection is only minimally handled for current/non-current grantor errors.
 
 Files touched:
 `src/backend/parser/analyze/query.rs`
@@ -26,4 +26,4 @@ Tests run:
 Remaining:
 Last completed focused regression after the first slices was 1002/1295 matched, 293 mismatches, no timeout.
 Need rerun after ON CONFLICT/DELETE/function-parser/password-detail changes once local Cargo build contention clears.
-Large remaining surfaces: default privileges, large-object ACLs/builtins, function/type privilege enforcement, `ALL ... IN SCHEMA`, catalog/info-schema views, MAINTAIN/pg_maintain, security-restricted operation contexts, and grant-option dependency cascade/restrict.
+Large remaining surfaces: default privileges, large-object ACLs/builtins, function/type privilege enforcement, `ALL ... IN SCHEMA`, catalog/info-schema views, MAINTAIN/pg_maintain, and security-restricted operation contexts.

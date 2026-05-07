@@ -1,8 +1,9 @@
 use pgrust_analyze::CatalogLookup;
 use pgrust_catalog_data::{
-    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
-    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, PgProcRow,
-    range_type_ref_for_multirange_sql_type, range_type_ref_for_sql_type,
+    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
+    ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID, PgProcRow, range_type_ref_for_multirange_sql_type,
+    range_type_ref_for_sql_type,
 };
 use pgrust_nodes::{SqlType, SqlTypeKind};
 
@@ -115,6 +116,12 @@ fn infer_concrete_polymorphic_types(
             ANYOID | ANYELEMENTOID => {
                 merge_exact_sql_type(&mut inferred.anyelement, actual_type);
             }
+            ANYNONARRAYOID if !actual_type.is_array => {
+                merge_exact_sql_type(&mut inferred.anyelement, actual_type);
+            }
+            ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum | SqlTypeKind::AnyEnum) => {
+                merge_exact_sql_type(&mut inferred.anyelement, actual_type);
+            }
             ANYARRAYOID if actual_type.is_array => {
                 inferred.anyarray.get_or_insert(actual_type);
                 merge_exact_sql_type(&mut inferred.anyelement, actual_type.element_type());
@@ -132,6 +139,7 @@ fn infer_concrete_polymorphic_types(
                 }
             }
             ANYCOMPATIBLEOID => compatible_loose.push(actual_type),
+            ANYCOMPATIBLENONARRAYOID if !actual_type.is_array => compatible_loose.push(actual_type),
             ANYCOMPATIBLEARRAYOID if actual_type.is_array => {
                 compatible_loose.push(actual_type.element_type());
             }
@@ -201,13 +209,13 @@ fn concrete_polymorphic_all_arg_oids(
 
 fn concrete_polymorphic_sql_type(oid: u32, inferred: &InferredPolymorphicTypes) -> Option<SqlType> {
     match oid {
-        ANYOID | ANYELEMENTOID => inferred.anyelement,
+        ANYOID | ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => inferred.anyelement,
         ANYARRAYOID => inferred
             .anyarray
             .or_else(|| inferred.anyelement.map(SqlType::array_of)),
         ANYRANGEOID => inferred.anyrange,
         ANYMULTIRANGEOID => inferred.anymultirange,
-        ANYCOMPATIBLEOID => inferred.anycompatible,
+        ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => inferred.anycompatible,
         ANYCOMPATIBLEARRAYOID => inferred.anycompatible.map(SqlType::array_of),
         ANYCOMPATIBLERANGEOID => inferred.anycompatiblerange,
         ANYCOMPATIBLEMULTIRANGEOID => inferred.anycompatiblemultirange,
@@ -290,10 +298,13 @@ pub fn is_polymorphic_type_oid(oid: u32) -> bool {
         oid,
         ANYOID
             | ANYELEMENTOID
+            | ANYNONARRAYOID
+            | ANYENUMOID
             | ANYARRAYOID
             | ANYRANGEOID
             | ANYMULTIRANGEOID
             | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLENONARRAYOID
             | ANYCOMPATIBLEARRAYOID
             | ANYCOMPATIBLERANGEOID
             | ANYCOMPATIBLEMULTIRANGEOID

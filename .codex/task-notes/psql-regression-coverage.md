@@ -22,4 +22,4 @@ CARGO_TARGET_DIR=/tmp/pgrust-target-stockholm-v3-manual-2 RUSTC_WRAPPER= scripts
 CARGO_TARGET_DIR=/tmp/pgrust-target-stockholm-v3-manual-2 RUSTC_WRAPPER= scripts/run_regression.sh --port 58733 --test psql
 
 Remaining:
-psql still fails 430/464 with 895 diff lines. Remaining hunks are outside the requested areas: table access method DDL/display, syntax error position/detail formatting, `SELECT 1 UNION` SQLSTATE/message, function/operator describe timeouts, COPY output-file behavior, and several broader describe output differences.
+psql still fails 430/464 with 895 diff lines. Remaining hunks are outside the requested areas: table access method DDL/display, syntax error position/detail formatting, function/operator describe timeouts, COPY output-file behavior, and several broader describe output differences.

@@ -149,12 +149,14 @@ syntax, and GUC-like parameter definitions.
 ## pg_catalog system tables
 
 psql queries `pg_catalog` tables for tab completion, `\d` commands, and
-other introspection. These queries fail with "unknown table" errors. Key
+other introspection. The server intercepts many common psql introspection
+queries via shims in `src/backend/tcop/postgres.rs`, but direct SQL access
+to `pg_catalog` tables still fails with "unknown table" errors. Key missing
 tables include `pg_class`, `pg_attribute`, `pg_type`, `pg_namespace`,
 `pg_index`, `pg_database`, `pg_roles`.
 
-**To add:** Virtual tables backed by catalog metadata, or a synthetic
-response mechanism for common introspection queries.
+**To add:** Real virtual tables backed by catalog metadata, eliminating the
+need for query-specific shims.
 
 ## LISTEN / NOTIFY
 

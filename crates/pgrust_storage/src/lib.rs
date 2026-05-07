@@ -24,7 +24,12 @@ pub(crate) fn now_timestamptz() -> pgrust_nodes::datetime::TimestampTzADT {
 
     const UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS: i64 = 10_957;
 
-    let unix_usecs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(target_arch = "wasm32")]
+    use web_time::{SystemTime, UNIX_EPOCH};
+
+    let unix_usecs = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs() as i64 * USECS_PER_SEC + duration.subsec_micros() as i64,
         Err(err) => {
             let duration = err.duration();

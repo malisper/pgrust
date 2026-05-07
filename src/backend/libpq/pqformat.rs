@@ -22,6 +22,7 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::InetValue;
 use crate::include::nodes::parsenodes::CopyFormat;
 use crate::pgrust::session::ByteaOutputFormat;
+use pgrust_catalog_data::{TEXT_TYPE_OID, UNKNOWN_TYPE_OID};
 
 // :HACK: Preserve the old root pqformat type path while scalar formatting
 // options live in pgrust_expr.
@@ -1336,7 +1337,9 @@ fn encode_binary_record(
     let mut out = Vec::new();
     pgrust_protocol::pqformat::begin_binary_record_body(&mut out, record.fields.len());
     for (field, value) in record.iter() {
-        let field_oid = if !field.sql_type.is_array && field.sql_type.type_oid != 0 {
+        let field_oid = if field.sql_type.type_oid == UNKNOWN_TYPE_OID {
+            TEXT_TYPE_OID
+        } else if !field.sql_type.is_array && field.sql_type.type_oid != 0 {
             field.sql_type.type_oid
         } else {
             pgrust_protocol::pqformat::wire_type_info(&QueryColumn {
@@ -1578,6 +1581,32 @@ pub(crate) fn send_notice_with_context_fields(
 ) -> io::Result<()> {
     pgrust_protocol::pqformat::send_notice_with_context_fields(
         w, severity, sqlstate, message, detail, hint, context, position,
+    )
+}
+
+pub(crate) fn send_notice_with_internal_fields(
+    w: &mut impl Write,
+    severity: &str,
+    sqlstate: &str,
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+    context: Option<&str>,
+    position: Option<usize>,
+    internal_query: Option<&str>,
+    internal_position: Option<usize>,
+) -> io::Result<()> {
+    pgrust_protocol::pqformat::send_notice_with_internal_fields(
+        w,
+        severity,
+        sqlstate,
+        message,
+        detail,
+        hint,
+        context,
+        position,
+        internal_query,
+        internal_position,
     )
 }
 

@@ -738,9 +738,34 @@ pub fn send_notice_with_context_fields(
     context: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
+    send_notice_with_internal_fields(
+        w, severity, sqlstate, message, detail, hint, context, position, None, None,
+    )
+}
+
+pub fn send_notice_with_internal_fields(
+    w: &mut impl Write,
+    severity: &str,
+    sqlstate: &str,
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+    context: Option<&str>,
+    position: Option<usize>,
+    internal_query: Option<&str>,
+    internal_position: Option<usize>,
+) -> io::Result<()> {
     let mut body = Vec::new();
     push_diagnostic_header(&mut body, severity, sqlstate, message);
-    push_optional_diagnostic_fields(&mut body, detail, hint, context, position, None, None);
+    push_optional_diagnostic_fields(
+        &mut body,
+        detail,
+        hint,
+        context,
+        position,
+        internal_query,
+        internal_position,
+    );
 
     w.write_all(&[b'N'])?;
     w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;

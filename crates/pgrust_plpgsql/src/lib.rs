@@ -26,8 +26,46 @@ pub use normalize::*;
 pub use polymorphic::*;
 pub use runtime::*;
 
+const PLPGSQL_STATEMENT_LINE_CONTEXT_PREFIX: &str = "__pgrust_plpgsql_statement_line:";
+
 pub fn normalize_sql_context_text(sql: &str) -> String {
     sql.trim().trim_end_matches(';').trim_end().to_string()
+}
+
+pub fn with_plpgsql_statement_line_context(err: ParseError, line: usize) -> ParseError {
+    if plpgsql_statement_line_from_error(&err).is_some() {
+        err
+    } else {
+        err.with_context(format!("{PLPGSQL_STATEMENT_LINE_CONTEXT_PREFIX}{line}"))
+    }
+}
+
+pub fn split_plpgsql_statement_line_context(err: ParseError) -> (ParseError, Option<usize>) {
+    match err {
+        ParseError::WithContext { source, context } => {
+            let (source, inner_line) = split_plpgsql_statement_line_context(*source);
+            if let Some(line) = plpgsql_statement_line_from_context(&context) {
+                (source, inner_line.or(Some(line)))
+            } else {
+                (source.with_context(context), inner_line)
+            }
+        }
+        other => (other, None),
+    }
+}
+
+pub fn plpgsql_statement_line_from_error(err: &ParseError) -> Option<usize> {
+    match err {
+        ParseError::WithContext { source, context } => plpgsql_statement_line_from_error(source)
+            .or_else(|| plpgsql_statement_line_from_context(context)),
+        _ => None,
+    }
+}
+
+fn plpgsql_statement_line_from_context(context: &str) -> Option<usize> {
+    context
+        .strip_prefix(PLPGSQL_STATEMENT_LINE_CONTEXT_PREFIX)
+        .and_then(|line| line.parse::<usize>().ok())
 }
 
 pub fn decode_nonstandard_backslash_escapes(value: &str) -> String {
@@ -268,6 +306,19 @@ pub fn split_cte_prefixed_select_into_target(sql: &str) -> Option<(String, Strin
         rest.trim_start()
     );
     Some((target, select_sql))
+}
+
+pub fn split_cte_prefixed_select_with_into_targets(
+    sql: &str,
+) -> Option<(Vec<String>, String, bool)> {
+    let trimmed = sql.trim_start();
+    if !keyword_at(trimmed, 0, "with") {
+        return None;
+    }
+    let select_idx = find_next_top_level_keyword(trimmed, &["select"])?;
+    let (targets, select_sql, strict) = split_select_with_into_targets(&trimmed[select_idx..])?;
+    let rewritten = format!("{} {}", trimmed[..select_idx].trim_end(), select_sql);
+    Some((targets, rewritten, strict))
 }
 
 fn split_leading_select_into_target(rest: &str) -> Option<(String, &str)> {
@@ -1248,6 +1299,9 @@ pub struct PlpgsqlNotice {
     pub detail: Option<String>,
     pub hint: Option<String>,
     pub context: Option<String>,
+    pub position: Option<usize>,
+    pub internal_query: Option<String>,
+    pub internal_position: Option<usize>,
 }
 
 impl PlpgsqlNotice {
@@ -1263,6 +1317,9 @@ impl PlpgsqlNotice {
             detail: None,
             hint: None,
             context: None,
+            position: None,
+            internal_query: None,
+            internal_position: None,
         }
     }
 }
@@ -1424,7 +1481,8 @@ fn validate_raise_placeholders(block: &Block) -> Result<(), ParseError> {
 
 fn validate_raise_placeholders_in_stmt(stmt: &Stmt) -> Result<(), ParseError> {
     match stmt {
-        Stmt::WithLine { stmt, .. } => validate_raise_placeholders_in_stmt(stmt),
+        Stmt::WithLine { line, stmt } => validate_raise_placeholders_in_stmt(stmt)
+            .map_err(|err| with_plpgsql_statement_line_context(err, *line)),
         Stmt::Block(block) => validate_raise_placeholders(block),
         Stmt::If {
             branches,
@@ -2219,6 +2277,16 @@ mod tests {
                 vec!["x".into(), "y".into()],
                 "select a, b from t".into(),
                 true
+            ))
+        );
+        assert_eq!(
+            split_cte_prefixed_select_with_into_targets(
+                "with p as (select a from t) select a into x from p"
+            ),
+            Some((
+                vec!["x".into()],
+                "with p as (select a from t) select a from p".into(),
+                false
             ))
         );
         assert_eq!(
