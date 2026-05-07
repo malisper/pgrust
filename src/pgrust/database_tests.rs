@@ -17998,6 +17998,67 @@ fn normal_view_select_uses_view_owner_for_base_privileges() {
 }
 
 #[test]
+fn nested_view_select_checks_intermediate_view_before_base_table() {
+    fn assert_view_permission_denied(result: Result<StatementResult, ExecError>, view: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for view {view}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected view permission error for {view}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("nested_view_select_intermediate_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role nested_select_owner login")
+        .unwrap();
+    session
+        .execute(&db, "create role nested_select_reader login")
+        .unwrap();
+    session
+        .execute(&db, "create table nested_select_base(a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into nested_select_base values (1, 'one')")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization nested_select_owner")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_select_inner_v as select * from nested_select_base",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization nested_select_reader")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_select_outer_v as select * from nested_select_inner_v",
+        )
+        .unwrap();
+
+    assert_view_permission_denied(
+        session.execute(&db, "select * from nested_select_outer_v"),
+        "nested_select_inner_v",
+    );
+    assert_view_permission_denied(
+        session.execute(&db, "select * from nested_select_outer_v for update"),
+        "nested_select_inner_v",
+    );
+}
+
+#[test]
 fn view_update_column_privileges_are_checked_on_view_columns() {
     fn assert_view_permission_denied(result: Result<StatementResult, ExecError>, view: &str) {
         match result {
@@ -18348,6 +18409,100 @@ fn merge_returning_projects_action_old_new_and_source() {
             Value::Int32(3),
             Value::Int32(3),
         ]]
+    );
+}
+
+#[test]
+fn merge_returning_full_join_order_matches_pg() {
+    let dir = temp_dir("merge_returning_full_join_order");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table merge_full_order_base(id int4 primary key, name text default 'Unspecified')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into merge_full_order_base values \
+             (-2, 'Row -2'), (-1, 'Row -1'), (0, 'Row 0'), \
+             (1, 'Row 1'), (2, 'Row 2')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view merge_full_order_view as \
+             select id, name from merge_full_order_base where id > 0",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into merge_full_order_view values (3, 'Row 3')")
+        .unwrap();
+    session
+        .execute(&db, "insert into merge_full_order_view (id) values (4)")
+        .unwrap();
+    session
+        .execute(&db, "update merge_full_order_view set id = 5 where id = 4")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "delete from merge_full_order_view where name = 'Row 2'",
+        )
+        .unwrap();
+
+    let _ = session_query_rows(
+        &mut session,
+        &db,
+        "merge into merge_full_order_view t \
+         using (values (0, 'ROW 0'), (1, 'ROW 1'), (2, 'ROW 2'), (3, 'ROW 3')) as s(id, name) on t.id = s.id \
+         when matched and t.id <= 1 then update set name = s.name \
+         when matched then delete \
+         when not matched and s.id > 0 then insert (id) values (s.id) \
+         returning merge_action(), s.id, old.id, new.id",
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_full_order_view t \
+             using (values (0, 'R0'), (1, 'R1'), (2, 'R2'), (3, 'R3')) as s(id, name) on t.id = s.id \
+             when matched and t.id <= 1 then update set name = s.name \
+             when matched then delete \
+             when not matched by source then delete \
+             when not matched and s.id > 0 then insert (id) values (s.id) \
+             returning merge_action(), s.id, old.id, new.id",
+        ),
+        vec![
+            vec![
+                Value::Text("UPDATE".into()),
+                Value::Int32(1),
+                Value::Int32(1),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Text("DELETE".into()),
+                Value::Null,
+                Value::Int32(5),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("DELETE".into()),
+                Value::Int32(2),
+                Value::Int32(2),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("INSERT".into()),
+                Value::Int32(3),
+                Value::Null,
+                Value::Int32(3),
+            ],
+        ]
     );
 }
 
@@ -19545,6 +19700,172 @@ fn security_barrier_inheritance_view_filters_through_subquery_scan() {
             ],
         ]
     );
+}
+
+#[test]
+fn security_barrier_inherited_view_dml_order_matches_postgres() {
+    let dir = temp_dir("security_barrier_inherited_view_dml_order");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create function sb_snoop(anyelement) returns boolean language plpgsql cost 0.000001 as $$
+         begin
+           raise notice 'snooped value: %', $1;
+           return true;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function sb_leakproof(anyelement) returns boolean language plpgsql strict immutable leakproof as $$
+         begin
+           return true;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(1, "create table sb_t1(a int4, b int4, c text)")
+        .unwrap();
+    db.execute(1, "create index sb_t1_a_idx on sb_t1(a)")
+        .unwrap();
+    db.execute(1, "create table sb_t11(d text) inherits (sb_t1)")
+        .unwrap();
+    db.execute(1, "create index sb_t11_a_idx on sb_t11(a)")
+        .unwrap();
+    db.execute(1, "create table sb_t12() inherits (sb_t1)")
+        .unwrap();
+    db.execute(1, "create index sb_t12_a_idx on sb_t12(a)")
+        .unwrap();
+    db.execute(1, "create table sb_t111() inherits (sb_t11, sb_t12)")
+        .unwrap();
+    db.execute(1, "create index sb_t111_a_idx on sb_t111(a)")
+        .unwrap();
+
+    let base_values = (1..=10)
+        .map(|value| format!("({value}, {value}, 't1')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into sb_t1 values {base_values}"))
+        .unwrap();
+    db.execute(1, "analyze sb_t1").unwrap();
+    let child_values = (1..=10)
+        .map(|value| format!("({value}, {value}, 't11', 't11d')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into sb_t11 values {child_values}"))
+        .unwrap();
+    db.execute(1, "analyze sb_t11").unwrap();
+    let child_values = (1..=10)
+        .map(|value| format!("({value}, {value}, 't12')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into sb_t12 values {child_values}"))
+        .unwrap();
+    db.execute(1, "analyze sb_t12").unwrap();
+    let child_values = (1..=10)
+        .map(|value| format!("({value}, {value}, 't111', 't11d')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(1, &format!("insert into sb_t111 values {child_values}"))
+        .unwrap();
+    db.execute(1, "analyze sb_t111").unwrap();
+    db.execute(
+        1,
+        "create view sb_v1 with (security_barrier=true) as
+         select *, (select d from sb_t11 where sb_t11.a = sb_t1.a limit 1) as d
+         from sb_t1
+         where a > 5 and exists(select 1 from sb_t12 where sb_t12.a = sb_t1.a)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a, b, c, d from sb_v1 where a = 8"),
+        vec![
+            vec![
+                Value::Int32(8),
+                Value::Int32(8),
+                Value::Text("t1".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Int32(8),
+                Value::Text("t11".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Int32(8),
+                Value::Text("t12".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Int32(8),
+                Value::Text("t111".into()),
+                Value::Text("t11d".into()),
+            ],
+        ]
+    );
+
+    clear_notices();
+    db.execute(
+        1,
+        "update sb_v1 set a = a + 1
+         where sb_snoop(a) and sb_leakproof(a) and a = 8",
+    )
+    .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "snooped value: 8".to_string(),
+            "snooped value: 8".to_string(),
+            "snooped value: 8".to_string(),
+            "snooped value: 8".to_string(),
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, b, c, d from sb_v1 where b = 8"),
+        vec![
+            vec![
+                Value::Int32(9),
+                Value::Int32(8),
+                Value::Text("t111".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Int32(8),
+                Value::Text("t12".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Int32(8),
+                Value::Text("t11".into()),
+                Value::Text("t11d".into()),
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Int32(8),
+                Value::Text("t1".into()),
+                Value::Text("t11d".into()),
+            ],
+        ]
+    );
+
+    clear_notices();
+    db.execute(1, "delete from sb_v1 where sb_snoop(a) and sb_leakproof(a)")
+        .unwrap();
+    let expected = ["6", "7", "9", "10", "9"]
+        .into_iter()
+        .cycle()
+        .take(20)
+        .map(|value| format!("snooped value: {value}"))
+        .collect::<Vec<_>>();
+    assert_eq!(take_notice_messages(), expected);
 }
 
 #[test]
@@ -25610,6 +25931,271 @@ fn insert_do_also_rule_reevaluates_new_default_expressions() {
         vec![
             vec![Value::Int32(3), Value::Text("a".into())],
             vec![Value::Int32(4), Value::Text("b".into())],
+        ]
+    );
+}
+
+#[test]
+fn auto_view_do_also_rule_default_new_rows_match_pg() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table base_items (id int4 primary key, name text default 'Unspecified')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view item_view as select id, name from base_items where id > 0",
+    )
+    .unwrap();
+    db.execute(1, "create table item_log (id int4, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_log as on insert to item_view do also \
+         insert into item_log values (new.id, new.name)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into item_view values (1, default), (2, default)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table item_view alter column name set default 'view-default'",
+    )
+    .unwrap();
+    db.execute(1, "insert into item_view values (3, default)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("Unspecified".into())],
+            vec![Value::Int32(2), Value::Text("Unspecified".into())],
+            vec![Value::Int32(3), Value::Text("view-default".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from item_log order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Null],
+            vec![Value::Int32(2), Value::Null],
+            vec![Value::Int32(3), Value::Text("view-default".into())],
+        ]
+    );
+}
+
+#[test]
+fn auto_view_update_whole_row_var_matches_pg() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table whole_row_base (a int4 primary key, b text default 'Unspecified')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into whole_row_base values (-2, 'Row -2'), (-1, 'Row -1'), \
+         (0, 'Row 0'), (1, 'Row 1'), (2, 'Row 2')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view whole_row_view as select b as bb, a as aa from whole_row_base",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function whole_row_view_aa(x whole_row_view) returns int4 \
+         as $$ select x.aa $$ language sql",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update whole_row_view v set bb = 'Updated row 2' \
+             where whole_row_view_aa(v) = 2 \
+             returning whole_row_view_aa(v), v.bb",
+        ),
+        vec![vec![Value::Int32(2), Value::Text("Updated row 2".into())]]
+    );
+}
+
+#[test]
+fn view_instead_insert_explicit_defaults_use_view_defaults() {
+    fn insert_explicit_default_rows(db: &Database) {
+        db.execute(
+            1,
+            "insert into default_view values \
+             (14, default, default, default, default), \
+             (15, default, default, default, default), \
+             (16, default, default, default, default)",
+        )
+        .unwrap();
+    }
+
+    fn expected_default_rows() -> Vec<Vec<Value>> {
+        vec![
+            vec![
+                Value::Int32(14),
+                Value::Text("View default".into()),
+                Value::Null,
+                Value::Text("View default".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Int32(15),
+                Value::Text("View default".into()),
+                Value::Null,
+                Value::Text("View default".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Int32(16),
+                Value::Text("View default".into()),
+                Value::Null,
+                Value::Text("View default".into()),
+                Value::Null,
+            ],
+        ]
+    }
+
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table default_base \
+         (a int4, b text default 'Table default', c text default 'Table default', d text, e text)",
+    )
+    .unwrap();
+    db.execute(1, "create view default_view as select * from default_base")
+        .unwrap();
+    db.execute(
+        1,
+        "alter view default_view alter column b set default 'View default'",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter view default_view alter column d set default 'View default'",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function default_view_insert_trigger_func() returns trigger as $$ \
+         begin \
+           insert into default_base values (new.a, new.b, new.c, new.d, new.e); \
+           return new; \
+         end; \
+         $$ language plpgsql",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger default_view_insert_trigger \
+         instead of insert on default_view \
+         for each row execute function default_view_insert_trigger_func()",
+    )
+    .unwrap();
+
+    insert_explicit_default_rows(&db);
+    assert_eq!(
+        query_rows(&db, 1, "select a, b, c, d, e from default_base order by a"),
+        expected_default_rows()
+    );
+
+    db.execute(
+        1,
+        "drop trigger default_view_insert_trigger on default_view",
+    )
+    .unwrap();
+    db.execute(1, "drop function default_view_insert_trigger_func")
+        .unwrap();
+    db.execute(1, "truncate default_base").unwrap();
+    db.execute(
+        1,
+        "create rule default_view_insert_rule as on insert to default_view \
+         do instead insert into default_base values (new.a, new.b, new.c, new.d, new.e)",
+    )
+    .unwrap();
+
+    insert_explicit_default_rows(&db);
+    assert_eq!(
+        query_rows(&db, 1, "select a, b, c, d, e from default_base order by a"),
+        expected_default_rows()
+    );
+}
+
+#[test]
+fn auto_view_insert_array_subscripts_use_element_target_type() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table array_default_base \
+         (a serial, b int4[], c text, d text default 'Table default')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view array_default_view as select c, a, b from array_default_base",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter view array_default_view alter column c set default 'View default'",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "insert into array_default_view (b[1], b[2], c, b[5], b[4], a, b[3]) \
+         values (1, 2, default, 5, 4, default, 3), \
+                (10, 11, 'C value', 14, 13, 100, 12)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a, b, c, d from array_default_base order by a"
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::PgArray(
+                    ArrayValue::from_1d(vec![
+                        Value::Int32(1),
+                        Value::Int32(2),
+                        Value::Int32(3),
+                        Value::Int32(4),
+                        Value::Int32(5),
+                    ])
+                    .with_element_type_oid(INT4_TYPE_OID),
+                ),
+                Value::Text("View default".into()),
+                Value::Text("Table default".into()),
+            ],
+            vec![
+                Value::Int32(100),
+                Value::PgArray(
+                    ArrayValue::from_1d(vec![
+                        Value::Int32(10),
+                        Value::Int32(11),
+                        Value::Int32(12),
+                        Value::Int32(13),
+                        Value::Int32(14),
+                    ])
+                    .with_element_type_oid(INT4_TYPE_OID),
+                ),
+                Value::Text("C value".into()),
+                Value::Text("Table default".into()),
+            ],
         ]
     );
 }

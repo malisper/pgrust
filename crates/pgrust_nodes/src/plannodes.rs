@@ -683,13 +683,11 @@ impl Plan {
                 if matches!(kind, JoinType::Semi | JoinType::Anti) {
                     return left.columns();
                 }
-                let mut cols = left.columns();
-                if !matches!(
-                    kind,
-                    crate::primnodes::JoinType::Semi | crate::primnodes::JoinType::Anti
-                ) {
-                    cols.extend(right.columns());
+                if matches!(kind, JoinType::RightSemi) {
+                    return right.columns();
                 }
+                let mut cols = left.columns();
+                cols.extend(right.columns());
                 cols
             }
             Plan::FunctionScan { call, .. } => call.output_columns().to_vec(),

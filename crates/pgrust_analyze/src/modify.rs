@@ -1481,6 +1481,7 @@ fn reject_merge_when_system_columns(expr: &SqlExpr) -> Result<(), ParseError> {
 
 fn merge_input_planner_config(
     force_target_driven_order: bool,
+    input_join_type: JoinType,
 ) -> pgrust_nodes::pathnodes::PlannerConfig {
     let mut config = pgrust_nodes::pathnodes::PlannerConfig::default();
     if force_target_driven_order {
@@ -1488,6 +1489,13 @@ fn merge_input_planner_config(
         // predicates before action predicates in target scan order. PostgreSQL
         // plans these cases as target-driven nested loops.
         config.enable_hashjoin = false;
+        config.enable_mergejoin = false;
+    } else if matches!(input_join_type, JoinType::Full) {
+        // :HACK: Full MERGE RETURNING order follows PostgreSQL's target-left
+        // full-join stream. Favor bitmap/index-backed target scans and avoid a
+        // sorted merge join so the hidden input query keeps PostgreSQL's row
+        // stream for matched/source-only/target-only rows.
+        config.enable_seqscan = false;
         config.enable_mergejoin = false;
     }
     config
@@ -3683,7 +3691,7 @@ pub fn plan_merge_with_outer_scopes_and_ctes(
             crate::runtime::planner_with_config(
                 query,
                 catalog,
-                merge_input_planner_config(force_target_driven_order),
+                merge_input_planner_config(force_target_driven_order, input_join_type),
             )
         })??,
     })
@@ -4457,6 +4465,8 @@ fn rewrite_auto_view_returning_targets(
     view_output_exprs: &[Expr],
     base_desc: &RelationDesc,
 ) -> Vec<TargetEntry> {
+    let local_visible_output_exprs =
+        &local_output_exprs[..local_output_exprs.len().min(view_output_exprs.len())];
     let old_view_output_exprs =
         view_returning_pseudo_output_exprs(view_output_exprs, base_desc, OUTER_VAR);
     let new_view_output_exprs =
@@ -4467,7 +4477,7 @@ fn rewrite_auto_view_returning_targets(
             let expr = rewrite_local_vars_for_output_exprs_with_whole_row_width(
                 target.expr,
                 1,
-                local_output_exprs,
+                local_visible_output_exprs,
                 view_output_exprs.len(),
             );
             let expr = rewrite_local_vars_for_output_exprs(expr, OUTER_VAR, &old_view_output_exprs);
@@ -5300,7 +5310,7 @@ pub fn rewrite_bound_insert_auto_view_target(
                     &target.indirection,
                     &resolved.visible_output_exprs,
                 ),
-                target_sql_type: resolved.base_relation.desc.columns[column_index].sql_type,
+                target_sql_type: target.target_sql_type,
             })
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
@@ -5875,7 +5885,7 @@ pub fn rewrite_bound_delete_auto_view_target(
     let targets = auto_view_base_children(&resolved, catalog)?
         .into_iter()
         .map(|child| {
-            build_delete_target(
+            let mut target = build_delete_target(
                 &relation_name,
                 &resolved.base_relation.desc,
                 predicate.as_ref(),
@@ -5884,7 +5894,15 @@ pub fn rewrite_bound_delete_auto_view_target(
                 &child,
                 catalog,
             )
-            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))
+            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?;
+            if resolved.has_security_barrier && resolved.base_inh {
+                // :HACK: PostgreSQL's inherited security-barrier view DELETE
+                // keeps the target scan in heap order for leaky quals. The
+                // longer-term shape is a costed ModifyTable input path instead
+                // of choosing a DML index probe during binding.
+                target.row_source = BoundModifyRowSource::Heap;
+            }
+            Ok(target)
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
 

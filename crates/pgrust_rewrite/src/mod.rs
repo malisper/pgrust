@@ -288,10 +288,16 @@ fn collect_query_relation_privileges_into(
         .iter()
         .map(|rte| rte.permission.clone())
         .collect::<Vec<_>>();
+    let mut nested_privileges = Vec::new();
     let mut nested_from_queries = Vec::new();
     for rte in &query.rtable {
         for qual in &rte.security_quals {
-            collect_expr_relation_privileges(qual, query, &mut local_privileges, privileges);
+            collect_expr_relation_privileges(
+                qual,
+                query,
+                &mut local_privileges,
+                &mut nested_privileges,
+            );
         }
         match &rte.kind {
             RangeTblEntryKind::Join { .. } => {}
@@ -301,7 +307,7 @@ fn collect_query_relation_privileges_into(
                         expr,
                         query,
                         &mut local_privileges,
-                        privileges,
+                        &mut nested_privileges,
                     );
                 }
             }
@@ -311,7 +317,7 @@ fn collect_query_relation_privileges_into(
                         expr,
                         query,
                         &mut local_privileges,
-                        privileges,
+                        &mut nested_privileges,
                     );
                 }
             }
@@ -324,7 +330,12 @@ fn collect_query_relation_privileges_into(
         }
     }
     if let Some(jointree) = &query.jointree {
-        collect_join_tree_relation_privileges(jointree, query, &mut local_privileges, privileges);
+        collect_join_tree_relation_privileges(
+            jointree,
+            query,
+            &mut local_privileges,
+            &mut nested_privileges,
+        );
     }
     let single_relation_target_varno = (query.rtable.len() == 1
         && matches!(query.rtable[0].kind, RangeTblEntryKind::Relation { .. }))
@@ -341,41 +352,77 @@ fn collect_query_relation_privileges_into(
                 &target.expr,
                 query,
                 &mut local_privileges,
-                privileges,
+                &mut nested_privileges,
             );
         }
     }
     for clause in &query.distinct_on {
-        collect_expr_relation_privileges(&clause.expr, query, &mut local_privileges, privileges);
+        collect_expr_relation_privileges(
+            &clause.expr,
+            query,
+            &mut local_privileges,
+            &mut nested_privileges,
+        );
     }
     if let Some(where_qual) = &query.where_qual {
-        collect_expr_relation_privileges(where_qual, query, &mut local_privileges, privileges);
+        collect_expr_relation_privileges(
+            where_qual,
+            query,
+            &mut local_privileges,
+            &mut nested_privileges,
+        );
     }
     for expr in &query.group_by {
-        collect_expr_relation_privileges(expr, query, &mut local_privileges, privileges);
+        collect_expr_relation_privileges(
+            expr,
+            query,
+            &mut local_privileges,
+            &mut nested_privileges,
+        );
     }
     for accum in &query.accumulators {
-        collect_agg_accum_relation_privileges(accum, query, &mut local_privileges, privileges);
+        collect_agg_accum_relation_privileges(
+            accum,
+            query,
+            &mut local_privileges,
+            &mut nested_privileges,
+        );
     }
     for clause in &query.window_clauses {
-        collect_window_clause_relation_privileges(clause, query, &mut local_privileges, privileges);
+        collect_window_clause_relation_privileges(
+            clause,
+            query,
+            &mut local_privileges,
+            &mut nested_privileges,
+        );
     }
     if let Some(having_qual) = &query.having_qual {
-        collect_expr_relation_privileges(having_qual, query, &mut local_privileges, privileges);
+        collect_expr_relation_privileges(
+            having_qual,
+            query,
+            &mut local_privileges,
+            &mut nested_privileges,
+        );
     }
     for clause in &query.sort_clause {
-        collect_expr_relation_privileges(&clause.expr, query, &mut local_privileges, privileges);
+        collect_expr_relation_privileges(
+            &clause.expr,
+            query,
+            &mut local_privileges,
+            &mut nested_privileges,
+        );
     }
     if let Some(recursive_union) = &query.recursive_union {
-        collect_query_relation_privileges_into(&recursive_union.anchor, privileges);
-        collect_query_relation_privileges_into(&recursive_union.recursive, privileges);
+        collect_query_relation_privileges_into(&recursive_union.anchor, &mut nested_privileges);
+        collect_query_relation_privileges_into(&recursive_union.recursive, &mut nested_privileges);
     }
     if let Some(set_operation) = &query.set_operation {
         for input in &set_operation.inputs {
-            collect_query_relation_privileges_into(input, privileges);
+            collect_query_relation_privileges_into(input, &mut nested_privileges);
         }
     }
     privileges.extend(local_privileges.into_iter().flatten());
+    privileges.extend(nested_privileges);
     for nested_query in nested_from_queries {
         collect_query_relation_privileges_into(nested_query, privileges);
     }

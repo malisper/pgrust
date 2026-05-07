@@ -185,7 +185,11 @@ fn emit_unmatched_left(
             outputs.push(output_null_extended_left(left, right_width))
         }
         JoinType::Anti => outputs.push(output_left_only(left)),
-        JoinType::Inner | JoinType::Right | JoinType::Semi | JoinType::Cross => {}
+        JoinType::Inner
+        | JoinType::Right
+        | JoinType::Semi
+        | JoinType::RightSemi
+        | JoinType::Cross => {}
     }
 }
 
@@ -493,6 +497,7 @@ impl PlanNode for MergeJoinState {
             JoinType::Right => "Merge Right Join".into(),
             JoinType::Full => "Merge Full Join".into(),
             JoinType::Semi => "Merge Semi Join".into(),
+            JoinType::RightSemi => "Merge Right Semi Join".into(),
             JoinType::Anti => "Merge Anti Join".into(),
             JoinType::Cross => "Merge Join".into(),
         }

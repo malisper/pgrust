@@ -178,7 +178,11 @@ fn nullable_relids_by_outer_joins(root: &PlannerInfo) -> Vec<usize> {
                 relids.extend(sjinfo.syn_lefthand.iter().copied());
                 relids.extend(sjinfo.syn_righthand.iter().copied());
             }
-            JoinType::Inner | JoinType::Cross | JoinType::Semi | JoinType::Anti => {}
+            JoinType::Inner
+            | JoinType::Cross
+            | JoinType::Semi
+            | JoinType::RightSemi
+            | JoinType::Anti => {}
         }
     }
     relids.sort_unstable();
@@ -271,7 +275,9 @@ fn reverse_join_type(kind: JoinType) -> JoinType {
     match kind {
         JoinType::Left => JoinType::Right,
         JoinType::Right => JoinType::Left,
-        JoinType::Semi | JoinType::Anti => kind,
+        JoinType::Semi => JoinType::RightSemi,
+        JoinType::RightSemi => JoinType::Semi,
+        JoinType::Anti => kind,
         other => other,
     }
 }
@@ -380,16 +386,27 @@ pub fn build_join_paths(
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
-    let mut output_columns = left.columns();
-    if !matches!(kind, JoinType::Semi | JoinType::Anti) {
-        output_columns.extend(right.columns());
-    }
-    let mut exprs = left.semantic_output_target().exprs;
-    let mut sortgrouprefs = left.semantic_output_target().sortgrouprefs;
-    if !matches!(kind, JoinType::Semi | JoinType::Anti) {
-        exprs.extend(right.semantic_output_target().exprs);
-        sortgrouprefs.extend(right.semantic_output_target().sortgrouprefs);
-    }
+    let (output_columns, exprs, sortgrouprefs) = match kind {
+        JoinType::Semi | JoinType::Anti => (
+            left.columns(),
+            left.semantic_output_target().exprs,
+            left.semantic_output_target().sortgrouprefs,
+        ),
+        JoinType::RightSemi => (
+            right.columns(),
+            right.semantic_output_target().exprs,
+            right.semantic_output_target().sortgrouprefs,
+        ),
+        _ => {
+            let mut output_columns = left.columns();
+            output_columns.extend(right.columns());
+            let mut exprs = left.semantic_output_target().exprs;
+            let mut sortgrouprefs = left.semantic_output_target().sortgrouprefs;
+            exprs.extend(right.semantic_output_target().exprs);
+            sortgrouprefs.extend(right.semantic_output_target().sortgrouprefs);
+            (output_columns, exprs, sortgrouprefs)
+        }
+    };
     path::build_join_paths(
         left,
         right,

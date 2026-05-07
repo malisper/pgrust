@@ -289,6 +289,9 @@ impl PathMethods for Path {
             | Self::MergeJoin {
                 left, right, kind, ..
             } => {
+                if matches!(kind, JoinType::RightSemi) {
+                    return right.output_vars();
+                }
                 let mut vars = left.output_vars();
                 if !matches!(kind, JoinType::Semi | JoinType::Anti) {
                     vars.extend(right.output_vars());
@@ -452,6 +455,9 @@ impl PathMethods for Path {
             {
                 left.pathkeys()
             }
+            Self::NestedLoopJoin { right, kind, .. } if matches!(kind, JoinType::RightSemi) => {
+                right.pathkeys()
+            }
             Self::MergeJoin { left, kind, .. }
                 if matches!(
                     kind,
@@ -459,6 +465,9 @@ impl PathMethods for Path {
                 ) =>
             {
                 left.pathkeys()
+            }
+            Self::MergeJoin { right, kind, .. } if matches!(kind, JoinType::RightSemi) => {
+                right.pathkeys()
             }
             Self::HashJoin { .. } => Vec::new(),
             Self::NestedLoopJoin { .. } | Self::MergeJoin { .. } => Vec::new(),

@@ -1845,6 +1845,7 @@ pub enum JoinType {
     Right,
     Full,
     Semi,
+    RightSemi,
     Anti,
 }
 

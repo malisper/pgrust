@@ -6133,6 +6133,7 @@ fn render_join_type(kind: JoinType) -> &'static str {
         JoinType::Right => "RIGHT",
         JoinType::Full => "FULL",
         JoinType::Semi => "SEMI",
+        JoinType::RightSemi => "RIGHT SEMI",
         JoinType::Anti => "ANTI",
     }
 }

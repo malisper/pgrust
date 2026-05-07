@@ -72,7 +72,7 @@ pub fn translated_restrict_info(clause: Expr, source: &RestrictInfo) -> Restrict
     translated
 }
 
-fn expr_is_leakproof(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
+pub(super) fn expr_is_leakproof(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
     match expr {
         Expr::Var(_)
         | Expr::Param(_)

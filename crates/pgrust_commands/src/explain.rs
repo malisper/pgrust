@@ -1810,7 +1810,7 @@ pub fn swapped_partition_hash_join_display_plan(plan: &Plan) -> Option<Plan> {
         JoinType::Left => JoinType::Right,
         JoinType::Right => JoinType::Left,
         JoinType::Full => JoinType::Full,
-        JoinType::Semi | JoinType::Anti | JoinType::Cross => return None,
+        JoinType::Semi | JoinType::RightSemi | JoinType::Anti | JoinType::Cross => return None,
     };
     if !partition_hash_join_display_prefers_swapped(left, hash_input) {
         return None;

@@ -10958,49 +10958,6 @@ impl MergeRuntimeTriggers {
     }
 }
 
-fn merge_action_mutates(action: &BoundMergeAction) -> bool {
-    !matches!(action, BoundMergeAction::DoNothing)
-}
-
-fn merge_uses_full_join_input(stmt: &BoundMergeStatement) -> bool {
-    let has_not_matched_by_source = stmt.when_clauses.iter().any(|clause| {
-        matches!(
-            clause.match_kind,
-            crate::backend::parser::MergeMatchKind::NotMatchedBySource
-        ) && merge_action_mutates(&clause.action)
-    });
-    let has_not_matched_by_target = stmt.when_clauses.iter().any(|clause| {
-        matches!(
-            clause.match_kind,
-            crate::backend::parser::MergeMatchKind::NotMatchedByTarget
-        ) && merge_action_mutates(&clause.action)
-    });
-    has_not_matched_by_source && has_not_matched_by_target
-}
-
-fn merge_row_has_target(stmt: &BoundMergeStatement, row_values: &[Value]) -> bool {
-    row_values
-        .get(stmt.target_ctid_index)
-        .is_some_and(|value| !matches!(value, Value::Null))
-}
-
-fn order_full_merge_input_rows(stmt: &BoundMergeStatement, rows: &mut Vec<Vec<Value>>) {
-    if !merge_uses_full_join_input(stmt) {
-        return;
-    }
-    let mut target_rows = Vec::with_capacity(rows.len());
-    let mut source_only_rows = Vec::new();
-    for row in rows.drain(..) {
-        if merge_row_has_target(stmt, &row) {
-            target_rows.push(row);
-        } else {
-            source_only_rows.push(row);
-        }
-    }
-    target_rows.extend(source_only_rows);
-    *rows = target_rows;
-}
-
 fn merge_view_action_error_message(relation_name: &str, event: ViewDmlEvent) -> String {
     match event {
         ViewDmlEvent::Insert => format!("cannot insert into view \"{}\"", relation_name),
@@ -11294,7 +11251,6 @@ fn execute_merge_on_instead_trigger_view(
         Value::materialize_all(&mut row_values);
         input_rows.push(row_values);
     }
-    order_full_merge_input_rows(&stmt, &mut input_rows);
 
     for row_values in input_rows {
         ctx.check_for_interrupts()?;
@@ -12182,7 +12138,6 @@ fn run_merge(
         input_rows.push(row_values);
     }
     let input_row_count = input_rows.len();
-    order_full_merge_input_rows(stmt, &mut input_rows);
 
     for row_values in input_rows {
         ctx.check_for_interrupts()?;

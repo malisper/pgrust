@@ -22,10 +22,10 @@ use crate::backend::executor::{
 use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::{
     AlterRuleRenameStatement, AlterTableRuleStateStatement, AlterTableTriggerMode,
-    BoundAssignmentTarget, CatalogLookup, CommentOnRuleStatement, CreateRuleStatement, CteBody,
-    DropRuleStatement, FromItem, ParseError, RuleDoKind, RuleEvent, SelectItem, SelectStatement,
-    Statement, bind_relation_constraints, bind_rule_action_statement, bind_rule_qual,
-    cte_body_references_table, delete_statement_references_table,
+    BoundAssignmentTarget, BoundInsertSource, CatalogLookup, CommentOnRuleStatement,
+    CreateRuleStatement, CteBody, DropRuleStatement, FromItem, ParseError, RuleDoKind, RuleEvent,
+    SelectItem, SelectStatement, Statement, bind_relation_constraints, bind_rule_action_statement,
+    bind_rule_qual, cte_body_references_table, delete_statement_references_table,
     insert_statement_references_table, merge_statement_references_table,
     rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
     rewrite_bound_update_auto_view_target, select_statement_references_table,
@@ -956,7 +956,11 @@ pub(crate) fn execute_bound_insert_with_rules(
             catalog,
             ctx.session_replication_role,
         )?;
-        let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
+        let rows = if stmt.relkind == 'v' {
+            materialize_view_insert_new_rows(&stmt, catalog, ctx)?
+        } else {
+            materialize_insert_rows(&stmt, catalog, ctx)?
+        };
         if stmt.relkind == 'v' && rules.iter().all(|rule| !rule.is_instead) {
             let view_name = stmt.relation_name.clone();
             let auto_stmt = rewrite_bound_insert_auto_view_target(stmt.clone(), catalog)
@@ -1156,7 +1160,7 @@ fn execute_auto_view_insert_with_do_also_rules(
             catalog,
             ctx.session_replication_role,
         )?;
-        let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
+        let rows = materialize_view_insert_new_rows(&stmt, catalog, ctx)?;
         let auto_result = execute_bound_insert_with_rules(auto_stmt, catalog, ctx, xid, cid)?;
         let null_old = vec![Value::Null; stmt.desc.columns.len()];
         let mut query_columns = None;
@@ -1194,6 +1198,101 @@ fn execute_auto_view_insert_with_do_also_rules(
     })();
     ctx.subplans = saved_subplans;
     result
+}
+
+fn materialize_view_insert_new_rows(
+    stmt: &crate::backend::parser::BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    let mut rule_stmt = stmt.clone();
+    rule_stmt.source = view_insert_new_source(stmt, catalog);
+    materialize_insert_rows(&rule_stmt, catalog, ctx)
+}
+
+fn view_insert_new_source(
+    stmt: &crate::backend::parser::BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+) -> BoundInsertSource {
+    match &stmt.source {
+        BoundInsertSource::Values(rows) => BoundInsertSource::Values(
+            rows.iter()
+                .enumerate()
+                .map(|(row_index, row)| view_insert_new_row(stmt, catalog, row_index, row))
+                .collect(),
+        ),
+        BoundInsertSource::ProjectSetValues(rows) => BoundInsertSource::ProjectSetValues(
+            rows.iter()
+                .enumerate()
+                .map(|(row_index, row)| view_insert_new_row(stmt, catalog, row_index, row))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn view_insert_new_row(
+    stmt: &crate::backend::parser::BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+    row_index: usize,
+    row: &[Expr],
+) -> Vec<Expr> {
+    row.iter()
+        .enumerate()
+        .map(|(target_index, expr)| {
+            let is_default = stmt
+                .source_defaults
+                .get(row_index)
+                .and_then(|row| row.get(target_index))
+                .copied()
+                .unwrap_or(false);
+            if is_default {
+                view_insert_new_default_expr(stmt, catalog, target_index)
+            } else {
+                expr.clone()
+            }
+        })
+        .collect()
+}
+
+fn view_insert_new_default_expr(
+    stmt: &crate::backend::parser::BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+    target_index: usize,
+) -> Expr {
+    let Some(target) = stmt.target_columns.get(target_index) else {
+        return Expr::Const(Value::Null);
+    };
+    if stmt
+        .desc
+        .columns
+        .get(target.column_index)
+        .is_some_and(|column| insert_column_has_effective_default(column, catalog))
+    {
+        stmt.column_defaults
+            .get(target.column_index)
+            .cloned()
+            .unwrap_or(Expr::Const(Value::Null))
+    } else {
+        // PostgreSQL replaces DEFAULTs in rule/trigger-updatable view NEW rows
+        // with NULL when the view column has no default. For auto-updatable
+        // DO ALSO rules, rewriteValuesRTEToNulls() applies the same treatment
+        // to the rule product query while the original auto-view insert still
+        // gets the base-table default later.
+        Expr::Const(Value::Null)
+    }
+}
+
+fn insert_column_has_effective_default(
+    column: &crate::include::nodes::primnodes::ColumnDesc,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    column.default_expr.is_some()
+        || column.default_sequence_oid.is_some()
+        || catalog
+            .type_oid_for_sql_type(column.sql_type)
+            .and_then(|type_oid| catalog.type_default_sql(type_oid))
+            .is_some()
 }
 
 pub(crate) fn execute_bound_update_with_rules(
@@ -2043,7 +2142,7 @@ fn execute_view_insert_with_triggers(
             ));
         }
         triggers.before_statement(ctx)?;
-        let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
+        let rows = materialize_view_insert_new_rows(&stmt, catalog, ctx)?;
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
         let null_old = vec![Value::Null; stmt.desc.columns.len()];

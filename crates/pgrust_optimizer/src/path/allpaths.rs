@@ -3273,6 +3273,9 @@ fn set_operation_child_can_accept_required_order(query: &Query) -> bool {
         && query.limit_offset.is_none()
         && query.locking_clause.is_none()
         && query.row_marks.is_empty()
+        && !query.has_target_srfs
+        && query.recursive_union.is_none()
+        && query.set_operation.is_none()
 }
 
 fn set_operation_child_ordering_is_worthwhile(query: &Query) -> bool {
@@ -4018,6 +4021,7 @@ fn push_subquery_filter(
     rtindex: usize,
     mut query: Query,
     filter: Option<Expr>,
+    catalog: &dyn CatalogLookup,
 ) -> (Query, Option<Expr>) {
     let Some(filter) = filter else {
         return (query, None);
@@ -4026,6 +4030,28 @@ fn push_subquery_filter(
         return push_set_operation_filter(rtindex, query, filter);
     }
     if !subquery_filter_pushdown_is_safe(&query) {
+        if security_barrier_subquery_filter_pushdown_is_safe(&query) {
+            let conjuncts = flatten_and_conjuncts(&filter);
+            let (leakproof, remaining): (Vec<_>, Vec<_>) = conjuncts
+                .into_iter()
+                .partition(|clause| joininfo::expr_is_leakproof(clause, catalog));
+            if let Some(leakproof_filter) = and_exprs(leakproof) {
+                let visible_targets = query
+                    .target_list
+                    .iter()
+                    .filter(|target| !target.resjunk)
+                    .collect::<Vec<_>>();
+                if let Some(pushed) =
+                    rewrite_filter_for_subquery(leakproof_filter, rtindex, &visible_targets, &query)
+                {
+                    query.where_qual = Some(match query.where_qual.take() {
+                        Some(existing) => Expr::and(pushed, existing),
+                        None => pushed,
+                    });
+                    return (query, and_exprs(remaining));
+                }
+            }
+        }
         if window_subquery_filter_pushdown_is_safe(&query) {
             let visible_targets = query
                 .target_list
@@ -4060,6 +4086,20 @@ fn push_subquery_filter(
         None => pushed,
     });
     (query, None)
+}
+
+fn security_barrier_subquery_filter_pushdown_is_safe(query: &Query) -> bool {
+    query.depends_on_row_security
+        && !query.distinct
+        && query.group_by.is_empty()
+        && query.accumulators.is_empty()
+        && query.window_clauses.is_empty()
+        && query.having_qual.is_none()
+        && query.sort_clause.is_empty()
+        && query.limit_count.is_none()
+        && query.limit_offset.is_none()
+        && query.locking_clause.is_none()
+        && query.row_marks.is_empty()
 }
 
 fn window_subquery_filter_pushdown_is_safe(query: &Query) -> bool {
@@ -6007,7 +6047,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         }
         RangeTblEntryKind::Subquery { query } => {
             let (query, filter) =
-                push_subquery_filter(rtindex, *query, base_filter_expr(rel, catalog));
+                push_subquery_filter(rtindex, *query, base_filter_expr(rel, catalog), catalog);
             let mut path = build_subquery_scan_path(
                 rtindex,
                 query,
@@ -6368,6 +6408,9 @@ fn join_reltarget(
     right_rel: &RelOptInfo,
     kind: JoinType,
 ) -> PathTarget {
+    if matches!(kind, JoinType::RightSemi) {
+        return right_rel.reltarget.clone();
+    }
     let mut exprs = left_rel.reltarget.exprs.clone();
     let mut sortgrouprefs = left_rel.reltarget.sortgrouprefs.clone();
     if !matches!(kind, JoinType::Semi | JoinType::Anti) {
@@ -6466,6 +6509,17 @@ fn rel_matches_special_join(
     } else {
         None
     }
+}
+
+fn query_is_merge_input(root: &PlannerInfo) -> bool {
+    // :HACK: MERGE lowers to a SELECT-like hidden input query today. PostgreSQL
+    // keeps the target relation on the left side of that join, and MERGE
+    // RETURNING order follows the executor stream. Preserve that orientation
+    // until MERGE has an explicit planner command tag.
+    root.parse
+        .target_list
+        .iter()
+        .any(|target| target.name == "__merge_source_present")
 }
 
 fn relids_match_ojrelid(root: &PlannerInfo, relids: &[usize], ojrelid: usize) -> bool {
@@ -6582,6 +6636,9 @@ fn join_is_legal(
     }
 
     if let Some((sjinfo, reversed)) = matched_sj {
+        if reversed && query_is_merge_input(root) {
+            return None;
+        }
         return Some(join_spec_for_special_join(sjinfo, reversed));
     }
 
@@ -7340,6 +7397,9 @@ fn query_columns_desc(columns: &[QueryColumn]) -> RelationDesc {
 }
 
 fn join_output_columns_for_child(left: &Path, right: &Path, kind: JoinType) -> Vec<QueryColumn> {
+    if matches!(kind, JoinType::RightSemi) {
+        return right.columns();
+    }
     let mut columns = left.columns();
     if !matches!(kind, JoinType::Semi | JoinType::Anti) {
         columns.extend(right.columns());

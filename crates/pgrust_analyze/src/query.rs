@@ -1466,6 +1466,42 @@ fn rewrite_local_vars_for_output_exprs_impl(
         Expr::Var(var)
             if var.varlevelsup == source_varlevelsup
                 && var.varno == source_varno
+                && var.varattno == WHOLE_ROW_ATTR_NO =>
+        {
+            let fields = output_exprs
+                .iter()
+                .enumerate()
+                .map(|(index, expr)| {
+                    (
+                        format!("f{}", index + 1),
+                        raise_expr_varlevels(expr.clone(), source_varlevelsup),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let descriptor_fields = fields
+                .iter()
+                .map(|(name, expr)| {
+                    (
+                        name.clone(),
+                        expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    )
+                })
+                .collect();
+            let descriptor = if matches!(var.vartype.kind, SqlTypeKind::Composite) {
+                pgrust_nodes::datum::RecordDescriptor::named(
+                    var.vartype.type_oid,
+                    var.vartype.typrelid,
+                    var.vartype.typmod,
+                    descriptor_fields,
+                )
+            } else {
+                pgrust_nodes::datum::RecordDescriptor::anonymous(descriptor_fields, -1)
+            };
+            Expr::Row { descriptor, fields }
+        }
+        Expr::Var(var)
+            if var.varlevelsup == source_varlevelsup
+                && var.varno == source_varno
                 && !is_system_attr(var.varattno) =>
         {
             if var.varattno == WHOLE_ROW_ATTR_NO {

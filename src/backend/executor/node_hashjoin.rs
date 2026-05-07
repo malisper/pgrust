@@ -107,6 +107,12 @@ impl PlanNode for HashJoinState {
                                 .get(&key)
                                 .cloned()
                                 .unwrap_or_default();
+                            if matches!(self.kind, JoinType::RightSemi) {
+                                // PostgreSQL stores same-bucket hash tuples in
+                                // newest-first order; right-semi output exposes
+                                // that order because the hash side is emitted.
+                                self.current_bucket_entries.reverse();
+                            }
                             self.phase = HashJoinPhase::ScanBucket;
                         } else {
                             self.phase = HashJoinPhase::FillOuterTuple;
@@ -128,46 +134,39 @@ impl PlanNode for HashJoinState {
 
                     let entry_index = self.current_bucket_entries[self.current_bucket_index];
                     self.current_bucket_index += 1;
-
-                    let right_values = self
-                        .right
-                        .table
-                        .as_ref()
-                        .expect("hash table must be built before probing")
-                        .entries[entry_index]
-                        .row
-                        .slot
-                        .tts_values
-                        .clone();
-                    let outer = self
-                        .current_outer
-                        .as_ref()
-                        .expect("current outer tuple must exist while scanning a bucket");
-                    store_virtual_row(&mut self.slot, combine_slots(outer, &right_values));
-                    self.current_bindings = merge_system_bindings(
-                        &outer.system_bindings,
-                        &self
+                    if matches!(self.kind, JoinType::RightSemi)
+                        && self
                             .right
                             .table
                             .as_ref()
                             .expect("hash table must be built before probing")
                             .entries[entry_index]
-                            .row
-                            .system_bindings,
-                    );
-                    set_active_system_bindings(ctx, &self.current_bindings);
-                    ctx.expr_bindings.outer_tuple = Some(outer.slot.tts_values.clone());
-                    ctx.expr_bindings.outer_system_bindings = outer.system_bindings.clone();
-                    ctx.expr_bindings.inner_tuple = Some(right_values.clone());
-                    ctx.expr_bindings.inner_system_bindings = self
+                            .matched
+                    {
+                        continue;
+                    }
+
+                    let right_entry = &self
                         .right
                         .table
                         .as_ref()
                         .expect("hash table must be built before probing")
                         .entries[entry_index]
-                        .row
-                        .system_bindings
-                        .clone();
+                        .row;
+                    let right_values = right_entry.slot.tts_values.clone();
+                    let right_bindings = right_entry.system_bindings.clone();
+                    let outer = self
+                        .current_outer
+                        .as_ref()
+                        .expect("current outer tuple must exist while scanning a bucket");
+                    store_virtual_row(&mut self.slot, combine_slots(outer, &right_values));
+                    self.current_bindings =
+                        merge_system_bindings(&outer.system_bindings, &right_bindings);
+                    set_active_system_bindings(ctx, &self.current_bindings);
+                    ctx.expr_bindings.outer_tuple = Some(outer.slot.tts_values.clone());
+                    ctx.expr_bindings.outer_system_bindings = outer.system_bindings.clone();
+                    ctx.expr_bindings.inner_tuple = Some(right_values.clone());
+                    ctx.expr_bindings.inner_system_bindings = right_bindings.clone();
 
                     if !eval_qual_list(&self.hash_clauses, &mut self.slot, ctx)? {
                         continue;
@@ -199,6 +198,13 @@ impl PlanNode for HashJoinState {
                         self.current_bindings = outer.system_bindings;
                         set_active_system_bindings(ctx, &self.current_bindings);
                         self.phase = HashJoinPhase::NeedNewOuter;
+                        self.stats.rows += 1;
+                        return Ok(Some(&mut self.slot));
+                    }
+                    if matches!(self.kind, JoinType::RightSemi) {
+                        store_virtual_row(&mut self.slot, right_values);
+                        self.current_bindings = right_bindings;
+                        set_active_system_bindings(ctx, &self.current_bindings);
                         self.stats.rows += 1;
                         return Ok(Some(&mut self.slot));
                     }
@@ -297,6 +303,7 @@ impl PlanNode for HashJoinState {
             JoinType::Right => "Hash Right Join".into(),
             JoinType::Full => "Hash Full Join".into(),
             JoinType::Semi => "Hash Semi Join".into(),
+            JoinType::RightSemi => "Hash Right Semi Join".into(),
             JoinType::Anti => "Hash Anti Join".into(),
             JoinType::Cross => "Hash Join".into(),
         }
