@@ -10,3 +10,20 @@ useDefault = true
 [[allowlists]]
 description = "PostHog public project keys — client-side by design"
 regexes = ['''phc_[A-Za-z0-9]{40,}''']
+
+[[allowlists]]
+description = "PostgreSQL regression output labels named Key"
+condition = "AND"
+paths = ['''runs/.*''']
+regexes = [
+  '''^(tenk1|tenk1_1)\.(fivethous|thousand)$''',
+  '''^minmaxtest_5\.f1$''',
+  '''^mclparted_[12]\.a$''',
+  '''^c12-06-geometry$''',
+]
+
+[[allowlists]]
+description = "Non-secret isolated test target pool key in task notes"
+condition = "AND"
+paths = ['''^\.codex/task-notes/''']
+regexes = ['''^c12-06-geometry$''']
