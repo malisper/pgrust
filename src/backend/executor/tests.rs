@@ -26393,7 +26393,8 @@ fn scalar_in_subquery_coerces_comparison_types() {
         db.execute(
             1,
             "select * from numeric_table
-             where num_col in (select float_col from float_table)",
+             where num_col in (select float_col from float_table)
+             order by num_col",
         )
         .unwrap(),
         vec![
