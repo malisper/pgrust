@@ -8,13 +8,13 @@
 
 ## **Status: V1 / experimental**
 
-**This is not production-ready. pgrust is now matching about 67% of the 54,000+ query blocks in PostgreSQL's regression suite. Core systems exist, `psql` connects, and the browser demo runs the same engine compiled to WebAssembly. Many features are still missing, performance is uneven, and correctness work is ongoing.**
+**This is not production-ready. pgrust is now passing about 96% of PostgreSQL's regression suite. Core systems exist, `psql` connects, and the browser demo runs the same engine compiled to WebAssembly. Many features are still missing, performance is uneven, and correctness work is ongoing.**
 
 [**Original launch write-up.**](https://malisper.me/pgrust-rebuilding-postgres-in-rust-with-ai)
 
-[**Latest update: 67% Postgres compatibility and accelerating.**](https://malisper.me/pgrust-update-at-67-postgres-compatibility-and-accelerating/)
+[**Latest update: The four horsemen behind thousands of Postgres outages.**](https://malisper.me/the-four-horsemen-behind-thousands-of-postgres-outages/)
 
-**Next update:** blog post 3 is coming soon. Link TBD.
+[**Previous update: 67% Postgres compatibility and accelerating.**](https://malisper.me/pgrust-update-at-67-postgres-compatibility-and-accelerating/)
 
 ## **Why?**
 
@@ -40,11 +40,17 @@
 - **Regex support**
 - **PL/pgSQL pieces**
 - **Basic SQL: SELECT / INSERT / UPDATE / DELETE / CREATE TABLE / CREATE INDEX / transactions / aggregates / joins**
-- **~67% of PostgreSQL regression query blocks match expected output**
+- **~96% of PostgreSQL regression tests match expected output**
 
 ## **Current snapshot**
 
-The public `main` branch moves forward with intentionally published updates. The 2026-04-27 regression snapshot that matched about 67% of PostgreSQL's regression query blocks is tagged separately so it remains easy to find even as `main` advances.
+The public `main` branch moves forward with intentionally published updates. The 96% compatibility snapshot is tagged as [`compat-96pct-20260507`](https://github.com/malisper/pgrust/releases/tag/compat-96pct-20260507), and the previous 67% snapshot remains tagged as [`compat-67pct-20260427`](https://github.com/malisper/pgrust/releases/tag/compat-67pct-20260427).
+
+## **Roadmap**
+
+- **Push the remaining PostgreSQL compatibility gaps toward 100%.**
+- **Stability and bug bashing so pgrust can move from experimental to trustworthy.**
+- **Explore architectural fixes for common Postgres outage sources: 64-bit transaction IDs, VACUUM alternatives, better connection/query parallelism, adaptive planning, and JSON statistics/compression.**
 
 ## **Quick start**
 
