@@ -20,3 +20,6 @@ pgrust_nodes = { path = "../pgrust_nodes" }
 pgrust_storage = { path = "../pgrust_storage" }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
