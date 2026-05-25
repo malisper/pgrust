@@ -14,6 +14,34 @@ pub fn is_postgres_guc(name: &str) -> bool {
     postgres_gucs().contains(normalized.as_str())
 }
 
+/// Returns true for `PGC_INTERNAL` GUCs: read-only preset parameters that
+/// SHOW reports but SET/RESET must reject. Mirrors the PGC_INTERNAL entries
+/// in `postgres/src/backend/utils/misc/guc_parameters.dat`.
+pub fn is_internal_guc(name: &str) -> bool {
+    matches!(
+        normalize_guc_name(name).as_str(),
+        "block_size"
+            | "data_checksums"
+            | "data_directory_mode"
+            | "in_hot_standby"
+            | "integer_datetimes"
+            | "is_superuser"
+            | "lc_collate"
+            | "lc_ctype"
+            | "max_identifier_length"
+            | "max_index_keys"
+            | "num_os_semaphores"
+            | "segment_size"
+            | "server_encoding"
+            | "server_version"
+            | "server_version_num"
+            | "shared_memory_size"
+            | "shared_memory_size_in_huge_pages"
+            | "wal_block_size"
+            | "wal_segment_size"
+    )
+}
+
 pub fn normalize_guc_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
@@ -125,6 +153,34 @@ mod tests {
 
     #[test]
     fn loads_checked_in_postgres_guc_list() {
-        assert_eq!(postgres_gucs().len(), 408);
+        assert_eq!(postgres_gucs().len(), 415);
+    }
+
+    #[test]
+    fn report_only_gucs_are_internal() {
+        for name in [
+            "server_version",
+            "server_version_num",
+            "server_encoding",
+            "lc_collate",
+            "lc_ctype",
+            "is_superuser",
+            "integer_datetimes",
+            "in_hot_standby",
+            "block_size",
+            "segment_size",
+            "wal_block_size",
+            "wal_segment_size",
+            "max_index_keys",
+            "max_identifier_length",
+        ] {
+            assert!(
+                is_postgres_guc(name),
+                "{name} missing from postgres GUC list"
+            );
+            assert!(is_internal_guc(name), "{name} should be PGC_INTERNAL");
+        }
+        assert!(!is_internal_guc("work_mem"));
+        assert!(!is_internal_guc("client_min_messages"));
     }
 }

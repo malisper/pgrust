@@ -6,6 +6,7 @@ pub mod notices;
 pub mod stack_depth;
 pub mod storage;
 pub mod transam;
+pub mod version;
 
 pub use access::{
     AttributeAlign, AttributeCompression, AttributeDesc, AttributeStorage, ItemPointerData,
@@ -38,3 +39,4 @@ pub use transam::{
     XLOG_HEAP_INSERT, XLOG_XACT_ABORT, XLOG_XACT_COMMIT, XLOG_XACT_PREPARE,
     transaction_id_is_normal,
 };
+pub use version::{PG_VERSION_NUM, PG_VERSION_STRING, SERVER_ENCODING};

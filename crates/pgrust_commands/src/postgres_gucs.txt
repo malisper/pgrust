@@ -152,6 +152,7 @@ io_max_combine_limit
 io_max_concurrency
 io_method
 io_workers
+is_superuser
 jit
 jit_above_cost
 jit_debugging_support
@@ -165,6 +166,8 @@ jit_tuple_deforming
 join_collapse_limit
 krb_caseins_users
 krb_server_keyfile
+lc_collate
+lc_ctype
 lc_messages
 lc_monetary
 lc_numeric
@@ -292,6 +295,10 @@ send_abort_for_crash
 send_abort_for_kill
 seq_page_cost
 serializable_buffers
+server_encoding
+server_version
+server_version_num
+session_authorization
 session_preload_libraries
 session_replication_role
 shared_buffers

@@ -6790,9 +6790,13 @@ where
         return Ok(());
     }
     send_auth_ok(&mut writer)?;
-    send_parameter_status(&mut writer, "server_version", "18.3")?;
-    send_parameter_status(&mut writer, "server_encoding", "UTF8")?;
-    send_parameter_status(&mut writer, "client_encoding", "UTF8")?;
+    send_parameter_status(
+        &mut writer,
+        "server_version",
+        pgrust_core::PG_VERSION_STRING,
+    )?;
+    send_parameter_status(&mut writer, "server_encoding", pgrust_core::SERVER_ENCODING)?;
+    send_parameter_status(&mut writer, "client_encoding", pgrust_core::SERVER_ENCODING)?;
     send_parameter_status(
         &mut writer,
         "DateStyle",

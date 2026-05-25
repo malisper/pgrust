@@ -1586,6 +1586,51 @@ fn transaction_characteristic_gucs_use_session_state() {
 }
 
 #[test]
+fn show_server_version_returns_advertised_version() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show server_version"),
+        vec![vec![Value::Text(
+            pgrust_core::PG_VERSION_STRING.to_string().into()
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show server_version_num"),
+        vec![vec![Value::Text(
+            pgrust_core::PG_VERSION_NUM.to_string().into()
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show server_encoding"),
+        vec![vec![Value::Text(
+            pgrust_core::SERVER_ENCODING.to_string().into()
+        )]]
+    );
+}
+
+#[test]
+fn set_internal_guc_rejected() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    match session.execute(&db, "set server_version = '17.0'") {
+        Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name))) => {
+            assert_eq!(name, "server_version");
+        }
+        other => panic!("expected server_version runtime change error, got {other:?}"),
+    }
+
+    match session.execute(&db, "reset server_version") {
+        Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name))) => {
+            assert_eq!(name, "server_version");
+        }
+        other => panic!("expected server_version reset error, got {other:?}"),
+    }
+}
+
+#[test]
 fn repeatable_read_update_conflict_errors() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut reader = Session::new(1);

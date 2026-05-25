@@ -69,7 +69,7 @@ use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::checkpoint::is_checkpoint_guc;
 use crate::backend::utils::misc::guc::{
-    TEMP_BUFFERS_DEFAULT_PAGES, TEMP_BUFFERS_MIN_PAGES, is_postgres_guc,
+    TEMP_BUFFERS_DEFAULT_PAGES, TEMP_BUFFERS_MIN_PAGES, is_internal_guc, is_postgres_guc,
     normalize_function_guc_assignment, normalize_guc_name, plpgsql_guc_default_value,
 };
 use crate::backend::utils::misc::guc_datetime::{
@@ -124,6 +124,7 @@ use crate::pl::plpgsql::{
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
+use pgrust_core::{PG_VERSION_NUM, PG_VERSION_STRING, SERVER_ENCODING};
 use pgrust_expr::expr_bool::parse_pg_bool_text;
 use pgrust_nodes::{SessionReplicationRole, StatementResult};
 use pgrust_protocol::fastpath::LargeObjectFastpathCall;
@@ -2940,6 +2941,34 @@ fn call_output_columns(row: &PgProcRow, catalog: &dyn CatalogLookup) -> Vec<Quer
             }
         })
         .collect()
+}
+
+/// Resolve the displayed value for a `PGC_INTERNAL` (report-only) GUC.
+/// These mirror the preset values pgrust advertises in the startup
+/// `ParameterStatus` packet and cannot be SET.
+fn internal_guc_value(name: &str) -> String {
+    match name {
+        "server_version" => PG_VERSION_STRING.to_string(),
+        "server_version_num" => PG_VERSION_NUM.to_string(),
+        "server_encoding" | "lc_collate" | "lc_ctype" => SERVER_ENCODING.to_string(),
+        "is_superuser" => "on".to_string(),
+        "in_hot_standby" => "off".to_string(),
+        "integer_datetimes" => "on".to_string(),
+        // :HACK: page/segment/wal sizes are wired to the compile-time
+        // constants in pgrust_core::storage / pgrust_core::transam. Surface
+        // the literal values here until a richer PGC_INTERNAL registry exists.
+        "block_size" => pgrust_core::BLCKSZ.to_string(),
+        "segment_size" => (1024 * 1024 * 1024 / pgrust_core::BLCKSZ as usize).to_string(),
+        "wal_block_size" => "8192".to_string(),
+        "wal_segment_size" => pgrust_core::WAL_SEG_SIZE_BYTES.to_string(),
+        "max_index_keys" => "32".to_string(),
+        "max_identifier_length" => "63".to_string(),
+        "data_checksums" => "off".to_string(),
+        "data_directory_mode" => "0700".to_string(),
+        "shared_memory_size" | "shared_memory_size_in_huge_pages" => "0".to_string(),
+        "num_os_semaphores" => "0".to_string(),
+        _ => String::new(),
+    }
 }
 
 fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
@@ -20530,7 +20559,7 @@ impl Session {
                 )));
             }
             validate_custom_guc_for_set(&name, self.plpgsql_loaded)?;
-        } else if is_checkpoint_guc(&name) || is_autovacuum_guc(&name) {
+        } else if is_checkpoint_guc(&name) || is_autovacuum_guc(&name) || is_internal_guc(&name) {
             return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name)));
         }
 
@@ -20700,7 +20729,11 @@ impl Session {
                 }
                 validate_custom_guc_for_set(&normalized, self.plpgsql_loaded)?;
             }
-            if is_builtin && (is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized)) {
+            if is_builtin
+                && (is_checkpoint_guc(&normalized)
+                    || is_autovacuum_guc(&normalized)
+                    || is_internal_guc(&normalized))
+            {
                 return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
                     normalized,
                 )));
@@ -20899,6 +20932,9 @@ impl Session {
                 db.autovacuum_config_value(&name)
                     .unwrap_or_else(|| "default".to_string()),
             ),
+            _ if is_internal_guc(&name) => {
+                (stmt.name.clone(), internal_guc_value(&name).to_string())
+            }
             _ => (
                 stmt.name.clone(),
                 format_guc_show_value(
