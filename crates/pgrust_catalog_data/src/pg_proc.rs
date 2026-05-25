@@ -1533,6 +1533,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::BrinDesummarizeRange,
         ),
         ("pg_table_size", BuiltinScalarFunction::PgTableSize),
+        ("pg_indexes_size", BuiltinScalarFunction::PgIndexesSize),
+        (
+            "pg_total_relation_size",
+            BuiltinScalarFunction::PgTotalRelationSize,
+        ),
+        ("pg_database_size", BuiltinScalarFunction::PgDatabaseSize),
         ("pg_num_nulls", BuiltinScalarFunction::NumNulls),
         ("num_nulls", BuiltinScalarFunction::NumNulls),
         ("pg_num_nonnulls", BuiltinScalarFunction::NumNonNulls),

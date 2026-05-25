@@ -8231,6 +8231,96 @@ fn eval_pg_table_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, 
     relation_main_fork_size(&relation, ctx).map(Value::Int64)
 }
 
+fn eval_pg_indexes_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_indexes_size(regclass)",
+            actual: format!("PgIndexesSize({} args)", values.len()),
+        }));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let catalog = executor_catalog(ctx)?;
+    let relation_oid = match oid_arg_to_u32(value, "pg_indexes_size") {
+        Ok(oid) => oid,
+        Err(err) if value.as_text().is_some() => {
+            let relation_name = value.as_text().expect("guarded above");
+            catalog
+                .lookup_any_relation(relation_name)
+                .map(|relation| relation.relation_oid)
+                .ok_or(err)?
+        }
+        Err(err) => return Err(err),
+    };
+    let mut total: i64 = 0;
+    for class in catalog.class_rows() {
+        if class.relkind != 'i' {
+            continue;
+        }
+        let Some(index) = catalog.index_row_by_oid(class.oid) else {
+            continue;
+        };
+        if index.indrelid != relation_oid {
+            continue;
+        }
+        let Some(index_relation) = catalog.relation_by_oid(class.oid) else {
+            continue;
+        };
+        if index_relation.rel.rel_number == 0 {
+            continue;
+        }
+        total = total.saturating_add(relation_main_fork_size(&index_relation, ctx)?);
+    }
+    Ok(Value::Int64(total))
+}
+
+fn eval_pg_total_relation_size(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let table_size = match eval_pg_table_size(values, ctx)? {
+        Value::Int64(n) => n,
+        Value::Null => return Ok(Value::Null),
+        other => return Ok(other),
+    };
+    let index_size = match eval_pg_indexes_size(values, ctx)? {
+        Value::Int64(n) => n,
+        Value::Null => 0,
+        _ => 0,
+    };
+    Ok(Value::Int64(table_size.saturating_add(index_size)))
+}
+
+fn eval_pg_database_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    // Accepts either oid or name. pgrust is effectively single-database for
+    // most workloads, so sum the main fork of every materialised relation
+    // (heap or index) and report that as the database size. Mirrors what PG
+    // returns (sum of relation sizes plus a small overhead), close enough for
+    // ORM introspection and dashboards.
+    let [_value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_database_size(name | oid)",
+            actual: format!("PgDatabaseSize({} args)", values.len()),
+        }));
+    };
+    let catalog = executor_catalog(ctx)?;
+    let mut total: i64 = 0;
+    for class in catalog.class_rows() {
+        if !matches!(class.relkind, 'r' | 'i' | 't' | 'm' | 'S') {
+            continue;
+        }
+        let Some(rel) = catalog.relation_by_oid(class.oid) else {
+            continue;
+        };
+        if rel.rel.rel_number == 0 {
+            continue;
+        }
+        total = total.saturating_add(relation_main_fork_size(&rel, ctx)?);
+    }
+    Ok(Value::Int64(total))
+}
+
 fn eval_pg_tablespace_location(
     values: &[Value],
     ctx: &ExecutorContext,
@@ -12057,6 +12147,9 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgTsTemplateIsVisible
         | BuiltinScalarFunction::PgTsConfigIsVisible
         | BuiltinScalarFunction::PgTableSize
+        | BuiltinScalarFunction::PgIndexesSize
+        | BuiltinScalarFunction::PgTotalRelationSize
+        | BuiltinScalarFunction::PgDatabaseSize
         | BuiltinScalarFunction::PgBlockingPids
         | BuiltinScalarFunction::PgIsolationTestSessionIsBlocked
         | BuiltinScalarFunction::GinCleanPendingList
@@ -14656,6 +14749,9 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgFilenodeRelation => eval_pg_filenode_relation(&values, ctx),
         BuiltinScalarFunction::PgRelationSize => eval_pg_relation_size(&values, ctx),
         BuiltinScalarFunction::PgTableSize => eval_pg_table_size(&values, ctx),
+        BuiltinScalarFunction::PgIndexesSize => eval_pg_indexes_size(&values, ctx),
+        BuiltinScalarFunction::PgTotalRelationSize => eval_pg_total_relation_size(&values, ctx),
+        BuiltinScalarFunction::PgDatabaseSize => eval_pg_database_size(&values, ctx),
         BuiltinScalarFunction::GinCleanPendingList => {
             eval_gin_maintenance_function(func, &values, ctx)
         }

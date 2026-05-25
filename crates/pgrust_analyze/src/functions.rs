@@ -2674,9 +2674,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::BrinSummarizeNewValues => args.len() == 1,
             BuiltinScalarFunction::BrinSummarizeRange
             | BuiltinScalarFunction::BrinDesummarizeRange => args.len() == 2,
-            BuiltinScalarFunction::PgTableSize | BuiltinScalarFunction::PgTablespaceLocation => {
-                args.len() == 1
-            }
+            BuiltinScalarFunction::PgTableSize
+            | BuiltinScalarFunction::PgIndexesSize
+            | BuiltinScalarFunction::PgTotalRelationSize
+            | BuiltinScalarFunction::PgDatabaseSize
+            | BuiltinScalarFunction::PgTablespaceLocation => args.len() == 1,
             BuiltinScalarFunction::PgRelationFilenode => args.len() == 1,
             BuiltinScalarFunction::PgFilenodeRelation => args.len() == 2,
             BuiltinScalarFunction::NumNulls | BuiltinScalarFunction::NumNonNulls => {
@@ -4221,6 +4223,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::BrinDesummarizeRange,
         ),
         ("pg_table_size", BuiltinScalarFunction::PgTableSize),
+        ("pg_indexes_size", BuiltinScalarFunction::PgIndexesSize),
+        (
+            "pg_total_relation_size",
+            BuiltinScalarFunction::PgTotalRelationSize,
+        ),
+        ("pg_database_size", BuiltinScalarFunction::PgDatabaseSize),
         ("pg_num_nulls", BuiltinScalarFunction::NumNulls),
         ("num_nulls", BuiltinScalarFunction::NumNulls),
         ("pg_num_nonnulls", BuiltinScalarFunction::NumNonNulls),
@@ -6176,6 +6184,9 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::BrinSummarizeRange
             | BuiltinScalarFunction::BrinDesummarizeRange
             | BuiltinScalarFunction::PgTableSize
+            | BuiltinScalarFunction::PgIndexesSize
+            | BuiltinScalarFunction::PgTotalRelationSize
+            | BuiltinScalarFunction::PgDatabaseSize
             | BuiltinScalarFunction::PgTablespaceLocation
             | BuiltinScalarFunction::PgRelationIsPublishable
             | BuiltinScalarFunction::PgIndexAmHasProperty

@@ -1635,6 +1635,87 @@ fn fetch_first_n_rows_only_limits_result_set() {
 }
 
 #[test]
+fn pg_database_size_returns_non_negative_int8() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(10, "create table dbsize_t (id int4 primary key, v int4)")
+        .unwrap();
+    db.execute(
+        10,
+        "insert into dbsize_t select g, g from generate_series(1, 5) g",
+    )
+    .unwrap();
+    let mut session = Session::new(1);
+    let rows_name = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_database_size(current_database())",
+    );
+    let rows_oid = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_database_size(oid) from pg_database where datname = current_database()",
+    );
+    match (rows_name[0][0].clone(), rows_oid[0][0].clone()) {
+        (Value::Int64(n_name), Value::Int64(n_oid)) => {
+            assert!(n_name >= 0);
+            assert!(n_oid >= 0);
+        }
+        other => panic!("expected int64s, got {other:?}"),
+    }
+}
+
+#[test]
+fn pg_total_relation_size_and_indexes_size_resolve() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(10, "create table sized_t (id int4 primary key, v int4)")
+        .unwrap();
+    db.execute(10, "create index sized_v_idx on sized_t (v)")
+        .unwrap();
+    db.execute(
+        10,
+        "insert into sized_t select g, g*2 from generate_series(1, 10) g",
+    )
+    .unwrap();
+    let mut session = Session::new(1);
+
+    // All three should resolve and return non-negative integers.
+    let table_rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_table_size('sized_t'::regclass)",
+    );
+    let indexes_rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_indexes_size('sized_t'::regclass)",
+    );
+    let total_rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_total_relation_size('sized_t'::regclass)",
+    );
+    let table = match table_rows[0][0] {
+        Value::Int64(n) => n,
+        ref other => panic!("expected int64, got {other:?}"),
+    };
+    let indexes = match indexes_rows[0][0] {
+        Value::Int64(n) => n,
+        ref other => panic!("expected int64, got {other:?}"),
+    };
+    let total = match total_rows[0][0] {
+        Value::Int64(n) => n,
+        ref other => panic!("expected int64, got {other:?}"),
+    };
+    assert!(table >= 0, "table size negative: {table}");
+    assert!(indexes >= 0, "indexes size negative: {indexes}");
+    assert_eq!(
+        total,
+        table + indexes,
+        "total ({total}) != table ({table}) + indexes ({indexes})"
+    );
+}
+
+#[test]
 fn generate_series_accepts_date_bounds_with_interval_step() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
