@@ -725,6 +725,7 @@ fn memory_context_row(
 }
 
 pub fn pg_config_fallback_rows() -> Vec<Vec<Value>> {
+    let version = format!("PostgreSQL {}", pgrust_core::PG_VERSION_STRING);
     [
         ("BINDIR", "/usr/local/pgsql/bin"),
         ("DOCDIR", "/usr/local/pgsql/share/doc"),
@@ -751,7 +752,7 @@ pub fn pg_config_fallback_rows() -> Vec<Vec<Value>> {
         ("LDFLAGS_EX", ""),
         ("LDFLAGS_SL", ""),
         ("LIBS", ""),
-        ("VERSION", "PostgreSQL 18"),
+        ("VERSION", version.as_str()),
     ]
     .into_iter()
     .map(|(name, setting)| vec![Value::Text(name.into()), Value::Text(setting.into())])
@@ -2040,10 +2041,11 @@ mod tests {
                 .any(|row| row.first() == Some(&Value::Text("TopMemoryContext".into())))
         );
         assert_eq!(pg_hba_file_rule_rows()[0][4], text_array(["all"]),);
+        let expected_version = format!("PostgreSQL {}", pgrust_core::PG_VERSION_STRING);
         assert!(pg_config_fallback_rows().into_iter().any(|row| row
             == vec![
                 Value::Text("VERSION".into()),
-                Value::Text("PostgreSQL 18".into())
+                Value::Text(expected_version.clone().into()),
             ]));
     }
 
