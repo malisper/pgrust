@@ -426,6 +426,22 @@ impl Database {
                         self.apply_catalog_mutation_effect_immediate(&pg_sequence_effect)?;
                         catalog_effects.push(pg_sequence_effect);
                         if let Some(owned_by) = data.options.owned_by {
+                            // `set_sequence_owned_by_dependency_mvcc` re-reads
+                            // pg_class for `entry.relation_oid` to validate the
+                            // new sequence still exists. Because the sequence
+                            // row was inserted at this very `cid`, an MVCC read
+                            // at the same cid would not see it. Advance the
+                            // cid for this one call so the just-inserted row
+                            // is visible.
+                            let owned_by_ctx = CatalogWriteContext {
+                                pool: self.pool.clone(),
+                                txns: self.txns.clone(),
+                                xid,
+                                cid: cid.saturating_add(1),
+                                client_id,
+                                waiter: None,
+                                interrupts: Arc::clone(&interrupts),
+                            };
                             let effect = self
                                 .catalog
                                 .write()
@@ -433,7 +449,7 @@ impl Database {
                                     entry.relation_oid,
                                     Some((owned_by.relation_oid, owned_by.attnum)),
                                     DEPENDENCY_AUTO,
-                                    &ctx,
+                                    &owned_by_ctx,
                                 )
                                 .map_err(map_catalog_error)?;
                             self.apply_catalog_mutation_effect_immediate(&effect)?;
@@ -463,11 +479,13 @@ impl Database {
                     temp_effects,
                 )?;
                 if let Some(owned_by) = data.options.owned_by {
+                    // Advance cid so `set_sequence_owned_by_dependency_mvcc`
+                    // can re-read the pg_class row inserted at `cid` above.
                     let ctx = CatalogWriteContext {
                         pool: self.pool.clone(),
                         txns: self.txns.clone(),
                         xid,
-                        cid,
+                        cid: cid.saturating_add(1),
                         client_id,
                         waiter: None,
                         interrupts: Arc::clone(&interrupts),

@@ -1635,6 +1635,24 @@ fn fetch_first_n_rows_only_limits_result_set() {
 }
 
 #[test]
+fn create_sequence_with_owned_by_succeeds_in_single_statement() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(10, "create table seq_owner_t (id int4 primary key, v int4)")
+        .unwrap();
+    // Previously failed with `TableDoesNotExist(<oid>)` because the
+    // set_sequence_owned_by_dependency_mvcc step ran at the same cid as the
+    // pg_class insert, leaving the just-created sequence invisible to its
+    // own ownership write.
+    db.execute(10, "create sequence seq_owned_a owned by seq_owner_t.id")
+        .expect("CREATE SEQUENCE OWNED BY column must succeed");
+    db.execute(
+        10,
+        "create sequence seq_owned_b owned by public.seq_owner_t.v",
+    )
+    .expect("CREATE SEQUENCE OWNED BY qualified.column must succeed");
+}
+
+#[test]
 fn pg_database_size_returns_non_negative_int8() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     db.execute(10, "create table dbsize_t (id int4 primary key, v int4)")
