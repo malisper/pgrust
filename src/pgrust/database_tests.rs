@@ -1611,6 +1611,42 @@ fn show_server_version_returns_advertised_version() {
 }
 
 #[test]
+fn pg_settings_surfaces_server_version_rows() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select setting from pg_settings where name = 'server_version'",
+        ),
+        vec![vec![Value::Text(
+            pgrust_core::PG_VERSION_STRING.to_string().into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select setting from pg_settings where name = 'server_version_num'",
+        ),
+        vec![vec![Value::Text(
+            pgrust_core::PG_VERSION_NUM.to_string().into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select setting from pg_settings where name = 'server_encoding'",
+        ),
+        vec![vec![Value::Text(
+            pgrust_core::SERVER_ENCODING.to_string().into()
+        )]]
+    );
+}
+
+#[test]
 fn version_function_starts_with_postgresql_and_version() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

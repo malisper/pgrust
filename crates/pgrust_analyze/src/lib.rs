@@ -64,7 +64,7 @@ use pgrust_catalog_data::{
     range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_aggregate_row_by_fnoid,
     synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
-use pgrust_core::RelFileLocator;
+use pgrust_core::{RelFileLocator, WAL_SEG_SIZE_BYTES as PG_CORE_WAL_SEG_SIZE_BYTES};
 use pgrust_nodes::datum::Value;
 use pgrust_nodes::pathnodes::{PlannerConfig, PlannerIndexExprCacheEntry};
 use pgrust_nodes::plannodes::{Plan, PlannedStmt};
@@ -1327,11 +1327,10 @@ fn validate_distinct_aggregate_order_by(
 }
 
 pub fn default_pg_settings_rows() -> Vec<Vec<Value>> {
-    const WAL_SEG_SIZE_BYTES: usize = 16 * 1024 * 1024;
     vec![
         vec![
             Value::Text("wal_segment_size".into()),
-            Value::Text(WAL_SEG_SIZE_BYTES.to_string().into()),
+            Value::Text(PG_CORE_WAL_SEG_SIZE_BYTES.to_string().into()),
         ],
         vec![Value::Text("jit".into()), Value::Text("off".into())],
         vec![

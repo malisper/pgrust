@@ -1015,9 +1015,92 @@ pub fn pg_show_all_settings_rows(
             )
         },
     ));
+    // PGC_INTERNAL report-only GUCs. Mirrors `pgrust_commands::guc::is_internal_guc`
+    // and the values that the startup `ParameterStatus` packet + SHOW already
+    // advertise, so introspection on pg_settings sees the same numbers.
+    let pg_version_num_string = pgrust_core::PG_VERSION_NUM.to_string();
+    let block_size_string = pgrust_core::BLCKSZ.to_string();
+    // `wal_segment_size` is already present in the base settings vec above
+    // with its own category, so it is intentionally omitted here.
+    let internal_settings: &[(&str, &str, &str, &str)] = &[
+        (
+            "server_version",
+            pgrust_core::PG_VERSION_STRING,
+            "Preset Options",
+            "string",
+        ),
+        (
+            "server_version_num",
+            pg_version_num_string.as_str(),
+            "Preset Options",
+            "integer",
+        ),
+        (
+            "server_encoding",
+            pgrust_core::SERVER_ENCODING,
+            "Preset Options",
+            "string",
+        ),
+        (
+            "lc_collate",
+            pgrust_core::SERVER_ENCODING,
+            "Preset Options",
+            "string",
+        ),
+        (
+            "lc_ctype",
+            pgrust_core::SERVER_ENCODING,
+            "Preset Options",
+            "string",
+        ),
+        ("is_superuser", "on", "Preset Options", "bool"),
+        ("in_hot_standby", "off", "Preset Options", "bool"),
+        ("integer_datetimes", "on", "Preset Options", "bool"),
+        (
+            "block_size",
+            block_size_string.as_str(),
+            "Preset Options",
+            "integer",
+        ),
+        (
+            "wal_block_size",
+            block_size_string.as_str(),
+            "Preset Options",
+            "integer",
+        ),
+        ("max_index_keys", "32", "Preset Options", "integer"),
+        ("max_identifier_length", "63", "Preset Options", "integer"),
+        ("data_checksums", "off", "Preset Options", "bool"),
+    ];
+    let mut internal_names = internal_settings
+        .iter()
+        .map(|(name, _, _, _)| *name)
+        .collect::<std::collections::HashSet<&str>>();
+    // wal_segment_size is rendered via the base settings vec above but is
+    // still PGC_INTERNAL upstream — surface that via context.
+    internal_names.insert("wal_segment_size");
+    settings.extend(
+        internal_settings
+            .iter()
+            .map(|(name, setting, category, vartype)| {
+                (
+                    *name,
+                    Cow::Borrowed(*setting),
+                    None,
+                    *category,
+                    "Shows a server preset.",
+                    *vartype,
+                )
+            }),
+    );
     settings
         .iter()
         .map(|(name, setting, unit, category, description, vartype)| {
+            let context = if internal_names.contains(name) {
+                "internal"
+            } else {
+                "user"
+            };
             output_columns
                 .iter()
                 .map(|column| match column.name.as_str() {
@@ -1029,7 +1112,7 @@ pub fn pg_show_all_settings_rows(
                     "category" => Value::Text((*category).into()),
                     "short_desc" => Value::Text((*description).into()),
                     "extra_desc" => Value::Null,
-                    "context" => Value::Text("user".into()),
+                    "context" => Value::Text(context.into()),
                     "vartype" => Value::Text((*vartype).into()),
                     "source" => Value::Text("default".into()),
                     "min_val" => Value::Null,
