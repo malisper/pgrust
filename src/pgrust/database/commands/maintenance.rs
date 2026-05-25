@@ -4542,17 +4542,24 @@ impl Database {
                     catalog_effects,
                 );
         }
+        // Each per-column ADD must advance the command id so the next
+        // iteration's catalog lookup observes the previous add. With a fixed
+        // cid the second add re-reads the relation as it stood before any add
+        // ran and ends up allocating a colliding attnum, tripping the
+        // pg_attribute_relid_attnam_index unique constraint.
+        let mut next_cid = cid;
         for add_stmt in &alter_stmt.columns {
             self.execute_alter_table_add_column_stmt_in_transaction_with_search_path(
                 client_id,
                 add_stmt,
                 xid,
-                cid,
+                next_cid,
                 configured_search_path,
                 catalog_effects,
                 temp_effects,
                 sequence_effects,
             )?;
+            next_cid = next_cid.saturating_add(1);
         }
         Ok(StatementResult::AffectedRows(0))
     }

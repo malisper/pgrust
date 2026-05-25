@@ -1611,6 +1611,44 @@ fn show_server_version_returns_advertised_version() {
 }
 
 #[test]
+fn alter_table_multi_add_column_assigns_distinct_attnums() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(10, "create table multi_add_t (id int4 primary key, v int4)")
+        .unwrap();
+    db.execute(
+        10,
+        "alter table multi_add_t add column a int4, add column b int4, add column c text",
+    )
+    .expect("multi-action ADD COLUMN should not trip pg_attribute uniqueness");
+
+    let mut session = Session::new(1);
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select attname, attnum from pg_attribute \
+         where attrelid = 'multi_add_t'::regclass and attnum > 0 \
+         order by attnum",
+    );
+    let actual = rows
+        .into_iter()
+        .map(|row| match (&row[0], &row[1]) {
+            (Value::Text(name), Value::Int16(num)) => (name.to_string(), *num as i32),
+            other => panic!("unexpected pg_attribute row shape: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            ("id".to_string(), 1),
+            ("v".to_string(), 2),
+            ("a".to_string(), 3),
+            ("b".to_string(), 4),
+            ("c".to_string(), 5),
+        ]
+    );
+}
+
+#[test]
 fn pg_settings_surfaces_server_version_rows() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
 
