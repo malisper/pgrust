@@ -1611,6 +1611,27 @@ fn show_server_version_returns_advertised_version() {
 }
 
 #[test]
+fn version_function_starts_with_postgresql_and_version() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(&mut session, &db, "select version()");
+    assert_eq!(rows.len(), 1);
+    let Value::Text(s) = &rows[0][0] else {
+        panic!("expected text, got {:?}", rows[0][0]);
+    };
+    let expected_prefix = format!("PostgreSQL {} ", pgrust_core::PG_VERSION_STRING);
+    assert!(
+        s.starts_with(&expected_prefix),
+        "version() should start with {expected_prefix:?}, got {s:?}"
+    );
+    assert!(
+        s.contains("pgrust"),
+        "version() should identify pgrust, got {s:?}"
+    );
+}
+
+#[test]
 fn set_internal_guc_rejected() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

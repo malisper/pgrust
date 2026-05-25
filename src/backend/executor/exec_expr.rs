@@ -13283,7 +13283,17 @@ fn eval_text_search_builtin_function(
 }
 
 fn pg_version_text() -> String {
-    format!("PostgreSQL-compatible pgrust {}", env!("CARGO_PKG_VERSION"))
+    // Lead with `PostgreSQL <version>` so version-sniffing clients (Django's
+    // psycopg backend, sqlalchemy, asyncpg, etc.) match the regex they apply
+    // to `version()` output. Keep the pgrust identifier so the string is not
+    // deceptive about the implementation.
+    format!(
+        "PostgreSQL {} (pgrust {}) on {}, {}-bit",
+        pgrust_core::PG_VERSION_STRING,
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH,
+        usize::BITS,
+    )
 }
 
 fn eval_domain_check_upper_less_than(values: &[Value]) -> Result<Value, ExecError> {
