@@ -3077,10 +3077,10 @@ fn bind_function_from_item_with_ctes(
             let step_type = raw_step_type.map(|inferred| {
                 let has_timestamp_bound = matches!(
                     start_type.kind,
-                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz | SqlTypeKind::Date
                 ) || matches!(
                     stop_type.kind,
-                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz | SqlTypeKind::Date
                 );
                 if has_timestamp_bound {
                     coerce_unknown_string_literal_type(

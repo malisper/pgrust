@@ -263,11 +263,16 @@ pub(super) fn resolve_generate_series_common_type(
     stop: SqlType,
     step: Option<SqlType>,
 ) -> Result<SqlType, ParseError> {
+    // PostgreSQL's `generate_series(date, date, interval)` resolves through
+    // the timestamp overload via the implicit date->timestamp cast, returning
+    // `timestamp without time zone` rows. Treat Date inputs as Timestamp here.
     if matches!(
         start.kind,
-        SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
-    ) || matches!(stop.kind, SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz)
-    {
+        SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz | SqlTypeKind::Date
+    ) || matches!(
+        stop.kind,
+        SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz | SqlTypeKind::Date
+    ) {
         let common = if matches!(start.kind, SqlTypeKind::TimestampTz)
             || matches!(stop.kind, SqlTypeKind::TimestampTz)
         {

@@ -1611,6 +1611,42 @@ fn show_server_version_returns_advertised_version() {
 }
 
 #[test]
+fn fetch_first_n_rows_only_limits_result_set() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(10, "create table fetch_t (id int4 primary key)")
+        .unwrap();
+    db.execute(10, "insert into fetch_t values (1), (2), (3), (4)")
+        .unwrap();
+    let mut session = Session::new(1);
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select id from fetch_t order by id fetch first 2 rows only",
+    );
+    assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+
+    // FETCH FIRST 1 ROW ONLY (singular ROW)
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select id from fetch_t order by id fetch first 1 row only",
+    );
+    assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+}
+
+#[test]
+fn generate_series_accepts_date_bounds_with_interval_step() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select count(*) from generate_series('2020-01-01'::date, '2020-01-03'::date, '1 day')",
+    );
+    assert_eq!(rows, vec![vec![Value::Int64(3)]]);
+}
+
+#[test]
 fn alter_table_multi_add_column_assigns_distinct_attnums() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     db.execute(10, "create table multi_add_t (id int4 primary key, v int4)")
