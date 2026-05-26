@@ -53,6 +53,7 @@ pub enum SyntheticSystemViewKind {
     PgStatIo,
     PgStatProgressCopy,
     PgLocks,
+    InformationSchemaSchemata,
     InformationSchemaTables,
     InformationSchemaViews,
     InformationSchemaSequences,
@@ -266,6 +267,7 @@ const PG_STAT_IO_ALIASES: &[&str] = &["pg_stat_io", "pg_catalog.pg_stat_io"];
 const PG_STAT_PROGRESS_COPY_ALIASES: &[&str] =
     &["pg_stat_progress_copy", "pg_catalog.pg_stat_progress_copy"];
 const PG_LOCKS_ALIASES: &[&str] = &["pg_locks", "pg_catalog.pg_locks"];
+const INFORMATION_SCHEMA_SCHEMATA_ALIASES: &[&str] = &["information_schema.schemata"];
 const INFORMATION_SCHEMA_TABLES_ALIASES: &[&str] = &["information_schema.tables"];
 const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
 const INFORMATION_SCHEMA_SEQUENCES_ALIASES: &[&str] = &["information_schema.sequences"];
@@ -1109,6 +1111,16 @@ const PG_STAT_PROGRESS_COPY_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("tuples_skipped", SqlType::new(SqlTypeKind::Int8)),
 ];
 
+const INFORMATION_SCHEMA_SCHEMATA_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("catalog_name"),
+    SyntheticSystemViewColumn::text("schema_name"),
+    SyntheticSystemViewColumn::text("schema_owner"),
+    SyntheticSystemViewColumn::text("default_character_set_catalog"),
+    SyntheticSystemViewColumn::text("default_character_set_schema"),
+    SyntheticSystemViewColumn::text("default_character_set_name"),
+    SyntheticSystemViewColumn::text("sql_path"),
+];
+
 const INFORMATION_SCHEMA_TABLES_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("table_schema"),
     SyntheticSystemViewColumn::text("table_name"),
@@ -1733,6 +1745,13 @@ const SYNTHETIC_SYSTEM_VIEWS: &[SyntheticSystemView] = &[
         aliases: PG_LOCKS_ALIASES,
         columns: PG_LOCKS_COLUMNS,
         view_definition_sql: PG_LOCKS_DEFINITION_SQL,
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaSchemata,
+        canonical_name: "information_schema.schemata",
+        aliases: INFORMATION_SCHEMA_SCHEMATA_ALIASES,
+        columns: INFORMATION_SCHEMA_SCHEMATA_COLUMNS,
+        view_definition_sql: "",
     },
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::InformationSchemaTables,

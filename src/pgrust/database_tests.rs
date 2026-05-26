@@ -23400,6 +23400,42 @@ fn drop_database_rejects_current_and_active_connections_then_removes_files() {
 }
 
 #[test]
+fn information_schema_schemata_lists_builtin_namespaces() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant_a").unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select schema_name from information_schema.schemata order by schema_name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let names: Vec<String> = rows
+                .iter()
+                .map(|row| match &row[0] {
+                    Value::Text(name) => name.to_string(),
+                    other => panic!("expected text schema_name, got {:?}", other),
+                })
+                .collect();
+            for required in ["information_schema", "pg_catalog", "public", "tenant_a"] {
+                assert!(
+                    names.iter().any(|n| n.eq_ignore_ascii_case(required)),
+                    "expected {required} in {names:?}"
+                );
+            }
+        }
+        other => panic!(
+            "expected rows from information_schema.schemata, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
 fn create_extension_plpgsql_succeeds_unknown_extensions_error() {
     let db = Database::open_ephemeral(16).unwrap();
     let mut session = Session::new(1);

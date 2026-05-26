@@ -384,6 +384,9 @@ pub(super) fn bind_builtin_system_view(
             unreachable!("pg_stat_progress_copy is bound as a runtime SRF")
         }
         SyntheticSystemViewKind::PgLocks => unreachable!("pg_locks is bound as pg_lock_status()"),
+        SyntheticSystemViewKind::InformationSchemaSchemata => {
+            information_schema_schemata_rows(catalog)
+        }
         SyntheticSystemViewKind::InformationSchemaTables => information_schema_table_rows(catalog),
         SyntheticSystemViewKind::InformationSchemaViews => information_schema_view_rows(catalog),
         SyntheticSystemViewKind::InformationSchemaSequences => {
@@ -559,6 +562,28 @@ fn nullable_oid_array(values: Option<Vec<u32>>) -> Value {
             )
         })
         .unwrap_or(Value::Null)
+}
+
+fn information_schema_schemata_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    catalog
+        .namespace_rows()
+        .into_iter()
+        .map(|ns| {
+            let owner = catalog
+                .role_name_by_oid(ns.nspowner)
+                .map(|name| Value::Text(name.into()))
+                .unwrap_or(Value::Null);
+            vec![
+                Value::Text(REGRESSION_DATABASE_NAME.into()),
+                Value::Text(ns.nspname.into()),
+                owner,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ]
+        })
+        .collect()
 }
 
 fn information_schema_table_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
