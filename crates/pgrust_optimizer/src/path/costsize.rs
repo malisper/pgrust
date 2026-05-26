@@ -5976,73 +5976,228 @@ fn index_scan_key_uses_outer_relids(
     use pgrust_nodes::plannodes::IndexScanKeyArgument;
     match &key.argument {
         IndexScanKeyArgument::Const(_) => false,
-        IndexScanKeyArgument::Runtime(expr) => expr_uses_outer_relids(expr, relids),
+        // Runtime index parameters reference the immediate outer scope, so
+        // their Vars use `varlevelsup == 1`. The generic
+        // `expr_uses_outer_relids` walker requires `varlevelsup > 1`
+        // (designed for grandparent+ refs in nested subqueries) and would
+        // miss every parameterized index probe.
+        IndexScanKeyArgument::Runtime(expr) => expr_uses_lateral_outer_relids(expr, relids),
     }
 }
 
-/// Returns true when the subquery body contains a Var at exactly
-/// `varlevelsup == 1` matching one of the provided outer relids. That's
-/// the LATERAL-dependency signal: a Var at varlevelsup=1 references the
-/// immediate outer scope, which is where `relids` live when we are
-/// costing a join in the outer query.
+/// Returns true when `expr` contains a Var at exactly `varlevelsup == 1`
+/// whose `varno` matches `relids`. That is the LATERAL-dependency signal
+/// for a path or subquery body costed at the outer query level.
+fn expr_uses_lateral_outer_relids(expr: &Expr, relids: &[usize]) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 1 && relids.contains(&var.varno),
+        Expr::Param(_) | Expr::Const(_) | Expr::CaseTest(_) | Expr::Random => false,
+        Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+        Expr::GroupingKey(g) => expr_uses_lateral_outer_relids(&g.expr, relids),
+        Expr::GroupingFunc(g) => g
+            .args
+            .iter()
+            .any(|arg| expr_uses_lateral_outer_relids(arg, relids)),
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .any(|a| expr_uses_lateral_outer_relids(a, relids))
+                || aggref
+                    .args
+                    .iter()
+                    .any(|a| expr_uses_lateral_outer_relids(a, relids))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| expr_uses_lateral_outer_relids(&item.expr, relids))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|f| expr_uses_lateral_outer_relids(f, relids))
+        }
+        Expr::WindowFunc(w) => {
+            w.args
+                .iter()
+                .any(|a| expr_uses_lateral_outer_relids(a, relids))
+                || matches!(&w.kind, pgrust_nodes::primnodes::WindowFuncKind::Aggregate(aggref)
+                    if expr_uses_lateral_outer_relids(&Expr::Aggref(Box::new(aggref.clone())), relids))
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|a| expr_uses_lateral_outer_relids(a, relids)),
+        Expr::Bool(b) => b
+            .args
+            .iter()
+            .any(|a| expr_uses_lateral_outer_relids(a, relids)),
+        Expr::Case(c) => {
+            c.arg
+                .as_deref()
+                .is_some_and(|a| expr_uses_lateral_outer_relids(a, relids))
+                || c.args.iter().any(|arm| {
+                    expr_uses_lateral_outer_relids(&arm.expr, relids)
+                        || expr_uses_lateral_outer_relids(&arm.result, relids)
+                })
+                || expr_uses_lateral_outer_relids(&c.defresult, relids)
+        }
+        Expr::Func(f) => f
+            .args
+            .iter()
+            .any(|a| expr_uses_lateral_outer_relids(a, relids)),
+        Expr::SqlJsonQueryFunction(f) => f
+            .child_exprs()
+            .into_iter()
+            .any(|child| expr_uses_lateral_outer_relids(child, relids)),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(|a| expr_uses_lateral_outer_relids(a, relids)),
+        Expr::SubLink(sub) => {
+            sub.testexpr
+                .as_deref()
+                .is_some_and(|t| expr_uses_lateral_outer_relids(t, relids))
+                // The sub-link's subselect is one level deeper, so an
+                // immediate-outer ref to `relids` from inside the subselect
+                // is at `varlevelsup == 2` at level 1 of the existing
+                // `query_uses_outer_relids_at_level` machinery.
+                || query_uses_outer_relids_at_level(&sub.subselect, relids, 1)
+        }
+        Expr::SubPlan(sub) => {
+            sub.testexpr
+                .as_deref()
+                .is_some_and(|t| expr_uses_lateral_outer_relids(t, relids))
+                || sub
+                    .args
+                    .iter()
+                    .any(|a| expr_uses_lateral_outer_relids(a, relids))
+        }
+        Expr::ScalarArrayOp(sa) => {
+            expr_uses_lateral_outer_relids(&sa.left, relids)
+                || expr_uses_lateral_outer_relids(&sa.right, relids)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_uses_lateral_outer_relids(inner, relids),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_uses_lateral_outer_relids(expr, relids)
+                || expr_uses_lateral_outer_relids(pattern, relids)
+                || escape
+                    .as_deref()
+                    .is_some_and(|e| expr_uses_lateral_outer_relids(e, relids))
+        }
+        Expr::IsDistinctFrom(l, r) | Expr::IsNotDistinctFrom(l, r) | Expr::Coalesce(l, r) => {
+            expr_uses_lateral_outer_relids(l, relids) || expr_uses_lateral_outer_relids(r, relids)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|e| expr_uses_lateral_outer_relids(e, relids)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, e)| expr_uses_lateral_outer_relids(e, relids)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_lateral_outer_relids(array, relids)
+                || subscripts.iter().any(|s| {
+                    s.lower
+                        .as_ref()
+                        .is_some_and(|l| expr_uses_lateral_outer_relids(l, relids))
+                        || s.upper
+                            .as_ref()
+                            .is_some_and(|u| expr_uses_lateral_outer_relids(u, relids))
+                })
+        }
+        Expr::Xml(x) => x
+            .child_exprs()
+            .any(|c| expr_uses_lateral_outer_relids(c, relids)),
+    }
+}
+
+/// Returns true when the subquery body contains a direct Var with
+/// `varlevelsup == 1` matching `relids`. Walks the top-level Query
+/// parts that the planner has already pulled up to the subquery's own
+/// scope (WHERE / HAVING / GROUP BY / ORDER BY / target list / jointree
+/// quals). Nested-subquery RTEs are intentionally not walked: those
+/// references would be at higher varlevelsup at a deeper scope and the
+/// generic `expr_uses_outer_relids_at_level` machinery is the right
+/// tool there.
 fn subquery_body_references_relids(query: &Query, relids: &[usize]) -> bool {
-    use pgrust_nodes::primnodes::Expr as E;
-    fn expr_refs(expr: &E, relids: &[usize]) -> bool {
-        match expr {
-            E::Var(var) => var.varlevelsup == 1 && relids.contains(&var.varno),
-            E::Cast(inner, _)
-            | E::Collate { expr: inner, .. }
-            | E::IsNull(inner)
-            | E::IsNotNull(inner) => expr_refs(inner, relids),
-            E::IsDistinctFrom(l, r) | E::IsNotDistinctFrom(l, r) | E::Coalesce(l, r) => {
-                expr_refs(l, relids) || expr_refs(r, relids)
-            }
-            E::Op(op) => op.args.iter().any(|a| expr_refs(a, relids)),
-            E::Bool(b) => b.args.iter().any(|a| expr_refs(a, relids)),
-            E::Func(f) => f.args.iter().any(|a| expr_refs(a, relids)),
-            E::ScalarArrayOp(sa) => expr_refs(&sa.left, relids) || expr_refs(&sa.right, relids),
-            E::Like {
-                expr,
-                pattern,
-                escape,
-                ..
-            }
-            | E::Similar {
-                expr,
-                pattern,
-                escape,
-                ..
-            } => {
-                expr_refs(expr, relids)
-                    || expr_refs(pattern, relids)
-                    || escape.as_deref().is_some_and(|e| expr_refs(e, relids))
-            }
-            E::ArrayLiteral { elements, .. } => elements.iter().any(|e| expr_refs(e, relids)),
-            E::Row { fields, .. } => fields.iter().any(|(_, e)| expr_refs(e, relids)),
-            E::FieldSelect { expr, .. } => expr_refs(expr, relids),
-            // For variants we don't enumerate, fall through. Subquery bodies
-            // referencing outer relids almost always do so via Var inside
-            // the variants enumerated above (where_qual is the common case).
-            _ => false,
-        }
-    }
-    if let Some(qual) = query.where_qual.as_ref() {
-        if expr_refs(qual, relids) {
-            return true;
-        }
-    }
-    if query.target_list.iter().any(|t| expr_refs(&t.expr, relids)) {
+    if query
+        .target_list
+        .iter()
+        .any(|t| expr_uses_lateral_outer_relids(&t.expr, relids))
+    {
         return true;
     }
-    if let Some(having) = query.having_qual.as_ref() {
-        if expr_refs(having, relids) {
+    if query
+        .where_qual
+        .as_ref()
+        .is_some_and(|q| expr_uses_lateral_outer_relids(q, relids))
+    {
+        return true;
+    }
+    if query
+        .having_qual
+        .as_ref()
+        .is_some_and(|q| expr_uses_lateral_outer_relids(q, relids))
+    {
+        return true;
+    }
+    if query
+        .group_by
+        .iter()
+        .any(|e| expr_uses_lateral_outer_relids(e, relids))
+    {
+        return true;
+    }
+    if query
+        .sort_clause
+        .iter()
+        .any(|s| expr_uses_lateral_outer_relids(&s.expr, relids))
+    {
+        return true;
+    }
+    if let Some(jt) = query.jointree.as_ref() {
+        if jointree_has_lateral_outer_quals(jt, relids) {
             return true;
         }
-    }
-    if query.group_by.iter().any(|e| expr_refs(e, relids)) {
-        return true;
     }
     false
+}
+
+fn jointree_has_lateral_outer_quals(node: &JoinTreeNode, relids: &[usize]) -> bool {
+    match node {
+        JoinTreeNode::RangeTblRef(_) => false,
+        JoinTreeNode::JoinExpr {
+            left, right, quals, ..
+        } => {
+            expr_uses_lateral_outer_relids(quals, relids)
+                || jointree_has_lateral_outer_quals(left, relids)
+                || jointree_has_lateral_outer_quals(right, relids)
+        }
+    }
 }
 
 fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {

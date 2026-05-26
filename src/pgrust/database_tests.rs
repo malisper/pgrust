@@ -1677,9 +1677,43 @@ fn pg_database_size_returns_non_negative_int8() {
         (Value::Int64(n_name), Value::Int64(n_oid)) => {
             assert!(n_name >= 0);
             assert!(n_oid >= 0);
+            assert_eq!(n_name, n_oid, "name and oid forms should agree");
         }
         other => panic!("expected int64s, got {other:?}"),
     }
+    // Missing database name -> SQLSTATE 3D000.
+    let err = session
+        .execute(&db, "select pg_database_size('does_not_exist')")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError { sqlstate, .. } => assert_eq!(sqlstate, "3D000"),
+        other => panic!("expected DetailedError 3D000, got {other:?}"),
+    }
+    // Missing database OID -> SQLSTATE 3D000.
+    let err = session
+        .execute(&db, "select pg_database_size(99999999::oid)")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError { sqlstate, .. } => assert_eq!(sqlstate, "3D000"),
+        other => panic!("expected DetailedError 3D000, got {other:?}"),
+    }
+    // NULL input -> NULL.
+    let rows = session_query_rows(&mut session, &db, "select pg_database_size(null::name)");
+    assert_eq!(rows[0][0], Value::Null);
+}
+
+#[test]
+fn pg_indexes_size_returns_null_for_unknown_oid() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    // A nonexistent OID must return NULL (not 0, which would conflate with
+    // a real relation that has no index).
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_indexes_size(99999999::regclass)",
+    );
+    assert_eq!(rows[0][0], Value::Null);
 }
 
 #[test]

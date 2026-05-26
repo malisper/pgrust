@@ -8281,6 +8281,12 @@ fn eval_pg_indexes_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         }
         Err(err) => return Err(err),
     };
+    // If the OID does not resolve to an actual relation, return NULL so
+    // callers can distinguish "missing relation" from "real relation with
+    // no index storage" (which legitimately sums to 0).
+    if catalog.relation_by_oid(relation_oid).is_none() {
+        return Ok(Value::Null);
+    }
     let mut total: i64 = 0;
     for class in catalog.class_rows() {
         if class.relkind != 'i' {
@@ -8322,17 +8328,62 @@ fn eval_pg_total_relation_size(
 
 fn eval_pg_database_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     // Accepts either oid or name. pgrust is effectively single-database for
-    // most workloads, so sum the main fork of every materialised relation
-    // (heap or index) and report that as the database size. Mirrors what PG
-    // returns (sum of relation sizes plus a small overhead), close enough for
-    // ORM introspection and dashboards.
-    let [_value] = values else {
+    // most workloads, so once we have confirmed the argument names the
+    // current database we report the sum of the main fork of every
+    // materialised relation. Any other target raises the same error
+    // PostgreSQL would.
+    let [value] = values else {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_database_size(name | oid)",
             actual: format!("PgDatabaseSize({} args)", values.len()),
         }));
     };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
     let catalog = executor_catalog(ctx)?;
+    let current_db_oid = catalog
+        .database_rows()
+        .into_iter()
+        .find(|row| row.datname.eq_ignore_ascii_case(&ctx.current_database_name))
+        .map(|row| row.oid)
+        .unwrap_or(0);
+    let resolved = if let Some(name) = value.as_text() {
+        let matches_current = name.eq_ignore_ascii_case(&ctx.current_database_name);
+        let found = catalog
+            .database_rows()
+            .into_iter()
+            .any(|row| row.datname.eq_ignore_ascii_case(name));
+        if !found {
+            return Err(ExecError::DetailedError {
+                message: format!("database \"{name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "3D000",
+            });
+        }
+        matches_current
+    } else {
+        let oid = oid_arg_to_u32(value, "pg_database_size")?;
+        let exists = catalog
+            .database_rows()
+            .into_iter()
+            .any(|row| row.oid == oid);
+        if !exists {
+            return Err(ExecError::DetailedError {
+                message: format!("database with OID {oid} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "3D000",
+            });
+        }
+        oid == current_db_oid
+    };
+    if !resolved {
+        // Cross-database introspection is not yet wired; size 0 is the
+        // safe answer for any database that isn't the connected one.
+        return Ok(Value::Int64(0));
+    }
     let mut total: i64 = 0;
     for class in catalog.class_rows() {
         if !matches!(class.relkind, 'r' | 'i' | 't' | 'm' | 'S') {
