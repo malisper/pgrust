@@ -23400,6 +23400,48 @@ fn drop_database_rejects_current_and_active_connections_then_removes_files() {
 }
 
 #[test]
+fn introspection_functions_resolve_from_issue_2() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table issue2_t (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create unique index issue2_t_pk on issue2_t(id)")
+        .unwrap();
+
+    for sql in [
+        "select pg_table_is_visible('issue2_t'::regclass)",
+        "select obj_description('issue2_t'::regclass, 'pg_class')",
+        "select pg_get_indexdef('issue2_t_pk'::regclass)",
+        "select to_regclass('issue2_t')",
+        "select current_schema()",
+        "select pg_get_serial_sequence('issue2_t', 'id')",
+    ] {
+        session
+            .execute(&db, sql)
+            .unwrap_or_else(|e| panic!("issue #2 fn must resolve, sql={sql}, err={e:?}"));
+    }
+}
+
+#[test]
+fn config_functions_resolve_from_issue_1() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "select set_config('search_path', 'public', false)")
+        .unwrap();
+    session
+        .execute(&db, "select current_setting('search_path')")
+        .unwrap();
+    session
+        .execute(&db, "select current_setting('does.not.exist', true)")
+        .unwrap();
+}
+
+#[test]
 fn information_schema_schemata_lists_builtin_namespaces() {
     let db = Database::open_ephemeral(16).unwrap();
     let mut session = Session::new(1);
