@@ -2,7 +2,7 @@ use super::super::*;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::parser::{
     AlterDatabaseAction, AlterDatabaseStatement, CommentOnDatabaseStatement,
-    CreateDatabaseStatement, DropDatabaseStatement,
+    CommentOnSchemaStatement, CreateDatabaseStatement, DropDatabaseStatement,
 };
 use crate::include::catalog::{
     DEFAULT_TABLESPACE_OID, PG_SHDESCRIPTION_RELATION_OID, TEMPLATE0_DATABASE_NAME,
@@ -390,6 +390,86 @@ impl Database {
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
+    }
+
+    pub(crate) fn execute_comment_on_schema_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &CommentOnSchemaStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_schema_stmt_in_transaction(
+            client_id,
+            stmt,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_comment_on_schema_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &CommentOnSchemaStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), None);
+        let namespace = catalog
+            .namespace_row_by_name(&stmt.schema_name)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("schema \"{}\" does not exist", stmt.schema_name),
+                detail: None,
+                hint: None,
+                sqlstate: "3F000",
+            })?;
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let current_role = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "current role does not exist".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        if !current_role.rolsuper
+            && !auth.has_effective_membership(namespace.nspowner, &auth_catalog)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!("must be owner of schema {}", stmt.schema_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_namespace_mvcc(namespace.oid, stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        self.session_stats_state(client_id)
+            .write()
+            .note_relation_update(PG_SHDESCRIPTION_RELATION_OID);
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn execute_comment_on_database_stmt_in_transaction(

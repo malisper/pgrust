@@ -503,6 +503,7 @@ pub enum Statement {
     CreatePublication(CreatePublicationStatement),
     CreateSubscription(CreateSubscriptionStatement),
     CommentOnDatabase(CommentOnDatabaseStatement),
+    CommentOnSchema(CommentOnSchemaStatement),
     CommentOnRole(CommentOnRoleStatement),
     AlterDefaultPrivileges(AlterDefaultPrivilegesStatement),
     GrantObject(GrantObjectStatement),
@@ -4066,6 +4067,12 @@ pub struct CommentOnRoleStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnDatabaseStatement {
     pub database_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnSchemaStatement {
+    pub schema_name: String,
     pub comment: Option<String>,
 }
 

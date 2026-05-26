@@ -9958,6 +9958,15 @@ impl CatalogStore {
         self.comment_shared_object_mvcc(database_oid, PG_DATABASE_RELATION_OID, comment, ctx)
     }
 
+    pub fn comment_namespace_mvcc(
+        &mut self,
+        namespace_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(namespace_oid, PG_NAMESPACE_RELATION_OID, comment, ctx)
+    }
+
     pub fn comment_rule_mvcc(
         &mut self,
         rewrite_oid: u32,

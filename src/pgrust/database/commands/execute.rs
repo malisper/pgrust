@@ -2801,6 +2801,9 @@ impl Database {
             Statement::CommentOnDatabase(ref comment_stmt) => {
                 self.execute_comment_on_database_stmt(client_id, comment_stmt)
             }
+            Statement::CommentOnSchema(ref comment_stmt) => {
+                self.execute_comment_on_schema_stmt(client_id, comment_stmt)
+            }
             Statement::CommentOnRole(ref comment_stmt) => {
                 self.execute_comment_on_role_stmt(client_id, comment_stmt)
             }

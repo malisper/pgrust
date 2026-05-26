@@ -1746,6 +1746,38 @@ fn generate_series_accepts_date_bounds_with_interval_step() {
 }
 
 #[test]
+fn comment_on_schema_parses_and_persists() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(10, "create schema cmt_s").unwrap();
+    db.execute(10, "comment on schema cmt_s is 'hello'")
+        .expect("COMMENT ON SCHEMA must succeed");
+    let rows = query_rows(
+        &db,
+        1,
+        "select obj_description(oid, 'pg_namespace') from pg_namespace where nspname = 'cmt_s'",
+    );
+    assert_eq!(rows, vec![vec![Value::Text("hello".into())]]);
+    // NULL clears the comment
+    db.execute(10, "comment on schema cmt_s is null")
+        .expect("COMMENT ... IS NULL must succeed");
+    let rows = query_rows(
+        &db,
+        1,
+        "select obj_description(oid, 'pg_namespace') from pg_namespace where nspname = 'cmt_s'",
+    );
+    assert_eq!(rows, vec![vec![Value::Null]]);
+    // missing schema -> 3F000
+    let err = db
+        .execute(10, "comment on schema does_not_exist is 'x'")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError { sqlstate, .. } => assert_eq!(sqlstate, "3F000"),
+        other => panic!("expected DetailedError 3F000, got {other:?}"),
+    }
+}
+
+#[test]
 fn session_info_builtins_resolve() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

@@ -6782,7 +6782,8 @@ impl Session {
             | Statement::CommentOnFunction(_)
             | Statement::CommentOnOperator(_)
             | Statement::CommentOnLargeObject(_)
-            | Statement::CommentOnDatabase(_) => Some("COMMENT"),
+            | Statement::CommentOnDatabase(_)
+            | Statement::CommentOnSchema(_) => Some("COMMENT"),
             Statement::GrantObject(_) => Some("GRANT"),
             Statement::RevokeObject(_) => Some("REVOKE"),
             Statement::AlterDefaultPrivileges(_) => Some("ALTER DEFAULT PRIVILEGES"),
@@ -11253,6 +11254,19 @@ impl Session {
                     result
                 } else {
                     db.execute_comment_on_database_stmt(self.client_id, comment_stmt)
+                }
+            }
+            Statement::CommentOnSchema(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_comment_on_schema_stmt(self.client_id, comment_stmt)
                 }
             }
             Statement::CommentOnConversion(ref comment_stmt) => {
@@ -18738,6 +18752,16 @@ impl Session {
                 Statement::CommentOnDatabase(ref comment_stmt) => {
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_database_stmt_in_transaction(
+                        client_id,
+                        comment_stmt,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::CommentOnSchema(ref comment_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_comment_on_schema_stmt_in_transaction(
                         client_id,
                         comment_stmt,
                         xid,
