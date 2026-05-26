@@ -1835,6 +1835,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_walfile_name_offset",
             BuiltinScalarFunction::PgWalfileNameOffset,
         ),
+        ("pg_current_wal_lsn", BuiltinScalarFunction::PgCurrentWalLsn),
+        (
+            "pg_current_wal_insert_lsn",
+            BuiltinScalarFunction::PgCurrentWalInsertLsn,
+        ),
+        (
+            "pg_current_wal_flush_lsn",
+            BuiltinScalarFunction::PgCurrentWalFlushLsn,
+        ),
         (
             "pg_split_walfile_name",
             BuiltinScalarFunction::PgSplitWalfileName,

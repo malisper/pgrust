@@ -1746,6 +1746,34 @@ fn generate_series_accepts_date_bounds_with_interval_step() {
 }
 
 #[test]
+fn pg_current_wal_lsn_variants_resolve() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    for q in &[
+        "select pg_current_wal_lsn()",
+        "select pg_current_wal_insert_lsn()",
+        "select pg_current_wal_flush_lsn()",
+    ] {
+        let rows = session_query_rows(&mut session, &db, q);
+        match rows[0][0] {
+            Value::PgLsn(_) => (),
+            ref other => panic!("expected pg_lsn from {q}, got {other:?}"),
+        }
+    }
+    // pg_walfile_name composes with pg_current_wal_lsn -- common monitoring
+    // / replication query.
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_walfile_name(pg_current_wal_lsn())",
+    );
+    match &rows[0][0] {
+        Value::Text(s) => assert_eq!(s.len(), 24, "expected 24-char WAL filename, got {s:?}"),
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
+#[test]
 fn lateral_subquery_with_parameterized_index_scan_does_not_panic() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     db.execute(10, "create table lat_pk_t (id int4 primary key, v int4)")

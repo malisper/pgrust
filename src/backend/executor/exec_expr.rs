@@ -6522,6 +6522,26 @@ fn parse_wal_file_name(name: &str) -> Option<(u32, u64)> {
     Some((timeline, log * segs_per_logid + seg))
 }
 
+fn eval_pg_current_wal_insert_lsn(ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let lsn = ctx
+        .database
+        .as_ref()
+        .and_then(|db| db.wal.as_ref())
+        .map(|wal| wal.insert_lsn())
+        .unwrap_or(0);
+    Ok(Value::PgLsn(lsn))
+}
+
+fn eval_pg_current_wal_flush_lsn(ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let lsn = ctx
+        .database
+        .as_ref()
+        .and_then(|db| db.wal.as_ref())
+        .map(|wal| wal.flushed_lsn())
+        .unwrap_or(0);
+    Ok(Value::PgLsn(lsn))
+}
+
 fn eval_pg_walfile_name(values: &[Value]) -> Result<Value, ExecError> {
     let [Value::PgLsn(lsn)] = values else {
         return Ok(Value::Null);
@@ -13483,6 +13503,10 @@ pub(crate) fn eval_native_builtin_scalar_typed_value_call(
         BuiltinScalarFunction::PgWalfileName => eval_pg_walfile_name(values),
         BuiltinScalarFunction::PgWalfileNameOffset => eval_pg_walfile_name_offset(values),
         BuiltinScalarFunction::PgSplitWalfileName => eval_pg_split_walfile_name(values),
+        BuiltinScalarFunction::PgCurrentWalLsn | BuiltinScalarFunction::PgCurrentWalFlushLsn => {
+            eval_pg_current_wal_flush_lsn(ctx)
+        }
+        BuiltinScalarFunction::PgCurrentWalInsertLsn => eval_pg_current_wal_insert_lsn(ctx),
         BuiltinScalarFunction::PgControlSystem
         | BuiltinScalarFunction::PgControlCheckpoint
         | BuiltinScalarFunction::PgControlRecovery
@@ -14789,6 +14813,10 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgWalfileName => eval_pg_walfile_name(&values),
         BuiltinScalarFunction::PgWalfileNameOffset => eval_pg_walfile_name_offset(&values),
         BuiltinScalarFunction::PgSplitWalfileName => eval_pg_split_walfile_name(&values),
+        BuiltinScalarFunction::PgCurrentWalLsn | BuiltinScalarFunction::PgCurrentWalFlushLsn => {
+            eval_pg_current_wal_flush_lsn(ctx)
+        }
+        BuiltinScalarFunction::PgCurrentWalInsertLsn => eval_pg_current_wal_insert_lsn(ctx),
         BuiltinScalarFunction::PgControlSystem
         | BuiltinScalarFunction::PgControlCheckpoint
         | BuiltinScalarFunction::PgControlRecovery

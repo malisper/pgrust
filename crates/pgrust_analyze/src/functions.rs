@@ -2712,6 +2712,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgControlCheckpoint
             | BuiltinScalarFunction::PgControlRecovery
             | BuiltinScalarFunction::PgControlInit
+            | BuiltinScalarFunction::PgCurrentWalLsn
+            | BuiltinScalarFunction::PgCurrentWalInsertLsn
+            | BuiltinScalarFunction::PgCurrentWalFlushLsn
             | BuiltinScalarFunction::TestRelpath => args.is_empty(),
             BuiltinScalarFunction::LastVal => args.is_empty(),
             BuiltinScalarFunction::NextVal
@@ -4524,6 +4527,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_walfile_name_offset",
             BuiltinScalarFunction::PgWalfileNameOffset,
+        ),
+        ("pg_current_wal_lsn", BuiltinScalarFunction::PgCurrentWalLsn),
+        (
+            "pg_current_wal_insert_lsn",
+            BuiltinScalarFunction::PgCurrentWalInsertLsn,
+        ),
+        (
+            "pg_current_wal_flush_lsn",
+            BuiltinScalarFunction::PgCurrentWalFlushLsn,
         ),
         (
             "pg_split_walfile_name",
