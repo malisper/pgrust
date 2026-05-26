@@ -1746,6 +1746,36 @@ fn generate_series_accepts_date_bounds_with_interval_step() {
 }
 
 #[test]
+fn session_info_builtins_resolve() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    for q in &[
+        "select inet_server_addr()",
+        "select inet_server_port()",
+        "select inet_client_addr()",
+        "select inet_client_port()",
+        "select current_query()",
+    ] {
+        let rows = session_query_rows(&mut session, &db, q);
+        assert_eq!(
+            rows[0][0],
+            Value::Null,
+            "{q} should return Null on an embedded session"
+        );
+    }
+    for q in &[
+        "select pg_postmaster_start_time()",
+        "select pg_conf_load_time()",
+    ] {
+        let rows = session_query_rows(&mut session, &db, q);
+        match rows[0][0] {
+            Value::TimestampTz(_) => (),
+            ref other => panic!("expected timestamptz from {q}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn pg_current_wal_lsn_variants_resolve() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

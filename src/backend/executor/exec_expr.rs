@@ -13507,6 +13507,18 @@ pub(crate) fn eval_native_builtin_scalar_typed_value_call(
             eval_pg_current_wal_flush_lsn(ctx)
         }
         BuiltinScalarFunction::PgCurrentWalInsertLsn => eval_pg_current_wal_insert_lsn(ctx),
+        BuiltinScalarFunction::InetServerAddr | BuiltinScalarFunction::InetClientAddr => {
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::InetServerPort | BuiltinScalarFunction::InetClientPort => {
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::CurrentQuery => Ok(Value::Null),
+        BuiltinScalarFunction::PgPostmasterStartTime | BuiltinScalarFunction::PgConfLoadTime => {
+            Ok(Value::TimestampTz(pgrust_nodes::datetime::TimestampTzADT(
+                ctx.statement_timestamp_usecs,
+            )))
+        }
         BuiltinScalarFunction::PgControlSystem
         | BuiltinScalarFunction::PgControlCheckpoint
         | BuiltinScalarFunction::PgControlRecovery
@@ -14817,6 +14829,18 @@ pub(crate) fn eval_builtin_function(
             eval_pg_current_wal_flush_lsn(ctx)
         }
         BuiltinScalarFunction::PgCurrentWalInsertLsn => eval_pg_current_wal_insert_lsn(ctx),
+        BuiltinScalarFunction::InetServerAddr | BuiltinScalarFunction::InetClientAddr => {
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::InetServerPort | BuiltinScalarFunction::InetClientPort => {
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::CurrentQuery => Ok(Value::Null),
+        BuiltinScalarFunction::PgPostmasterStartTime | BuiltinScalarFunction::PgConfLoadTime => {
+            Ok(Value::TimestampTz(pgrust_nodes::datetime::TimestampTzADT(
+                ctx.statement_timestamp_usecs,
+            )))
+        }
         BuiltinScalarFunction::PgControlSystem
         | BuiltinScalarFunction::PgControlCheckpoint
         | BuiltinScalarFunction::PgControlRecovery

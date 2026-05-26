@@ -1844,6 +1844,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_current_wal_flush_lsn",
             BuiltinScalarFunction::PgCurrentWalFlushLsn,
         ),
+        ("inet_server_addr", BuiltinScalarFunction::InetServerAddr),
+        ("inet_server_port", BuiltinScalarFunction::InetServerPort),
+        ("inet_client_addr", BuiltinScalarFunction::InetClientAddr),
+        ("inet_client_port", BuiltinScalarFunction::InetClientPort),
+        ("current_query", BuiltinScalarFunction::CurrentQuery),
+        (
+            "pg_postmaster_start_time",
+            BuiltinScalarFunction::PgPostmasterStartTime,
+        ),
+        ("pg_conf_load_time", BuiltinScalarFunction::PgConfLoadTime),
         (
             "pg_split_walfile_name",
             BuiltinScalarFunction::PgSplitWalfileName,
