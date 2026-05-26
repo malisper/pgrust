@@ -23400,6 +23400,35 @@ fn drop_database_rejects_current_and_active_connections_then_removes_files() {
 }
 
 #[test]
+fn create_extension_plpgsql_succeeds_unknown_extensions_error() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create extension plpgsql").unwrap();
+    session
+        .execute(&db, "create extension if not exists plpgsql")
+        .unwrap();
+
+    match session.execute(&db, "create extension pgcrypto") {
+        Err(ExecError::DetailedError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert!(message.contains("pgcrypto"));
+            assert!(message.contains("is not available"));
+        }
+        other => panic!("expected unknown extension rejection, got {:?}", other),
+    }
+
+    session
+        .execute(
+            &db,
+            "create extension if not exists pgcrypto with schema public version '1.3' cascade",
+        )
+        .expect_err("if not exists does not waive missing extension");
+}
+
+#[test]
 fn create_schema_creates_namespace_row_and_allows_qualified_create_table() {
     let db = Database::open_ephemeral(16).unwrap();
     let mut session = Session::new(1);

@@ -6715,6 +6715,7 @@ impl Session {
                     Some("DROP TEXT SEARCH PARSER")
                 }
             },
+            Statement::CreateExtension(_) => Some("CREATE EXTENSION"),
             Statement::DropExtension(_) => Some("DROP EXTENSION"),
             Statement::DropAccessMethod(_) => Some("DROP ACCESS METHOD"),
             Statement::DropOwned(_) => Some("DROP OWNED"),
@@ -10755,6 +10756,9 @@ impl Session {
                 } else {
                     db.execute_drop_database_stmt(self.client_id, drop_stmt)
                 }
+            }
+            Statement::CreateExtension(ref create_stmt) => {
+                db.execute_create_extension_stmt(self.client_id, create_stmt)
             }
             Statement::DropExtension(ref drop_stmt) => {
                 db.execute_drop_extension_stmt(self.client_id, drop_stmt)
@@ -18650,6 +18654,9 @@ impl Session {
                 Statement::DropDatabase(_) => Err(ExecError::Parse(
                     ParseError::ActiveSqlTransaction("DROP DATABASE"),
                 )),
+                Statement::CreateExtension(ref create_stmt) => {
+                    db.execute_create_extension_stmt(client_id, create_stmt)
+                }
                 Statement::DropExtension(ref drop_stmt) => {
                     db.execute_drop_extension_stmt(client_id, drop_stmt)
                 }

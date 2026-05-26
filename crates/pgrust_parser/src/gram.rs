@@ -122,6 +122,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_drop_catalog_object_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_create_extension_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_text_search_statement(&sql)? {
         return Ok(stmt);
     }
@@ -7675,6 +7678,102 @@ fn build_drop_database_statement(sql: &str) -> Result<DropDatabaseStatement, Par
         database_name,
         force,
     })
+}
+
+fn try_parse_create_extension_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("create extension") {
+        return Ok(None);
+    }
+    let after_kw = trimmed["create extension".len()..].trim_start();
+    if !after_kw.is_empty()
+        && !after_kw
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_whitespace() || c == '"')
+        && !after_kw.starts_with(|c: char| c.is_alphabetic() || c == '_')
+    {
+        return Ok(None);
+    }
+    build_create_extension_statement(trimmed).map(|stmt| Some(Statement::CreateExtension(stmt)))
+}
+
+fn build_create_extension_statement(sql: &str) -> Result<CreateExtensionStatement, ParseError> {
+    let mut rest = sql["create extension".len()..].trim_start();
+    let if_not_exists = if let Some(after) = consume_keywords(rest, &["if", "not", "exists"]) {
+        rest = after.trim_start();
+        true
+    } else {
+        false
+    };
+    let (extension_name, after_name) = parse_unqualified_identifier(rest, "extension name")?;
+    rest = after_name.trim_start();
+    if let Some(after) = consume_keywords(rest, &["with"]) {
+        rest = after.trim_start();
+    }
+
+    let mut schema: Option<String> = None;
+    let mut version: Option<String> = None;
+    let mut cascade = false;
+
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(after) = consume_keywords(rest, &["schema"]) {
+            rest = after.trim_start();
+            let (name, after_name) = parse_unqualified_identifier(rest, "schema name")?;
+            if schema.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single SCHEMA clause",
+                    actual: name,
+                });
+            }
+            schema = Some(name);
+            rest = after_name;
+            continue;
+        }
+        if let Some(after) = consume_keywords(rest, &["version"]) {
+            rest = after.trim_start();
+            let (value, after_value) = parse_extension_option_value(rest)?;
+            if version.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single VERSION clause",
+                    actual: value,
+                });
+            }
+            version = Some(value);
+            rest = after_value;
+            continue;
+        }
+        if let Some(after) = consume_keywords(rest, &["cascade"]) {
+            cascade = true;
+            rest = after;
+            continue;
+        }
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE EXTENSION option",
+            actual: rest.trim().into(),
+        });
+    }
+
+    Ok(CreateExtensionStatement {
+        if_not_exists,
+        extension_name,
+        schema,
+        version,
+        cascade,
+    })
+}
+
+fn parse_extension_option_value(input: &str) -> Result<(String, &str), ParseError> {
+    let trimmed = input.trim_start();
+    if trimmed.starts_with('\'') || trimmed.starts_with('$') {
+        return parse_copy_string_literal(trimmed);
+    }
+    parse_unqualified_identifier(trimmed, "extension option value")
 }
 
 fn try_parse_drop_catalog_object_statement(sql: &str) -> Result<Option<Statement>, ParseError> {

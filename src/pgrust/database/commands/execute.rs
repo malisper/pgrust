@@ -2762,6 +2762,9 @@ impl Database {
             Statement::DropDatabase(ref drop_stmt) => {
                 self.execute_drop_database_stmt(client_id, drop_stmt)
             }
+            Statement::CreateExtension(ref create_stmt) => {
+                self.execute_create_extension_stmt(client_id, create_stmt)
+            }
             Statement::DropExtension(ref drop_stmt) => {
                 self.execute_drop_extension_stmt(client_id, drop_stmt)
             }

@@ -623,6 +623,7 @@ fn run_statement(
         | Statement::AlterRole(_)
         | Statement::DropRole(_)
         | Statement::DropDatabase(_)
+        | Statement::CreateExtension(_)
         | Statement::DropExtension(_)
         | Statement::DropAccessMethod(_)
         | Statement::GrantObject(_)

@@ -387,6 +387,7 @@ pub enum Statement {
     AlterTextSearchConfiguration(AlterTextSearchConfigurationStatement),
     DropTextSearchConfiguration(DropTextSearchConfigurationStatement),
     DropTextSearch(DropTextSearchStatement),
+    CreateExtension(CreateExtensionStatement),
     DropExtension(DropExtensionStatement),
     DropAccessMethod(DropAccessMethodStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
@@ -3973,6 +3974,15 @@ pub struct DropDatabaseStatement {
     pub if_exists: bool,
     pub database_name: String,
     pub force: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateExtensionStatement {
+    pub if_not_exists: bool,
+    pub extension_name: String,
+    pub schema: Option<String>,
+    pub version: Option<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

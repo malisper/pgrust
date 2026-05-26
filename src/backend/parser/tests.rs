@@ -4037,6 +4037,29 @@ fn parse_text_search_generic_statements() {
         })
     );
     assert_eq!(
+        parse_statement("create extension plpgsql").unwrap(),
+        Statement::CreateExtension(CreateExtensionStatement {
+            if_not_exists: false,
+            extension_name: "plpgsql".into(),
+            schema: None,
+            version: None,
+            cascade: false,
+        })
+    );
+    assert_eq!(
+        parse_statement(
+            "create extension if not exists pgcrypto with schema public version '1.3' cascade"
+        )
+        .unwrap(),
+        Statement::CreateExtension(CreateExtensionStatement {
+            if_not_exists: true,
+            extension_name: "pgcrypto".into(),
+            schema: Some("public".into()),
+            version: Some("1.3".into()),
+            cascade: true,
+        })
+    );
+    assert_eq!(
         parse_statement("drop access method if exists alt_am1 cascade").unwrap(),
         Statement::DropAccessMethod(DropAccessMethodStatement {
             if_exists: true,

@@ -1,6 +1,8 @@
 use super::super::*;
 use crate::backend::executor::StatementResult;
-use crate::backend::parser::{DropAccessMethodStatement, DropExtensionStatement};
+use crate::backend::parser::{
+    CreateExtensionStatement, DropAccessMethodStatement, DropExtensionStatement,
+};
 use crate::backend::utils::misc::notices::push_notice;
 
 fn ensure_current_user_superuser(
@@ -28,6 +30,33 @@ fn ensure_current_user_superuser(
 }
 
 impl Database {
+    pub(crate) fn execute_create_extension_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &CreateExtensionStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let _ = client_id;
+        // plpgsql ships preloaded; treat as a successful no-op to unblock
+        // regression scripts that begin with `CREATE EXTENSION [IF NOT EXISTS] plpgsql`.
+        if stmt.extension_name.eq_ignore_ascii_case("plpgsql") {
+            if stmt.if_not_exists {
+                push_notice(format!(
+                    "extension \"{}\" already exists, skipping",
+                    stmt.extension_name
+                ));
+            }
+            return Ok(StatementResult::AffectedRows(0));
+        }
+        Err(ExecError::DetailedError {
+            message: format!("extension \"{}\" is not available", stmt.extension_name),
+            detail: Some(
+                "pgrust does not ship contrib extensions; only \"plpgsql\" is preloaded.".into(),
+            ),
+            hint: None,
+            sqlstate: "0A000",
+        })
+    }
+
     pub(crate) fn execute_drop_extension_stmt(
         &self,
         client_id: ClientId,

@@ -776,6 +776,10 @@ fn execute_statement_with_source(
             expected: "DROP DATABASE handled by database/session layer",
             actual: "DROP DATABASE".into(),
         })),
+        Statement::CreateExtension(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE EXTENSION handled by database/session layer",
+            actual: "CREATE EXTENSION".into(),
+        })),
         Statement::DropExtension(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP EXTENSION handled by database/session layer",
             actual: "DROP EXTENSION".into(),
@@ -1278,6 +1282,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::DropDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP DATABASE".into(),
+        })),
+        Statement::CreateExtension(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE EXTENSION".into(),
         })),
         Statement::DropExtension(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
