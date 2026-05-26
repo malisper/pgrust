@@ -5969,13 +5969,113 @@ fn project_set_target_uses_outer_relids(target: &ProjectSetTarget, relids: &[usi
     }
 }
 
+fn index_scan_key_uses_outer_relids(
+    key: &pgrust_nodes::plannodes::IndexScanKey,
+    relids: &[usize],
+) -> bool {
+    use pgrust_nodes::plannodes::IndexScanKeyArgument;
+    match &key.argument {
+        IndexScanKeyArgument::Const(_) => false,
+        IndexScanKeyArgument::Runtime(expr) => expr_uses_outer_relids(expr, relids),
+    }
+}
+
+/// Returns true when the subquery body contains a Var at exactly
+/// `varlevelsup == 1` matching one of the provided outer relids. That's
+/// the LATERAL-dependency signal: a Var at varlevelsup=1 references the
+/// immediate outer scope, which is where `relids` live when we are
+/// costing a join in the outer query.
+fn subquery_body_references_relids(query: &Query, relids: &[usize]) -> bool {
+    use pgrust_nodes::primnodes::Expr as E;
+    fn expr_refs(expr: &E, relids: &[usize]) -> bool {
+        match expr {
+            E::Var(var) => var.varlevelsup == 1 && relids.contains(&var.varno),
+            E::Cast(inner, _)
+            | E::Collate { expr: inner, .. }
+            | E::IsNull(inner)
+            | E::IsNotNull(inner) => expr_refs(inner, relids),
+            E::IsDistinctFrom(l, r) | E::IsNotDistinctFrom(l, r) | E::Coalesce(l, r) => {
+                expr_refs(l, relids) || expr_refs(r, relids)
+            }
+            E::Op(op) => op.args.iter().any(|a| expr_refs(a, relids)),
+            E::Bool(b) => b.args.iter().any(|a| expr_refs(a, relids)),
+            E::Func(f) => f.args.iter().any(|a| expr_refs(a, relids)),
+            E::ScalarArrayOp(sa) => expr_refs(&sa.left, relids) || expr_refs(&sa.right, relids),
+            E::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            }
+            | E::Similar {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                expr_refs(expr, relids)
+                    || expr_refs(pattern, relids)
+                    || escape.as_deref().is_some_and(|e| expr_refs(e, relids))
+            }
+            E::ArrayLiteral { elements, .. } => elements.iter().any(|e| expr_refs(e, relids)),
+            E::Row { fields, .. } => fields.iter().any(|(_, e)| expr_refs(e, relids)),
+            E::FieldSelect { expr, .. } => expr_refs(expr, relids),
+            // For variants we don't enumerate, fall through. Subquery bodies
+            // referencing outer relids almost always do so via Var inside
+            // the variants enumerated above (where_qual is the common case).
+            _ => false,
+        }
+    }
+    if let Some(qual) = query.where_qual.as_ref() {
+        if expr_refs(qual, relids) {
+            return true;
+        }
+    }
+    if query.target_list.iter().any(|t| expr_refs(&t.expr, relids)) {
+        return true;
+    }
+    if let Some(having) = query.having_qual.as_ref() {
+        if expr_refs(having, relids) {
+            return true;
+        }
+    }
+    if query.group_by.iter().any(|e| expr_refs(e, relids)) {
+        return true;
+    }
+    false
+}
+
 fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
     match path {
-        Path::Result { .. }
-        | Path::IndexOnlyScan { .. }
-        | Path::IndexScan { .. }
-        | Path::BitmapIndexScan { .. }
-        | Path::WorkTableScan { .. } => false,
+        Path::Result { .. } | Path::WorkTableScan { .. } => false,
+        // Parameterized index scans embed outer-rel references as
+        // `IndexScanKeyArgument::Runtime(Expr)` keys. Treating them as
+        // outer-rel-free let the planner swap a LATERAL subquery to the
+        // outer side of a Nested Loop even when the inner index probe
+        // needed the outer tuple, triggering an `empty slot` panic at
+        // exec time (issue #5). Walk the keys.
+        Path::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Path::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        } => keys
+            .iter()
+            .chain(order_by_keys.iter())
+            .any(|key| index_scan_key_uses_outer_relids(key, relids)),
+        Path::BitmapIndexScan {
+            keys, index_quals, ..
+        } => {
+            keys.iter()
+                .any(|key| index_scan_key_uses_outer_relids(key, relids))
+                || index_quals
+                    .iter()
+                    .any(|expr| expr_uses_outer_relids(expr, relids))
+        }
         Path::SeqScan { tablesample, .. } => {
             table_sample_uses_outer_relids(tablesample.as_ref(), relids)
         }
@@ -6124,7 +6224,14 @@ fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
             .flatten()
             .any(|expr| expr_uses_outer_relids(expr, relids)),
         Path::FunctionScan { call, .. } => set_returning_call_uses_outer_relids(call, relids),
-        Path::SubqueryScan { input, .. } => path_uses_outer_relids(input, relids),
+        Path::SubqueryScan { input, query, .. } => {
+            // LATERAL subqueries reference outer relids through Vars with
+            // varlevelsup >= 1 in their body. The planned input path may have
+            // those references as Params (Exec params), so they won't show up
+            // in the path traversal. Walk the subquery's parsed Query to
+            // detect the lateral dependency explicitly.
+            path_uses_outer_relids(input, relids) || subquery_body_references_relids(query, relids)
+        }
         Path::CteScan { cte_plan, .. } => path_uses_outer_relids(cte_plan, relids),
         Path::RecursiveUnion {
             anchor, recursive, ..

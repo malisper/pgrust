@@ -1746,6 +1746,45 @@ fn generate_series_accepts_date_bounds_with_interval_step() {
 }
 
 #[test]
+fn lateral_subquery_with_parameterized_index_scan_does_not_panic() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(10, "create table lat_pk_t (id int4 primary key, v int4)")
+        .unwrap();
+    db.execute(10, "insert into lat_pk_t values (1, 10), (2, 20), (3, 30)")
+        .unwrap();
+    let mut session = Session::new(1);
+
+    // Previously panicked with `cannot get attrs from empty slot`: the
+    // planner generated a swapped orientation Nested Loop putting the
+    // LATERAL subquery (containing a parameterized index scan) on the
+    // outer side, and the inner index scan tried to read the outer slot
+    // before it was populated. See issue #5.
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select a.id, s.v \
+         from lat_pk_t a, lateral (select v from lat_pk_t b where b.id = a.id) s \
+         order by a.id",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(2), Value::Int32(20)],
+            vec![Value::Int32(3), Value::Int32(30)],
+        ]
+    );
+
+    let count_rows = session_query_rows(
+        &mut session,
+        &db,
+        "select count(*) from lat_pk_t a, \
+         lateral (select * from lat_pk_t b where b.id = a.id) s",
+    );
+    assert_eq!(count_rows, vec![vec![Value::Int64(3)]]);
+}
+
+#[test]
 fn alter_table_multi_add_column_assigns_distinct_attnums() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     db.execute(10, "create table multi_add_t (id int4 primary key, v int4)")
