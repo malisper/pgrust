@@ -12659,6 +12659,14 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::Ln
         | BuiltinScalarFunction::Sin
         | BuiltinScalarFunction::Cos
+        | BuiltinScalarFunction::Tan
+        | BuiltinScalarFunction::Cot
+        | BuiltinScalarFunction::Asin
+        | BuiltinScalarFunction::Acos
+        | BuiltinScalarFunction::Atan
+        | BuiltinScalarFunction::Atan2
+        | BuiltinScalarFunction::Radians
+        | BuiltinScalarFunction::Degrees
         | BuiltinScalarFunction::Sinh
         | BuiltinScalarFunction::Cosh
         | BuiltinScalarFunction::Tanh
@@ -15020,6 +15028,38 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::Cos => {
             expr_math::eval_unary_float_function("cos", &values, |v| Ok(v.cos()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Tan => {
+            expr_math::eval_unary_float_function("tan", &values, |v| Ok(v.tan()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Cot => {
+            expr_math::eval_unary_float_function("cot", &values, |v| Ok(1.0 / v.tan()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Asin => {
+            expr_math::eval_unary_float_function("asin", &values, |v| Ok(v.asin()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Acos => {
+            expr_math::eval_unary_float_function("acos", &values, |v| Ok(v.acos()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Atan => {
+            expr_math::eval_unary_float_function("atan", &values, |v| Ok(v.atan()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Atan2 => {
+            expr_math::eval_binary_float_function("atan2", &values, |y, x| Ok(y.atan2(x)))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Radians => {
+            expr_math::eval_unary_float_function("radians", &values, |v| Ok(v.to_radians()))
+                .map_err(Into::into)
+        }
+        BuiltinScalarFunction::Degrees => {
+            expr_math::eval_unary_float_function("degrees", &values, |v| Ok(v.to_degrees()))
                 .map_err(Into::into)
         }
         BuiltinScalarFunction::Sinh => {

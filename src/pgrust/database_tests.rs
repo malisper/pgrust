@@ -1780,6 +1780,53 @@ fn generate_series_accepts_date_bounds_with_interval_step() {
 }
 
 #[test]
+fn radian_trig_builtins_resolve() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select tan(0), asin(0), acos(1), atan(0)",
+    );
+    match (&rows[0][0], &rows[0][1], &rows[0][2], &rows[0][3]) {
+        (Value::Float64(t), Value::Float64(asin), Value::Float64(acos), Value::Float64(atan)) => {
+            assert!(t.abs() < 1e-12);
+            assert!(asin.abs() < 1e-12);
+            assert!(acos.abs() < 1e-12);
+            assert!(atan.abs() < 1e-12);
+        }
+        other => panic!("expected floats, got {other:?}"),
+    }
+
+    let rows = session_query_rows(&mut session, &db, "select atan2(1, 1)");
+    match rows[0][0] {
+        Value::Float64(v) => assert!((v - std::f64::consts::FRAC_PI_4).abs() < 1e-12),
+        ref other => panic!("expected float, got {other:?}"),
+    }
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select radians(180), degrees(3.141592653589793)",
+    );
+    match (&rows[0][0], &rows[0][1]) {
+        (Value::Float64(r), Value::Float64(d)) => {
+            assert!((r - std::f64::consts::PI).abs() < 1e-12);
+            assert!((d - 180.0).abs() < 1e-9);
+        }
+        other => panic!("expected floats, got {other:?}"),
+    }
+
+    // cot is non-zero at non-pole inputs
+    let rows = session_query_rows(&mut session, &db, "select cot(1.0)");
+    match rows[0][0] {
+        Value::Float64(v) => assert!((v - 1.0 / 1.0_f64.tan()).abs() < 1e-12),
+        ref other => panic!("expected float, got {other:?}"),
+    }
+}
+
+#[test]
 fn comment_on_schema_parses_and_persists() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
 

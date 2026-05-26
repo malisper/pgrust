@@ -2545,7 +2545,16 @@ pub(super) fn validate_scalar_function_arity(
                 matches!(args.len(), 2 | 3)
             }
             BuiltinScalarFunction::Pi => args.is_empty(),
-            BuiltinScalarFunction::Sin | BuiltinScalarFunction::Cos => args.len() == 1,
+            BuiltinScalarFunction::Sin
+            | BuiltinScalarFunction::Cos
+            | BuiltinScalarFunction::Tan
+            | BuiltinScalarFunction::Cot
+            | BuiltinScalarFunction::Asin
+            | BuiltinScalarFunction::Acos
+            | BuiltinScalarFunction::Atan
+            | BuiltinScalarFunction::Radians
+            | BuiltinScalarFunction::Degrees => args.len() == 1,
+            BuiltinScalarFunction::Atan2 => args.len() == 2,
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
             }
@@ -2891,6 +2900,14 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Cbrt
             | BuiltinScalarFunction::Exp
             | BuiltinScalarFunction::Ln
+            | BuiltinScalarFunction::Tan
+            | BuiltinScalarFunction::Cot
+            | BuiltinScalarFunction::Asin
+            | BuiltinScalarFunction::Acos
+            | BuiltinScalarFunction::Atan
+            | BuiltinScalarFunction::Atan2
+            | BuiltinScalarFunction::Radians
+            | BuiltinScalarFunction::Degrees
             | BuiltinScalarFunction::Sinh
             | BuiltinScalarFunction::Cosh
             | BuiltinScalarFunction::Tanh
@@ -3881,6 +3898,20 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("dsin", BuiltinScalarFunction::Sin),
         ("cos", BuiltinScalarFunction::Cos),
         ("dcos", BuiltinScalarFunction::Cos),
+        ("tan", BuiltinScalarFunction::Tan),
+        ("dtan", BuiltinScalarFunction::Tan),
+        ("cot", BuiltinScalarFunction::Cot),
+        ("dcot", BuiltinScalarFunction::Cot),
+        ("asin", BuiltinScalarFunction::Asin),
+        ("dasin", BuiltinScalarFunction::Asin),
+        ("acos", BuiltinScalarFunction::Acos),
+        ("dacos", BuiltinScalarFunction::Acos),
+        ("atan", BuiltinScalarFunction::Atan),
+        ("datan", BuiltinScalarFunction::Atan),
+        ("atan2", BuiltinScalarFunction::Atan2),
+        ("datan2", BuiltinScalarFunction::Atan2),
+        ("radians", BuiltinScalarFunction::Radians),
+        ("degrees", BuiltinScalarFunction::Degrees),
         ("uuid_in", BuiltinScalarFunction::UuidIn),
         ("uuid_out", BuiltinScalarFunction::UuidOut),
         ("uuid_recv", BuiltinScalarFunction::UuidRecv),
