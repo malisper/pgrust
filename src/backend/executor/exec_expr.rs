@@ -6522,6 +6522,14 @@ fn parse_wal_file_name(name: &str) -> Option<(u32, u64)> {
     Some((timeline, log * segs_per_logid + seg))
 }
 
+fn eval_pg_export_snapshot(ctx: &ExecutorContext) -> Value {
+    // pgrust does not yet plumb shared snapshot IDs through the executor.
+    // Return a PG-shaped placeholder text token so parallel-query callers can
+    // round-trip it; SET TRANSACTION SNAPSHOT will reject it the same way PG
+    // would reject an expired snapshot.
+    Value::Text(format!("{:08x}-{:08x}-1", ctx.snapshot.xmin, ctx.snapshot.xmax).into())
+}
+
 fn eval_pg_current_wal_insert_lsn(ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let lsn = ctx
         .database
@@ -13519,6 +13527,7 @@ pub(crate) fn eval_native_builtin_scalar_typed_value_call(
                 ctx.statement_timestamp_usecs,
             )))
         }
+        BuiltinScalarFunction::PgExportSnapshot => Ok(eval_pg_export_snapshot(ctx)),
         BuiltinScalarFunction::PgControlSystem
         | BuiltinScalarFunction::PgControlCheckpoint
         | BuiltinScalarFunction::PgControlRecovery
@@ -14841,6 +14850,7 @@ pub(crate) fn eval_builtin_function(
                 ctx.statement_timestamp_usecs,
             )))
         }
+        BuiltinScalarFunction::PgExportSnapshot => Ok(eval_pg_export_snapshot(ctx)),
         BuiltinScalarFunction::PgControlSystem
         | BuiltinScalarFunction::PgControlCheckpoint
         | BuiltinScalarFunction::PgControlRecovery

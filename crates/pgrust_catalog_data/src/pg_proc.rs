@@ -1855,6 +1855,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_conf_load_time", BuiltinScalarFunction::PgConfLoadTime),
         (
+            "pg_export_snapshot",
+            BuiltinScalarFunction::PgExportSnapshot,
+        ),
+        (
             "pg_split_walfile_name",
             BuiltinScalarFunction::PgSplitWalfileName,
         ),

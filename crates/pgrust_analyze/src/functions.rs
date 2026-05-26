@@ -2722,6 +2722,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::CurrentQuery
             | BuiltinScalarFunction::PgPostmasterStartTime
             | BuiltinScalarFunction::PgConfLoadTime
+            | BuiltinScalarFunction::PgExportSnapshot
             | BuiltinScalarFunction::TestRelpath => args.is_empty(),
             BuiltinScalarFunction::LastVal => args.is_empty(),
             BuiltinScalarFunction::NextVal
@@ -4554,6 +4555,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgPostmasterStartTime,
         ),
         ("pg_conf_load_time", BuiltinScalarFunction::PgConfLoadTime),
+        (
+            "pg_export_snapshot",
+            BuiltinScalarFunction::PgExportSnapshot,
+        ),
         (
             "pg_split_walfile_name",
             BuiltinScalarFunction::PgSplitWalfileName,

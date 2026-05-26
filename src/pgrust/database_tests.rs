@@ -1778,6 +1778,19 @@ fn comment_on_schema_parses_and_persists() {
 }
 
 #[test]
+fn pg_export_snapshot_returns_text_token() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    session.execute(&db, "begin").unwrap();
+    let rows = session_query_rows(&mut session, &db, "select pg_export_snapshot()");
+    match &rows[0][0] {
+        Value::Text(_) => (),
+        other => panic!("expected text, got {other:?}"),
+    }
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn session_info_builtins_resolve() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
