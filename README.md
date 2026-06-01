@@ -16,6 +16,10 @@
 
 [**Previous update: 67% Postgres compatibility and accelerating.**](https://malisper.me/pgrust-update-at-67-postgres-compatibility-and-accelerating/)
 
+## **June 2026 update**
+
+**pgrust is still active. We have been exploring a few different directions for the next phase of the rewrite, including some approaches that may be more interesting than continuing to push this first implementation forward linearly. The public repo may be quieter while we test those ideas, but more updates are coming soon.**
+
 ## **Why?**
 
 **PostgreSQL has been in development for 40 years. But some architectural decisions from 80s keep showing up as operational pain:**
