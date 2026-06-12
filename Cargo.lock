@@ -78,6 +78,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-port-atomics"
+version = "0.0.0"
+
+[[package]]
 name = "backend-storage-lmgr-lwlock-seams"
 version = "0.0.0"
 dependencies = [
@@ -249,6 +253,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-hashvalidate",
  "backend-libpq-pqsignal",
+ "backend-port-atomics",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
  "backend-utils-mb-wstrcmp",
