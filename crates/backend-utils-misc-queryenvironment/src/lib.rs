@@ -23,7 +23,9 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
+use mcx::Mcx;
 use types_core::primitive::InvalidOid;
+use types_error::PgResult;
 use types_tuple::access::{
     EphemeralNamedRelationData, EphemeralNamedRelationMetadata,
     EphemeralNamedRelationMetadataData, NoLock,
@@ -36,10 +38,11 @@ pub fn init_seams() {}
 
 /// `create_queryEnv(void)` — allocate a fresh, empty query environment.
 ///
-/// C `palloc0(sizeof(QueryEnvironment))`; the owned equivalent is the
-/// zero-initialized (empty `namedRelList`) struct, which the caller stores.
-pub fn create_queryEnv() -> QueryEnvironment {
-    QueryEnvironment::default()
+/// C `palloc0(sizeof(QueryEnvironment))` in `CurrentMemoryContext`; per the
+/// mcx translation rule the caller passes the context handle instead, and the
+/// environment's allocations are tied to (and accounted in) that context.
+pub fn create_queryEnv(mcx: Mcx<'_>) -> QueryEnvironment<'_> {
+    QueryEnvironment::new_in(mcx)
 }
 
 /// `get_visible_ENR_metadata(queryEnv, refname)` — return the metadata of the
@@ -67,7 +70,12 @@ pub fn get_visible_ENR_metadata(
 ///
 /// If this is intended exclusively for planning purposes, the `reldata` field
 /// can be left `None` (C: NULL `tstate`).
-pub fn register_ENR(query_env: &mut QueryEnvironment, enr: EphemeralNamedRelationData) {
+///
+/// Fallible because C's `lappend` pallocs, which can `ereport(ERROR)` on OOM.
+pub fn register_ENR(
+    query_env: &mut QueryEnvironment<'_>,
+    enr: EphemeralNamedRelationData,
+) -> PgResult<()> {
     // Assert(enr != NULL) — `enr` is owned, never null.
     // Assert(get_ENR(queryEnv, enr->md.name) == NULL)
     debug_assert!(
@@ -79,7 +87,13 @@ pub fn register_ENR(query_env: &mut QueryEnvironment, enr: EphemeralNamedRelatio
         "register_ENR: duplicate ephemeral named relation"
     );
 
+    let mcx = *query_env.namedRelList.allocator();
+    query_env
+        .namedRelList
+        .try_reserve(1)
+        .map_err(|_| mcx.oom(core::mem::size_of::<EphemeralNamedRelationData>()))?;
     query_env.namedRelList.push(enr);
+    Ok(())
 }
 
 /// `unregister_ENR(queryEnv, name)` — unregister an ephemeral relation by

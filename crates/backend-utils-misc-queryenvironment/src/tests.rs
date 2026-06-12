@@ -23,14 +23,18 @@ fn make_enr(name: &str) -> EphemeralNamedRelationData {
 
 #[test]
 fn create_is_empty() {
-    let env = create_queryEnv();
+    let ctx = mcx::MemoryContext::new("test");
+    let env = create_queryEnv(ctx.mcx());
     assert!(env.namedRelList.is_empty());
+    assert_eq!(ctx.used(), 0, "empty environment allocates nothing");
 }
 
 #[test]
 fn register_then_get() {
-    let mut env = create_queryEnv();
-    register_ENR(&mut env, make_enr("delta"));
+    let ctx = mcx::MemoryContext::new("test");
+    let mut env = create_queryEnv(ctx.mcx());
+    register_ENR(&mut env, make_enr("delta")).unwrap();
+    assert!(ctx.used() > 0, "registered ENR is charged to the context");
 
     let found = get_ENR(&env, "delta").expect("registered ENR must be found");
     assert_eq!(found.md.name.as_deref(), Some("delta"));
@@ -41,8 +45,9 @@ fn register_then_get() {
 
 #[test]
 fn get_visible_metadata_clones_md() {
-    let mut env = create_queryEnv();
-    register_ENR(&mut env, make_enr("trans"));
+    let ctx = mcx::MemoryContext::new("test");
+    let mut env = create_queryEnv(ctx.mcx());
+    register_ENR(&mut env, make_enr("trans")).unwrap();
 
     let md = get_visible_ENR_metadata(Some(&env), "trans").expect("must find metadata");
     assert_eq!(md.name.as_deref(), Some("trans"));
@@ -55,9 +60,10 @@ fn get_visible_metadata_clones_md() {
 
 #[test]
 fn unregister_removes_match() {
-    let mut env = create_queryEnv();
-    register_ENR(&mut env, make_enr("a"));
-    register_ENR(&mut env, make_enr("b"));
+    let ctx = mcx::MemoryContext::new("test");
+    let mut env = create_queryEnv(ctx.mcx());
+    register_ENR(&mut env, make_enr("a")).unwrap();
+    register_ENR(&mut env, make_enr("b")).unwrap();
 
     unregister_ENR(&mut env, "a");
     assert!(get_ENR(&env, "a").is_none());
@@ -70,10 +76,11 @@ fn unregister_removes_match() {
 
 #[test]
 fn get_enr_walk_order_preserved() {
-    let mut env = create_queryEnv();
+    let ctx = mcx::MemoryContext::new("test");
+    let mut env = create_queryEnv(ctx.mcx());
     let names = ["x", "y", "z"];
     for n in names {
-        register_ENR(&mut env, make_enr(n));
+        register_ENR(&mut env, make_enr(n)).unwrap();
     }
     let got: Vec<_> = env
         .namedRelList
@@ -105,4 +112,18 @@ fn tupdesc_branch_uses_inline_descriptor() {
 
     let out = ENRMetadataGetTupDesc(&md).unwrap();
     assert!(out.is_some());
+}
+
+#[test]
+fn environment_bytes_return_on_drop() {
+    let ctx = mcx::MemoryContext::new("per-query");
+    {
+        let mut env = create_queryEnv(ctx.mcx());
+        register_ENR(&mut env, make_enr("delta")).unwrap();
+        assert_eq!(
+            ctx.used(),
+            env.namedRelList.capacity() * core::mem::size_of::<EphemeralNamedRelationData>()
+        );
+    }
+    assert_eq!(ctx.used(), 0, "dropping the environment returns every byte");
 }
