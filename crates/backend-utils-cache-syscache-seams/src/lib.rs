@@ -2,9 +2,9 @@
 //! (`utils/cache/syscache.c` `SearchSysCache*` reads), expressed as
 //! caller-shaped projected catalog rows.
 //!
-//! The owning unit installs these from its `init_seams()` when it lands
-//! (catcache lookup + deform + field projection — thin marshal only); until
-//! then a call panics loudly. A cache miss is `Ok(None)` / an empty list — the
+//! The owning unit (`backend-utils-cache-syscache`) installs these from its
+//! `init_seams()` (catcache lookup + attribute extraction + field projection
+//! — thin marshal only). A cache miss is `Ok(None)` / an empty list — the
 //! caller raises its own `cache lookup failed` error, as in C.
 //!
 //! The projected rows are copies out of the catcache (the cache entries live

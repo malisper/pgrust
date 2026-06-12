@@ -1,0 +1,26 @@
+[package]
+name = "backend-utils-cache-syscache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_cache_syscache"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-cache = { path = "../types-cache" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-hash = { path = "../types-hash" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-utils-cache-catcache-seams = { path = "../backend-utils-cache-catcache-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

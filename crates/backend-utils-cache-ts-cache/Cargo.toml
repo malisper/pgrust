@@ -1,0 +1,30 @@
+[package]
+name = "backend-utils-cache-ts-cache"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_cache_ts_cache"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-cache = { path = "../types-cache" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-guc = { path = "../types-guc" }
+types-tuple = { path = "../types-tuple" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-commands-tsearchcmds-seams = { path = "../backend-commands-tsearchcmds-seams" }
+backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
+backend-utils-error-seams = { path = "../backend-utils-error-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

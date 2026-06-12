@@ -15,6 +15,11 @@ pub fn init_all() {
     backend_postmaster_interrupt::init_seams();
     backend_storage_page_checksum::init_seams();
     backend_utils_activity_small::init_seams();
+    backend_utils_cache_attoptcache::init_seams();
+    backend_utils_cache_relfilenumbermap::init_seams();
+    backend_utils_cache_spccache::init_seams();
+    backend_utils_cache_syscache::init_seams();
+    backend_utils_cache_ts_cache::init_seams();
     backend_utils_error::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();

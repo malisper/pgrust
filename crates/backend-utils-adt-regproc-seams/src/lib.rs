@@ -19,3 +19,16 @@ seam_core::seam!(
     /// name for diagnostics.
     pub fn format_operator(operator_oid: Oid) -> PgResult<String>
 );
+
+seam_core::seam!(
+    /// `stringToQualifiedNameList(string, escontext)` (regproc.c): parse a
+    /// possibly-qualified SQL identifier into its name parts, allocated in
+    /// `mcx`. With `soft = false` (C: `escontext == NULL`) bad syntax raises
+    /// `ERRCODE_INVALID_NAME` (`Err`); with `soft = true` (C: an
+    /// `ErrorSaveContext`) it is `Ok(None)` (C: NIL). `Err` includes OOM.
+    pub fn string_to_qualified_name_list<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        string: &str,
+        soft: bool,
+    ) -> PgResult<Option<mcx::PgVec<'mcx, mcx::PgString<'mcx>>>>
+);

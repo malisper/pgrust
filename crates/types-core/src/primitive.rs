@@ -42,6 +42,8 @@ pub type XLogSegNo = uint64;
 pub type RepOriginId = uint16;
 pub type pg_crc32c = uint32;
 pub type RelFileNumber = Oid;
+/// `RegProcedure` (`postgres_ext.h`) — a pg_proc OID.
+pub type RegProcedure = Oid;
 /// `ForkNumber` (`relpath.h`) — was C `int`.
 pub type ForkNumber = i32;
 /// `Buffer` (`buf.h`) — shared/local buffer id, was C `int`.

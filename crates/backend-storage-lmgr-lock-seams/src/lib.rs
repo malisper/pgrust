@@ -45,3 +45,28 @@ seam_core::seam!(
         recdata: &[u8],
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `LockAcquire(locktag, lockmode, sessionLock, dontWait)` (lock.c).
+    /// `Err` carries the C `ereport(ERROR)` surface (deadlock detected, out
+    /// of shared memory, unrecognized lock mode, ...).
+    pub fn lock_acquire(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+        session_lock: bool,
+        dont_wait: bool,
+    ) -> types_error::PgResult<types_storage::lock::LockAcquireResult>
+);
+
+seam_core::seam!(
+    /// `LockRelease(locktag, lockmode, sessionLock)` (lock.c): returns
+    /// whether the lock was held and released; `Err` carries the C
+    /// `elog(ERROR, "unrecognized lock mode")` / lock-table corruption
+    /// errors (the "you don't own a lock of type" path is a WARNING and
+    /// `false` in C, preserved as `Ok(false)`).
+    pub fn lock_release(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+        session_lock: bool,
+    ) -> types_error::PgResult<bool>
+);
