@@ -202,21 +202,23 @@ fn install_seams() {
 
     parallel::is_parallel_worker::set(|| env().parallel.get());
 
-    pqformat::pq_beginmessage::set(|_msgtype| {
+    pqformat::pq_beginmessage::set(|mcx, msgtype| {
         let e = env();
         e.pending_index.set(None);
         e.pending_incr.set(None);
-        Ok(())
+        let mut buf = types_stringinfo::StringInfo::new_in(mcx);
+        buf.cursor = msgtype as usize;
+        Ok(buf)
     });
-    pqformat::pq_sendint32::set(|v| {
+    pqformat::pq_sendint32::set(|_buf, v| {
         env().pending_index.set(Some(v as i32));
         Ok(())
     });
-    pqformat::pq_sendint64::set(|v| {
-        env().pending_incr.set(Some(v));
+    pqformat::pq_sendint64::set(|_buf, v| {
+        env().pending_incr.set(Some(v as i64));
         Ok(())
     });
-    pqformat::pq_endmessage::set(|| {
+    pqformat::pq_endmessage::set(|_buf| {
         let e = env();
         let idx = e.pending_index.get().unwrap();
         let incr = e.pending_incr.get().unwrap();

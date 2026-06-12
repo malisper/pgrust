@@ -536,11 +536,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-pqformat"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqcomm-seams",
+ "backend-libpq-pqformat-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-error",
+ "types-stringinfo",
+]
+
+[[package]]
 name = "backend-libpq-pqformat-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
+ "types-stringinfo",
 ]
 
 [[package]]
@@ -927,10 +941,12 @@ dependencies = [
  "backend-utils-activity-stat-seams",
  "backend-utils-activity-status-seams",
  "backend-utils-adt-timestamp-seams",
+ "mcx",
  "types-core",
  "types-error",
  "types-pgstat",
  "types-storage",
+ "types-stringinfo",
 ]
 
 [[package]]
@@ -1240,7 +1256,9 @@ dependencies = [
 name = "backend-utils-mb-mbutils-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -1494,6 +1512,7 @@ dependencies = [
  "backend-executor-execUtils",
  "backend-executor-nodeMaterial",
  "backend-libpq-pqcomm",
+ "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
  "backend-postmaster-interrupt",
@@ -1638,6 +1657,13 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "types-core",
+]
+
+[[package]]
+name = "types-stringinfo"
+version = "0.0.0"
+dependencies = [
+ "mcx",
 ]
 
 [[package]]
