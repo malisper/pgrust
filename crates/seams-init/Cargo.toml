@@ -19,6 +19,7 @@ backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }

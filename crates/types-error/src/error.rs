@@ -392,11 +392,36 @@ pub const ERRCODE_INDEX_CORRUPTED: SqlState = make_sqlstate(*b"XX002");
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErrorField(pub i32);
 
+pub const PG_DIAG_SEVERITY: ErrorField = ErrorField(b'S' as i32);
+pub const PG_DIAG_SEVERITY_NONLOCALIZED: ErrorField = ErrorField(b'V' as i32);
+pub const PG_DIAG_SQLSTATE: ErrorField = ErrorField(b'C' as i32);
+pub const PG_DIAG_MESSAGE_PRIMARY: ErrorField = ErrorField(b'M' as i32);
+pub const PG_DIAG_MESSAGE_DETAIL: ErrorField = ErrorField(b'D' as i32);
+pub const PG_DIAG_MESSAGE_HINT: ErrorField = ErrorField(b'H' as i32);
+pub const PG_DIAG_STATEMENT_POSITION: ErrorField = ErrorField(b'P' as i32);
+pub const PG_DIAG_INTERNAL_POSITION: ErrorField = ErrorField(b'p' as i32);
+pub const PG_DIAG_INTERNAL_QUERY: ErrorField = ErrorField(b'q' as i32);
+pub const PG_DIAG_CONTEXT: ErrorField = ErrorField(b'W' as i32);
 pub const PG_DIAG_SCHEMA_NAME: ErrorField = ErrorField(b's' as i32);
 pub const PG_DIAG_TABLE_NAME: ErrorField = ErrorField(b't' as i32);
 pub const PG_DIAG_COLUMN_NAME: ErrorField = ErrorField(b'c' as i32);
 pub const PG_DIAG_DATATYPE_NAME: ErrorField = ErrorField(b'd' as i32);
 pub const PG_DIAG_CONSTRAINT_NAME: ErrorField = ErrorField(b'n' as i32);
+pub const PG_DIAG_SOURCE_FILE: ErrorField = ErrorField(b'F' as i32);
+pub const PG_DIAG_SOURCE_LINE: ErrorField = ErrorField(b'L' as i32);
+pub const PG_DIAG_SOURCE_FUNCTION: ErrorField = ErrorField(b'R' as i32);
+
+/// `Log_error_verbosity` values (`elog.h` `PGErrorVerbosity`).
+pub const PGERROR_TERSE: i32 = 0;
+pub const PGERROR_DEFAULT: i32 = 1;
+pub const PGERROR_VERBOSE: i32 = 2;
+
+/// `Log_destination` bitmask values (`elog.h`).
+pub const LOG_DESTINATION_STDERR: i32 = 1;
+pub const LOG_DESTINATION_SYSLOG: i32 = 2;
+pub const LOG_DESTINATION_EVENTLOG: i32 = 4;
+pub const LOG_DESTINATION_CSVLOG: i32 = 8;
+pub const LOG_DESTINATION_JSONLOG: i32 = 16;
 
 pub const fn pg_sixbit(ch: u8) -> i32 {
     ((ch as i32) - (b'0' as i32)) & 0x3f
