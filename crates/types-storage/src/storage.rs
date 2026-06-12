@@ -87,6 +87,48 @@ const _: () = assert!(core::mem::size_of::<LWLockPadded>() == LWLOCK_PADDED_SIZE
 pub const MAX_BACKENDS_BITS: i32 = 18;
 pub const MAX_BACKENDS: uint32 = (1_u32 << MAX_BACKENDS_BITS) - 1;
 
+/// `ProcSignalReason` (`storage/procsignal.h`) — reasons for signaling a
+/// Postgres child process over the multiplexed SIGUSR1 channel.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcSignalReason {
+    PROCSIG_CATCHUP_INTERRUPT = 0,
+    PROCSIG_NOTIFY_INTERRUPT = 1,
+    PROCSIG_PARALLEL_MESSAGE = 2,
+    PROCSIG_WALSND_INIT_STOPPING = 3,
+    PROCSIG_BARRIER = 4,
+    PROCSIG_LOG_MEMORY_CONTEXT = 5,
+    PROCSIG_PARALLEL_APPLY_MESSAGE = 6,
+    PROCSIG_RECOVERY_CONFLICT_DATABASE = 7,
+    PROCSIG_RECOVERY_CONFLICT_TABLESPACE = 8,
+    PROCSIG_RECOVERY_CONFLICT_LOCK = 9,
+    PROCSIG_RECOVERY_CONFLICT_SNAPSHOT = 10,
+    PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT = 11,
+    PROCSIG_RECOVERY_CONFLICT_BUFFERPIN = 12,
+    PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK = 13,
+}
+
+pub const PROCSIG_RECOVERY_CONFLICT_FIRST: ProcSignalReason =
+    ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_DATABASE;
+pub const PROCSIG_RECOVERY_CONFLICT_LAST: ProcSignalReason =
+    ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK;
+/// `NUM_PROCSIGNALS` (`storage/procsignal.h`).
+pub const NUM_PROCSIGNALS: usize = PROCSIG_RECOVERY_CONFLICT_LAST as usize + 1;
+
+/// `ProcSignalBarrierType` (`storage/procsignal.h`).
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcSignalBarrierType {
+    /// ask smgr to close files
+    PROCSIGNAL_BARRIER_SMGRRELEASE = 0,
+}
+
+/// `MAX_IO_WORKERS` (`storage/proc.h`).
+pub const MAX_IO_WORKERS: i32 = 32;
+/// `NUM_AUXILIARY_PROCS` (`storage/proc.h`): extra PGPROC/ProcSignal slots
+/// for auxiliary processes.
+pub const NUM_AUXILIARY_PROCS: i32 = 6 + MAX_IO_WORKERS;
+
 /// `NUM_INDIVIDUAL_LWLOCKS` — generated from `lwlocklist.h`.
 pub const NUM_INDIVIDUAL_LWLOCKS: i32 = 54;
 

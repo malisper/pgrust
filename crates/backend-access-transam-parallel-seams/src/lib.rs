@@ -10,3 +10,10 @@ seam_core::seam!(
     /// `parallel.c`.
     pub fn is_parallel_worker() -> bool
 );
+
+seam_core::seam!(
+    /// `HandleParallelMessageInterrupt()` (parallel.c) — the
+    /// PROCSIG_PARALLEL_MESSAGE arm of `procsignal_sigusr1_handler`.
+    /// Signal-handler-safe flag flipping; infallible.
+    pub fn handle_parallel_message_interrupt()
+);

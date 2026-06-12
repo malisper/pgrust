@@ -180,6 +180,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-async-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-commands-tsearchcmds-seams"
 version = "0.0.0"
 dependencies = [
@@ -476,6 +483,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-applyparallelworker-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-replication-walsender-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-storage-buffer-bufmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -528,6 +549,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-procsignal"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-commands-async-seams",
+ "backend-replication-logical-applyparallelworker-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-ipc-sinval-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-smgr-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "libc",
+ "types-condvar",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-ipc-procsignal-seams"
 version = "0.0.0"
 dependencies = [
@@ -553,6 +601,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-sinval-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-storage-ipc-waiteventset-seams"
 version = "0.0.0"
 dependencies = [
@@ -560,6 +615,15 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-lmgr-condition-variable-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-condvar",
+ "types-error",
 ]
 
 [[package]]
@@ -633,11 +697,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-smgr-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-tcop-postgres-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -1233,6 +1306,7 @@ dependencies = [
  "backend-postmaster-interrupt",
  "backend-postmaster-syslogger",
  "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-procsignal",
  "backend-storage-lmgr-lwlock",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
@@ -1277,6 +1351,10 @@ dependencies = [
  "types-core",
  "types-datum",
 ]
+
+[[package]]
+name = "types-condvar"
+version = "0.0.0"
 
 [[package]]
 name = "types-core"

@@ -1,0 +1,32 @@
+[package]
+name = "backend-storage-ipc-procsignal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_ipc_procsignal"
+path = "src/lib.rs"
+
+[dependencies]
+backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-commands-async-seams = { path = "../backend-commands-async-seams" }
+backend-replication-logical-applyparallelworker-seams = { path = "../backend-replication-logical-applyparallelworker-seams" }
+backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
+backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+backend-storage-ipc-sinval-seams = { path = "../backend-storage-ipc-sinval-seams" }
+backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
+libc = "0.2"
+types-condvar = { path = "../types-condvar" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
