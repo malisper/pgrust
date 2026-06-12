@@ -245,3 +245,62 @@ fn pg_string_round_trips_and_keys() {
     let bad = slice_in(mcx, b"\xff\xfe".as_slice()).unwrap();
     assert!(PgString::from_utf8(bad).is_err());
 }
+
+mod owned {
+    use crate::*;
+
+    struct Plan<'mcx> {
+        nodes: PgVec<'mcx, u64>,
+    }
+    crate::bind!(PlanTy => Plan<'mcx>);
+
+    fn build_plan(root: &MemoryContext, n: u64) -> PgResult<McxOwned<PlanTy>> {
+        // The context is an accounting child of `root`, so the bundle's bytes
+        // stay visible in root's subtree wherever the bundle moves.
+        McxOwned::try_new(root.new_child("cached-plan"), |mcx| {
+            let mut nodes = vec_with_capacity_in(mcx, n as usize)?;
+            nodes.extend(0..n);
+            Ok(Plan { nodes })
+        })
+    }
+
+    #[test]
+    fn bundle_moves_and_outlives_its_builder_scope() {
+        let cache_root = MemoryContext::new("CacheMemoryContext");
+        let mut cache: alloc::vec::Vec<McxOwned<PlanTy>> = alloc::vec::Vec::new();
+        {
+            // built in an inner scope, moved out — the SetParent shape
+            let plan = build_plan(&cache_root, 100).unwrap();
+            assert_eq!(plan.get().nodes.len(), 100);
+            cache.push(plan);
+        }
+        let plan = &mut cache[0];
+        assert_eq!(plan.get().nodes.iter().sum::<u64>(), 4950);
+        assert!(cache_root.subtree_used() >= 800, "bundle bytes visible from the cache root");
+
+        // mutation through the universal closure; accounting follows
+        let before = plan.context().used();
+        plan.with_mut(|p| {
+            for i in 0..1000 {
+                p.nodes.push(i);
+            }
+        });
+        assert!(plan.context().used() > before);
+
+        drop(cache);
+        assert_eq!(cache_root.subtree_used(), 0, "dropping the bundle returns every byte");
+    }
+
+    #[test]
+    fn build_failure_passes_through_and_drops_context() {
+        let root = MemoryContext::new("root");
+        let r = McxOwned::<PlanTy>::try_new(root.new_child("doomed").with_limit(8), |mcx| {
+            let mut nodes: PgVec<u64> = PgVec::new_in(mcx);
+            nodes.try_reserve_exact(64).map_err(|_| mcx.oom(512))?;
+            nodes.extend(0..64);
+            Ok(Plan { nodes })
+        });
+        assert!(r.is_err());
+        assert_eq!(root.subtree_used(), 0);
+    }
+}

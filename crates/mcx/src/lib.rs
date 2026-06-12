@@ -25,7 +25,9 @@ use core::ptr::NonNull;
 use allocator_api2::alloc::{AllocError, Allocator, Global};
 use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
+mod owned;
 mod string;
+pub use owned::{Bind, McxOwned};
 pub use string::PgString;
 
 /// Growable array allocating in a context: the real `Vec`, full API included.
