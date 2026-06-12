@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+publish = false
+
+# Linking dominates build time on this kind of workspace; keep debuginfo light.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"

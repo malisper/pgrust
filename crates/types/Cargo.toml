@@ -1,0 +1,9 @@
+[package]
+name = "types"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "types"
+path = "src/lib.rs"

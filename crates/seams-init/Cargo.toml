@@ -1,0 +1,12 @@
+[package]
+name = "seams-init"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "seams_init"
+path = "src/lib.rs"
+
+# Every ported crate that exposes init_seams() gets a dependency line here.
+[dependencies]

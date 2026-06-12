@@ -1,0 +1,9 @@
+[package]
+name = "seam-core"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "seam_core"
+path = "src/lib.rs"
