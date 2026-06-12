@@ -144,6 +144,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-index-amapi-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-index-amvalidate-seams"
 version = "0.0.0"
 dependencies = [
@@ -314,6 +323,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execAmi"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amapi-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-instrument-seams",
+ "backend-executor-nodeMaterial",
+ "backend-executor-nodeSubplan-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execAmi-seams"
 version = "0.0.0"
 dependencies = [
@@ -408,6 +436,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-instrument-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-nodeMaterial"
 version = "0.0.0"
 dependencies = [
@@ -427,6 +464,16 @@ dependencies = [
 name = "backend-executor-nodeModifyTable-seams"
 version = "0.0.0"
 dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-nodeSubplan-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -1443,6 +1490,7 @@ dependencies = [
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-xlogstats",
+ "backend-executor-execAmi",
  "backend-executor-execUtils",
  "backend-executor-nodeMaterial",
  "backend-libpq-pqcomm",

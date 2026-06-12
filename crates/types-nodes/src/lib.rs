@@ -18,19 +18,24 @@ pub mod execexpr;
 pub mod execnodes;
 pub mod executor;
 pub mod funcapi;
+pub mod instrument;
 pub mod nodeforeigncustom;
 pub mod nodeindexscan;
 pub mod nodes;
 pub mod parsenodes;
+pub mod pathnodes;
 pub mod planstate;
 pub mod primnodes;
 
 pub use bitmapset::Bitmapset;
+pub use execexpr::SubPlanState;
 pub use execnodes::{
     EStateData, EcxtId, ExecProcNodeMtd, ExprContext, ExprContextCallbackFunction,
     ExprContext_CB, Opaque, ParamExecData, PlanStateData, ResultRelInfo, RriId,
-    ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId,
+    ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId, T_MaterialState,
 };
+pub use instrument::Instrumentation;
+pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{Material, MaterialState};

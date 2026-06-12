@@ -1,8 +1,11 @@
 //! Seam declarations for the `backend-executor-execAmi` unit
 //! (`executor/execAmi.c`).
 //!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly.
+//! The owning crate (`backend-executor-execAmi`) installs these from its
+//! `init_seams()`. The C `ExecReScan(PlanState *)` gains the explicit
+//! `estate` parameter of the owned-tree model (the C `node->state`
+//! back-pointer) and returns `PgResult` (the dispatch's `elog(ERROR,
+//! "unrecognized node type")` plus whatever the per-node rescans raise).
 
 #![allow(non_snake_case)]
 

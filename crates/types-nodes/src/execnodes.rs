@@ -31,11 +31,17 @@ use types_tuple::heaptuple::TupleDescData;
 use types_tuple::tupconvert::TupleConversionMap;
 
 use crate::bitmapset::Bitmapset;
-use crate::execexpr::ProjectionInfo;
+use crate::execexpr::{ProjectionInfo, SubPlanState};
 use crate::executor::{TupleSlotKind, TupleTableSlot};
+use crate::instrument::Instrumentation;
 use crate::nodeindexscan::PlannedStmt;
 use crate::parsenodes::{RTEPermissionInfo, RangeTblEntry};
 use crate::planstate::PlanStateNode;
+use types_core::NodeTag;
+
+/// `T_MaterialState` (nodes/nodetags.h) — the executor-state node tag for a
+/// Material node.
+pub const T_MaterialState: NodeTag = 424;
 
 /// `ScanDirection` (access/sdir.h). Kept as the raw C scale so direction
 /// comparisons read like the original.
@@ -205,10 +211,18 @@ pub struct PlanStateData<'mcx> {
     pub plan: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `ExecProcNodeMtd ExecProcNode` — function to return next tuple.
     pub ExecProcNode: ExecProcNodeMtd<'mcx>,
+    /// `Instrumentation *instrument` — optional runtime stats for this node.
+    pub instrument: Option<PgBox<'mcx, Instrumentation>>,
     /// `struct PlanState *lefttree` — input plan tree (`outerPlanState`).
     pub lefttree: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
     /// `struct PlanState *righttree` — `innerPlanState`.
     pub righttree: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
+    /// `List *initPlan` — `SubPlanState` nodes for my init-plans (un-correlated
+    /// expression subselects). `None` is the C `NIL`.
+    pub initPlan: Option<PgVec<'mcx, SubPlanState<'mcx>>>,
+    /// `List *subPlan` — `SubPlanState` nodes in my expressions. `None` is the
+    /// C `NIL`.
+    pub subPlan: Option<PgVec<'mcx, SubPlanState<'mcx>>>,
     /// `Bitmapset *chgParam` — set of IDs of changed Params.
     pub chgParam: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `ExprContext *ps_ExprContext` — node's expression-evaluation context

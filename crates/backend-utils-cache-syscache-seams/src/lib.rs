@@ -17,6 +17,14 @@ use types_error::PgResult;
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 
 seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to the
+    /// `Form_pg_class.relam` field (the relation's access method). `Ok(None)`
+    /// on a cache miss (`!HeapTupleIsValid`); the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn search_relation_relam(relid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid))` projected to the
     /// `Form_pg_opclass` fields the hash validator reads, copied into `mcx`.
     /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`).
