@@ -14,6 +14,7 @@ pub fn init_all() {
     backend_port_atomics::init_seams();
     backend_postmaster_interrupt::init_seams();
     backend_storage_page_checksum::init_seams();
+    backend_timezone_localtime::init_seams();
     backend_utils_activity_small::init_seams();
     backend_utils_error::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
