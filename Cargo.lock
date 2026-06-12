@@ -34,6 +34,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-reloptions-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-reloptions",
+]
+
+[[package]]
 name = "backend-access-hashvalidate"
 version = "0.0.0"
 dependencies = [
@@ -70,6 +79,18 @@ dependencies = [
  "types-amvalidate",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-access-index-genam-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-error",
+ "types-tuple",
 ]
 
 [[package]]
@@ -126,6 +147,25 @@ dependencies = [
  "mcx",
  "types-core",
  "types-wal",
+]
+
+[[package]]
+name = "backend-catalog-namespace-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-commands-tsearchcmds-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-error",
 ]
 
 [[package]]
@@ -214,6 +254,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-path-costsize-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-port-atomics"
 version = "0.0.0"
 
@@ -233,6 +280,13 @@ dependencies = [
 
 [[package]]
 name = "backend-postmaster-syslogger-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-storage-buffer-bufmgr-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -306,6 +360,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -413,8 +468,18 @@ dependencies = [
 name = "backend-utils-adt-regproc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-ruleutils-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
  "types-error",
 ]
 
@@ -424,6 +489,45 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+]
+
+[[package]]
+name = "backend-utils-cache-attoptcache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-reloptions-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-syscache",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-reloptions",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-catcache-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-inval-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-cache",
+ "types-datum",
+ "types-error",
 ]
 
 [[package]]
@@ -448,6 +552,70 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-relfilenumbermap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-genam-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relmapper-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-relmapper-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
+name = "backend-utils-cache-spccache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-reloptions-seams",
+ "backend-optimizer-path-costsize-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-reloptions",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-syscache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-storage-lmgr-lock-seams",
+ "backend-utils-cache-catcache-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-hash",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-cache-syscache-seams"
 version = "0.0.0"
 dependencies = [
@@ -456,6 +624,31 @@ dependencies = [
  "types-core",
  "types-error",
  "types-hash",
+]
+
+[[package]]
+name = "backend-utils-cache-ts-cache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-genam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-namespace-seams",
+ "backend-commands-tsearchcmds-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-error-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-guc",
+ "types-tuple",
 ]
 
 [[package]]
@@ -486,6 +679,17 @@ name = "backend-utils-error-small-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-fmgr-fmgr-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
  "types-error",
 ]
 
@@ -693,6 +897,11 @@ dependencies = [
  "backend-storage-ipc-dsm-core",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
+ "backend-utils-cache-attoptcache",
+ "backend-utils-cache-relfilenumbermap",
+ "backend-utils-cache-spccache",
+ "backend-utils-cache-syscache",
+ "backend-utils-cache-ts-cache",
  "backend-utils-error",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
@@ -719,6 +928,15 @@ name = "types-amvalidate"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "types-cache"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
 ]
 
 [[package]]
@@ -770,6 +988,10 @@ dependencies = [
  "types-core",
  "types-storage",
 ]
+
+[[package]]
+name = "types-reloptions"
+version = "0.0.0"
 
 [[package]]
 name = "types-storage"

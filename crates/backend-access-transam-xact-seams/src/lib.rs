@@ -21,3 +21,9 @@ seam_core::seam!(
     /// cannot `ereport`.
     pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool
 );
+
+seam_core::seam!(
+    /// `IsTransactionState()` (xact.c): true when in a live transaction
+    /// (`TRANS_INPROGRESS`). Pure read of backend-local transaction state.
+    pub fn is_transaction_state() -> bool
+);

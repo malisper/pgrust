@@ -1,0 +1,41 @@
+//! Search-key currency for `SearchSysCache*` / `SearchCatCache*`.
+//!
+//! In C every cache key is a bare `Datum`; pass-by-reference key types
+//! (`name`, `cstring`, `text`) travel as pointers inside the word. The owned
+//! model cannot smuggle pointers through `Datum`, so a key crosses as this
+//! enum: by-value scalars keep the word, by-reference keys carry their bytes.
+
+use types_datum::Datum;
+
+/// One search key (`Datum key1..key4` of `SearchSysCache`).
+#[derive(Clone, Copy, Debug)]
+pub enum SysCacheKey<'a> {
+    /// Pass-by-value key: the `Datum` word itself (`ObjectIdGetDatum`,
+    /// `Int16GetDatum`, `CharGetDatum`, ...).
+    Value(Datum),
+    /// NUL-free string key (`CStringGetDatum(name)` for `name`/`cstring` key
+    /// columns, `CStringGetTextDatum` for `text` ones).
+    Str(&'a str),
+    /// Raw by-reference key payload for anything not covered by [`Str`]
+    /// (verbatim on-disk bytes, including any varlena header).
+    ///
+    /// [`Str`]: SysCacheKey::Str
+    Bytes(&'a [u8]),
+}
+
+impl SysCacheKey<'_> {
+    /// The C `0` placeholder for an unused key slot.
+    pub const UNUSED: SysCacheKey<'static> = SysCacheKey::Value(Datum::null());
+}
+
+impl Default for SysCacheKey<'_> {
+    fn default() -> Self {
+        Self::UNUSED
+    }
+}
+
+impl From<Datum> for SysCacheKey<'static> {
+    fn from(d: Datum) -> Self {
+        SysCacheKey::Value(d)
+    }
+}

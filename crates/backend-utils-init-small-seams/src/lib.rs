@@ -52,3 +52,15 @@ seam_core::seam!(
     /// the underflow Assert).
     pub fn resume_interrupts()
 );
+
+seam_core::seam!(
+    /// `MyDatabaseId` (globals.c): the OID of the database this backend is
+    /// connected to (`InvalidOid` before `InitPostgres` selects one).
+    pub fn my_database_id() -> types_core::primitive::Oid
+);
+
+seam_core::seam!(
+    /// `MyDatabaseTableSpace` (globals.c): the default tablespace of the
+    /// connected database.
+    pub fn my_database_tablespace() -> types_core::primitive::Oid
+);
