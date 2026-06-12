@@ -384,6 +384,7 @@ name = "backend-storage-ipc-shmem-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -408,6 +409,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-lmgr-lwlock"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lwlock-seams"
 version = "0.0.0"
 dependencies = [
@@ -423,6 +441,15 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-lmgr-proc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-storage",
 ]
 
 [[package]]
@@ -489,6 +516,7 @@ name = "backend-utils-activity-waitevent-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
 ]
 
 [[package]]
@@ -972,6 +1000,7 @@ dependencies = [
  "backend-port-atomics",
  "backend-postmaster-interrupt",
  "backend-storage-ipc-dsm-core",
+ "backend-storage-lmgr-lwlock",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
  "backend-utils-cache-attoptcache",

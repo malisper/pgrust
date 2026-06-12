@@ -1,13 +1,14 @@
 [package]
-name = "backend-utils-activity-waitevent-seams"
+name = "backend-storage-lmgr-proc-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_utils_activity_waitevent_seams"
+name = "backend_storage_lmgr_proc_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
+types-storage = { path = "../types-storage" }

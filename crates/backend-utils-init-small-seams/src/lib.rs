@@ -17,6 +17,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyProcNumber` (globals.c) — the pgprocno of the current backend, or
+    /// `INVALID_PROC_NUMBER` when no `PGPROC` is attached (`MyProc == NULL`,
+    /// i.e. during bootstrap / shared-memory initialization).
+    pub fn my_proc_number() -> types_core::ProcNumber
+);
+
+seam_core::seam!(
+    /// `IsUnderPostmaster` (globals.c) — false in the postmaster itself, true
+    /// in a forked backend.
+    pub fn is_under_postmaster() -> bool
+);
+
+seam_core::seam!(
     /// `MaxBackends` (globals.c): the computed backend-slot count, fixed at
     /// postmaster startup.
     pub fn max_backends() -> i32

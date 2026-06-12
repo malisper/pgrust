@@ -15,6 +15,7 @@ pub fn init_all() {
     backend_port_atomics::init_seams();
     backend_postmaster_interrupt::init_seams();
     backend_storage_ipc_dsm_core::init_seams();
+    backend_storage_lmgr_lwlock::init_seams();
     backend_storage_page_checksum::init_seams();
     backend_utils_activity_small::init_seams();
     backend_utils_cache_attoptcache::init_seams();
