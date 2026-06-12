@@ -210,6 +210,42 @@ name = "backend-port-atomics"
 version = "0.0.0"
 
 [[package]]
+name = "backend-postmaster-interrupt"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "libc",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
+name = "backend-storage-ipc-latch-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-storage-ipc-procsignal-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-storage-ipc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lock-seams"
 version = "0.0.0"
 dependencies = [
@@ -392,6 +428,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-guc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
 name = "backend-utils-misc-pg-rusage"
 version = "0.0.0"
 dependencies = [
@@ -416,6 +461,14 @@ version = "0.0.0"
 dependencies = [
  "pg-prng",
  "types-core",
+]
+
+[[package]]
+name = "backend-utils-mmgr-mcxt-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -526,6 +579,7 @@ dependencies = [
  "backend-executor-nodeMaterial",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
+ "backend-postmaster-interrupt",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
  "backend-utils-mb-wstrcmp",
@@ -570,6 +624,10 @@ dependencies = [
 
 [[package]]
 name = "types-error"
+version = "0.0.0"
+
+[[package]]
+name = "types-guc"
 version = "0.0.0"
 
 [[package]]
