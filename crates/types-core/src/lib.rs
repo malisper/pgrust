@@ -8,9 +8,11 @@
 #![allow(non_upper_case_globals)]
 
 pub mod fmgr;
+pub mod geo;
 pub mod primitive;
 pub mod xact;
 
 pub use fmgr::*;
+pub use geo::*;
 pub use primitive::*;
 pub use xact::*;

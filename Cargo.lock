@@ -226,6 +226,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib-earthdistance"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+]
+
+[[package]]
 name = "interfaces-libpq-legacy-pqsignal"
 version = "0.0.0"
 dependencies = [
