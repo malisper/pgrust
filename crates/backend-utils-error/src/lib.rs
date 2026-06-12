@@ -32,9 +32,9 @@
 //!    path contains no seams and cannot panic.
 //! 3. **Output sinks via per-owner seam crates**: frontend protocol output
 //!    goes through `backend-libpq-pqcomm-seams` (`pq_putmessage`/`pq_flush`);
-//!    the syslogger pipe through `backend-postmaster-syslogger-seams`
-//!    (`write_pipe_chunks` is treated as owned by the syslogger unit, since
-//!    its `PipeProtoChunk` layout pairs with syslogger.c's reassembly);
+//!    `write_pipe_chunks` (elog.c's own function) is ported here in
+//!    [`report`]; the syslogger's `write_syslogger_file` goes through
+//!    `backend-postmaster-syslogger-seams`;
 //!    csv/json log lines through `backend-utils-error-small-seams`; FATAL's
 //!    `proc_exit(1)` through `backend-storage-ipc-seams`; the FATAL pgstat
 //!    note through `backend-utils-activity-pgstat-seams`. All panic until
@@ -89,7 +89,7 @@ pub use report::{
     get_backend_type_for_log, get_formatted_log_time, get_formatted_start_time, log_line_prefix,
     log_status_format, pre_format_elog_string, reset_formatted_start_time,
     send_message_to_frontend, send_message_to_server_log, set_backtrace, unpack_sql_state,
-    vwrite_stderr, write_console, write_stderr, DebugFileOpen,
+    vwrite_stderr, write_console, write_pipe_chunks, write_stderr, DebugFileOpen,
 };
 pub use sink::{
     backend_log_context, set_backend_log_context, set_emit_log_hook, BackendLogContext,

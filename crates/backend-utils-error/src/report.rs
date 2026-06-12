@@ -688,10 +688,7 @@ pub fn send_message_to_server_log(edata: &PgError) {
         // Use the chunking protocol if the syslogger should be catching
         // stderr output and we are not ourselves the syslogger.
         if config::redirection_done() && !config::am_syslogger() {
-            backend_postmaster_syslogger_seams::write_pipe_chunks::call(
-                buf.as_bytes(),
-                LOG_DESTINATION_STDERR,
-            );
+            write_pipe_chunks(buf.as_bytes(), LOG_DESTINATION_STDERR);
         } else {
             write_console(buf.as_bytes());
         }
@@ -711,6 +708,85 @@ pub fn send_message_to_server_log(edata: &PgError) {
 /// ported.
 pub fn write_console(line: &[u8]) {
     let _ = std::io::stderr().write_all(line);
+}
+
+// ---------------------------------------------------------------------------
+// Syslogger pipe chunk protocol (write_pipe_chunks)
+// ---------------------------------------------------------------------------
+
+/// `PIPE_CHUNK_SIZE` (`postmaster/syslogger.h`): `PIPE_BUF` clamped to 64K.
+/// `PIPE_BUF` is 4096 on Linux and the POSIX-minimum 512 on macOS/BSD
+/// (`sys/syslimits.h`), both <= 65536.
+#[cfg(target_os = "linux")]
+const PIPE_CHUNK_SIZE: usize = 4096;
+#[cfg(not(target_os = "linux"))]
+const PIPE_CHUNK_SIZE: usize = 512;
+
+/// `PIPE_HEADER_SIZE = offsetof(PipeProtoHeader, data)`:
+/// `nuls[2]` (2) + `uint16 len` (2) + `int32 pid` (4) + `bits8 flags` (1).
+const PIPE_HEADER_SIZE: usize = 9;
+/// `PIPE_MAX_PAYLOAD`.
+const PIPE_MAX_PAYLOAD: usize = PIPE_CHUNK_SIZE - PIPE_HEADER_SIZE;
+
+/// `PIPE_PROTO_IS_LAST` — last chunk of message?
+const PIPE_PROTO_IS_LAST: u8 = 0x01;
+/// `PIPE_PROTO_DEST_STDERR`.
+const PIPE_PROTO_DEST_STDERR: u8 = 0x10;
+/// `PIPE_PROTO_DEST_CSVLOG`.
+const PIPE_PROTO_DEST_CSVLOG: u8 = 0x20;
+/// `PIPE_PROTO_DEST_JSONLOG`.
+const PIPE_PROTO_DEST_JSONLOG: u8 = 0x40;
+
+/// One `PipeProtoHeader` rendered to bytes (native-endian `len`/`pid`, as the
+/// C struct is read back by the syslogger on the same host).
+fn pipe_proto_header(len: u16, pid: i32, flags: u8) -> [u8; PIPE_HEADER_SIZE] {
+    let mut header = [0u8; PIPE_HEADER_SIZE];
+    // nuls[0] = nuls[1] = '\0' (already zeroed)
+    header[2..4].copy_from_slice(&len.to_ne_bytes());
+    header[4..8].copy_from_slice(&pid.to_ne_bytes());
+    header[8] = flags;
+    header
+}
+
+/// `write_pipe_chunks` — send data to the syslogger over the stderr pipe using
+/// the chunked protocol: each write is one atomic `PipeProtoChunk` no larger
+/// than PIPE_BUF, so concurrent writers cannot interleave. Write failures are
+/// deliberately ignored (there is nowhere to report them).
+pub fn write_pipe_chunks(data: &[u8], dest: i32) {
+    // Assert(len > 0)
+    debug_assert!(!data.is_empty());
+
+    let pid = sink::backend_log_context().map_or_else(std::process::id, |c| c.process_id()) as i32;
+    let mut flags: u8 = 0;
+    if dest == LOG_DESTINATION_STDERR {
+        flags |= PIPE_PROTO_DEST_STDERR;
+    } else if dest == LOG_DESTINATION_CSVLOG {
+        flags |= PIPE_PROTO_DEST_CSVLOG;
+    } else if dest == LOG_DESTINATION_JSONLOG {
+        flags |= PIPE_PROTO_DEST_JSONLOG;
+    }
+
+    let write_chunk = |payload: &[u8], flags: u8| {
+        let mut chunk = Vec::with_capacity(PIPE_HEADER_SIZE + payload.len());
+        chunk.extend_from_slice(&pipe_proto_header(payload.len() as u16, pid, flags));
+        chunk.extend_from_slice(payload);
+        // write(fileno(stderr), &p, ...); (void) rc;  — one write per chunk,
+        // result ignored. Must be a single write for pipe atomicity, so use
+        // the raw fd rather than the buffering Stdio handle.
+        unsafe {
+            let _ = libc::write(2, chunk.as_ptr().cast(), chunk.len());
+        }
+    };
+
+    // write all but the last chunk (no PIPE_PROTO_IS_LAST yet)
+    let mut rest = data;
+    while rest.len() > PIPE_MAX_PAYLOAD {
+        write_chunk(&rest[..PIPE_MAX_PAYLOAD], flags);
+        rest = &rest[PIPE_MAX_PAYLOAD..];
+    }
+
+    // write the last chunk
+    write_chunk(rest, flags | PIPE_PROTO_IS_LAST);
 }
 
 // ---------------------------------------------------------------------------

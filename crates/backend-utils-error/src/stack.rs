@@ -437,9 +437,14 @@ pub fn errmsg_internal(message: &str) -> PgResult<()> {
 }
 
 /// `errmsg_plural` — primary message with pluralization (`dngettext` picks by
-/// n; without NLS that is the n == 1 test).
+/// n; without NLS that is the n == 1 test). The message id is always the
+/// singular form, as in C (`edata->message_id = fmt_singular`).
 pub fn errmsg_plural(fmt_singular: &str, fmt_plural: &str, n: u64) -> PgResult<()> {
-    errmsg(if n == 1 { fmt_singular } else { fmt_plural })
+    let picked = if n == 1 { fmt_singular } else { fmt_plural };
+    with_current_mut(|error| {
+        error.message_id = Some(fmt_singular.to_owned());
+        error.message = errno::replace_percent_m(picked, error.saved_errno.unwrap_or(0));
+    })
 }
 
 /// `errdetail` — add a detail message to the current error.
@@ -686,8 +691,12 @@ pub fn pg_re_throw<T>() -> PgResult<T> {
 /// display/diagnostics: crank up a fresh entry, fire the callbacks into it,
 /// and return the accumulated context string.
 pub fn GetErrorContextStack() -> String {
+    // recursion_depth++ around the callbacks, as in C (it feeds
+    // in_error_recursion_trouble() should a callback misbehave).
+    STACK.with(|s| s.borrow_mut().recursion_depth += 1);
     let mut scratch = PgError::new(types_error::LOG, String::new());
     context_chain::run_error_context_callbacks(&mut scratch);
+    STACK.with(|s| s.borrow_mut().recursion_depth -= 1);
     scratch.context.unwrap_or_default()
 }
 
@@ -710,13 +719,13 @@ pub fn errsave_start(context: Option<&mut types_error::SoftErrorContext>, domain
         return false;
     }
 
-    STACK.with(|s| {
+    let overflow = STACK.with(|s| {
         let mut st = s.borrow_mut();
         st.recursion_depth += 1;
-        // (Stack overflow cannot reasonably be provoked on the soft path; the
-        // hard path above guards it. Guard anyway.)
+        // get_error_stack_entry(): stack not big enough -> make room and PANIC.
         if st.frames.len() >= ERRORDATA_STACK_SIZE {
             st.frames.clear();
+            return true;
         }
         let mut error = PgError::new(types_error::LOG, String::new());
         error.saved_errno = Some(errno::current_errno());
@@ -731,7 +740,14 @@ pub fn errsave_start(context: Option<&mut types_error::SoftErrorContext>, domain
             output_to_client: false,
         });
         st.recursion_depth -= 1;
+        false
     });
+    if overflow {
+        // ereport(PANIC, (errmsg_internal("ERRORDATA_STACK_SIZE exceeded")))
+        let _ = ThrowErrorData(PgError::new(PANIC, "ERRORDATA_STACK_SIZE exceeded"));
+        // PANIC aborts; not reached.
+        std::process::abort();
+    }
     true
 }
 

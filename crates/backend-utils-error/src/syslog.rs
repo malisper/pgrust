@@ -130,10 +130,10 @@ pub fn write_syslog(level: i32, line: &str) {
             }
 
             // already word boundary?
-            if pos + buflen < bytes.len() && !bytes[pos + buflen].is_ascii_whitespace() {
+            if pos + buflen < bytes.len() && !c_isspace(bytes[pos + buflen]) {
                 // try to divide at word boundary
                 let mut i = buflen - 1;
-                while i > 0 && !bytes[pos + i].is_ascii_whitespace() {
+                while i > 0 && !c_isspace(bytes[pos + i]) {
                     i -= 1;
                 }
                 if i > 0 {
@@ -175,4 +175,10 @@ pub fn write_syslog(level: i32, line: &str) {
 
 fn memchr_newline(bytes: &[u8], from: usize) -> Option<usize> {
     bytes[from..].iter().position(|&b| b == b'\n').map(|i| from + i)
+}
+
+/// C-locale `isspace`: space, \t, \n, \v, \f, \r (Rust's
+/// `is_ascii_whitespace` omits vertical tab).
+fn c_isspace(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }

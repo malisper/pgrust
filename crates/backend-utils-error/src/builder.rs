@@ -70,23 +70,28 @@ impl ErrorBuilder {
         self
     }
 
+    /// Like `errmsg` but untranslated; C errmsg_internal still records the
+    /// message id (`edata->message_id = fmt`).
     pub fn errmsg_internal(mut self, message: impl Into<String>) -> Self {
-        let message = self.format_message(message.into());
-        self.error = self.error.with_message(message);
+        let message_id = message.into();
+        let message = self.format_message(message_id.clone());
+        self.error = self.error.with_message(message).with_message_id(message_id);
         self
     }
 
+    /// The message id is always the singular form, as in C
+    /// (`edata->message_id = fmt_singular`).
     pub fn errmsg_plural(
-        self,
+        mut self,
         singular: impl Into<String>,
         plural: impl Into<String>,
         n: u64,
     ) -> Self {
-        if n == 1 {
-            self.errmsg(singular)
-        } else {
-            self.errmsg(plural)
-        }
+        let singular = singular.into();
+        let picked = if n == 1 { singular.clone() } else { plural.into() };
+        let message = self.format_message(picked);
+        self.error = self.error.with_message(message).with_message_id(singular);
+        self
     }
 
     pub fn errdetail(mut self, detail: impl Into<String>) -> Self {
