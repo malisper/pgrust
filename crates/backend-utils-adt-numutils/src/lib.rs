@@ -5,20 +5,21 @@
 //! separators), parsing unsigned 32/64-bit integers with C `strtoul`/`strtou64`
 //! base-0 semantics, and formatting integers to their decimal text.
 //!
-//! Where the C code writes into a caller-provided `char *` buffer and returns a
-//! length (or an end pointer), the Rust API returns an owned [`String`]
-//! (formatters) or returns the unconsumed tail as a `&str` (the `uint*in_subr`
-//! "endloc" out-parameter). The C formatters perform no heap allocation of
-//! their own (fixed-size caller buffers), so the formatters here build their
-//! text in compile-time-sized stack buffers and take no `Mcx`. Hard errors
-//! surface as [`PgError`] via `Result`; the `*_safe` / `escontext` variants
-//! route to a soft [`SoftErrorContext`] when one is supplied, mirroring
-//! PostgreSQL's `ereturn`.
+//! The formatters keep the C shape: they write into a caller-provided byte
+//! buffer and return the number of bytes written (the C end pointer, as an
+//! offset), so callers like datetime.c's `EncodeDateTime`/`EncodeTimezone`
+//! can build one output string piecewise in a single buffer. They perform no
+//! heap allocation and take no `Mcx`, exactly like the C; the only Rust
+//! deviation is that no NUL terminator is written. The parsers return the
+//! unconsumed tail as a `&str` where C uses the `uint*in_subr` "endloc"
+//! out-parameter. Hard errors surface as [`PgError`] via `Result`; the
+//! `*_safe` / `escontext` variants route to a soft [`SoftErrorContext`] when
+//! one is supplied, via `types_error::ereturn`.
 //!
 //! This crate has no cyclic callers, so it declares no seams.
 
 use types_error::{
-    PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
 
@@ -462,21 +463,27 @@ fn parse_unsigned<'a>(
 // ---------------------------------------------------------------------------
 
 /// Maximum bytes for an unsigned 32-bit decimal string ("4294967295").
-const MAX_UINT32_DIGITS: usize = 10;
+pub const MAX_UINT32_DIGITS: usize = 10;
 /// Maximum bytes for an unsigned 64-bit decimal string ("18446744073709551615").
-const MAX_UINT64_DIGITS: usize = 20;
+pub const MAX_UINT64_DIGITS: usize = 20;
+/// Maximum bytes for a signed 32-bit decimal string ("-2147483648").
+pub const MAX_INT32_DIGITS: usize = MAX_UINT32_DIGITS + 1;
+/// Maximum bytes for a signed 64-bit decimal string ("-9223372036854775808").
+pub const MAX_INT64_DIGITS: usize = MAX_UINT64_DIGITS + 1;
 
-/// Convert a signed 16-bit integer to its decimal string. Mirrors C `pg_itoa`,
-/// which simply delegates to `pg_ltoa`.
-pub fn pg_itoa(i: i16) -> String {
-    pg_ltoa(i32::from(i))
+/// Convert a signed 16-bit integer to decimal text at the start of `buf` and
+/// return the number of bytes written. Mirrors C `pg_itoa`, which simply
+/// delegates to `pg_ltoa` (so `buf` must be at least [`MAX_INT32_DIGITS`]
+/// long; no NUL terminator is written).
+pub fn pg_itoa(i: i16, buf: &mut [u8]) -> usize {
+    pg_ltoa(i32::from(i), buf)
 }
 
 /// Render an unsigned 32-bit value as decimal digits into `buf` (no sign, no
 /// NUL terminator) and return the number of bytes written. Mirrors C
 /// `pg_ultoa_n`, including the two-digit `DIGIT_TABLE` blitting. `buf` must be
 /// at least [`MAX_UINT32_DIGITS`] long.
-fn pg_ultoa_n_into(mut value: u32, buf: &mut [u8]) -> usize {
+pub fn pg_ultoa_n(mut value: u32, buf: &mut [u8]) -> usize {
     // Degenerate case.
     if value == 0 {
         buf[0] = b'0';
@@ -516,10 +523,10 @@ fn pg_ultoa_n_into(mut value: u32, buf: &mut [u8]) -> usize {
     olength
 }
 
-/// Render an unsigned 64-bit value as decimal digits into `buf` and return the
-/// length. Mirrors C `pg_ulltoa_n`. `buf` must be at least
-/// [`MAX_UINT64_DIGITS`] long.
-fn pg_ulltoa_n_into(mut value: u64, buf: &mut [u8]) -> usize {
+/// Render an unsigned 64-bit value as decimal digits into `buf` (no sign, no
+/// NUL terminator) and return the number of bytes written. Mirrors C
+/// `pg_ulltoa_n`. `buf` must be at least [`MAX_UINT64_DIGITS`] long.
+pub fn pg_ulltoa_n(mut value: u64, buf: &mut [u8]) -> usize {
     if value == 0 {
         buf[0] = b'0';
         return 1;
@@ -580,18 +587,10 @@ fn pg_ulltoa_n_into(mut value: u64, buf: &mut [u8]) -> usize {
     olength
 }
 
-/// Decimal text of an unsigned 32-bit integer. Mirrors C `pg_ultoa_n` (which
-/// returns a length into a caller buffer); here it returns an owned
-/// [`String`].
-pub fn pg_ultoa_n(value: u32) -> String {
-    let mut buf = [0u8; MAX_UINT32_DIGITS];
-    let len = pg_ultoa_n_into(value, &mut buf);
-    ascii_to_string(&buf[..len])
-}
-
-/// Decimal text of a signed 32-bit integer. Mirrors C `pg_ltoa`.
-pub fn pg_ltoa(value: i32) -> String {
-    let mut buf = [0u8; MAX_UINT32_DIGITS + 1]; // + leading sign
+/// Convert a signed 32-bit integer to decimal text at the start of `buf` and
+/// return the number of bytes written (no NUL terminator). Mirrors C
+/// `pg_ltoa`. `buf` must be at least [`MAX_INT32_DIGITS`] long.
+pub fn pg_ltoa(value: i32, buf: &mut [u8]) -> usize {
     let mut len = 0;
     let uvalue = if value < 0 {
         buf[len] = b'-';
@@ -601,20 +600,13 @@ pub fn pg_ltoa(value: i32) -> String {
     } else {
         value as u32
     };
-    len += pg_ultoa_n_into(uvalue, &mut buf[len..]);
-    ascii_to_string(&buf[..len])
+    len + pg_ultoa_n(uvalue, &mut buf[len..])
 }
 
-/// Decimal text of an unsigned 64-bit integer. Mirrors C `pg_ulltoa_n`.
-pub fn pg_ulltoa_n(value: u64) -> String {
-    let mut buf = [0u8; MAX_UINT64_DIGITS];
-    let len = pg_ulltoa_n_into(value, &mut buf);
-    ascii_to_string(&buf[..len])
-}
-
-/// Decimal text of a signed 64-bit integer. Mirrors C `pg_lltoa`.
-pub fn pg_lltoa(value: i64) -> String {
-    let mut buf = [0u8; MAX_UINT64_DIGITS + 1]; // + leading sign
+/// Convert a signed 64-bit integer to decimal text at the start of `buf` and
+/// return the number of bytes written (no NUL terminator). Mirrors C
+/// `pg_lltoa`. `buf` must be at least [`MAX_INT64_DIGITS`] long.
+pub fn pg_lltoa(value: i64, buf: &mut [u8]) -> usize {
     let mut len = 0;
     let uvalue = if value < 0 {
         buf[len] = b'-';
@@ -623,79 +615,51 @@ pub fn pg_lltoa(value: i64) -> String {
     } else {
         value as u64
     };
-    len += pg_ulltoa_n_into(uvalue, &mut buf[len..]);
-    ascii_to_string(&buf[..len])
+    len + pg_ulltoa_n(uvalue, &mut buf[len..])
 }
 
-/// Decimal text of `value`, zero-padded on the left to at least `minwidth`
-/// characters. Mirrors C `pg_ultostr_zeropad`, including the `value < 100 &&
-/// minwidth == 2` shortcut. Panics if `minwidth <= 0`, mirroring the C
-/// `Assert(minwidth > 0)`.
-pub fn pg_ultostr_zeropad(value: u32, minwidth: i32) -> String {
+/// Write the decimal text of `value`, zero-padded on the left to at least
+/// `minwidth` characters, at the start of `buf`; return the number of bytes
+/// written (the C end pointer, as an offset, so callers can keep appending
+/// into the same buffer — `pg_ultostr_zeropad(str, hours, 2); *str++ = ':';
+/// …`). No NUL terminator is written. Mirrors C `pg_ultostr_zeropad`,
+/// including the `value < 100 && minwidth == 2` shortcut. Panics if `minwidth
+/// <= 0`, mirroring the C `Assert(minwidth > 0)`. `buf` must be at least
+/// `max(minwidth, MAX_UINT32_DIGITS)` long.
+pub fn pg_ultostr_zeropad(buf: &mut [u8], value: u32, minwidth: i32) -> usize {
     assert!(minwidth > 0, "minwidth must be positive");
     let minwidth = minwidth as usize;
 
     // Short cut for the common case.
     if value < 100 && minwidth == 2 {
         let idx = (value as usize) * 2;
-        return ascii_to_string(&DIGIT_TABLE[idx..idx + 2]);
+        buf[..2].copy_from_slice(&DIGIT_TABLE[idx..idx + 2]);
+        return 2;
     }
 
-    let mut buf = [0u8; MAX_UINT32_DIGITS];
-    let len = pg_ultoa_n_into(value, &mut buf);
+    let len = pg_ultoa_n(value, buf);
     if len >= minwidth {
-        return ascii_to_string(&buf[..len]);
+        return len;
     }
 
-    // Left-pad with zeros to minwidth (C memmoves the digits right and fills
-    // the gap with '0').
-    let mut out = String::with_capacity(minwidth);
-    for _ in 0..(minwidth - len) {
-        out.push('0');
-    }
-    out.push_str(std::str::from_utf8(&buf[..len]).expect("digits are ASCII"));
-    out
+    // Left-pad with zeros to minwidth (the C memmove + memset('0')).
+    buf.copy_within(..len, minwidth - len);
+    buf[..minwidth - len].fill(b'0');
+    minwidth
 }
 
-/// Decimal text of an unsigned 32-bit integer. Mirrors C `pg_ultostr` (which
-/// returns the buffer end pointer for appending; callers here concatenate
-/// strings instead).
-pub fn pg_ultostr(value: u32) -> String {
-    pg_ultoa_n(value)
+/// Write the decimal text of an unsigned 32-bit integer at the start of `buf`
+/// and return the number of bytes written (the C end pointer, as an offset,
+/// for piecewise appending — see [`pg_ultostr_zeropad`]). No NUL terminator
+/// is written. Mirrors C `pg_ultostr`. `buf` must be at least
+/// [`MAX_UINT32_DIGITS`] long.
+pub fn pg_ultostr(buf: &mut [u8], value: u32) -> usize {
+    pg_ultoa_n(value, buf)
 }
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-/// Build an owned `String` from bytes the callers produced from `DIGIT_TABLE`
-/// / `b'0' + digit`, all of which are ASCII.
-fn ascii_to_string(bytes: &[u8]) -> String {
-    std::str::from_utf8(bytes)
-        .expect("decimal digits are ASCII")
-        .to_owned()
-}
-
-/// `ereturn(escontext, errorval, …)`: with a soft-error context the error is
-/// saved (details only when wanted) and `errorval` is returned; without one
-/// the error propagates as a hard error.
-fn ereturn<T>(
-    escontext: Option<&mut SoftErrorContext>,
-    errorval: T,
-    error: PgError,
-) -> PgResult<T> {
-    match escontext {
-        Some(context) => {
-            if context.details_wanted() {
-                context.save(error);
-            } else {
-                context.mark_error_occurred();
-            }
-            Ok(errorval)
-        }
-        None => Err(error),
-    }
-}
 
 fn invalid_syntax(input: &str, typname: &str) -> PgError {
     PgError::error(format!(
@@ -961,38 +925,81 @@ mod tests {
         assert!(context.error_occurred());
     }
 
+    /// Test-only owned-string views over the buffer-writing formatters.
+    fn itoa(v: i16) -> String {
+        let mut buf = [0u8; MAX_INT32_DIGITS];
+        let len = pg_itoa(v, &mut buf);
+        String::from_utf8(buf[..len].to_vec()).unwrap()
+    }
+
+    fn ultoa_n(v: u32) -> String {
+        let mut buf = [0u8; MAX_UINT32_DIGITS];
+        let len = pg_ultoa_n(v, &mut buf);
+        String::from_utf8(buf[..len].to_vec()).unwrap()
+    }
+
+    fn ltoa(v: i32) -> String {
+        let mut buf = [0u8; MAX_INT32_DIGITS];
+        let len = pg_ltoa(v, &mut buf);
+        String::from_utf8(buf[..len].to_vec()).unwrap()
+    }
+
+    fn ulltoa_n(v: u64) -> String {
+        let mut buf = [0u8; MAX_UINT64_DIGITS];
+        let len = pg_ulltoa_n(v, &mut buf);
+        String::from_utf8(buf[..len].to_vec()).unwrap()
+    }
+
+    fn lltoa(v: i64) -> String {
+        let mut buf = [0u8; MAX_INT64_DIGITS];
+        let len = pg_lltoa(v, &mut buf);
+        String::from_utf8(buf[..len].to_vec()).unwrap()
+    }
+
+    fn ultostr(v: u32) -> String {
+        let mut buf = [0u8; MAX_UINT32_DIGITS];
+        let len = pg_ultostr(&mut buf, v);
+        String::from_utf8(buf[..len].to_vec()).unwrap()
+    }
+
+    fn ultostr_zeropad(v: u32, minwidth: i32) -> String {
+        let mut buf = [0u8; 32];
+        let len = pg_ultostr_zeropad(&mut buf, v, minwidth);
+        String::from_utf8(buf[..len].to_vec()).unwrap()
+    }
+
     #[test]
     fn decimal_formatters_match_postgres_text() {
-        assert_eq!(pg_itoa(-32768), "-32768");
-        assert_eq!(pg_ultoa_n(4_294_967_295), "4294967295");
-        assert_eq!(pg_ltoa(i32::MIN), "-2147483648");
-        assert_eq!(pg_ulltoa_n(u64::MAX), "18446744073709551615");
-        assert_eq!(pg_lltoa(i64::MIN), "-9223372036854775808");
-        assert_eq!(pg_ultostr_zeropad(42, 5), "00042");
-        assert_eq!(pg_ultostr(42), "42");
+        assert_eq!(itoa(-32768), "-32768");
+        assert_eq!(ultoa_n(4_294_967_295), "4294967295");
+        assert_eq!(ltoa(i32::MIN), "-2147483648");
+        assert_eq!(ulltoa_n(u64::MAX), "18446744073709551615");
+        assert_eq!(lltoa(i64::MIN), "-9223372036854775808");
+        assert_eq!(ultostr_zeropad(42, 5), "00042");
+        assert_eq!(ultostr(42), "42");
     }
 
     #[test]
     fn formatters_cover_digit_table_boundaries() {
-        assert_eq!(pg_ultoa_n(0), "0");
-        assert_eq!(pg_ultoa_n(7), "7");
-        assert_eq!(pg_ultoa_n(99), "99");
-        assert_eq!(pg_ultoa_n(100), "100");
-        assert_eq!(pg_ultoa_n(9999), "9999");
-        assert_eq!(pg_ultoa_n(10000), "10000");
-        assert_eq!(pg_ultoa_n(123456789), "123456789");
+        assert_eq!(ultoa_n(0), "0");
+        assert_eq!(ultoa_n(7), "7");
+        assert_eq!(ultoa_n(99), "99");
+        assert_eq!(ultoa_n(100), "100");
+        assert_eq!(ultoa_n(9999), "9999");
+        assert_eq!(ultoa_n(10000), "10000");
+        assert_eq!(ultoa_n(123456789), "123456789");
 
-        assert_eq!(pg_ulltoa_n(0), "0");
-        assert_eq!(pg_ulltoa_n(99999999), "99999999");
-        assert_eq!(pg_ulltoa_n(100000000), "100000000");
-        assert_eq!(pg_ulltoa_n(1234567890123456789), "1234567890123456789");
+        assert_eq!(ulltoa_n(0), "0");
+        assert_eq!(ulltoa_n(99999999), "99999999");
+        assert_eq!(ulltoa_n(100000000), "100000000");
+        assert_eq!(ulltoa_n(1234567890123456789), "1234567890123456789");
 
-        assert_eq!(pg_ltoa(0), "0");
-        assert_eq!(pg_ltoa(-1), "-1");
-        assert_eq!(pg_ltoa(i32::MAX), "2147483647");
-        assert_eq!(pg_itoa(0), "0");
-        assert_eq!(pg_itoa(i16::MAX), "32767");
-        assert_eq!(pg_lltoa(i64::MAX), "9223372036854775807");
+        assert_eq!(ltoa(0), "0");
+        assert_eq!(ltoa(-1), "-1");
+        assert_eq!(ltoa(i32::MAX), "2147483647");
+        assert_eq!(itoa(0), "0");
+        assert_eq!(itoa(i16::MAX), "32767");
+        assert_eq!(lltoa(i64::MAX), "9223372036854775807");
     }
 
     /// Cross-check every formatter against the standard library over a range
@@ -1004,11 +1011,11 @@ mod tests {
             1_000_000_000,
             u32::MAX,
         ] {
-            assert_eq!(pg_ultoa_n(v), v.to_string());
-            assert_eq!(pg_ultostr(v), v.to_string());
+            assert_eq!(ultoa_n(v), v.to_string());
+            assert_eq!(ultostr(v), v.to_string());
         }
         for v in [0i32, 1, -1, 12345, -12345, i32::MAX, i32::MIN, i32::MIN + 1] {
-            assert_eq!(pg_ltoa(v), v.to_string());
+            assert_eq!(ltoa(v), v.to_string());
         }
         for v in [
             0u64,
@@ -1018,31 +1025,52 @@ mod tests {
             9_999_999_999_999_999_999,
             u64::MAX,
         ] {
-            assert_eq!(pg_ulltoa_n(v), v.to_string());
+            assert_eq!(ulltoa_n(v), v.to_string());
         }
         for v in [0i64, -1, 1, i64::MAX, i64::MIN, i64::MIN + 1] {
-            assert_eq!(pg_lltoa(v), v.to_string());
+            assert_eq!(lltoa(v), v.to_string());
         }
     }
 
     #[test]
     fn zeropad_shortcut_and_overflow_width() {
         // value < 100 && minwidth == 2 shortcut.
-        assert_eq!(pg_ultostr_zeropad(7, 2), "07");
-        assert_eq!(pg_ultostr_zeropad(42, 2), "42");
-        assert_eq!(pg_ultostr_zeropad(0, 2), "00");
+        assert_eq!(ultostr_zeropad(7, 2), "07");
+        assert_eq!(ultostr_zeropad(42, 2), "42");
+        assert_eq!(ultostr_zeropad(0, 2), "00");
         // value already wider than minwidth: no padding.
-        assert_eq!(pg_ultostr_zeropad(12345, 3), "12345");
+        assert_eq!(ultostr_zeropad(12345, 3), "12345");
         // wide padding.
-        assert_eq!(pg_ultostr_zeropad(5, 6), "000005");
+        assert_eq!(ultostr_zeropad(5, 6), "000005");
         // value >= 100 with minwidth 2 takes the general path, not the
         // shortcut.
-        assert_eq!(pg_ultostr_zeropad(100, 2), "100");
+        assert_eq!(ultostr_zeropad(100, 2), "100");
+    }
+
+    /// The C intended use-case: build one string piecewise in a single buffer
+    /// (datetime.c's `str = pg_ultostr_zeropad(str, hours, 2); *str++ = ':';
+    /// …`), tracking the end pointer as an offset.
+    #[test]
+    fn formatters_append_piecewise_into_one_buffer() {
+        let mut buf = [0u8; 32];
+        let mut pos = 0;
+        pos += pg_ultostr_zeropad(&mut buf[pos..], 9, 2);
+        buf[pos] = b':';
+        pos += 1;
+        pos += pg_ultostr_zeropad(&mut buf[pos..], 5, 2);
+        buf[pos] = b':';
+        pos += 1;
+        pos += pg_ultostr_zeropad(&mut buf[pos..], 42, 2);
+        buf[pos] = b' ';
+        pos += 1;
+        pos += pg_ultostr(&mut buf[pos..], 2026);
+        assert_eq!(&buf[..pos], b"09:05:42 2026");
     }
 
     #[test]
     #[should_panic]
     fn zeropad_requires_positive_minwidth() {
-        let _ = pg_ultostr_zeropad(1, 0);
+        let mut buf = [0u8; 32];
+        let _ = pg_ultostr_zeropad(&mut buf, 1, 0);
     }
 }
