@@ -15,6 +15,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetCurrentTransactionNestLevel()` (xact.c): the current
+    /// (sub)transaction nesting depth (1 = top level). Pure read of
+    /// backend-local transaction state; cannot `ereport`.
+    pub fn get_current_transaction_nest_level() -> i32
+);
+
+seam_core::seam!(
     /// `TransactionIdIsCurrentTransactionId(xid)` (xact.c): true iff `xid` is
     /// the current top transaction's xid or one of its in-progress
     /// subtransactions'. Pure lookup over backend-local transaction state;
