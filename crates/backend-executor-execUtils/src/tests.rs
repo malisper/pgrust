@@ -29,9 +29,9 @@ fn prevpower2() {
 fn executor_state_create_and_free() {
     let top = MemoryContext::new("test-top");
     let estate = CreateExecutorState(&top).unwrap();
-    assert_eq!(estate.get().es_direction, types_nodes::execnodes::ForwardScanDirection);
-    assert!(estate.get().es_exprcontexts.is_empty());
-    assert_eq!(estate.get().es_processed, 0);
+    estate.with(|s| assert_eq!(s.es_direction, types_nodes::execnodes::ForwardScanDirection));
+    estate.with(|s| assert!(s.es_exprcontexts.is_empty()));
+    estate.with(|s| assert_eq!(s.es_processed, 0));
     FreeExecutorState(estate);
 }
 
@@ -342,9 +342,9 @@ fn errposition_noop_paths() {
     let estate = CreateExecutorState(&top).unwrap();
     // Negative location: no-op even without source text or estate.
     assert_eq!(executor_errposition(None, -1).unwrap(), 0);
-    assert_eq!(executor_errposition(Some(estate.get()), -1).unwrap(), 0);
+    estate.with(|s| assert_eq!(executor_errposition(Some(s), -1).unwrap(), 0));
     // Source text unavailable: no-op.
-    assert_eq!(executor_errposition(Some(estate.get()), 5).unwrap(), 0);
+    estate.with(|s| assert_eq!(executor_errposition(Some(s), 5).unwrap(), 0));
     FreeExecutorState(estate);
 }
 

@@ -101,7 +101,7 @@ fn get_tablespace(mut spcid: Oid) -> PgResult<Option<TableSpaceOpts>> {
         InitializeTableSpaceCache()?;
     }
     let cached = TABLESPACE_CACHE
-        .with(|cell| cell.borrow().as_ref().and_then(|owned| owned.get().hash.get(&spcid).copied()));
+        .with(|cell| cell.borrow().as_ref().and_then(|owned| owned.with(|s| s.hash.get(&spcid).copied())));
     if let Some(spc) = cached {
         return Ok(spc);
     }

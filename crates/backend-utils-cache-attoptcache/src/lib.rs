@@ -136,7 +136,7 @@ pub fn get_attribute_options(attrelid: Oid, attnum: i32) -> PgResult<Option<Attr
     let key = AttoptCacheKey { attrelid, attnum };
 
     let cached = ATTOPT_CACHE.with(|cell| {
-        cell.borrow().as_ref().and_then(|owned| owned.get().hash.get(&key).copied())
+        cell.borrow().as_ref().and_then(|owned| owned.with(|s| s.hash.get(&key).copied()))
     });
     if let Some(entry) = cached {
         // Return results in caller's memory context (a by-value copy).

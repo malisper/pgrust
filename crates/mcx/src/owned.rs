@@ -14,8 +14,8 @@
 //!   context lifetime (`for<'mcx>`), so it cannot borrow anything except the
 //!   supplied context (and `'static` data);
 //! - the state can only be **accessed** through borrows of the wrapper
-//!   ([`get`](McxOwned::get), shared) or through a `for<'mcx>` closure
-//!   ([`with_mut`](McxOwned::with_mut)) whose body must typecheck for an
+//!   `for<'mcx>` closures ([`with`](McxOwned::with) /
+//!   [`with_mut`](McxOwned::with_mut)) whose bodies must typecheck for an
 //!   arbitrary lifetime and therefore cannot smuggle borrows out;
 //! - drop order is state **then** context — load-bearing, because the
 //!   state's destructors deallocate into the context.
@@ -57,7 +57,7 @@ macro_rules! bind {
 ///
 /// Borrows of the state cannot outlive the wrapper:
 ///
-/// ```compile_fail,E0505
+/// ```compile_fail
 /// mcx::bind!(VTy => V<'mcx>);
 /// struct V<'mcx> { v: mcx::PgVec<'mcx, u8> }
 ///
@@ -65,8 +65,8 @@ macro_rules! bind {
 ///     mcx::MemoryContext::new("c"),
 ///     |m| Ok(V { v: mcx::PgVec::new_in(m) }),
 /// ).unwrap();
-/// let stolen = &owned.get().v;
-/// drop(owned); // ERROR: cannot move out of `owned` while borrowed
+/// let stolen = owned.with(|s| &s.v);
+/// drop(owned);
 /// assert_eq!(stolen.len(), 0);
 /// ```
 pub struct McxOwned<B: Bind> {
@@ -97,13 +97,17 @@ impl<B: Bind> McxOwned<B> {
         Ok(McxOwned { state: ManuallyDrop::new(state), ctx: ManuallyDrop::new(ctx) })
     }
 
-    /// Shared access. The returned borrow's lifetime is the borrow of
-    /// `self`, so neither the state nor anything inside it (including its
-    /// `Mcx` handle) can outlive the wrapper.
-    pub fn get<'a>(&'a self) -> &'a B::Out<'a> {
-        let ptr: *const B::Out<'static> = &*self.state;
-        // SAFETY: shortening 'static back to 'a ≤ the wrapper's life.
-        unsafe { &*ptr.cast::<B::Out<'a>>() }
+    /// Shared access through a lifetime-universal closure.
+    ///
+    /// Universal (not a concrete `&'a Out<'a>` return) for soundness, not
+    /// style: a concrete `'a` unifies with the caller's scope, so if the
+    /// state carries interior mutability over its lifetime parameter (e.g. a
+    /// `Cell<Option<Mcx<'mcx>>>` field), safe code could store a *different*,
+    /// shorter-lived context's handle into this state and read it back after
+    /// that context died. With `for<'mcx>`, no external lifetime can unify
+    /// with the state's, so nothing can be written into it from outside.
+    pub fn with<R>(&self, f: impl for<'mcx> FnOnce(&B::Out<'mcx>) -> R) -> R {
+        f(&self.state)
     }
 
     /// Mutable access through a lifetime-universal closure: the body must

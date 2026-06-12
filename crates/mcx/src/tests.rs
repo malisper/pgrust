@@ -299,11 +299,11 @@ mod owned {
         {
             // built in an inner scope, moved out — the SetParent shape
             let plan = build_plan(&cache_root, 100).unwrap();
-            assert_eq!(plan.get().nodes.len(), 100);
+            assert_eq!(plan.with(|p| p.nodes.len()), 100);
             cache.push(plan);
         }
         let plan = &mut cache[0];
-        assert_eq!(plan.get().nodes.iter().sum::<u64>(), 4950);
+        assert_eq!(plan.with(|p| p.nodes.iter().sum::<u64>()), 4950);
         assert!(cache_root.subtree_used() >= 800, "bundle bytes visible from the cache root");
 
         // mutation through the universal closure; accounting follows

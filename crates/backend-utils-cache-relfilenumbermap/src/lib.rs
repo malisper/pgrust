@@ -146,7 +146,7 @@ pub fn RelidByRelfilenumber(
     // since querying invalid values isn't supposed to be a frequent thing,
     // but it's basically free.
     let cached = RELFILENUMBER_MAP
-        .with(|cell| cell.borrow().as_ref().and_then(|owned| owned.get().hash.get(&key).copied()));
+        .with(|cell| cell.borrow().as_ref().and_then(|owned| owned.with(|s| s.hash.get(&key).copied())));
     if let Some(relid) = cached {
         return Ok(relid);
     }
@@ -165,7 +165,7 @@ pub fn RelidByRelfilenumber(
 
         // copy scankey to local copy and set scan arguments
         let mut skey = RELFILENUMBER_MAP
-            .with(|cell| cell.borrow().as_ref().unwrap().get().relfilenumber_skey);
+            .with(|cell| cell.borrow().as_ref().unwrap().with(|s| s.relfilenumber_skey));
         skey[0].sk_argument = Datum::from_oid(reltablespace);
         skey[1].sk_argument = Datum::from_oid(relfilenumber);
 
