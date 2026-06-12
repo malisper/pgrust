@@ -18,6 +18,7 @@ backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
+backend-timezone-strftime = { path = "../backend-timezone-strftime" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
