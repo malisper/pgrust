@@ -3,6 +3,11 @@
 use mcx::PgVec;
 use types_core::{pg_crc32c, uint16, uint32, uint8, RmgrId, TransactionId, XLogRecPtr};
 
+/// `XLR_INFO_MASK` (access/xlogrecord.h) — the low nibble of `xl_info` is
+/// reserved for xlog-insertion flags; the rmgr's record opcode lives in the
+/// high nibble (`info & ~XLR_INFO_MASK`).
+pub const XLR_INFO_MASK: uint8 = 0x0F;
+
 /// `MAX_XLINFO_TYPES` (access/xlogstats.h) — sixteen per-record buckets per
 /// rmgr (the four xl_info bits in the rmgr's domain).
 pub const MAX_XLINFO_TYPES: usize = 16;
