@@ -1,12 +1,16 @@
 //! Relation block sampling routines (`src/backend/utils/misc/sampling.c`).
 //!
 //! Block-level sampling (Knuth's Algorithm S), reservoir sampling (Vitter's
-//! Algorithm Z), and the deprecated `anl_*` API that shares a single global
-//! reservoir state across callers.
+//! Algorithm Z), and the deprecated `anl_*` API that shares one per-backend
+//! reservoir state across callers (thread-local here).
+//!
+//! mcx note: `sampling.c` never pallocs — both state structs are pure
+//! scalars, caller-placed, so nothing here takes an `Mcx` handle or carries
+//! a context lifetime.
 
 #![allow(non_snake_case)]
 
-use std::sync::Mutex;
+use std::cell::RefCell;
 
 use pg_prng::{global_prng, PgPrng};
 use types_core::{uint32, BlockNumber};
@@ -290,15 +294,21 @@ pub fn sampler_random_fract(randstate: &mut PgPrng) -> f64 {
 // except that a common random state is used across all callers.
 // ----------------------------------------------------------------------------
 
-/// `(oldrs, oldrs_initialized)` — the shared reservoir state for the deprecated
-/// `anl_*` API. The boolean records whether the random state has been seeded.
-static OLD_RESERVOIR_STATE: Mutex<(ReservoirStateData, bool)> = Mutex::new((
-    ReservoirStateData {
-        W: 0.0,
-        randstate: PgPrng::from_raw_state(0, 0),
-    },
-    false,
-));
+thread_local! {
+    /// `(oldrs, oldrs_initialized)` — the reservoir state shared across the
+    /// deprecated `anl_*` API. The boolean records whether the random state
+    /// has been seeded. C's `static ReservoirStateData oldrs` is per-backend
+    /// state, so it is thread-local here, never a shared static.
+    static OLD_RESERVOIR_STATE: RefCell<(ReservoirStateData, bool)> = const {
+        RefCell::new((
+            ReservoirStateData {
+                W: 0.0,
+                randstate: PgPrng::from_raw_state(0, 0),
+            },
+            false,
+        ))
+    };
+}
 
 pub fn anl_random_fract() -> f64 {
     // and compute a random fraction
@@ -313,32 +323,29 @@ pub fn anl_init_selection_state(n: i32) -> f64 {
 pub fn anl_get_next_S(t: f64, n: i32, stateptr: &mut f64) -> f64 {
     // Note: unlike anl_random_fract/anl_init_selection_state, the C function
     // has no oldrs_initialized guard -- it uses oldrs.randstate as-is.
-    let mut state = OLD_RESERVOIR_STATE
-        .lock()
-        .expect("old reservoir state lock poisoned");
-    let rs = &mut state.0;
+    OLD_RESERVOIR_STATE.with_borrow_mut(|state| {
+        let rs = &mut state.0;
 
-    rs.W = *stateptr;
-    let result = reservoir_get_next_S(rs, t, n);
-    *stateptr = rs.W;
-    result
+        rs.W = *stateptr;
+        let result = reservoir_get_next_S(rs, t, n);
+        *stateptr = rs.W;
+        result
+    })
 }
 
 /// Run `f` against the shared `oldrs` reservoir state, initializing the random
 /// state on first use (the C `oldrs_initialized` guard).
 fn with_old_reservoir_state<R>(f: impl FnOnce(&mut ReservoirStateData) -> R) -> R {
-    let mut state = OLD_RESERVOIR_STATE
-        .lock()
-        .expect("old reservoir state lock poisoned");
+    OLD_RESERVOIR_STATE.with_borrow_mut(|state| {
+        // initialize if first time through
+        if !state.1 {
+            let seed = global_prng(PgPrng::next_u32);
+            sampler_random_init_state(seed, &mut state.0.randstate);
+            state.1 = true;
+        }
 
-    // initialize if first time through
-    if !state.1 {
-        let seed = global_prng(PgPrng::next_u32);
-        sampler_random_init_state(seed, &mut state.0.randstate);
-        state.1 = true;
-    }
-
-    f(&mut state.0)
+        f(&mut state.0)
+    })
 }
 
 /// This crate declares no inward seams; nothing to install.
@@ -431,5 +438,26 @@ mod tests {
 
         let fract = anl_random_fract();
         assert!(fract > 0.0 && fract < 1.0);
+    }
+
+    #[test]
+    fn anl_state_is_per_thread() {
+        // The deprecated oldrs state is per-backend in C; here per-thread.
+        // Seeding it on this thread must not mark it initialized (or leak
+        // PRNG position) on any other thread.
+        let _ = anl_init_selection_state(10);
+        assert!(OLD_RESERVOIR_STATE.with_borrow(|s| s.1));
+
+        std::thread::spawn(|| {
+            assert!(
+                OLD_RESERVOIR_STATE.with_borrow(|s| !s.1),
+                "fresh thread saw another thread's oldrs initialization"
+            );
+            // First use on this thread runs its own seeding path.
+            let w = anl_init_selection_state(10);
+            assert!(w > 1.0);
+        })
+        .join()
+        .unwrap();
     }
 }
