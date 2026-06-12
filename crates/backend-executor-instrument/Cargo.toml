@@ -1,0 +1,15 @@
+[package]
+name = "backend-executor-instrument"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_executor_instrument"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }

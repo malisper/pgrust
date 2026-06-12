@@ -9,11 +9,13 @@
 
 pub mod fmgr;
 pub mod geo;
+pub mod instrument;
 pub mod primitive;
 pub mod xact;
 
 pub use fmgr::*;
 pub use geo::*;
+pub use instrument::*;
 pub use types_error::{PgError, PgResult};
 pub use primitive::*;
 pub use xact::*;
