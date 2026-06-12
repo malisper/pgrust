@@ -18,3 +18,17 @@ seam_core::seam!(
         tuple_desc: &types_tuple::heaptuple::TupleDescData<'_>,
     ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>
 );
+
+seam_core::seam!(
+    /// `toast_flatten_tuple(tup, tupleDesc)` (access/heap/heaptoast.c):
+    /// "flatten" a tuple to contain no out-of-line toasted fields (does not
+    /// eliminate compressed or short-header datums). The caller already
+    /// checked `HeapTupleHasExternal(tup)`. `Err` carries the detoasting
+    /// `ereport(ERROR)`s and OOM; the result is allocated in `mcx` (C: palloc
+    /// in `CurrentMemoryContext`).
+    pub fn toast_flatten_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
+        tuple_desc: &types_tuple::heaptuple::TupleDescData<'_>,
+    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>
+);

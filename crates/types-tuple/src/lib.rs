@@ -16,6 +16,7 @@ pub mod heap;
 pub mod heaptuple;
 pub mod parse;
 pub mod tupconvert;
+pub mod toast_helper;
 
 pub use access::*;
 pub use attmap::*;
@@ -24,3 +25,4 @@ pub use heap::*;
 pub use heaptuple::*;
 pub use parse::*;
 pub use tupconvert::*;
+pub use toast_helper::*;

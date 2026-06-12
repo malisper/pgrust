@@ -227,3 +227,15 @@ pub const LWTRANCHE_XACT_SLRU: i32 = LWTRANCHE_SUBTRANS_SLRU + 1;
 pub const LWTRANCHE_PARALLEL_VACUUM_DSA: i32 = LWTRANCHE_XACT_SLRU + 1;
 pub const LWTRANCHE_AIO_URING_COMPLETION: i32 = LWTRANCHE_PARALLEL_VACUUM_DSA + 1;
 pub const LWTRANCHE_FIRST_USER_DEFINED: i32 = LWTRANCHE_AIO_URING_COMPLETION + 1;
+
+/// `LOCKMODE` (`storage/lockdefs.h`) — a relation/object lock level.
+pub type LOCKMODE = i32;
+pub const NoLock: LOCKMODE = 0;
+pub const AccessShareLock: LOCKMODE = 1;
+pub const RowShareLock: LOCKMODE = 2;
+pub const RowExclusiveLock: LOCKMODE = 3;
+pub const ShareUpdateExclusiveLock: LOCKMODE = 4;
+pub const ShareLock: LOCKMODE = 5;
+pub const ShareRowExclusiveLock: LOCKMODE = 6;
+pub const ExclusiveLock: LOCKMODE = 7;
+pub const AccessExclusiveLock: LOCKMODE = 8;

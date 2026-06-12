@@ -21,6 +21,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "backend-access-common-detoast-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-common-heaptuple"
 version = "0.0.0"
 dependencies = [
@@ -54,6 +63,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-toast-internals-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-hashvalidate"
 version = "0.0.0"
 dependencies = [
@@ -69,6 +91,27 @@ dependencies = [
  "types-core",
  "types-error",
  "types-hash",
+]
+
+[[package]]
+name = "backend-access-heap-heaptoast"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-common-heaptuple",
+ "backend-access-common-toast-internals-seams",
+ "backend-access-heap-heaptoast-seams",
+ "backend-access-index-genam-seams",
+ "backend-access-table-toast-helper-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -101,6 +144,7 @@ dependencies = [
  "types-cache",
  "types-core",
  "types-error",
+ "types-scan",
  "types-tuple",
 ]
 
@@ -110,6 +154,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-table-toast-helper-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-error",
  "types-tuple",
 ]
@@ -1297,6 +1350,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-hashvalidate",
+ "backend-access-heap-heaptoast",
  "backend-access-transam-xlogstats",
  "backend-executor-execUtils",
  "backend-executor-nodeMaterial",
@@ -1422,6 +1476,14 @@ version = "0.0.0"
 [[package]]
 name = "types-reloptions"
 version = "0.0.0"
+
+[[package]]
+name = "types-scan"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+]
 
 [[package]]
 name = "types-signal"

@@ -1,0 +1,26 @@
+[package]
+name = "backend-access-heap-heaptoast"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_access_heap_heaptoast"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-tuple = { path = "../types-tuple" }
+types-scan = { path = "../types-scan" }
+types-storage = { path = "../types-storage" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-heap-heaptoast-seams = { path = "../backend-access-heap-heaptoast-seams" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-access-common-toast-internals-seams = { path = "../backend-access-common-toast-internals-seams" }
+backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-access-table-toast-helper-seams = { path = "../backend-access-table-toast-helper-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
