@@ -64,6 +64,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogstats"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-libpq-pqformat-seams"
 version = "0.0.0"
 dependencies = [
@@ -260,6 +268,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-hashvalidate",
+ "backend-access-transam-xlogstats",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
  "backend-storage-page-checksum",
@@ -321,6 +330,13 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-datum",
+]
+
+[[package]]
+name = "types-wal"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
