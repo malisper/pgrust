@@ -103,6 +103,6 @@ fn tupdesc_branch_uses_inline_descriptor() {
     }));
     md.tupdesc = desc.clone();
 
-    let out = ENRMetadataGetTupDesc(&md);
+    let out = ENRMetadataGetTupDesc(&md).unwrap();
     assert!(out.is_some());
 }

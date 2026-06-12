@@ -12,5 +12,5 @@ seam_core::seam!(
     pub fn exec_re_scan(
         node: &mut types_nodes::PlanStateNode,
         estate: &mut types_nodes::EStateData,
-    ) -> types_core::PgResult<()>
+    ) -> types_error::PgResult<()>
 );

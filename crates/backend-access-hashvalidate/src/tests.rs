@@ -125,11 +125,11 @@ fn install_test_seams() {
                 let i = group_for(&mut groups, p.amproclefttype, p.amprocrighttype);
                 groups[i].functionset |= 1u64 << p.amprocnum;
             }
-            groups
+            Ok(groups)
         });
         // No opclass for opfamily 999; opclass 555 for opfamily 998.
         backend_access_index_amvalidate_seams::opclass_for_family_datatype::set(
-            |_am, fam, _typ| if fam == 998 { 555 } else { 0 },
+            |_am, fam, _typ| Ok(if fam == 998 { 555 } else { 0 }),
         );
     });
 }

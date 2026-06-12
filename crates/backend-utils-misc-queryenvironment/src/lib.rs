@@ -119,7 +119,9 @@ fn enr_index(query_env: &QueryEnvironment, name: &str) -> Option<usize> {
 /// When the `TupleDesc` is based on a relation from the catalogs, we count on
 /// that relation being used at the same time, so that appropriate locks will
 /// already be held. Locking here would be too late anyway.
-pub fn ENRMetadataGetTupDesc(enrmd: &EphemeralNamedRelationMetadataData) -> TupleDesc {
+pub fn ENRMetadataGetTupDesc(
+    enrmd: &EphemeralNamedRelationMetadataData,
+) -> types_error::PgResult<TupleDesc> {
     // One, and only one, of these fields must be filled.
     debug_assert!(
         (enrmd.reliddesc == InvalidOid) != enrmd.tupdesc.is_none(),
@@ -127,15 +129,15 @@ pub fn ENRMetadataGetTupDesc(enrmd: &EphemeralNamedRelationMetadataData) -> Tupl
     );
 
     if enrmd.tupdesc.is_some() {
-        enrmd.tupdesc.clone()
+        Ok(enrmd.tupdesc.clone())
     } else {
         // relation = table_open(enrmd->reliddesc, NoLock);
         // tupdesc = relation->rd_att;
         // table_close(relation, NoLock);
-        let relation = backend_access_table_table_seams::table_open::call(enrmd.reliddesc, NoLock);
+        let relation = backend_access_table_table_seams::table_open::call(enrmd.reliddesc, NoLock)?;
         let tupdesc = backend_utils_cache_relcache_seams::relation_rd_att::call(relation);
-        backend_access_table_table_seams::table_close::call(relation, NoLock);
-        tupdesc
+        backend_access_table_table_seams::table_close::call(relation, NoLock)?;
+        Ok(tupdesc)
     }
 }
 

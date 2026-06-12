@@ -16,6 +16,7 @@ use backend_utils_activity_status_seams::{
     track_activities, zero_progress_param,
 };
 use types_core::{int64, InvalidOid, Oid};
+use types_error::PgResult;
 use types_pgstat::backend_progress::ProgressCommandType;
 
 /// `#define PGSTAT_NUM_PROGRESS_PARAM 20` (`utils/backend_progress.h`).
@@ -75,19 +76,21 @@ pub fn pgstat_progress_incr_param(index: i32, incr: int64) {
 /// `pgstat_progress_parallel_incr_param()` —
 ///
 /// A variant of [`pgstat_progress_incr_param`] to allow a worker to poke at
-/// a leader to do an incremental progress update.
-pub fn pgstat_progress_parallel_incr_param(index: i32, incr: int64) {
+/// a leader to do an incremental progress update. `Err` carries the libpq
+/// message-build `ereport(ERROR)`s (StringInfo growth).
+pub fn pgstat_progress_parallel_incr_param(index: i32, incr: int64) -> PgResult<()> {
     // Parallel workers notify a leader through a PqMsg_Progress message to
     // update progress, passing the progress index and incremented value.
     // Leaders can just call pgstat_progress_incr_param directly.
     if is_parallel_worker::call() {
-        pq_beginmessage::call(PQ_MSG_PROGRESS);
-        pq_sendint32::call(index as u32);
-        pq_sendint64::call(incr);
+        pq_beginmessage::call(PQ_MSG_PROGRESS)?;
+        pq_sendint32::call(index as u32)?;
+        pq_sendint64::call(incr)?;
         pq_endmessage::call();
     } else {
         pgstat_progress_incr_param(index, incr);
     }
+    Ok(())
 }
 
 /// `pgstat_progress_update_multi_param()` —
@@ -205,7 +208,7 @@ mod tests {
     #[test]
     fn parallel_incr_param_sends_message_in_worker() {
         with_flags(true, true, true, || {
-            pgstat_progress_parallel_incr_param(2, 99);
+            pgstat_progress_parallel_incr_param(2, 99).unwrap();
             with_fixture(|e| {
                 assert_eq!(e.sent.get(), Some((2, 99)));
                 // The leader's progress_param must NOT have been touched.
@@ -218,7 +221,7 @@ mod tests {
     #[test]
     fn parallel_incr_param_updates_directly_in_leader() {
         with_flags(true, true, false, || {
-            pgstat_progress_parallel_incr_param(2, 99);
+            pgstat_progress_parallel_incr_param(2, 99).unwrap();
             with_fixture(|e| {
                 assert_eq!(e.params[2].get(), 99);
                 assert_eq!(e.changecount.get(), 2);

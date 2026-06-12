@@ -9,5 +9,5 @@ seam_core::seam!(
     /// service it via `ProcessInterrupts()` (tcop/postgres.c). A query-cancel
     /// or backend-termination interrupt surfaces as the `Err` (the C
     /// `ereport(ERROR/FATAL, ...)` longjmp).
-    pub fn check_for_interrupts() -> types_core::PgResult<()>
+    pub fn check_for_interrupts() -> types_error::PgResult<()>
 );

@@ -11,20 +11,23 @@
 seam_core::seam!(
     /// `table_open(relationId, lockmode)` (access/table/table.c): open a table
     /// relation by OID — `relation_open` plus a check that the relation is not
-    /// an index nor a composite type. A relation that cannot be opened raises
-    /// `ereport(ERROR)` inside the owner.
+    /// an index nor a composite type. `Err` carries the C `ereport(ERROR)`s:
+    /// a relation that cannot be opened (`could not open relation with OID
+    /// %u`), a wrong relation kind, or a lock-acquisition error.
     pub fn table_open(
         relation_id: types_core::primitive::Oid,
         lockmode: types_tuple::access::LOCKMODE,
-    ) -> types_core::primitive::Oid
+    ) -> types_error::PgResult<types_core::primitive::Oid>
 );
 
 seam_core::seam!(
     /// `table_close(relation, lockmode)` (access/table/table.c): close a table
     /// previously opened with `table_open`. If `lockmode` is not `NoLock`, the
-    /// specified lock is then released.
+    /// specified lock is then released; `LockRelease` can `elog(ERROR)`
+    /// (`unrecognized lock mode`, `failed to re-find shared lock object`),
+    /// carried on `Err`.
     pub fn table_close(
         relation: types_core::primitive::Oid,
         lockmode: types_tuple::access::LOCKMODE,
-    )
+    ) -> types_error::PgResult<()>
 );

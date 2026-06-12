@@ -17,7 +17,7 @@ seam_core::seam!(
         node: Option<&types_nodes::nodes::Node>,
         estate: &mut types_nodes::EStateData,
         eflags: i32,
-    ) -> types_core::PgResult<Option<alloc::boxed::Box<types_nodes::PlanStateNode>>>
+    ) -> types_error::PgResult<Option<alloc::boxed::Box<types_nodes::PlanStateNode>>>
 );
 
 seam_core::seam!(
@@ -28,7 +28,7 @@ seam_core::seam!(
     pub fn exec_proc_node(
         node: &mut types_nodes::PlanStateNode,
         estate: &mut types_nodes::EStateData,
-    ) -> types_core::PgResult<Option<types_nodes::SlotId>>
+    ) -> types_error::PgResult<Option<types_nodes::SlotId>>
 );
 
 seam_core::seam!(
@@ -37,5 +37,5 @@ seam_core::seam!(
     pub fn exec_end_node(
         node: &mut types_nodes::PlanStateNode,
         estate: &mut types_nodes::EStateData,
-    ) -> types_core::PgResult<()>
+    ) -> types_error::PgResult<()>
 );

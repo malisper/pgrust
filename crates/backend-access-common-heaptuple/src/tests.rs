@@ -209,7 +209,7 @@ fn compute_data_size_matches_form() {
     ];
     let isnull = vec![false, false, false];
 
-    let size = heap_compute_data_size(&td, &values, &isnull);
+    let size = heap_compute_data_size(&td, &values, &isnull).unwrap();
     let formed = heap_form_tuple(&td, &values, &isnull).expect("form");
     assert_eq!(formed.data.len(), size);
     // t_len == t_hoff + data_len.
@@ -722,7 +722,7 @@ fn heap_expand_tuple_appends_nulls_for_absent_attrs() {
     .expect("form src");
 
     let td = tupdesc(vec![byval(4, 4), byval(4, 4), byval(4, 4)]);
-    let expanded = crate::heap_expand_tuple(&src, &td);
+    let expanded = crate::heap_expand_tuple(&src, &td).unwrap();
 
     let hdr = expanded.tuple.t_data.as_ref().unwrap();
     assert_ne!(hdr.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
@@ -743,7 +743,7 @@ fn minimal_expand_tuple_appends_nulls() {
     )
     .expect("form src");
     let td = tupdesc(vec![byval(4, 4), byval(4, 4)]);
-    let mt = crate::minimal_expand_tuple(&src, &td);
+    let mt = crate::minimal_expand_tuple(&src, &td).unwrap();
     assert_ne!(mt.tuple.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
     assert_eq!(mt.tuple.t_infomask2 & types_tuple::heaptuple::HEAP_NATTS_MASK, 2);
 }
@@ -801,7 +801,7 @@ fn copy_tuple_as_datum_sets_composite_header() {
     )
     .expect("form");
 
-    let d = crate::heap_copy_tuple_as_datum(&h, &td);
+    let d = crate::heap_copy_tuple_as_datum(&h, &td).unwrap();
     match &d.tuple.t_data.as_ref().unwrap().t_choice {
         types_tuple::heaptuple::HeapTupleHeaderChoice::TDatum(f) => {
             assert_eq!(f.datum_len_, h.tuple.t_len as i32);

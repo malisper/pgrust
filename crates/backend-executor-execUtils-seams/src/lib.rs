@@ -15,5 +15,5 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData,
         scanstate: &mut types_nodes::ScanStateData,
         tts_ops: types_nodes::TupleSlotKind,
-    ) -> types_core::PgResult<()>
+    ) -> types_error::PgResult<()>
 );

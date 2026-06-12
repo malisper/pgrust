@@ -8,20 +8,28 @@
 
 seam_core::seam!(
     /// `pq_beginmessage(&buf, msgtype)` — begin a message of type `msgtype`.
-    pub fn pq_beginmessage(msgtype: u8)
+    /// `Err` carries `initStringInfo`'s `palloc` out-of-memory
+    /// `ereport(ERROR)`.
+    pub fn pq_beginmessage(msgtype: u8) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
-    /// `pq_sendint32(&buf, v)` — append a network-order int32.
-    pub fn pq_sendint32(v: u32)
+    /// `pq_sendint32(&buf, v)` — append a network-order int32. `Err` carries
+    /// `enlargeStringInfo`'s `ereport(ERROR)` (out of memory / 1GB string
+    /// buffer cap).
+    pub fn pq_sendint32(v: u32) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
-    /// `pq_sendint64(&buf, v)` — append a network-order int64.
-    pub fn pq_sendint64(v: i64)
+    /// `pq_sendint64(&buf, v)` — append a network-order int64. `Err` carries
+    /// `enlargeStringInfo`'s `ereport(ERROR)` (out of memory / 1GB string
+    /// buffer cap).
+    pub fn pq_sendint64(v: i64) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `pq_endmessage(&buf)` — send the completed message and free the buffer.
+    /// Infallible: a send failure is `ereport(COMMERROR)` inside pqcomm.c
+    /// (below ERROR, no longjmp) and the C return value is ignored.
     pub fn pq_endmessage()
 );

@@ -10,6 +10,7 @@ dependencies = [
  "backend-utils-adt-misc2-seams",
  "types-core",
  "types-datum",
+ "types-error",
  "types-tuple",
 ]
 
@@ -35,6 +36,7 @@ name = "backend-access-heap-heaptoast-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -54,6 +56,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -106,7 +109,7 @@ name = "backend-executor-execAmi-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
+ "types-error",
  "types-nodes",
 ]
 
@@ -115,7 +118,7 @@ name = "backend-executor-execProcnode-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
+ "types-error",
  "types-nodes",
 ]
 
@@ -124,7 +127,7 @@ name = "backend-executor-execTuples-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
+ "types-error",
  "types-nodes",
 ]
 
@@ -133,7 +136,7 @@ name = "backend-executor-execUtils-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
+ "types-error",
  "types-nodes",
 ]
 
@@ -164,6 +167,7 @@ name = "backend-libpq-pqformat-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -191,6 +195,7 @@ name = "backend-storage-lmgr-lwlock-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
  "types-storage",
 ]
 
@@ -215,7 +220,7 @@ name = "backend-tcop-postgres-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -223,6 +228,7 @@ name = "backend-utils-activity-pgstat-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
  "types-pgstat",
 ]
 
@@ -238,6 +244,7 @@ dependencies = [
  "backend-utils-activity-status-seams",
  "backend-utils-adt-timestamp-seams",
  "types-core",
+ "types-error",
  "types-pgstat",
  "types-storage",
 ]
@@ -274,6 +281,7 @@ name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -365,6 +373,7 @@ dependencies = [
  "backend-access-table-table-seams",
  "backend-utils-cache-relcache-seams",
  "types-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -381,7 +390,7 @@ name = "backend-utils-sort-storage-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
+ "types-error",
  "types-nodes",
 ]
 

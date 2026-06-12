@@ -84,7 +84,7 @@ pub fn ExecMaterial(node: &mut MaterialState, estate: &mut EStateData) -> PgResu
     // to fetch a tuple from tuplestore.
     let mut eof_tuplestore = match node.tuplestorestate.as_deref() {
         None => true,
-        Some(ts) => tuplestore::tuplestore_ateof::call(ts)?,
+        Some(ts) => tuplestore::tuplestore_ateof::call(ts),
     };
 
     if !forward && eof_tuplestore {
@@ -266,7 +266,7 @@ pub fn ExecInitMaterial(
 pub fn ExecEndMaterial(node: &mut MaterialState, estate: &mut EStateData) -> PgResult<()> {
     // Release tuplestore resources
     if let Some(tuplestorestate) = node.tuplestorestate.take() {
-        tuplestore::tuplestore_end::call(tuplestorestate)?;
+        tuplestore::tuplestore_end::call(tuplestorestate);
     }
 
     // shut down the subplan
@@ -293,7 +293,8 @@ pub fn ExecMaterialMarkPos(node: &mut MaterialState) -> PgResult<()> {
     tuplestore::tuplestore_copy_read_pointer::call(ts, 0, 1)?;
 
     // since we may have advanced the mark, try to truncate the tuplestore.
-    tuplestore::tuplestore_trim::call(ts)
+    tuplestore::tuplestore_trim::call(ts);
+    Ok(())
 }
 
 /// `ExecMaterialRestrPos(node)` — calls tuplestore to restore the last saved
@@ -357,7 +358,7 @@ pub fn ExecReScanMaterial(node: &mut MaterialState, estate: &mut EStateData) -> 
                 node.tuplestorestate
                     .take()
                     .expect("checked Some above"),
-            )?;
+            );
             if outer_chgparam_is_null {
                 let outer = node
                     .ss
