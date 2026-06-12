@@ -13,3 +13,11 @@ seam_core::seam!(
     /// carried on `Err`.
     pub fn command_counter_increment() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `TransactionIdIsCurrentTransactionId(xid)` (xact.c): true iff `xid` is
+    /// the current top transaction's xid or one of its in-progress
+    /// subtransactions'. Pure lookup over backend-local transaction state;
+    /// cannot `ereport`.
+    pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool
+);
