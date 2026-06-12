@@ -7,5 +7,6 @@
 #![allow(non_upper_case_globals)]
 
 pub mod storage;
+pub mod waiteventset;
 
 pub use storage::*;

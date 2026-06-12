@@ -11,3 +11,11 @@ seam_core::seam!(
     /// Async-signal-safe and infallible in C.
     pub fn set_latch_my_latch()
 );
+
+seam_core::seam!(
+    /// `ResetLatch(MyLatch)`: clear this backend's own process latch before
+    /// checking for work, so later `SetLatch` wakeups are not lost. `MyLatch`
+    /// is resolved by the latch crate when installing (same pattern as
+    /// `set_latch_my_latch`). Infallible in C.
+    pub fn reset_latch_my_latch()
+);

@@ -69,3 +69,9 @@ pub const PG_DIR_MODE_OWNER: i32 = 0o700;
 pub const USE_ISO_DATES: i32 = 1;
 pub const DATEORDER_MDY: i32 = 2;
 pub const INTSTYLE_POSTGRES: i32 = 0;
+
+/// `pgsocket` (`port.h`) — a socket descriptor; C `int` on the non-WIN32
+/// build this tree targets.
+pub type pgsocket = i32;
+/// `PGINVALID_SOCKET` (`port.h`).
+pub const PGINVALID_SOCKET: pgsocket = -1;
