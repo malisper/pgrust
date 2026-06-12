@@ -2,25 +2,29 @@
 //! (`storage/ipc/procarray.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::{Oid, ProcNumber, TransactionId};
+use mcx::{Mcx, PgVec};
+use types_core::{Oid, ProcNumber, TransactionId, XLogRecPtr};
 use types_error::PgResult;
-use types_storage::{ProcSignalReason, RunningTransactionsData, VirtualTransactionId};
+use types_storage::{
+    ProcSignalReason, RunningTransactionLocksHeld, RunningTransactionsData, VirtualTransactionId,
+};
 
 seam_core::seam!(
     /// `GetConflictingVirtualXIDs(limitXmin, dbOid)` — VXIDs of backends whose
-    /// snapshots could still see `limitXmin`. The C `InvalidVirtualTransactionId`
-    /// terminator is dropped; the returned `Vec` is a snapshot of the
-    /// owner-managed (TopMemoryContext-static) result array. Fallible: the
-    /// first call allocates that array.
-    pub fn get_conflicting_virtual_xids(
+    /// snapshots could still see `limitXmin`. The C
+    /// `InvalidVirtualTransactionId` terminator is dropped; the result array
+    /// is allocated in `mcx` (C reuses a TopMemoryContext-static array; the
+    /// owner copies into the caller's context instead).
+    pub fn get_conflicting_virtual_xids<'mcx>(
+        mcx: Mcx<'mcx>,
         limit_xmin: TransactionId,
         db_oid: Oid,
-    ) -> PgResult<std::vec::Vec<VirtualTransactionId>>
+    ) -> PgResult<PgVec<'mcx, VirtualTransactionId>>
 );
 
 seam_core::seam!(
     /// `ProcArrayApplyRecoveryInfo(running)`.
-    pub fn proc_array_apply_recovery_info(running: &RunningTransactionsData) -> PgResult<()>
+    pub fn proc_array_apply_recovery_info(running: &RunningTransactionsData<'_>) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -29,9 +33,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `GetRunningTransactionData()`. Returns with `ProcArrayLock` and
-    /// `XidGenLock` HELD; the caller releases them (`lwlock_release_builtin`).
-    pub fn get_running_transaction_data() -> PgResult<RunningTransactionsData>
+    /// `GetRunningTransactionData()` — C returns with `ProcArrayLock` and
+    /// `XidGenLock` held and the caller releases them by hand. Here the
+    /// owner acquires the locks, builds the snapshot, and runs `f` with both
+    /// held; `locks.release_proc_array_lock()` lets the callback release
+    /// `ProcArrayLock` early (the `wal_level < logical` path). Every lock
+    /// still held when `f` returns — on success or error — is released by
+    /// the owner, so no out-of-band release contract survives the seam. The
+    /// `XLogRecPtr` is the callback's result, passed through.
+    pub fn get_running_transaction_data(
+        f: &mut dyn FnMut(
+            &RunningTransactionsData<'_>,
+            &mut dyn RunningTransactionLocksHeld,
+        ) -> PgResult<XLogRecPtr>,
+    ) -> PgResult<XLogRecPtr>
 );
 
 seam_core::seam!(

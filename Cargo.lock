@@ -326,6 +326,7 @@ dependencies = [
 name = "backend-storage-ipc-procarray-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -911,7 +912,9 @@ dependencies = [
 name = "types-storage"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
+ "types-error",
 ]
 
 [[package]]

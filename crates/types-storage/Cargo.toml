@@ -9,4 +9,6 @@ name = "types_storage"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }

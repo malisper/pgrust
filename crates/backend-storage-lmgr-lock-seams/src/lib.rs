@@ -70,12 +70,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `GetLockConflicts(locktag, lockmode, countp)` — VXIDs of transactions
     /// holding conflicting locks; the C terminator is dropped and `countp`
-    /// folds into the length. The returned `Vec` is a snapshot of the
-    /// owner-managed (TopMemoryContext-static) result array.
-    pub fn get_lock_conflicts(
+    /// folds into the length. The result array is allocated in `mcx` (C
+    /// reuses a TopMemoryContext-static array; the owner copies into the
+    /// caller's context instead).
+    pub fn get_lock_conflicts<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         locktag: &types_storage::LOCKTAG,
         lockmode: types_storage::LOCKMODE,
-    ) -> types_error::PgResult<std::vec::Vec<types_storage::VirtualTransactionId>>
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_storage::VirtualTransactionId>>
 );
 
 seam_core::seam!(

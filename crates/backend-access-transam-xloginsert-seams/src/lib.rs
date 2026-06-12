@@ -6,24 +6,16 @@ use types_core::{RmgrId, XLogRecPtr};
 use types_error::PgResult;
 
 seam_core::seam!(
-    /// `XLogBeginInsert()`.
-    pub fn xlog_begin_insert()
-);
-
-seam_core::seam!(
-    /// `XLogSetRecordFlags(flags)`.
-    pub fn xlog_set_record_flags(flags: u8)
-);
-
-seam_core::seam!(
-    /// `XLogRegisterData(data, len)` — append a record fragment to the rdata
-    /// chain. C keeps the caller's pointer; the installed implementation
-    /// copies the bytes into its chain instead.
-    pub fn xlog_register_data(data: &[u8])
-);
-
-seam_core::seam!(
-    /// `XLogInsert(rmid, info)` — insert the assembled record; returns its
-    /// end LSN.
-    pub fn xlog_insert(rmid: RmgrId, info: u8) -> PgResult<XLogRecPtr>
+    /// One whole-record insertion: C's `XLogBeginInsert()`, one
+    /// `XLogRegisterData(data, len)` per `fragments` entry (in order),
+    /// `XLogSetRecordFlags(flags)` (skipped when `flags == 0`), then
+    /// `XLogInsert(rmid, info)`. Returns the record's end LSN. The ambient
+    /// rdata-chain registration protocol stays on the owner's side of the
+    /// boundary.
+    pub fn xlog_insert(
+        rmid: RmgrId,
+        info: u8,
+        flags: u8,
+        fragments: &[&[u8]],
+    ) -> PgResult<XLogRecPtr>
 );

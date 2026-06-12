@@ -22,7 +22,9 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `LogRecoveryConflict(reason, wait_start, now, wait_list, still_waiting)`.
+    /// Takes the caller's context for the transient conflicting-pid string.
     pub fn log_recovery_conflict(
+        mcx: mcx::Mcx<'_>,
         reason: ProcSignalReason,
         wait_start: TimestampTz,
         now: TimestampTz,
@@ -35,6 +37,7 @@ seam_core::seam!(
     /// `ResolveRecoveryConflictWithSnapshot(snapshotConflictHorizon,
     /// isCatalogRel, locator)`.
     pub fn resolve_recovery_conflict_with_snapshot(
+        mcx: mcx::Mcx<'_>,
         snapshot_conflict_horizon: TransactionId,
         is_catalog_rel: bool,
         locator: RelFileLocator,
@@ -45,6 +48,7 @@ seam_core::seam!(
     /// `ResolveRecoveryConflictWithSnapshotFullXid(snapshotConflictHorizon,
     /// isCatalogRel, locator)`.
     pub fn resolve_recovery_conflict_with_snapshot_full_xid(
+        mcx: mcx::Mcx<'_>,
         snapshot_conflict_horizon: FullTransactionId,
         is_catalog_rel: bool,
         locator: RelFileLocator,
@@ -52,8 +56,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ResolveRecoveryConflictWithTablespace(tsid)`.
-    pub fn resolve_recovery_conflict_with_tablespace(tsid: Oid) -> PgResult<()>
+    /// `ResolveRecoveryConflictWithTablespace(tsid)`. Takes the caller's
+    /// context for the transient conflicting-VXID array.
+    pub fn resolve_recovery_conflict_with_tablespace(mcx: mcx::Mcx<'_>, tsid: Oid) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -62,8 +67,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ResolveRecoveryConflictWithLock(locktag, logging_conflict)`.
+    /// `ResolveRecoveryConflictWithLock(locktag, logging_conflict)`. Takes
+    /// the caller's context for the transient conflicting-VXID array.
     pub fn resolve_recovery_conflict_with_lock(
+        mcx: mcx::Mcx<'_>,
         locktag: LOCKTAG,
         logging_conflict: bool,
     ) -> PgResult<()>
@@ -120,11 +127,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `standby_redo(record)` — replay one `RM_STANDBY_ID` record. `info` is
-    /// the raw `XLogRecGetInfo` byte (the implementation masks
-    /// `XLR_INFO_MASK`), `data` is `XLogRecGetData`, and
-    /// `has_any_block_refs` is `XLogRecHasAnyBlockRefs` (asserted false).
-    pub fn standby_redo(info: u8, data: &[u8], has_any_block_refs: bool) -> PgResult<()>
+    /// `standby_redo(record)` — replay one `RM_STANDBY_ID` record. The
+    /// implementation masks `XLR_INFO_MASK` out of `record.info` and asserts
+    /// `!record.has_any_block_refs`. Takes the caller's context for the
+    /// parsed record body.
+    pub fn standby_redo(
+        mcx: mcx::Mcx<'_>,
+        record: types_wal::RedoRecord<'_>,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -136,8 +146,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `LogAccessExclusiveLock(dbOid, relOid)`.
-    pub fn log_access_exclusive_lock(db_oid: Oid, rel_oid: Oid) -> PgResult<()>
+    /// `LogAccessExclusiveLock(dbOid, relOid)`. Takes the caller's context
+    /// for the transient WAL payload buffer.
+    pub fn log_access_exclusive_lock(mcx: mcx::Mcx<'_>, db_oid: Oid, rel_oid: Oid) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -146,8 +157,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `LogStandbyInvalidations(nmsgs, msgs, relcacheInitFileInval)`.
+    /// `LogStandbyInvalidations(nmsgs, msgs, relcacheInitFileInval)`. Takes
+    /// the caller's context for the transient WAL payload buffers.
     pub fn log_standby_invalidations(
+        mcx: mcx::Mcx<'_>,
         msgs: &[SharedInvalidationMessage],
         relcache_init_file_inval: bool,
     ) -> PgResult<()>

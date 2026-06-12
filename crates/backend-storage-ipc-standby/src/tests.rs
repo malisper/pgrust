@@ -81,6 +81,7 @@ fn guc_accessors_roundtrip() {
 
 #[test]
 fn parse_standby_locks_record() {
+    let ctx = mcx::MemoryContext::new("test");
     // xl_standby_locks { nlocks = 2 } + two xl_standby_lock entries.
     let mut data = Vec::new();
     data.extend_from_slice(&2i32.to_ne_bytes());
@@ -89,10 +90,10 @@ fn parse_standby_locks_record() {
         data.extend_from_slice(&db.to_ne_bytes());
         data.extend_from_slice(&rel.to_ne_bytes());
     }
-    let parsed = parse_xl_standby_locks(&data).unwrap();
+    let parsed = parse_xl_standby_locks(ctx.mcx(), &data).unwrap();
     assert_eq!(
-        parsed.locks,
-        vec![
+        parsed.locks.as_slice(),
+        &[
             xl_standby_lock { xid: 100, dbOid: 5, relOid: 17 },
             xl_standby_lock { xid: 200, dbOid: 0, relOid: 42 },
         ]
@@ -101,6 +102,7 @@ fn parse_standby_locks_record() {
 
 #[test]
 fn parse_running_xacts_record() {
+    let ctx = mcx::MemoryContext::new("test");
     let mut data = Vec::new();
     data.extend_from_slice(&2i32.to_ne_bytes()); // xcnt
     data.extend_from_slice(&1i32.to_ne_bytes()); // subxcnt
@@ -112,36 +114,42 @@ fn parse_running_xacts_record() {
     for xid in [901u32, 902, 903] {
         data.extend_from_slice(&xid.to_ne_bytes());
     }
-    let parsed = parse_xl_running_xacts(&data).unwrap();
+    let parsed = parse_xl_running_xacts(ctx.mcx(), &data).unwrap();
     assert_eq!(parsed.xcnt, 2);
     assert_eq!(parsed.subxcnt, 1);
     assert!(parsed.subxid_overflow);
     assert_eq!(parsed.nextXid, 1000);
     assert_eq!(parsed.oldestRunningXid, 900);
     assert_eq!(parsed.latestCompletedXid, 999);
-    assert_eq!(parsed.xids, vec![901, 902, 903]);
+    assert_eq!(parsed.xids.as_slice(), &[901, 902, 903]);
 }
 
 #[test]
 fn parse_invalidations_record() {
+    let ctx = mcx::MemoryContext::new("test");
+    let msg = SharedInvalidationMessage::Catcache(types_storage::SharedInvalCatcacheMsg {
+        id: 11,
+        dbId: 5,
+        hashValue: 0xDEAD_BEEF,
+    });
     let mut data = Vec::new();
     data.extend_from_slice(&7u32.to_ne_bytes()); // dbId
     data.extend_from_slice(&1663u32.to_ne_bytes()); // tsId
     data.push(1); // relcacheInitFileInval
     data.extend_from_slice(&[0u8; 3]);
     data.extend_from_slice(&1i32.to_ne_bytes()); // nmsgs
-    data.extend_from_slice(&[0xABu8; SHARED_INVALIDATION_MESSAGE_SIZE]);
-    let parsed = parse_xl_invalidations(&data).unwrap();
+    data.extend_from_slice(&msg.to_wire_bytes());
+    let parsed = parse_xl_invalidations(ctx.mcx(), &data).unwrap();
     assert_eq!(parsed.dbId, 7);
     assert_eq!(parsed.tsId, 1663);
     assert!(parsed.relcacheInitFileInval);
-    assert_eq!(parsed.msgs.len(), 1);
-    assert_eq!(parsed.msgs[0].raw, [0xAB; SHARED_INVALIDATION_MESSAGE_SIZE]);
+    assert_eq!(parsed.msgs.as_slice(), &[msg]);
 }
 
 #[test]
 fn parse_too_short_record_errors() {
-    assert!(parse_xl_standby_locks(&[0u8; 2]).is_err());
-    assert!(parse_xl_running_xacts(&[0u8; 10]).is_err());
-    assert!(parse_xl_invalidations(&[0u8; 10]).is_err());
+    let ctx = mcx::MemoryContext::new("test");
+    assert!(parse_xl_standby_locks(ctx.mcx(), &[0u8; 2]).is_err());
+    assert!(parse_xl_running_xacts(ctx.mcx(), &[0u8; 10]).is_err());
+    assert!(parse_xl_invalidations(ctx.mcx(), &[0u8; 10]).is_err());
 }

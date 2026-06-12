@@ -15,7 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use backend_utils_error::{elog, ereport};
-use mcx::Mcx;
+use mcx::{Mcx, PgString, PgVec};
 use types_core::xact::{
     FullTransactionId, InvalidTransactionId, MaxTransactionId, TransactionIdIsNormal,
     TransactionIdIsValid,
@@ -27,12 +27,12 @@ use types_error::{
 use types_storage::{
     xl_standby_lock, AccessExclusiveLock, ProcSignalReason, RelFileLocator,
     RunningTransactionsData, SharedInvalidationMessage, VirtualTransactionId, DEFAULT_LOCKMETHOD,
-    LOCKTAG, LOCKTAG_RELATION, LWLOCK_PROC_ARRAY, LWLOCK_XID_GEN,
-    SHARED_INVALIDATION_MESSAGE_SIZE, SUBXIDS_IN_ARRAY, SUBXIDS_MISSING,
+    LOCKTAG, LOCKTAG_RELATION, SHARED_INVALIDATION_MESSAGE_SIZE, SUBXIDS_IN_ARRAY,
+    SUBXIDS_MISSING,
 };
 use types_timeout::{EnableTimeoutParams, TimeoutId, TimeoutType};
 use types_wal::{
-    RM_STANDBY_ID, RS_INVAL_HORIZON, STANDBY_DISABLED, STANDBY_INITIALIZED,
+    RedoRecord, RM_STANDBY_ID, RS_INVAL_HORIZON, STANDBY_DISABLED, STANDBY_INITIALIZED,
     STANDBY_SNAPSHOT_PENDING, WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA, XLOG_MARK_UNIMPORTANT,
     XLR_INFO_MASK,
 };
@@ -61,15 +61,15 @@ pub const XLOG_RUNNING_XACTS: u8 = 0x10;
 pub const XLOG_INVALIDATIONS: u8 = 0x20;
 
 /// `xl_standby_locks` (standbydefs.h): `nlocks` plus the flexible lock array,
-/// as an owned `Vec`.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct XlStandbyLocks {
-    pub locks: Vec<xl_standby_lock>,
+/// context-allocated like the C decode buffer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XlStandbyLocks<'mcx> {
+    pub locks: PgVec<'mcx, xl_standby_lock>,
 }
 
 /// `xl_running_xacts` (standbydefs.h): the running-xact snapshot in WAL.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct XlRunningXacts {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XlRunningXacts<'mcx> {
     pub xcnt: i32,
     pub subxcnt: i32,
     pub subxid_overflow: bool,
@@ -77,16 +77,16 @@ pub struct XlRunningXacts {
     pub oldestRunningXid: TransactionId,
     pub latestCompletedXid: TransactionId,
     /// Length `xcnt + subxcnt`.
-    pub xids: Vec<TransactionId>,
+    pub xids: PgVec<'mcx, TransactionId>,
 }
 
 /// `xl_invalidations` (standbydefs.h).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct XlInvalidations {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XlInvalidations<'mcx> {
     pub dbId: Oid,
     pub tsId: Oid,
     pub relcacheInitFileInval: bool,
-    pub msgs: Vec<SharedInvalidationMessage>,
+    pub msgs: PgVec<'mcx, SharedInvalidationMessage>,
 }
 
 /// `MinSizeOfXactRunningXacts` — `offsetof(xl_running_xacts, xids)`: xcnt(4) +
@@ -342,6 +342,7 @@ fn WaitExceedsMaxStandbyDelay(wait_event_info: u32) -> PgResult<bool> {
 /// vxids; `still_waiting` indicates whether the startup process is still
 /// waiting for the conflict to be resolved.
 pub fn LogRecoveryConflict(
+    mcx: Mcx<'_>,
     reason: ProcSignalReason,
     wait_start: TimestampTz,
     now: TimestampTz,
@@ -358,7 +359,7 @@ pub fn LogRecoveryConflict(
     usecs %= 1000;
 
     let mut nprocs: u64 = 0;
-    let mut buf = String::new();
+    let mut buf = PgString::new_in(mcx);
 
     if let Some(list) = wait_list {
         // Construct a string of the list of the conflicting processes.
@@ -369,11 +370,10 @@ pub fn LogRecoveryConflict(
             let pid = procarray::proc_number_get_proc_pid::call(vxid.procNumber);
             // proc can be NULL if the target backend is not active.
             if pid != 0 {
-                if nprocs == 0 {
-                    buf = format!("{pid}");
-                } else {
-                    buf.push_str(&format!(", {pid}"));
+                if nprocs > 0 {
+                    buf.try_push_str(", ")?;
                 }
+                buf.try_push_str(&format!("{pid}"))?;
                 nprocs += 1;
             }
         }
@@ -388,8 +388,8 @@ pub fn LogRecoveryConflict(
         ));
         if nprocs > 0 {
             builder = builder.errdetail_log_plural(
-                format!("Conflicting process: {buf}."),
-                format!("Conflicting processes: {buf}."),
+                format!("Conflicting process: {}.", buf.as_str()),
+                format!("Conflicting processes: {}.", buf.as_str()),
                 nprocs,
             );
         }
@@ -413,6 +413,7 @@ pub fn LogRecoveryConflict(
 /// the wait is reported in the log if necessary; pass false when the caller
 /// is responsible for that reporting.
 fn ResolveRecoveryConflictWithVirtualXIDs(
+    mcx: Mcx<'_>,
     waitlist: &[VirtualTransactionId],
     reason: ProcSignalReason,
     wait_event_info: u32,
@@ -487,7 +488,7 @@ fn ResolveRecoveryConflictWithVirtualXIDs(
                         proc::deadlock_timeout::call(),
                     )
                 {
-                    LogRecoveryConflict(reason, wait_start, now, Some(&waitlist[idx..]), true)?;
+                    LogRecoveryConflict(mcx, reason, wait_start, now, Some(&waitlist[idx..]), true)?;
                     logged_recovery_conflict = true;
                 }
             }
@@ -501,6 +502,7 @@ fn ResolveRecoveryConflictWithVirtualXIDs(
     // startup process waited longer than deadlock_timeout for it.
     if logged_recovery_conflict {
         LogRecoveryConflict(
+            mcx,
             reason,
             wait_start,
             backend_utils_adt_timestamp_seams::get_current_timestamp::call(),
@@ -524,6 +526,7 @@ fn ResolveRecoveryConflictWithVirtualXIDs(
 /// already-applied WAL after a standby crash, XLOG_HEAP2_VISIBLE on an
 /// already-all-visible page, or index-deletion records).
 pub fn ResolveRecoveryConflictWithSnapshot(
+    mcx: Mcx<'_>,
     snapshotConflictHorizon: TransactionId,
     isCatalogRel: bool,
     locator: RelFileLocator,
@@ -534,8 +537,9 @@ pub fn ResolveRecoveryConflictWithSnapshot(
 
     assert!(TransactionIdIsNormal(snapshotConflictHorizon));
     let backends =
-        procarray::get_conflicting_virtual_xids::call(snapshotConflictHorizon, locator.dbOid)?;
+        procarray::get_conflicting_virtual_xids::call(mcx, snapshotConflictHorizon, locator.dbOid)?;
     ResolveRecoveryConflictWithVirtualXIDs(
+        mcx,
         &backends,
         ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
         WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT,
@@ -561,6 +565,7 @@ pub fn ResolveRecoveryConflictWithSnapshot(
 /// 32-bit xid; if the value is so old that XID wrap-around already happened
 /// on it, there can't be any snapshots that still see it.
 pub fn ResolveRecoveryConflictWithSnapshotFullXid(
+    mcx: Mcx<'_>,
     snapshotConflictHorizon: FullTransactionId,
     isCatalogRel: bool,
     locator: RelFileLocator,
@@ -569,7 +574,7 @@ pub fn ResolveRecoveryConflictWithSnapshotFullXid(
     let diff = next_xid.value.wrapping_sub(snapshotConflictHorizon.value);
     if diff < (MaxTransactionId as u64) / 2 {
         let truncated = snapshotConflictHorizon.xid();
-        ResolveRecoveryConflictWithSnapshot(truncated, isCatalogRel, locator)?;
+        ResolveRecoveryConflictWithSnapshot(mcx, truncated, isCatalogRel, locator)?;
     }
     Ok(())
 }
@@ -577,10 +582,11 @@ pub fn ResolveRecoveryConflictWithSnapshotFullXid(
 /// `ResolveRecoveryConflictWithTablespace` — standby users may currently be
 /// using this tablespace for their temporary files; ask everybody to cancel
 /// their queries immediately so the tablespace can be removed.
-pub fn ResolveRecoveryConflictWithTablespace(_tsid: Oid) -> PgResult<()> {
+pub fn ResolveRecoveryConflictWithTablespace(mcx: Mcx<'_>, _tsid: Oid) -> PgResult<()> {
     let temp_file_users =
-        procarray::get_conflicting_virtual_xids::call(InvalidTransactionId, InvalidOid)?;
+        procarray::get_conflicting_virtual_xids::call(mcx, InvalidTransactionId, InvalidOid)?;
     ResolveRecoveryConflictWithVirtualXIDs(
+        mcx,
         &temp_file_users,
         ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_TABLESPACE,
         WAIT_EVENT_RECOVERY_CONFLICT_TABLESPACE,
@@ -616,7 +622,11 @@ pub fn ResolveRecoveryConflictWithDatabase(dbid: Oid) -> PgResult<()> {
 /// logged yet even though logging is enabled; in that case, after the
 /// deadlock-check request is sent we return without waiting again so the
 /// caller can log, and are called again with `logging_conflict = false`.
-pub fn ResolveRecoveryConflictWithLock(locktag: LOCKTAG, logging_conflict: bool) -> PgResult<()> {
+pub fn ResolveRecoveryConflictWithLock(
+    mcx: Mcx<'_>,
+    locktag: LOCKTAG,
+    logging_conflict: bool,
+) -> PgResult<()> {
     assert!(in_hot_standby());
 
     let ltime = GetStandbyLimitTime();
@@ -633,12 +643,13 @@ pub fn ResolveRecoveryConflictWithLock(locktag: LOCKTAG, logging_conflict: bool)
 
     if now >= ltime && ltime != 0 {
         // We're already behind, so clear a path as quickly as possible.
-        let backends = lock::get_lock_conflicts::call(&locktag, AccessExclusiveLock)?;
+        let backends = lock::get_lock_conflicts::call(mcx, &locktag, AccessExclusiveLock)?;
 
         // Prevent ResolveRecoveryConflictWithVirtualXIDs() from reporting
         // "waiting" in PS display; the caller, WaitOnLock(), has already
         // reported that.
         ResolveRecoveryConflictWithVirtualXIDs(
+            mcx,
             &backends,
             ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_LOCK,
             PG_WAIT_LOCK | locktag.locktag_type as u32,
@@ -646,28 +657,31 @@ pub fn ResolveRecoveryConflictWithLock(locktag: LOCKTAG, logging_conflict: bool)
         )?;
     } else {
         // Wait (or wait again) until ltime, and check for deadlocks as well
-        // if we will be waiting longer than deadlock_timeout.
-        let mut timeouts: Vec<EnableTimeoutParams> = Vec::with_capacity(2);
-
-        if ltime != 0 {
-            GOT_STANDBY_LOCK_TIMEOUT.set(false);
-            timeouts.push(EnableTimeoutParams {
+        // if we will be waiting longer than deadlock_timeout. C's stack array
+        // `EnableTimeoutParams timeouts[2]`.
+        let timeouts = [
+            EnableTimeoutParams {
                 id: TimeoutId::STANDBY_LOCK_TIMEOUT,
                 r#type: TimeoutType::TMPARAM_AT,
                 delay_ms: 0,
                 fin_time: ltime,
-            });
-        }
+            },
+            EnableTimeoutParams {
+                id: TimeoutId::STANDBY_DEADLOCK_TIMEOUT,
+                r#type: TimeoutType::TMPARAM_AFTER,
+                delay_ms: proc::deadlock_timeout::call(),
+                fin_time: 0,
+            },
+        ];
+        let enabled = if ltime != 0 {
+            GOT_STANDBY_LOCK_TIMEOUT.set(false);
+            &timeouts[..]
+        } else {
+            &timeouts[1..]
+        };
 
         GOT_STANDBY_DEADLOCK_TIMEOUT.set(false);
-        timeouts.push(EnableTimeoutParams {
-            id: TimeoutId::STANDBY_DEADLOCK_TIMEOUT,
-            r#type: TimeoutType::TMPARAM_AFTER,
-            delay_ms: proc::deadlock_timeout::call(),
-            fin_time: 0,
-        });
-
-        backend_utils_misc_timeout_seams::enable_timeouts::call(&timeouts)?;
+        backend_utils_misc_timeout_seams::enable_timeouts::call(enabled)?;
     }
 
     // Wait to be signaled by the release of the Relation Lock.
@@ -681,7 +695,7 @@ pub fn ResolveRecoveryConflictWithLock(locktag: LOCKTAG, logging_conflict: bool)
         }
 
         if GOT_STANDBY_DEADLOCK_TIMEOUT.get() {
-            let backends = lock::get_lock_conflicts::call(&locktag, AccessExclusiveLock)?;
+            let backends = lock::get_lock_conflicts::call(mcx, &locktag, AccessExclusiveLock)?;
 
             // Quick exit if there's no work to be done.
             if backends.is_empty() || !backends[0].is_valid() {
@@ -746,27 +760,26 @@ pub fn ResolveRecoveryConflictWithBufferPin() -> PgResult<()> {
         )?;
     } else {
         // Wake up at ltime, and check for deadlocks as well if we will be
-        // waiting longer than deadlock_timeout.
-        let mut timeouts: Vec<EnableTimeoutParams> = Vec::with_capacity(2);
-
-        if ltime != 0 {
-            timeouts.push(EnableTimeoutParams {
+        // waiting longer than deadlock_timeout. C's stack array
+        // `EnableTimeoutParams timeouts[2]`.
+        let timeouts = [
+            EnableTimeoutParams {
                 id: TimeoutId::STANDBY_TIMEOUT,
                 r#type: TimeoutType::TMPARAM_AT,
                 delay_ms: 0,
                 fin_time: ltime,
-            });
-        }
+            },
+            EnableTimeoutParams {
+                id: TimeoutId::STANDBY_DEADLOCK_TIMEOUT,
+                r#type: TimeoutType::TMPARAM_AFTER,
+                delay_ms: proc::deadlock_timeout::call(),
+                fin_time: 0,
+            },
+        ];
+        let enabled = if ltime != 0 { &timeouts[..] } else { &timeouts[1..] };
 
         GOT_STANDBY_DEADLOCK_TIMEOUT.set(false);
-        timeouts.push(EnableTimeoutParams {
-            id: TimeoutId::STANDBY_DEADLOCK_TIMEOUT,
-            r#type: TimeoutType::TMPARAM_AFTER,
-            delay_ms: proc::deadlock_timeout::call(),
-            fin_time: 0,
-        });
-
-        backend_utils_misc_timeout_seams::enable_timeouts::call(&timeouts)?;
+        backend_utils_misc_timeout_seams::enable_timeouts::call(enabled)?;
     }
 
     // Wait to be signaled by UnpinBuffer() or for the wait to be interrupted
@@ -1025,12 +1038,9 @@ pub fn StandbyReleaseOldLocks(oldxid: TransactionId) -> PgResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Parse an `xl_standby_locks` record body.
-fn parse_xl_standby_locks(data: &[u8]) -> PgResult<XlStandbyLocks> {
+fn parse_xl_standby_locks<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<XlStandbyLocks<'mcx>> {
     let nlocks = i32::from_ne_bytes(slice4(data, 0)?) as usize;
-    let mut locks = Vec::new();
-    locks
-        .try_reserve_exact(nlocks)
-        .map_err(|_| PgError::error("out of memory"))?;
+    let mut locks = mcx::vec_with_capacity_in(mcx, nlocks)?;
     for i in 0..nlocks {
         let off = OFFSETOF_XL_STANDBY_LOCKS_LOCKS + i * SIZEOF_XL_STANDBY_LOCK;
         locks.push(xl_standby_lock {
@@ -1043,7 +1053,7 @@ fn parse_xl_standby_locks(data: &[u8]) -> PgResult<XlStandbyLocks> {
 }
 
 /// Parse an `xl_running_xacts` record body.
-fn parse_xl_running_xacts(data: &[u8]) -> PgResult<XlRunningXacts> {
+fn parse_xl_running_xacts<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<XlRunningXacts<'mcx>> {
     let xcnt = i32::from_ne_bytes(slice4(data, 0)?);
     let subxcnt = i32::from_ne_bytes(slice4(data, 4)?);
     let subxid_overflow = *data
@@ -1055,9 +1065,7 @@ fn parse_xl_running_xacts(data: &[u8]) -> PgResult<XlRunningXacts> {
     let latestCompletedXid = u32::from_ne_bytes(slice4(data, 20)?);
 
     let nxids = (xcnt + subxcnt) as usize;
-    let mut xids = Vec::new();
-    xids.try_reserve_exact(nxids)
-        .map_err(|_| PgError::error("out of memory"))?;
+    let mut xids = mcx::vec_with_capacity_in(mcx, nxids)?;
     for i in 0..nxids {
         xids.push(u32::from_ne_bytes(slice4(
             data,
@@ -1076,7 +1084,7 @@ fn parse_xl_running_xacts(data: &[u8]) -> PgResult<XlRunningXacts> {
 }
 
 /// Parse an `xl_invalidations` record body.
-fn parse_xl_invalidations(data: &[u8]) -> PgResult<XlInvalidations> {
+fn parse_xl_invalidations<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<XlInvalidations<'mcx>> {
     let dbId = u32::from_ne_bytes(slice4(data, 0)?);
     let tsId = u32::from_ne_bytes(slice4(data, 4)?);
     let relcacheInitFileInval = *data
@@ -1085,9 +1093,7 @@ fn parse_xl_invalidations(data: &[u8]) -> PgResult<XlInvalidations> {
         != 0;
     let nmsgs = i32::from_ne_bytes(slice4(data, 12)?) as usize;
 
-    let mut msgs = Vec::new();
-    msgs.try_reserve_exact(nmsgs)
-        .map_err(|_| PgError::error("out of memory"))?;
+    let mut msgs = mcx::vec_with_capacity_in(mcx, nmsgs)?;
     for i in 0..nmsgs {
         let off = MIN_SIZE_OF_INVALIDATIONS + i * SHARED_INVALIDATION_MESSAGE_SIZE;
         let raw: [u8; SHARED_INVALIDATION_MESSAGE_SIZE] = data
@@ -1095,7 +1101,10 @@ fn parse_xl_invalidations(data: &[u8]) -> PgResult<XlInvalidations> {
             .ok_or_else(|| PgError::error("invalid xl_invalidations record"))?
             .try_into()
             .expect("slice length checked");
-        msgs.push(SharedInvalidationMessage { raw });
+        msgs.push(
+            SharedInvalidationMessage::from_wire_bytes(raw)
+                .ok_or_else(|| PgError::error("invalid xl_invalidations record"))?,
+        );
     }
     Ok(XlInvalidations {
         dbId,
@@ -1111,14 +1120,16 @@ fn slice4(data: &[u8], off: usize) -> PgResult<[u8; 4]> {
         .ok_or_else(|| PgError::error("invalid RM_STANDBY_ID record: too short"))
 }
 
-/// `standby_redo(record)` — replay of an `RM_STANDBY_ID` record. `info` is
-/// the raw `XLogRecGetInfo` byte, `data` is `XLogRecGetData`, and
-/// `has_any_block_refs` is `XLogRecHasAnyBlockRefs`.
-pub fn standby_redo(info: u8, data: &[u8], has_any_block_refs: bool) -> PgResult<()> {
-    let info = info & !XLR_INFO_MASK;
+/// `standby_redo(record)` — replay of an `RM_STANDBY_ID` record. `record`
+/// carries `XLogRecGetInfo`, `XLogRecGetData`, and `XLogRecHasAnyBlockRefs`;
+/// `mcx` is the target context for the parsed record body (the C decode
+/// happens in the redo loop's per-record context).
+pub fn standby_redo(mcx: Mcx<'_>, record: RedoRecord<'_>) -> PgResult<()> {
+    let info = record.info & !XLR_INFO_MASK;
+    let data = record.data;
 
     // Backup blocks are not used in standby records.
-    assert!(!has_any_block_refs);
+    assert!(!record.has_any_block_refs);
 
     // Do nothing if we're not in hot standby mode.
     if xlogutils::standby_state::call() == STANDBY_DISABLED {
@@ -1126,12 +1137,12 @@ pub fn standby_redo(info: u8, data: &[u8], has_any_block_refs: bool) -> PgResult
     }
 
     if info == XLOG_STANDBY_LOCK {
-        let xlrec = parse_xl_standby_locks(data)?;
+        let xlrec = parse_xl_standby_locks(mcx, data)?;
         for l in &xlrec.locks {
             StandbyAcquireAccessExclusiveLock(l.xid, l.dbOid, l.relOid)?;
         }
     } else if info == XLOG_RUNNING_XACTS {
-        let xlrec = parse_xl_running_xacts(data)?;
+        let xlrec = parse_xl_running_xacts(mcx, data)?;
         let running = RunningTransactionsData {
             xcnt: xlrec.xcnt,
             subxcnt: xlrec.subxcnt,
@@ -1155,7 +1166,7 @@ pub fn standby_redo(info: u8, data: &[u8], has_any_block_refs: bool) -> PgResult
         // cadence, making this a convenient location to report stats.
         backend_utils_activity_pgstat_seams::pgstat_report_stat::call(true)?;
     } else if info == XLOG_INVALIDATIONS {
-        let xlrec = parse_xl_invalidations(data)?;
+        let xlrec = parse_xl_invalidations(mcx, data)?;
         backend_utils_cache_inval_seams::process_committed_invalidation_messages::call(
             &xlrec.msgs,
             xlrec.relcacheInitFileInval,
@@ -1182,36 +1193,30 @@ pub fn LogStandbySnapshot(mcx: Mcx<'_>) -> PgResult<XLogRecPtr> {
     // Get details of any AccessExclusiveLocks being held at the moment.
     let locks = lock::get_running_transaction_locks::call(mcx)?;
     if !locks.is_empty() {
-        LogAccessExclusiveLocks(&locks)?;
+        LogAccessExclusiveLocks(mcx, &locks)?;
     }
     drop(locks); // pfree(locks)
 
     // Log details of all in-progress transactions. This should be the last
     // record we write, because the standby will open up when it sees this.
-    let running = procarray::get_running_transaction_data::call()?;
+    //
+    // GetRunningTransactionData() runs the callback with ProcArrayLock and
+    // XidGenLock held. For Hot Standby ProcArrayLock can be released before
+    // inserting the WAL record because ProcArrayApplyRecoveryInfo() rechecks
+    // the commit status using the clog. For logical decoding the lock can't
+    // be released early because the clog might be "in the future" from the
+    // POV of the historic snapshot, which would allow waiting for the end of
+    // a transaction that according to the WAL committed before the
+    // xl_running_xacts record. The owner releases whatever is still held
+    // (ProcArrayLock on the logical path, then XidGenLock) when the callback
+    // returns, on the error path included.
+    procarray::get_running_transaction_data::call(&mut |running, held_locks| {
+        if xlog::wal_level::call() < WAL_LEVEL_LOGICAL {
+            held_locks.release_proc_array_lock()?;
+        }
 
-    // GetRunningTransactionData() acquired ProcArrayLock; release it. For
-    // Hot Standby this can happen before inserting the WAL record because
-    // ProcArrayApplyRecoveryInfo() rechecks the commit status using the
-    // clog. For logical decoding the lock can't be released early because
-    // the clog might be "in the future" from the POV of the historic
-    // snapshot, which would allow waiting for the end of a transaction that
-    // according to the WAL committed before the xl_running_xacts record.
-    if xlog::wal_level::call() < WAL_LEVEL_LOGICAL {
-        backend_storage_lmgr_lwlock_seams::lwlock_release_builtin::call(LWLOCK_PROC_ARRAY)?;
-    }
-
-    let recptr = LogCurrentRunningXacts(&running)?;
-
-    // Release lock if we kept it longer ...
-    if xlog::wal_level::call() >= WAL_LEVEL_LOGICAL {
-        backend_storage_lmgr_lwlock_seams::lwlock_release_builtin::call(LWLOCK_PROC_ARRAY)?;
-    }
-
-    // GetRunningTransactionData() acquired XidGenLock, we must release it.
-    backend_storage_lmgr_lwlock_seams::lwlock_release_builtin::call(LWLOCK_XID_GEN)?;
-
-    Ok(recptr)
+        LogCurrentRunningXacts(mcx, running)
+    })
 }
 
 /// `LogCurrentRunningXacts` — record an enhanced snapshot of running
@@ -1219,12 +1224,15 @@ pub fn LogStandbySnapshot(mcx: Mcx<'_>) -> PgResult<XLogRecPtr> {
 /// `xl_running_xacts` are similar, but the latter is the contiguous WAL
 /// layout assembled here. The record is marked as not important for
 /// durability, to avoid triggering superfluous checkpoint/archiving activity.
-fn LogCurrentRunningXacts(CurrRunningXacts: &RunningTransactionsData) -> PgResult<XLogRecPtr> {
+fn LogCurrentRunningXacts(
+    mcx: Mcx<'_>,
+    CurrRunningXacts: &RunningTransactionsData<'_>,
+) -> PgResult<XLogRecPtr> {
     let subxid_overflow = CurrRunningXacts.subxid_status != SUBXIDS_IN_ARRAY;
 
     // xl_running_xacts up to MinSizeOfXactRunningXacts (the flexible xids
     // array follows).
-    let mut header = Vec::with_capacity(MIN_SIZE_OF_XACT_RUNNING_XACTS);
+    let mut header: PgVec<u8> = mcx::vec_with_capacity_in(mcx, MIN_SIZE_OF_XACT_RUNNING_XACTS)?;
     header.extend_from_slice(&CurrRunningXacts.xcnt.to_ne_bytes());
     header.extend_from_slice(&CurrRunningXacts.subxcnt.to_ne_bytes());
     header.push(subxid_overflow as u8);
@@ -1233,21 +1241,27 @@ fn LogCurrentRunningXacts(CurrRunningXacts: &RunningTransactionsData) -> PgResul
     header.extend_from_slice(&CurrRunningXacts.oldestRunningXid.to_ne_bytes());
     header.extend_from_slice(&CurrRunningXacts.latestCompletedXid.to_ne_bytes());
 
-    xloginsert::xlog_begin_insert::call();
-    xloginsert::xlog_set_record_flags::call(XLOG_MARK_UNIMPORTANT);
-    xloginsert::xlog_register_data::call(&header);
-
     // array of TransactionIds
-    if CurrRunningXacts.xcnt > 0 {
+    let recptr = if CurrRunningXacts.xcnt > 0 {
         let nxids = (CurrRunningXacts.xcnt + CurrRunningXacts.subxcnt) as usize;
-        let mut xids = Vec::with_capacity(nxids * 4);
+        let mut xids: PgVec<u8> = mcx::vec_with_capacity_in(mcx, nxids * 4)?;
         for &xid in CurrRunningXacts.xids.iter().take(nxids) {
             xids.extend_from_slice(&xid.to_ne_bytes());
         }
-        xloginsert::xlog_register_data::call(&xids);
-    }
-
-    let recptr = xloginsert::xlog_insert::call(RM_STANDBY_ID, XLOG_RUNNING_XACTS)?;
+        xloginsert::xlog_insert::call(
+            RM_STANDBY_ID,
+            XLOG_RUNNING_XACTS,
+            XLOG_MARK_UNIMPORTANT,
+            &[&header, &xids],
+        )?
+    } else {
+        xloginsert::xlog_insert::call(
+            RM_STANDBY_ID,
+            XLOG_RUNNING_XACTS,
+            XLOG_MARK_UNIMPORTANT,
+            &[&header],
+        )?
+    };
 
     if subxid_overflow {
         let _ = elog(
@@ -1290,36 +1304,36 @@ fn LogCurrentRunningXacts(CurrRunningXacts: &RunningTransactionsData) -> PgResul
 /// `LogAccessExclusiveLocks` — wholesale logging of AccessExclusiveLocks.
 /// Other lock types need not be logged, as described in
 /// backend/storage/lmgr/README.
-fn LogAccessExclusiveLocks(locks: &[xl_standby_lock]) -> PgResult<()> {
+fn LogAccessExclusiveLocks(mcx: Mcx<'_>, locks: &[xl_standby_lock]) -> PgResult<()> {
     // xl_standby_locks up to offsetof(xl_standby_locks, locks): the nlocks.
     let header = (locks.len() as i32).to_ne_bytes();
 
-    let mut body = Vec::with_capacity(locks.len() * SIZEOF_XL_STANDBY_LOCK);
+    let mut body: PgVec<u8> = mcx::vec_with_capacity_in(mcx, locks.len() * SIZEOF_XL_STANDBY_LOCK)?;
     for l in locks {
         body.extend_from_slice(&l.xid.to_ne_bytes());
         body.extend_from_slice(&l.dbOid.to_ne_bytes());
         body.extend_from_slice(&l.relOid.to_ne_bytes());
     }
 
-    xloginsert::xlog_begin_insert::call();
-    xloginsert::xlog_register_data::call(&header);
-    xloginsert::xlog_register_data::call(&body);
-    xloginsert::xlog_set_record_flags::call(XLOG_MARK_UNIMPORTANT);
-
-    xloginsert::xlog_insert::call(RM_STANDBY_ID, XLOG_STANDBY_LOCK)?;
+    xloginsert::xlog_insert::call(
+        RM_STANDBY_ID,
+        XLOG_STANDBY_LOCK,
+        XLOG_MARK_UNIMPORTANT,
+        &[&header, &body],
+    )?;
     Ok(())
 }
 
 /// `LogAccessExclusiveLock(dbOid, relOid)` — individual logging of an
 /// AccessExclusiveLock, for use during `LockAcquire()`.
-pub fn LogAccessExclusiveLock(dbOid: Oid, relOid: Oid) -> PgResult<()> {
+pub fn LogAccessExclusiveLock(mcx: Mcx<'_>, dbOid: Oid, relOid: Oid) -> PgResult<()> {
     let xlrec = xl_standby_lock {
         xid: xact::get_current_transaction_id::call()?,
         dbOid,
         relOid,
     };
 
-    LogAccessExclusiveLocks(&[xlrec])?;
+    LogAccessExclusiveLocks(mcx, &[xlrec])?;
     xact::set_my_xact_flags_acquired_access_exclusive_lock::call();
     Ok(())
 }
@@ -1339,27 +1353,26 @@ pub fn LogAccessExclusiveLockPrepare() -> PgResult<()> {
 /// for invalidations. Currently only used for commits without an xid that
 /// contain invalidations.
 pub fn LogStandbyInvalidations(
+    mcx: Mcx<'_>,
     msgs: &[SharedInvalidationMessage],
     relcacheInitFileInval: bool,
 ) -> PgResult<()> {
     // xl_invalidations up to MinSizeOfInvalidations: dbId, tsId,
     // relcacheInitFileInval (+3 bytes padding), nmsgs.
-    let mut header = Vec::with_capacity(MIN_SIZE_OF_INVALIDATIONS);
+    let mut header: PgVec<u8> = mcx::vec_with_capacity_in(mcx, MIN_SIZE_OF_INVALIDATIONS)?;
     header.extend_from_slice(&globals::my_database_id::call().to_ne_bytes());
     header.extend_from_slice(&globals::my_database_table_space::call().to_ne_bytes());
     header.push(relcacheInitFileInval as u8);
     header.extend_from_slice(&[0u8; 3]); // padding before nmsgs
     header.extend_from_slice(&(msgs.len() as i32).to_ne_bytes());
 
-    let mut body = Vec::with_capacity(msgs.len() * SHARED_INVALIDATION_MESSAGE_SIZE);
+    let mut body: PgVec<u8> =
+        mcx::vec_with_capacity_in(mcx, msgs.len() * SHARED_INVALIDATION_MESSAGE_SIZE)?;
     for msg in msgs {
-        body.extend_from_slice(&msg.raw);
+        body.extend_from_slice(&msg.to_wire_bytes());
     }
 
-    xloginsert::xlog_begin_insert::call();
-    xloginsert::xlog_register_data::call(&header);
-    xloginsert::xlog_register_data::call(&body);
-    xloginsert::xlog_insert::call(RM_STANDBY_ID, XLOG_INVALIDATIONS)?;
+    xloginsert::xlog_insert::call(RM_STANDBY_ID, XLOG_INVALIDATIONS, 0, &[&header, &body])?;
     Ok(())
 }
 
