@@ -81,6 +81,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-ifaddr"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "backend-libpq-pqformat-seams"
 version = "0.0.0"
 dependencies = [
