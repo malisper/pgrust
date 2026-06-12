@@ -909,6 +909,9 @@ pub fn dsm_detach_all() -> PgResult<()> {
 
     if !control_address.is_null() {
         let mut impl_private = DSM_CONTROL_IMPL_PRIVATE.with(|c| c.get());
+        // C passes a *local* copy of dsm_control here, so the dsm_control
+        // global itself is deliberately left unchanged (stale) — only the
+        // impl_private and mapped_size globals are updated in place.
         let mut address = control_address;
         let mut mapped_size = DSM_CONTROL_MAPPED_SIZE.with(|c| c.get());
         let detached = dsm_impl_op(
@@ -921,7 +924,6 @@ pub fn dsm_detach_all() -> PgResult<()> {
             ERROR,
         );
         DSM_CONTROL_IMPL_PRIVATE.with(|c| c.set(impl_private));
-        DSM_CONTROL.with(|c| c.set(address as *mut dsm_control_header));
         DSM_CONTROL_MAPPED_SIZE.with(|c| c.set(mapped_size));
         detached?;
     }
