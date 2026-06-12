@@ -10,6 +10,7 @@ pub fn init_all() {
     backend_access_hashvalidate::init_seams();
     backend_access_transam_xlogstats::init_seams();
     backend_executor_nodeMaterial::init_seams();
+    backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();
     backend_port_atomics::init_seams();
     backend_postmaster_interrupt::init_seams();
