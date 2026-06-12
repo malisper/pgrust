@@ -3,9 +3,34 @@
 version = 4
 
 [[package]]
+name = "backend-access-common-heaptuple"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heaptoast-seams",
+ "backend-utils-adt-misc2-seams",
+ "types",
+]
+
+[[package]]
+name = "backend-access-heap-heaptoast-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
+ "types",
+]
+
+[[package]]
+name = "backend-utils-adt-misc2-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types",
 ]
 
@@ -48,6 +73,7 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-storage-page-checksum",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
