@@ -6,18 +6,19 @@
 //! Each `*_desc` appends a human-readable rendering of one WAL record to the
 //! caller's `StringInfo`; each `*_identify` names the record subtype. The C
 //! signature `void f(StringInfo buf, XLogReaderState *record)` becomes
-//! `fn f(buf: &mut PgString<'_>, info: u8, data: &[u8]) -> PgResult<()>`:
+//! `fn f(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()>`:
 //!
 //! - `buf` is the caller's context-allocated string (the `StringInfo` living
 //!   in `CurrentMemoryContext`); appends are fallible because C's
 //!   `appendStringInfo` can `ereport(ERROR)` on OOM.
-//! - `record` is decomposed into `info` (`XLogRecGetInfo(record)`, masked
-//!   inside each function exactly where the C masks it) and `data`
-//!   (`XLogRecGetData(record)`, with `XLogRecGetDataLen` == `data.len()`).
-//! - Record payloads arrive as raw bytes; field reads mirror the C's
-//!   struct-cast/`memcpy` reads at the `#[repr(C)]` offsets. A payload too
-//!   short for a read is impossible for well-formed WAL (C would read
-//!   garbage); here it raises `ERRCODE_DATA_CORRUPTED`.
+//! - `record` is `types-wal`'s `DecodedXLogRecord` view: `record.info()` is
+//!   `XLogRecGetInfo(record)` (masked inside each function exactly where the
+//!   C masks it) and `record.main_data()` is `XLogRecGetData(record)` (with
+//!   `XLogRecGetDataLen` == `.len()`).
+//! - Where the C casts the payload to an `xl_*` struct, the typed structs in
+//!   `types_wal::rmgrdesc` parse it with bounds-checked `from_bytes`. A
+//!   payload too short for its record is impossible for well-formed WAL (C
+//!   would read garbage); here it raises `ERRCODE_DATA_CORRUPTED`.
 //!
 //! `*_identify` returns `Option<&'static str>` (C `const char *` / NULL).
 

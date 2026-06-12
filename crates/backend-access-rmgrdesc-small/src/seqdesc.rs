@@ -2,23 +2,29 @@
 
 use mcx::PgString;
 use types_core::{uint8, PgResult};
-use types_wal::XLR_INFO_MASK;
+use types_wal::{xl_seq_rec, DecodedXLogRecord, XLR_INFO_MASK};
 
-use crate::util::{appendf, read_u32};
+use crate::util::{appendf, record_truncated};
 
 /// `XLOG_SEQ_LOG` (commands/sequence.h).
 pub const XLOG_SEQ_LOG: uint8 = 0x00;
 
-/// `seq_desc`. Payload: `xl_seq_rec { RelFileLocator locator; ... }` with
-/// `RelFileLocator { Oid spcOid; Oid dbOid; RelFileNumber relNumber; }`.
-pub fn seq_desc(buf: &mut PgString<'_>, info: uint8, data: &[u8]) -> PgResult<()> {
-    let info = info & !XLR_INFO_MASK;
+/// `seq_desc`. The payload is an [`xl_seq_rec`]; only its `RelFileLocator`
+/// is printed.
+pub fn seq_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
+    let data = record.main_data();
+    let info = record.info() & !XLR_INFO_MASK;
 
     if info == XLOG_SEQ_LOG {
-        let spc_oid = read_u32(data, 0, "xl_seq_rec.locator.spcOid")?;
-        let db_oid = read_u32(data, 4, "xl_seq_rec.locator.dbOid")?;
-        let rel_number = read_u32(data, 8, "xl_seq_rec.locator.relNumber")?;
-        appendf!(buf, "rel {spc_oid}/{db_oid}/{rel_number}")?;
+        let xlrec = xl_seq_rec::from_bytes(data).ok_or_else(|| record_truncated("xl_seq_rec"))?;
+        let locator = xlrec.locator();
+        appendf!(
+            buf,
+            "rel {}/{}/{}",
+            locator.spc_oid(),
+            locator.db_oid(),
+            locator.rel_number()
+        )?;
     }
 
     Ok(())

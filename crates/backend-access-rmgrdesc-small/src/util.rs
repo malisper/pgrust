@@ -1,6 +1,6 @@
 //! Shared helpers: fallible formatted appends into the caller's `PgString`
-//! (the `appendStringInfo` analog) and bounds-checked native-endian field
-//! reads out of a raw record payload (the struct-cast/`memcpy` analog).
+//! (the `appendStringInfo` analog) and bounds-checked native-endian scalar
+//! reads for the records that carry bare values rather than an `xl_*` struct.
 
 use core::fmt;
 
@@ -40,7 +40,21 @@ macro_rules! appendf {
 }
 pub(crate) use appendf;
 
-/// The record payload is shorter than the field being read. Unreachable for
+/// `%s` over bytes that are not guaranteed UTF-8: stream them into `buf`
+/// lossily (invalid sequences become U+FFFD) chunk by chunk through the
+/// fallible API, never materializing an owned `String` through the
+/// infallible global allocator.
+pub(crate) fn append_lossy(buf: &mut PgString<'_>, bytes: &[u8]) -> PgResult<()> {
+    for chunk in bytes.utf8_chunks() {
+        buf.try_push_str(chunk.valid())?;
+        if !chunk.invalid().is_empty() {
+            buf.try_push(char::REPLACEMENT_CHARACTER)?;
+        }
+    }
+    Ok(())
+}
+
+/// The record payload is shorter than the record being read. Unreachable for
 /// well-formed WAL (the C reads whatever bytes follow the record); loud
 /// `ERRCODE_DATA_CORRUPTED` beats reading garbage.
 pub(crate) fn record_truncated(what: &'static str) -> PgError {
@@ -58,27 +72,10 @@ fn bytes_at<const N: usize>(
     Ok(bytes.try_into().expect("slice length is N"))
 }
 
-pub(crate) fn read_u8(data: &[u8], offset: usize, what: &'static str) -> PgResult<u8> {
-    Ok(u8::from_ne_bytes(bytes_at(data, offset, what)?))
-}
-
 pub(crate) fn read_u16(data: &[u8], offset: usize, what: &'static str) -> PgResult<u16> {
     Ok(u16::from_ne_bytes(bytes_at(data, offset, what)?))
 }
 
-pub(crate) fn read_u32(data: &[u8], offset: usize, what: &'static str) -> PgResult<u32> {
-    Ok(u32::from_ne_bytes(bytes_at(data, offset, what)?))
-}
-
-pub(crate) fn read_i32(data: &[u8], offset: usize, what: &'static str) -> PgResult<i32> {
-    Ok(i32::from_ne_bytes(bytes_at(data, offset, what)?))
-}
-
 pub(crate) fn read_i64(data: &[u8], offset: usize, what: &'static str) -> PgResult<i64> {
     Ok(i64::from_ne_bytes(bytes_at(data, offset, what)?))
-}
-
-/// Read a C `Size` (native `size_t`).
-pub(crate) fn read_size(data: &[u8], offset: usize, what: &'static str) -> PgResult<usize> {
-    Ok(usize::from_ne_bytes(bytes_at(data, offset, what)?))
 }

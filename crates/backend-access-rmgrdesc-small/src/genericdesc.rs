@@ -3,14 +3,15 @@
 
 use mcx::PgString;
 use types_core::{uint8, PgResult};
+use types_wal::DecodedXLogRecord;
 
 use crate::util::{appendf, read_u16};
 
 /// `generic_desc` — write the page regions this record overrides. The payload
 /// is a sequence of `(OffsetNumber offset, OffsetNumber length, char
-/// data[length])` region entries; the record carries no `info` subtypes, so
-/// only the data is taken (C reads `XLogRecGetData`/`XLogRecGetDataLen`).
-pub fn generic_desc(buf: &mut PgString<'_>, data: &[u8]) -> PgResult<()> {
+/// data[length])` region entries; generic records carry no `info` subtypes.
+pub fn generic_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
+    let data = record.main_data();
     let end = data.len();
     let mut ptr = 0usize;
 

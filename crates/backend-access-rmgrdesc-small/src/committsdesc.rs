@@ -3,28 +3,28 @@
 
 use mcx::PgString;
 use types_core::{uint8, PgResult};
-use types_wal::XLR_INFO_MASK;
+use types_wal::{xl_commit_ts_truncate, DecodedXLogRecord, XLR_INFO_MASK};
 
-use crate::util::{appendf, read_i64, read_u32};
+use crate::util::{appendf, read_i64, record_truncated};
 
 /// `COMMIT_TS_ZEROPAGE` (access/commit_ts.h).
 pub const COMMIT_TS_ZEROPAGE: uint8 = 0x00;
 /// `COMMIT_TS_TRUNCATE` (access/commit_ts.h).
 pub const COMMIT_TS_TRUNCATE: uint8 = 0x10;
 
-/// `commit_ts_desc`. Payloads: `COMMIT_TS_ZEROPAGE` carries a bare
-/// `int64 pageno`; `COMMIT_TS_TRUNCATE` carries `xl_commit_ts_truncate
-/// { int64 pageno; TransactionId oldestXid; }`.
-pub fn commit_ts_desc(buf: &mut PgString<'_>, info: uint8, data: &[u8]) -> PgResult<()> {
-    let info = info & !XLR_INFO_MASK;
+/// `commit_ts_desc`. `COMMIT_TS_ZEROPAGE` carries a bare `int64 pageno`;
+/// `COMMIT_TS_TRUNCATE` carries an [`xl_commit_ts_truncate`].
+pub fn commit_ts_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> PgResult<()> {
+    let data = record.main_data();
+    let info = record.info() & !XLR_INFO_MASK;
 
     if info == COMMIT_TS_ZEROPAGE {
         let pageno = read_i64(data, 0, "commit_ts zeropage pageno")?;
         appendf!(buf, "{pageno}")?;
     } else if info == COMMIT_TS_TRUNCATE {
-        let pageno = read_i64(data, 0, "xl_commit_ts_truncate.pageno")?;
-        let oldest_xid = read_u32(data, 8, "xl_commit_ts_truncate.oldestXid")?;
-        appendf!(buf, "pageno {pageno}, oldestXid {oldest_xid}")?;
+        let trunc = xl_commit_ts_truncate::from_bytes(data)
+            .ok_or_else(|| record_truncated("xl_commit_ts_truncate"))?;
+        appendf!(buf, "pageno {}, oldestXid {}", trunc.pageno(), trunc.oldest_xid())?;
     }
 
     Ok(())
