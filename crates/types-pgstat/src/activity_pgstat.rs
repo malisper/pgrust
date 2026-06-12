@@ -9,6 +9,10 @@
 use types_core::primitive::TimestampTz;
 use types_storage::LWLock;
 
+/// `PgStat_Kind` (`pgstat_kind.h`): `typedef uint32 PgStat_Kind;` — the id of
+/// a cumulative-statistics kind (builtin or custom).
+pub type PgStat_Kind = u32;
+
 /// `PgStat_Counter` (`pgstat.h`): `typedef int64 PgStat_Counter;`.
 pub type PgStat_Counter = i64;
 

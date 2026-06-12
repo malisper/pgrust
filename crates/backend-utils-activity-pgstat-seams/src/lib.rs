@@ -69,6 +69,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_clear_snapshot()` (`pgstat.c`) — discard any materialized stats
+    /// snapshot: reset the fixed/custom validity flags, drop the snapshot hash
+    /// and its memory context, and forward the reset to `backend_status.c`.
+    /// Frees only; infallible.
+    pub fn pgstat_clear_snapshot()
+);
+
+seam_core::seam!(
+    /// `pgstat_reset(kind, dboid, objid)` (`pgstat.c`) — reset one
+    /// variable-numbered stats entry to zero (and, for kinds not accessed
+    /// across databases, touch the database entry's reset timestamp). `Err`
+    /// carries the `ereport(ERROR)`s reachable through
+    /// `pgstat_get_entry_ref_locked` (palloc/dsa out-of-memory,
+    /// `LWLockAcquire`'s `too many LWLocks taken`).
+    pub fn pgstat_reset(
+        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+        dboid: types_core::Oid,
+        objid: u64,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `(pgstat_get_kind_info(kind))->name` (`pgstat.c`) — the human-readable
+    /// name of a stats kind (builtin table `pgstat_kind_builtin_infos[]` or
+    /// the custom-kind registry; both hold `'static`-equivalent struct
+    /// pointers). Callers only consult it for kinds that already resolved to
+    /// a live entry, so the lookup cannot miss; infallible.
+    pub fn pgstat_get_kind_name(kind: types_pgstat::activity_pgstat::PgStat_Kind) -> &'static str
+);
+
+seam_core::seam!(
     /// elog.c's FATAL path lets the cumulative stats system know the session
     /// terminated abnormally: `if (pgStatSessionEndCause == DISCONNECT_NORMAL)
     /// pgStatSessionEndCause = DISCONNECT_FATAL;` (the global lives in

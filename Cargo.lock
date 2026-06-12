@@ -926,6 +926,17 @@ name = "backend-utils-activity-pgstat-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+]
+
+[[package]]
+name = "backend-utils-activity-shmem-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
  "types-error",
  "types-pgstat",
 ]
@@ -973,6 +984,21 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+]
+
+[[package]]
+name = "backend-utils-activity-xact"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-shmem-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-pgstat",
 ]
 
 [[package]]
@@ -1522,6 +1548,7 @@ dependencies = [
  "backend-storage-lmgr-lwlock",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
+ "backend-utils-activity-xact",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
