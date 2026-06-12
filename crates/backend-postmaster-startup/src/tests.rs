@@ -91,11 +91,11 @@ fn install_mocks() -> MutexGuard<'static, ()> {
         backend_access_transam_xlogrecovery_seams::wakeup_recovery::set(|| {
             record(Call::WakeupRecovery)
         });
-        backend_access_transam_xlogrecovery_seams::primary_conninfo::set(|| {
-            with_mock(|m| m.conninfo.clone())
+        backend_access_transam_xlogrecovery_seams::primary_conninfo::set(|mcx| {
+            with_mock(|m| mcx::PgString::from_str_in(&m.conninfo, mcx))
         });
-        backend_access_transam_xlogrecovery_seams::primary_slot_name::set(|| {
-            with_mock(|m| m.slotname.clone())
+        backend_access_transam_xlogrecovery_seams::primary_slot_name::set(|mcx| {
+            with_mock(|m| mcx::PgString::from_str_in(&m.slotname, mcx))
         });
         backend_access_transam_xlogrecovery_seams::wal_receiver_create_temp_slot::set(|| {
             with_mock(|m| m.temp_slot)
@@ -241,8 +241,9 @@ fn shutdown_handler_outside_restore_sets_flag_then_interrupts_exit() {
     StartupProcShutdownHandler(libc::SIGTERM);
     assert!(SHUTDOWN_REQUESTED.get());
     assert_eq!(calls(), vec![Call::WakeupRecovery]);
+    let ctx = mcx::MemoryContext::new("test");
     assert_exits_with(1, || {
-        let _ = ProcessStartupProcInterrupts();
+        let _ = ProcessStartupProcInterrupts(ctx.mcx());
     });
 }
 
@@ -270,7 +271,8 @@ fn sighup_reload_without_changes_does_not_restart_walreceiver() {
         m.slotname = "slot".to_string();
     });
     GOT_SIGHUP.set(true);
-    ProcessStartupProcInterrupts().unwrap();
+    let ctx = mcx::MemoryContext::new("test");
+    ProcessStartupProcInterrupts(ctx.mcx()).unwrap();
     assert!(!GOT_SIGHUP.get());
     assert_eq!(calls(), vec![Call::ProcessConfigFile]);
 }
@@ -283,7 +285,8 @@ fn sighup_reload_with_conninfo_change_restarts_walreceiver() {
         m.reload_sets_conninfo = Some("host=new".to_string());
     });
     GOT_SIGHUP.set(true);
-    ProcessStartupProcInterrupts().unwrap();
+    let ctx = mcx::MemoryContext::new("test");
+    ProcessStartupProcInterrupts(ctx.mcx()).unwrap();
     assert_eq!(
         calls(),
         vec![Call::ProcessConfigFile, Call::RequestWalRcvRestart]
@@ -298,7 +301,8 @@ fn sighup_reload_with_slotname_change_restarts_walreceiver() {
         m.reload_sets_slotname = Some("new_slot".to_string());
     });
     GOT_SIGHUP.set(true);
-    ProcessStartupProcInterrupts().unwrap();
+    let ctx = mcx::MemoryContext::new("test");
+    ProcessStartupProcInterrupts(ctx.mcx()).unwrap();
     assert_eq!(
         calls(),
         vec![Call::ProcessConfigFile, Call::RequestWalRcvRestart]
@@ -312,7 +316,8 @@ fn temp_slot_change_with_empty_slot_name_restarts_walreceiver() {
     // is empty and unchanged => walreceiver restart.
     with_mock(|m| m.reload_sets_temp_slot = Some(true));
     GOT_SIGHUP.set(true);
-    ProcessStartupProcInterrupts().unwrap();
+    let ctx = mcx::MemoryContext::new("test");
+    ProcessStartupProcInterrupts(ctx.mcx()).unwrap();
     assert_eq!(
         calls(),
         vec![Call::ProcessConfigFile, Call::RequestWalRcvRestart]
@@ -328,7 +333,8 @@ fn temp_slot_change_is_ignored_when_slot_name_configured() {
         m.reload_sets_temp_slot = Some(true);
     });
     GOT_SIGHUP.set(true);
-    ProcessStartupProcInterrupts().unwrap();
+    let ctx = mcx::MemoryContext::new("test");
+    ProcessStartupProcInterrupts(ctx.mcx()).unwrap();
     assert_eq!(calls(), vec![Call::ProcessConfigFile]);
 }
 
@@ -339,7 +345,8 @@ fn barrier_and_memory_context_interrupts_are_serviced() {
         m.barrier_pending = true;
         m.log_memctx_pending = true;
     });
-    ProcessStartupProcInterrupts().unwrap();
+    let ctx = mcx::MemoryContext::new("test");
+    ProcessStartupProcInterrupts(ctx.mcx()).unwrap();
     assert_eq!(calls(), vec![Call::ProcSignalBarrier, Call::LogMemoryContext]);
 }
 

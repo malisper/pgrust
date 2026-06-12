@@ -15,9 +15,10 @@
 
 use std::cell::Cell;
 
+use mcx::Mcx;
 use types_core::TimestampTz;
 use types_error::PgResult;
-use types_signal::{disposition_from_handler, SigDisposition};
+use types_signal::SigDisposition;
 use types_timeout::{STANDBY_DEADLOCK_TIMEOUT, STANDBY_LOCK_TIMEOUT, STANDBY_TIMEOUT,
                     STARTUP_PROGRESS_TIMEOUT};
 
@@ -114,11 +115,11 @@ fn StartupProcShutdownHandler(_postgres_signal_arg: i32) {
 ///
 /// If one of the critical walreceiver options has changed, flag xlog.c to
 /// restart it.
-fn StartupRereadConfig() -> PgResult<()> {
-    // char *conninfo = pstrdup(PrimaryConnInfo); — the seam returns an owned
-    // snapshot of the GUC string, serving the same purpose as the pstrdup.
-    let conninfo = backend_access_transam_xlogrecovery_seams::primary_conninfo::call();
-    let slotname = backend_access_transam_xlogrecovery_seams::primary_slot_name::call();
+fn StartupRereadConfig(mcx: Mcx<'_>) -> PgResult<()> {
+    // char *conninfo = pstrdup(PrimaryConnInfo); — copied into mcx, the
+    // caller's current context, exactly as the C pstrdup.
+    let conninfo = backend_access_transam_xlogrecovery_seams::primary_conninfo::call(mcx)?;
+    let slotname = backend_access_transam_xlogrecovery_seams::primary_slot_name::call(mcx)?;
     let temp_slot =
         backend_access_transam_xlogrecovery_seams::wal_receiver_create_temp_slot::call();
     let mut temp_slot_changed = false;
@@ -126,14 +127,14 @@ fn StartupRereadConfig() -> PgResult<()> {
     backend_utils_misc_guc_seams::process_config_file::call(types_guc::PGC_SIGHUP)?;
 
     let conninfo_changed =
-        conninfo != backend_access_transam_xlogrecovery_seams::primary_conninfo::call();
+        conninfo != backend_access_transam_xlogrecovery_seams::primary_conninfo::call(mcx)?;
     let slotname_changed =
-        slotname != backend_access_transam_xlogrecovery_seams::primary_slot_name::call();
+        slotname != backend_access_transam_xlogrecovery_seams::primary_slot_name::call(mcx)?;
 
     // wal_receiver_create_temp_slot is used only when we have no slot
     // configured. We do not need to track this change if it has no effect.
     if !slotname_changed
-        && backend_access_transam_xlogrecovery_seams::primary_slot_name::call().is_empty()
+        && backend_access_transam_xlogrecovery_seams::primary_slot_name::call(mcx)?.is_empty()
     {
         temp_slot_changed = temp_slot
             != backend_access_transam_xlogrecovery_seams::wal_receiver_create_temp_slot::call();
@@ -165,12 +166,13 @@ fn postmaster_poll_due() -> bool {
 }
 
 /// `ProcessStartupProcInterrupts()` — process various signals that might be
-/// sent to the startup process.
-pub fn ProcessStartupProcInterrupts() -> PgResult<()> {
+/// sent to the startup process. `mcx` is the caller's current context, used
+/// for the transient GUC-snapshot copies in the config-reload path.
+pub fn ProcessStartupProcInterrupts(mcx: Mcx<'_>) -> PgResult<()> {
     // Process any requests or signals received recently.
     if GOT_SIGHUP.get() {
         GOT_SIGHUP.set(false);
-        StartupRereadConfig()?;
+        StartupRereadConfig(mcx)?;
     }
 
     // Check if we were requested to exit without finishing recovery.
@@ -241,25 +243,25 @@ pub fn StartupProcessMain(startup_data: &[u8]) -> PgResult<()> {
     // Properly accept or ignore signals the postmaster might send us.
     port_pqsignal_seams::pqsignal::call(
         libc::SIGHUP,
-        disposition_from_handler(StartupProcSigHupHandler),
+        SigDisposition::Handler(StartupProcSigHupHandler),
     ); // reload config file
     port_pqsignal_seams::pqsignal::call(libc::SIGINT, SigDisposition::Ignore); // ignore query cancel
     port_pqsignal_seams::pqsignal::call(
         libc::SIGTERM,
-        disposition_from_handler(StartupProcShutdownHandler),
+        SigDisposition::Handler(StartupProcShutdownHandler),
     ); // request shutdown
     // SIGQUIT handler was already set up by InitPostmasterChild
     backend_utils_misc_timeout_seams::initialize_timeouts::call(); // establishes SIGALRM handler
     port_pqsignal_seams::pqsignal::call(libc::SIGPIPE, SigDisposition::Ignore);
     port_pqsignal_seams::pqsignal::call(
         libc::SIGUSR1,
-        disposition_from_handler(
+        SigDisposition::Handler(
             backend_storage_ipc_procsignal_seams::procsignal_sigusr1_handler::call,
         ),
     );
     port_pqsignal_seams::pqsignal::call(
         libc::SIGUSR2,
-        disposition_from_handler(StartupProcTriggerHandler),
+        SigDisposition::Handler(StartupProcTriggerHandler),
     );
 
     // Reset some signals that are accepted by postmaster but not here.

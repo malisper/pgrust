@@ -9,9 +9,13 @@
 
 seam_core::seam!(
     /// `ProcessStartupProcInterrupts()` — service SIGHUP/shutdown/postmaster
-    /// death/barrier/memory-context-log requests in the redo loop. The
-    /// config-reload and interrupt-service paths can `ereport(ERROR)`.
-    pub fn process_startup_proc_interrupts() -> types_error::PgResult<()>
+    /// death/barrier/memory-context-log requests in the redo loop. `mcx` is
+    /// the caller's current context (the config-reload path `pstrdup`s GUC
+    /// snapshots into it). The config-reload and interrupt-service paths can
+    /// `ereport(ERROR)`.
+    pub fn process_startup_proc_interrupts<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

@@ -131,7 +131,9 @@ dependencies = [
 name = "backend-access-transam-xlogrecovery-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -282,6 +284,7 @@ dependencies = [
  "backend-utils-misc-timeout-seams",
  "backend-utils-mmgr-mcxt-seams",
  "libc",
+ "mcx",
  "port-pqsignal-seams",
  "types-core",
  "types-datum",
@@ -297,6 +300,7 @@ dependencies = [
 name = "backend-postmaster-startup-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
 ]

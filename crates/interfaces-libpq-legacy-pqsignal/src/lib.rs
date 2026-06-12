@@ -13,10 +13,10 @@
 //! C's `pqsigfunc` is `void (*)(int)`, overloaded with the sentinels
 //! `SIG_DFL`, `SIG_IGN`, and (as a return value only) `SIG_ERR`. The port
 //! models those as the owned [`SigDisposition`] enum (shared signal
-//! vocabulary in `types-signal`, re-exported here) so no raw function
-//! pointer crosses the API.
+//! vocabulary in `types-signal`, re-exported here) so the sentinel pointer
+//! values never cross the API; a concrete handler stays a typed `fn(i32)`.
 
-pub use types_signal::{disposition_from_handler, handler_from_disposition, SigDisposition};
+pub use types_signal::SigDisposition;
 
 /// Install this crate's seams. The unit is a leaf with no inward seam
 /// declarations, so there is nothing to `set()`.
@@ -35,7 +35,7 @@ pub fn pqsignal(signo: i32, func: SigDisposition) -> SigDisposition {
     let handler: libc::sighandler_t = match func {
         SigDisposition::Default => libc::SIG_DFL,
         SigDisposition::Ignore => libc::SIG_IGN,
-        SigDisposition::Handler(addr) => addr as libc::sighandler_t,
+        SigDisposition::Handler(f) => f as usize as libc::sighandler_t,
         SigDisposition::Error => panic!(
             "pqsignal: SIG_ERR is a return-only sentinel and is never installable"
         ),
@@ -62,7 +62,14 @@ pub fn pqsignal(signo: i32, func: SigDisposition) -> SigDisposition {
         match oact.sa_sigaction {
             x if x == libc::SIG_DFL => SigDisposition::Default,
             x if x == libc::SIG_IGN => SigDisposition::Ignore,
-            x => SigDisposition::Handler(x as usize),
+            // SAFETY: the OS reports the previously installed handler; every
+            // non-sentinel disposition this process installs is a `fn(i32)`
+            // (this is the one FFI boundary where the C-untyped
+            // `sighandler_t` is re-typed).
+            x => SigDisposition::Handler(core::mem::transmute::<
+                libc::sighandler_t,
+                fn(i32),
+            >(x)),
         }
     }
 }
@@ -74,25 +81,15 @@ mod tests {
     fn a_handler(_signo: i32) {}
 
     #[test]
-    fn handler_disposition_round_trips() {
-        let handler: fn(i32) = a_handler;
-        let disp = disposition_from_handler(handler);
-        match disp {
-            SigDisposition::Handler(addr) => assert_eq!(addr, handler as usize),
-            other => panic!("expected Handler, got {other:?}"),
-        }
-
-        let recovered =
-            handler_from_disposition(disp).expect("handler round-trips");
-        assert_eq!(recovered as usize, handler as usize);
-    }
-
-    #[test]
-    fn sentinels_have_no_handler() {
-        assert!(handler_from_disposition(SigDisposition::Default).is_none());
-        assert!(handler_from_disposition(SigDisposition::Ignore).is_none());
-        assert!(handler_from_disposition(SigDisposition::Error).is_none());
-        assert!(handler_from_disposition(SigDisposition::Handler(0)).is_none());
+    fn handler_disposition_round_trips_through_sigaction() {
+        // Install a concrete handler on a benign signal (SIGURG: unused
+        // elsewhere in the test process, and distinct from the SIGWINCH the
+        // sentinel test uses, since dispositions are process-wide); the next
+        // install must report it back as the same typed fn(i32).
+        let original = pqsignal(libc::SIGURG, SigDisposition::Handler(a_handler));
+        let prev = pqsignal(libc::SIGURG, SigDisposition::Default);
+        assert_eq!(prev, SigDisposition::Handler(a_handler));
+        pqsignal(libc::SIGURG, original);
     }
 
     #[test]

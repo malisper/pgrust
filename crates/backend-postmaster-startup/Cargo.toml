@@ -25,6 +25,7 @@ backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
 backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 libc = "0.2"
+mcx = { path = "../mcx" }
 port-pqsignal-seams = { path = "../port-pqsignal-seams" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
