@@ -109,3 +109,9 @@ seam_core::seam!(
     /// `am_syslogger`) are updated by the assigning unit itself.
     pub fn set_my_backend_type(backend_type: types_core::init::BackendType)
 );
+
+seam_core::seam!(
+    /// `NBuffers` (globals.c): the `shared_buffers` GUC — number of shared
+    /// buffers. Pure read of backend-local state.
+    pub fn nbuffers() -> i32
+);

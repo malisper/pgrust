@@ -54,12 +54,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-relation-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-reloptions-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
  "types-reloptions",
+]
+
+[[package]]
+name = "backend-access-common-syncscan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -149,12 +168,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-table-table"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-access-table-table-seams",
+ "backend-catalog-pg-class-seams",
+ "backend-utils-cache-relcache-seams",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-table-table-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-table-tableam"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-syncscan-seams",
+ "backend-access-transam-xact-seams",
+ "backend-executor-execTuples-seams",
+ "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-util-plancat-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-smgr-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-snapshot",
+ "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -229,6 +285,14 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-class-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-error",
 ]
 
@@ -457,6 +521,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-util-plancat-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-parser-relation-seams"
 version = "0.0.0"
 dependencies = [
@@ -554,6 +627,8 @@ name = "backend-storage-buffer-bufmgr-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -754,7 +829,9 @@ name = "backend-storage-smgr-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -936,6 +1013,8 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -1219,6 +1298,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-time-snapmgr-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-snapshot",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1351,6 +1440,8 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
+ "backend-access-table-table",
+ "backend-access-table-tableam",
  "backend-access-transam-xlogstats",
  "backend-executor-execUtils",
  "backend-executor-nodeMaterial",
@@ -1490,11 +1581,27 @@ name = "types-signal"
 version = "0.0.0"
 
 [[package]]
+name = "types-snapshot"
+version = "0.0.0"
+
+[[package]]
 name = "types-storage"
 version = "0.0.0"
 dependencies = [
  "libc",
  "types-core",
+]
+
+[[package]]
+name = "types-tableam"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-snapshot",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

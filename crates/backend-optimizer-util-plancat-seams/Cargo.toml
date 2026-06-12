@@ -1,11 +1,11 @@
 [package]
-name = "backend-storage-buffer-bufmgr-seams"
+name = "backend-optimizer-util-plancat-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_storage_buffer_bufmgr_seams"
+name = "backend_optimizer_util_plancat_seams"
 path = "src/lib.rs"
 
 [dependencies]

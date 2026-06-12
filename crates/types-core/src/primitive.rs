@@ -67,6 +67,24 @@ pub const fn OidIsValid(oid: Oid) -> bool {
     oid != InvalidOid
 }
 
+/// `InvalidBlockNumber` (`storage/block.h`) — `0xFFFFFFFF`.
+pub const InvalidBlockNumber: BlockNumber = 0xFFFF_FFFF;
+/// `MaxBlockNumber` (`storage/block.h`) — `0xFFFFFFFE`.
+pub const MaxBlockNumber: BlockNumber = 0xFFFF_FFFE;
+
+/// `InvalidForkNumber` (`common/relpath.h`).
+pub const InvalidForkNumber: ForkNumber = -1;
+/// `MAIN_FORKNUM` (`common/relpath.h`).
+pub const MAIN_FORKNUM: ForkNumber = 0;
+/// `FSM_FORKNUM` (`common/relpath.h`).
+pub const FSM_FORKNUM: ForkNumber = 1;
+/// `VISIBILITYMAP_FORKNUM` (`common/relpath.h`).
+pub const VISIBILITYMAP_FORKNUM: ForkNumber = 2;
+/// `INIT_FORKNUM` (`common/relpath.h`).
+pub const INIT_FORKNUM: ForkNumber = 3;
+/// `MAX_FORKNUM` (`common/relpath.h`) — `INIT_FORKNUM`.
+pub const MAX_FORKNUM: ForkNumber = INIT_FORKNUM;
+
 pub const INVALID_PROC_NUMBER: ProcNumber = -1;
 pub const MAX_CANCEL_KEY_LENGTH: usize = 32;
 pub const MAXPGPATH: usize = 1024;

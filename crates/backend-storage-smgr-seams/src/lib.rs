@@ -11,3 +11,14 @@ seam_core::seam!(
     /// `Err` (the caller's PG_TRY in `ProcessProcSignalBarrier`).
     pub fn process_barrier_smgr_release() -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `smgrnblocks(smgropen(rlocator, backend), forknum)` (smgr.c): the
+    /// number of blocks in the fork. `Err` carries the C `ereport(ERROR)`s
+    /// from the underlying `mdnblocks` (e.g. `could not seek to end of file`).
+    pub fn smgrnblocks(
+        rlocator: types_storage::RelFileLocator,
+        backend: types_core::primitive::ProcNumber,
+        forknum: types_core::primitive::ForkNumber,
+    ) -> types_error::PgResult<types_core::primitive::BlockNumber>
+);

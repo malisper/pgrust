@@ -99,3 +99,24 @@ seam_core::seam!(
         slot: types_nodes::SlotId,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `MakeSingleTupleTableSlot(tupdesc, tts_ops)` (execTuples.c): create a
+    /// standalone slot (not tied to a tuple table) of the given slot class,
+    /// fixed to `tupdesc`. The slot is allocated in `mcx` (C: palloc in
+    /// `CurrentMemoryContext`), so the call is fallible on OOM.
+    pub fn make_single_tuple_table_slot<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+        tts_ops: types_nodes::TupleSlotKind,
+    ) -> types_error::PgResult<types_nodes::TupleTableSlot>
+);
+
+seam_core::seam!(
+    /// `ExecDropSingleTupleTableSlot(slot)` (execTuples.c): release a slot
+    /// made with `MakeSingleTupleTableSlot`. Clearing the slot can release a
+    /// buffer pin, whose bookkeeping can `elog(ERROR)`, carried on `Err`.
+    pub fn exec_drop_single_tuple_table_slot(
+        slot: types_nodes::TupleTableSlot,
+    ) -> types_error::PgResult<()>
+);

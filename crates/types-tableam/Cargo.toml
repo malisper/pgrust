@@ -1,18 +1,17 @@
 [package]
-name = "backend-utils-cache-relcache-seams"
+name = "types-tableam"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_utils_cache_relcache_seams"
+name = "types_tableam"
 path = "src/lib.rs"
 
 [dependencies]
-seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
-types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }
-mcx = { path = "../mcx" }
-types-tableam = { path = "../types-tableam" }
+types-tuple = { path = "../types-tuple" }
+types-nodes = { path = "../types-nodes" }
+types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }
