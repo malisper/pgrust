@@ -18,18 +18,33 @@
 /// - `set(f)`   — install the implementation (owner crate only, exactly once)
 /// - `call(..)` — invoke it; panics loudly if not installed
 /// - `is_installed()`
+///
+/// A signature may be generic over lifetimes (and only lifetimes): declare
+/// them after the function name and the stored slot becomes a higher-ranked
+/// `for<'a, ...> fn(...)` pointer, so installed implementations must work for
+/// every lifetime — the shape needed once argument/return types carry an
+/// allocator lifetime (e.g. `mcx::Mcx<'mcx>` in, `PgVec<'mcx, u8>` out):
+///
+/// ```ignore
+/// seam_core::seam!(
+///     pub fn flatten<'mcx>(mcx: mcx::Mcx<'mcx>, src: &[u8]) -> PgResult<mcx::PgVec<'mcx, u8>>
+/// );
+/// ```
+///
+/// Elided lifetimes (`&T`, `Foo<'_>`) in parameter position are likewise
+/// higher-ranked, as in any `fn` pointer type.
 #[macro_export]
 macro_rules! seam {
     (
         $(#[$attr:meta])*
-        $vis:vis fn $name:ident ( $($arg:ident : $arg_ty:ty),* $(,)? ) $(-> $ret:ty)?
+        $vis:vis fn $name:ident $(<$($lt:lifetime),+ $(,)?>)? ( $($arg:ident : $arg_ty:ty),* $(,)? ) $(-> $ret:ty)?
     ) => {
         $(#[$attr])*
         $vis mod $name {
             #![allow(dead_code, unused_imports)]
             use super::*;
 
-            pub type Signature = fn($($arg_ty),*) $(-> $ret)?;
+            pub type Signature = $(for<$($lt),+>)? fn($($arg_ty),*) $(-> $ret)?;
 
             static SLOT: ::std::sync::OnceLock<Signature> = ::std::sync::OnceLock::new();
 
@@ -45,7 +60,7 @@ macro_rules! seam {
                 SLOT.get().is_some()
             }
 
-            pub fn call($($arg: $arg_ty),*) $(-> $ret)? {
+            pub fn call $(<$($lt),+>)? ($($arg: $arg_ty),*) $(-> $ret)? {
                 match SLOT.get() {
                     Some(f) => f($($arg),*),
                     None => panic!(concat!("seam not installed: ", module_path!())),
@@ -59,6 +74,7 @@ macro_rules! seam {
 mod tests {
     crate::seam!(pub fn double(x: i32) -> i32);
     crate::seam!(pub fn never_installed(x: i32) -> i32);
+    crate::seam!(pub fn first<'a>(xs: &'a [i32]) -> &'a i32);
 
     #[test]
     fn install_and_call() {
@@ -71,5 +87,12 @@ mod tests {
     #[should_panic(expected = "seam not installed")]
     fn uninstalled_call_panics() {
         never_installed::call(1);
+    }
+
+    #[test]
+    fn lifetime_generic_seam_returns_borrow() {
+        first::set(|xs| &xs[0]);
+        let data = vec![7, 8, 9];
+        assert_eq!(*first::call(&data), 7);
     }
 }

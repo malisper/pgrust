@@ -26,6 +26,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-heap-heaptoast-seams",
  "backend-utils-adt-misc2-seams",
+ "mcx",
  "types-core",
  "types-datum",
  "types-error",
@@ -53,6 +54,7 @@ dependencies = [
 name = "backend-access-heap-heaptoast-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-tuple",
@@ -332,8 +334,10 @@ dependencies = [
 name = "backend-utils-cache-relcache-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -593,6 +597,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-error",
 ]
 
 [[package]]

@@ -2,11 +2,12 @@
 //! `access/htup_details.h` `MinimalTupleData` layout).
 //!
 //! The tuplestore/tuplesort boundary speaks a `MinimalTuple` as its
-//! contiguous C byte image — an owned `Vec<u8>` whose first four bytes are the
-//! tuple's `t_len` — while this crate's structured producers/consumers speak
-//! [`FormedMinimalTuple`] (owned `MinimalTupleData` header + the user-data
-//! bytes alongside).  This module is the single source of truth for the flat
-//! layout, exactly the bytes C holds at `(char *) mtup .. + mtup->t_len`:
+//! contiguous C byte image — a context-allocated `PgVec<u8>` whose first four
+//! bytes are the tuple's `t_len` — while this crate's structured
+//! producers/consumers speak [`FormedMinimalTuple`] (owned `MinimalTupleData`
+//! header + the user-data bytes alongside).  This module is the single source
+//! of truth for the flat layout, exactly the bytes C holds at
+//! `(char *) mtup .. + mtup->t_len`:
 //!
 //! ```text
 //! offset  0: t_len        (uint32, 4 bytes)
@@ -29,7 +30,8 @@
 //! `t_hoff` bounds, null-bitmap fit) and fails loudly on a corrupt blob —
 //! bytes are never fabricated.
 
-use alloc::vec::Vec;
+use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgVec};
+use types_error::PgError;
 
 use types_tuple::heaptuple::{
     HeapTupleData, MinimalTupleData, TupleDescData, BITMAPLEN, HEAP_HASNULL, HEAP_NATTS_MASK,
@@ -45,7 +47,7 @@ use crate::{
 /// `MinimalTuple` blob.  Each variant corresponds to a violated layout
 /// invariant; none of these can arise from a blob produced by
 /// [`minimal_tuple_to_flat`] over a well-formed [`FormedMinimalTuple`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MinimalTupleFlatError {
     /// The blob is shorter than `SizeofMinimalTupleHeader` (15 bytes).
     TooShort { len: usize },
@@ -62,16 +64,29 @@ pub enum MinimalTupleFlatError {
     /// (encode from `HeapTupleData`) the carried `t_user_data` byte count does
     /// not match `t_len - t_hoff` (or is absent while data is expected).
     UserDataLength { expected: usize, actual: usize },
+    /// An `ereport(ERROR)` from the allocation path (out of memory in the
+    /// target context).
+    Pg(PgError),
+}
+
+impl From<PgError> for MinimalTupleFlatError {
+    fn from(err: PgError) -> Self {
+        MinimalTupleFlatError::Pg(err)
+    }
 }
 
 /// Serialize a [`FormedMinimalTuple`] into its canonical contiguous C byte
-/// image (the `Vec<u8>` blob the tuplestore seams carry).
+/// image (the `PgVec<u8>` blob the tuplestore seams carry), allocated in
+/// `mcx`.
 ///
 /// The header fields are written verbatim (this is a serializer, not a
 /// header-policy function).  Panics (loudly) if the structured tuple is
 /// internally inconsistent — a `t_hoff`/`t_bits`/`data` combination that no
 /// `heap_form_minimal_tuple` output can have.
-pub fn minimal_tuple_to_flat(mtup: &FormedMinimalTuple) -> Vec<u8> {
+pub fn minimal_tuple_to_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    mtup: &FormedMinimalTuple<'_>,
+) -> Result<PgVec<'mcx, u8>, MinimalTupleFlatError> {
     let t = &*mtup.tuple;
     let t_hoff = t.t_hoff as usize;
     assert!(
@@ -86,7 +101,7 @@ pub fn minimal_tuple_to_flat(mtup: &FormedMinimalTuple) -> Vec<u8> {
         "minimal_tuple_to_flat: t_len disagrees with hoff + data len"
     );
 
-    let mut blob: Vec<u8> = Vec::with_capacity(t.t_len as usize);
+    let mut blob: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, t.t_len as usize)?;
     blob.extend_from_slice(&t.t_len.to_ne_bytes());
     for b in t.mt_padding {
         blob.push(b as u8);
@@ -110,12 +125,16 @@ pub fn minimal_tuple_to_flat(mtup: &FormedMinimalTuple) -> Vec<u8> {
 
     blob.extend_from_slice(&mtup.data);
     debug_assert_eq!(blob.len(), t.t_len as usize);
-    blob
+    Ok(blob)
 }
 
 /// Decode a flat `MinimalTuple` blob back into the structured
-/// [`FormedMinimalTuple`], validating every layout invariant.
-pub fn minimal_tuple_from_flat(blob: &[u8]) -> Result<FormedMinimalTuple, MinimalTupleFlatError> {
+/// [`FormedMinimalTuple`] (allocated in `mcx`), validating every layout
+/// invariant.
+pub fn minimal_tuple_from_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    blob: &[u8],
+) -> Result<FormedMinimalTuple<'mcx>, MinimalTupleFlatError> {
     if blob.len() < SIZEOF_MINIMAL_TUPLE_HEADER {
         return Err(MinimalTupleFlatError::TooShort { len: blob.len() });
     }
@@ -144,39 +163,51 @@ pub fn minimal_tuple_from_flat(blob: &[u8]) -> Result<FormedMinimalTuple, Minima
     }
     let hoff = t_hoff_usize - MINIMAL_TUPLE_OFFSET;
 
-    let t_bits: Vec<u8> = if (t_infomask & HEAP_HASNULL) != 0 {
+    let t_bits: PgVec<'mcx, u8> = if (t_infomask & HEAP_HASNULL) != 0 {
         let natts = t_infomask2 & HEAP_NATTS_MASK;
         let bitmap_len = BITMAPLEN(natts as i32) as usize;
         if SIZEOF_MINIMAL_TUPLE_HEADER + bitmap_len > hoff {
             return Err(MinimalTupleFlatError::BitmapOverrun { natts, t_hoff });
         }
-        blob[SIZEOF_MINIMAL_TUPLE_HEADER..SIZEOF_MINIMAL_TUPLE_HEADER + bitmap_len].to_vec()
+        slice_in(
+            mcx,
+            &blob[SIZEOF_MINIMAL_TUPLE_HEADER..SIZEOF_MINIMAL_TUPLE_HEADER + bitmap_len],
+        )?
     } else {
-        Vec::new()
+        PgVec::new_in(mcx)
     };
 
     Ok(FormedMinimalTuple {
-        tuple: alloc::boxed::Box::new(MinimalTupleData {
-            t_len,
-            mt_padding,
-            t_infomask2,
-            t_infomask,
-            t_hoff,
-            t_bits,
-        }),
-        data: blob[hoff..].to_vec(),
+        tuple: alloc_in(
+            mcx,
+            MinimalTupleData {
+                t_len,
+                mt_padding,
+                t_infomask2,
+                t_infomask,
+                t_hoff,
+                t_bits,
+            },
+        )?,
+        data: slice_in(mcx, &blob[hoff..])?,
     })
 }
 
 /// `heap_form_minimal_tuple(tdesc, values, isnull, 0)` returning the flat blob
 /// — the shape the tuplestore/tuplesort boundary consumes.
-pub fn heap_form_minimal_tuple_flat(
-    tuple_descriptor: &TupleDescData,
-    values: &[TupleValue],
+pub fn heap_form_minimal_tuple_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple_descriptor: &TupleDescData<'_>,
+    values: &[TupleValue<'_>],
     isnull: &[bool],
-) -> Result<Vec<u8>, HeapTupleError> {
-    let formed = crate::heap_form_minimal_tuple(tuple_descriptor, values, isnull, 0)?;
-    Ok(minimal_tuple_to_flat(&formed))
+) -> Result<PgVec<'mcx, u8>, HeapTupleError> {
+    let formed = crate::heap_form_minimal_tuple(mcx, tuple_descriptor, values, isnull, 0)?;
+    match minimal_tuple_to_flat(mcx, &formed) {
+        Ok(blob) => Ok(blob),
+        Err(MinimalTupleFlatError::Pg(err)) => Err(HeapTupleError::Pg(err)),
+        // Structural variants cannot arise from a freshly formed tuple.
+        Err(other) => panic!("minimal_tuple_to_flat on a fresh tuple failed: {other:?}"),
+    }
 }
 
 /// `minimal_tuple_from_heap_tuple(htup, 0)` returning the flat blob — the
@@ -188,9 +219,10 @@ pub fn heap_form_minimal_tuple_flat(
 /// MINIMAL_TUPLE_OFFSET` for `t_len - MINIMAL_TUPLE_OFFSET` bytes and rewrites
 /// `t_len`; structurally that is: drop the t_choice/t_ctid region, keep the
 /// shared `t_infomask2 .. t_bits` tail + pad + data.
-pub fn minimal_tuple_from_heap_tuple_flat(
-    htup: &HeapTupleData,
-) -> Result<Vec<u8>, MinimalTupleFlatError> {
+pub fn minimal_tuple_from_heap_tuple_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    htup: &HeapTupleData<'_>,
+) -> Result<PgVec<'mcx, u8>, MinimalTupleFlatError> {
     let header = htup
         .t_data
         .as_ref()
@@ -207,7 +239,7 @@ pub fn minimal_tuple_from_heap_tuple_flat(
     }
 
     let expected = htup.t_len as usize - header.t_hoff as usize;
-    let data = htup.t_user_data.as_deref().unwrap_or(&[]);
+    let data: &[u8] = htup.t_user_data.as_deref().unwrap_or(&[]);
     if data.len() != expected {
         return Err(MinimalTupleFlatError::UserDataLength {
             expected,
@@ -217,20 +249,23 @@ pub fn minimal_tuple_from_heap_tuple_flat(
 
     let len = htup.t_len as usize - MINIMAL_TUPLE_OFFSET;
     let mtup = FormedMinimalTuple {
-        tuple: alloc::boxed::Box::new(MinimalTupleData {
-            t_len: len as u32,
-            mt_padding: [0; 6],
-            t_infomask2: header.t_infomask2,
-            t_infomask: header.t_infomask,
-            // The minimal t_hoff already carries the MINIMAL_TUPLE_OFFSET bias
-            // and equals the heap tuple's full header offset (see
-            // minimal_tuple_from_heap_tuple, heaptuple.c:1586).
-            t_hoff: header.t_hoff,
-            t_bits: header.t_bits.clone(),
-        }),
-        data: data.to_vec(),
+        tuple: alloc_in(
+            mcx,
+            MinimalTupleData {
+                t_len: len as u32,
+                mt_padding: [0; 6],
+                t_infomask2: header.t_infomask2,
+                t_infomask: header.t_infomask,
+                // The minimal t_hoff already carries the MINIMAL_TUPLE_OFFSET bias
+                // and equals the heap tuple's full header offset (see
+                // minimal_tuple_from_heap_tuple, heaptuple.c:1586).
+                t_hoff: header.t_hoff,
+                t_bits: slice_in(mcx, &header.t_bits)?,
+            },
+        )?,
+        data: slice_in(mcx, data)?,
     };
-    Ok(minimal_tuple_to_flat(&mtup))
+    minimal_tuple_to_flat(mcx, &mtup)
 }
 
 /// Deform a flat `MinimalTuple` blob into per-column `(value, isnull)` pairs —
@@ -239,11 +274,12 @@ pub fn minimal_tuple_from_heap_tuple_flat(
 /// with the crate's existing `heap_tuple_from_minimal_tuple` +
 /// `heap_deform_tuple` (the same route C takes through
 /// `tts_minimal_getsomeattrs`).
-pub fn heap_deform_minimal_tuple_flat(
+pub fn heap_deform_minimal_tuple_flat<'mcx>(
+    mcx: Mcx<'mcx>,
     blob: &[u8],
-    tuple_desc: &TupleDescData,
-) -> Result<Vec<DeformedColumn>, MinimalTupleFlatError> {
-    let mtup = minimal_tuple_from_flat(blob)?;
-    let ft = heap_tuple_from_minimal_tuple(&mtup);
-    Ok(crate::heap_deform_tuple(&ft.tuple, tuple_desc, &ft.data))
+    tuple_desc: &TupleDescData<'_>,
+) -> Result<PgVec<'mcx, DeformedColumn<'mcx>>, MinimalTupleFlatError> {
+    let mtup = minimal_tuple_from_flat(mcx, blob)?;
+    let ft = heap_tuple_from_minimal_tuple(mcx, &mtup)?;
+    Ok(crate::heap_deform_tuple(mcx, &ft.tuple, tuple_desc, &ft.data)?)
 }

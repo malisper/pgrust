@@ -56,10 +56,7 @@ pub mod flat;
 #[cfg(test)]
 mod tests;
 
-use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
-
+use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgVec};
 use types_tuple::heap::SizeofHeapTupleHeader;
 use types_tuple::heaptuple::{
     bits8, BlockIdData, CompactAttribute, DatumTupleFields, HeapTupleData, HeapTupleField3,
@@ -313,8 +310,8 @@ fn store_att_byval(dest: &mut [u8], off: usize, newdatum: Datum, attlen: i16) {
 ///
 /// `values[i]` is consulted only for non-null attributes (`isnull[i] == false`).
 pub fn heap_compute_data_size(
-    tuple_desc: &TupleDescData,
-    values: &[TupleValue],
+    tuple_desc: &TupleDescData<'_>,
+    values: &[TupleValue<'_>],
     isnull: &[bool],
 ) -> PgResult<Size> {
     let mut data_length: Size = 0;
@@ -536,41 +533,47 @@ fn byval_datum(datum: &TupleValue) -> Datum {
 
 /// Result of [`heap_fill_tuple`]: the serialized user-data area, the computed
 /// `t_infomask`, and the null bitmap bytes (empty when no nulls are present).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct FilledData {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FilledData<'mcx> {
     /// The `data_size` bytes of the user-data area.
-    pub data: Vec<u8>,
+    pub data: PgVec<'mcx, u8>,
     /// The `t_infomask` bits implied by the data (HASNULL/HASVARWIDTH/HASEXTERNAL).
     pub infomask: u16,
     /// The null bitmap (`BITMAPLEN(natts)` bytes), or empty when `bits` is `None`.
-    pub bits: Vec<bits8>,
+    pub bits: PgVec<'mcx, bits8>,
 }
 
 /// `heap_fill_tuple(tupleDesc, values, isnull, data, data_size, &infomask, bit)`
 /// (heaptuple.c:401) — load the data portion of a tuple from the values/isnull
 /// arrays, also filling the null bitmap (when `with_bitmap`) and the infomask.
 ///
-/// Returns the filled [`FilledData`]. `data_size` is the
-/// [`heap_compute_data_size`] result; the returned `data` is exactly that long.
-/// `with_bitmap` corresponds to C's `bit != NULL` (i.e. `hasnull`).
-pub fn heap_fill_tuple(
-    tuple_desc: &TupleDescData,
-    values: &[TupleValue],
+/// Returns the filled [`FilledData`], allocated in `mcx` (in C the caller's
+/// `palloc0` block). `data_size` is the [`heap_compute_data_size`] result; the
+/// returned `data` is exactly that long. `with_bitmap` corresponds to C's
+/// `bit != NULL` (i.e. `hasnull`).
+pub fn heap_fill_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple_desc: &TupleDescData<'_>,
+    values: &[TupleValue<'_>],
     isnull: &[bool],
     data_size: Size,
     with_bitmap: bool,
-) -> PgResult<FilledData> {
+) -> PgResult<FilledData<'mcx>> {
     let number_of_attributes = tuple_desc.natts as usize;
-    let mut data = vec![0u8; data_size];
+    let mut data = vec_with_capacity_in(mcx, data_size)?;
+    data.resize(data_size, 0);
     let mut infomask: u16 = 0;
 
     // C zeroes the infomask flag bits it owns: *infomask &= ~(HASNULL|HASVARWIDTH|HASEXTERNAL).
     // We start from 0, which is equivalent for these three bits.
 
-    let mut bits: Vec<bits8> = if with_bitmap {
-        vec![0u8; BITMAPLEN(tuple_desc.natts) as usize]
+    let mut bits: PgVec<'mcx, bits8> = if with_bitmap {
+        let len = BITMAPLEN(tuple_desc.natts) as usize;
+        let mut b = vec_with_capacity_in(mcx, len)?;
+        b.resize(len, 0);
+        b
     } else {
-        Vec::new()
+        PgVec::new_in(mcx)
     };
 
     // bitP = &bit[-1]; bitmask = HIGHBIT;  (model &bit[-1] with byte = usize::MAX)
@@ -580,9 +583,10 @@ pub fn heap_fill_tuple(
     };
 
     let mut data_off = 0usize;
+    let null_datum = TupleValue::ByVal(Datum::null());
     for i in 0..number_of_attributes {
         let attr = &tuple_desc.compact_attrs[i];
-        let datum = values.get(i).cloned().unwrap_or(TupleValue::ByVal(Datum::null()));
+        let datum = values.get(i).unwrap_or(&null_datum);
         let this_isnull = isnull.get(i).copied().unwrap_or(true);
 
         if with_bitmap {
@@ -593,7 +597,7 @@ pub fn heap_fill_tuple(
                 &mut data,
                 &mut data_off,
                 &mut infomask,
-                &datum,
+                datum,
                 this_isnull,
             )?;
         } else {
@@ -604,7 +608,7 @@ pub fn heap_fill_tuple(
                 &mut data,
                 &mut data_off,
                 &mut infomask,
-                &datum,
+                datum,
                 this_isnull,
             )?;
         }
@@ -641,16 +645,18 @@ pub use types_tuple::backend_access_common_heaptuple::FormedTuple;
 
 /// `heap_form_tuple(tupleDescriptor, values, isnull)` (heaptuple.c:1116) —
 /// construct a tuple from the given `values`/`isnull` arrays (one entry per
-/// `tupleDescriptor.natts`).
+/// `tupleDescriptor.natts`), allocated in `mcx` (C: one `palloc` block in
+/// `CurrentMemoryContext`).
 ///
 /// Returns the formed tuple, or [`HeapTupleError::TooManyColumns`] when the
 /// descriptor has more than `MaxTupleAttributeNumber` columns (C: `ereport
 /// (ERROR, ERRCODE_TOO_MANY_COLUMNS)`).
-pub fn heap_form_tuple(
-    tuple_descriptor: &TupleDescData,
-    values: &[TupleValue],
+pub fn heap_form_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple_descriptor: &TupleDescData<'_>,
+    values: &[TupleValue<'_>],
     isnull: &[bool],
-) -> Result<FormedTuple, HeapTupleError> {
+) -> Result<FormedTuple<'mcx>, HeapTupleError> {
     let number_of_attributes = tuple_descriptor.natts;
 
     if number_of_attributes > MaxTupleAttributeNumber {
@@ -686,7 +692,7 @@ pub fn heap_form_tuple(
     len += data_len;
 
     // Fill the data area + null bitmap + infomask.
-    let filled = heap_fill_tuple(tuple_descriptor, values, isnull, data_len, hasnull)?;
+    let filled = heap_fill_tuple(mcx, tuple_descriptor, values, isnull, data_len, hasnull)?;
 
     // Build the owned header.  ItemPointerSetInvalid sets blockid = (0xffff,
     // 0xffff) and posid = 0 (== InvalidOffsetNumber).
@@ -717,14 +723,17 @@ pub fn heap_form_tuple(
     // HeapTupleHeaderSetNatts(td, numberOfAttributes)
     HeapTupleHeaderSetNatts(&mut td, number_of_attributes as u16);
 
-    let tuple = Box::new(HeapTupleData {
-        t_len: len as u32,
-        // ItemPointerSetInvalid(&tuple->t_self)
-        t_self: invalid_ctid,
-        t_tableOid: INVALID_OID,
-        t_data: Some(Box::new(td)),
-        t_user_data: None,
-    });
+    let tuple = alloc_in(
+        mcx,
+        HeapTupleData {
+            t_len: len as u32,
+            // ItemPointerSetInvalid(&tuple->t_self)
+            t_self: invalid_ctid,
+            t_tableOid: INVALID_OID,
+            t_data: Some(alloc_in(mcx, td)?),
+            t_user_data: None,
+        },
+    )?;
 
     Ok(FormedTuple {
         tuple,
@@ -753,17 +762,20 @@ pub use types_tuple::backend_access_common_heaptuple::DeformedColumn;
 ///
 /// `data` is the tuple's user-data area (the bytes at `td + t_hoff`, i.e.
 /// [`FormedTuple::data`]). Returns one [`DeformedColumn`] per `tupleDesc`
-/// attribute. Columns beyond the tuple's stored natts are read as missing
-/// values (or NULL) via [`getmissingattr`].
+/// attribute, with the by-reference column byte copies (and the output array
+/// itself, C's caller-palloc'd `values`/`isnull`) allocated in `mcx`. Columns
+/// beyond the tuple's stored natts are read as missing values (or NULL) via
+/// [`getmissingattr`].
 ///
 /// NB: this mirrors C's caching of `attcacheoff`, but because the descriptor is
 /// borrowed immutably here the cache writes are omitted (they are a pure
 /// performance optimization; the computed offsets are identical).
-pub fn heap_deform_tuple(
-    tuple: &HeapTupleData,
-    tuple_desc: &TupleDescData,
+pub fn heap_deform_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &HeapTupleData<'_>,
+    tuple_desc: &TupleDescData<'_>,
     data: &[u8],
-) -> Vec<DeformedColumn> {
+) -> PgResult<PgVec<'mcx, DeformedColumn<'mcx>>> {
     let tup = tuple
         .t_data
         .as_ref()
@@ -778,7 +790,8 @@ pub fn heap_deform_tuple(
     }
 
     let bp = &tup.t_bits; // ptr to null bitmap in tuple
-    let mut out: Vec<DeformedColumn> = Vec::with_capacity(tdesc_natts as usize);
+    let mut out: PgVec<'mcx, DeformedColumn<'mcx>> =
+        vec_with_capacity_in(mcx, tdesc_natts as usize)?;
 
     // tp = (char *) tup + tup->t_hoff;  ==> the `data` slice (data area).
     let mut off: usize = 0;
@@ -815,7 +828,7 @@ pub fn heap_deform_tuple(
         }
 
         // values[attnum] = fetchatt(thisatt, tp + off);
-        let value = fetchatt(thisatt, data, off);
+        let value = fetchatt(mcx, thisatt, data, off)?;
         out.push((value, false));
 
         // off = att_addlength_pointer(off, thisatt->attlen, tp + off);
@@ -835,19 +848,24 @@ pub fn heap_deform_tuple(
         attnum += 1;
     }
 
-    out
+    Ok(out)
 }
 
 /// `fetchatt(A, T)` (tupmacs.h): for a by-value att read the scalar from
 /// `data[off..]`; for a by-reference att return its on-disk bytes (C returns a
-/// pointer into the tuple — here we copy the exact field span).
+/// pointer into the tuple — here we copy the exact field span into `mcx`).
 #[inline]
-fn fetchatt(att: &CompactAttribute, data: &[u8], off: usize) -> TupleValue {
+fn fetchatt<'mcx>(
+    mcx: Mcx<'mcx>,
+    att: &CompactAttribute,
+    data: &[u8],
+    off: usize,
+) -> PgResult<TupleValue<'mcx>> {
     if att.attbyval {
-        TupleValue::ByVal(fetch_att_byval(data, off, att.attlen))
+        Ok(TupleValue::ByVal(fetch_att_byval(data, off, att.attlen)))
     } else {
         let end = att_addlength_pointer(off, att.attlen, data, off);
-        TupleValue::ByRef(data[off..end].to_vec())
+        Ok(TupleValue::ByRef(slice_in(mcx, &data[off..end])?))
     }
 }
 
@@ -902,7 +920,7 @@ fn att_addlength_pointer(cur_offset: usize, attlen: i16, data: &[u8], off: usize
 /// same contract as [`expand_tuple`]'s `missing_value`); the cache machinery
 /// consequently has no role here. By-value missing values are returned
 /// directly, exactly as C's `attbyval` fast path does.
-pub fn getmissingattr(tuple_desc: &TupleDescData, attnum: i32) -> DeformedColumn {
+pub fn getmissingattr<'mcx>(tuple_desc: &TupleDescData<'_>, attnum: i32) -> DeformedColumn<'mcx> {
     debug_assert!(attnum <= tuple_desc.natts);
     debug_assert!(attnum > 0);
 
@@ -929,7 +947,9 @@ pub fn getmissingattr(tuple_desc: &TupleDescData, attnum: i32) -> DeformedColumn
 
 /// Borrow `tupleDesc->constr->missing` (the `AttrMissing[]` array), if present.
 #[inline]
-fn constr_missing(tuple_desc: &TupleDescData) -> Option<&[types_tuple::heaptuple::AttrMissing]> {
+fn constr_missing<'a>(
+    tuple_desc: &'a TupleDescData<'_>,
+) -> Option<&'a [types_tuple::heaptuple::AttrMissing]> {
     let constr: &TupleConstr = tuple_desc.constr.as_deref()?;
     if constr.missing.is_empty() {
         None
@@ -995,21 +1015,22 @@ const _: () = assert!(SIZEOF_MINIMAL_TUPLE_HEADER == 15);
 /// the faithful equivalent of the contiguous-block `memcpy`.
 ///
 /// C returns `NULL` when `tuple` is invalid or has a NULL `t_data`; here that is
-/// `None`.
-pub fn heap_copytuple(tuple: Option<&FormedTuple>) -> Option<FormedTuple> {
+/// `None`. The copy is allocated in `mcx` (C: `palloc` in
+/// `CurrentMemoryContext`), so it is fallible (OOM).
+pub fn heap_copytuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: Option<&FormedTuple<'_>>,
+) -> PgResult<Option<FormedTuple<'mcx>>> {
     // if (!HeapTupleIsValid(tuple) || tuple->t_data == NULL) return NULL;
-    let tuple = tuple?;
+    let Some(tuple) = tuple else { return Ok(None) };
     if tuple.tuple.t_data.is_none() {
-        return None;
+        return Ok(None);
     }
 
     // newTuple = palloc(HEAPTUPLESIZE + tuple->t_len); copy t_len/t_self/
     // t_tableOid; newTuple->t_data = newTuple + HEAPTUPLESIZE;
     // memcpy(newTuple->t_data, tuple->t_data, tuple->t_len).
-    Some(FormedTuple {
-        tuple: tuple.tuple.clone(),
-        data: tuple.data.clone(),
-    })
+    Ok(Some(tuple.clone_in(mcx)?))
 }
 
 /// `heap_copytuple_with_tuple(src, dest)` (heaptuple.c:803) — copy a tuple into a
@@ -1021,26 +1042,29 @@ pub fn heap_copytuple(tuple: Option<&FormedTuple>) -> Option<FormedTuple> {
 /// cloned from `src`. When `src` is invalid / has a NULL `t_data`, C sets
 /// `dest->t_data = NULL`; here that is a `dest` with `t_data == None` and an
 /// empty data area.
-pub fn heap_copytuple_with_tuple(src: Option<&FormedTuple>) -> FormedTuple {
+pub fn heap_copytuple_with_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    src: Option<&FormedTuple<'_>>,
+) -> PgResult<FormedTuple<'mcx>> {
     match src {
-        Some(src) if src.tuple.t_data.is_some() => FormedTuple {
-            // dest->t_len = src->t_len; dest->t_self = src->t_self;
-            // dest->t_tableOid = src->t_tableOid;
-            // dest->t_data = palloc(src->t_len); memcpy(dest->t_data, src->t_data, src->t_len);
-            tuple: src.tuple.clone(),
-            data: src.data.clone(),
-        },
-        _ => FormedTuple {
+        // dest->t_len = src->t_len; dest->t_self = src->t_self;
+        // dest->t_tableOid = src->t_tableOid;
+        // dest->t_data = palloc(src->t_len); memcpy(dest->t_data, src->t_data, src->t_len);
+        Some(src) if src.tuple.t_data.is_some() => src.clone_in(mcx),
+        _ => Ok(FormedTuple {
             // dest->t_data = NULL; (the rest of *dest is left as the caller had it).
-            tuple: alloc::boxed::Box::new(types_tuple::heaptuple::HeapTupleData {
-                t_len: 0,
-                t_self: invalid_item_pointer(),
-                t_tableOid: INVALID_OID,
-                t_data: None,
-                t_user_data: None,
-            }),
-            data: alloc::vec::Vec::new(),
-        },
+            tuple: alloc_in(
+                mcx,
+                types_tuple::heaptuple::HeapTupleData {
+                    t_len: 0,
+                    t_self: invalid_item_pointer(),
+                    t_tableOid: INVALID_OID,
+                    t_data: None,
+                    t_user_data: None,
+                },
+            )?,
+            data: PgVec::new_in(mcx),
+        }),
     }
 }
 
@@ -1056,7 +1080,7 @@ pub fn heap_copytuple_with_tuple(src: Option<&FormedTuple>) -> FormedTuple {
 /// data `Vec`) are released when this function returns — the faithful
 /// equivalent of the `pfree`.
 #[inline]
-pub fn heap_freetuple(htup: FormedTuple) {
+pub fn heap_freetuple(htup: FormedTuple<'_>) {
     drop(htup);
 }
 
@@ -1076,21 +1100,22 @@ pub fn heap_freetuple(htup: FormedTuple) {
 /// columns, `heap_form_tuple` the result, then copy the old tuple's identity
 /// (`t_ctid`, `t_self`, `t_tableOid`). C's intermediate `palloc`/`pfree` of the
 /// `values`/`isnull` scratch arrays is the owned `Vec`s built and dropped here.
-pub fn heap_modify_tuple(
-    tuple: &FormedTuple,
-    tuple_desc: &TupleDescData,
-    repl_values: &[TupleValue],
+pub fn heap_modify_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &FormedTuple<'_>,
+    tuple_desc: &TupleDescData<'_>,
+    repl_values: &[TupleValue<'_>],
     repl_isnull: &[bool],
     do_replace: &[bool],
-) -> Result<FormedTuple, HeapTupleError> {
+) -> Result<FormedTuple<'mcx>, HeapTupleError> {
     let number_of_attributes = tuple_desc.natts as usize;
 
     // values = palloc(natts * sizeof(Datum)); isnull = palloc(natts * sizeof(bool));
     // heap_deform_tuple(tuple, tupleDesc, values, isnull);
-    let deformed = heap_deform_tuple(&tuple.tuple, tuple_desc, &tuple.data);
-    let mut values: alloc::vec::Vec<TupleValue> =
-        alloc::vec::Vec::with_capacity(number_of_attributes);
-    let mut isnull: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(number_of_attributes);
+    let deformed = heap_deform_tuple(mcx, &tuple.tuple, tuple_desc, &tuple.data)?;
+    let mut values: PgVec<'mcx, TupleValue<'mcx>> =
+        vec_with_capacity_in(mcx, number_of_attributes)?;
+    let mut isnull: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, number_of_attributes)?;
     for (val, null) in deformed {
         values.push(val);
         isnull.push(null);
@@ -1099,13 +1124,13 @@ pub fn heap_modify_tuple(
     // for (attoff ...) if (doReplace[attoff]) { values[..]=replValues[..]; isnull[..]=replIsnull[..]; }
     for attoff in 0..number_of_attributes {
         if do_replace[attoff] {
-            values[attoff] = repl_values[attoff].clone();
+            values[attoff] = repl_values[attoff].clone_in(mcx)?;
             isnull[attoff] = repl_isnull[attoff];
         }
     }
 
     // newTuple = heap_form_tuple(tupleDesc, values, isnull);
-    let mut new_tuple = heap_form_tuple(tuple_desc, &values, &isnull)?;
+    let mut new_tuple = heap_form_tuple(mcx, tuple_desc, &values, &isnull)?;
 
     // copy the identification info of the old tuple: t_ctid, t_self, t_tableOid.
     copy_tuple_identity(&mut new_tuple, tuple);
@@ -1125,23 +1150,24 @@ pub fn heap_modify_tuple(
 ///
 /// Returns [`HeapTupleError::InvalidColumnNumber`] for a `replCols[i]` outside
 /// `1..=natts` (C: `elog(ERROR, "invalid column number %d", attnum)`).
-pub fn heap_modify_tuple_by_cols(
-    tuple: &FormedTuple,
-    tuple_desc: &TupleDescData,
+pub fn heap_modify_tuple_by_cols<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &FormedTuple<'_>,
+    tuple_desc: &TupleDescData<'_>,
     n_cols: i32,
     repl_cols: &[i32],
-    repl_values: &[TupleValue],
+    repl_values: &[TupleValue<'_>],
     repl_isnull: &[bool],
-) -> Result<FormedTuple, HeapTupleError> {
+) -> Result<FormedTuple<'mcx>, HeapTupleError> {
     let number_of_attributes = tuple_desc.natts;
 
     // values = palloc(natts * sizeof(Datum)); isnull = palloc(natts * sizeof(bool));
     // heap_deform_tuple(tuple, tupleDesc, values, isnull);
-    let deformed = heap_deform_tuple(&tuple.tuple, tuple_desc, &tuple.data);
-    let mut values: alloc::vec::Vec<TupleValue> =
-        alloc::vec::Vec::with_capacity(number_of_attributes as usize);
-    let mut isnull: alloc::vec::Vec<bool> =
-        alloc::vec::Vec::with_capacity(number_of_attributes as usize);
+    let deformed = heap_deform_tuple(mcx, &tuple.tuple, tuple_desc, &tuple.data)?;
+    let mut values: PgVec<'mcx, TupleValue<'mcx>> =
+        vec_with_capacity_in(mcx, number_of_attributes as usize)?;
+    let mut isnull: PgVec<'mcx, bool> =
+        vec_with_capacity_in(mcx, number_of_attributes as usize)?;
     for (val, null) in deformed {
         values.push(val);
         isnull.push(null);
@@ -1154,12 +1180,12 @@ pub fn heap_modify_tuple_by_cols(
         if attnum <= 0 || attnum > number_of_attributes {
             return Err(HeapTupleError::InvalidColumnNumber { attnum });
         }
-        values[(attnum - 1) as usize] = repl_values[i].clone();
+        values[(attnum - 1) as usize] = repl_values[i].clone_in(mcx)?;
         isnull[(attnum - 1) as usize] = repl_isnull[i];
     }
 
     // newTuple = heap_form_tuple(tupleDesc, values, isnull);
-    let mut new_tuple = heap_form_tuple(tuple_desc, &values, &isnull)?;
+    let mut new_tuple = heap_form_tuple(mcx, tuple_desc, &values, &isnull)?;
 
     // copy the identification info of the old tuple: t_ctid, t_self, t_tableOid.
     copy_tuple_identity(&mut new_tuple, tuple);
@@ -1198,10 +1224,21 @@ fn copy_tuple_identity(new_tuple: &mut FormedTuple, old: &FormedTuple) {
 /// `MINIMAL_TUPLE_OFFSET`, exactly as C sets it; `t_len` is `hoff + data.len()`
 /// *without* `MINIMAL_TUPLE_OFFSET` (per the `t_len` contract).
 #[derive(Clone, Debug)]
-pub struct FormedMinimalTuple {
-    pub tuple: alloc::boxed::Box<types_tuple::heaptuple::MinimalTupleData>,
+pub struct FormedMinimalTuple<'mcx> {
+    pub tuple: mcx::PgBox<'mcx, types_tuple::heaptuple::MinimalTupleData<'mcx>>,
     /// The user-data area (`data_len` bytes), i.e. the bytes at `tuple + hoff`.
-    pub data: alloc::vec::Vec<u8>,
+    pub data: PgVec<'mcx, u8>,
+}
+
+impl FormedMinimalTuple<'_> {
+    /// Deep copy into `mcx` (C: `heap_copy_minimal_tuple`'s single-block copy
+    /// into the caller's current context).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<FormedMinimalTuple<'b>> {
+        Ok(FormedMinimalTuple {
+            tuple: alloc_in(mcx, self.tuple.clone_in(mcx)?)?,
+            data: slice_in(mcx, &self.data)?,
+        })
+    }
 }
 
 /// `heap_form_minimal_tuple(tupleDescriptor, values, isnull, extra)`
@@ -1219,12 +1256,13 @@ pub struct FormedMinimalTuple {
 /// `MAXALIGN(extra)` (C `Assert`). It does not change any tuple *content*, so in
 /// the owned model — where the tuple is not a raw leading-padded block — it
 /// affects nothing but is still validated.
-pub fn heap_form_minimal_tuple(
-    tuple_descriptor: &TupleDescData,
-    values: &[TupleValue],
+pub fn heap_form_minimal_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple_descriptor: &TupleDescData<'_>,
+    values: &[TupleValue<'_>],
     isnull: &[bool],
     extra: Size,
-) -> Result<FormedMinimalTuple, HeapTupleError> {
+) -> Result<FormedMinimalTuple<'mcx>, HeapTupleError> {
     // Assert(extra == MAXALIGN(extra));
     debug_assert_eq!(extra, maxalign(extra));
 
@@ -1265,7 +1303,7 @@ pub fn heap_form_minimal_tuple(
     // The `extra` leading-pad bytes carry no tuple content (zeroed, before the
     // tuple), so the owned tuple is built from `len`/`hoff`/`data_len` exactly as
     // C does; `extra` only had to be MAXALIGNed (asserted above).
-    let filled = heap_fill_tuple(tuple_descriptor, values, isnull, data_len, hasnull)?;
+    let filled = heap_fill_tuple(mcx, tuple_descriptor, values, isnull, data_len, hasnull)?;
 
     let mut tuple = types_tuple::heaptuple::MinimalTupleData {
         // tuple->t_len = len;
@@ -1284,7 +1322,7 @@ pub fn heap_form_minimal_tuple(
     minimal_tuple_set_natts(&mut tuple, number_of_attributes as u16);
 
     Ok(FormedMinimalTuple {
-        tuple: alloc::boxed::Box::new(tuple),
+        tuple: alloc_in(mcx, tuple)?,
         data: filled.data,
     })
 }
@@ -1298,7 +1336,7 @@ pub fn heap_form_minimal_tuple(
 /// tuple. We replicate the mask write here because the idiomatic
 /// `HeapTupleHeaderSetNatts` is typed to `HeapTupleHeaderData`.
 #[inline]
-fn minimal_tuple_set_natts(tuple: &mut types_tuple::heaptuple::MinimalTupleData, natts: u16) {
+fn minimal_tuple_set_natts(tuple: &mut types_tuple::heaptuple::MinimalTupleData<'_>, natts: u16) {
     tuple.t_infomask2 = (tuple.t_infomask2 & !types_tuple::heaptuple::HEAP_NATTS_MASK)
         | (natts & types_tuple::heaptuple::HEAP_NATTS_MASK);
 }
@@ -1400,19 +1438,20 @@ pub fn heap_attisnull(
 ///
 /// Callers reach this only for `attnum > 0` non-null attributes (per
 /// `fastgetattr`); a NULL or out-of-range `attnum` is a caller bug.
-pub fn nocachegetattr(
-    tuple: &HeapTupleData,
+pub fn nocachegetattr<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &HeapTupleData<'_>,
     attnum: i32,
-    tuple_desc: &TupleDescData,
+    tuple_desc: &TupleDescData<'_>,
     data: &[u8],
-) -> TupleValue {
+) -> PgResult<TupleValue<'mcx>> {
     debug_assert!(attnum > 0, "nocachegetattr: attnum must be > 0");
 
-    let cols = heap_deform_tuple(tuple, tuple_desc, data);
+    let mut cols = heap_deform_tuple(mcx, tuple, tuple_desc, data)?;
     let idx = (attnum - 1) as usize;
     // The caller (fastgetattr) only invokes this for a non-null value.
     debug_assert!(!cols[idx].1, "nocachegetattr called on a NULL attribute");
-    cols[idx].0.clone()
+    Ok(cols.swap_remove(idx).0)
 }
 
 /// `heap_getsysattr(tup, attnum, tupleDesc, &isnull)` (heaptuple.c:724) — fetch
@@ -1424,7 +1463,12 @@ pub fn nocachegetattr(
 /// `ItemPointerData` bytes (`ByRef`), the faithful stand-in for C's
 /// `PointerGetDatum(&tup->t_self)`. The xact/cid attributes are by-value.
 /// Panics on an invalid `attnum` (C: `elog(ERROR, "invalid attnum: %d")`).
-pub fn heap_getsysattr(tuple: &HeapTupleData, attnum: i32) -> DeformedColumn {
+/// Fallible: the ctid by-reference bytes are copied into `mcx`.
+pub fn heap_getsysattr<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &HeapTupleData<'_>,
+    attnum: i32,
+) -> PgResult<DeformedColumn<'mcx>> {
     let header = tuple
         .t_data
         .as_ref()
@@ -1433,7 +1477,7 @@ pub fn heap_getsysattr(tuple: &HeapTupleData, attnum: i32) -> DeformedColumn {
     // Currently, no sys attribute ever reads as NULL.
     let value = if attnum == SelfItemPointerAttributeNumber as i32 {
         // PointerGetDatum(&(tup->t_self)): the ItemPointerData bytes.
-        TupleValue::ByRef(item_pointer_bytes(&tuple.t_self))
+        TupleValue::ByRef(item_pointer_bytes(mcx, &tuple.t_self)?)
     } else if attnum == MinTransactionIdAttributeNumber as i32 {
         // TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(tup->t_data))
         TupleValue::ByVal(Datum::from_u32(
@@ -1456,18 +1500,18 @@ pub fn heap_getsysattr(tuple: &HeapTupleData, attnum: i32) -> DeformedColumn {
         panic!("invalid attnum: {attnum}");
     };
 
-    (value, false)
+    Ok((value, false))
 }
 
 /// The little-endian on-disk bytes of an `ItemPointerData` (4 bytes blockid + 2
 /// bytes posid), as `PointerGetDatum(&t_self)` would expose them.
 #[inline]
-fn item_pointer_bytes(ip: &ItemPointerData) -> Vec<u8> {
-    let mut out = Vec::with_capacity(6);
+fn item_pointer_bytes<'mcx>(mcx: Mcx<'mcx>, ip: &ItemPointerData) -> PgResult<PgVec<'mcx, u8>> {
+    let mut out = vec_with_capacity_in(mcx, 6)?;
     out.extend_from_slice(&ip.ip_blkid.bi_hi.to_ne_bytes());
     out.extend_from_slice(&ip.ip_blkid.bi_lo.to_ne_bytes());
     out.extend_from_slice(&ip.ip_posid.to_ne_bytes());
-    out
+    Ok(out)
 }
 
 // ===========================================================================
@@ -1486,7 +1530,7 @@ enum ExpandTarget {
 
 /// The flat layout computed by [`expand_tuple`]: the data area, the null bitmap,
 /// the header metadata, and `t_hoff`.
-struct ExpandedLayout {
+struct ExpandedLayout<'mcx> {
     /// Total tuple length (`t_len`).
     len: usize,
     /// `t_hoff` to store in the header (MINIMAL_TUPLE_OFFSET-adjusted for the
@@ -1495,9 +1539,9 @@ struct ExpandedLayout {
     /// `t_infomask` accumulated while filling the trailing attributes.
     infomask: u16,
     /// The user-data area bytes (verbatim source data + appended missing values).
-    data: Vec<u8>,
+    data: PgVec<'mcx, u8>,
     /// The null bitmap (`BITMAPLEN(natts)` bytes), or empty when no nulls.
-    bits: Vec<bits8>,
+    bits: PgVec<'mcx, bits8>,
 }
 
 /// `expand_tuple` (heaptuple.c:829). The source must have fewer attributes than
@@ -1506,11 +1550,12 @@ struct ExpandedLayout {
 ///
 /// `source` carries the verbatim source data area in [`FormedTuple::data`] (C's
 /// `(char *) sourceTuple->t_data + t_hoff`).
-fn expand_tuple(
+fn expand_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
     target: &ExpandTarget,
-    source: &FormedTuple,
-    tuple_desc: &TupleDescData,
-) -> PgResult<ExpandedLayout> {
+    source: &FormedTuple<'_>,
+    tuple_desc: &TupleDescData<'_>,
+) -> PgResult<ExpandedLayout<'mcx>> {
     let source_header = source
         .tuple
         .t_data
@@ -1588,8 +1633,10 @@ fn expand_tuple(
     let hoff = maxalign(len);
     len = hoff + target_data_len;
 
-    let mut data = vec![0u8; target_data_len];
-    let mut bits: Vec<bits8> = vec![0u8; target_null_len];
+    let mut data = vec_with_capacity_in(mcx, target_data_len)?;
+    data.resize(target_data_len, 0);
+    let mut bits: PgVec<'mcx, bits8> = vec_with_capacity_in(mcx, target_null_len)?;
+    bits.resize(target_null_len, 0);
     let mut infomask = source_header.t_infomask;
 
     // Build the null bitmap from the source (or all-NOT-NULL), exactly as C does.
@@ -1681,7 +1728,10 @@ fn expand_tuple(
 /// blocked on the unported catalog-missing-value substrate — a loud panic,
 /// never a silent fabrication.
 #[inline]
-fn missing_value(attrmiss: &types_tuple::heaptuple::AttrMissing, att: &CompactAttribute) -> TupleValue {
+fn missing_value<'a>(
+    attrmiss: &types_tuple::heaptuple::AttrMissing,
+    att: &CompactAttribute,
+) -> TupleValue<'a> {
     if att.attbyval {
         TupleValue::ByVal(attrmiss.am_value)
     } else {
@@ -1696,11 +1746,12 @@ fn missing_value(attrmiss: &types_tuple::heaptuple::AttrMissing, att: &CompactAt
 
 /// `minimal_expand_tuple(sourceTuple, tupleDesc)` (heaptuple.c:1053) — fill in the
 /// missing values for a minimal HeapTuple.
-pub fn minimal_expand_tuple(
-    source: &FormedTuple,
-    tuple_desc: &TupleDescData,
-) -> PgResult<FormedMinimalTuple> {
-    let layout = expand_tuple(&ExpandTarget::Minimal, source, tuple_desc)?;
+pub fn minimal_expand_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    source: &FormedTuple<'_>,
+    tuple_desc: &TupleDescData<'_>,
+) -> PgResult<FormedMinimalTuple<'mcx>> {
+    let layout = expand_tuple(mcx, &ExpandTarget::Minimal, source, tuple_desc)?;
 
     let mut tuple = types_tuple::heaptuple::MinimalTupleData {
         t_len: layout.len as u32,
@@ -1713,18 +1764,19 @@ pub fn minimal_expand_tuple(
     minimal_tuple_set_natts(&mut tuple, tuple_desc.natts as u16);
 
     Ok(FormedMinimalTuple {
-        tuple: alloc::boxed::Box::new(tuple),
+        tuple: alloc_in(mcx, tuple)?,
         data: layout.data,
     })
 }
 
 /// `heap_expand_tuple(sourceTuple, tupleDesc)` (heaptuple.c:1065) — fill in the
 /// missing values for an ordinary HeapTuple.
-pub fn heap_expand_tuple(
-    source: &FormedTuple,
-    tuple_desc: &TupleDescData,
-) -> PgResult<FormedTuple> {
-    let layout = expand_tuple(&ExpandTarget::Heap, source, tuple_desc)?;
+pub fn heap_expand_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    source: &FormedTuple<'_>,
+    tuple_desc: &TupleDescData<'_>,
+) -> PgResult<FormedTuple<'mcx>> {
+    let layout = expand_tuple(mcx, &ExpandTarget::Heap, source, tuple_desc)?;
 
     // C: targetTHeader->t_infomask = sourceTHeader->t_infomask (already folded
     // into layout.infomask); SetNatts/SetDatumLength/SetTypeId/SetTypMod;
@@ -1743,15 +1795,18 @@ pub fn heap_expand_tuple(
     };
     HeapTupleHeaderSetNatts(&mut td, tuple_desc.natts as u16);
 
-    let tuple = Box::new(HeapTupleData {
-        t_len: layout.len as u32,
-        // (*targetHeapTuple)->t_self = sourceTuple->t_self;
-        t_self: source.tuple.t_self,
-        // (*targetHeapTuple)->t_tableOid = sourceTuple->t_tableOid;
-        t_tableOid: source.tuple.t_tableOid,
-        t_data: Some(Box::new(td)),
-        t_user_data: None,
-    });
+    let tuple = alloc_in(
+        mcx,
+        HeapTupleData {
+            t_len: layout.len as u32,
+            // (*targetHeapTuple)->t_self = sourceTuple->t_self;
+            t_self: source.tuple.t_self,
+            // (*targetHeapTuple)->t_tableOid = sourceTuple->t_tableOid;
+            t_tableOid: source.tuple.t_tableOid,
+            t_data: Some(alloc_in(mcx, td)?),
+            t_user_data: None,
+        },
+    )?;
 
     Ok(FormedTuple {
         tuple,
@@ -1777,10 +1832,11 @@ pub fn heap_expand_tuple(
 /// (`access/common/toast_helper` + `access/heap/heaptoast`) is unported here, so
 /// that branch is routed through the loud-panic
 /// `backend_access_heap_heaptoast_seams::toast_flatten_tuple_to_datum` seam.
-pub fn heap_copy_tuple_as_datum(
-    tuple: &FormedTuple,
-    tuple_desc: &TupleDescData,
-) -> PgResult<FormedTuple> {
+pub fn heap_copy_tuple_as_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &FormedTuple<'_>,
+    tuple_desc: &TupleDescData<'_>,
+) -> PgResult<FormedTuple<'mcx>> {
     let header = tuple
         .tuple
         .t_data
@@ -1789,11 +1845,13 @@ pub fn heap_copy_tuple_as_datum(
 
     // If the tuple contains any external TOAST pointers, inline those fields.
     if (header.t_infomask & HEAP_HASEXTERNAL) != 0 {
-        return backend_access_heap_heaptoast_seams::toast_flatten_tuple_to_datum::call(tuple, tuple_desc);
+        return backend_access_heap_heaptoast_seams::toast_flatten_tuple_to_datum::call(
+            mcx, tuple, tuple_desc,
+        );
     }
 
     // Fast path: palloc'd copy with the composite-Datum header fields set.
-    let mut new = tuple.clone();
+    let mut new = tuple.clone_in(mcx)?;
     if let Some(td) = new.tuple.t_data.as_mut() {
         // HeapTupleHeaderSetDatumLength(td, tuple->t_len);
         // HeapTupleHeaderSetTypeId / SetTypMod.
@@ -1816,17 +1874,21 @@ pub fn heap_copy_tuple_as_datum(
 /// owned model freeing is dropping: taking the [`FormedMinimalTuple`] by value
 /// consumes it.
 #[inline]
-pub fn heap_free_minimal_tuple(mtup: FormedMinimalTuple) {
+pub fn heap_free_minimal_tuple(mtup: FormedMinimalTuple<'_>) {
     drop(mtup);
 }
 
 /// `heap_copy_minimal_tuple(mtup, extra)` (heaptuple.c:1541) — copy a
-/// MinimalTuple. `extra` must be `MAXALIGN(extra)` (C `Assert`); it only governs
-/// C's leading-padding allocation (which carries no tuple content), so the owned
-/// copy is a deep clone of the header + data.
-pub fn heap_copy_minimal_tuple(mtup: &FormedMinimalTuple, extra: Size) -> FormedMinimalTuple {
+/// MinimalTuple into `mcx`. `extra` must be `MAXALIGN(extra)` (C `Assert`); it
+/// only governs C's leading-padding allocation (which carries no tuple
+/// content), so the owned copy is a deep clone of the header + data.
+pub fn heap_copy_minimal_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    mtup: &FormedMinimalTuple<'_>,
+    extra: Size,
+) -> PgResult<FormedMinimalTuple<'mcx>> {
     debug_assert_eq!(extra, maxalign(extra));
-    mtup.clone()
+    mtup.clone_in(mcx)
 }
 
 /// Offset of `t_infomask2` within the contiguous `MinimalTuple` memory image —
@@ -1849,13 +1911,17 @@ const _: () = assert!(MINIMAL_TUPLE_DATA_OFFSET == 4 + 6);
 /// are native-endian, exactly as the in-memory C image (the image never leaves
 /// the process: it round-trips through this module's parser and the
 /// process-private tuplestore temp files only).
-pub fn minimal_tuple_to_flat_bytes(mtup: &FormedMinimalTuple) -> Vec<u8> {
+pub fn minimal_tuple_to_flat_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    mtup: &FormedMinimalTuple<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
     let t_len = mtup.tuple.t_len as usize;
     // data area starts at t_hoff - MINIMAL_TUPLE_OFFSET (htup_details.h:663).
     let hoff = mtup.tuple.t_hoff as usize - types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
     debug_assert_eq!(t_len, hoff + mtup.data.len(), "t_len == hoff + data_len");
 
-    let mut image = vec![0u8; t_len];
+    let mut image = vec_with_capacity_in(mcx, t_len)?;
+    image.resize(t_len, 0);
     image[0..4].copy_from_slice(&(t_len as u32).to_ne_bytes());
     // [4..10) mt_padding: zeroed.
     image[10..12].copy_from_slice(&mtup.tuple.t_infomask2.to_ne_bytes());
@@ -1868,7 +1934,7 @@ pub fn minimal_tuple_to_flat_bytes(mtup: &FormedMinimalTuple) -> Vec<u8> {
     image[SIZEOF_MINIMAL_TUPLE_HEADER..bits_end].copy_from_slice(&mtup.tuple.t_bits);
     // user data at hoff.
     image[hoff..].copy_from_slice(&mtup.data);
-    image
+    Ok(image)
 }
 
 /// Parse a contiguous `MinimalTuple` memory image (as produced by
@@ -1877,7 +1943,10 @@ pub fn minimal_tuple_to_flat_bytes(mtup: &FormedMinimalTuple) -> Vec<u8> {
 /// serializer: reads the fixed header fields at their C offsets, the null
 /// bitmap (`BITMAPLEN(natts)` bytes at offset 15, present iff `HEAP_HASNULL`),
 /// and the user-data area at `t_hoff - MINIMAL_TUPLE_OFFSET`.
-pub fn minimal_tuple_from_flat_bytes(image: &[u8]) -> FormedMinimalTuple {
+pub fn minimal_tuple_from_flat_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    image: &[u8],
+) -> PgResult<FormedMinimalTuple<'mcx>> {
     assert!(
         image.len() >= SIZEOF_MINIMAL_TUPLE_HEADER,
         "minimal tuple image shorter than SizeofMinimalTupleHeader"
@@ -1895,25 +1964,31 @@ pub fn minimal_tuple_from_flat_bytes(image: &[u8]) -> FormedMinimalTuple {
     assert!(hoff <= image.len(), "minimal tuple image t_hoff out of range");
 
     // HEAP_HASNULL + HeapTupleHeaderGetNatts govern the bitmap presence/length.
-    let t_bits: Vec<u8> = if t_infomask & HEAP_HASNULL != 0 {
+    let t_bits: PgVec<'mcx, u8> = if t_infomask & HEAP_HASNULL != 0 {
         let natts = (t_infomask2 & types_tuple::heaptuple::HEAP_NATTS_MASK) as i32;
         let bitmaplen = BITMAPLEN(natts) as usize;
-        image[SIZEOF_MINIMAL_TUPLE_HEADER..SIZEOF_MINIMAL_TUPLE_HEADER + bitmaplen].to_vec()
+        slice_in(
+            mcx,
+            &image[SIZEOF_MINIMAL_TUPLE_HEADER..SIZEOF_MINIMAL_TUPLE_HEADER + bitmaplen],
+        )?
     } else {
-        Vec::new()
+        PgVec::new_in(mcx)
     };
 
-    FormedMinimalTuple {
-        tuple: Box::new(types_tuple::heaptuple::MinimalTupleData {
-            t_len,
-            mt_padding: [0; 6],
-            t_infomask2,
-            t_infomask,
-            t_hoff,
-            t_bits,
-        }),
-        data: image[hoff..].to_vec(),
-    }
+    Ok(FormedMinimalTuple {
+        tuple: alloc_in(
+            mcx,
+            types_tuple::heaptuple::MinimalTupleData {
+                t_len,
+                mt_padding: [0; 6],
+                t_infomask2,
+                t_infomask,
+                t_hoff,
+                t_bits,
+            },
+        )?,
+        data: slice_in(mcx, &image[hoff..])?,
+    })
 }
 
 /// `heap_tuple_from_minimal_tuple(mtup)` (heaptuple.c:1564) — create a HeapTuple
@@ -1927,7 +2002,10 @@ pub fn minimal_tuple_from_flat_bytes(image: &[u8]) -> FormedMinimalTuple {
 /// `t_infomask2 .. t_bits` tail and data area. `t_len` is `mtup.t_len +
 /// MINIMAL_TUPLE_OFFSET`; `t_hoff` likewise drops the minimal bias back to the
 /// full HeapTuple header offset.
-pub fn heap_tuple_from_minimal_tuple(mtup: &FormedMinimalTuple) -> FormedTuple {
+pub fn heap_tuple_from_minimal_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    mtup: &FormedMinimalTuple<'_>,
+) -> PgResult<FormedTuple<'mcx>> {
     let len = mtup.tuple.t_len as usize + types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
 
     // memset(result->t_data, 0, offsetof(t_infomask2)) zeroes t_choice + t_ctid.
@@ -1941,22 +2019,25 @@ pub fn heap_tuple_from_minimal_tuple(mtup: &FormedMinimalTuple) -> FormedTuple {
         // MINIMAL_TUPLE_OFFSET bias, and the HeapTuple header occupies exactly
         // that region, so the on-disk header offset is unchanged.
         t_hoff: mtup.tuple.t_hoff,
-        t_bits: mtup.tuple.t_bits.clone(),
+        t_bits: slice_in(mcx, &mtup.tuple.t_bits)?,
     };
 
-    let tuple = Box::new(HeapTupleData {
-        t_len: len as u32,
-        // ItemPointerSetInvalid(&result->t_self);
-        t_self: invalid_item_pointer(),
-        t_tableOid: INVALID_OID,
-        t_data: Some(Box::new(td)),
-        t_user_data: None,
-    });
+    let tuple = alloc_in(
+        mcx,
+        HeapTupleData {
+            t_len: len as u32,
+            // ItemPointerSetInvalid(&result->t_self);
+            t_self: invalid_item_pointer(),
+            t_tableOid: INVALID_OID,
+            t_data: Some(alloc_in(mcx, td)?),
+            t_user_data: None,
+        },
+    )?;
 
-    FormedTuple {
+    Ok(FormedTuple {
         tuple,
-        data: mtup.data.clone(),
-    }
+        data: slice_in(mcx, &mtup.data)?,
+    })
 }
 
 /// `minimal_tuple_from_heap_tuple(htup, extra)` (heaptuple.c:1586) — create a
@@ -1965,7 +2046,11 @@ pub fn heap_tuple_from_minimal_tuple(mtup: &FormedMinimalTuple) -> FormedTuple {
 /// i.e. it drops the leading `MINIMAL_TUPLE_OFFSET` bytes of the HeapTuple header
 /// (the t_choice/t_ctid system-column region) and keeps the shared
 /// `t_infomask2 .. t_bits` tail + data; `len = htup->t_len - MINIMAL_TUPLE_OFFSET`.
-pub fn minimal_tuple_from_heap_tuple(htup: &FormedTuple, extra: Size) -> FormedMinimalTuple {
+pub fn minimal_tuple_from_heap_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    htup: &FormedTuple<'_>,
+    extra: Size,
+) -> PgResult<FormedMinimalTuple<'mcx>> {
     debug_assert_eq!(extra, maxalign(extra));
     // Assert(htup->t_len > MINIMAL_TUPLE_OFFSET);
     debug_assert!(htup.tuple.t_len as usize > types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET);
@@ -1987,13 +2072,13 @@ pub fn minimal_tuple_from_heap_tuple(htup: &FormedTuple, extra: Size) -> FormedM
         t_infomask2: header.t_infomask2,
         t_infomask: header.t_infomask,
         t_hoff: header.t_hoff,
-        t_bits: header.t_bits.clone(),
+        t_bits: slice_in(mcx, &header.t_bits)?,
     };
 
-    FormedMinimalTuple {
-        tuple: alloc::boxed::Box::new(tuple),
-        data: htup.data.clone(),
-    }
+    Ok(FormedMinimalTuple {
+        tuple: alloc_in(mcx, tuple)?,
+        data: slice_in(mcx, &htup.data)?,
+    })
 }
 
 /// `ItemPointerSetInvalid(&p)` (itemptr.h): `blockid = (0xffff, 0xffff)`,
@@ -2045,16 +2130,19 @@ fn invalid_item_pointer() -> types_tuple::heaptuple::ItemPointerData {
 /// Panics if the tuple has no header (`t_data == None`): a tuple destined for a
 /// page write must carry a header (a wiring bug, surfaced loud rather than
 /// writing a corrupt page).
-pub fn heap_tuple_to_disk_image(tuple: &HeapTupleData) -> Vec<u8> {
+pub fn heap_tuple_to_disk_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &HeapTupleData<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
     let hdr = tuple
         .t_data
         .as_ref()
         .expect("heap_tuple_to_disk_image: tuple has no t_data header");
 
     let t_hoff = hdr.t_hoff as usize;
-    let user = tuple.t_user_data.as_deref().unwrap_or(&[]);
+    let user: &[u8] = tuple.t_user_data.as_deref().unwrap_or(&[]);
 
-    let mut img: Vec<u8> = Vec::with_capacity(t_hoff + user.len());
+    let mut img: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, t_hoff + user.len())?;
 
     // --- t_choice (12 bytes): the union of HeapTupleFields / DatumTupleFields ---
     match &hdr.t_choice {
@@ -2099,7 +2187,7 @@ pub fn heap_tuple_to_disk_image(tuple: &HeapTupleData) -> Vec<u8> {
 
     // --- user data (the post-t_hoff column bytes) ---
     img.extend_from_slice(user);
-    img
+    Ok(img)
 }
 
 /// `heap_form_tuple(tupleDescriptor, values, isnull)` returning a single owned
@@ -2112,13 +2200,14 @@ pub fn heap_tuple_to_disk_image(tuple: &HeapTupleData) -> Vec<u8> {
 /// page-write seam and be serialized by [`heap_tuple_to_disk_image`].  Callers
 /// that want the split representation (e.g. composite-Datum producers, the
 /// minimal-tuple path) keep using [`heap_form_tuple`] directly.
-pub fn heap_form_tuple_heaptuple(
-    tuple_descriptor: &TupleDescData,
-    values: &[TupleValue],
+pub fn heap_form_tuple_heaptuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple_descriptor: &TupleDescData<'_>,
+    values: &[TupleValue<'_>],
     isnull: &[bool],
-) -> Result<HeapTupleData, HeapTupleError> {
-    let FormedTuple { tuple, data } = heap_form_tuple(tuple_descriptor, values, isnull)?;
-    let mut tuple = *tuple;
+) -> Result<HeapTupleData<'mcx>, HeapTupleError> {
+    let FormedTuple { tuple, data } = heap_form_tuple(mcx, tuple_descriptor, values, isnull)?;
+    let mut tuple = mcx::PgBox::into_inner(tuple);
     tuple.t_user_data = Some(data);
     Ok(tuple)
 }

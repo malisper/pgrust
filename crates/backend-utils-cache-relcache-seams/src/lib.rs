@@ -8,8 +8,12 @@
 
 seam_core::seam!(
     /// `relation->rd_att` (`RelationGetDescr(relation)`, utils/rel.h): the
-    /// tuple descriptor of an open relation, cloned out of the relcache entry.
-    pub fn relation_rd_att(
+    /// tuple descriptor of an open relation, cloned out of the relcache entry
+    /// into `mcx` (the relcache entry itself lives in `CacheMemoryContext`;
+    /// the safe port copies rather than lending a borrow across the seam).
+    /// `Err` carries OOM from the copy.
+    pub fn relation_rd_att<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         relation: types_core::primitive::Oid,
-    ) -> types_tuple::heaptuple::TupleDesc
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
 );

@@ -1,22 +1,22 @@
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::vec::Vec;
-
+use mcx::{alloc_in, slice_in, Mcx, PgBox, PgString, PgVec};
 use types_core::{
     uint16, uint32, uint8, AttrNumber, BlockNumber, CommandId, OffsetNumber, Oid, Size,
     TransactionId,
 };
 use types_datum::Datum;
+use types_error::PgResult;
 
 pub type bits8 = uint8;
-pub type Name = Option<Box<NameData>>;
-pub type Form_pg_attribute = Option<Box<FormData_pg_attribute>>;
-pub type HeapTupleHeader = Option<Box<HeapTupleHeaderData>>;
-pub type HeapTuple = Option<Box<HeapTupleData>>;
-pub type MinimalTuple = Option<Box<MinimalTupleData>>;
-pub type IndexTuple = Option<Box<IndexTupleData>>;
-pub type IndexAttributeBitMap = Option<Box<IndexAttributeBitMapData>>;
-pub type TupleDesc = Option<Box<TupleDescData>>;
+// In C these are bare pointers to palloc'd structs; here the box allocates in
+// (and cannot outlive) the memory context whose `'mcx` it carries.
+pub type Name<'mcx> = Option<PgBox<'mcx, NameData>>;
+pub type Form_pg_attribute<'mcx> = Option<PgBox<'mcx, FormData_pg_attribute>>;
+pub type HeapTupleHeader<'mcx> = Option<PgBox<'mcx, HeapTupleHeaderData<'mcx>>>;
+pub type HeapTuple<'mcx> = Option<PgBox<'mcx, HeapTupleData<'mcx>>>;
+pub type MinimalTuple<'mcx> = Option<PgBox<'mcx, MinimalTupleData<'mcx>>>;
+pub type IndexTuple<'mcx> = Option<PgBox<'mcx, IndexTupleData>>;
+pub type IndexAttributeBitMap<'mcx> = Option<PgBox<'mcx, IndexAttributeBitMapData>>;
+pub type TupleDesc<'mcx> = Option<PgBox<'mcx, TupleDescData<'mcx>>>;
 
 pub const RECORDOID: Oid = 2249;
 /// `VOIDOID` — `void` pseudo-type (`pg_type_d.h:228`).
@@ -335,31 +335,60 @@ pub struct DatumTupleFields {
 }
 
 #[derive(Clone, Debug)]
-pub struct HeapTupleHeaderData {
+pub struct HeapTupleHeaderData<'mcx> {
     pub t_choice: HeapTupleHeaderChoice,
     pub t_ctid: ItemPointerData,
     pub t_infomask2: uint16,
     pub t_infomask: uint16,
     pub t_hoff: uint8,
-    pub t_bits: Vec<bits8>,
+    pub t_bits: PgVec<'mcx, bits8>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct MinimalTupleData {
+impl HeapTupleHeaderData<'_> {
+    /// Deep copy into `mcx` (C: part of the tuple-`memcpy` into the caller's
+    /// current context). Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<HeapTupleHeaderData<'b>> {
+        Ok(HeapTupleHeaderData {
+            t_choice: self.t_choice.clone(),
+            t_ctid: self.t_ctid,
+            t_infomask2: self.t_infomask2,
+            t_infomask: self.t_infomask,
+            t_hoff: self.t_hoff,
+            t_bits: slice_in(mcx, &self.t_bits)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MinimalTupleData<'mcx> {
     pub t_len: uint32,
     pub mt_padding: [i8; 6],
     pub t_infomask2: uint16,
     pub t_infomask: uint16,
     pub t_hoff: uint8,
-    pub t_bits: Vec<bits8>,
+    pub t_bits: PgVec<'mcx, bits8>,
+}
+
+impl MinimalTupleData<'_> {
+    /// Deep copy into `mcx`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<MinimalTupleData<'b>> {
+        Ok(MinimalTupleData {
+            t_len: self.t_len,
+            mt_padding: self.mt_padding,
+            t_infomask2: self.t_infomask2,
+            t_infomask: self.t_infomask,
+            t_hoff: self.t_hoff,
+            t_bits: slice_in(mcx, &self.t_bits)?,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
-pub struct HeapTupleData {
+pub struct HeapTupleData<'mcx> {
     pub t_len: uint32,
     pub t_self: ItemPointerData,
     pub t_tableOid: Oid,
-    pub t_data: HeapTupleHeader,
+    pub t_data: HeapTupleHeader<'mcx>,
     /// The post-`t_hoff` user-data (column) bytes of the tuple, when this
     /// `HeapTupleData` is one freshly formed by `heap_form_tuple` and intended
     /// to be serialized back onto a page.
@@ -379,7 +408,27 @@ pub struct HeapTupleData {
     /// design and are never re-serialized through the page-write seam.  Adding
     /// the field is purely additive — every existing construction site keeps
     /// `None`.
-    pub t_user_data: Option<Vec<u8>>,
+    pub t_user_data: Option<PgVec<'mcx, u8>>,
+}
+
+impl HeapTupleData<'_> {
+    /// Deep copy into `mcx` (C: `heap_copytuple`'s `memcpy` of the whole
+    /// contiguous block into the caller's current context).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<HeapTupleData<'b>> {
+        Ok(HeapTupleData {
+            t_len: self.t_len,
+            t_self: self.t_self,
+            t_tableOid: self.t_tableOid,
+            t_data: match &self.t_data {
+                Some(hdr) => Some(alloc_in(mcx, hdr.clone_in(mcx)?)?),
+                None => None,
+            },
+            t_user_data: match &self.t_user_data {
+                Some(d) => Some(slice_in(mcx, d)?),
+                None => None,
+            },
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -393,31 +442,82 @@ pub struct IndexAttributeBitMapData {
     pub bits: [bits8; INDEX_ATTRIBUTE_BITMAP_BYTES],
 }
 
-#[derive(Clone, Debug)]
-pub struct AttrDefault {
+#[derive(Debug)]
+pub struct AttrDefault<'mcx> {
     pub adnum: AttrNumber,
-    pub adbin: Option<String>,
+    pub adbin: Option<PgString<'mcx>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct ConstrCheck {
-    pub ccname: Option<String>,
-    pub ccbin: Option<String>,
+impl AttrDefault<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AttrDefault<'b>> {
+        Ok(AttrDefault {
+            adnum: self.adnum,
+            adbin: clone_opt_string_in(&self.adbin, mcx)?,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct ConstrCheck<'mcx> {
+    pub ccname: Option<PgString<'mcx>>,
+    pub ccbin: Option<PgString<'mcx>>,
     pub ccenforced: bool,
     pub ccvalid: bool,
     pub ccnoinherit: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct TupleConstr {
-    pub defval: Vec<AttrDefault>,
-    pub check: Vec<ConstrCheck>,
-    pub missing: Vec<AttrMissing>,
+impl ConstrCheck<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ConstrCheck<'b>> {
+        Ok(ConstrCheck {
+            ccname: clone_opt_string_in(&self.ccname, mcx)?,
+            ccbin: clone_opt_string_in(&self.ccbin, mcx)?,
+            ccenforced: self.ccenforced,
+            ccvalid: self.ccvalid,
+            ccnoinherit: self.ccnoinherit,
+        })
+    }
+}
+
+fn clone_opt_string_in<'b>(s: &Option<PgString<'_>>, mcx: Mcx<'b>) -> PgResult<Option<PgString<'b>>> {
+    match s {
+        Some(s) => Ok(Some(s.clone_in(mcx)?)),
+        None => Ok(None),
+    }
+}
+
+#[derive(Debug)]
+pub struct TupleConstr<'mcx> {
+    pub defval: PgVec<'mcx, AttrDefault<'mcx>>,
+    pub check: PgVec<'mcx, ConstrCheck<'mcx>>,
+    pub missing: PgVec<'mcx, AttrMissing>,
     pub num_defval: uint16,
     pub num_check: uint16,
     pub has_not_null: bool,
     pub has_generated_stored: bool,
     pub has_generated_virtual: bool,
+}
+
+impl TupleConstr<'_> {
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TupleConstr<'b>> {
+        let mut defval = mcx::vec_with_capacity_in(mcx, self.defval.len())?;
+        for d in &self.defval {
+            defval.push(d.clone_in(mcx)?);
+        }
+        let mut check = mcx::vec_with_capacity_in(mcx, self.check.len())?;
+        for c in &self.check {
+            check.push(c.clone_in(mcx)?);
+        }
+        Ok(TupleConstr {
+            defval,
+            check,
+            missing: slice_in(mcx, &self.missing)?,
+            num_defval: self.num_defval,
+            num_check: self.num_check,
+            has_not_null: self.has_not_null,
+            has_generated_stored: self.has_generated_stored,
+            has_generated_virtual: self.has_generated_virtual,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -439,14 +539,14 @@ pub struct CompactAttribute {
     pub attalignby: uint8,
 }
 
-#[derive(Clone, Debug)]
-pub struct TupleDescData {
+#[derive(Debug)]
+pub struct TupleDescData<'mcx> {
     pub natts: i32,
     pub tdtypeid: Oid,
     pub tdtypmod: i32,
     pub tdrefcount: i32,
-    pub constr: Option<Box<TupleConstr>>,
-    pub compact_attrs: Vec<CompactAttribute>,
+    pub constr: Option<PgBox<'mcx, TupleConstr<'mcx>>>,
+    pub compact_attrs: PgVec<'mcx, CompactAttribute>,
     /// The full `FormData_pg_attribute[]` flexible array that PG18's
     /// `TupleDescData` carries alongside `compact_attrs`
     /// (`access/tupdesc.h`).  In C this is the trailing flexible array reached
@@ -457,10 +557,30 @@ pub struct TupleDescData {
     /// (`atttypid`, `attstorage`, `attcollation`, `attname`, ...) read this
     /// via [`TupleDescAttr`].  `populate_compact_attribute` derives the
     /// matching `compact_attrs[i]` from `attrs[i]`.
-    pub attrs: Vec<FormData_pg_attribute>,
+    pub attrs: PgVec<'mcx, FormData_pg_attribute>,
 }
 
-impl TupleDescData {
+impl TupleDescData<'_> {
+    /// Deep copy into `mcx` (C: `CreateTupleDescCopyConstr` semantics — the
+    /// descriptor plus its constraint payload, allocated in the caller's
+    /// context).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TupleDescData<'b>> {
+        Ok(TupleDescData {
+            natts: self.natts,
+            tdtypeid: self.tdtypeid,
+            tdtypmod: self.tdtypmod,
+            tdrefcount: self.tdrefcount,
+            constr: match &self.constr {
+                Some(c) => Some(alloc_in(mcx, c.clone_in(mcx)?)?),
+                None => None,
+            },
+            compact_attrs: slice_in(mcx, &self.compact_attrs)?,
+            attrs: slice_in(mcx, &self.attrs)?,
+        })
+    }
+}
+
+impl TupleDescData<'_> {
     /// `TupleDescAttr(tupdesc, i)` (`access/tupdesc.h`) — the `i`-th full
     /// `Form_pg_attribute` (0-based).
     pub fn attr(&self, i: usize) -> &FormData_pg_attribute {

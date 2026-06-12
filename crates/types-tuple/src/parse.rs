@@ -12,10 +12,10 @@ use crate::access::EphemeralNamedRelationData;
 /// ENR list is context-allocated through the `Mcx` handle the constructor
 /// receives, so the environment cannot outlive that context and its bytes
 /// show up in the context's accounting.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct QueryEnvironment<'mcx> {
     /// list of `EphemeralNamedRelation`s registered in this environment
-    pub namedRelList: PgVec<'mcx, EphemeralNamedRelationData>,
+    pub namedRelList: PgVec<'mcx, EphemeralNamedRelationData<'mcx>>,
 }
 
 impl<'mcx> QueryEnvironment<'mcx> {

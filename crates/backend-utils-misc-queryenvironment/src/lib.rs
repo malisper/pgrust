@@ -21,9 +21,7 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
-
-use mcx::Mcx;
+use mcx::{alloc_in, Mcx};
 use types_core::primitive::InvalidOid;
 use types_error::PgResult;
 use types_tuple::access::{
@@ -50,18 +48,22 @@ pub fn create_queryEnv(mcx: Mcx<'_>) -> QueryEnvironment<'_> {
 ///
 /// C returns NULL when `queryEnv == NULL` (here `None`). On a hit C returns
 /// `&(enr->md)`; the owned signature hands back an owned
-/// `EphemeralNamedRelationMetadata`, so the matched `md` is cloned.
-pub fn get_visible_ENR_metadata(
-    query_env: Option<&QueryEnvironment>,
+/// `EphemeralNamedRelationMetadata`, so the matched `md` is cloned into `mcx`
+/// (fallible: the copy allocates).
+pub fn get_visible_ENR_metadata<'mcx>(
+    mcx: Mcx<'mcx>,
+    query_env: Option<&QueryEnvironment<'_>>,
     refname: &str,
-) -> EphemeralNamedRelationMetadata {
+) -> PgResult<EphemeralNamedRelationMetadata<'mcx>> {
     // Assert(refname != NULL) — `&str` is non-null by construction.
 
-    let query_env = query_env?;
+    let Some(query_env) = query_env else {
+        return Ok(None);
+    };
 
     match get_ENR(query_env, refname) {
-        Some(enr) => Some(Box::new(enr.md.clone())),
-        None => None,
+        Some(enr) => Ok(Some(alloc_in(mcx, enr.md.clone_in(mcx)?)?)),
+        None => Ok(None),
     }
 }
 
@@ -72,9 +74,9 @@ pub fn get_visible_ENR_metadata(
 /// can be left `None` (C: NULL `tstate`).
 ///
 /// Fallible because C's `lappend` pallocs, which can `ereport(ERROR)` on OOM.
-pub fn register_ENR(
-    query_env: &mut QueryEnvironment<'_>,
-    enr: EphemeralNamedRelationData,
+pub fn register_ENR<'mcx>(
+    query_env: &mut QueryEnvironment<'mcx>,
+    enr: EphemeralNamedRelationData<'mcx>,
 ) -> PgResult<()> {
     // Assert(enr != NULL) — `enr` is owned, never null.
     // Assert(get_ENR(queryEnv, enr->md.name) == NULL)
@@ -99,7 +101,7 @@ pub fn register_ENR(
 /// `unregister_ENR(queryEnv, name)` — unregister an ephemeral relation by
 /// name. This will probably be a rarely used function, but seems like it
 /// should be provided "just in case".
-pub fn unregister_ENR(query_env: &mut QueryEnvironment, name: &str) {
+pub fn unregister_ENR(query_env: &mut QueryEnvironment<'_>, name: &str) {
     if let Some(idx) = enr_index(query_env, name) {
         query_env.namedRelList.remove(idx);
     }
@@ -110,17 +112,17 @@ pub fn unregister_ENR(query_env: &mut QueryEnvironment, name: &str) {
 ///
 /// C also returns NULL when `queryEnv == NULL`; here the caller passes a
 /// borrow, so non-null is implied.
-pub fn get_ENR<'e>(
-    query_env: &'e QueryEnvironment,
+pub fn get_ENR<'e, 'mcx>(
+    query_env: &'e QueryEnvironment<'mcx>,
     name: &str,
-) -> Option<&'e EphemeralNamedRelationData> {
+) -> Option<&'e EphemeralNamedRelationData<'mcx>> {
     // Assert(name != NULL) — `&str` is non-null.
     enr_index(query_env, name).map(|idx| &query_env.namedRelList[idx])
 }
 
 /// Shared name-match walk used by `get_ENR` / `unregister_ENR`. Mirrors C's
 /// `foreach` + `strcmp(enr->md.name, name) == 0`.
-fn enr_index(query_env: &QueryEnvironment, name: &str) -> Option<usize> {
+fn enr_index(query_env: &QueryEnvironment<'_>, name: &str) -> Option<usize> {
     query_env
         .namedRelList
         .iter()
@@ -133,23 +135,24 @@ fn enr_index(query_env: &QueryEnvironment, name: &str) -> Option<usize> {
 /// When the `TupleDesc` is based on a relation from the catalogs, we count on
 /// that relation being used at the same time, so that appropriate locks will
 /// already be held. Locking here would be too late anyway.
-pub fn ENRMetadataGetTupDesc(
-    enrmd: &EphemeralNamedRelationMetadataData,
-) -> types_error::PgResult<TupleDesc> {
+pub fn ENRMetadataGetTupDesc<'mcx>(
+    mcx: Mcx<'mcx>,
+    enrmd: &EphemeralNamedRelationMetadataData<'_>,
+) -> types_error::PgResult<TupleDesc<'mcx>> {
     // One, and only one, of these fields must be filled.
     debug_assert!(
         (enrmd.reliddesc == InvalidOid) != enrmd.tupdesc.is_none(),
         "ENRMetadataGetTupDesc: exactly one of reliddesc/tupdesc must be set"
     );
 
-    if enrmd.tupdesc.is_some() {
-        Ok(enrmd.tupdesc.clone())
+    if let Some(tupdesc) = &enrmd.tupdesc {
+        Ok(Some(alloc_in(mcx, tupdesc.clone_in(mcx)?)?))
     } else {
         // relation = table_open(enrmd->reliddesc, NoLock);
         // tupdesc = relation->rd_att;
         // table_close(relation, NoLock);
         let relation = backend_access_table_table_seams::table_open::call(enrmd.reliddesc, NoLock)?;
-        let tupdesc = backend_utils_cache_relcache_seams::relation_rd_att::call(relation);
+        let tupdesc = backend_utils_cache_relcache_seams::relation_rd_att::call(mcx, relation)?;
         backend_access_table_table_seams::table_close::call(relation, NoLock)?;
         Ok(tupdesc)
     }
