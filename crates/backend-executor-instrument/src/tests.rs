@@ -1,6 +1,6 @@
 use super::*;
 use mcx::MemoryContext;
-use types_core::instrument::{INSTRUMENT_ALL, INSTRUMENT_ROWS};
+use types_core::instrument::{instr_time, INSTRUMENT_ALL, INSTRUMENT_ROWS, NS_PER_S};
 
 #[test]
 fn instr_alloc_initializes_flags() {
@@ -43,9 +43,9 @@ fn instr_alloc_zero_is_empty() {
 fn instr_alloc_oversize_is_recoverable_error() {
     let ctx = MemoryContext::new("test");
     let err = InstrAlloc(ctx.mcx(), i32::MAX, 0, false).unwrap_err();
-    assert_eq!(err.message(), "invalid memory alloc request size");
+    assert!(err.message().starts_with("invalid memory alloc request size"));
     let err = InstrAlloc(ctx.mcx(), -1, 0, false).unwrap_err();
-    assert_eq!(err.message(), "invalid memory alloc request size");
+    assert!(err.message().starts_with("invalid memory alloc request size"));
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn wal_usage_accum_diff_uses_wrapping_bytes() {
 fn parallel_query_accumulates_thread_local_usage() {
     set_pgBufferUsage(BufferUsage::default());
     set_pgWalUsage(WalUsage::default());
-    InstrStartParallelQuery();
+    let snapshot = InstrStartParallelQuery();
 
     with_pgBufferUsage(|usage| usage.shared_blks_read = 5);
     with_pgWalUsage(|usage| {
@@ -291,7 +291,7 @@ fn parallel_query_accumulates_thread_local_usage() {
 
     let mut buf = BufferUsage::default();
     let mut wal = WalUsage::default();
-    InstrEndParallelQuery(&mut buf, &mut wal);
+    InstrEndParallelQuery(snapshot, &mut buf, &mut wal);
 
     assert_eq!(buf.shared_blks_read, 5);
     assert_eq!(wal.wal_records, 2);
@@ -325,9 +325,11 @@ fn start_stop_records_buffer_and_wal_deltas() {
 }
 
 #[test]
-fn clock_is_monotonic_and_nonzero() {
-    let a = pg_clock_gettime_ns();
-    let b = pg_clock_gettime_ns();
-    assert!(a.ticks > 0);
-    assert!(b.ticks >= a.ticks);
+fn with_accessor_reentrancy_panics_instead_of_clobbering() {
+    let result = std::panic::catch_unwind(|| {
+        with_pgBufferUsage(|_| {
+            pgBufferUsage();
+        })
+    });
+    assert!(result.is_err());
 }

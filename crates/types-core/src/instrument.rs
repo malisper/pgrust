@@ -11,6 +11,36 @@ pub struct instr_time {
     pub ticks: i64,
 }
 
+/// The pure-arithmetic `INSTR_TIME_*` macros from `portability/instr_time.h`.
+/// The clock read (`INSTR_TIME_SET_CURRENT[_LAZY]`) needs libc and lives in
+/// the `portability-instr-time` crate; this crate stays dependency-free.
+impl instr_time {
+    /// `INSTR_TIME_SET_ZERO(t)`.
+    pub fn set_zero(&mut self) {
+        self.ticks = 0;
+    }
+
+    /// `INSTR_TIME_IS_ZERO(t)`.
+    pub fn is_zero(self) -> bool {
+        self.ticks == 0
+    }
+
+    /// `INSTR_TIME_ADD(x, y)` — `x += y`.
+    pub fn add(&mut self, y: instr_time) {
+        self.ticks += y.ticks;
+    }
+
+    /// `INSTR_TIME_ACCUM_DIFF(x, y, z)` — `x += (y - z)`.
+    pub fn accum_diff(&mut self, y: instr_time, z: instr_time) {
+        self.ticks += y.ticks - z.ticks;
+    }
+
+    /// `INSTR_TIME_GET_DOUBLE(t)` — ticks (nanoseconds) to seconds.
+    pub fn get_double(self) -> f64 {
+        self.ticks as f64 / NS_PER_S as f64
+    }
+}
+
 /// `BufferUsage` (`executor/instrument.h`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BufferUsage {

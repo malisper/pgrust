@@ -9,7 +9,7 @@ name = "backend_executor_instrument"
 path = "src/lib.rs"
 
 [dependencies]
-libc = "0.2"
 mcx = { path = "../mcx" }
+portability-instr-time = { path = "../portability-instr-time" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

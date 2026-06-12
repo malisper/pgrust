@@ -2,85 +2,68 @@
 //! for plan-node execution (the data behind `EXPLAIN ANALYZE`,
 //! `pg_stat_statements`, and parallel-query usage rollups).
 //!
-//! C exposes `pgBufferUsage` / `pgWalUsage` as process globals (with
-//! file-local `save_pgBufferUsage` / `save_pgWalUsage` snapshots). Those are
+//! C exposes `pgBufferUsage` / `pgWalUsage` as process globals. Those are
 //! per-backend session state, so here they are thread-locals reached through
-//! accessors.
+//! accessors (`RefCell` so a reentrant in-place update fails loudly instead
+//! of silently clobbering counts). C's file-local `save_pgBufferUsage` /
+//! `save_pgWalUsage` are parallel-query-lifecycle state, not backend-lifetime
+//! state: here `InstrStartParallelQuery` returns the snapshot as an owned
+//! [`ParallelQueryUsageSnapshot`] that `InstrEndParallelQuery` consumes.
 //!
-//! `INSTR_TIME_SET_CURRENT` expands to `pg_clock_gettime_ns()`, a `static
-//! inline` in `portability/instr_time.h` reading the OS monotonic clock; it is
-//! implemented in-crate via `libc::clock_gettime`. Everything else in the file
-//! is pure arithmetic.
+//! `instr_time` arithmetic lives on the type in `types_core::instrument`; the
+//! monotonic-clock read (`INSTR_TIME_SET_CURRENT*`) comes from
+//! `portability_instr_time`.
 
 #![allow(non_snake_case)]
 
-use std::cell::Cell;
+use std::cell::RefCell;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use portability_instr_time::{instr_time_set_current_lazy, pg_clock_gettime_ns};
 use types_core::instrument::{
-    instr_time, BufferUsage, Instrumentation, InstrumentOption, WalUsage, INSTRUMENT_BUFFERS,
-    INSTRUMENT_TIMER, INSTRUMENT_WAL, NS_PER_S,
+    BufferUsage, Instrumentation, InstrumentOption, WalUsage, INSTRUMENT_BUFFERS,
+    INSTRUMENT_TIMER, INSTRUMENT_WAL,
 };
 use types_error::{PgError, PgResult};
-
-/// `MaxAllocSize` (`memutils.h`, `0x3FFFFFFF`): the cap `palloc` enforces on a
-/// single request. `InstrAlloc`'s `n` is data-derived, so the C
-/// `palloc0(n * sizeof(Instrumentation))` failure surface ("invalid memory
-/// alloc request size") is reproduced here.
-const MAX_ALLOC_SIZE: usize = 0x3FFF_FFFF;
 
 thread_local! {
     /// `BufferUsage pgBufferUsage;` — running, never-reset buffer-access
     /// counters for the current backend.
-    static PG_BUFFER_USAGE: Cell<BufferUsage> = Cell::new(BufferUsage::default());
-    /// `static BufferUsage save_pgBufferUsage;` — snapshot taken at parallel
-    /// query startup.
-    static SAVE_PG_BUFFER_USAGE: Cell<BufferUsage> = Cell::new(BufferUsage::default());
+    static PG_BUFFER_USAGE: RefCell<BufferUsage> = RefCell::new(BufferUsage::default());
     /// `WalUsage pgWalUsage;` — running, never-reset WAL-generation counters.
-    static PG_WAL_USAGE: Cell<WalUsage> = Cell::new(WalUsage::default());
-    /// `static WalUsage save_pgWalUsage;` — snapshot taken at parallel query
-    /// startup.
-    static SAVE_PG_WAL_USAGE: Cell<WalUsage> = Cell::new(WalUsage::default());
+    static PG_WAL_USAGE: RefCell<WalUsage> = RefCell::new(WalUsage::default());
 }
 
 /// Read the backend-global `pgBufferUsage` counter.
 pub fn pgBufferUsage() -> BufferUsage {
-    PG_BUFFER_USAGE.with(Cell::get)
+    PG_BUFFER_USAGE.with(|cell| *cell.borrow())
 }
 
 /// Overwrite the backend-global `pgBufferUsage` counter.
 pub fn set_pgBufferUsage(usage: BufferUsage) {
-    PG_BUFFER_USAGE.with(|cell| cell.set(usage));
+    PG_BUFFER_USAGE.with(|cell| *cell.borrow_mut() = usage);
 }
 
-/// Mutate the backend-global `pgBufferUsage` counter in place.
+/// Mutate the backend-global `pgBufferUsage` counter in place. Panics on
+/// reentrant use (the closure must not touch `pgBufferUsage` itself).
 pub fn with_pgBufferUsage<R>(f: impl FnOnce(&mut BufferUsage) -> R) -> R {
-    PG_BUFFER_USAGE.with(|cell| {
-        let mut value = cell.get();
-        let result = f(&mut value);
-        cell.set(value);
-        result
-    })
+    PG_BUFFER_USAGE.with(|cell| f(&mut cell.borrow_mut()))
 }
 
 /// Read the backend-global `pgWalUsage` counter.
 pub fn pgWalUsage() -> WalUsage {
-    PG_WAL_USAGE.with(Cell::get)
+    PG_WAL_USAGE.with(|cell| *cell.borrow())
 }
 
 /// Overwrite the backend-global `pgWalUsage` counter.
 pub fn set_pgWalUsage(usage: WalUsage) {
-    PG_WAL_USAGE.with(|cell| cell.set(usage));
+    PG_WAL_USAGE.with(|cell| *cell.borrow_mut() = usage);
 }
 
-/// Mutate the backend-global `pgWalUsage` counter in place.
+/// Mutate the backend-global `pgWalUsage` counter in place. Panics on
+/// reentrant use (the closure must not touch `pgWalUsage` itself).
 pub fn with_pgWalUsage<R>(f: impl FnOnce(&mut WalUsage) -> R) -> R {
-    PG_WAL_USAGE.with(|cell| {
-        let mut value = cell.get();
-        let result = f(&mut value);
-        cell.set(value);
-        result
-    })
+    PG_WAL_USAGE.with(|cell| f(&mut cell.borrow_mut()))
 }
 
 /// Allocate new instrumentation structure(s) (`InstrAlloc`).
@@ -94,13 +77,10 @@ pub fn InstrAlloc<'mcx>(
     instrument_options: InstrumentOption,
     async_mode: bool,
 ) -> PgResult<PgVec<'mcx, Instrumentation>> {
-    // In C, a negative or oversized `n * sizeof(...)` request is rejected by
-    // palloc's MaxAllocSize gate.
-    let per = core::mem::size_of::<Instrumentation>();
-    if n < 0 || (n as usize) > MAX_ALLOC_SIZE / per {
-        return Err(PgError::error("invalid memory alloc request size"));
-    }
-    let n = n as usize;
+    // C computes `(size_t) n * sizeof(Instrumentation)`: a negative `n`
+    // sign-extends to a huge request and palloc's MaxAllocSize gate (now in
+    // `mcx::vec_with_capacity_in`) rejects it.
+    let n = n as isize as usize;
 
     // initialize all fields to zeroes, then modify as needed
     let mut instr: PgVec<'mcx, Instrumentation> = vec_with_capacity_in(mcx, n)?;
@@ -160,14 +140,14 @@ pub fn InstrStopNode(instr: &mut Instrumentation, n_tuples: f64) -> PgResult<()>
 
     // let's update the time only if the timer was requested
     if instr.need_timer {
-        if instr_time_is_zero(instr.starttime) {
+        if instr.starttime.is_zero() {
             return Err(PgError::error("InstrStopNode called without start"));
         }
 
         let endtime = pg_clock_gettime_ns();
-        instr_time_accum_diff(&mut instr.counter, endtime, instr.starttime);
+        instr.counter.accum_diff(endtime, instr.starttime);
 
-        instr_time_set_zero(&mut instr.starttime);
+        instr.starttime.set_zero();
     }
 
     // Add delta of buffer usage since entry to node's totals
@@ -184,11 +164,11 @@ pub fn InstrStopNode(instr: &mut Instrumentation, n_tuples: f64) -> PgResult<()>
     // Is this the first tuple of this cycle?
     if !instr.running {
         instr.running = true;
-        instr.firsttuple = instr_time_get_double(instr.counter);
+        instr.firsttuple = instr.counter.get_double();
     } else if instr.async_mode && save_tuplecount < 1.0 {
         // In async mode, if the plan node hadn't emitted any tuples before,
         // this might be the first tuple
-        instr.firsttuple = instr_time_get_double(instr.counter);
+        instr.firsttuple = instr.counter.get_double();
     }
 
     Ok(())
@@ -207,12 +187,12 @@ pub fn InstrEndLoop(instr: &mut Instrumentation) -> PgResult<()> {
         return Ok(());
     }
 
-    if !instr_time_is_zero(instr.starttime) {
+    if !instr.starttime.is_zero() {
         return Err(PgError::error("InstrEndLoop called on running node"));
     }
 
     // Accumulate per-cycle statistics into totals
-    let totaltime = instr_time_get_double(instr.counter);
+    let totaltime = instr.counter.get_double();
 
     instr.startup += instr.firsttuple;
     instr.total += totaltime;
@@ -221,8 +201,8 @@ pub fn InstrEndLoop(instr: &mut Instrumentation) -> PgResult<()> {
 
     // Reset for next cycle (if any)
     instr.running = false;
-    instr_time_set_zero(&mut instr.starttime);
-    instr_time_set_zero(&mut instr.counter);
+    instr.starttime.set_zero();
+    instr.counter.set_zero();
     instr.firsttuple = 0.0;
     instr.tuplecount = 0.0;
 
@@ -239,7 +219,7 @@ pub fn InstrAggNode(dst: &mut Instrumentation, add: &Instrumentation) {
         dst.firsttuple = add.firsttuple;
     }
 
-    instr_time_add(&mut dst.counter, add.counter);
+    dst.counter.add(add.counter);
 
     dst.tuplecount += add.tuplecount;
     dst.startup += add.startup;
@@ -260,24 +240,40 @@ pub fn InstrAggNode(dst: &mut Instrumentation, add: &Instrumentation) {
     }
 }
 
-/// Note current values during parallel executor startup
-/// (`InstrStartParallelQuery`).
-pub fn InstrStartParallelQuery() {
-    SAVE_PG_BUFFER_USAGE.with(|save| save.set(pgBufferUsage()));
-    SAVE_PG_WAL_USAGE.with(|save| save.set(pgWalUsage()));
+/// The `pgBufferUsage` / `pgWalUsage` values noted at parallel executor
+/// startup (C: file-local `save_pgBufferUsage` / `save_pgWalUsage`). This is
+/// parallel-query-lifecycle state, not backend state: the executor holds it
+/// from `InstrStartParallelQuery` until `InstrEndParallelQuery` consumes it.
+#[must_use]
+#[derive(Clone, Copy, Debug)]
+pub struct ParallelQueryUsageSnapshot {
+    buf: BufferUsage,
+    wal: WalUsage,
 }
 
-/// Report usage after parallel executor shutdown (`InstrEndParallelQuery`).
-pub fn InstrEndParallelQuery(bufusage: &mut BufferUsage, walusage: &mut WalUsage) {
+/// Note current values during parallel executor startup
+/// (`InstrStartParallelQuery`).
+pub fn InstrStartParallelQuery() -> ParallelQueryUsageSnapshot {
+    ParallelQueryUsageSnapshot {
+        buf: pgBufferUsage(),
+        wal: pgWalUsage(),
+    }
+}
+
+/// Report usage after parallel executor shutdown (`InstrEndParallelQuery`):
+/// the deltas since `snapshot` was taken at `InstrStartParallelQuery`.
+pub fn InstrEndParallelQuery(
+    snapshot: ParallelQueryUsageSnapshot,
+    bufusage: &mut BufferUsage,
+    walusage: &mut WalUsage,
+) {
     *bufusage = BufferUsage::default();
     let now_buf = pgBufferUsage();
-    let save_buf = SAVE_PG_BUFFER_USAGE.with(Cell::get);
-    BufferUsageAccumDiff(bufusage, &now_buf, &save_buf);
+    BufferUsageAccumDiff(bufusage, &now_buf, &snapshot.buf);
 
     *walusage = WalUsage::default();
     let now_wal = pgWalUsage();
-    let save_wal = SAVE_PG_WAL_USAGE.with(Cell::get);
-    WalUsageAccumDiff(walusage, &now_wal, &save_wal);
+    WalUsageAccumDiff(walusage, &now_wal, &snapshot.wal);
 }
 
 /// Accumulate work done by workers in the leader's stats
@@ -299,12 +295,12 @@ fn BufferUsageAdd(dst: &mut BufferUsage, add: &BufferUsage) {
     dst.local_blks_written += add.local_blks_written;
     dst.temp_blks_read += add.temp_blks_read;
     dst.temp_blks_written += add.temp_blks_written;
-    instr_time_add(&mut dst.shared_blk_read_time, add.shared_blk_read_time);
-    instr_time_add(&mut dst.shared_blk_write_time, add.shared_blk_write_time);
-    instr_time_add(&mut dst.local_blk_read_time, add.local_blk_read_time);
-    instr_time_add(&mut dst.local_blk_write_time, add.local_blk_write_time);
-    instr_time_add(&mut dst.temp_blk_read_time, add.temp_blk_read_time);
-    instr_time_add(&mut dst.temp_blk_write_time, add.temp_blk_write_time);
+    dst.shared_blk_read_time.add(add.shared_blk_read_time);
+    dst.shared_blk_write_time.add(add.shared_blk_write_time);
+    dst.local_blk_read_time.add(add.local_blk_read_time);
+    dst.local_blk_write_time.add(add.local_blk_write_time);
+    dst.temp_blk_read_time.add(add.temp_blk_read_time);
+    dst.temp_blk_write_time.add(add.temp_blk_write_time);
 }
 
 /// `dst += add - sub` (`BufferUsageAccumDiff`).
@@ -319,36 +315,18 @@ pub fn BufferUsageAccumDiff(dst: &mut BufferUsage, add: &BufferUsage, sub: &Buff
     dst.local_blks_written += add.local_blks_written - sub.local_blks_written;
     dst.temp_blks_read += add.temp_blks_read - sub.temp_blks_read;
     dst.temp_blks_written += add.temp_blks_written - sub.temp_blks_written;
-    instr_time_accum_diff(
-        &mut dst.shared_blk_read_time,
-        add.shared_blk_read_time,
-        sub.shared_blk_read_time,
-    );
-    instr_time_accum_diff(
-        &mut dst.shared_blk_write_time,
-        add.shared_blk_write_time,
-        sub.shared_blk_write_time,
-    );
-    instr_time_accum_diff(
-        &mut dst.local_blk_read_time,
-        add.local_blk_read_time,
-        sub.local_blk_read_time,
-    );
-    instr_time_accum_diff(
-        &mut dst.local_blk_write_time,
-        add.local_blk_write_time,
-        sub.local_blk_write_time,
-    );
-    instr_time_accum_diff(
-        &mut dst.temp_blk_read_time,
-        add.temp_blk_read_time,
-        sub.temp_blk_read_time,
-    );
-    instr_time_accum_diff(
-        &mut dst.temp_blk_write_time,
-        add.temp_blk_write_time,
-        sub.temp_blk_write_time,
-    );
+    dst.shared_blk_read_time
+        .accum_diff(add.shared_blk_read_time, sub.shared_blk_read_time);
+    dst.shared_blk_write_time
+        .accum_diff(add.shared_blk_write_time, sub.shared_blk_write_time);
+    dst.local_blk_read_time
+        .accum_diff(add.local_blk_read_time, sub.local_blk_read_time);
+    dst.local_blk_write_time
+        .accum_diff(add.local_blk_write_time, sub.local_blk_write_time);
+    dst.temp_blk_read_time
+        .accum_diff(add.temp_blk_read_time, sub.temp_blk_read_time);
+    dst.temp_blk_write_time
+        .accum_diff(add.temp_blk_write_time, sub.temp_blk_write_time);
 }
 
 /// `dst += add` (`static WalUsageAdd`).
@@ -369,68 +347,6 @@ pub fn WalUsageAccumDiff(dst: &mut WalUsage, add: &WalUsage, sub: &WalUsage) {
     dst.wal_records += add.wal_records - sub.wal_records;
     dst.wal_fpi += add.wal_fpi - sub.wal_fpi;
     dst.wal_buffers_full += add.wal_buffers_full - sub.wal_buffers_full;
-}
-
-// --- instr_time helpers (portability/instr_time.h) -------------------------
-
-/// `pg_clock_gettime_ns()` — read `PG_INSTR_CLOCK` and convert to nanosecond
-/// ticks (`tv_sec * NS_PER_S + tv_nsec`). PG picks `CLOCK_MONOTONIC_RAW` on
-/// darwin (faster and higher resolution there) and `CLOCK_MONOTONIC`
-/// elsewhere. Like the C inline, the (cannot-fail-for-these-args) return code
-/// is ignored.
-fn pg_clock_gettime_ns() -> instr_time {
-    #[cfg(target_os = "macos")]
-    const PG_INSTR_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC_RAW;
-    #[cfg(not(target_os = "macos"))]
-    const PG_INSTR_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
-
-    let mut tmp = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: clock_gettime fills `tmp`; a valid clock id and out pointer.
-    unsafe {
-        libc::clock_gettime(PG_INSTR_CLOCK, &mut tmp);
-    }
-    instr_time {
-        ticks: (tmp.tv_sec as i64) * NS_PER_S + tmp.tv_nsec as i64,
-    }
-}
-
-/// `INSTR_TIME_SET_CURRENT_LAZY(t)` — set `t` to the current time only if it
-/// is zero; returns whether `t` was set.
-fn instr_time_set_current_lazy(time: &mut instr_time) -> bool {
-    if instr_time_is_zero(*time) {
-        *time = pg_clock_gettime_ns();
-        true
-    } else {
-        false
-    }
-}
-
-/// `INSTR_TIME_SET_ZERO(t)`.
-fn instr_time_set_zero(time: &mut instr_time) {
-    time.ticks = 0;
-}
-
-/// `INSTR_TIME_IS_ZERO(t)`.
-fn instr_time_is_zero(time: instr_time) -> bool {
-    time.ticks == 0
-}
-
-/// `INSTR_TIME_ADD(x, y)` — `x += y`.
-fn instr_time_add(dst: &mut instr_time, add: instr_time) {
-    dst.ticks += add.ticks;
-}
-
-/// `INSTR_TIME_ACCUM_DIFF(x, y, z)` — `x += (y - z)`.
-fn instr_time_accum_diff(dst: &mut instr_time, add: instr_time, sub: instr_time) {
-    dst.ticks += add.ticks - sub.ticks;
-}
-
-/// `INSTR_TIME_GET_DOUBLE(t)` — ticks (nanoseconds) to seconds.
-fn instr_time_get_double(time: instr_time) -> f64 {
-    time.ticks as f64 / NS_PER_S as f64
 }
 
 /// This crate declares no seams; nothing to install.

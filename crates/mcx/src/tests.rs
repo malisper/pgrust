@@ -2,6 +2,24 @@ use super::*;
 use core::fmt::Write as _;
 
 #[test]
+fn alloc_size_gate_matches_palloc() {
+    assert!(check_alloc_size(MAX_ALLOC_SIZE).is_ok());
+    let err = check_alloc_size(MAX_ALLOC_SIZE + 1).unwrap_err();
+    assert_eq!(
+        err.message(),
+        alloc::format!("invalid memory alloc request size {}", MAX_ALLOC_SIZE + 1)
+    );
+
+    // A negative C count sign-extended to usize is caught by the gate.
+    let ctx = MemoryContext::new("t");
+    let r: PgResult<PgVec<u64>> = vec_with_capacity_in(ctx.mcx(), (-1i32) as isize as usize);
+    assert!(r
+        .unwrap_err()
+        .message()
+        .starts_with("invalid memory alloc request size"));
+}
+
+#[test]
 fn accounting_tracks_capacity_exactly() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();

@@ -1,0 +1,13 @@
+[package]
+name = "portability-instr-time"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "portability_instr_time"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+types-core = { path = "../types-core" }
