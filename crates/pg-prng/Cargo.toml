@@ -1,0 +1,9 @@
+[package]
+name = "pg-prng"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_prng"
+path = "src/lib.rs"
