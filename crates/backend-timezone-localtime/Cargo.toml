@@ -11,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 backend-timezone-pgtz-seams = { path = "../backend-timezone-pgtz-seams" }
 types-core = { path = "../types-core" }
+types-pgtime = { path = "../types-pgtime" }

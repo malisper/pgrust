@@ -1,28 +1,21 @@
 //! Port of PostgreSQL's `src/timezone/localtime.c`: TZif parsing, POSIX TZ
 //! parsing, and the `pg_localtime`/`pg_gmtime`/DST-boundary calendar math.
 //!
-//! Char buffers are plain `u8` arrays and `pg_tm.tm_zone` is an owned
-//! `Option<String>` rather than a borrowed C string pointer. Timezone names
-//! are `&str`, calendar results are owned values, and DST-boundary
-//! information is returned through enums/structs rather than caller-provided
-//! output pointers. The file open goes through the `backend-timezone-pgtz`
-//! seam (C `pg_open_tzfile`); everything else is self-contained.
+//! Char buffers are plain `u8` arrays; `pg_tm.tm_zone` borrows the zone
+//! abbreviation from the zone's `state.chars` table, exactly as C's pointer
+//! does. Timezone names are `&str` and DST-boundary information is returned
+//! through enums/structs rather than caller-provided output pointers. The
+//! shared `pg_tm`/`pg_tz`/`state` vocabulary (pgtime.h/pgtz.h) lives in the
+//! `types-pgtime` crate. The file open goes through the
+//! `backend-timezone-pgtz` seam (C `pg_open_tzfile`); everything else is
+//! self-contained.
 
 #![allow(non_camel_case_types)]
 
 pub use types_core::primitive::pg_time_t;
+pub use types_pgtime::{lsinfo, pg_tm, pg_tz, state, ttinfo, TZ_STRLEN_MAX};
 
-/// pgtime.h — maximum length of a timezone name/POSIX TZ string.
-pub const TZ_STRLEN_MAX: usize = 255;
-const TZ_MAX_TIMES: usize = 2000;
-const TZ_MAX_TYPES: usize = 256;
-// tzfile.h:105 — maximum number of abbreviation characters in a TZif file.
-const TZ_MAX_CHARS: usize = 50;
-const TZ_MAX_LEAPS: usize = 50;
-// localtime.c: char chars[BIGGEST(BIGGEST(TZ_MAX_CHARS + 1, 3),
-// 2 * (TZ_STRLEN_MAX + 1))] — the in-memory abbreviation buffer is sized for
-// POSIX TZ strings, not just TZif file contents.
-const CHARS_SIZE: usize = 2 * (TZ_STRLEN_MAX + 1);
+use types_pgtime::{CHARS_SIZE, TZ_MAX_CHARS, TZ_MAX_LEAPS, TZ_MAX_TIMES, TZ_MAX_TYPES};
 
 const SECSPERMIN: i64 = 60;
 const MINSPERHOUR: i64 = 60;
@@ -60,106 +53,8 @@ const GMT: &str = "GMT";
 // this is truncated and then fails the length checks).
 const INPUT_BUF_SIZE: usize = 2 * 44 + 2 * 23440 + 4 * TZ_MAX_TIMES;
 
-/// A broken-down calendar time, mirroring PostgreSQL's `struct pg_tm`.
-///
-/// `tm_zone` holds the (owned) timezone abbreviation for this instant, or
-/// `None` where C would have left the field unset.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct pg_tm {
-    pub tm_sec: i32,
-    pub tm_min: i32,
-    pub tm_hour: i32,
-    pub tm_mday: i32,
-    pub tm_mon: i32,
-    pub tm_year: i32,
-    pub tm_wday: i32,
-    pub tm_yday: i32,
-    pub tm_isdst: i32,
-    pub tm_gmtoff: i64,
-    pub tm_zone: Option<String>,
-}
-
-/// A loaded timezone: its canonical name plus the parsed transition state
-/// (C `struct pg_tz` in pgtz.h, shared with pgtz.c).
-#[derive(Clone)]
-pub struct pg_tz {
-    name: String,
-    state: state,
-}
-
-impl pg_tz {
-    /// Construct a timezone from a name and parsed state. Used by the pgtz
-    /// unit (`pg_tzset`/`pg_tzset_offset`), which owns timezone caching.
-    pub fn new(name: String, state: state) -> Self {
-        Self { name, state }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn state(&self) -> &state {
-        &self.state
-    }
-}
-
-/// Parsed TZif/POSIX transition state, mirroring `struct state` in
-/// `localtime.c`. Fixed-size arrays keep the bounded-allocation behavior of
-/// the C original (all sizes are compile-time constants, never data-derived).
-/// Public because pgtz.c shares this struct (via tzload/tzparse) to build
-/// `pg_tz` values.
-#[derive(Clone)]
-pub struct state {
-    pub leapcnt: i32,
-    pub timecnt: i32,
-    pub typecnt: i32,
-    pub charcnt: i32,
-    pub goback: bool,
-    pub goahead: bool,
-    pub ats: [pg_time_t; TZ_MAX_TIMES],
-    pub types: [u8; TZ_MAX_TIMES],
-    pub ttis: [ttinfo; TZ_MAX_TYPES],
-    pub chars: [u8; CHARS_SIZE],
-    pub lsis: [lsinfo; TZ_MAX_LEAPS],
-    pub defaulttype: i32,
-}
-
-#[derive(Copy, Clone, Default)]
-pub struct lsinfo {
-    pub ls_trans: pg_time_t,
-    pub ls_corr: i64,
-}
-
-#[derive(Copy, Clone, Default)]
-pub struct ttinfo {
-    pub tt_utoff: i32,
-    pub tt_isdst: bool,
-    pub tt_desigidx: i32,
-    pub tt_ttisstd: bool,
-    pub tt_ttisut: bool,
-}
-
-impl Default for state {
-    fn default() -> Self {
-        Self {
-            leapcnt: 0,
-            timecnt: 0,
-            typecnt: 0,
-            charcnt: 0,
-            goback: false,
-            goahead: false,
-            ats: [0; TZ_MAX_TIMES],
-            types: [0; TZ_MAX_TIMES],
-            ttis: [ttinfo::default(); TZ_MAX_TYPES],
-            chars: [0; CHARS_SIZE],
-            lsis: [lsinfo::default(); TZ_MAX_LEAPS],
-            defaulttype: 0,
-        }
-    }
-}
-
-/// Errno-style result of the TZif loader, preserving C's ENOENT/EINVAL
-/// distinction.
+/// Errno-style result of the TZif loader, preserving C's
+/// ENOENT/EINVAL/ENOMEM distinction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TzLoadError {
     /// File could not be found/opened (C `ENOENT`).
@@ -167,6 +62,9 @@ pub enum TzLoadError {
     /// File contents were malformed, truncated, or unreadable (C `EINVAL`
     /// and the read-error errno cases).
     Invalid,
+    /// The read buffer could not be allocated (C `tzload` returns errno —
+    /// `ENOMEM` — when `malloc(sizeof(union local_storage))` fails).
+    OutOfMemory,
 }
 
 /// Load and parse a TZif file by name. Returns the canonical name on success
@@ -185,7 +83,13 @@ pub fn tzload(
         return Err(TzLoadError::NotFound);
     };
 
+    // C tzload mallocs its read buffer (`union local_storage`) and returns
+    // errno (ENOMEM) when that fails; reserve the full single-read cap up
+    // front so the read itself never allocates.
     let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(INPUT_BUF_SIZE).is_err() {
+        return Err(TzLoadError::OutOfMemory);
+    }
     {
         use std::io::Read;
         if file
@@ -300,8 +204,8 @@ pub fn tzparse(name: &str, sp: &mut state, lastditch: bool) -> bool {
 // GMT state (C gmtsub's static gmtptr + gmtload)
 
 thread_local! {
-    static GMT_STATE: std::cell::OnceCell<Box<state>> =
-        const { std::cell::OnceCell::new() };
+    static GMT_STATE: std::cell::Cell<Option<&'static state>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn gmtload(sp: &mut state) {
@@ -310,32 +214,59 @@ fn gmtload(sp: &mut state) {
     }
 }
 
+/// Fetch (loading on first use) this thread's GMT `struct state`, the
+/// equivalent of C gmtsub's `static struct state *gmtptr` (allocated once
+/// with malloc and never freed; the per-thread leak here matches that).
+/// Returns `None` when the allocation fails, mirroring C gmtsub's NULL
+/// return on malloc failure.
+///
+/// The state is built fully in a local before being published: gmtload runs
+/// through tzload and the `pg_open_tzfile` seam into not-yet-ported code, so
+/// a re-entrant pg_gmtime call during initialization (e.g. log-line
+/// timestamp formatting) must find either `None` or a finished state, never
+/// a half-initialized one. If such a recursive call won the race to publish,
+/// keep its state and quietly leak ours.
+fn gmt_state() -> Option<&'static state> {
+    GMT_STATE.with(|cell| {
+        if let Some(gmtptr) = cell.get() {
+            return Some(gmtptr);
+        }
+        // Fallibly allocate the state (C: malloc(sizeof(struct state))),
+        // then load it in place.
+        let mut storage: Vec<state> = Vec::new();
+        if storage.try_reserve_exact(1).is_err() {
+            return None; /* C: errno should be set by malloc */
+        }
+        storage.push(state::default());
+        let mut boxed: Box<[state]> = storage.into_boxed_slice();
+        gmtload(&mut boxed[0]);
+        if cell.get().is_none() {
+            cell.set(Some(&Box::leak(boxed)[0]));
+        }
+        cell.get()
+    })
+}
+
 /// gmtsub is to gmtime as localsub is to localtime; the GMT `struct state`
 /// is loaded on first use and kept per backend thread.
-fn gmtsub(timep: pg_time_t, offset: i32) -> Option<pg_tm> {
-    GMT_STATE.with(|cell| {
-        let gmtptr = cell.get_or_init(|| {
-            let mut sp = Box::new(state::default());
-            gmtload(&mut sp);
-            sp
-        });
-        let mut tm = timesub(timep, offset, Some(gmtptr))?;
-        // Could get fancy here and deliver something such as "+xx" or "-xx"
-        // if offset is non-zero, but this is no time for a treasure hunt.
-        tm.tm_zone = Some(if offset != 0 {
-            WILDABBR.to_owned()
-        } else {
-            read_cstr(&gmtptr.chars, 0)
-        });
-        Some(tm)
-    })
+fn gmtsub(timep: pg_time_t, offset: i32) -> Option<pg_tm<'static>> {
+    let gmtptr = gmt_state()?;
+    let mut tm = timesub(timep, offset, Some(gmtptr))?;
+    // Could get fancy here and deliver something such as "+xx" or "-xx"
+    // if offset is non-zero, but this is no time for a treasure hunt.
+    tm.tm_zone = Some(if offset != 0 {
+        WILDABBR
+    } else {
+        cstr_str(&gmtptr.chars, 0)
+    });
+    Some(tm)
 }
 
 /// Convert `timep` to broken-down local time in timezone `tz`.
 ///
 /// Returns `None` if the conversion overflows (C returns NULL).
-pub fn pg_localtime(timep: pg_time_t, tz: &pg_tz) -> Option<pg_tm> {
-    localsub(&tz.state, timep)
+pub fn pg_localtime<'tz>(timep: pg_time_t, tz: &'tz pg_tz) -> Option<pg_tm<'tz>> {
+    localsub(tz.state(), timep)
 }
 
 /// C `localsub`: the guts of localtime, freely callable. For times outside a
@@ -343,7 +274,7 @@ pub fn pg_localtime(timep: pg_time_t, tz: &pg_tz) -> Option<pg_tm> {
 /// by whole 400-year Gregorian cycles, converts the mapped time, and then
 /// shifts `tm_year` back — so the leap-second scan inside `timesub` sees the
 /// mapped time, exactly as in C.
-fn localsub(sp: &state, t: pg_time_t) -> Option<pg_tm> {
+fn localsub<'tz>(sp: &'tz state, t: pg_time_t) -> Option<pg_tm<'tz>> {
     let timecnt = sp.timecnt as usize;
     if timecnt > 0 && ((sp.goback && t < sp.ats[0]) || (sp.goahead && t > sp.ats[timecnt - 1])) {
         let mapping = repeat_mapping(t, sp)?; /* None: "cannot happen" */
@@ -373,7 +304,7 @@ fn localsub(sp: &state, t: pg_time_t) -> Option<pg_tm> {
 }
 
 /// Convert `timep` to broken-down UTC time.
-pub fn pg_gmtime(timep: pg_time_t) -> Option<pg_tm> {
+pub fn pg_gmtime(timep: pg_time_t) -> Option<pg_tm<'static>> {
     gmtsub(timep, 0)
 }
 
@@ -525,7 +456,7 @@ fn next_dst_boundary_impl(timep: pg_time_t, sp: &state) -> NextDstBoundary {
 /// DST transition applies or when extrapolation failed. Use
 /// [`pg_next_dst_boundary_tristate`] to distinguish those two cases.
 pub fn pg_next_dst_boundary(timep: pg_time_t, tz: &pg_tz) -> Option<DstBoundary> {
-    match next_dst_boundary_impl(timep, &tz.state) {
+    match next_dst_boundary_impl(timep, tz.state()) {
         NextDstBoundary::Boundary(b) => Some(b),
         _ => None,
     }
@@ -534,7 +465,7 @@ pub fn pg_next_dst_boundary(timep: pg_time_t, tz: &pg_tz) -> Option<DstBoundary>
 /// Tri-state wrapper around C's `pg_next_dst_boundary` (see
 /// [`NextDstBoundary`]).
 pub fn pg_next_dst_boundary_tristate(timep: pg_time_t, tz: &pg_tz) -> NextDstBoundary {
-    next_dst_boundary_impl(timep, &tz.state)
+    next_dst_boundary_impl(timep, tz.state())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -554,7 +485,7 @@ pub fn pg_interpret_timezone_abbrev(
     timep: pg_time_t,
     tz: &pg_tz,
 ) -> Option<TimezoneAbbrev> {
-    let sp = &tz.state;
+    let sp = tz.state();
     let abbrind = find_abbrev(sp, abbrev)?;
 
     // Unlike pg_next_dst_boundary, we needn't sweat about extrapolation
@@ -615,7 +546,7 @@ pub struct KnownTimezoneAbbrev {
 ///
 /// Note: abbrev is matched case-sensitively; it should be all-upper-case.
 pub fn pg_timezone_abbrev_is_known(abbrev: &str, tz: &pg_tz) -> Option<KnownTimezoneAbbrev> {
-    let sp = &tz.state;
+    let sp = tz.state();
     let abbrind = find_abbrev(sp, abbrev)?;
     let mut found: Option<KnownTimezoneAbbrev> = None;
 
@@ -649,8 +580,8 @@ pub fn pg_timezone_abbrev_is_known(abbrev: &str, tz: &pg_tz) -> Option<KnownTime
 /// `index` is a state counter the caller initializes to zero before the
 /// first call and does not touch between calls. Returns `None` when there
 /// are no more abbreviations.
-pub fn pg_get_next_timezone_abbrev(index: &mut i32, tz: &pg_tz) -> Option<String> {
-    let sp = &tz.state;
+pub fn pg_get_next_timezone_abbrev<'tz>(index: &mut i32, tz: &'tz pg_tz) -> Option<&'tz str> {
+    let sp = tz.state();
     let start = usize::try_from(*index).ok()?;
     if start >= sp.charcnt as usize {
         return None;
@@ -658,16 +589,14 @@ pub fn pg_get_next_timezone_abbrev(index: &mut i32, tz: &pg_tz) -> Option<String
     let end = start + sp.chars[start..].iter().position(|&byte| byte == 0)?;
     // Advance past this abbrev and its trailing NUL.
     *index = (end + 1) as i32;
-    std::str::from_utf8(&sp.chars[start..end])
-        .ok()
-        .map(str::to_owned)
+    std::str::from_utf8(&sp.chars[start..end]).ok()
 }
 
 /// If the given timezone uses only one GMT offset, return it, else `None`.
 /// (The zone could have more than one ttinfo if it historically used more
 /// than one abbreviation; we succeed as long as they all share one gmtoff.)
 pub fn pg_get_timezone_offset(tz: &pg_tz) -> Option<i64> {
-    let sp = &tz.state;
+    let sp = tz.state();
     let first = sp.ttis[0].tt_utoff;
     sp.ttis[..sp.typecnt as usize]
         .iter()
@@ -774,8 +703,8 @@ fn typesequiv(sp: &state, a: i32, b: i32) -> bool {
         && ap.tt_isdst == bp.tt_isdst
         && ap.tt_ttisstd == bp.tt_ttisstd
         && ap.tt_ttisut == bp.tt_ttisut
-        && read_cstr(&sp.chars, ap.tt_desigidx as usize)
-            == read_cstr(&sp.chars, bp.tt_desigidx as usize)
+        && cstr_bytes(&sp.chars, ap.tt_desigidx as usize)
+            == cstr_bytes(&sp.chars, bp.tt_desigidx as usize)
 }
 
 /// True when `t1 - t0 == SECSPERREPEAT`, accounting for pg_time_t's bit width
@@ -1022,14 +951,14 @@ fn extend_with_posix(sp: &mut state, ts: &mut state) {
     let mut gotabbr = 0usize;
     let mut charcnt = sp.charcnt as usize;
     for i in 0..ts.typecnt as usize {
-        let tsabbr = read_cstr(&ts.chars, ts.ttis[i].tt_desigidx as usize);
+        let tsabbr = cstr_bytes(&ts.chars, ts.ttis[i].tt_desigidx as usize);
         // Search for a matching NUL-terminated string at *every* byte offset
         // j in [0, charcnt) — C's loop steps j by 1, so a suffix of an
         // existing abbreviation (e.g. "ST" inside "AKST\0") also matches.
         let mut matched = None;
         let mut j = 0usize;
         while j < charcnt {
-            if read_cstr(&sp.chars, j) == tsabbr {
+            if cstr_bytes(&sp.chars, j) == tsabbr {
                 matched = Some(j);
                 break;
             }
@@ -1042,7 +971,7 @@ fn extend_with_posix(sp: &mut state, ts: &mut state) {
             // `j` now equals charcnt (the append point). Append if it fits.
             let tsabbrlen = tsabbr.len();
             if j + tsabbrlen < TZ_MAX_CHARS {
-                sp.chars[j..j + tsabbrlen].copy_from_slice(tsabbr.as_bytes());
+                sp.chars[j..j + tsabbrlen].copy_from_slice(tsabbr);
                 sp.chars[j + tsabbrlen] = 0;
                 charcnt = j + tsabbrlen + 1;
                 ts.ttis[i].tt_desigidx = j as i32;
@@ -1486,7 +1415,7 @@ fn leaps_thru_end_of(y: i32) -> i32 {
     }
 }
 
-fn timesub(timep: pg_time_t, offset: i32, sp: Option<&state>) -> Option<pg_tm> {
+fn timesub<'tz>(timep: pg_time_t, offset: i32, sp: Option<&state>) -> Option<pg_tm<'tz>> {
     let (corr, hit) = leap_correction(sp, timep);
 
     let mut y: i32 = EPOCH_YEAR;
@@ -1624,31 +1553,31 @@ fn find_abbrev(sp: &state, abbrev: &str) -> Option<i32> {
 }
 
 /// Resolve the timezone abbreviation at `index` within the state's char
-/// table, returning an owned `String`, or the `wildabbr` sentinel when out
-/// of range (C `&sp->chars[ttisp->tt_desigidx]` / `wildabbr`).
-fn zone_name(sp: &state, index: i32) -> Option<String> {
+/// table, returning a borrow into the table (C's `tm_zone` points at
+/// `&sp->chars[ttisp->tt_desigidx]`), or the `wildabbr` sentinel when out of
+/// range or not UTF-8.
+fn zone_name(sp: &state, index: i32) -> Option<&str> {
     let Ok(index) = usize::try_from(index) else {
-        return Some(WILDABBR.to_owned());
+        return Some(WILDABBR);
     };
-    let Some(slice) = sp.chars.get(index..) else {
-        return Some(WILDABBR.to_owned());
-    };
-    let end = slice
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(slice.len());
-    std::str::from_utf8(&slice[..end])
-        .ok()
-        .map(str::to_owned)
-        .or_else(|| Some(WILDABBR.to_owned()))
+    if index >= sp.chars.len() {
+        return Some(WILDABBR);
+    }
+    Some(cstr_str(&sp.chars, index))
 }
 
-/// Read the NUL-terminated abbreviation starting at `start` from a char
-/// table.
-fn read_cstr(chars: &[u8], start: usize) -> String {
+/// The NUL-terminated abbreviation starting at `start` in a char table, as
+/// raw bytes (C `&chars[start]` viewed as a C string).
+fn cstr_bytes(chars: &[u8], start: usize) -> &[u8] {
     let slice = chars.get(start..).unwrap_or(&[]);
     let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
-    String::from_utf8_lossy(&slice[..end]).into_owned()
+    &slice[..end]
+}
+
+/// As [`cstr_bytes`], but as `&str`, falling back to the `wildabbr` sentinel
+/// for non-UTF-8 contents.
+fn cstr_str(chars: &[u8], start: usize) -> &str {
+    std::str::from_utf8(cstr_bytes(chars, start)).unwrap_or(WILDABBR)
 }
 
 /// Write `value` plus a trailing NUL at `offset` (C memcpy + '\0').

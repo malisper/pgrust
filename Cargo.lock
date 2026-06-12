@@ -308,6 +308,7 @@ version = "0.0.0"
 dependencies = [
  "backend-timezone-pgtz-seams",
  "types-core",
+ "types-pgtime",
 ]
 
 [[package]]
@@ -723,6 +724,13 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-storage",
+]
+
+[[package]]
+name = "types-pgtime"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]

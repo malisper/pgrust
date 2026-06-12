@@ -4,9 +4,11 @@
 //! `pg_next_dst_boundary`, ...).
 //!
 //! Timezone loading from disk (`pg_open_tzfile`) belongs to the
-//! `backend-timezone-pgtz` unit and is reached through its seam crate;
-//! `tzload`/`tzparse` and the `state` type are exported for that unit, which
-//! owns `pg_tzset` and the timezone cache.
+//! `backend-timezone-pgtz` unit and is reached through its seam crate.
+//! The shared `pg_tm`/`pg_tz`/`state` vocabulary (pgtime.h/pgtz.h) lives in
+//! the `types-pgtime` crate and is re-exported here for convenience;
+//! `tzload`/`tzparse` are exported for the pgtz unit, which owns `pg_tzset`
+//! and the timezone cache.
 
 mod localtime;
 
@@ -17,6 +19,7 @@ pub use localtime::{
     pg_tz_acceptable, state, tzload, tzparse, DstBoundary, KnownTimezoneAbbrev, NextDstBoundary,
     TimezoneAbbrev, TzLoadError, TZ_STRLEN_MAX,
 };
+pub use types_pgtime::{lsinfo, ttinfo};
 
 /// This crate has no inward seam crate yet (it sits at the bottom of the
 /// timezone dependency chain; consumers depend on it directly).
