@@ -120,6 +120,7 @@ dependencies = [
 name = "backend-access-transam-xlogstats"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
  "types-wal",
 ]
@@ -604,6 +605,7 @@ dependencies = [
 name = "types-wal"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
 ]
 

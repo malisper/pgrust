@@ -1,7 +1,6 @@
 //! WAL record types and resource-manager constants.
 
-use alloc::vec::Vec;
-
+use mcx::PgVec;
 use types_core::{pg_crc32c, uint16, uint32, uint8, RmgrId, TransactionId, XLogRecPtr};
 
 /// `MAX_XLINFO_TYPES` (access/xlogstats.h) — sixteen per-record buckets per
@@ -94,17 +93,19 @@ impl DecodedBkpBlock {
 }
 
 /// A decoded WAL record (`DecodedXLogRecord`, access/xlogreader.h). Trimmed to
-/// the header plus the block references `0..=max_block_id`.
-#[derive(Clone, Debug)]
-pub struct DecodedXLogRecord {
+/// the header plus the block references `0..=max_block_id`. The block array
+/// is context-allocated (C pallocs the decode buffer in the reader's
+/// context), so the record carries its allocator lifetime.
+#[derive(Debug)]
+pub struct DecodedXLogRecord<'mcx> {
     header: XLogRecord,
-    blocks: Vec<DecodedBkpBlock>,
+    blocks: PgVec<'mcx, DecodedBkpBlock>,
 }
 
-impl DecodedXLogRecord {
+impl<'mcx> DecodedXLogRecord<'mcx> {
     /// `blocks` must hold the block references `0..=max_block_id` (in-use or
     /// not), mirroring the C array indexed by block id.
-    pub const fn new(header: XLogRecord, blocks: Vec<DecodedBkpBlock>) -> Self {
+    pub const fn new(header: XLogRecord, blocks: PgVec<'mcx, DecodedBkpBlock>) -> Self {
         Self { header, blocks }
     }
 
