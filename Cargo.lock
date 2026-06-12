@@ -163,6 +163,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-pqcomm-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-libpq-pqformat-seams"
 version = "0.0.0"
 dependencies = [
@@ -180,6 +187,20 @@ dependencies = [
 [[package]]
 name = "backend-port-atomics"
 version = "0.0.0"
+
+[[package]]
+name = "backend-postmaster-syslogger-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-storage-ipc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
 
 [[package]]
 name = "backend-storage-lmgr-lock-seams"
@@ -330,7 +351,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-error"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqcomm-seams",
+ "backend-postmaster-syslogger-seams",
+ "backend-storage-ipc-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-error-seams",
+ "backend-utils-error-small-seams",
+ "libc",
+ "types-dest",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-error-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-error-small-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -435,6 +479,7 @@ dependencies = [
  "backend-port-atomics",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
+ "backend-utils-error",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-pg-rusage",
@@ -463,6 +508,10 @@ version = "0.0.0"
 dependencies = [
  "types-core",
 ]
+
+[[package]]
+name = "types-dest"
+version = "0.0.0"
 
 [[package]]
 name = "types-error"
