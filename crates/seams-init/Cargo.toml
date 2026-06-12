@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
+backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
