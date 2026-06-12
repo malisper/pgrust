@@ -9,6 +9,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{Oid, OidIsValid, InvalidOid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
 use types_hash::hash::{
@@ -46,11 +47,16 @@ fn list_member_oid(list: &[Oid], oid: Oid) -> bool {
     list.contains(&oid)
 }
 
-/// `list_append_unique_oid(list, oid)`.
-fn list_append_unique_oid(list: &mut Vec<Oid>, oid: Oid) {
+/// `list_append_unique_oid(list, oid)` — fallible: C's `lappend_oid` pallocs
+/// in the list's context.
+fn list_append_unique_oid(list: &mut PgVec<'_, Oid>, oid: Oid) -> PgResult<()> {
     if !list.contains(&oid) {
+        let mcx = *list.allocator();
+        list.try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<Oid>()))?;
         list.push(oid);
     }
+    Ok(())
 }
 
 /// `ereport(INFO, (errcode(ERRCODE_INVALID_OBJECT_DEFINITION), errmsg(...)))`.
@@ -76,12 +82,15 @@ fn report_info(msg: String) -> PgResult<()> {
 ///
 /// The C signature is `bool hashvalidate(Oid)`; here the `elog(ERROR, "cache
 /// lookup failed for operator class %u")` path (and any error raised by the
-/// catalog substrate) travels on the `Err` channel.
-pub fn hashvalidate(opclassoid: Oid) -> PgResult<bool> {
+/// catalog substrate, including OOM) travels on the `Err` channel. `mcx` is
+/// the translation of the C current context every catalog projection and the
+/// work lists are palloc'd in; everything allocated here drops on return
+/// (C: `ReleaseCatCacheList` / `ReleaseSysCache` plus context cleanup).
+pub fn hashvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
     let mut result = true;
 
     // Fetch opclass information.
-    let classform = match syscache_seams::search_opclass::call(opclassoid)? {
+    let classform = match syscache_seams::search_opclass::call(mcx, opclassoid)? {
         Some(form) => form,
         None => {
             return Err(PgError::error(format!(
@@ -94,14 +103,14 @@ pub fn hashvalidate(opclassoid: Oid) -> PgResult<bool> {
     let opclassname = classform.opcname;
 
     // Fetch opfamily information.
-    let opfamilyname = lsyscache_seams::get_opfamily_name::call(opfamilyoid, false)?
+    let opfamilyname = lsyscache_seams::get_opfamily_name::call(mcx, opfamilyoid, false)?
         .expect("get_opfamily_name(missing_ok = false) returned no name");
 
     // Fetch all operators and support functions of the opfamily.
-    let oprlist = syscache_seams::search_amop_list::call(opfamilyoid)?;
-    let proclist = syscache_seams::search_amproc_list::call(opfamilyoid)?;
+    let oprlist = syscache_seams::search_amop_list::call(mcx, opfamilyoid)?;
+    let proclist = syscache_seams::search_amproc_list::call(mcx, opfamilyoid)?;
 
-    let mut hashabletypes: Vec<Oid> = Vec::new();
+    let mut hashabletypes: PgVec<'_, Oid> = PgVec::new_in(mcx);
 
     // Check individual support functions.
     for procform in &proclist {
@@ -167,7 +176,7 @@ pub fn hashvalidate(opclassoid: Oid) -> PgResult<bool> {
             && (procform.amprocnum as u16 == HASHSTANDARD_PROC
                 || procform.amprocnum as u16 == HASHEXTENDED_PROC)
         {
-            list_append_unique_oid(&mut hashabletypes, procform.amproclefttype);
+            list_append_unique_oid(&mut hashabletypes, procform.amproclefttype)?;
         }
     }
 
@@ -221,24 +230,26 @@ pub fn hashvalidate(opclassoid: Oid) -> PgResult<bool> {
     // Now check for inconsistent groups of operators/functions. In C this
     // passes the same CatCLists; here the validator's owned rows are projected
     // to the fields identify_opfamily_groups reads.
-    let amv_oprlist: Vec<types_amvalidate::AmopRow> = oprlist
-        .iter()
-        .map(|r| types_amvalidate::AmopRow {
+    let mut amv_oprlist: PgVec<'_, types_amvalidate::AmopRow> =
+        vec_with_capacity_in(mcx, oprlist.len())?;
+    for r in &oprlist {
+        amv_oprlist.push(types_amvalidate::AmopRow {
             amoplefttype: r.amoplefttype,
             amoprighttype: r.amoprighttype,
             amopstrategy: r.amopstrategy,
-        })
-        .collect();
-    let amv_proclist: Vec<types_amvalidate::AmprocRow> = proclist
-        .iter()
-        .map(|r| types_amvalidate::AmprocRow {
+        });
+    }
+    let mut amv_proclist: PgVec<'_, types_amvalidate::AmprocRow> =
+        vec_with_capacity_in(mcx, proclist.len())?;
+    for r in &proclist {
+        amv_proclist.push(types_amvalidate::AmprocRow {
             amproclefttype: r.amproclefttype,
             amprocrighttype: r.amprocrighttype,
             amprocnum: r.amprocnum,
-        })
-        .collect();
+        });
+    }
     let grouplist =
-        amvalidate_seams::identify_opfamily_groups::call(&amv_oprlist, &amv_proclist)?;
+        amvalidate_seams::identify_opfamily_groups::call(mcx, &amv_oprlist, &amv_proclist)?;
 
     let mut opclassgroup: Option<&types_amvalidate::OpFamilyOpFuncGroup> = None;
     for thisgroup in &grouplist {

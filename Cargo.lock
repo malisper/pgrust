@@ -44,6 +44,7 @@ dependencies = [
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error-seams",
+ "mcx",
  "types-amvalidate",
  "types-core",
  "types-error",
@@ -64,6 +65,7 @@ dependencies = [
 name = "backend-access-index-amvalidate-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-amvalidate",
  "types-core",
@@ -328,6 +330,7 @@ dependencies = [
 name = "backend-utils-cache-lsyscache-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -348,6 +351,7 @@ dependencies = [
 name = "backend-utils-cache-syscache-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -568,6 +572,7 @@ version = "0.0.0"
 name = "types-hash"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
 ]
 

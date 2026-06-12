@@ -9,18 +9,20 @@
 //! the other AM validators and the parser-side `OpFamilyMember`), so they live
 //! under this module's own C-path.
 
+use mcx::PgString;
 use types_core::Oid;
 
 /// `Form_pg_opclass` fields read by `hashvalidate` (the result of
 /// `SearchSysCache1(CLAOID, opclassoid)` projected to what the validator uses).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct OpclassForm {
+/// The name is context-allocated, so the form carries the allocator lifetime.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OpclassForm<'mcx> {
     /// `opcfamily` — the opclass's opfamily OID.
     pub opcfamily: Oid,
     /// `opcintype` — the opclass's input data type OID.
     pub opcintype: Oid,
     /// `NameStr(opcname)` — the opclass name (for the missing-operators message).
-    pub opcname: alloc::string::String,
+    pub opcname: PgString<'mcx>,
 }
 
 /// One `Form_pg_amproc` member row (a member of the `AMPROCNUM` cat-list for the

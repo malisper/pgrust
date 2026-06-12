@@ -4,14 +4,21 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+use mcx::{Mcx, PgString};
 use types_core::Oid;
 use types_error::PgResult;
 
 seam_core::seam!(
     /// `get_opfamily_name(opfid, missing_ok)` (lsyscache.c): the opfamily's
-    /// name. With `missing_ok = false` a missing opfamily raises (`Err`); with
-    /// `missing_ok = true` it is `Ok(None)`.
-    pub fn get_opfamily_name(opfid: Oid, missing_ok: bool) -> PgResult<Option<String>>
+    /// name, copied out of the syscache into `mcx` (C: `pstrdup` in the
+    /// current context). With `missing_ok = false` a missing opfamily raises
+    /// (`Err`); with `missing_ok = true` it is `Ok(None)`. `Err` includes OOM
+    /// from the copy.
+    pub fn get_opfamily_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        opfid: Oid,
+        missing_ok: bool,
+    ) -> PgResult<Option<PgString<'mcx>>>
 );
 
 seam_core::seam!(
