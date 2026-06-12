@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 seam_core::seam!(
     /// `ExecBuildProjectionInfo(targetList, econtext, slot, parent,
     /// inputDesc)` (execExpr.c), marshaled over the owned tree: the owner

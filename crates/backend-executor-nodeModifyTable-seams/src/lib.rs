@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(non_snake_case)]
+
 seam_core::seam!(
     /// `ExecInitGenerated(resultRelInfo, estate, cmdtype)`
     /// (nodeModifyTable.c): initialize the result relation's stored-generated
