@@ -76,7 +76,8 @@ use backend_access_transam_xlog_seams as xlog_seams;
 use backend_catalog_aclchk_seams as aclchk_seams;
 use backend_catalog_dependency_seams as dependency_seams;
 use backend_catalog_dependency_seams::{
-    PERFORM_DELETION_INTERNAL, PERFORM_DELETION_QUIETLY, PERFORM_DELETION_SKIP_ORIGINAL,
+    PERFORM_DELETION_INTERNAL, PERFORM_DELETION_QUIETLY, PERFORM_DELETION_SKIP_EXTENSIONS,
+    PERFORM_DELETION_SKIP_ORIGINAL,
 };
 use backend_catalog_objectaccess_seams as objectaccess_seams;
 use backend_catalog_objectaddress_seams as objectaddress_seams;
@@ -3779,7 +3780,10 @@ fn RemoveTempRelations(tempNamespaceId: Oid) -> PgResult<()> {
         tempNamespaceId,
         0,
         types_nodes::parsenodes::DROP_CASCADE,
-        PERFORM_DELETION_INTERNAL | PERFORM_DELETION_QUIETLY | PERFORM_DELETION_SKIP_ORIGINAL,
+        PERFORM_DELETION_INTERNAL
+            | PERFORM_DELETION_QUIETLY
+            | PERFORM_DELETION_SKIP_ORIGINAL
+            | PERFORM_DELETION_SKIP_EXTENSIONS,
     )
 }
 
