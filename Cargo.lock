@@ -312,6 +312,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-postmaster-launch-backend-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
+name = "backend-postmaster-syslogger"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqsignal",
+ "backend-postmaster-interrupt",
+ "backend-postmaster-launch-backend-seams",
+ "backend-postmaster-syslogger-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-waiteventset-seams",
+ "backend-timezone-pgtz-seams",
+ "backend-timezone-strftime-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-file-seams",
+ "backend-utils-misc-more-seams",
+ "common-file-perm-seams",
+ "libc",
+ "port-pqsignal-seams",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-guc",
+ "types-pgstat",
+ "types-signal",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-postmaster-syslogger-seams"
 version = "0.0.0"
 dependencies = [
@@ -320,6 +358,13 @@ dependencies = [
 
 [[package]]
 name = "backend-storage-buffer-bufmgr-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-storage-file-fd-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -465,6 +510,23 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-timezone-pgtz-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-pgtime",
+]
+
+[[package]]
+name = "backend-timezone-strftime-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-pgtime",
 ]
 
 [[package]]
@@ -814,6 +876,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-more-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-utils-misc-pg-rusage"
 version = "0.0.0"
 dependencies = [
@@ -892,6 +961,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "common-file-perm-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "common-ip-seams"
 version = "0.0.0"
 dependencies = [
@@ -966,6 +1042,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pqsignal-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-signal",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -999,6 +1083,7 @@ dependencies = [
  "backend-libpq-pqsignal",
  "backend-port-atomics",
  "backend-postmaster-interrupt",
+ "backend-postmaster-syslogger",
  "backend-storage-ipc-dsm-core",
  "backend-storage-lmgr-lwlock",
  "backend-storage-page-checksum",
@@ -1103,7 +1188,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-pgtime"
+version = "0.0.0"
+
+[[package]]
 name = "types-reloptions"
+version = "0.0.0"
+
+[[package]]
+name = "types-signal"
 version = "0.0.0"
 
 [[package]]

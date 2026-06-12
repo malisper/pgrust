@@ -95,3 +95,17 @@ seam_core::seam!(
     /// connected database.
     pub fn my_database_tablespace() -> types_core::primitive::Oid
 );
+
+seam_core::seam!(
+    /// `MyStartTime` (globals.c): this process's start time (`pg_time_t`,
+    /// seconds since the Unix epoch), set once at process start.
+    pub fn my_start_time() -> types_core::pg_time_t
+);
+
+seam_core::seam!(
+    /// Write `MyBackendType` (globals.c, declared in miscadmin.h): processes
+    /// assign their own type at startup (e.g. `MyBackendType = B_LOGGER` in
+    /// SysLoggerMain). Per-crate mirrors of this global (e.g. elog's
+    /// `am_syslogger`) are updated by the assigning unit itself.
+    pub fn set_my_backend_type(backend_type: types_core::init::BackendType)
+);

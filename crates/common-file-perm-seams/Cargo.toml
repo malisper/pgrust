@@ -1,0 +1,12 @@
+[package]
+name = "common-file-perm-seams"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_file_perm_seams"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
