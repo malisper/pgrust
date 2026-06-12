@@ -256,4 +256,7 @@ fn parse_strtoul_full_matches_c_semantics() {
     assert_eq!(parse_strtoul_full(""), None);
     assert_eq!(parse_strtoul_full("12abc"), None);
     assert_eq!(parse_strtoul_full("staff"), None);
+    // C-locale isspace includes vertical tab; strtoul clamps on overflow.
+    assert_eq!(parse_strtoul_full("\x0b9"), Some(9));
+    assert_eq!(parse_strtoul_full("99999999999999999999999999"), Some(u64::MAX));
 }

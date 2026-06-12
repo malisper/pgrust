@@ -712,7 +712,8 @@ fn Lock_AF_UNIX(unix_socket_dir: &str, unix_socket_path: &str) -> PgResult<i32> 
 fn parse_strtoul_full(s: &str) -> Option<u64> {
     let bytes = s.as_bytes();
     let mut i = 0;
-    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+    // C-locale isspace(): space, \t, \n, \v, \f, \r.
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') {
         i += 1;
     }
     let mut negative = false;
@@ -722,14 +723,21 @@ fn parse_strtoul_full(s: &str) -> Option<u64> {
     }
     let start = i;
     let mut value: u64 = 0;
+    let mut overflowed = false;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
-        value = value
-            .wrapping_mul(10)
-            .wrapping_add(u64::from(bytes[i] - b'0'));
+        let (mul, o1) = value.overflowing_mul(10);
+        let (add, o2) = mul.overflowing_add(u64::from(bytes[i] - b'0'));
+        overflowed = overflowed || o1 || o2;
+        value = add;
         i += 1;
     }
     if i == start || i != bytes.len() {
         return None;
+    }
+    if overflowed {
+        // strtoul clamps to ULONG_MAX (and sets ERANGE) on overflow; the C
+        // caller ignores errno and uses the clamped value.
+        return Some(u64::MAX);
     }
     Some(if negative { value.wrapping_neg() } else { value })
 }
@@ -1208,7 +1216,10 @@ pub fn pq_getmessage(s: &mut Vec<u8>, maxlen: i32) -> PgResult<i32> {
         // large message), we will ERROR, but we want to discard the message
         // body first so as not to lose communication sync.
         if let Err(oom) = enlarge_message_buffer(s, len, "pq_getmessage") {
-            if let Ok(EOF) = pq_discardbytes(len) {
+            // An error raised inside the catch block (here: from
+            // pq_discardbytes) propagates immediately in C, skipping the rest
+            // of the block — hence the `?`.
+            if pq_discardbytes(len)? == EOF {
                 let _ = ereport(COMMERROR)
                     .errcode(ERRCODE_PROTOCOL_VIOLATION)
                     .errmsg("incomplete message from client")
