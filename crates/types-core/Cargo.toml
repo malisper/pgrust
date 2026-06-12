@@ -1,9 +1,9 @@
 [package]
-name = "types"
+name = "types-core"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "types"
+name = "types_core"
 path = "src/lib.rs"

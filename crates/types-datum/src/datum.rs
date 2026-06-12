@@ -9,7 +9,7 @@
 
 use core::num::NonZeroUsize;
 
-use crate::{Oid, TransactionId};
+use types_core::{Oid, TransactionId};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Datum(usize);

@@ -9,6 +9,8 @@ name = "backend_access_common_heaptuple"
 path = "src/lib.rs"
 
 [dependencies]
-types = { path = "../types" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-tuple = { path = "../types-tuple" }
 backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }
 backend-access-heap-heaptoast-seams = { path = "../backend-access-heap-heaptoast-seams" }

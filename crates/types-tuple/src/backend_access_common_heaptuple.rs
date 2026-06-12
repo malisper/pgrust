@@ -1,10 +1,7 @@
-//! Hoisted type vocabulary for `access/common/heaptuple.c`'s form/deform core.
-//!
-//! Centralized here (under the owning crate's C-path module) so the `seams`
-//! crate — which depends only on `types` + `backend-utils-mctx` — can carry the
-//! `toast_flatten_tuple_to_datum` seam whose signature references
-//! [`FormedTuple`]. The crate
-//! `backend-access-common-heaptuple` re-exports this as `crate::FormedTuple`.
+//! Type vocabulary for `access/common/heaptuple.c`'s form/deform core. Lives
+//! here (not in the owning crate) so seam-crate signatures can reference
+//! [`FormedTuple`] / [`TupleValue`] / [`DeformedColumn`] without depending on
+//! the owning crate; `backend-access-common-heaptuple` re-exports them.
 
 extern crate alloc;
 
@@ -12,22 +9,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::heaptuple::HeapTupleData;
-use crate::Datum;
+use types_datum::Datum;
 
-// ---------------------------------------------------------------------------
 // Per-attribute value model (the faithful idiomatic `Datum` substitute).
-//
-// Seam centralization (task #33): hoisted from `backend-access-common-heaptuple`
-// so the central `seams` crate (which depends only on `types` +
-// `backend-utils-mctx`) can carry the `seams-ub-heaprest` heaptoast decls whose
-// signatures reference `TupleValue` / `DeformedColumn`. The owning crate
-// `backend-access-common-heaptuple` re-exports these as `crate::TupleValue` /
-// `crate::DeformedColumn`. The inherent `as_ref_bytes` helper moved with the
-// type (it is self-contained — a match + panic, no C-internal logic); its
-// visibility was widened from crate-private to `pub` only so the owning crate's
-// existing `val.as_ref_bytes()` call sites keep resolving across the crate
-// boundary.
-// ---------------------------------------------------------------------------
 
 /// A single attribute's value handed to / produced by the tuple
 /// (de)serializers, modelling C's per-attribute `Datum` over the safe byte

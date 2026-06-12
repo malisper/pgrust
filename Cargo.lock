@@ -8,7 +8,9 @@ version = "0.0.0"
 dependencies = [
  "backend-access-heap-heaptoast-seams",
  "backend-utils-adt-misc2-seams",
- "types",
+ "types-core",
+ "types-datum",
+ "types-tuple",
 ]
 
 [[package]]
@@ -16,14 +18,14 @@ name = "backend-access-heap-heaptoast-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types",
+ "types-tuple",
 ]
 
 [[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
- "types",
+ "types-core",
 ]
 
 [[package]]
@@ -31,21 +33,20 @@ name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types",
 ]
 
 [[package]]
 name = "backend-utils-mb-wstrcmp"
 version = "0.0.0"
 dependencies = [
- "types",
+ "types-wchar",
 ]
 
 [[package]]
 name = "backend-utils-mb-wstrncmp"
 version = "0.0.0"
 dependencies = [
- "types",
+ "types-wchar",
 ]
 
 [[package]]
@@ -81,5 +82,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "types"
+name = "types-core"
 version = "0.0.0"
+
+[[package]]
+name = "types-datum"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-tuple"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+]
+
+[[package]]
+name = "types-wchar"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]

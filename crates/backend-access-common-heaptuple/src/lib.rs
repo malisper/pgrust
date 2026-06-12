@@ -60,15 +60,16 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use types::heap::SizeofHeapTupleHeader;
-use types::heaptuple::{
+use types_tuple::heap::SizeofHeapTupleHeader;
+use types_tuple::heaptuple::{
     bits8, BlockIdData, CompactAttribute, DatumTupleFields, HeapTupleData, HeapTupleField3,
     HeapTupleFields, HeapTupleHeaderChoice, HeapTupleHeaderData, HeapTupleHeaderGetNatts,
     HeapTupleHeaderSetNatts, ItemPointerData,
     TupleConstr, TupleDescData, BITMAPLEN, HEAP_HASEXTERNAL, HEAP_HASNULL, HEAP_HASVARWIDTH, HIGHBIT,
     MaxTupleAttributeNumber,
 };
-use types::{Datum, Oid, Size};
+use types_core::{Oid, Size};
+use types_datum::Datum;
 
 // ---------------------------------------------------------------------------
 // Per-attribute value model (the faithful idiomatic `Datum` substitute).
@@ -78,9 +79,9 @@ use types::{Datum, Oid, Size};
 /// (de)serializers, modelling C's per-attribute `Datum` over the safe byte
 /// representation (see the module docs).
 ///
-/// Defined in `types::backend_access_common_heaptuple` so seam signatures can
+/// Defined in `types_tuple::backend_access_common_heaptuple` so seam signatures can
 /// reference it; re-exported here as `crate::TupleValue`.
-pub use types::backend_access_common_heaptuple::TupleValue;
+pub use types_tuple::backend_access_common_heaptuple::TupleValue;
 
 // ---------------------------------------------------------------------------
 // Alignment + varlena helpers (access/tupmacs.h, varatt.h, c.h), ported 1:1.
@@ -628,9 +629,9 @@ const INVALID_OID: Oid = 0;
 /// [`FormedTuple::data`]. `tuple.t_len` is the full on-disk length
 /// (`t_hoff + data.len()`), matching C.
 ///
-/// Defined in `types::backend_access_common_heaptuple` so seam signatures can
+/// Defined in `types_tuple::backend_access_common_heaptuple` so seam signatures can
 /// reference it; re-exported here as `crate::FormedTuple`.
-pub use types::backend_access_common_heaptuple::FormedTuple;
+pub use types_tuple::backend_access_common_heaptuple::FormedTuple;
 
 /// `heap_form_tuple(tupleDescriptor, values, isnull)` (heaptuple.c:1116) —
 /// construct a tuple from the given `values`/`isnull` arrays (one entry per
@@ -737,9 +738,9 @@ pub fn heap_form_tuple(
 /// the tuple (the C contract that the pointer "points into the given tuple" is
 /// preserved by copying the exact bytes spanned by the field).
 ///
-/// Defined in `types::backend_access_common_heaptuple` so seam signatures can
+/// Defined in `types_tuple::backend_access_common_heaptuple` so seam signatures can
 /// reference it; re-exported here as `crate::DeformedColumn`.
-pub use types::backend_access_common_heaptuple::DeformedColumn;
+pub use types_tuple::backend_access_common_heaptuple::DeformedColumn;
 
 /// `heap_deform_tuple(tuple, tupleDesc, values, isnull)` (heaptuple.c:1345) —
 /// given a tuple, extract data into `values`/`isnull` arrays.
@@ -922,7 +923,7 @@ pub fn getmissingattr(tuple_desc: &TupleDescData, attnum: i32) -> DeformedColumn
 
 /// Borrow `tupleDesc->constr->missing` (the `AttrMissing[]` array), if present.
 #[inline]
-fn constr_missing(tuple_desc: &TupleDescData) -> Option<&[types::heaptuple::AttrMissing]> {
+fn constr_missing(tuple_desc: &TupleDescData) -> Option<&[types_tuple::heaptuple::AttrMissing]> {
     let constr: &TupleConstr = tuple_desc.constr.as_deref()?;
     if constr.missing.is_empty() {
         None
@@ -961,7 +962,7 @@ pub enum HeapTupleError {
 /// `MinimalTupleData` drops `MINIMAL_TUPLE_OFFSET` bytes off the front of a
 /// `HeapTupleHeaderData` and shares the `t_infomask2 .. t_bits` tail.
 const SIZEOF_MINIMAL_TUPLE_HEADER: usize =
-    types::heap::SizeofHeapTupleHeader - types::heaptuple::MINIMAL_TUPLE_OFFSET;
+    types_tuple::heap::SizeofHeapTupleHeader - types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
 const _: () = assert!(SIZEOF_MINIMAL_TUPLE_HEADER == 15);
 
 // ---------------------------------------------------------------------------
@@ -1016,7 +1017,7 @@ pub fn heap_copytuple_with_tuple(src: Option<&FormedTuple>) -> FormedTuple {
         },
         _ => FormedTuple {
             // dest->t_data = NULL; (the rest of *dest is left as the caller had it).
-            tuple: alloc::boxed::Box::new(types::heaptuple::HeapTupleData {
+            tuple: alloc::boxed::Box::new(types_tuple::heaptuple::HeapTupleData {
                 t_len: 0,
                 t_self: invalid_item_pointer(),
                 t_tableOid: INVALID_OID,
@@ -1183,7 +1184,7 @@ fn copy_tuple_identity(new_tuple: &mut FormedTuple, old: &FormedTuple) {
 /// *without* `MINIMAL_TUPLE_OFFSET` (per the `t_len` contract).
 #[derive(Clone, Debug)]
 pub struct FormedMinimalTuple {
-    pub tuple: alloc::boxed::Box<types::heaptuple::MinimalTupleData>,
+    pub tuple: alloc::boxed::Box<types_tuple::heaptuple::MinimalTupleData>,
     /// The user-data area (`data_len` bytes), i.e. the bytes at `tuple + hoff`.
     pub data: alloc::vec::Vec<u8>,
 }
@@ -1214,10 +1215,10 @@ pub fn heap_form_minimal_tuple(
 
     let number_of_attributes = tuple_descriptor.natts;
 
-    if number_of_attributes > types::heaptuple::MaxTupleAttributeNumber {
+    if number_of_attributes > types_tuple::heaptuple::MaxTupleAttributeNumber {
         return Err(HeapTupleError::TooManyColumns {
             columns: number_of_attributes,
-            limit: types::heaptuple::MaxTupleAttributeNumber,
+            limit: types_tuple::heaptuple::MaxTupleAttributeNumber,
         });
     }
 
@@ -1234,7 +1235,7 @@ pub fn heap_form_minimal_tuple(
     let mut len = SIZEOF_MINIMAL_TUPLE_HEADER;
 
     if hasnull {
-        len += types::heaptuple::BITMAPLEN(number_of_attributes) as usize;
+        len += types_tuple::heaptuple::BITMAPLEN(number_of_attributes) as usize;
     }
 
     // hoff = len = MAXALIGN(len);  /* align user data safely */
@@ -1251,14 +1252,14 @@ pub fn heap_form_minimal_tuple(
     // C does; `extra` only had to be MAXALIGNed (asserted above).
     let filled = heap_fill_tuple(tuple_descriptor, values, isnull, data_len, hasnull);
 
-    let mut tuple = types::heaptuple::MinimalTupleData {
+    let mut tuple = types_tuple::heaptuple::MinimalTupleData {
         // tuple->t_len = len;
         t_len: len as u32,
         mt_padding: [0; 6],
         t_infomask2: 0,
         t_infomask: filled.infomask,
         // tuple->t_hoff = hoff + MINIMAL_TUPLE_OFFSET;
-        t_hoff: (hoff + types::heaptuple::MINIMAL_TUPLE_OFFSET) as u8,
+        t_hoff: (hoff + types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET) as u8,
         t_bits: filled.bits,
     };
 
@@ -1282,9 +1283,9 @@ pub fn heap_form_minimal_tuple(
 /// tuple. We replicate the mask write here because the idiomatic
 /// `HeapTupleHeaderSetNatts` is typed to `HeapTupleHeaderData`.
 #[inline]
-fn minimal_tuple_set_natts(tuple: &mut types::heaptuple::MinimalTupleData, natts: u16) {
-    tuple.t_infomask2 = (tuple.t_infomask2 & !types::heaptuple::HEAP_NATTS_MASK)
-        | (natts & types::heaptuple::HEAP_NATTS_MASK);
+fn minimal_tuple_set_natts(tuple: &mut types_tuple::heaptuple::MinimalTupleData, natts: u16) {
+    tuple.t_infomask2 = (tuple.t_infomask2 & !types_tuple::heaptuple::HEAP_NATTS_MASK)
+        | (natts & types_tuple::heaptuple::HEAP_NATTS_MASK);
 }
 
 // ===========================================================================
@@ -1299,7 +1300,7 @@ fn minimal_tuple_set_natts(tuple: &mut types::heaptuple::MinimalTupleData, natts
 
 /// System attribute numbers used by [`heap_attisnull`] / [`heap_getsysattr`]
 /// (access/sysattr.h).
-use types::heaptuple::{
+use types_tuple::heaptuple::{
     MaxCommandIdAttributeNumber, MaxTransactionIdAttributeNumber, MinCommandIdAttributeNumber,
     MinTransactionIdAttributeNumber, SelfItemPointerAttributeNumber, TableOidAttributeNumber,
 };
@@ -1311,10 +1312,10 @@ fn header_no_nulls(header: &HeapTupleHeaderData) -> bool {
 }
 
 /// `HeapTupleHeaderGetRawXmax(td)` (htup_details.h): the raw xmax. (The idiomatic
-/// `types::heaptuple` exposes `HeapTupleHeaderGetRawXmin` but not `Xmax`, so the
+/// `types_tuple::heaptuple` exposes `HeapTupleHeaderGetRawXmin` but not `Xmax`, so the
 /// equivalent field read is mirrored here.)
 #[inline]
-fn header_raw_xmax(header: &HeapTupleHeaderData) -> types::TransactionId {
+fn header_raw_xmax(header: &HeapTupleHeaderData) -> types_core::TransactionId {
     match &header.t_choice {
         HeapTupleHeaderChoice::THeap(t_heap) => t_heap.t_xmax,
         HeapTupleHeaderChoice::TDatum(_) => 0,
@@ -1421,7 +1422,7 @@ pub fn heap_getsysattr(tuple: &HeapTupleData, attnum: i32) -> DeformedColumn {
     } else if attnum == MinTransactionIdAttributeNumber as i32 {
         // TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(tup->t_data))
         TupleValue::ByVal(Datum::from_u32(
-            types::heaptuple::HeapTupleHeaderGetRawXmin(header),
+            types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(header),
         ))
     } else if attnum == MaxTransactionIdAttributeNumber as i32 {
         // TransactionIdGetDatum(HeapTupleHeaderGetRawXmax(tup->t_data))
@@ -1431,7 +1432,7 @@ pub fn heap_getsysattr(tuple: &HeapTupleData, attnum: i32) -> DeformedColumn {
     {
         // CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(tup->t_data))
         TupleValue::ByVal(Datum::from_u32(
-            types::heaptuple::HeapTupleHeaderGetRawCommandId(header),
+            types_tuple::heaptuple::HeapTupleHeaderGetRawCommandId(header),
         ))
     } else if attnum == TableOidAttributeNumber as i32 {
         // ObjectIdGetDatum(tup->t_tableOid)
@@ -1523,7 +1524,7 @@ fn expand_tuple(
     let mut target_data_len = source_data_len;
 
     // Determine which trailing attributes have a missing value.
-    let attrmiss: Option<&[types::heaptuple::AttrMissing]> = constr_missing(tuple_desc);
+    let attrmiss: Option<&[types_tuple::heaptuple::AttrMissing]> = constr_missing(tuple_desc);
     let mut first_missing = source_natts;
     if let Some(attrmiss) = attrmiss {
         // Find the first attr for which we don't have a value in the source.
@@ -1649,7 +1650,7 @@ fn expand_tuple(
         len,
         hoff: match target {
             ExpandTarget::Heap => hoff,
-            ExpandTarget::Minimal => hoff + types::heaptuple::MINIMAL_TUPLE_OFFSET,
+            ExpandTarget::Minimal => hoff + types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET,
         },
         infomask,
         data,
@@ -1665,7 +1666,7 @@ fn expand_tuple(
 /// blocked on the unported catalog-missing-value substrate — a loud panic,
 /// never a silent fabrication.
 #[inline]
-fn missing_value(attrmiss: &types::heaptuple::AttrMissing, att: &CompactAttribute) -> TupleValue {
+fn missing_value(attrmiss: &types_tuple::heaptuple::AttrMissing, att: &CompactAttribute) -> TupleValue {
     if att.attbyval {
         TupleValue::ByVal(attrmiss.am_value)
     } else {
@@ -1686,7 +1687,7 @@ pub fn minimal_expand_tuple(
 ) -> FormedMinimalTuple {
     let layout = expand_tuple(&ExpandTarget::Minimal, source, tuple_desc);
 
-    let mut tuple = types::heaptuple::MinimalTupleData {
+    let mut tuple = types_tuple::heaptuple::MinimalTupleData {
         t_len: layout.len as u32,
         mt_padding: [0; 6],
         t_infomask2: 0,
@@ -1830,7 +1831,7 @@ const _: () = assert!(MINIMAL_TUPLE_DATA_OFFSET == 4 + 6);
 pub fn minimal_tuple_to_flat_bytes(mtup: &FormedMinimalTuple) -> Vec<u8> {
     let t_len = mtup.tuple.t_len as usize;
     // data area starts at t_hoff - MINIMAL_TUPLE_OFFSET (htup_details.h:663).
-    let hoff = mtup.tuple.t_hoff as usize - types::heaptuple::MINIMAL_TUPLE_OFFSET;
+    let hoff = mtup.tuple.t_hoff as usize - types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
     debug_assert_eq!(t_len, hoff + mtup.data.len(), "t_len == hoff + data_len");
 
     let mut image = vec![0u8; t_len];
@@ -1869,12 +1870,12 @@ pub fn minimal_tuple_from_flat_bytes(image: &[u8]) -> FormedMinimalTuple {
     let t_infomask2 = u16::from_ne_bytes([image[10], image[11]]);
     let t_infomask = u16::from_ne_bytes([image[12], image[13]]);
     let t_hoff = image[14];
-    let hoff = t_hoff as usize - types::heaptuple::MINIMAL_TUPLE_OFFSET;
+    let hoff = t_hoff as usize - types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
     assert!(hoff <= image.len(), "minimal tuple image t_hoff out of range");
 
     // HEAP_HASNULL + HeapTupleHeaderGetNatts govern the bitmap presence/length.
     let t_bits: Vec<u8> = if t_infomask & HEAP_HASNULL != 0 {
-        let natts = (t_infomask2 & types::heaptuple::HEAP_NATTS_MASK) as i32;
+        let natts = (t_infomask2 & types_tuple::heaptuple::HEAP_NATTS_MASK) as i32;
         let bitmaplen = BITMAPLEN(natts) as usize;
         image[SIZEOF_MINIMAL_TUPLE_HEADER..SIZEOF_MINIMAL_TUPLE_HEADER + bitmaplen].to_vec()
     } else {
@@ -1882,7 +1883,7 @@ pub fn minimal_tuple_from_flat_bytes(image: &[u8]) -> FormedMinimalTuple {
     };
 
     FormedMinimalTuple {
-        tuple: Box::new(types::heaptuple::MinimalTupleData {
+        tuple: Box::new(types_tuple::heaptuple::MinimalTupleData {
             t_len,
             mt_padding: [0; 6],
             t_infomask2,
@@ -1906,7 +1907,7 @@ pub fn minimal_tuple_from_flat_bytes(image: &[u8]) -> FormedMinimalTuple {
 /// MINIMAL_TUPLE_OFFSET`; `t_hoff` likewise drops the minimal bias back to the
 /// full HeapTuple header offset.
 pub fn heap_tuple_from_minimal_tuple(mtup: &FormedMinimalTuple) -> FormedTuple {
-    let len = mtup.tuple.t_len as usize + types::heaptuple::MINIMAL_TUPLE_OFFSET;
+    let len = mtup.tuple.t_len as usize + types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
 
     // memset(result->t_data, 0, offsetof(t_infomask2)) zeroes t_choice + t_ctid.
     let td = HeapTupleHeaderData {
@@ -1946,7 +1947,7 @@ pub fn heap_tuple_from_minimal_tuple(mtup: &FormedMinimalTuple) -> FormedTuple {
 pub fn minimal_tuple_from_heap_tuple(htup: &FormedTuple, extra: Size) -> FormedMinimalTuple {
     debug_assert_eq!(extra, maxalign(extra));
     // Assert(htup->t_len > MINIMAL_TUPLE_OFFSET);
-    debug_assert!(htup.tuple.t_len as usize > types::heaptuple::MINIMAL_TUPLE_OFFSET);
+    debug_assert!(htup.tuple.t_len as usize > types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET);
 
     let header = htup
         .tuple
@@ -1954,9 +1955,9 @@ pub fn minimal_tuple_from_heap_tuple(htup: &FormedTuple, extra: Size) -> FormedM
         .as_ref()
         .expect("minimal_tuple_from_heap_tuple: tuple has no t_data");
 
-    let len = htup.tuple.t_len as usize - types::heaptuple::MINIMAL_TUPLE_OFFSET;
+    let len = htup.tuple.t_len as usize - types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET;
 
-    let tuple = types::heaptuple::MinimalTupleData {
+    let tuple = types_tuple::heaptuple::MinimalTupleData {
         // result->t_len = len; (set after the memcpy in C, overriding the copied
         // bytes that aliased the HeapTuple's t_len region).
         t_len: len as u32,
@@ -1977,9 +1978,9 @@ pub fn minimal_tuple_from_heap_tuple(htup: &FormedTuple, extra: Size) -> FormedM
 /// `ItemPointerSetInvalid(&p)` (itemptr.h): `blockid = (0xffff, 0xffff)`,
 /// `posid = 0` (== `InvalidOffsetNumber`).
 #[inline]
-fn invalid_item_pointer() -> types::heaptuple::ItemPointerData {
-    types::heaptuple::ItemPointerData {
-        ip_blkid: types::heaptuple::BlockIdData {
+fn invalid_item_pointer() -> types_tuple::heaptuple::ItemPointerData {
+    types_tuple::heaptuple::ItemPointerData {
+        ip_blkid: types_tuple::heaptuple::BlockIdData {
             bi_hi: 0xffff,
             bi_lo: 0xffff,
         },

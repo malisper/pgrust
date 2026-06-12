@@ -3,3 +3,4 @@ crates/*/target
 Cargo.lock.orig
 *.patch
 .DS_Store
+.claude/worktrees/
