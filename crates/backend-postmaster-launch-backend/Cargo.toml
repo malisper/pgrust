@@ -1,0 +1,34 @@
+[package]
+name = "backend-postmaster-launch-backend"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_postmaster_launch_backend"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-net = { path = "../types-net" }
+backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
+backend-postmaster-autovacuum-seams = { path = "../backend-postmaster-autovacuum-seams" }
+backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }
+backend-postmaster-bgwriter-seams = { path = "../backend-postmaster-bgwriter-seams" }
+backend-postmaster-checkpointer-seams = { path = "../backend-postmaster-checkpointer-seams" }
+backend-postmaster-fork-process-seams = { path = "../backend-postmaster-fork-process-seams" }
+backend-postmaster-pgarch-seams = { path = "../backend-postmaster-pgarch-seams" }
+backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
+backend-postmaster-startup-seams = { path = "../backend-postmaster-startup-seams" }
+backend-postmaster-syslogger-seams = { path = "../backend-postmaster-syslogger-seams" }
+backend-postmaster-walsummarizer-seams = { path = "../backend-postmaster-walsummarizer-seams" }
+backend-postmaster-walwriter-seams = { path = "../backend-postmaster-walwriter-seams" }
+backend-replication-logical-slotsync-seams = { path = "../backend-replication-logical-slotsync-seams" }
+backend-replication-walreceiver-seams = { path = "../backend-replication-walreceiver-seams" }
+backend-storage-aio-methods-seams = { path = "../backend-storage-aio-methods-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
+backend-tcop-backend-startup-seams = { path = "../backend-tcop-backend-startup-seams" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }

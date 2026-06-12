@@ -22,9 +22,159 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-port-sysv-shmem-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-autovacuum-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-bgworker-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-bgwriter-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-checkpointer-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-fork-process-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
+name = "backend-postmaster-launch-backend"
+version = "0.0.0"
+dependencies = [
+ "backend-port-sysv-shmem-seams",
+ "backend-postmaster-autovacuum-seams",
+ "backend-postmaster-bgworker-seams",
+ "backend-postmaster-bgwriter-seams",
+ "backend-postmaster-checkpointer-seams",
+ "backend-postmaster-fork-process-seams",
+ "backend-postmaster-pgarch-seams",
+ "backend-postmaster-postmaster-seams",
+ "backend-postmaster-startup-seams",
+ "backend-postmaster-syslogger-seams",
+ "backend-postmaster-walsummarizer-seams",
+ "backend-postmaster-walwriter-seams",
+ "backend-replication-logical-slotsync-seams",
+ "backend-replication-walreceiver-seams",
+ "backend-storage-aio-methods-seams",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-tcop-backend-startup-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "types-core",
+ "types-net",
+]
+
+[[package]]
+name = "backend-postmaster-pgarch-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-postmaster-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-startup-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-syslogger-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-walsummarizer-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-postmaster-walwriter-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-replication-logical-slotsync-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-replication-walreceiver-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-storage-aio-methods-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-storage-ipc-dsm-core-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "backend-tcop-backend-startup-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-core",
 ]
 
@@ -33,6 +183,29 @@ name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-utils-adt-timestamp-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
+name = "backend-utils-init-miscinit-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-utils-init-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-net",
 ]
 
 [[package]]
@@ -57,6 +230,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-mmgr-mcxt-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -75,6 +255,7 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-postmaster-launch-backend",
  "backend-storage-page-checksum",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
@@ -91,6 +272,10 @@ version = "0.0.0"
 dependencies = [
  "types-core",
 ]
+
+[[package]]
+name = "types-net"
+version = "0.0.0"
 
 [[package]]
 name = "types-tuple"

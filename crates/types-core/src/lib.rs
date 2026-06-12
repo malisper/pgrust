@@ -8,9 +8,13 @@
 #![allow(non_upper_case_globals)]
 
 pub mod fmgr;
+pub mod init;
 pub mod primitive;
+pub mod storage;
 pub mod xact;
 
 pub use fmgr::*;
+pub use init::*;
 pub use primitive::*;
+pub use storage::*;
 pub use xact::*;
