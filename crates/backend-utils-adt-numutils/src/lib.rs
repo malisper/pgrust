@@ -226,14 +226,13 @@ fn parse_signed_inner<T: SignedInt>(s: &str, typname: &str) -> PgResult<T> {
     };
 
     // Accumulate the magnitude unsigned to handle the two's-complement
-    // most-negative value. The limit is |min| when negative and max when
-    // positive; this is exactly the set C accepts (its per-digit guard
-    // `tmp > -(PG_INT*_MIN / base)` plus the final range check).
-    let limit = if neg {
-        T::min_unsigned_abs()
-    } else {
-        T::max_as_u128()
-    };
+    // most-negative value. C guards each digit with `tmp > -(PG_INT*_MIN /
+    // base)` (so tmp can briefly reach |MIN| + base - 1) and applies the real
+    // range check only AFTER the trailing-junk syntax checks. The split
+    // matters for which error fires: e.g. int16 "32768x" is invalid_syntax in
+    // C (the per-digit guard admits 32768, then the trailing 'x' is seen),
+    // not out_of_range.
+    let digit_guard = T::min_unsigned_abs() / base;
 
     let mut tmp = 0u128;
     loop {
@@ -259,8 +258,8 @@ fn parse_signed_inner<T: SignedInt>(s: &str, typname: &str) -> PgResult<T> {
             break;
         };
 
-        // Overflow guard before accumulating.
-        if tmp > (limit - digit) / base {
+        // Per-digit overflow guard, mirroring C `tmp > -(PG_INT*_MIN / base)`.
+        if tmp > digit_guard {
             return Err(out_of_range(s, typname));
         }
         tmp = tmp * base + digit;
@@ -278,6 +277,16 @@ fn parse_signed_inner<T: SignedInt>(s: &str, typname: &str) -> PgResult<T> {
     }
     if index != bytes.len() {
         return Err(invalid_syntax(s, typname));
+    }
+
+    // Final range check, after syntax validation, like C: pg_neg_u*_overflow
+    // when negative (tmp > |MIN|), `tmp > PG_INT*_MAX` when positive.
+    if neg {
+        if tmp > T::min_unsigned_abs() {
+            return Err(out_of_range(s, typname));
+        }
+    } else if tmp > T::max_as_u128() {
+        return Err(out_of_range(s, typname));
     }
 
     Ok(T::from_magnitude(tmp, neg))
