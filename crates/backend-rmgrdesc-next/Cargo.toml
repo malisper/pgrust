@@ -1,0 +1,16 @@
+[package]
+name = "backend-rmgrdesc-next"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_rmgrdesc_next"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-wal = { path = "../types-wal" }
+backend-rmgrdesc-small-seams = { path = "../backend-rmgrdesc-small-seams" }

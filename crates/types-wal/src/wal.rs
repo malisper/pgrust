@@ -117,3 +117,89 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
         &self.blocks
     }
 }
+
+/// `XLR_INFO_MASK` (access/xlogrecord.h) — the bits of `xl_info` reserved for
+/// the WAL machinery itself; the rmgr's record type lives in the high bits.
+pub const XLR_INFO_MASK: uint8 = 0x0F;
+
+/// One block reference of a record as the rm_desc routines see it: the
+/// `XLogRecHasBlockImage` / `XLogRecBlockImageApply` / `XLogRecHasBlockData` /
+/// `XLogRecGetBlockData` facet of `XLogReaderState`'s per-block decode state.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XLogRecordBlockView<'a> {
+    in_use: bool,
+    has_image: bool,
+    apply_image: bool,
+    /// `Some` iff the block carries block data (`has_data`); the slice is the
+    /// `XLogRecGetBlockData` payload.
+    data: Option<&'a [u8]>,
+}
+
+impl<'a> XLogRecordBlockView<'a> {
+    pub const fn new(
+        in_use: bool,
+        has_image: bool,
+        apply_image: bool,
+        data: Option<&'a [u8]>,
+    ) -> Self {
+        Self { in_use, has_image, apply_image, data }
+    }
+}
+
+/// Borrowed view of a decoded WAL record, trimmed to the accessors the
+/// rm_desc/rm_identify routines consume: `XLogRecGetInfo`, `XLogRecGetData`,
+/// and the per-block-reference queries. The owning reader holds the decoded
+/// bytes; this view only borrows them.
+#[derive(Clone, Copy, Debug)]
+pub struct XLogRecordView<'a> {
+    info: uint8,
+    /// `XLogRecGetData` — the record's main data.
+    main_data: &'a [u8],
+    /// Block references indexed by block id (`0..=max_block_id`).
+    blocks: &'a [XLogRecordBlockView<'a>],
+}
+
+impl<'a> XLogRecordView<'a> {
+    pub const fn new(
+        info: uint8,
+        main_data: &'a [u8],
+        blocks: &'a [XLogRecordBlockView<'a>],
+    ) -> Self {
+        Self { info, main_data, blocks }
+    }
+
+    /// `XLogRecGetInfo(record)` — the raw `xl_info` byte.
+    pub const fn info(&self) -> uint8 {
+        self.info
+    }
+
+    /// `XLogRecGetData(record)`.
+    pub const fn data(&self) -> &'a [u8] {
+        self.main_data
+    }
+
+    fn block(&self, block_id: usize) -> Option<&XLogRecordBlockView<'a>> {
+        self.blocks.get(block_id).filter(|b| b.in_use)
+    }
+
+    /// `XLogRecHasBlockData(record, block_id)`.
+    pub fn has_block_data(&self, block_id: usize) -> bool {
+        self.block(block_id).is_some_and(|b| b.data.is_some())
+    }
+
+    /// `XLogRecGetBlockData(record, block_id, NULL)` — `None` where C returns
+    /// a NULL pointer (block not in use, or no block data).
+    pub fn block_data(&self, block_id: usize) -> Option<&'a [u8]> {
+        self.block(block_id).and_then(|b| b.data)
+    }
+
+    /// `XLogRecHasBlockImage(record, block_id)`.
+    pub fn has_block_image(&self, block_id: usize) -> bool {
+        self.block(block_id).is_some_and(|b| b.has_image)
+    }
+
+    /// `XLogRecBlockImageApply(record, block_id)`.
+    pub fn block_image_apply(&self, block_id: usize) -> bool {
+        self.block(block_id).is_some_and(|b| b.apply_image)
+    }
+}
