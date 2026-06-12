@@ -19,7 +19,7 @@ fn install_fixtures() {
     INSTALL.call_once(|| {
         backend_libpq_pqcomm_seams::pq_putmessage::set(|msgtype, body| {
             SENT.with(|s| s.borrow_mut().push((msgtype, body.to_vec())));
-            0
+            Ok(0)
         });
         backend_utils_mb_mbutils_seams::pg_server_to_client::set(convert_fixture);
         backend_utils_mb_mbutils_seams::pg_client_to_server::set(convert_fixture);

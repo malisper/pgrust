@@ -1,10 +1,15 @@
 use super::*;
-use std::sync::Mutex;
+use std::cell::RefCell;
 
-static CALLBACK_LOG: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+// Thread-local: callbacks run on the registering test's own thread, and the
+// test harness runs tests on separate threads — a process-global log would
+// race across tests.
+thread_local! {
+    static CALLBACK_LOG: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
 
 fn log_cb(arg: Datum) {
-    CALLBACK_LOG.lock().unwrap().push(arg.as_usize());
+    CALLBACK_LOG.with(|l| l.borrow_mut().push(arg.as_usize()));
 }
 
 fn other_cb(_arg: Datum) {}
@@ -65,19 +70,19 @@ fn callbacks_run_in_reverse_order_and_only_on_commit() {
         RegisterExprContextCallback(ec, log_cb, Datum::from_usize(2)).unwrap();
         RegisterExprContextCallback(ec, log_cb, Datum::from_usize(3)).unwrap();
 
-        CALLBACK_LOG.lock().unwrap().clear();
+        CALLBACK_LOG.with(|l| l.borrow_mut().clear());
         ReScanExprContext(estate.ecxt_mut(id));
         // reverse registration order
-        assert_eq!(*CALLBACK_LOG.lock().unwrap(), vec![3, 2, 1]);
+        CALLBACK_LOG.with(|l| assert_eq!(*l.borrow(), vec![3, 2, 1]));
         // list was emptied
         assert!(estate.ecxt(id).ecxt_callbacks.is_none());
 
         // isCommit = false: callbacks dropped, not called.
         let ec = estate.ecxt_mut(id);
         RegisterExprContextCallback(ec, log_cb, Datum::from_usize(9)).unwrap();
-        CALLBACK_LOG.lock().unwrap().clear();
+        CALLBACK_LOG.with(|l| l.borrow_mut().clear());
         FreeExprContext(estate, id, false);
-        assert!(CALLBACK_LOG.lock().unwrap().is_empty());
+        CALLBACK_LOG.with(|l| assert!(l.borrow().is_empty()));
     });
     FreeExecutorState(estate);
 }
@@ -97,9 +102,9 @@ fn unregister_removes_matching_entries_only() {
         // Removes BOTH (log_cb, 1) entries; keeps (other_cb, 1) and (log_cb, 2).
         UnregisterExprContextCallback(ec, log_cb, Datum::from_usize(1));
 
-        CALLBACK_LOG.lock().unwrap().clear();
+        CALLBACK_LOG.with(|l| l.borrow_mut().clear());
         ShutdownExprContext(ec, true);
-        assert_eq!(*CALLBACK_LOG.lock().unwrap(), vec![2]);
+        CALLBACK_LOG.with(|l| assert_eq!(*l.borrow(), vec![2]));
     });
     FreeExecutorState(estate);
 }
@@ -114,10 +119,10 @@ fn free_executor_state_runs_remaining_callbacks() {
         RegisterExprContextCallback(estate.ecxt_mut(a), log_cb, Datum::from_usize(10)).unwrap();
         RegisterExprContextCallback(estate.ecxt_mut(b), log_cb, Datum::from_usize(20)).unwrap();
     });
-    CALLBACK_LOG.lock().unwrap().clear();
+    CALLBACK_LOG.with(|l| l.borrow_mut().clear());
     FreeExecutorState(estate);
     // newest context first (the C lcons order)
-    assert_eq!(*CALLBACK_LOG.lock().unwrap(), vec![20, 10]);
+    CALLBACK_LOG.with(|l| assert_eq!(*l.borrow(), vec![20, 10]));
 }
 
 #[test]
@@ -126,9 +131,9 @@ fn standalone_expr_context() {
     let mut ec = CreateStandaloneExprContext(ctx.mcx()).unwrap();
     assert!(ec.caseValue_isNull && ec.domainValue_isNull);
     RegisterExprContextCallback(&mut ec, log_cb, Datum::from_usize(7)).unwrap();
-    CALLBACK_LOG.lock().unwrap().clear();
+    CALLBACK_LOG.with(|l| l.borrow_mut().clear());
     FreeStandaloneExprContext(ec, true);
-    assert_eq!(*CALLBACK_LOG.lock().unwrap(), vec![7]);
+    CALLBACK_LOG.with(|l| assert_eq!(*l.borrow(), vec![7]));
 }
 
 #[test]

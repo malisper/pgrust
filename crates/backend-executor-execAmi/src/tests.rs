@@ -140,7 +140,21 @@ fn exec_re_scan_walks_params_and_dispatches() {
     mat.eflags = 0;
     mat.ss.ps.ps_ResultTupleSlot = Some(slot);
     mat.ss.ps.instrument = Some(alloc_in(mcx, Instrumentation::default()).unwrap());
-    mat.ss.ps.ps_ExprContext = Some(alloc_in(mcx, ExprContext::default()).unwrap());
+    let econtext = ExprContext {
+        ecxt_scantuple: None,
+        ecxt_innertuple: None,
+        ecxt_outertuple: None,
+        ecxt_per_query_memory: estate.es_query_cxt,
+        ecxt_per_tuple_memory: estate.es_query_cxt.context().new_child("ExprContext"),
+        ecxt_aggvalues: PgVec::new_in(estate.es_query_cxt),
+        ecxt_aggnulls: PgVec::new_in(estate.es_query_cxt),
+        caseValue_datum: Default::default(),
+        caseValue_isNull: true,
+        domainValue_datum: Default::default(),
+        domainValue_isNull: true,
+        ecxt_callbacks: None,
+    };
+    mat.ss.ps.ps_ExprContext = Some(estate.add_expr_context(econtext).unwrap());
     mat.ss.ps.chgParam = Some(empty_bms(mcx).unwrap());
     mat.ss.ps.initPlan = Some(init_plan);
     mat.ss.ps.lefttree = Some(
