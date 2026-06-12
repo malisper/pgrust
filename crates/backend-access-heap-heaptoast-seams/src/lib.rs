@@ -10,7 +10,7 @@ seam_core::seam!(
     /// produce a self-contained composite-type Datum. Reached from
     /// `heap_copy_tuple_as_datum` when the tuple has `HEAP_HASEXTERNAL` set.
     pub fn toast_flatten_tuple_to_datum(
-        tuple: &types::backend_access_common_heaptuple::FormedTuple,
-        tuple_desc: &types::heaptuple::TupleDescData,
-    ) -> types::backend_access_common_heaptuple::FormedTuple
+        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple,
+        tuple_desc: &types_tuple::heaptuple::TupleDescData,
+    ) -> types_tuple::backend_access_common_heaptuple::FormedTuple
 );

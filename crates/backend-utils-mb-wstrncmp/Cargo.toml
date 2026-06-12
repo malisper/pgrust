@@ -9,4 +9,4 @@ name = "backend_utils_mb_wstrncmp"
 path = "src/lib.rs"
 
 [dependencies]
-types = { path = "../types" }
+types-wchar = { path = "../types-wchar" }

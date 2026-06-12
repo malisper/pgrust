@@ -31,7 +31,7 @@
 
 use alloc::vec::Vec;
 
-use types::heaptuple::{
+use types_tuple::heaptuple::{
     HeapTupleData, MinimalTupleData, TupleDescData, BITMAPLEN, HEAP_HASNULL, HEAP_NATTS_MASK,
     MINIMAL_TUPLE_OFFSET,
 };

@@ -2,10 +2,11 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{
-    uint16, uint32, uint8, AttrNumber, BlockNumber, CommandId, Datum, OffsetNumber, Oid, Size,
+use types_core::{
+    uint16, uint32, uint8, AttrNumber, BlockNumber, CommandId, OffsetNumber, Oid, Size,
     TransactionId,
 };
+use types_datum::Datum;
 
 pub type bits8 = uint8;
 pub type Name = Option<Box<NameData>>;
@@ -209,11 +210,11 @@ pub const INDEX_SIZE_MASK: uint16 = 0x1FFF;
 pub const INDEX_AM_RESERVED_BIT: uint16 = 0x2000;
 pub const INDEX_VAR_MASK: uint16 = 0x4000;
 pub const INDEX_NULL_MASK: uint16 = 0x8000;
-pub const INDEX_ATTRIBUTE_BITMAP_BYTES: usize = (crate::INDEX_MAX_KEYS as usize + 8 - 1) / 8;
+pub const INDEX_ATTRIBUTE_BITMAP_BYTES: usize = (types_core::INDEX_MAX_KEYS as usize + 8 - 1) / 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NameData {
-    pub data: [u8; crate::NAMEDATALEN as usize],
+    pub data: [u8; types_core::NAMEDATALEN as usize],
 }
 
 impl NameData {
@@ -232,7 +233,7 @@ impl NameData {
 impl Default for NameData {
     fn default() -> Self {
         Self {
-            data: [0; crate::NAMEDATALEN as usize],
+            data: [0; types_core::NAMEDATALEN as usize],
         }
     }
 }
