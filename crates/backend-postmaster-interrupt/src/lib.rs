@@ -62,7 +62,7 @@ pub fn ProcessMainLoopInterrupts() -> PgResult<()> {
 
     if ConfigReloadPending() {
         SetConfigReloadPending(false);
-        backend_utils_misc_guc_seams::process_config_file::call(types_guc::PGC_SIGHUP)?;
+        backend_utils_misc_guc_file_seams::process_config_file::call(types_guc::PGC_SIGHUP)?;
     }
 
     if ShutdownRequestPending() {

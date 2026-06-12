@@ -1,5 +1,5 @@
-//! Seam declarations for the `backend-utils-misc-guc` unit
-//! (`utils/misc/guc.c` / `guc-file.l`).
+//! Seam declarations for the `backend-utils-misc-guc-file` unit
+//! (`utils/misc/guc-file.l`).
 //!
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.

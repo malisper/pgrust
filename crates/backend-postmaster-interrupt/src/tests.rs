@@ -52,7 +52,7 @@ fn install_mock(barrier_pending: bool, log_memctx_pending: bool) {
         backend_storage_ipc_latch_seams::set_latch_my_latch::set(|| {
             record(Call::SetLatchMyLatch)
         });
-        backend_utils_misc_guc_seams::process_config_file::set(|context| {
+        backend_utils_misc_guc_file_seams::process_config_file::set(|context| {
             record(Call::ProcessConfigFile { context });
             Ok(())
         });
