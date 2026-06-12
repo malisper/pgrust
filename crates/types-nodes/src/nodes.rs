@@ -7,6 +7,18 @@
 use mcx::{Mcx, PgBox};
 use types_core::PgResult;
 
+/// `CmdType` (nodes/nodes.h).
+pub type CmdType = u32;
+
+pub const CMD_UNKNOWN: CmdType = 0;
+pub const CMD_SELECT: CmdType = 1;
+pub const CMD_UPDATE: CmdType = 2;
+pub const CMD_INSERT: CmdType = 3;
+pub const CMD_DELETE: CmdType = 4;
+pub const CMD_MERGE: CmdType = 5;
+pub const CMD_UTILITY: CmdType = 6;
+pub const CMD_NOTHING: CmdType = 7;
+
 /// A plan-tree node (`Plan *` in C). The `NodeTag` is the enum discriminant.
 /// Carries the allocator lifetime of the context the plan tree lives in;
 /// copying allocates, so it goes through the fallible [`Node::clone_in`].

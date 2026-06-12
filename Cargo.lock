@@ -34,6 +34,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-next-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-reloptions-seams"
 version = "0.0.0"
 dependencies = [
@@ -101,6 +112,16 @@ dependencies = [
  "types-core",
  "types-error",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-access-tableam-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -178,6 +199,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execExpr-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-execMain-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execProcnode-seams"
 version = "0.0.0"
 dependencies = [
@@ -195,6 +238,40 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-execUtils"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-next-seams",
+ "backend-access-table-table-seams",
+ "backend-access-tableam-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeModifyTable-seams",
+ "backend-jit-jit-seams",
+ "backend-nodes-core-seams",
+ "backend-parser-relation-seams",
+ "backend-partitioning-core-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -220,6 +297,22 @@ dependencies = [
  "mcx",
  "types-core",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-nodeModifyTable-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-jit-jit-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -287,7 +380,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-core-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-optimizer-path-costsize-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-parser-relation-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-partitioning-core-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -441,6 +560,15 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-lmgr-lmgr-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-tuple",
 ]
 
 [[package]]
@@ -786,6 +914,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-typcache-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-error"
 version = "0.0.0"
 dependencies = [
@@ -832,6 +971,7 @@ name = "backend-utils-init-miscinit-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -842,6 +982,13 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-net",
+]
+
+[[package]]
+name = "backend-utils-mb-mbutils-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -1078,6 +1225,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-hashvalidate",
  "backend-access-transam-xlogstats",
+ "backend-executor-execUtils",
  "backend-executor-nodeMaterial",
  "backend-libpq-pqcomm",
  "backend-libpq-pqsignal",
@@ -1177,6 +1325,8 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-datum",
+ "types-tuple",
 ]
 
 [[package]]

@@ -23,6 +23,10 @@ pub type TimeADT = i64;
 pub type Size = usize;
 pub type NodeTag = u32;
 pub type AttrNumber = i16;
+/// `Index` (`c.h`) — index into an array (e.g. a range-table index).
+pub type Index = u32;
+/// `InvalidAttrNumber` (`access/attnum.h`).
+pub const InvalidAttrNumber: AttrNumber = 0;
 /// `Cost` (`nodes.h`) — abstract plan cost, a `double`.
 pub type Cost = f64;
 /// `Cardinality` (`nodes.h`) — estimated row count, a `double`.

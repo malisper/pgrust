@@ -17,3 +17,29 @@ seam_core::seam!(
         relation: types_core::primitive::Oid,
     ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
 );
+
+seam_core::seam!(
+    /// `relation->rd_rel->relispopulated` (`RelationIsScannable(relation)`,
+    /// utils/rel.h): is the relation populated (matviews can be not)? `Err`
+    /// carries OID-resolution failure.
+    pub fn relation_rd_rel_relispopulated(
+        relation: types_core::primitive::Oid,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `relation->rd_rel->relispartition` (utils/rel.h): is the relation a
+    /// partition? `Err` carries OID-resolution failure.
+    pub fn relation_rd_rel_relispartition(
+        relation: types_core::primitive::Oid,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `RelationGetRelationName(relation)` (utils/rel.h): the relation's
+    /// name, copied out of the relcache entry. `Err` carries OID-resolution
+    /// failure.
+    pub fn relation_get_relation_name(
+        relation: types_core::primitive::Oid,
+    ) -> types_error::PgResult<std::string::String>
+);

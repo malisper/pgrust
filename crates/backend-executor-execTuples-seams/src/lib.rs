@@ -40,3 +40,62 @@ seam_core::seam!(
         srcslot: &types_nodes::TupleTableSlot,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecInitResultSlot(planstate, tts_ops)` (execTuples.c): create the
+    /// node's result slot (from its already-set `ps_ResultTupleDesc`) in the
+    /// EState slot pool, storing the id in `planstate.ps_ResultTupleSlot`.
+    /// Fallible on OOM.
+    pub fn exec_init_result_slot<'mcx>(
+        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        tts_ops: types_nodes::TupleSlotKind,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecInitScanTupleSlot(estate, scanstate, tupledesc, tts_ops)`
+    /// (execTuples.c): create the scan slot in the EState slot pool, storing
+    /// the id in `scanstate.ss_ScanTupleSlot` and the scan-ops fields in the
+    /// node. The descriptor moves into the slot (the owned model passes an
+    /// already-`'mcx` copy where C shares the pointer). Fallible on OOM.
+    pub fn exec_init_scan_tuple_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        scanstate: &mut types_nodes::execnodes::ScanStateData<'mcx>,
+        tupledesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+        tts_ops: types_nodes::TupleSlotKind,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecInitExtraTupleSlot(estate, tupledesc, tts_ops)` (execTuples.c):
+    /// create a slot outside the standard per-node slots (trigger OLD/NEW,
+    /// RETURNING, ...), returning its pool id (the C pointer). Fallible on
+    /// OOM.
+    pub fn exec_init_extra_tuple_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        tupledesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+        tts_ops: types_nodes::TupleSlotKind,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecSetSlotDescriptor(slot, tupdesc)` (execTuples.c): set (or reset)
+    /// the slot's row descriptor, releasing any tuple stored in it. The slot
+    /// is addressed by pool id; the descriptor moves in. Fallible on OOM
+    /// (the C pallocs the per-column value arrays).
+    pub fn exec_set_slot_descriptor<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+        tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecStoreAllNullTuple(slot)` (tuptable.h/execTuples.c): store an
+    /// all-NULL virtual tuple in the slot. Fallible on OOM.
+    pub fn exec_store_all_null_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);

@@ -607,6 +607,41 @@ pub const fn HeapTupleHeaderGetNatts(tup: &HeapTupleHeaderData) -> uint16 {
     tup.t_infomask2 & HEAP_NATTS_MASK
 }
 
+/// `HeapTupleHeaderGetTypeId(tup)` (`htup_details.h`) —
+/// `tup->t_choice.t_datum.datum_typeid`. Only meaningful for a composite
+/// Datum's header; panics if the header carries heap (xmin/xmax) fields
+/// instead (C would read the other union arm's bytes).
+pub fn HeapTupleHeaderGetTypeId(tup: &HeapTupleHeaderData) -> Oid {
+    match &tup.t_choice {
+        HeapTupleHeaderChoice::TDatum(d) => d.datum_typeid,
+        HeapTupleHeaderChoice::THeap(_) => {
+            panic!("HeapTupleHeaderGetTypeId: header is not a composite Datum")
+        }
+    }
+}
+
+/// `HeapTupleHeaderGetTypMod(tup)` (`htup_details.h`) —
+/// `tup->t_choice.t_datum.datum_typmod`.
+pub fn HeapTupleHeaderGetTypMod(tup: &HeapTupleHeaderData) -> i32 {
+    match &tup.t_choice {
+        HeapTupleHeaderChoice::TDatum(d) => d.datum_typmod,
+        HeapTupleHeaderChoice::THeap(_) => {
+            panic!("HeapTupleHeaderGetTypMod: header is not a composite Datum")
+        }
+    }
+}
+
+/// `HeapTupleHeaderGetDatumLength(tup)` (`htup_details.h`) — `VARSIZE(tup)`,
+/// i.e. the composite Datum's `datum_len_` varlena length word.
+pub fn HeapTupleHeaderGetDatumLength(tup: &HeapTupleHeaderData) -> i32 {
+    match &tup.t_choice {
+        HeapTupleHeaderChoice::TDatum(d) => d.datum_len_,
+        HeapTupleHeaderChoice::THeap(_) => {
+            panic!("HeapTupleHeaderGetDatumLength: header is not a composite Datum")
+        }
+    }
+}
+
 pub fn HeapTupleHeaderSetNatts(tup: &mut HeapTupleHeaderData, natts: uint16) {
     tup.t_infomask2 = (tup.t_infomask2 & !HEAP_NATTS_MASK) | (natts & HEAP_NATTS_MASK);
 }

@@ -21,3 +21,10 @@ seam_core::seam!(
     /// postmaster is running registered `shmem_request_hook`s.
     pub fn process_shmem_requests_in_progress() -> bool
 );
+
+seam_core::seam!(
+    /// `GetUserId()` (miscinit.c): the current user ID (the backend-global
+    /// `CurrentUserId`). Infallible (the C `Assert(OidIsValid(...))` is the
+    /// owner's debug assertion).
+    pub fn get_user_id() -> types_core::primitive::Oid
+);

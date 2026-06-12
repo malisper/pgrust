@@ -22,12 +22,24 @@ pub type bitmapword = u64;
 ///
 /// The word storage is context-allocated (C: the `bms_*` constructors palloc
 /// in `CurrentMemoryContext`), so the set carries the allocator lifetime.
-/// No `Clone`: copying allocates, so it must go through a fallible
-/// `bms_copy`-shaped constructor when the owning unit lands.
+/// No derived `Clone`: copying allocates, so it goes through the fallible
+/// `bms_copy`-shaped [`Bitmapset::clone_in`]. Set *operations* (union,
+/// intersect, membership, ...) stay with the owning `nodes/bitmapset.c` unit.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Bitmapset<'mcx> {
     /// `int nwords` — number of words in array.
     pub nwords: i32,
     /// `bitmapword words[]` — the bit storage.
     pub words: PgVec<'mcx, bitmapword>,
+}
+
+impl Bitmapset<'_> {
+    /// `bms_copy(a)`-shaped deep copy into `mcx` (C: `palloc` + `memcpy`).
+    /// Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: mcx::Mcx<'b>) -> types_core::PgResult<Bitmapset<'b>> {
+        Ok(Bitmapset {
+            nwords: self.nwords,
+            words: mcx::slice_in(mcx, &self.words)?,
+        })
+    }
 }
