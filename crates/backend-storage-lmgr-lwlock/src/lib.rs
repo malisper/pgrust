@@ -646,12 +646,16 @@ pub fn RequestNamedLWLockTranche(tranche_name: &str, num_lwlocks: i32) -> PgResu
     }
 
     // C: Assert(strlen(tranche_name) + 1 <= NAMEDATALEN), then
-    // strlcpy(request->tranche_name, tranche_name, NAMEDATALEN).
+    // strlcpy(request->tranche_name, tranche_name, NAMEDATALEN), i.e. a
+    // BYTE-wise truncation to at most NAMEDATALEN - 1 bytes (backed off to
+    // the nearest char boundary, since a Rust String cannot hold a split
+    // UTF-8 sequence).
     debug_assert!(tranche_name.len() < NAMEDATALEN as usize);
-    let clamped: String = tranche_name
-        .chars()
-        .take(NAMEDATALEN as usize - 1)
-        .collect();
+    let mut clamp_len = tranche_name.len().min(NAMEDATALEN as usize - 1);
+    while !tranche_name.is_char_boundary(clamp_len) {
+        clamp_len -= 1;
+    }
+    let clamped: String = tranche_name[..clamp_len].to_owned();
 
     NAMED_LWLOCK_TRANCHE_REQUESTS.with(|reqs| {
         let mut reqs = reqs.borrow_mut();
