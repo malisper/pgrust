@@ -21,3 +21,10 @@ seam_core::seam!(
     /// cannot `ereport`.
     pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool
 );
+
+seam_core::seam!(
+    /// `xact_redo(record)` (xact.c) — WAL redo for RM_XACT_ID records
+    /// (`rm_redo` slot of `RmgrTable`). Can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn xact_redo(record: &mut types_wal::rmgr::XLogReaderState) -> PgResult<()>
+);

@@ -35,3 +35,12 @@ seam_core::seam!(
         recdata: &[u8],
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `multixact_redo(record)` (multixact.c) — WAL redo for RM_MULTIXACT_ID
+    /// records (`rm_redo` slot of `RmgrTable`). Can `ereport(ERROR)`, carried
+    /// on `Err`.
+    pub fn multixact_redo(
+        record: &mut types_wal::rmgr::XLogReaderState,
+    ) -> types_error::PgResult<()>
+);
