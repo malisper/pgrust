@@ -70,7 +70,9 @@ fn scankey_init_stamps_fields() {
     assert_eq!(key.sk_attno, 2);
     assert_eq!(key.sk_strategy, BTGreaterEqualStrategyNumber);
     assert_eq!(key.sk_subtype, InvalidOid);
-    assert_eq!(key.sk_collation, InvalidOid);
+    // C ScanKeyInit always stamps C_COLLATION_OID (pg_collation.dat oid 950).
+    assert_eq!(key.sk_collation, C_COLLATION_OID);
+    assert_eq!(key.sk_collation, 950);
     assert_eq!(key.sk_func.fn_oid, F_INT4GE);
     assert_eq!(key.sk_argument.as_i32(), 7);
 }

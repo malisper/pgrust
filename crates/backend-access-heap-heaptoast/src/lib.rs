@@ -147,6 +147,11 @@ const HEAP_INSERT_SPECULATIVE: i32 = 0x0010;
 
 const InvalidOid: Oid = 0;
 
+/// `C_COLLATION_OID` (pg_collation.dat oid 950) — `ScanKeyInit` always sets
+/// `sk_collation` to the C collation; it is ignored for non-collatable
+/// columns such as the toast (valueid, chunkidx) keys.
+const C_COLLATION_OID: Oid = 950;
+
 // ---------------------------------------------------------------------------
 // varatt.h predicates over verbatim datum bytes (the value's on-disk image,
 // exactly what `DatumGetPointer` would dereference; little-endian build).
@@ -219,7 +224,7 @@ fn ScanKeyInit(
     entry.sk_attno = attribute_number;
     entry.sk_strategy = strategy;
     entry.sk_subtype = InvalidOid;
-    entry.sk_collation = InvalidOid;
+    entry.sk_collation = C_COLLATION_OID;
     entry.sk_argument = argument;
     entry.sk_func = types_core::fmgr::FmgrInfo { fn_oid: procedure };
 }
