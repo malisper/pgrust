@@ -5,10 +5,9 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicI32;
 
-use types_core::{ProtocolVersion, UserAuth};
-
-pub type pgsocket = i32;
+use types_core::{pgsocket, sig_atomic_t, ProtocolVersion, UserAuth};
 
 /// `SockAddr` (`libpq/pqcomm.h`). `addr` mirrors the platform
 /// `struct sockaddr_storage`, a fixed-size socket-address buffer
@@ -58,22 +57,17 @@ pub type ClientCertName = u32;
 pub const clientCertCN: ClientCertName = 0;
 pub const clientCertDN: ClientCertName = 1;
 
-/// Compiled regular expression handle (`regex/regex.h` `pg_regex_t`). The
-/// compiled RE keeps opaque pointers to its hidden innards, so it is a
-/// private regex-subsystem handle reached through `Option<Box<regex_t>>`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct regex_t {}
-
 /// A single string token lexed from an authentication configuration file
-/// (`libpq/hba.h` `struct AuthToken`).
+/// (`libpq/hba.h` `struct AuthToken`). The C struct also carries a
+/// `regex_t *regex` (the compiled RE); no port consumes it yet, so the field
+/// is trimmed until the regex-owning unit lands and defines the compiled-RE
+/// type (docs/types.md rule 3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthToken {
     /// Token text (`char *string`).
     pub string: Option<String>,
     /// Whether the token was quoted.
     pub quoted: bool,
-    /// Compiled regular expression, if the token contained one.
-    pub regex: Option<Box<regex_t>>,
 }
 
 /// Authentication line parsed from `pg_hba.conf` (`libpq/hba.h`
@@ -140,24 +134,14 @@ pub struct HbaLine {
     pub oauth_skip_usermap: bool,
 }
 
-/// GSSAPI connection state (`libpq/be-gssapi-common.h` `struct pg_gssinfo`).
-/// Neither `ENABLE_GSS` nor `ENABLE_SSPI` is defined in this build, so the
-/// active `Port::gss` field is a bare `void *`; a minimal handle.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct pg_gssinfo {}
-
-/// OpenSSL `SSL` connection object (opaque library handle; `USE_OPENSSL`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SSL {}
-
-/// OpenSSL `X509` certificate object (opaque library handle; `USE_OPENSSL`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct X509 {}
-
 /// `struct Port` (`libpq/libpq-be.h`): per-connection state passed from the
-/// postmaster into backend execution. The `gss` branch reflects the non-GSS
-/// build (`void *`); the `ssl`/`peer` branch reflects the `USE_OPENSSL`
-/// build.
+/// postmaster into backend execution.
+///
+/// Trimmed relative to the C struct: the non-GSS build's `void *gss` (always
+/// NULL, dead storage) is omitted, and the `USE_OPENSSL`-only `SSL *ssl` /
+/// `X509 *peer` library handles are deferred until the TLS-owning unit
+/// decides their representation — the no-TLS state is fully expressed by
+/// `ssl_in_use` / `peer_cn` / `peer_dn` / `peer_cert_valid`.
 ///
 /// `Default` is not derived: the `local_host` / SCRAM key / `SockAddr` byte
 /// arrays exceed the length for which stdlib derives `Default`.
@@ -214,9 +198,6 @@ pub struct Port {
     /// True if the two SCRAM keys above are valid.
     pub has_scram_keys: bool,
 
-    /// GSSAPI information (the non-GSS build stores a `void *`).
-    pub gss: Option<Box<pg_gssinfo>>,
-
     /// SSL state.
     pub ssl_in_use: bool,
     pub peer_cn: Option<String>,
@@ -224,11 +205,6 @@ pub struct Port {
     pub peer_cert_valid: bool,
     pub alpn_used: bool,
     pub last_read_was_eof: bool,
-
-    /// OpenSSL connection object (`USE_OPENSSL` build).
-    pub ssl: Option<Box<SSL>>,
-    /// OpenSSL peer certificate (`USE_OPENSSL` build).
-    pub peer: Option<Box<X509>>,
 
     /// Data previously read and "unread" for the SSL handshake. In C a
     /// `char *` of arbitrary bytes; an owned byte buffer preserves exact
@@ -280,15 +256,12 @@ impl Port {
             scram_ClientKey: [0; SCRAM_MAX_KEY_LEN],
             scram_ServerKey: [0; SCRAM_MAX_KEY_LEN],
             has_scram_keys: false,
-            gss: None,
             ssl_in_use: false,
             peer_cn: None,
             peer_dn: None,
             peer_cert_valid: false,
             alpn_used: false,
             last_read_was_eof: false,
-            ssl: None,
-            peer: None,
             raw_buf: None,
             raw_buf_consumed: 0,
             raw_buf_remaining: 0,
@@ -296,14 +269,41 @@ impl Port {
     }
 }
 
-/// Platform `sig_atomic_t` (`int` on every supported target).
-pub type sig_atomic_t = i32;
-
 /// `struct Latch` (`storage/latch.h`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// In C a latch is always reached through a pointer (`MyLatch`,
+/// `&proc->procLatch`) and is mutated concurrently: `SetLatch` runs from
+/// signal handlers and, for shared latches living in PGPROC shared memory,
+/// from other backends. The `volatile sig_atomic_t` wait/set fields are
+/// therefore atomics here, and a latch is shared by handle
+/// (e.g. `Arc<Latch>`), never copied by value. `is_shared` / `owner_pid` are
+/// written only by `InitLatch`/`InitSharedLatch`/`OwnLatch` before the latch
+/// is visible to other parties.
+#[derive(Debug)]
 pub struct Latch {
-    pub is_set: sig_atomic_t,
-    pub maybe_sleeping: sig_atomic_t,
+    /// `sig_atomic_t is_set;`
+    pub is_set: AtomicI32,
+    /// `sig_atomic_t maybe_sleeping;`
+    pub maybe_sleeping: AtomicI32,
+    /// `bool is_shared;`
     pub is_shared: bool,
+    /// `int owner_pid;`
     pub owner_pid: i32,
 }
+
+impl Latch {
+    /// A cleared latch (`is_set`/`maybe_sleeping` zero), as `InitLatch`
+    /// leaves the flag fields.
+    pub fn new(is_shared: bool, owner_pid: i32) -> Latch {
+        Latch {
+            is_set: AtomicI32::new(0),
+            maybe_sleeping: AtomicI32::new(0),
+            is_shared,
+            owner_pid,
+        }
+    }
+}
+
+/// Assert the C field widths: `sig_atomic_t` is `int` on every supported
+/// target and `AtomicI32` has the same in-memory representation.
+const _: () = assert!(core::mem::size_of::<AtomicI32>() == core::mem::size_of::<sig_atomic_t>());

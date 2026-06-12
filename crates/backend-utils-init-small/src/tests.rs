@@ -101,16 +101,29 @@ fn accessors_update_backend_local_state() {
         globals::SetInterruptPending(true);
         assert!(globals::InterruptPending());
 
-        let latch = Latch {
-            is_set: 1,
-            maybe_sleeping: 0,
-            is_shared: true,
-            owner_pid: 42,
-        };
-        globals::SetMyLatch(Some(latch));
+        // MyLatch is a handle to a shared latch object: the getter hands
+        // back the same object (pointer copy), not a value copy.
+        let latch = std::sync::Arc::new(Latch::new(true, 42));
+        globals::SetMyLatch(Some(latch.clone()));
         assert!(globals::MyLatchIsSet());
-        assert_eq!(globals::MyLatch(), Some(latch));
-        assert_eq!(globals::TakeMyLatch(), Some(latch));
+        assert!(std::sync::Arc::ptr_eq(
+            &globals::MyLatch().unwrap(),
+            &latch
+        ));
+        latch
+            .is_set
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            globals::MyLatch()
+                .unwrap()
+                .is_set
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &globals::TakeMyLatch().unwrap(),
+            &latch
+        ));
         assert!(!globals::MyLatchIsSet());
 
         globals::SetDataDir(Some(String::from("/var/lib/pgdata")));

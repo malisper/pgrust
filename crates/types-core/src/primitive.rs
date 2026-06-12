@@ -47,6 +47,12 @@ pub type ForkNumber = i32;
 /// `Buffer` (`buf.h`) — shared/local buffer id, was C `int`.
 pub type Buffer = i32;
 pub type OffsetNumber = uint16;
+/// POSIX `pid_t`, used as an `int`-width process id throughout PostgreSQL.
+pub type pid_t = i32;
+/// Platform `sig_atomic_t` (`int` on every supported target).
+pub type sig_atomic_t = i32;
+/// `pgsocket` (`port.h`): `typedef int pgsocket;` on non-Windows.
+pub type pgsocket = i32;
 
 pub const BLCKSZ: usize = 8192;
 pub const InvalidOid: Oid = 0;

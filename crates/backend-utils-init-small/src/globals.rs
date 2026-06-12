@@ -6,11 +6,12 @@
 //! Every variable in `globals.c` is backend-private state (each C backend is
 //! a process and owns its own copy), so each is a `thread_local!` cell here,
 //! never a shared static. Pointer-valued C globals (`MyClientSocket`,
-//! `MyProcPort`, `MyLatch`, `DataDir`, `DatabasePath`) become owned optional
-//! values; the fixed-size `char` path buffers stay fixed-size byte arrays.
-//! Names, types-widths, and initial values match the C declarations
-//! one-to-one. (`EXEC_BACKEND`'s `postgres_exec_path` is compiled out, as in
-//! the unix build.)
+//! `MyProcPort`, `DataDir`, `DatabasePath`) become owned optional values;
+//! `MyLatch` — a pointer to a latch mutated cross-process — stays a handle
+//! (`Arc<Latch>`) to the shared object; the fixed-size `char` path buffers
+//! stay fixed-size byte arrays. Names, types-widths, and initial values
+//! match the C declarations one-to-one. (`EXEC_BACKEND`'s
+//! `postgres_exec_path` is compiled out, as in the unix build.)
 //!
 //! Five of these variables (`FrontendProtocol`, `CritSectionCount`,
 //! `IsUnderPostmaster`, `ExitOnAnyError`, `OutputFileName`) are also read —
@@ -23,16 +24,15 @@
 #![allow(non_camel_case_types)]
 
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 use types_core::{
     pg_time_t, uint32, uint8, InvalidOid, Oid, ProcNumber, ProtocolVersion, TimestampTz,
     DATEORDER_MDY, INTSTYLE_POSTGRES, INVALID_PROC_NUMBER, MAXPGPATH, MAX_CANCEL_KEY_LENGTH,
     PG_DIR_MODE_OWNER, USE_ISO_DATES,
 };
+pub use types_core::pid_t;
 use types_net::{ClientSocket, Latch, Port};
-
-/// POSIX `pid_t`, used as an `int`-width process id throughout PostgreSQL.
-pub type pid_t = i32;
 
 /// One backend-private scalar global: a `thread_local!` `Cell` plus a getter
 /// named after the C variable and a setter.
@@ -438,8 +438,11 @@ thread_local! {
     /// `struct Latch *MyLatch;` — the latch the current process should use
     /// for signal handling: a process-local latch when the process has no
     /// PGPROC entry, else `PGPROC->procLatch`. Thus it can always be used in
-    /// signal handlers, without checking for its existence.
-    static MY_LATCH: Cell<Option<Latch>> = const { Cell::new(None) };
+    /// signal handlers, without checking for its existence. A latch is
+    /// mutated cross-process (`SetLatch` from signal handlers and, for
+    /// shared latches, other backends), so `MyLatch` is a shared handle to
+    /// the synchronized `Latch` object, never an owned copy.
+    static MY_LATCH: RefCell<Option<Arc<Latch>>> = const { RefCell::new(None) };
 
     /// `char *DataDir = NULL;` — the absolute path to the top level of the
     /// PGDATA directory tree. Except during early startup, this is also the
@@ -469,7 +472,10 @@ pub fn TakeMyClientSocket() -> Option<ClientSocket> {
     MY_CLIENT_SOCKET.take()
 }
 
-/// Returns a clone of `MyProcPort`, if set.
+/// Snapshot accessor: returns a deep clone of `MyProcPort`, if set. C reads
+/// a pointer here; a caller that mutates the returned clone does *not*
+/// affect the live value — use [`WithMyProcPort`] (the primary accessor) to
+/// read or mutate the live `Port` without cloning.
 pub fn MyProcPort() -> Option<Port> {
     MY_PROC_PORT.with_borrow(|p| p.as_deref().cloned())
 }
@@ -487,24 +493,32 @@ pub fn TakeMyProcPort() -> Option<Box<Port>> {
 }
 
 /// Run `f` against the live `MyProcPort` value (the C idiom of mutating
-/// through the pointer), if set.
+/// through the pointer), if set. The value is taken out of the cell while
+/// `f` runs and put back afterwards, so no `RefCell` borrow is held across
+/// `f` — re-entrant `MyProcPort()`/`MyProcPortIsSet()` calls inside `f` see
+/// an unset global rather than panicking, and a `SetMyProcPort` inside `f`
+/// is overwritten when the borrowed value is restored.
 pub fn WithMyProcPort<R>(f: impl FnOnce(&mut Port) -> R) -> Option<R> {
-    MY_PROC_PORT.with_borrow_mut(|p| p.as_deref_mut().map(f))
+    let mut port = MY_PROC_PORT.take()?;
+    let result = f(&mut port);
+    MY_PROC_PORT.set(Some(port));
+    Some(result)
 }
 
-pub fn MyLatch() -> Option<Latch> {
-    MY_LATCH.get()
+/// Returns the `MyLatch` handle (the C pointer copy), if set.
+pub fn MyLatch() -> Option<Arc<Latch>> {
+    MY_LATCH.with_borrow(Clone::clone)
 }
 
-pub fn SetMyLatch(value: Option<Latch>) {
+pub fn SetMyLatch(value: Option<Arc<Latch>>) {
     MY_LATCH.set(value);
 }
 
 pub fn MyLatchIsSet() -> bool {
-    MY_LATCH.get().is_some()
+    MY_LATCH.with_borrow(Option::is_some)
 }
 
-pub fn TakeMyLatch() -> Option<Latch> {
+pub fn TakeMyLatch() -> Option<Arc<Latch>> {
     MY_LATCH.take()
 }
 
