@@ -311,12 +311,17 @@ pub fn anl_init_selection_state(n: i32) -> f64 {
 }
 
 pub fn anl_get_next_S(t: f64, n: i32, stateptr: &mut f64) -> f64 {
-    with_old_reservoir_state(|rs| {
-        rs.W = *stateptr;
-        let result = reservoir_get_next_S(rs, t, n);
-        *stateptr = rs.W;
-        result
-    })
+    // Note: unlike anl_random_fract/anl_init_selection_state, the C function
+    // has no oldrs_initialized guard -- it uses oldrs.randstate as-is.
+    let mut state = OLD_RESERVOIR_STATE
+        .lock()
+        .expect("old reservoir state lock poisoned");
+    let rs = &mut state.0;
+
+    rs.W = *stateptr;
+    let result = reservoir_get_next_S(rs, t, n);
+    *stateptr = rs.W;
+    result
 }
 
 /// Run `f` against the shared `oldrs` reservoir state, initializing the random
