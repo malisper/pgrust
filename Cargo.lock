@@ -22,6 +22,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-parallel-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-libpq-pqformat-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-storage-lmgr-lwlock-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
@@ -29,10 +51,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-pgstat-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-pgstat",
+]
+
+[[package]]
+name = "backend-utils-activity-small"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-libpq-pqformat-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-activity-status-seams",
+ "backend-utils-adt-timestamp-seams",
+ "types-core",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-utils-activity-stat-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-utils-activity-status-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-pgstat",
+]
+
+[[package]]
 name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-utils-adt-timestamp-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
 ]
 
 [[package]]
@@ -76,6 +146,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
  "backend-storage-page-checksum",
+ "backend-utils-activity-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-pg-rusage",
@@ -87,6 +158,21 @@ version = "0.0.0"
 
 [[package]]
 name = "types-datum"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-pgstat"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-storage",
+]
+
+[[package]]
+name = "types-storage"
 version = "0.0.0"
 dependencies = [
  "types-core",

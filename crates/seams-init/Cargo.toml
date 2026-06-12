@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
+backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
