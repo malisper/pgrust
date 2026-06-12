@@ -61,6 +61,10 @@ enum Backend {
 /// reads (nodeAgg's spill decision) are O(1).
 struct Acct {
     name: &'static str,
+    /// `MemoryContextSetIdentifier`: distinguishes same-kind contexts in
+    /// stats (e.g. which prepared statement). Owned copy — C instead requires
+    /// the caller to keep the string alive as long as the context.
+    ident: RefCell<Option<alloc::string::String>>,
     /// Live requested bytes allocated *in this context* (collection
     /// capacities, not lengths).
     self_used: Cell<usize>,
@@ -135,6 +139,7 @@ impl MemoryContext {
     ) -> Self {
         let acct = alloc::rc::Rc::new(Acct {
             name,
+            ident: RefCell::new(None),
             self_used: Cell::new(0),
             subtree_used: Cell::new(0),
             self_peak: Cell::new(0),
@@ -173,6 +178,16 @@ impl MemoryContext {
 
     pub fn name(&self) -> &'static str {
         self.acct.name
+    }
+
+    /// `MemoryContextSetIdentifier`: attach (or with `None`, forget) an
+    /// identifier distinguishing same-kind contexts in stats dumps.
+    pub fn set_ident(&self, id: Option<&str>) {
+        *self.acct.ident.borrow_mut() = id.map(alloc::string::String::from);
+    }
+
+    pub fn ident(&self) -> Option<alloc::string::String> {
+        self.acct.ident.borrow().clone()
     }
 
     /// Live requested bytes allocated in this context itself.
@@ -235,6 +250,7 @@ impl MemoryContext {
     pub fn stats(&self) -> ContextStats {
         ContextStats {
             name: self.acct.name,
+            ident: self.ident(),
             used: self.acct.self_used.get(),
             peak: self.acct.self_peak.get(),
             subtree_used: self.acct.subtree_used.get(),
@@ -262,6 +278,7 @@ impl MemoryContext {
             });
             TreeStats {
                 name: acct.name,
+                ident: acct.ident.borrow().clone(),
                 used: acct.self_used.get(),
                 peak: acct.self_peak.get(),
                 subtree_used: acct.subtree_used.get(),
@@ -342,6 +359,9 @@ impl Drop for MemoryContext {
     /// to ancestor counters so the accounting tree never holds phantom bytes.
     fn drop(&mut self) {
         self.fire_reset_callbacks();
+        // C MemoryContextDeleteOnly resets the ident; ours would otherwise
+        // linger on the Acct node a surviving child keeps alive.
+        self.acct.ident.borrow_mut().take();
         let residual = self.acct.self_used.get();
         if residual > 0 {
             for node in self.acct.ancestors() {
@@ -365,9 +385,10 @@ impl fmt::Debug for MemoryContext {
 }
 
 /// One context's accounting numbers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextStats {
     pub name: &'static str,
+    pub ident: Option<alloc::string::String>,
     /// Live requested bytes in this context itself.
     pub used: usize,
     /// High-water mark of `used` since creation/reset.
@@ -387,6 +408,7 @@ pub struct ContextStats {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeStats {
     pub name: &'static str,
+    pub ident: Option<alloc::string::String>,
     pub used: usize,
     pub peak: usize,
     pub subtree_used: usize,

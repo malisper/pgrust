@@ -25,6 +25,11 @@ impl<'mcx> PgString<'mcx> {
         Ok(out)
     }
 
+    /// C `pchomp`: copy of `s` with all trailing newlines removed.
+    pub fn chomp_in(s: &str, mcx: Mcx<'mcx>) -> PgResult<Self> {
+        Self::from_str_in(s.trim_end_matches('\n'), mcx)
+    }
+
     pub fn try_push_str(&mut self, s: &str) -> PgResult<()> {
         let mcx = *self.bytes.allocator();
         self.bytes

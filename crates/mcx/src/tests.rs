@@ -246,6 +246,34 @@ fn pg_string_round_trips_and_keys() {
     assert!(PgString::from_utf8(bad).is_err());
 }
 
+#[test]
+fn chomp_strips_only_trailing_newlines() {
+    let ctx = MemoryContext::new("s");
+    let mcx = ctx.mcx();
+    assert_eq!(PgString::chomp_in("warn: x\n\n", mcx).unwrap(), "warn: x");
+    assert_eq!(PgString::chomp_in("a\nb\n", mcx).unwrap(), "a\nb");
+    assert_eq!(PgString::chomp_in("no newline", mcx).unwrap(), "no newline");
+    assert_eq!(PgString::chomp_in("\n", mcx).unwrap(), "");
+}
+
+#[test]
+fn ident_set_forget_and_stats() {
+    let root = MemoryContext::new("CachedPlanSource");
+    assert_eq!(root.ident(), None);
+    root.set_ident(Some("SELECT 1"));
+    assert_eq!(root.ident().as_deref(), Some("SELECT 1"));
+    assert_eq!(root.stats().ident.as_deref(), Some("SELECT 1"));
+
+    let child = root.new_child("CachedPlanQuery");
+    child.set_ident(Some("q"));
+    let t = root.stats_tree();
+    assert_eq!(t.ident.as_deref(), Some("SELECT 1"));
+    assert_eq!(t.children[0].ident.as_deref(), Some("q"));
+
+    root.set_ident(None);
+    assert_eq!(root.ident(), None, "NULL forgets the old identifier");
+}
+
 mod owned {
     use crate::*;
 
