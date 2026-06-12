@@ -462,13 +462,22 @@ pub static password_encryption_options: &[GucEnumOption] = &[
     GucEnumOption { name: "scram-sha-256", val: PASSWORD_TYPE_SCRAM_SHA_256, hidden: false },
 ];
 
-pub static ssl_protocol_versions_info: &[GucEnumOption] = &[
+const SSL_PROTOCOL_VERSIONS_INFO: [GucEnumOption; 5] = [
     GucEnumOption { name: "", val: PG_TLS_ANY, hidden: false },
     GucEnumOption { name: "TLSv1", val: PG_TLS1_VERSION, hidden: false },
     GucEnumOption { name: "TLSv1.1", val: PG_TLS1_1_VERSION, hidden: false },
     GucEnumOption { name: "TLSv1.2", val: PG_TLS1_2_VERSION, hidden: false },
     GucEnumOption { name: "TLSv1.3", val: PG_TLS1_3_VERSION, hidden: false },
 ];
+
+pub static ssl_protocol_versions_info: &[GucEnumOption] = &SSL_PROTOCOL_VERSIONS_INFO;
+
+/// `ssl_protocol_versions_info + 1` in C: the same array without the leading
+/// `""` (= `PG_TLS_ANY`) entry; `ssl_min_protocol_version` must not allow it.
+pub static ssl_protocol_versions_info_without_any: &[GucEnumOption] = {
+    const REST: &[GucEnumOption] = SSL_PROTOCOL_VERSIONS_INFO.split_first().unwrap().1;
+    REST
+};
 
 pub static debug_logical_replication_streaming_options: &[GucEnumOption] = &[
     GucEnumOption { name: "buffered", val: DEBUG_LOGICAL_REP_STREAMING_BUFFERED, hidden: false },
@@ -929,7 +938,7 @@ pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
     GucEnumSetting { name: "debug_parallel_query", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Forces the planner's use parallel query nodes."), long_desc: Some("This can be useful for testing the parallel query infrastructure by forcing the planner to generate plans that contain nodes that perform tuple communication between workers and the main process."), flags: GUC_NOT_IN_SAMPLE | GUC_EXPLAIN, variable: "debug_parallel_query", boot_val: GucDefaultValue::Enum(DEBUG_PARALLEL_OFF), options: Some(debug_parallel_query_options), option_set: None, check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "password_encryption", context: PGC_USERSET, group: CONN_AUTH_AUTH, short_desc: Some("Chooses the algorithm for encrypting passwords."), long_desc: None, flags: 0, variable: "Password_encryption", boot_val: GucDefaultValue::Enum(PASSWORD_TYPE_SCRAM_SHA_256), options: Some(password_encryption_options), option_set: None, check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "plan_cache_mode", context: PGC_USERSET, group: QUERY_TUNING_OTHER, short_desc: Some("Controls the planner's selection of custom or generic plan."), long_desc: Some("Prepared statements can have custom and generic plans, and the planner will attempt to choose which is better.  This can be set to override the default behavior."), flags: GUC_EXPLAIN, variable: "plan_cache_mode", boot_val: GucDefaultValue::Enum(PLAN_CACHE_MODE_AUTO), options: Some(plan_cache_mode_options), option_set: None, check_hook: None, assign_hook: None, show_hook: None },
-    GucEnumSetting { name: "ssl_min_protocol_version", context: PGC_SIGHUP, group: CONN_AUTH_SSL, short_desc: Some("Sets the minimum SSL/TLS protocol version to use."), long_desc: None, flags: GUC_SUPERUSER_ONLY, variable: "ssl_min_protocol_version", boot_val: GucDefaultValue::Enum(PG_TLS1_2_VERSION), options: Some(ssl_protocol_versions_info), option_set: None, check_hook: None, assign_hook: None, show_hook: None },
+    GucEnumSetting { name: "ssl_min_protocol_version", context: PGC_SIGHUP, group: CONN_AUTH_SSL, short_desc: Some("Sets the minimum SSL/TLS protocol version to use."), long_desc: None, flags: GUC_SUPERUSER_ONLY, variable: "ssl_min_protocol_version", boot_val: GucDefaultValue::Enum(PG_TLS1_2_VERSION), options: Some(ssl_protocol_versions_info_without_any), option_set: None, check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "ssl_max_protocol_version", context: PGC_SIGHUP, group: CONN_AUTH_SSL, short_desc: Some("Sets the maximum SSL/TLS protocol version to use."), long_desc: None, flags: GUC_SUPERUSER_ONLY, variable: "ssl_max_protocol_version", boot_val: GucDefaultValue::Enum(PG_TLS_ANY), options: Some(ssl_protocol_versions_info), option_set: None, check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "recovery_init_sync_method", context: PGC_SIGHUP, group: ERROR_HANDLING_OPTIONS, short_desc: Some("Sets the method for synchronizing the data directory before crash recovery."), long_desc: None, flags: 0, variable: "recovery_init_sync_method", boot_val: GucDefaultValue::Enum(DATA_DIR_SYNC_METHOD_FSYNC), options: Some(recovery_init_sync_method_options), option_set: None, check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "debug_logical_replication_streaming", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Forces immediate streaming or serialization of changes in large transactions."), long_desc: Some("On the publisher, it allows streaming or serializing each change in logical decoding. On the subscriber, it allows serialization of all changes to files and notifies the parallel apply workers to read and apply them at the end of the transaction."), flags: GUC_NOT_IN_SAMPLE, variable: "debug_logical_replication_streaming", boot_val: GucDefaultValue::Enum(DEBUG_LOGICAL_REP_STREAMING_BUFFERED), options: Some(debug_logical_replication_streaming_options), option_set: None, check_hook: None, assign_hook: None, show_hook: None },
