@@ -58,10 +58,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-multixact-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-transam-parallel-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-access-transam-twophase-rmgr"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-multixact-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-utils-activity-stat-seams",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -106,11 +127,29 @@ name = "backend-port-atomics"
 version = "0.0.0"
 
 [[package]]
+name = "backend-storage-lmgr-lock-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lwlock-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-lmgr-predicate-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -149,6 +188,8 @@ name = "backend-utils-activity-stat-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]

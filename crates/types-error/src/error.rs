@@ -68,3 +68,25 @@ pub const ERRCODE_SUCCESSFUL_COMPLETION: SqlState = make_sqlstate(*b"00000");
 pub const ERRCODE_WARNING: SqlState = make_sqlstate(*b"01000");
 pub const ERRCODE_INTERNAL_ERROR: SqlState = make_sqlstate(*b"XX000");
 pub const ERRCODE_INVALID_OBJECT_DEFINITION: SqlState = make_sqlstate(*b"42P17");
+
+/// `ERRCODE_TO_CATEGORY(ec)` (elog.h).
+pub const fn errcode_to_category(sqlstate: SqlState) -> SqlState {
+    SqlState(sqlstate.0 & ((1 << 12) - 1))
+}
+
+/// `ERRCODE_IS_CATEGORY(ec)` (elog.h).
+pub const fn errcode_is_category(sqlstate: SqlState) -> bool {
+    (sqlstate.0 & !((1 << 12) - 1)) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlstate_roundtrip() {
+        assert_eq!(unpack_sqlstate(ERRCODE_WARNING), *b"01000");
+        assert_eq!(unpack_sqlstate(ERRCODE_INTERNAL_ERROR), *b"XX000");
+        assert_eq!(unpack_sqlstate(ERRCODE_SUCCESSFUL_COMPLETION), *b"00000");
+    }
+}
