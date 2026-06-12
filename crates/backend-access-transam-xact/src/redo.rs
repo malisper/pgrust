@@ -6,11 +6,11 @@
 use crate::*;
 use types_core::RepOriginId;
 use types_error::PANIC;
-use types_storage::RelFileLocator;
+use types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVAL_MESSAGE_SIZE};
 use types_wal::{
     xact_completion_apply_feedback, xact_completion_force_sync_commit,
     xact_completion_relcache_init_file_inval, ParsedAbort, ParsedCommit, XlXactStatsItem,
-    SHARED_INVAL_MESSAGE_SIZE, XACT_XINFO_HAS_AE_LOCKS, XACT_XINFO_HAS_DBINFO,
+    STANDBY_DISABLED, STANDBY_INITIALIZED, XACT_XINFO_HAS_AE_LOCKS, XACT_XINFO_HAS_DBINFO,
     XACT_XINFO_HAS_DROPPED_STATS, XACT_XINFO_HAS_GID, XACT_XINFO_HAS_INVALS,
     XACT_XINFO_HAS_ORIGIN, XACT_XINFO_HAS_RELFILELOCATORS, XACT_XINFO_HAS_SUBXACTS,
     XACT_XINFO_HAS_TWOPHASE, XLOG_XACT_ABORT, XLOG_XACT_ABORT_PREPARED, XLOG_XACT_ASSIGNMENT,
@@ -194,22 +194,15 @@ pub fn parse_commit_record(info: u8, data: &[u8]) -> PgResult<ParsedCommit> {
     }
 
     if (xinfo & XACT_XINFO_HAS_INVALS) != 0 {
-        let n = c.i32()?;
-        if n < 0 {
-            return Err(PgError::error(
-                "negative element count in transaction WAL record",
-            ));
+        let n = c.read_count(SHARED_INVAL_MESSAGE_SIZE, &mut parsed.msgs)?;
+        for _ in 0..n {
+            let bytes: &[u8; SHARED_INVAL_MESSAGE_SIZE] =
+                c.take(SHARED_INVAL_MESSAGE_SIZE)?.try_into().unwrap();
+            let msg = SharedInvalidationMessage::from_wal_bytes(bytes).ok_or_else(|| {
+                PgError::error("invalid shared-invalidation message in transaction WAL record")
+            })?;
+            parsed.msgs.push(msg);
         }
-        parsed.nmsgs = n;
-        let want = (n as usize)
-            .checked_mul(SHARED_INVAL_MESSAGE_SIZE)
-            .ok_or_else(truncated)?;
-        let bytes = c.take(want)?;
-        parsed
-            .msgs
-            .try_reserve(want)
-            .map_err(|_| PgError::error("out of memory parsing transaction WAL record"))?;
-        parsed.msgs.extend_from_slice(bytes);
     }
 
     if (xinfo & XACT_XINFO_HAS_TWOPHASE) != 0 {
@@ -340,7 +333,6 @@ fn xact_redo_commit(
         // release-locks order as CommitTransaction).
         inval_seams::process_committed_invalidation_messages::call(
             &parsed.msgs,
-            parsed.nmsgs,
             xact_completion_relcache_init_file_inval(parsed.xinfo),
             parsed.db_id,
             parsed.ts_id,

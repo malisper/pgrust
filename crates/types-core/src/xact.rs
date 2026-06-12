@@ -14,9 +14,49 @@ pub type LocalTransactionId = u32;
 /// `SubTransactionId` (`c.h`).
 pub type SubTransactionId = u32;
 /// `TransState` (xact.c) — low-level transaction state.
-pub type TransState = u32;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum TransState {
+    TRANS_DEFAULT,    /* idle */
+    TRANS_START,      /* transaction starting */
+    TRANS_INPROGRESS, /* inside a valid transaction */
+    TRANS_COMMIT,     /* commit in progress */
+    TRANS_ABORT,      /* abort in progress */
+    TRANS_PREPARE,    /* prepare in progress */
+}
+pub use TransState::*;
+
 /// `TBlockState` (xact.c) — transaction-block state.
-pub type TBlockState = u32;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum TBlockState {
+    /* not-in-transaction-block states */
+    TBLOCK_DEFAULT, /* idle */
+    TBLOCK_STARTED, /* running single-query transaction */
+
+    /* transaction block states */
+    TBLOCK_BEGIN,               /* starting transaction block */
+    TBLOCK_INPROGRESS,          /* live transaction */
+    TBLOCK_IMPLICIT_INPROGRESS, /* live transaction after implicit BEGIN */
+    TBLOCK_PARALLEL_INPROGRESS, /* live transaction inside parallel worker */
+    TBLOCK_END,                 /* COMMIT received */
+    TBLOCK_ABORT,               /* failed xact, awaiting ROLLBACK */
+    TBLOCK_ABORT_END,           /* failed xact, ROLLBACK received */
+    TBLOCK_ABORT_PENDING,       /* live xact, ROLLBACK received */
+    TBLOCK_PREPARE,             /* live xact, PREPARE received */
+
+    /* subtransaction states */
+    TBLOCK_SUBBEGIN,         /* starting a subtransaction */
+    TBLOCK_SUBINPROGRESS,    /* live subtransaction */
+    TBLOCK_SUBRELEASE,       /* RELEASE received */
+    TBLOCK_SUBCOMMIT,        /* COMMIT received while TBLOCK_SUBINPROGRESS */
+    TBLOCK_SUBABORT,         /* failed subxact, awaiting ROLLBACK */
+    TBLOCK_SUBABORT_END,     /* failed subxact, ROLLBACK received */
+    TBLOCK_SUBABORT_PENDING, /* live subxact, ROLLBACK received */
+    TBLOCK_SUBRESTART,       /* live subxact, ROLLBACK TO received */
+    TBLOCK_SUBABORT_RESTART, /* failed subxact, ROLLBACK TO received */
+}
+pub use TBlockState::*;
 
 pub const InvalidTransactionId: TransactionId = 0;
 pub const BootstrapTransactionId: TransactionId = 1;
@@ -55,50 +95,31 @@ pub const XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK: i32 = 1 << 1;
 pub const XACT_FLAGS_NEEDIMMEDIATECOMMIT: i32 = 1 << 2;
 pub const XACT_FLAGS_PIPELINING: i32 = 1 << 3;
 
-// --- TransState (xact.c) ---
-pub const TRANS_DEFAULT: TransState = 0;
-pub const TRANS_START: TransState = 1;
-pub const TRANS_INPROGRESS: TransState = 2;
-pub const TRANS_COMMIT: TransState = 3;
-pub const TRANS_ABORT: TransState = 4;
-pub const TRANS_PREPARE: TransState = 5;
+/// `XactEvent` (`access/xact.h`) — events delivered to xact callbacks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum XactEvent {
+    XACT_EVENT_COMMIT,
+    XACT_EVENT_PARALLEL_COMMIT,
+    XACT_EVENT_ABORT,
+    XACT_EVENT_PARALLEL_ABORT,
+    XACT_EVENT_PREPARE,
+    XACT_EVENT_PRE_COMMIT,
+    XACT_EVENT_PARALLEL_PRE_COMMIT,
+    XACT_EVENT_PRE_PREPARE,
+}
+pub use XactEvent::*;
 
-// --- TBlockState (xact.c) ---
-pub const TBLOCK_DEFAULT: TBlockState = 0;
-pub const TBLOCK_STARTED: TBlockState = 1;
-pub const TBLOCK_BEGIN: TBlockState = 2;
-pub const TBLOCK_INPROGRESS: TBlockState = 3;
-pub const TBLOCK_IMPLICIT_INPROGRESS: TBlockState = 4;
-pub const TBLOCK_PARALLEL_INPROGRESS: TBlockState = 5;
-pub const TBLOCK_END: TBlockState = 6;
-pub const TBLOCK_ABORT: TBlockState = 7;
-pub const TBLOCK_ABORT_END: TBlockState = 8;
-pub const TBLOCK_ABORT_PENDING: TBlockState = 9;
-pub const TBLOCK_PREPARE: TBlockState = 10;
-pub const TBLOCK_SUBBEGIN: TBlockState = 11;
-pub const TBLOCK_SUBINPROGRESS: TBlockState = 12;
-pub const TBLOCK_SUBRELEASE: TBlockState = 13;
-pub const TBLOCK_SUBCOMMIT: TBlockState = 14;
-pub const TBLOCK_SUBABORT: TBlockState = 15;
-pub const TBLOCK_SUBABORT_END: TBlockState = 16;
-pub const TBLOCK_SUBABORT_PENDING: TBlockState = 17;
-pub const TBLOCK_SUBRESTART: TBlockState = 18;
-pub const TBLOCK_SUBABORT_RESTART: TBlockState = 19;
-
-// --- XactEvent / SubXactEvent (`access/xact.h`) ---
-pub const XACT_EVENT_COMMIT: u32 = 0;
-pub const XACT_EVENT_PARALLEL_COMMIT: u32 = 1;
-pub const XACT_EVENT_ABORT: u32 = 2;
-pub const XACT_EVENT_PARALLEL_ABORT: u32 = 3;
-pub const XACT_EVENT_PREPARE: u32 = 4;
-pub const XACT_EVENT_PRE_COMMIT: u32 = 5;
-pub const XACT_EVENT_PARALLEL_PRE_COMMIT: u32 = 6;
-pub const XACT_EVENT_PRE_PREPARE: u32 = 7;
-
-pub const SUBXACT_EVENT_START_SUB: u32 = 0;
-pub const SUBXACT_EVENT_COMMIT_SUB: u32 = 1;
-pub const SUBXACT_EVENT_ABORT_SUB: u32 = 2;
-pub const SUBXACT_EVENT_PRE_COMMIT_SUB: u32 = 3;
+/// `SubXactEvent` (`access/xact.h`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SubXactEvent {
+    SUBXACT_EVENT_START_SUB,
+    SUBXACT_EVENT_COMMIT_SUB,
+    SUBXACT_EVENT_ABORT_SUB,
+    SUBXACT_EVENT_PRE_COMMIT_SUB,
+}
+pub use SubXactEvent::*;
 
 /// `FullTransactionId` (`access/transam.h`) — 64-bit epoch-qualified XID.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -143,6 +164,29 @@ pub struct SavedTransactionCharacteristics {
     pub save_XactDeferrable: bool,
 }
 
-// --- TimeoutId values consumed so far (`utils/timeout.h`) ---
-/// `TRANSACTION_TIMEOUT` member of `TimeoutId` (9th enumerator).
-pub const TRANSACTION_TIMEOUT: i32 = 8;
+/// `TimeoutId` (`utils/timeout.h`) — identifiers for timeout reasons.
+/// Multiple simultaneous timeouts are serviced in this enum's order.
+/// `USER_TIMEOUT` is the first user-definable reason
+/// (`MAX_TIMEOUTS = USER_TIMEOUT + 10`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub enum TimeoutId {
+    STARTUP_PACKET_TIMEOUT,
+    DEADLOCK_TIMEOUT,
+    LOCK_TIMEOUT,
+    STATEMENT_TIMEOUT,
+    STANDBY_DEADLOCK_TIMEOUT,
+    STANDBY_TIMEOUT,
+    STANDBY_LOCK_TIMEOUT,
+    IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
+    TRANSACTION_TIMEOUT,
+    IDLE_SESSION_TIMEOUT,
+    IDLE_STATS_UPDATE_TIMEOUT,
+    CLIENT_CONNECTION_CHECK_TIMEOUT,
+    STARTUP_PROGRESS_TIMEOUT,
+    USER_TIMEOUT,
+}
+pub use TimeoutId::*;
+
+/// `MAX_TIMEOUTS` (`utils/timeout.h`).
+pub const MAX_TIMEOUTS: i32 = USER_TIMEOUT as i32 + 10;

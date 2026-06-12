@@ -25,6 +25,16 @@
 //!   its owner; dynahash seq-scan tracking does not exist over `PgHashMap`.
 //! * Backend-local file statics are `thread_local!` (one backend = one
 //!   thread), never shared statics.
+//! * **Transaction-lifetime collections are std `Vec`/`String`, not
+//!   `PgVec<'mcx>`** (ledgered divergence): C allocates `childXids`,
+//!   savepoint names, `prepareGID`, `unreportedXids`, and
+//!   `ParallelCurrentXids` in `TopTransactionContext`/`TopMemoryContext`;
+//!   here they live directly in the `thread_local!` `XactState`, which cannot
+//!   borrow the `top_transaction_context` it also owns (self-referential
+//!   state). Every allocating touch of these collections goes through
+//!   fallible `try_reserve`-style calls carrying C's OOM failure surface;
+//!   what is lost is only the context accounting/reset coupling. Tracked in
+//!   DESIGN_DEBT.md.
 
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
@@ -66,13 +76,6 @@ pub use engine::{
 };
 pub use redo::{parse_abort_record, parse_commit_record, xact_redo, XactRedoInfo};
 pub use wal::{XactLogAbortRecord, XactLogCommitRecord};
-
-/// `STANDBY_DISABLED` etc. (`access/xlogutils.h`) — hot-standby states the
-/// redo path branches on (via the xlogutils seam).
-pub const STANDBY_DISABLED: i32 = 0;
-pub const STANDBY_INITIALIZED: i32 = 1;
-pub const STANDBY_SNAPSHOT_PENDING: i32 = 2;
-pub const STANDBY_SNAPSHOT_READY: i32 = 3;
 
 /// `MaxAllocSize` (1 GB - 1): bounds `childXids` (`AtSubCommit_childXids`).
 pub(crate) const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
@@ -198,11 +201,21 @@ pub(crate) struct XactState {
     pub transaction_abort_context: Option<MemoryContext>,
 }
 
-type XactCallback = Box<dyn FnMut(u32) -> PgResult<()>>;
-type SubXactCallback = Box<dyn FnMut(u32, SubTransactionId, SubTransactionId) -> PgResult<()>>;
+type XactCallback = Box<dyn FnMut(XactEvent) -> PgResult<()>>;
+type SubXactCallback =
+    Box<dyn FnMut(SubXactEvent, SubTransactionId, SubTransactionId) -> PgResult<()>>;
+
+/// Registration token returned by `RegisterXactCallback`; C identifies the
+/// registration by its `(callback, arg)` pair, which dissolves into closure
+/// capture here — the token is the registration's identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XactCallbackToken(u64);
+
+/// See `XactCallbackToken`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SubXactCallbackToken(u64);
 
 pub(crate) struct XactCallbackRegistration {
-    key: usize,
     /// Unique registration id; lets Call*Callbacks track entries across
     /// re-entrant register/unregister (the C list uses node identity).
     serial: u64,
@@ -212,13 +225,12 @@ pub(crate) struct XactCallbackRegistration {
 impl std::fmt::Debug for XactCallbackRegistration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("XactCallbackRegistration")
-            .field("key", &self.key)
+            .field("serial", &self.serial)
             .finish_non_exhaustive()
     }
 }
 
 pub(crate) struct SubXactCallbackRegistration {
-    key: usize,
     /// See `XactCallbackRegistration::serial`.
     serial: u64,
     callback: SubXactCallback,
@@ -227,7 +239,7 @@ pub(crate) struct SubXactCallbackRegistration {
 impl std::fmt::Debug for SubXactCallbackRegistration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubXactCallbackRegistration")
-            .field("key", &self.key)
+            .field("serial", &self.serial)
             .finish_non_exhaustive()
     }
 }
@@ -526,9 +538,13 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
     if is_subxact
         && !xs(|s| s.transaction_stack[idx - 1].full_transaction_id.is_valid())
     {
+        // C: parents = palloc(sizeof(TransactionState) * parentOffset)
         let mut parents = Vec::new();
         let mut p = idx;
         while p > 0 && !xs(|s| s.transaction_stack[p - 1].full_transaction_id.is_valid()) {
+            parents
+                .try_reserve(1)
+                .map_err(|_| PgError::error("out of memory assigning transaction IDs"))?;
             parents.push(p - 1);
             p -= 1;
         }
@@ -1060,32 +1076,37 @@ pub(crate) fn AtSubCleanup_Memory() {
 //  Callbacks (xact.c:3804-3911)
 // ---------------------------------------------------------------------------
 
-/// `RegisterXactCallback` (xact.c:3804). The C `(callback, arg)` pair is keyed
-/// here by a caller-chosen `key` for unregistration. New registrations are
-/// prepended, as in C (`item->next = Xact_callbacks; Xact_callbacks = item`),
-/// so callbacks run most-recently-registered first and a callback registered
-/// during `CallXactCallbacks` is not invoked in the same round.
-pub fn RegisterXactCallback(key: usize, callback: impl FnMut(u32) -> PgResult<()> + 'static) {
+/// `RegisterXactCallback` (xact.c:3804). C identifies a registration by its
+/// `(callback, arg)` pair; the returned token is that identity here. New
+/// registrations are prepended, as in C (`item->next = Xact_callbacks;
+/// Xact_callbacks = item`), so callbacks run most-recently-registered first
+/// and a callback registered during `CallXactCallbacks` is not invoked in
+/// the same round.
+pub fn RegisterXactCallback(
+    callback: impl FnMut(XactEvent) -> PgResult<()> + 'static,
+) -> XactCallbackToken {
     xs(|s| {
         let serial = s.next_callback_serial;
         s.next_callback_serial += 1;
         s.xact_callbacks.insert(
             0,
             XactCallbackRegistration {
-                key,
                 serial,
                 callback: Box::new(callback),
             },
-        )
-    });
+        );
+        XactCallbackToken(serial)
+    })
 }
 
-/// `UnregisterXactCallback` (xact.c:3817) — removes the first match in list
-/// order (most recent registration), like the C `break` after the first
-/// `(callback, arg)` hit.
-pub fn UnregisterXactCallback(key: usize) {
+/// `UnregisterXactCallback` (xact.c:3817).
+pub fn UnregisterXactCallback(token: XactCallbackToken) {
     xs(|s| {
-        if let Some(pos) = s.xact_callbacks.iter().position(|item| item.key == key) {
+        if let Some(pos) = s
+            .xact_callbacks
+            .iter()
+            .position(|item| item.serial == token.0)
+        {
             s.xact_callbacks.remove(pos);
         }
     });
@@ -1093,27 +1114,30 @@ pub fn UnregisterXactCallback(key: usize) {
 
 /// `RegisterSubXactCallback` (xact.c:3864) — see `RegisterXactCallback`.
 pub fn RegisterSubXactCallback(
-    key: usize,
-    callback: impl FnMut(u32, SubTransactionId, SubTransactionId) -> PgResult<()> + 'static,
-) {
+    callback: impl FnMut(SubXactEvent, SubTransactionId, SubTransactionId) -> PgResult<()> + 'static,
+) -> SubXactCallbackToken {
     xs(|s| {
         let serial = s.next_callback_serial;
         s.next_callback_serial += 1;
         s.subxact_callbacks.insert(
             0,
             SubXactCallbackRegistration {
-                key,
                 serial,
                 callback: Box::new(callback),
             },
-        )
-    });
+        );
+        SubXactCallbackToken(serial)
+    })
 }
 
 /// `UnregisterSubXactCallback` (xact.c:3877) — see `UnregisterXactCallback`.
-pub fn UnregisterSubXactCallback(key: usize) {
+pub fn UnregisterSubXactCallback(token: SubXactCallbackToken) {
     xs(|s| {
-        if let Some(pos) = s.subxact_callbacks.iter().position(|item| item.key == key) {
+        if let Some(pos) = s
+            .subxact_callbacks
+            .iter()
+            .position(|item| item.serial == token.0)
+        {
             s.subxact_callbacks.remove(pos);
         }
     });
@@ -1124,8 +1148,15 @@ pub fn UnregisterSubXactCallback(key: usize) {
 /// callbacks may unregister themselves while being called (the entry just
 /// disappears), and registrations made mid-iteration (prepended) are not
 /// invoked this round.
-pub(crate) fn CallXactCallbacks(event: u32) -> PgResult<()> {
-    let serials: Vec<u64> = xs(|s| s.xact_callbacks.iter().map(|item| item.serial).collect());
+pub(crate) fn CallXactCallbacks(event: XactEvent) -> PgResult<()> {
+    let serials: Vec<u64> = xs(|s| {
+        let mut serials = Vec::new();
+        serials
+            .try_reserve(s.xact_callbacks.len())
+            .map_err(|_| PgError::error("out of memory calling transaction callbacks"))?;
+        serials.extend(s.xact_callbacks.iter().map(|item| item.serial));
+        Ok::<_, PgError>(serials)
+    })?;
     for serial in serials {
         // Temporarily take the closure out so the callback can re-enter this
         // module (register/unregister) without holding the state borrow.
@@ -1153,11 +1184,18 @@ pub(crate) fn CallXactCallbacks(event: u32) -> PgResult<()> {
 
 /// `CallSubXactCallbacks` (xact.c:3898) — see `CallXactCallbacks`.
 pub(crate) fn CallSubXactCallbacks(
-    event: u32,
+    event: SubXactEvent,
     my_subid: SubTransactionId,
     parent_subid: SubTransactionId,
 ) -> PgResult<()> {
-    let serials: Vec<u64> = xs(|s| s.subxact_callbacks.iter().map(|item| item.serial).collect());
+    let serials: Vec<u64> = xs(|s| {
+        let mut serials = Vec::new();
+        serials
+            .try_reserve(s.subxact_callbacks.len())
+            .map_err(|_| PgError::error("out of memory calling subtransaction callbacks"))?;
+        serials.extend(s.subxact_callbacks.iter().map(|item| item.serial));
+        Ok::<_, PgError>(serials)
+    })?;
     for serial in serials {
         let cb = xs(|s| {
             s.subxact_callbacks
@@ -1186,9 +1224,16 @@ pub(crate) fn CallSubXactCallbacks(
 // ---------------------------------------------------------------------------
 
 /// `xactGetCommittedChildren` (xact.c:5790) — committed children of the
-/// current transaction (C hands out the in-place array; we clone).
-pub fn xactGetCommittedChildren() -> Vec<TransactionId> {
-    xs(|s| s.current().child_xids.clone())
+/// current transaction (C hands out the in-place array; we copy fallibly).
+pub fn xactGetCommittedChildren() -> PgResult<Vec<TransactionId>> {
+    xs(|s| {
+        let src = &s.current().child_xids;
+        let mut out = Vec::new();
+        out.try_reserve_exact(src.len())
+            .map_err(|_| PgError::error("out of memory copying committed subtransactions"))?;
+        out.extend_from_slice(src);
+        Ok(out)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,6 +1242,17 @@ pub fn xactGetCommittedChildren() -> Vec<TransactionId> {
 
 pub(crate) fn xact_location(function: &'static str) -> ErrorLocation {
     ErrorLocation::new("xact.c", 0, function)
+}
+
+/// Fallible string copy standing in for C's
+/// `MemoryContextStrdup(TopTransactionContext, ...)` — palloc can
+/// `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`.
+pub(crate) fn try_strdup(s: &str, what: &'static str) -> PgResult<String> {
+    let mut out = String::new();
+    out.try_reserve_exact(s.len())
+        .map_err(|_| PgError::error(what))?;
+    out.push_str(s);
+    Ok(out)
 }
 
 pub(crate) fn unexpected_block_state(function: &str, st: TBlockState) -> PgError {
@@ -1280,7 +1336,6 @@ pub fn BlockStateAsString(state: TBlockState) -> &'static str {
         TBLOCK_SUBABORT_PENDING => "SUBABORT_PENDING",
         TBLOCK_SUBRESTART => "SUBRESTART",
         TBLOCK_SUBABORT_RESTART => "SUBABORT_RESTART",
-        _ => "UNRECOGNIZED",
     }
 }
 
@@ -1293,7 +1348,6 @@ pub fn TransStateAsString(state: TransState) -> &'static str {
         TRANS_COMMIT => "COMMIT",
         TRANS_ABORT => "ABORT",
         TRANS_PREPARE => "PREPARE",
-        _ => "UNRECOGNIZED",
     }
 }
 
@@ -1412,13 +1466,9 @@ pub fn TransactionBlockStatusCode() -> char {
         | TBLOCK_SUBABORT_PENDING
         | TBLOCK_SUBRESTART
         | TBLOCK_SUBABORT_RESTART => 'E', // in a failed transaction
-        other => {
-            // C: elog(FATAL, "invalid transaction block state: %s")
-            panic!(
-                "invalid transaction block state: {}",
-                BlockStateAsString(other)
-            );
-        }
+                                           // C's elog(FATAL, "invalid transaction block state")
+                                           // default arm is statically unreachable: TBlockState
+                                           // is a real enum and the match is exhaustive.
     }
 }
 
@@ -1449,10 +1499,10 @@ mod callback_tests {
     fn callbacks_run_newest_first() {
         reset_xact_state_for_tests();
         let log: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
-        for key in [1usize, 2, 3] {
+        for tag in [1usize, 2, 3] {
             let log = log.clone();
-            RegisterXactCallback(key, move |_| {
-                log.borrow_mut().push(key);
+            RegisterXactCallback(move |_| {
+                log.borrow_mut().push(tag);
                 Ok(())
             });
         }
@@ -1469,18 +1519,24 @@ mod callback_tests {
         let log: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let log = log.clone();
-            RegisterXactCallback(1, move |_| {
+            RegisterXactCallback(move |_| {
                 log.borrow_mut().push(1);
                 Ok(())
             });
         }
         {
             let log = log.clone();
-            RegisterXactCallback(2, move |_| {
+            let token: Rc<std::cell::Cell<Option<XactCallbackToken>>> =
+                Rc::new(std::cell::Cell::new(None));
+            let token_in_cb = token.clone();
+            let registered = RegisterXactCallback(move |_| {
                 log.borrow_mut().push(2);
-                UnregisterXactCallback(2);
+                if let Some(token) = token_in_cb.get() {
+                    UnregisterXactCallback(token);
+                }
                 Ok(())
             });
+            token.set(Some(registered));
         }
         CallXactCallbacks(XACT_EVENT_COMMIT).unwrap();
         CallXactCallbacks(XACT_EVENT_COMMIT).unwrap();
@@ -1497,16 +1553,16 @@ mod callback_tests {
         let log: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let log = log.clone();
-            RegisterXactCallback(1, move |_| {
+            RegisterXactCallback(move |_| {
                 log.borrow_mut().push(1);
                 let log = log.clone();
-                RegisterXactCallback(99, move |_| {
+                let nested = RegisterXactCallback(move |_| {
                     log.borrow_mut().push(99);
                     Ok(())
                 });
-                // re-register under a fresh key so only one nested
-                // registration accumulates per round
-                UnregisterXactCallback(99);
+                // unregister again so only one nested registration
+                // accumulates per round
+                UnregisterXactCallback(nested);
                 Ok(())
             });
         }

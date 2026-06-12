@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::cell::RefCell;
 
 const FALLBACK_S0: u64 = 0x5851_f42d_4c95_7f2d;
 const FALLBACK_S1: u64 = 0x1405_7b7e_f767_814f;
@@ -140,11 +140,15 @@ impl PgPrng {
     }
 }
 
-static GLOBAL_PRNG: Mutex<PgPrng> = Mutex::new(PgPrng::from_raw_state(0, 0));
+thread_local! {
+    /// `pg_global_prng_state` lives in backend-private memory in C (seeded
+    /// per backend), so it is per-backend = per-thread state here, never a
+    /// process-wide static.
+    static GLOBAL_PRNG: RefCell<PgPrng> = const { RefCell::new(PgPrng::from_raw_state(0, 0)) };
+}
 
 pub fn global_prng<R>(f: impl FnOnce(&mut PgPrng) -> R) -> R {
-    let mut state = GLOBAL_PRNG.lock().expect("global PRNG state lock poisoned");
-    f(&mut state)
+    GLOBAL_PRNG.with(|state| f(&mut state.borrow_mut()))
 }
 
 fn leftmost_one_pos64(word: u64) -> u32 {

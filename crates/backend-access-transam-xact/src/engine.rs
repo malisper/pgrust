@@ -66,14 +66,13 @@ fn RecordTransactionCommit() -> PgResult<TransactionId> {
     let workspace = MemoryContext::new("RecordTransactionCommit");
     let mcx = workspace.mcx();
     let rels = storage_seams::smgr_get_pending_deletes::call(mcx, true)?;
-    let children = xactGetCommittedChildren();
+    let children = xactGetCommittedChildren()?;
     let dropped_stats = pgstat_xact_seams::pgstat_get_transactional_drops::call(mcx, true)?;
-    let (inval_msgs, nmsgs, relcache_init_file_inval) =
-        if xlog_seams::xlog_standby_info_active::call() {
-            inval_seams::xact_get_committed_invalidation_messages::call(mcx)?
-        } else {
-            (mcx::PgVec::new_in(mcx), 0, false)
-        };
+    let (inval_msgs, relcache_init_file_inval) = if xlog_seams::xlog_standby_info_active::call() {
+        inval_seams::xact_get_committed_invalidation_messages::call(mcx)?
+    } else {
+        (mcx::PgVec::new_in(mcx), false)
+    };
     let mut wrote_xlog = xlog_seams::xact_last_rec_end::call() != 0;
 
     if !mark_xid_committed {
@@ -91,12 +90,8 @@ fn RecordTransactionCommit() -> PgResult<TransactionId> {
 
         // Transactions without an assigned xid can still carry invalidation
         // messages (inplace updates; extensions); emit a bespoke record.
-        if nmsgs != 0 {
-            standby_seams::log_standby_invalidations::call(
-                nmsgs,
-                &inval_msgs,
-                relcache_init_file_inval,
-            )?;
+        if !inval_msgs.is_empty() {
+            standby_seams::log_standby_invalidations::call(&inval_msgs, relcache_init_file_inval)?;
             wrote_xlog = true; // not strictly necessary
         }
 
@@ -125,7 +120,6 @@ fn RecordTransactionCommit() -> PgResult<TransactionId> {
             &rels,
             &dropped_stats,
             &inval_msgs,
-            nmsgs,
             relcache_init_file_inval,
             MyXactFlags(),
             InvalidTransactionId,
@@ -237,7 +231,7 @@ fn RecordTransactionAbort(is_subxact: bool) -> PgResult<TransactionId> {
     let workspace = MemoryContext::new("RecordTransactionAbort");
     let mcx = workspace.mcx();
     let rels = storage_seams::smgr_get_pending_deletes::call(mcx, false)?;
-    let children = xactGetCommittedChildren();
+    let children = xactGetCommittedChildren()?;
     let dropped_stats = pgstat_xact_seams::pgstat_get_transactional_drops::call(mcx, false)?;
 
     globals_seams::start_critical_section::call();
@@ -1244,17 +1238,8 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             debug_assert_eq!(cur_block_state(), TBLOCK_SUBBEGIN);
             StartSubTransaction()?;
             xs(|s| s.current_mut().block_state = TBLOCK_SUBINPROGRESS);
-        }
-
-        other => {
-            return Err(PgError::new(
-                FATAL,
-                format!(
-                    "CommitTransactionCommand: unexpected state {}",
-                    BlockStateAsString(other)
-                ),
-            ));
-        }
+        } // C's elog(FATAL, "...unexpected state...") default arm is
+          // statically unreachable: the match is exhaustive over TBlockState.
     }
 
     Ok(true)
@@ -1359,17 +1344,8 @@ fn AbortCurrentTransactionInternal() -> PgResult<bool> {
         TBLOCK_SUBABORT_END | TBLOCK_SUBABORT_RESTART => {
             CleanupSubTransaction()?;
             return Ok(false);
-        }
-
-        other => {
-            return Err(PgError::new(
-                FATAL,
-                format!(
-                    "AbortCurrentTransaction: unexpected state {}",
-                    BlockStateAsString(other)
-                ),
-            ));
-        }
+        } // C's elog(FATAL, "...unexpected state...") default arm is
+          // statically unreachable: the match is exhaustive over TBlockState.
     }
 
     Ok(true)
@@ -1411,8 +1387,10 @@ pub fn PrepareTransactionBlock(gid: &str) -> PgResult<bool> {
         let top_state = xs(|s| s.transaction_stack[0].block_state);
         if top_state == TBLOCK_END {
             // Save GID where PrepareTransaction can find it.
+            // (C: MemoryContextStrdup(TopTransactionContext, gid))
+            let gid = try_strdup(gid, "out of memory saving prepared-transaction GID")?;
             xs(|s| {
-                s.prepare_gid = Some(gid.to_owned());
+                s.prepare_gid = Some(gid);
                 s.transaction_stack[0].block_state = TBLOCK_PREPARE;
             });
         } else {
@@ -1671,8 +1649,10 @@ pub fn DefineSavepoint(name: Option<&str>) -> PgResult<()> {
             // Note that we are allocating the savepoint name in the parent
             // transaction's memory lifetime, since we don't yet have a
             // transaction context for the new guy.
+            // (C: MemoryContextStrdup(TopTransactionContext, name))
             if let Some(name) = name {
-                xs(|s| s.current_mut().name = Some(name.to_owned()));
+                let name = try_strdup(name, "out of memory saving savepoint name")?;
+                xs(|s| s.current_mut().name = Some(name));
             }
             Ok(())
         }
@@ -1884,8 +1864,10 @@ pub fn BeginInternalSubTransaction(name: Option<&str>) -> PgResult<()> {
             | TBLOCK_SUBINPROGRESS => {
                 // Normal subtransaction start.
                 PushTransaction()?;
+                // (C: MemoryContextStrdup(TopTransactionContext, name))
                 if let Some(name) = name {
-                    xs(|s| s.current_mut().name = Some(name.to_owned()));
+                    let name = try_strdup(name, "out of memory saving savepoint name")?;
+                    xs(|s| s.current_mut().name = Some(name));
                 }
             }
             other => {
@@ -2020,16 +2002,9 @@ pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
                     portal_seams::at_subabort_portals::call(my, parent)?;
                 }
                 CleanupSubTransaction()?;
-            }
-            other => {
-                return Err(PgError::new(
-                    FATAL,
-                    format!(
-                        "AbortOutOfAnyTransaction: unexpected state {}",
-                        BlockStateAsString(other)
-                    ),
-                ));
-            }
+            } // C's elog(FATAL, "...unexpected state...") default arm is
+              // statically unreachable: the match is exhaustive over
+              // TBlockState.
         }
         if cur_block_state() == TBLOCK_DEFAULT {
             break;
@@ -2424,7 +2399,14 @@ pub fn SerializeTransactionState(out: &mut [u8]) -> PgResult<usize> {
     let (iso, deferrable, top_full, cur_full, cur_cid, xids) = xs(|s| {
         let xids: Vec<TransactionId> = if !s.parallel_current_xids.is_empty() {
             // Already in a parallel worker: pass along what we were given.
-            s.parallel_current_xids.clone()
+            let mut xids = Vec::new();
+            if xids.try_reserve_exact(s.parallel_current_xids.len()).is_err() {
+                return Err(PgError::error(
+                    "out of memory serializing transaction state",
+                ));
+            }
+            xids.extend_from_slice(&s.parallel_current_xids);
+            xids
         } else {
             let mut workspace: Vec<TransactionId> = Vec::new();
             for node in &s.transaction_stack {

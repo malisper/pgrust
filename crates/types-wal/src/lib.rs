@@ -12,6 +12,8 @@ extern crate alloc;
 
 pub mod wal;
 pub mod xact;
+pub mod xlogutils;
 
 pub use wal::*;
 pub use xact::*;
+pub use xlogutils::*;

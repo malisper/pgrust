@@ -5,7 +5,7 @@
 use alloc::vec::Vec;
 
 use types_core::primitive::{Oid, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
-use types_storage::RelFileLocator;
+use types_storage::{RelFileLocator, SharedInvalidationMessage};
 
 // --- record opcodes stored in xl_info, masked by XLOG_XACT_OPMASK ---
 pub const XLOG_XACT_COMMIT: u8 = 0x00;
@@ -49,10 +49,6 @@ pub const fn xact_completion_apply_feedback(xinfo: u32) -> bool {
     xinfo & XACT_COMPLETION_APPLY_FEEDBACK != 0
 }
 
-/// `sizeof(SharedInvalidationMessage)` (`storage/sinval.h`) — the per-message
-/// stride of the opaque inval blob carried in commit records.
-pub const SHARED_INVAL_MESSAGE_SIZE: usize = 16;
-
 /// One dropped pg_stat item, matching C's `xl_xact_stats_item`
 /// (`{ int kind; Oid dboid; uint32 objid_lo; uint32 objid_hi; }`, 16 bytes;
 /// the 64-bit objid is reassembled from its two halves).
@@ -64,8 +60,7 @@ pub struct XlXactStatsItem {
 }
 
 /// `xl_xact_parsed_commit` (`access/xact.h`), the decoded form of a commit
-/// record. The inval messages stay an opaque byte blob
-/// (`nmsgs * SHARED_INVAL_MESSAGE_SIZE` bytes).
+/// record.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ParsedCommit {
     pub xact_time: TimestampTz,
@@ -75,9 +70,8 @@ pub struct ParsedCommit {
     pub subxacts: Vec<TransactionId>,
     pub xlocators: Vec<RelFileLocator>,
     pub stats: Vec<XlXactStatsItem>,
-    /// raw `SharedInvalidationMessage` bytes (opaque here)
-    pub msgs: Vec<u8>,
-    pub nmsgs: i32,
+    /// `msgs`/`nmsgs` — the record's `SharedInvalidationMessage` array.
+    pub msgs: Vec<SharedInvalidationMessage>,
     pub twophase_xid: TransactionId,
     pub twophase_gid: Vec<u8>,
     pub origin_lsn: XLogRecPtr,

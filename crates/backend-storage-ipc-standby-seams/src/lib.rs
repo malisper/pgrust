@@ -4,6 +4,7 @@
 
 use types_core::TransactionId;
 use types_error::PgResult;
+use types_storage::SharedInvalidationMessage;
 
 seam_core::seam!(
     /// `RecordKnownAssignedTransactionIds(xid)` — hot-standby bookkeeping for
@@ -29,12 +30,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `LogStandbyInvalidations(nmsgs, msgs, relcacheInitFileInval)` — emit a
-    /// bespoke invalidations WAL record for an xid-less committing transaction.
-    /// `msgs` is the raw `SharedInvalidationMessage` array
-    /// (`nmsgs * sizeof(SharedInvalidationMessage)` bytes).
+    /// bespoke invalidations WAL record for an xid-less committing transaction
+    /// (the slice carries `nmsgs`).
     pub fn log_standby_invalidations(
-        nmsgs: i32,
-        msgs: &[u8],
+        msgs: &[SharedInvalidationMessage],
         relcache_init_file_inval: bool,
     ) -> PgResult<()>
 );

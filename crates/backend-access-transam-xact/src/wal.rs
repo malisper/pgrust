@@ -8,7 +8,7 @@
 
 use crate::*;
 use types_core::{Oid, TransactionId};
-use types_storage::RelFileLocator;
+use types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVAL_MESSAGE_SIZE};
 use types_wal::{
     XlXactStatsItem, RM_XACT_ID, XACT_COMPLETION_APPLY_FEEDBACK,
     XACT_COMPLETION_FORCE_SYNC_COMMIT, XACT_COMPLETION_UPDATE_RELCACHE_FILE,
@@ -53,6 +53,18 @@ fn stats_bytes(items: &[XlXactStatsItem]) -> PgResult<Vec<u8>> {
     Ok(buf)
 }
 
+/// Serialize the `SharedInvalidationMessage` array to its raw C-union form
+/// (the byte layout the redo side and xactdesc expect).
+fn inval_msgs_bytes(msgs: &[SharedInvalidationMessage]) -> PgResult<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.try_reserve(msgs.len() * SHARED_INVAL_MESSAGE_SIZE)
+        .map_err(|_| oom())?;
+    for msg in msgs {
+        buf.extend_from_slice(&msg.to_wal_bytes());
+    }
+    Ok(buf)
+}
+
 fn xids_bytes(xids: &[TransactionId]) -> PgResult<Vec<u8>> {
     let mut buf = Vec::new();
     buf.try_reserve(xids.len() * 4).map_err(|_| oom())?;
@@ -63,15 +75,13 @@ fn xids_bytes(xids: &[TransactionId]) -> PgResult<Vec<u8>> {
 }
 
 /// `XactLogCommitRecord` (xact.c:5814) — log the commit record for a plain or
-/// twophase commit (2PC when `twophase_xid` is valid). `msgs` is the raw
-/// `SharedInvalidationMessage` array bytes.
+/// twophase commit (2PC when `twophase_xid` is valid).
 pub fn XactLogCommitRecord(
     commit_time: TimestampTz,
     subxacts: &[TransactionId],
     rels: &[RelFileLocator],
     dropped_stats: &[XlXactStatsItem],
-    msgs: &[u8],
-    nmsgs: i32,
+    msgs: &[SharedInvalidationMessage],
     relcache_inval: bool,
     xactflags: i32,
     twophase_xid: TransactionId,
@@ -108,7 +118,7 @@ pub fn XactLogCommitRecord(
     let logical_info = xlog_seams::xlog_logical_info_active::call();
     let mut db_id: Oid = 0;
     let mut ts_id: Oid = 0;
-    if nmsgs > 0 || logical_info {
+    if !msgs.is_empty() || logical_info {
         xinfo |= XACT_XINFO_HAS_DBINFO;
         db_id = globals_seams::my_database_id::call();
         ts_id = globals_seams::my_database_table_space::call();
@@ -124,7 +134,7 @@ pub fn XactLogCommitRecord(
     if !dropped_stats.is_empty() {
         xinfo |= XACT_XINFO_HAS_DROPPED_STATS;
     }
-    if nmsgs > 0 {
+    if !msgs.is_empty() {
         xinfo |= XACT_XINFO_HAS_INVALS;
     }
 
@@ -185,8 +195,8 @@ pub fn XactLogCommitRecord(
 
     if (xinfo & XACT_XINFO_HAS_INVALS) != 0 {
         // xl_xact_invals { int nmsgs; SharedInvalidationMessage msgs[]; }
-        xloginsert_seams::xlog_register_data::call(&nmsgs.to_ne_bytes())?;
-        xloginsert_seams::xlog_register_data::call(msgs)?;
+        xloginsert_seams::xlog_register_data::call(&(msgs.len() as i32).to_ne_bytes())?;
+        xloginsert_seams::xlog_register_data::call(&inval_msgs_bytes(msgs)?)?;
     }
 
     if (xinfo & XACT_XINFO_HAS_TWOPHASE) != 0 {
