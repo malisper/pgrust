@@ -5,5 +5,5 @@
 seam_core::seam!(
     /// `BackgroundWriterMain(startup_data, startup_data_len)` (`src/backend/postmaster/bgwriter.c`): child entry
     /// point invoked by `postmaster_child_launch`; never returns.
-    pub fn background_writer_main(startup_data: &[u8]) -> !
+    pub fn background_writer_main(startup_data: &types_startup::StartupData) -> !
 );

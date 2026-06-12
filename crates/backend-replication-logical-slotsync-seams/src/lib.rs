@@ -5,5 +5,5 @@
 seam_core::seam!(
     /// `ReplSlotSyncWorkerMain(startup_data, startup_data_len)` (`src/backend/replication/logical/slotsync.c`): child entry
     /// point invoked by `postmaster_child_launch`; never returns.
-    pub fn repl_slot_sync_worker_main(startup_data: &[u8]) -> !
+    pub fn repl_slot_sync_worker_main(startup_data: &types_startup::StartupData) -> !
 );

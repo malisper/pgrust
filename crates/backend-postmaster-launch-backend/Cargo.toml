@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 types-core = { path = "../types-core" }
 types-net = { path = "../types-net" }
+types-startup = { path = "../types-startup" }
 backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
 backend-postmaster-autovacuum-seams = { path = "../backend-postmaster-autovacuum-seams" }
 backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }

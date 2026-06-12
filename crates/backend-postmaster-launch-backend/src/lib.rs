@@ -13,23 +13,22 @@
 //! save/restore/read backend-variables machinery, and the inheritable-socket
 //! helpers) is not compiled on a Unix build and is not ported.
 
-use types_core::init::{
-    BackendType, BACKEND_NUM_TYPES, B_BACKEND, B_LOGGER, B_WAL_SENDER,
-};
+use types_core::init::{BackendType, BACKEND_NUM_TYPES};
 use types_core::pid_t;
 use types_net::ClientSocket;
+use types_startup::StartupData;
 
 /// `IsExternalConnectionBackend(backend_type)` (`miscadmin.h`):
 /// `backend_type == B_BACKEND || backend_type == B_WAL_SENDER`.
 #[inline]
 fn is_external_connection_backend(backend_type: BackendType) -> bool {
-    backend_type == B_BACKEND || backend_type == B_WAL_SENDER
+    backend_type == BackendType::Backend || backend_type == BackendType::WalSender
 }
 
 /// C: `void (*main_fn)(const void *startup_data, size_t startup_data_len)` —
-/// a child process's entry point; never returns. The byte slice carries both
-/// the pointer and the length.
-type ChildMainFn = fn(&[u8]) -> !;
+/// a child process's entry point; never returns. [`StartupData`] is the typed
+/// stand-in for the pointer/length pair.
+type ChildMainFn = fn(&StartupData) -> !;
 
 /// C: `child_process_kind` — information needed to launch one kind of child
 /// process.
@@ -171,10 +170,10 @@ pub fn postmaster_child_name(child_type: BackendType) -> &'static str {
 /// Start a new postmaster child process.
 ///
 /// `child_slot` is the `PMChildFlags` array index reserved for the child
-/// process. `startup_data` is an optional contiguous chunk of data passed to
-/// the child process (the slice carries both the C `void *` and its
-/// `startup_data_len`; an empty slice is the C NULL). `client_sock`, when
-/// `Some`, is the inherited client socket.
+/// process. `startup_data` is the typed stand-in for the C `void
+/// *`/`startup_data_len` pair passed to the child process
+/// ([`StartupData::None`] is the C NULL). `client_sock`, when `Some`, is the
+/// inherited client socket.
 ///
 /// The child closes inherited resources, (optionally) detaches shared memory,
 /// switches to `TopMemoryContext`, records `MyPMChildSlot` / `MyClientSocket`,
@@ -183,7 +182,7 @@ pub fn postmaster_child_name(child_type: BackendType) -> &'static str {
 pub fn postmaster_child_launch(
     child_type: BackendType,
     child_slot: i32,
-    startup_data: &mut [u8],
+    startup_data: &mut StartupData,
     client_sock: Option<&ClientSocket>,
 ) -> pid_t {
     // Assert(IsPostmasterEnvironment && !IsUnderPostmaster);
@@ -195,11 +194,12 @@ pub fn postmaster_child_launch(
     // Capture time Postmaster initiates process creation for logging.
     if is_external_connection_backend(child_type) {
         // ((BackendStartupData *) startup_data)->fork_started = GetCurrentTimestamp();
-        let now = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
-        backend_tcop_backend_startup_seams::set_backend_startup_data_fork_started::call(
-            startup_data,
-            now,
-        );
+        // The C cast's type confusion would be UB; panic is the loud equivalent.
+        let StartupData::Backend(backend_startup_data) = &mut *startup_data else {
+            panic!("postmaster_child_launch: {child_type:?} launched without BackendStartupData")
+        };
+        backend_startup_data.fork_started =
+            backend_utils_adt_timestamp_seams::get_current_timestamp::call();
     }
 
     let pid = backend_postmaster_fork_process_seams::fork_process::call();
@@ -208,10 +208,13 @@ pub fn postmaster_child_launch(
 
         // Capture and transfer timings that may be needed for logging.
         if is_external_connection_backend(child_type) {
-            let (socket_created, fork_started) =
-                backend_tcop_backend_startup_seams::backend_startup_data_timings::call(
-                    startup_data,
-                );
+            let StartupData::Backend(backend_startup_data) = &*startup_data else {
+                unreachable!()
+            };
+            let (socket_created, fork_started) = (
+                backend_startup_data.socket_created,
+                backend_startup_data.fork_started,
+            );
             let fork_end = backend_utils_adt_timestamp_seams::get_current_timestamp::call();
             backend_tcop_backend_startup_seams::set_conn_timing_child::call(
                 socket_created,
@@ -222,7 +225,7 @@ pub fn postmaster_child_launch(
 
         // Close the postmaster's sockets.
         backend_postmaster_postmaster_seams::close_postmaster_ports::call(
-            child_type == B_LOGGER,
+            child_type == BackendType::Logger,
         );
 
         // Detangle from postmaster.
@@ -253,7 +256,7 @@ pub fn postmaster_child_launch(
         let main_fn = CHILD_PROCESS_KINDS[child_type as usize]
             .main_fn
             .unwrap_or_else(|| {
-                panic!("postmaster_child_launch: no main_fn for child type {child_type}")
+                panic!("postmaster_child_launch: no main_fn for child type {child_type:?}")
             });
         main_fn(startup_data);
     }

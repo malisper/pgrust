@@ -5,5 +5,5 @@
 seam_core::seam!(
     /// `SysLoggerMain(startup_data, startup_data_len)` (`src/backend/postmaster/syslogger.c`): child entry
     /// point invoked by `postmaster_child_launch`; never returns.
-    pub fn sys_logger_main(startup_data: &[u8]) -> !
+    pub fn sys_logger_main(startup_data: &types_startup::StartupData) -> !
 );

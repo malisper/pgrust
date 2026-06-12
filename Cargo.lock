@@ -33,6 +33,7 @@ name = "backend-postmaster-autovacuum-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -40,6 +41,7 @@ name = "backend-postmaster-bgworker-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -47,6 +49,7 @@ name = "backend-postmaster-bgwriter-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -54,6 +57,7 @@ name = "backend-postmaster-checkpointer-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -91,6 +95,7 @@ dependencies = [
  "backend-utils-mmgr-mcxt-seams",
  "types-core",
  "types-net",
+ "types-startup",
 ]
 
 [[package]]
@@ -98,6 +103,7 @@ name = "backend-postmaster-pgarch-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -112,6 +118,7 @@ name = "backend-postmaster-startup-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -119,6 +126,7 @@ name = "backend-postmaster-syslogger-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -126,6 +134,7 @@ name = "backend-postmaster-walsummarizer-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -133,6 +142,7 @@ name = "backend-postmaster-walwriter-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -140,6 +150,7 @@ name = "backend-replication-logical-slotsync-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -147,6 +158,7 @@ name = "backend-replication-walreceiver-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -154,6 +166,7 @@ name = "backend-storage-aio-methods-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -176,6 +189,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-startup",
 ]
 
 [[package]]
@@ -276,6 +290,16 @@ dependencies = [
 [[package]]
 name = "types-net"
 version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "types-startup"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-tuple"

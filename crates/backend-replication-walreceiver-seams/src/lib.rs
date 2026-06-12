@@ -5,5 +5,5 @@
 seam_core::seam!(
     /// `WalReceiverMain(startup_data, startup_data_len)` (`src/backend/replication/walreceiver.c`): child entry
     /// point invoked by `postmaster_child_launch`; never returns.
-    pub fn wal_receiver_main(startup_data: &[u8]) -> !
+    pub fn wal_receiver_main(startup_data: &types_startup::StartupData) -> !
 );

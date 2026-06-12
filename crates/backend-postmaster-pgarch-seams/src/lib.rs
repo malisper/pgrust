@@ -5,5 +5,5 @@
 seam_core::seam!(
     /// `PgArchiverMain(startup_data, startup_data_len)` (`src/backend/postmaster/pgarch.c`): child entry
     /// point invoked by `postmaster_child_launch`; never returns.
-    pub fn pg_archiver_main(startup_data: &[u8]) -> !
+    pub fn pg_archiver_main(startup_data: &types_startup::StartupData) -> !
 );

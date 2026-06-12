@@ -1,26 +1,73 @@
 //! Process-environment vocabulary from `miscadmin.h`.
 
 /// `BackendType` (`miscadmin.h`) — the kind of a postmaster child process.
-pub type BackendType = u32;
-pub const B_INVALID: BackendType = 0;
-pub const B_BACKEND: BackendType = 1;
-pub const B_DEAD_END_BACKEND: BackendType = 2;
-pub const B_AUTOVAC_LAUNCHER: BackendType = 3;
-pub const B_AUTOVAC_WORKER: BackendType = 4;
-pub const B_BG_WORKER: BackendType = 5;
-pub const B_WAL_SENDER: BackendType = 6;
-pub const B_SLOTSYNC_WORKER: BackendType = 7;
-pub const B_STANDALONE_BACKEND: BackendType = 8;
-pub const B_ARCHIVER: BackendType = 9;
-pub const B_BG_WRITER: BackendType = 10;
-pub const B_CHECKPOINTER: BackendType = 11;
-pub const B_IO_WORKER: BackendType = 12;
-pub const B_STARTUP: BackendType = 13;
-pub const B_WAL_RECEIVER: BackendType = 14;
-pub const B_WAL_SUMMARIZER: BackendType = 15;
-pub const B_WAL_WRITER: BackendType = 16;
-pub const B_LOGGER: BackendType = 17;
+/// Discriminants match the C enum; `launch_backend.c`'s
+/// `child_process_kinds[]` is indexed by these values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum BackendType {
+    /// `B_INVALID`.
+    Invalid = 0,
+    /// `B_BACKEND`.
+    Backend = 1,
+    /// `B_DEAD_END_BACKEND`.
+    DeadEndBackend = 2,
+    /// `B_AUTOVAC_LAUNCHER`.
+    AutoVacLauncher = 3,
+    /// `B_AUTOVAC_WORKER`.
+    AutoVacWorker = 4,
+    /// `B_BG_WORKER`.
+    BgWorker = 5,
+    /// `B_WAL_SENDER`.
+    WalSender = 6,
+    /// `B_SLOTSYNC_WORKER`.
+    SlotSyncWorker = 7,
+    /// `B_STANDALONE_BACKEND`.
+    StandaloneBackend = 8,
+    /// `B_ARCHIVER`.
+    Archiver = 9,
+    /// `B_BG_WRITER`.
+    BgWriter = 10,
+    /// `B_CHECKPOINTER`.
+    Checkpointer = 11,
+    /// `B_IO_WORKER`.
+    IoWorker = 12,
+    /// `B_STARTUP`.
+    Startup = 13,
+    /// `B_WAL_RECEIVER`.
+    WalReceiver = 14,
+    /// `B_WAL_SUMMARIZER`.
+    WalSummarizer = 15,
+    /// `B_WAL_WRITER`.
+    WalWriter = 16,
+    /// `B_LOGGER`.
+    Logger = 17,
+}
+
+impl BackendType {
+    /// Every `BackendType`, in C enum (discriminant) order.
+    pub const ALL: [BackendType; BACKEND_NUM_TYPES] = [
+        BackendType::Invalid,
+        BackendType::Backend,
+        BackendType::DeadEndBackend,
+        BackendType::AutoVacLauncher,
+        BackendType::AutoVacWorker,
+        BackendType::BgWorker,
+        BackendType::WalSender,
+        BackendType::SlotSyncWorker,
+        BackendType::StandaloneBackend,
+        BackendType::Archiver,
+        BackendType::BgWriter,
+        BackendType::Checkpointer,
+        BackendType::IoWorker,
+        BackendType::Startup,
+        BackendType::WalReceiver,
+        BackendType::WalSummarizer,
+        BackendType::WalWriter,
+        BackendType::Logger,
+    ];
+}
 
 /// `BACKEND_NUM_TYPES` (`miscadmin.h`): `(B_LOGGER + 1)`, the number of
 /// distinct [`BackendType`] values.
-pub const BACKEND_NUM_TYPES: usize = (B_LOGGER + 1) as usize;
+pub const BACKEND_NUM_TYPES: usize = BackendType::Logger as usize + 1;

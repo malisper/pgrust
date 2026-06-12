@@ -5,5 +5,5 @@
 seam_core::seam!(
     /// `WalSummarizerMain(startup_data, startup_data_len)` (`src/backend/postmaster/walsummarizer.c`): child entry
     /// point invoked by `postmaster_child_launch`; never returns.
-    pub fn wal_summarizer_main(startup_data: &[u8]) -> !
+    pub fn wal_summarizer_main(startup_data: &types_startup::StartupData) -> !
 );

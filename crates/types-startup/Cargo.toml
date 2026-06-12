@@ -1,12 +1,12 @@
 [package]
-name = "types-net"
+name = "types-startup"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "types_net"
+name = "types_startup"
 path = "src/lib.rs"
 
 [dependencies]
-libc = { version = "0.2", default-features = false }
+types-core = { path = "../types-core" }
