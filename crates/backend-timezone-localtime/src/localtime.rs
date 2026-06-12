@@ -335,12 +335,40 @@ fn gmtsub(timep: pg_time_t, offset: i32) -> Option<pg_tm> {
 ///
 /// Returns `None` if the conversion overflows (C returns NULL).
 pub fn pg_localtime(timep: pg_time_t, tz: &pg_tz) -> Option<pg_tm> {
-    let ttis_index = local_type_index(timep, &tz.state)?;
-    let tt = tz.state.ttis[ttis_index];
-    let mut tm = timesub(timep, tt.tt_utoff, Some(&tz.state))?;
+    localsub(&tz.state, timep)
+}
+
+/// C `localsub`: the guts of localtime, freely callable. For times outside a
+/// repeating zone's transition table, the C code maps the time into the table
+/// by whole 400-year Gregorian cycles, converts the mapped time, and then
+/// shifts `tm_year` back — so the leap-second scan inside `timesub` sees the
+/// mapped time, exactly as in C.
+fn localsub(sp: &state, t: pg_time_t) -> Option<pg_tm> {
+    let timecnt = sp.timecnt as usize;
+    if timecnt > 0 && ((sp.goback && t < sp.ats[0]) || (sp.goahead && t > sp.ats[timecnt - 1])) {
+        let mapping = repeat_mapping(t, sp)?; /* None: "cannot happen" */
+        let mut result = localsub(sp, mapping.newt)?;
+        let newy = if t < sp.ats[0] {
+            (result.tm_year as i64).wrapping_sub(mapping.years)
+        } else {
+            (result.tm_year as i64).wrapping_add(mapping.years)
+        };
+        if !(i32::MIN as i64 <= newy && newy <= i32::MAX as i64) {
+            return None;
+        }
+        result.tm_year = newy as i32;
+        return Some(result);
+    }
+    let i = if timecnt == 0 || t < sp.ats[0] {
+        sp.defaulttype as usize
+    } else {
+        let lo = sp.ats[..timecnt].partition_point(|&at| at <= t);
+        sp.types[lo - 1] as usize
+    };
+    let tt = sp.ttis[i];
+    let mut tm = timesub(t, tt.tt_utoff, Some(sp))?;
     tm.tm_isdst = tt.tt_isdst as i32;
-    tm.tm_gmtoff = tt.tt_utoff as i64;
-    tm.tm_zone = zone_name(&tz.state, tt.tt_desigidx);
+    tm.tm_zone = zone_name(sp, tt.tt_desigidx);
     Some(tm)
 }
 
@@ -349,53 +377,48 @@ pub fn pg_gmtime(timep: pg_time_t) -> Option<pg_tm> {
     gmtsub(timep, 0)
 }
 
-/// Map a time outside a repeating zone's transition table into the table
-/// (C localsub's / pg_next_dst_boundary's extrapolation), returning the
-/// mapped time plus the delta to add to a table-relative boundary to get
-/// back to the original time frame. `None` mirrors C's "cannot happen"
-/// range-check failure (NULL / -1). Arithmetic wraps like C built with
-/// -fwrapv; the trailing range check catches wrapped results.
-fn repeat_mapped_time(timep: pg_time_t, sp: &state) -> Option<(pg_time_t, pg_time_t)> {
-    let timecnt = sp.timecnt as usize;
-    if timecnt == 0 {
-        return Some((timep, 0));
-    }
-    let below = sp.goback && timep < sp.ats[0];
-    let above = sp.goahead && timep > sp.ats[timecnt - 1];
-    if !below && !above {
-        return Some((timep, 0));
-    }
+/// The 400-year-cycle extrapolation shared by C `localsub` and
+/// `pg_next_dst_boundary`: `newt` is the time mapped into the transition
+/// table, `seconds` the whole-cycle shift in seconds, and `years` the same
+/// shift in years. (`pg_next_dst_boundary` computes the cycle count as
+/// `seconds / YEARSPERREPEAT / AVGSECSPERYEAR`, which equals localsub's
+/// `seconds / SECSPERREPEAT` — truncated division composes.) `None` mirrors
+/// C's "cannot happen" range-check failure (NULL / -1). Arithmetic wraps like
+/// C built with -fwrapv; the trailing range check catches wrapped results.
+struct RepeatMapping {
+    newt: pg_time_t,
+    seconds: pg_time_t,
+    years: pg_time_t,
+}
 
+/// Precondition (as in C): `sp.timecnt > 0` and `timep` is outside the table
+/// on the goback/goahead side.
+fn repeat_mapping(timep: pg_time_t, sp: &state) -> Option<RepeatMapping> {
+    let timecnt = sp.timecnt as usize;
+    let below = timep < sp.ats[0];
     let seconds = if below {
         sp.ats[0].wrapping_sub(timep)
     } else {
         timep.wrapping_sub(sp.ats[timecnt - 1])
     }
     .wrapping_sub(1);
-    let delta = (seconds / SECSPERREPEAT)
+    let years = (seconds / SECSPERREPEAT)
         .wrapping_add(1)
-        .wrapping_mul(SECSPERREPEAT);
+        .wrapping_mul(YEARSPERREPEAT as i64);
+    let seconds = years.wrapping_mul(AVGSECSPERYEAR);
     let newt = if below {
-        timep.wrapping_add(delta)
+        timep.wrapping_add(seconds)
     } else {
-        timep.wrapping_sub(delta)
+        timep.wrapping_sub(seconds)
     };
     if newt < sp.ats[0] || newt > sp.ats[timecnt - 1] {
         return None; /* "cannot happen" */
     }
-    Some((newt, if below { -delta } else { delta }))
-}
-
-/// The type-index selection of C `localsub`: which `ttis` entry governs
-/// `timep`. `None` mirrors C's extrapolation failure (localsub returns NULL).
-fn local_type_index(timep: pg_time_t, sp: &state) -> Option<usize> {
-    let (timep, _) = repeat_mapped_time(timep, sp)?;
-    let timecnt = sp.timecnt as usize;
-    if timecnt == 0 || timep < sp.ats[0] {
-        return Some(sp.defaulttype as usize);
-    }
-    let index = sp.ats[..timecnt].partition_point(|&at| at <= timep);
-    Some(sp.types[index - 1] as usize)
+    Some(RepeatMapping {
+        newt,
+        seconds,
+        years,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,12 +461,16 @@ fn next_dst_boundary_impl(timep: pg_time_t, sp: &state) -> NextDstBoundary {
 
     if (sp.goback && timep < sp.ats[0]) || (sp.goahead && timep > sp.ats[timecnt - 1]) {
         // For values outside the transition table, extrapolate.
-        let Some((newt, delta)) = repeat_mapped_time(timep, sp) else {
+        let Some(mapping) = repeat_mapping(timep, sp) else {
             return NextDstBoundary::Overflow;
         };
-        return match next_dst_boundary_impl(newt, sp) {
+        return match next_dst_boundary_impl(mapping.newt, sp) {
             NextDstBoundary::Boundary(mut b) => {
-                b.boundary = b.boundary.wrapping_add(delta);
+                b.boundary = if timep < sp.ats[0] {
+                    b.boundary.wrapping_sub(mapping.seconds)
+                } else {
+                    b.boundary.wrapping_add(mapping.seconds)
+                };
                 NextDstBoundary::Boundary(b)
             }
             other => other,
@@ -673,19 +700,30 @@ fn parse_tzif(bytes: &[u8], sp: &mut state, doextend: bool) -> Result<(), TzLoad
     let first = TzifHeader::parse_at(bytes, 0).ok_or(TzLoadError::Invalid)?;
     let mut cursor = first.data_start;
     parse_tzif_block(bytes, &first, 4, &mut cursor, sp)?;
-    let mut version = first.version;
-    if version != 0 {
+
+    // C's loop breaks (before its memmove) when a parsed header's version
+    // byte is '\0'; the footer check then runs against whatever the buffer
+    // happens to hold. The candidate footer region is therefore: the whole
+    // file when the first header's version is 0; the bytes from the second
+    // header onward when the second header's version is 0; otherwise the
+    // bytes after the 64-bit block. (There is no magic check, so a crafted
+    // version-0 file starting and ending with '\n' does reach tzparse in C.)
+    let footer_start = if first.version == 0 {
+        0
+    } else {
+        let second_start = cursor;
         let second = TzifHeader::parse_at(bytes, cursor).ok_or(TzLoadError::Invalid)?;
         cursor = second.data_start;
         parse_tzif_block(bytes, &second, 8, &mut cursor, sp)?;
-        version = second.version;
-    }
+        if second.version == 0 {
+            second_start
+        } else {
+            cursor
+        }
+    };
 
-    // The footer (a POSIX TZ string between two newlines at the very end of
-    // the file) only applies when the last parsed header's version was
-    // nonzero, mirroring C's memmove bookkeeping.
-    if doextend && version != 0 && sp.typecnt as usize + 2 <= TZ_MAX_TYPES {
-        if let Some(posix) = parse_footer_posix(bytes, cursor) {
+    if doextend && sp.typecnt as usize + 2 <= TZ_MAX_TYPES {
+        if let Some(posix) = parse_footer_posix(bytes, footer_start) {
             let mut extended = state::default();
             if tzparse(posix, &mut extended, false) {
                 extend_with_posix(sp, &mut extended);
@@ -782,6 +820,10 @@ impl TzifHeader {
     }
 }
 
+// The `at <= TIME_T_MAX` / `at < TIME_T_MIN` / `tr <= TIME_T_MAX` comparisons
+// deliberately transcribe C's range checks, which are vacuous when pg_time_t
+// is the full i64 range (as here) but kept for fidelity.
+#[allow(clippy::absurd_extreme_comparisons)]
 fn parse_tzif_block(
     bytes: &[u8],
     header: &TzifHeader,
@@ -948,14 +990,20 @@ fn parse_tzif_block(
 }
 
 /// The footer shape check of C tzloadbody: the remaining bytes must be more
-/// than two, start with '\n', and end with '\n' (the end of the file); the
-/// TZ string is everything in between.
-fn parse_footer_posix(bytes: &[u8], cursor: usize) -> Option<&str> {
-    let footer = bytes.get(cursor..)?;
+/// than two, start with '\n', and end with '\n' (the end of the file). C
+/// overwrites the final '\n' with '\0' and passes `&buf[1]` as a C string, so
+/// the TZ string runs to the first NUL (or to that final newline).
+fn parse_footer_posix(bytes: &[u8], start: usize) -> Option<&str> {
+    let footer = bytes.get(start..)?;
     if footer.len() <= 2 || footer[0] != b'\n' || footer[footer.len() - 1] != b'\n' {
         return None;
     }
-    std::str::from_utf8(&footer[1..footer.len() - 1]).ok()
+    let tz = &footer[1..footer.len() - 1];
+    let tz = match tz.iter().position(|&byte| byte == 0) {
+        Some(nul) => &tz[..nul],
+        None => tz,
+    };
+    std::str::from_utf8(tz).ok()
 }
 
 /// The `doextend` graft of C tzloadbody (localtime.c:415-491): splice the
@@ -975,17 +1023,17 @@ fn extend_with_posix(sp: &mut state, ts: &mut state) {
     let mut charcnt = sp.charcnt as usize;
     for i in 0..ts.typecnt as usize {
         let tsabbr = read_cstr(&ts.chars, ts.ttis[i].tt_desigidx as usize);
-        // Search existing abbreviations (C iterates `j` over [0, charcnt)
-        // stepping by strlen+1 since each slot is NUL-terminated).
+        // Search for a matching NUL-terminated string at *every* byte offset
+        // j in [0, charcnt) — C's loop steps j by 1, so a suffix of an
+        // existing abbreviation (e.g. "ST" inside "AKST\0") also matches.
         let mut matched = None;
         let mut j = 0usize;
         while j < charcnt {
-            let existing = read_cstr(&sp.chars, j);
-            if existing == tsabbr {
+            if read_cstr(&sp.chars, j) == tsabbr {
                 matched = Some(j);
                 break;
             }
-            j += existing.len() + 1;
+            j += 1;
         }
         if let Some(j) = matched {
             ts.ttis[i].tt_desigidx = j as i32;
@@ -1457,7 +1505,9 @@ fn timesub(timep: pg_time_t, offset: i32, sp: Option<&state>) -> Option<pg_tm> {
         if increment_overflow(&mut newy, idelta) {
             return None; // out of range
         }
-        let leapdays = leaps_thru_end_of(newy - 1) - leaps_thru_end_of(y - 1);
+        // wrapping_sub: C (built with -fwrapv) wraps when newy/y is INT_MIN.
+        let leapdays =
+            leaps_thru_end_of(newy.wrapping_sub(1)) - leaps_thru_end_of(y.wrapping_sub(1));
         tdays -= (newy as i64 - y as i64) * DAYSPERNYEAR as i64;
         tdays -= leapdays as i64;
         y = newy;
@@ -1493,9 +1543,11 @@ fn timesub(timep: pg_time_t, offset: i32, sp: Option<&state>) -> Option<pg_tm> {
     }
     let tm_yday = idays;
 
-    // The "extra" mods avoid overflow problems.
+    // The "extra" mods avoid overflow problems. wrapping_sub: with -fwrapv, C
+    // wraps y - EPOCH_YEAR for y within 1970 of INT_MIN (tm_year above only
+    // guarantees y >= INT_MIN + TM_YEAR_BASE).
     let mut tm_wday = EPOCH_WDAY
-        + ((y - EPOCH_YEAR) % DAYSPERWEEK) * (DAYSPERNYEAR % DAYSPERWEEK)
+        + (y.wrapping_sub(EPOCH_YEAR) % DAYSPERWEEK) * (DAYSPERNYEAR % DAYSPERWEEK)
         + leaps_thru_end_of(y - 1)
         - leaps_thru_end_of(EPOCH_YEAR - 1)
         + idays;
@@ -1778,6 +1830,25 @@ mod tests {
         let ok = synthetic_tzif_v1(49);
         let mut sp = state::default();
         assert!(parse_tzif(&ok, &mut sp, false).is_ok());
+    }
+
+    /// C's abbreviation-reuse scan in tzloadbody steps byte-by-byte, so a
+    /// footer abbreviation that is a suffix of an existing one ("KST" inside
+    /// "AKST\0") is reused rather than appended.
+    #[test]
+    fn footer_abbrev_reuse_matches_c_suffix_scan() {
+        let mut sp = state::default();
+        sp.typecnt = 2;
+        sp.charcnt = 10;
+        sp.chars[..10].copy_from_slice(b"AKST\0AKDT\0");
+        sp.ttis[1].tt_desigidx = 5;
+        let mut ts = state::default();
+        assert!(tzparse("KST9KDT,M3.2.0,M11.1.0", &mut ts, false));
+        extend_with_posix(&mut sp, &mut ts);
+        // "KST" matches at offset 1 (suffix of "AKST"), "KDT" at offset 6.
+        assert_eq!(sp.charcnt, 10, "no new abbreviation bytes are appended");
+        assert_eq!(sp.ttis[2].tt_desigidx, 1);
+        assert_eq!(sp.ttis[3].tt_desigidx, 6);
     }
 
     /// The footer-graft path must reference the correctly-grafted POSIX type
