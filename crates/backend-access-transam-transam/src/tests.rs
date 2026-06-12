@@ -17,8 +17,6 @@ thread_local! {
         RefCell::new(BTreeMap::new());
     /// subxid -> parent xid, as pg_subtrans would report.
     static PARENTS: RefCell<BTreeMap<TransactionId, TransactionId>> = RefCell::new(BTreeMap::new());
-    /// the TransactionXmin global.
-    static XMIN: Cell<TransactionId> = const { Cell::new(InvalidTransactionId) };
     /// count of TransactionIdGetStatus calls (to assert the cache works).
     static GET_STATUS_CALLS: Cell<usize> = const { Cell::new(0) };
     /// recorded TransactionIdSetTreeStatus calls.
@@ -64,10 +62,6 @@ fn fixture_sub_trans_get_parent(xid: TransactionId) -> PgResult<TransactionId> {
     Ok(PARENTS.with(|m| m.borrow().get(&xid).copied().unwrap_or(InvalidTransactionId)))
 }
 
-fn fixture_transaction_xmin() -> TransactionId {
-    XMIN.with(|c| c.get())
-}
-
 static INSTALL: Once = Once::new();
 
 /// Install the seams (once) and reset this thread's fixture and the
@@ -77,11 +71,9 @@ fn setup() {
         clog_seams::transaction_id_get_status::set(fixture_get_status);
         clog_seams::transaction_id_set_tree_status::set(fixture_set_tree_status);
         subtrans_seams::sub_trans_get_parent::set(fixture_sub_trans_get_parent);
-        snapmgr_seams::transaction_xmin::set(fixture_transaction_xmin);
     });
     STATUSES.with(|m| m.borrow_mut().clear());
     PARENTS.with(|m| m.borrow_mut().clear());
-    XMIN.with(|c| c.set(InvalidTransactionId));
     GET_STATUS_CALLS.with(|c| c.set(0));
     SET_STATUS_CALLS.with(|c| c.borrow_mut().clear());
     cachedFetchXid.set(InvalidTransactionId);
@@ -99,10 +91,6 @@ fn set_parent(xid: TransactionId, parent: TransactionId) {
     PARENTS.with(|m| {
         m.borrow_mut().insert(xid, parent);
     });
-}
-
-fn set_xmin(xmin: TransactionId) {
-    XMIN.with(|c| c.set(xmin));
 }
 
 #[test]
@@ -163,21 +151,19 @@ fn subcommitted_commit_status_follows_parent() {
     set_status(10, TRANSACTION_STATUS_SUB_COMMITTED, 0);
     set_status(9, TRANSACTION_STATUS_COMMITTED, 88);
     set_parent(10, 9);
-    set_xmin(3);
 
-    assert!(TransactionIdDidCommit(10).unwrap());
-    assert!(!TransactionIdDidAbort(10).unwrap());
+    assert!(TransactionIdDidCommit(10, 3).unwrap());
+    assert!(!TransactionIdDidAbort(10, 3).unwrap());
 }
 
 #[test]
 fn old_subcommitted_xids_assume_crashed_parent() {
     setup();
     set_status(10, TRANSACTION_STATUS_SUB_COMMITTED, 0);
-    set_xmin(20);
 
     // older than TransactionXmin: did-commit is false, did-abort is true.
-    assert!(!TransactionIdDidCommit(10).unwrap());
-    assert!(TransactionIdDidAbort(10).unwrap());
+    assert!(!TransactionIdDidCommit(10, 20).unwrap());
+    assert!(TransactionIdDidAbort(10, 20).unwrap());
 }
 
 #[test]
@@ -185,11 +171,10 @@ fn subcommitted_missing_parent_warns_and_defaults() {
     setup();
     // subcommitted, not older than xmin, but no pg_subtrans parent recorded.
     set_status(10, TRANSACTION_STATUS_SUB_COMMITTED, 0);
-    set_xmin(3);
 
     // WARNING is emitted; did-commit defaults to false, did-abort to true.
-    assert!(!TransactionIdDidCommit(10).unwrap());
-    assert!(TransactionIdDidAbort(10).unwrap());
+    assert!(!TransactionIdDidCommit(10, 3).unwrap());
+    assert!(TransactionIdDidAbort(10, 3).unwrap());
 }
 
 #[test]
@@ -199,15 +184,15 @@ fn committed_and_aborted_leaf_statuses() {
     set_status(6, TRANSACTION_STATUS_ABORTED, 0);
     set_status(7, TRANSACTION_STATUS_IN_PROGRESS, 0);
 
-    assert!(TransactionIdDidCommit(5).unwrap());
-    assert!(!TransactionIdDidAbort(5).unwrap());
+    assert!(TransactionIdDidCommit(5, InvalidTransactionId).unwrap());
+    assert!(!TransactionIdDidAbort(5, InvalidTransactionId).unwrap());
 
-    assert!(!TransactionIdDidCommit(6).unwrap());
-    assert!(TransactionIdDidAbort(6).unwrap());
+    assert!(!TransactionIdDidCommit(6, InvalidTransactionId).unwrap());
+    assert!(TransactionIdDidAbort(6, InvalidTransactionId).unwrap());
 
     // in-progress: neither committed nor (explicitly) aborted.
-    assert!(!TransactionIdDidCommit(7).unwrap());
-    assert!(!TransactionIdDidAbort(7).unwrap());
+    assert!(!TransactionIdDidCommit(7, InvalidTransactionId).unwrap());
+    assert!(!TransactionIdDidAbort(7, InvalidTransactionId).unwrap());
 }
 
 #[test]

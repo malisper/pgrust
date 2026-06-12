@@ -123,7 +123,6 @@ dependencies = [
  "backend-access-transam-clog-seams",
  "backend-access-transam-subtrans-seams",
  "backend-utils-error",
- "backend-utils-time-snapmgr-seams",
  "types-core",
  "types-error",
 ]
@@ -558,14 +557,6 @@ dependencies = [
  "types-core",
  "types-error",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-utils-time-snapmgr-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
 ]
 
 [[package]]

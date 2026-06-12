@@ -12,17 +12,18 @@
 //!
 //! C's `ereport(ERROR)` channel (clog / subtrans SLRU I/O failures) surfaces
 //! as `PgResult`. Outward boundaries: the clog status layer through
-//! `backend-access-transam-clog-seams`, the pg_subtrans parent map through
-//! `backend-access-transam-subtrans-seams`, the `TransactionXmin` global
-//! through `backend-utils-time-snapmgr-seams` (all panic until their owners
-//! land), and `elog(WARNING, ...)` directly via `backend-utils-error`.
+//! `backend-access-transam-clog-seams` and the pg_subtrans parent map through
+//! `backend-access-transam-subtrans-seams` (both panic until their owners
+//! land), plus `elog(WARNING, ...)` directly via `backend-utils-error`.
+//! C reads the `TransactionXmin` global from snapmgr.c; here callers pass it
+//! explicitly (read off their snapshot facet once snapmgr lands), so no
+//! ambient-global seam exists.
 
 use std::cell::Cell;
 
 use backend_access_transam_clog_seams as clog_seams;
 use backend_access_transam_subtrans_seams as subtrans_seams;
 use backend_utils_error::elog;
-use backend_utils_time_snapmgr_seams as snapmgr_seams;
 use types_core::xact::{
     BootstrapTransactionId, FirstNormalTransactionId, FrozenTransactionId, InvalidTransactionId,
     InvalidXLogRecPtr, XidStatus, TRANSACTION_STATUS_ABORTED, TRANSACTION_STATUS_COMMITTED,
@@ -80,7 +81,14 @@ fn TransactionLogFetch(transactionId: TransactionId) -> PgResult<XidStatus> {
 /// identifier did commit.
 ///
 /// Note: Assumes transaction identifier is valid and exists in clog.
-pub fn TransactionIdDidCommit(transactionId: TransactionId) -> PgResult<bool> {
+///
+/// `transaction_xmin` is C's `TransactionXmin` global (snapmgr.c), passed
+/// explicitly: the oldest xid still considered running by this backend's
+/// snapshots.
+pub fn TransactionIdDidCommit(
+    transactionId: TransactionId,
+    transaction_xmin: TransactionId,
+) -> PgResult<bool> {
     let xidstatus = TransactionLogFetch(transactionId)?;
 
     // If it's marked committed, it's committed.
@@ -101,7 +109,7 @@ pub fn TransactionIdDidCommit(transactionId: TransactionId) -> PgResult<bool> {
     // zeroed. Since this case should not happen under normal conditions, it
     // seems reasonable to emit a WARNING for it.
     if xidstatus == TRANSACTION_STATUS_SUB_COMMITTED {
-        if TransactionIdPrecedes(transactionId, snapmgr_seams::transaction_xmin::call()) {
+        if TransactionIdPrecedes(transactionId, transaction_xmin) {
             return Ok(false);
         }
         let parentXid = subtrans_seams::sub_trans_get_parent::call(transactionId)?;
@@ -112,7 +120,7 @@ pub fn TransactionIdDidCommit(transactionId: TransactionId) -> PgResult<bool> {
             )?;
             return Ok(false);
         }
-        return TransactionIdDidCommit(parentXid);
+        return TransactionIdDidCommit(parentXid, transaction_xmin);
     }
 
     // It's not committed.
@@ -129,7 +137,14 @@ pub fn TransactionIdDidCommit(transactionId: TransactionId) -> PgResult<bool> {
 /// in-progress in the clog. Most of the time TransactionIdDidCommit(), with a
 /// preceding TransactionIdIsInProgress() check, should be used instead of
 /// TransactionIdDidAbort().
-pub fn TransactionIdDidAbort(transactionId: TransactionId) -> PgResult<bool> {
+///
+/// `transaction_xmin` is C's `TransactionXmin` global (snapmgr.c), passed
+/// explicitly: the oldest xid still considered running by this backend's
+/// snapshots.
+pub fn TransactionIdDidAbort(
+    transactionId: TransactionId,
+    transaction_xmin: TransactionId,
+) -> PgResult<bool> {
     let xidstatus = TransactionLogFetch(transactionId)?;
 
     // If it's marked aborted, it's aborted.
@@ -142,7 +157,7 @@ pub fn TransactionIdDidAbort(transactionId: TransactionId) -> PgResult<bool> {
     // pg_subtrans; instead assume that the parent crashed without cleaning up
     // its children.
     if xidstatus == TRANSACTION_STATUS_SUB_COMMITTED {
-        if TransactionIdPrecedes(transactionId, snapmgr_seams::transaction_xmin::call()) {
+        if TransactionIdPrecedes(transactionId, transaction_xmin) {
             return Ok(true);
         }
         let parentXid = subtrans_seams::sub_trans_get_parent::call(transactionId)?;
@@ -154,7 +169,7 @@ pub fn TransactionIdDidAbort(transactionId: TransactionId) -> PgResult<bool> {
             )?;
             return Ok(true);
         }
-        return TransactionIdDidAbort(parentXid);
+        return TransactionIdDidAbort(parentXid, transaction_xmin);
     }
 
     // It's not aborted.
