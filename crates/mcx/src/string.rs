@@ -43,6 +43,31 @@ impl<'mcx> PgString<'mcx> {
         unsafe { core::str::from_utf8_unchecked(&self.bytes) }
     }
 
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The underlying byte vector (still context-allocated).
+    pub fn into_bytes(self) -> PgVec<'mcx, u8> {
+        self.bytes
+    }
+
+    /// Bytes that are valid UTF-8, reusing the allocation (C idiom:
+    /// `text`/`cstring` payloads validated then treated as strings).
+    pub fn from_utf8(bytes: PgVec<'mcx, u8>) -> Result<Self, core::str::Utf8Error> {
+        core::str::from_utf8(&bytes)?;
+        Ok(PgString { bytes })
+    }
+
+    /// Copy into another context (C idiom: `MemoryContextStrdup`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PgString<'b>> {
+        PgString::from_str_in(self.as_str(), mcx)
+    }
+
+    pub fn allocator(&self) -> Mcx<'mcx> {
+        *self.bytes.allocator()
+    }
+
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
@@ -105,5 +130,45 @@ impl PartialEq<str> for PgString<'_> {
 impl PartialEq<&str> for PgString<'_> {
     fn eq(&self, other: &&str) -> bool {
         self.as_str() == *other
+    }
+}
+
+impl PartialEq for PgString<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for PgString<'_> {}
+
+impl PartialOrd for PgString<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PgString<'_> {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl core::hash::Hash for PgString<'_> {
+    /// Hashes like `str`, so a `PgString` key probes equal to its `&str`
+    /// (with hashbrown's `Equivalent` borrowed-key lookups).
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state)
+    }
+}
+
+impl AsRef<str> for PgString<'_> {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl core::borrow::Borrow<str> for PgString<'_> {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }

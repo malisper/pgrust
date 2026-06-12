@@ -222,3 +222,26 @@ fn child_churn_does_not_grow_parent_child_list() {
     assert_eq!(t.children.len(), 0);
     assert_eq!(root.subtree_used(), 0);
 }
+
+#[test]
+fn pg_string_round_trips_and_keys() {
+    let ctx = MemoryContext::new("s");
+    let other = MemoryContext::new("o");
+    let mcx = ctx.mcx();
+
+    let s = PgString::from_str_in("key", mcx).unwrap();
+    let s2 = s.clone_in(other.mcx()).unwrap();
+    assert_eq!(s, s2);
+    assert_eq!(other.used(), s2.capacity_bytes());
+
+    // Borrow<str> + Hash-as-str: &str probes find PgString keys.
+    let mut m: PgHashMap<PgString, u32> = PgHashMap::new_in(mcx);
+    m.insert(s, 7);
+    assert_eq!(m.get("key"), Some(&7));
+
+    // from_utf8 reuses the allocation; invalid bytes are rejected.
+    let raw = slice_in(mcx, b"caf\xc3\xa9".as_slice()).unwrap();
+    assert_eq!(PgString::from_utf8(raw).unwrap(), "café");
+    let bad = slice_in(mcx, b"\xff\xfe".as_slice()).unwrap();
+    assert!(PgString::from_utf8(bad).is_err());
+}
