@@ -4,22 +4,13 @@
 //! using PostgreSQL's C-locale `pg_strftime` rules (conversion specifiers,
 //! the `C_time_locale` tables, ISO-week math, `%z`/`%Z` handling, and the
 //! truncate-then-detect-overflow buffer semantics).
-//!
-//! The C `tm_zone` is a `const char *`; here it is an owned
-//! `Option<CString>` (`None` when the zone is not determinable).
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 
-// Time unit constants from `src/timezone/private.h` /
-// `src/include/datatype/timestamp.h` as used by strftime.c.
-pub const SECSPERMIN: i32 = 60;
-pub const MINSPERHOUR: i32 = 60;
-pub const HOURSPERDAY: i32 = 24;
-pub const DAYSPERWEEK: i32 = 7;
-pub const DAYSPERNYEAR: i32 = 365;
-pub const DAYSPERLYEAR: i32 = 366;
-pub const MONSPERYEAR: i32 = 12;
-pub const TM_YEAR_BASE: i32 = 1900;
+use types_pgtime::{
+    pg_tm, DAYSPERLYEAR, DAYSPERNYEAR, DAYSPERWEEK, HOURSPERDAY, MINSPERHOUR, MONSPERYEAR,
+    SECSPERMIN, TM_YEAR_BASE,
+};
 
 const DIVISOR: i32 = 100;
 
@@ -57,25 +48,6 @@ const C_FMT: &[u8] = b"%a %b %e %T %Y";
 const AM: &[u8] = b"AM";
 const PM: &[u8] = b"PM";
 const DATE_FMT: &[u8] = b"%a %b %e %H:%M:%S %Z %Y";
-
-/// Broken-down timestamp, mirroring PostgreSQL's `struct pg_tm` (`pgtime.h`).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-#[allow(non_camel_case_types)]
-pub struct pg_tm {
-    pub tm_sec: i32,
-    pub tm_min: i32,
-    pub tm_hour: i32,
-    pub tm_mday: i32,
-    pub tm_mon: i32,
-    pub tm_year: i32,
-    pub tm_wday: i32,
-    pub tm_yday: i32,
-    pub tm_isdst: i32,
-    /// Seconds east of UTC; C declares this `long int`.
-    pub tm_gmtoff: i64,
-    /// Time-zone abbreviation; `None` when not determinable.
-    pub tm_zone: Option<CString>,
-}
 
 /// `enum warn { IN_NONE, IN_SOME, IN_THIS, IN_ALL }` from strftime.c.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -123,7 +95,7 @@ impl OutBuf<'_> {
 /// the number of formatted bytes (excluding the NUL) is returned. If the
 /// output (plus NUL) does not fit, `s` holds the truncated bytes without a
 /// NUL terminator and `None` is returned (the C `return 0` / `ERANGE` path).
-pub fn pg_strftime(s: &mut [u8], format: &CStr, t: &pg_tm) -> Option<usize> {
+pub fn pg_strftime(s: &mut [u8], format: &CStr, t: &pg_tm<'_>) -> Option<usize> {
     let mut warn = Warn::None;
     let mut out = OutBuf { buf: s, pos: 0 };
 
@@ -139,7 +111,7 @@ pub fn pg_strftime(s: &mut [u8], format: &CStr, t: &pg_tm) -> Option<usize> {
 }
 
 /// `_fmt` from strftime.c.
-fn fmt(format: &[u8], t: &pg_tm, out: &mut OutBuf<'_>, warnp: &mut Warn) {
+fn fmt(format: &[u8], t: &pg_tm<'_>, out: &mut OutBuf<'_>, warnp: &mut Warn) {
     let mut i = 0;
 
     while i < format.len() {
@@ -453,9 +425,11 @@ pub fn init_seams() {}
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+
     use super::*;
 
-    fn sample_tm(zone: &str) -> pg_tm {
+    fn sample_tm(zone: &'static CStr) -> pg_tm<'static> {
         pg_tm {
             tm_sec: 7,
             tm_min: 6,
@@ -467,11 +441,11 @@ mod tests {
             tm_yday: 1,
             tm_isdst: 0,
             tm_gmtoff: -8 * 60 * 60,
-            tm_zone: Some(CString::new(zone).unwrap()),
+            tm_zone: Some(zone),
         }
     }
 
-    fn format(format: &str, t: &pg_tm) -> Vec<u8> {
+    fn format(format: &str, t: &pg_tm<'_>) -> Vec<u8> {
         let format = CString::new(format).unwrap();
         let mut buf = [0u8; 256];
         let len = pg_strftime(&mut buf, &format, t).expect("output fits");
@@ -481,7 +455,7 @@ mod tests {
 
     #[test]
     fn formats_common_postgres_timestamp_parts() {
-        let t = sample_tm("PST");
+        let t = sample_tm(c"PST");
 
         assert_eq!(
             format("%a %b %e %T %Y %Z %z", &t),
@@ -492,20 +466,20 @@ mod tests {
 
     #[test]
     fn supports_c_locale_composites_and_unknown_ranges() {
-        let mut t = sample_tm("UTC");
+        let mut t = sample_tm(c"UTC");
         t.tm_wday = 99;
         t.tm_mon = -1;
 
         assert_eq!(format("%A %a %B %b", &t), b"? ? ? ?");
         assert_eq!(
-            format("%c %x %X", &sample_tm("UTC")),
+            format("%c %x %X", &sample_tm(c"UTC")),
             b"Tue Jan  2 15:06:07 2024 01/02/24 15:06:07"
         );
     }
 
     #[test]
     fn formats_iso_week_year_boundaries() {
-        let mut t = sample_tm("UTC");
+        let mut t = sample_tm(c"UTC");
         t.tm_year = 119;
         t.tm_mon = 11;
         t.tm_mday = 30;
@@ -519,7 +493,7 @@ mod tests {
     fn iso_week_late_january_of_iso_year_53() {
         // 2021-01-01 was a Friday; it belongs to ISO week 53 of ISO year 2020
         // (the `yday >= bot` is false / `--base` back-up branch).
-        let mut t = sample_tm("UTC");
+        let mut t = sample_tm(c"UTC");
         t.tm_year = 121;
         t.tm_mon = 0;
         t.tm_mday = 1;
@@ -531,7 +505,7 @@ mod tests {
 
     #[test]
     fn omits_timezone_offset_when_dst_unknown() {
-        let mut t = sample_tm("UTC");
+        let mut t = sample_tm(c"UTC");
         t.tm_isdst = -1;
 
         assert_eq!(format("[%z]", &t), b"[]");
@@ -539,7 +513,7 @@ mod tests {
 
     #[test]
     fn uses_zone_sign_for_zero_offset() {
-        let mut t = sample_tm("-00");
+        let mut t = sample_tm(c"-00");
         t.tm_gmtoff = 0;
 
         assert_eq!(format("%z", &t), b"-0000");
@@ -547,7 +521,7 @@ mod tests {
 
     #[test]
     fn no_zone_emits_nothing_for_z_specifier() {
-        let mut t = sample_tm("UTC");
+        let mut t = sample_tm(c"UTC");
         t.tm_zone = None;
 
         // %Z is empty when the zone is unknown; %z still formats the offset.
@@ -556,7 +530,7 @@ mod tests {
 
     #[test]
     fn handles_literal_and_modifier_edge_cases() {
-        let t = sample_tm("UTC");
+        let t = sample_tm(c"UTC");
 
         assert_eq!(format("%", &t), b"%");
         assert_eq!(format("%Q", &t), b"Q");
@@ -568,7 +542,7 @@ mod tests {
 
     #[test]
     fn hour_fields_match_swapped_k_and_l() {
-        let mut t = sample_tm("UTC");
+        let mut t = sample_tm(c"UTC");
         t.tm_hour = 5;
 
         assert_eq!(format("%H|%I|%k|%l|%p", &t), b"05|05| 5| 5|AM");
@@ -578,7 +552,7 @@ mod tests {
 
     #[test]
     fn week_of_year_fields() {
-        let t = sample_tm("UTC");
+        let t = sample_tm(c"UTC");
         assert_eq!(format("%U %W %w %u %j %C %y", &t), b"00 01 2 2 002 20 24");
     }
 
@@ -586,7 +560,7 @@ mod tests {
     fn negative_year_yconv_paths() {
         // tm_year for year -5 is -1905; %Y must render "-5" via the
         // lead==0/trail<0 "-0" + abs(trail) path ("%C%y" == "%Y").
-        let mut t = sample_tm("UTC");
+        let mut t = sample_tm(c"UTC");
         t.tm_year = -1905;
         assert_eq!(format("%Y", &t), b"-005");
         assert_eq!(format("%C%y", &t), b"-005");
@@ -594,7 +568,7 @@ mod tests {
 
     #[test]
     fn writes_nul_terminated_buffer_on_success() {
-        let t = sample_tm("UTC");
+        let t = sample_tm(c"UTC");
         let fmt = CString::new("%Y").unwrap();
         let mut buf = [0u8; 8];
 
@@ -607,7 +581,7 @@ mod tests {
 
     #[test]
     fn overflow_truncates_without_nul_and_returns_none() {
-        let t = sample_tm("UTC");
+        let t = sample_tm(c"UTC");
         let fmt = CString::new("%Y").unwrap();
         let mut buf = [b'x'; 4];
 
@@ -624,7 +598,7 @@ mod tests {
 
     #[test]
     fn empty_format_returns_zero_length() {
-        let t = sample_tm("UTC");
+        let t = sample_tm(c"UTC");
         let fmt = CString::new("").unwrap();
         let mut buf = [b'x'; 2];
 
@@ -635,14 +609,14 @@ mod tests {
     #[test]
     fn renders_large_year_field_without_truncation() {
         // tm_year is years since 1900; year 10000 exercises a 3-digit lead.
-        let mut t = sample_tm("UTC");
+        let mut t = sample_tm(c"UTC");
         t.tm_year = 8100;
         assert_eq!(format("%Y", &t), b"10000");
     }
 
     #[test]
     fn date_fmt_and_misc_specifiers() {
-        let t = sample_tm("PST");
+        let t = sample_tm(c"PST");
         assert_eq!(
             format("%+", &t),
             b"Tue Jan  2 15:06:07 PST 2024".as_slice()

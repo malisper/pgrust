@@ -305,6 +305,9 @@ dependencies = [
 [[package]]
 name = "backend-timezone-strftime"
 version = "0.0.0"
+dependencies = [
+ "types-pgtime",
+]
 
 [[package]]
 name = "backend-utils-activity-pgstat-seams"
@@ -713,6 +716,10 @@ dependencies = [
  "types-core",
  "types-storage",
 ]
+
+[[package]]
+name = "types-pgtime"
+version = "0.0.0"
 
 [[package]]
 name = "types-storage"
