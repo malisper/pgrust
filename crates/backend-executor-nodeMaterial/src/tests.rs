@@ -167,7 +167,10 @@ fn supply_rows<'mcx>(
         return Ok(None);
     }
     SUPPLY.with(|c| c.set(remaining - 1));
-    let id = estate.make_slot(TupleTableSlot { tts_flags: 0 })?;
+    let id = estate.make_slot(TupleTableSlot {
+        tts_flags: 0,
+        ..Default::default()
+    })?;
     Ok(Some(id))
 }
 

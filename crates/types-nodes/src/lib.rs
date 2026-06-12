@@ -21,14 +21,19 @@ pub mod funcapi;
 pub mod nodeforeigncustom;
 pub mod nodeindexscan;
 pub mod nodes;
+pub mod parsenodes;
 pub mod planstate;
+pub mod primnodes;
 
 pub use bitmapset::Bitmapset;
 pub use execnodes::{
-    EStateData, ExecProcNodeMtd, PlanStateData, ScanDirection, ScanDirectionIsForward,
-    ScanStateData, SlotId,
+    EStateData, EcxtId, ExecProcNodeMtd, ExprContext, ExprContextCallbackFunction,
+    ExprContext_CB, Opaque, ParamExecData, PlanStateData, ResultRelInfo, RriId,
+    ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId,
 };
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{Material, MaterialState};
+pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
 pub use planstate::PlanStateNode;
+pub use primnodes::{Expr, TargetEntry, Var};

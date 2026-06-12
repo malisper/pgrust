@@ -5,8 +5,11 @@
 //! `plan.lefttree`); cost/targetlist/qual fields arrive with the units that
 //! read them.
 
-use mcx::{alloc_in, Mcx, PgBox};
+use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::PgResult;
+
+use crate::bitmapset::Bitmapset;
+use crate::primnodes::TargetEntry;
 
 /// `Plan` (nodes/plannodes.h) — the abstract base every plan-tree node embeds
 /// first. The child links are context-allocated (the plan tree lives in a
@@ -14,17 +17,33 @@ use types_core::PgResult;
 /// fallible [`Plan::clone_in`] rather than a derived `Clone`.
 #[derive(Debug, Default)]
 pub struct Plan<'mcx> {
+    /// `List *targetlist` — target list to be computed at this node
+    /// (`None` = the C `NIL`).
+    pub targetlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     /// `struct Plan *lefttree` — input plan tree (`outerPlan(node)`).
     pub lefttree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `struct Plan *righttree` — `innerPlan(node)`.
     pub righttree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
+    /// `Bitmapset *allParam` — all PARAM_EXEC params the node depends on.
+    pub allParam: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
 }
 
 impl Plan<'_> {
     /// Deep copy of the plan subtree into `mcx` (C: `copyObject` shape).
     /// Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Plan<'b>> {
+        let targetlist = match &self.targetlist {
+            Some(tlist) => {
+                let mut out = vec_with_capacity_in(mcx, tlist.len())?;
+                for tle in tlist.iter() {
+                    out.push(tle.clone_in(mcx)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
         Ok(Plan {
+            targetlist,
             lefttree: match &self.lefttree {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
                 None => None,
@@ -33,6 +52,18 @@ impl Plan<'_> {
                 Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
                 None => None,
             },
+            allParam: match &self.allParam {
+                Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
+                None => None,
+            },
         })
     }
+}
+
+/// `PlannedStmt` (nodes/plannodes.h), trimmed to the fields ports consume.
+#[derive(Debug, Default)]
+pub struct PlannedStmt<'mcx> {
+    /// `List *resultRelations` — integer list of RT indexes of the query's
+    /// target relations (`None` = the C `NIL`).
+    pub resultRelations: Option<PgVec<'mcx, i32>>,
 }
