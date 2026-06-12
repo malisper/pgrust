@@ -6,5 +6,5 @@
 
 pub fn init_all() {
     // One line per ported crate, kept sorted:
-    // backend_commands_vacuum::init_seams();
+    backend_access_common_heaptuple::init_seams();
 }

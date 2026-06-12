@@ -3,12 +3,40 @@
 version = 4
 
 [[package]]
+name = "backend-access-common-heaptuple"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heaptoast-seams",
+ "backend-utils-adt-misc2-seams",
+ "types",
+]
+
+[[package]]
+name = "backend-access-heap-heaptoast-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types",
+]
+
+[[package]]
+name = "backend-utils-adt-misc2-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types",
+]
+
+[[package]]
 name = "seam-core"
 version = "0.0.0"
 
 [[package]]
 name = "seams-init"
 version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+]
 
 [[package]]
 name = "types"
