@@ -11,3 +11,10 @@ seam_core::seam!(
     /// `ereport(ERROR/FATAL, ...)` longjmp).
     pub fn check_for_interrupts() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `HandleRecoveryConflictInterrupt(reason)` (tcop/postgres.c) — the
+    /// PROCSIG_RECOVERY_CONFLICT_* arms of `procsignal_sigusr1_handler`.
+    /// Signal-handler-safe flag flipping; infallible.
+    pub fn handle_recovery_conflict_interrupt(reason: types_storage::ProcSignalReason)
+);

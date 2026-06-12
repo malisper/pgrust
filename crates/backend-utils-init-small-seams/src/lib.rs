@@ -10,3 +10,27 @@ seam_core::seam!(
     /// budget in kilobytes.
     pub fn work_mem() -> i32
 );
+
+seam_core::seam!(
+    /// `MaxBackends` (globals.c): the computed backend-slot count, fixed at
+    /// postmaster startup.
+    pub fn max_backends() -> i32
+);
+
+seam_core::seam!(
+    /// `MyProcNumber` (globals.c): this backend's PGPROC/ProcSignal slot
+    /// index; `INVALID_PROC_NUMBER` (-1) until assigned.
+    pub fn my_proc_number() -> types_core::ProcNumber
+);
+
+seam_core::seam!(
+    /// `MyProcPid` (globals.c): this backend's process ID.
+    pub fn my_proc_pid() -> i32
+);
+
+seam_core::seam!(
+    /// Write `InterruptPending` (globals.c), the per-backend
+    /// `volatile sig_atomic_t` master interrupt flag checked by
+    /// `CHECK_FOR_INTERRUPTS()`.
+    pub fn set_interrupt_pending(value: bool)
+);

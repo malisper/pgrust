@@ -19,3 +19,10 @@ seam_core::seam!(
     /// under PG_TRY/PG_FINALLY, so an `ereport(ERROR)` propagates.
     pub fn process_log_memory_context_interrupt() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `HandleLogMemoryContextInterrupt()` (mcxt.c) — the
+    /// PROCSIG_LOG_MEMORY_CONTEXT arm of `procsignal_sigusr1_handler`.
+    /// Signal-handler-safe flag flipping; infallible.
+    pub fn handle_log_memory_context_interrupt()
+);
