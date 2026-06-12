@@ -148,7 +148,9 @@ fn parse_strtol_base10(s: &str) -> Option<i64> {
     let bytes = s.as_bytes();
     let mut i = 0;
 
-    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+    // C-locale isspace(): space, \t, \n, \v, \f, \r. Note that Rust's
+    // `is_ascii_whitespace` excludes vertical tab (0x0b), which strtol skips.
+    while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == 0x0b) {
         i += 1;
     }
 
@@ -406,8 +408,11 @@ mod tests {
         let a = pg_sockaddr_cidr_mask(Some("  24"), AddressFamily::Inet).expect("valid");
         let b = pg_sockaddr_cidr_mask(Some("+24"), AddressFamily::Inet).expect("valid");
         let c = pg_sockaddr_cidr_mask(Some("24"), AddressFamily::Inet).expect("valid");
+        // C-locale isspace() includes vertical tab, which strtol skips.
+        let d = pg_sockaddr_cidr_mask(Some("\x0b\t24"), AddressFamily::Inet).expect("valid");
         assert_eq!(a, c);
         assert_eq!(b, c);
+        assert_eq!(d, c);
     }
 
     #[test]
