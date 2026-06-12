@@ -142,7 +142,14 @@ impl MemoryContext {
             children: RefCell::new(alloc::vec::Vec::new()),
         });
         if let Some(p) = &acct.parent {
-            p.children.borrow_mut().push(alloc::rc::Rc::downgrade(&acct));
+            let mut children = p.children.borrow_mut();
+            // Amortized pruning: dead Weaks are otherwise only collected by
+            // stats_tree() walks, and context churn (per-tuple children)
+            // must not grow this list unboundedly when stats are never read.
+            if children.len() == children.capacity() {
+                children.retain(|w| w.strong_count() > 0);
+            }
+            children.push(alloc::rc::Rc::downgrade(&acct));
         }
         MemoryContext { acct, backend, reset_cbs: RefCell::new(alloc::vec::Vec::new()) }
     }

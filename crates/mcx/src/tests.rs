@@ -208,3 +208,17 @@ fn child_may_outlive_parent_accounting_safely() {
     drop(v);
     assert_eq!(child.used(), 0);
 }
+
+#[test]
+fn child_churn_does_not_grow_parent_child_list() {
+    let root = MemoryContext::new("root");
+    for _ in 0..10_000 {
+        let child = root.new_child("per-tuple");
+        let _v = vec_with_capacity_in::<u8>(child.mcx(), 16).unwrap();
+    }
+    // All children are dead; the weak list must have been pruned along the
+    // way rather than holding 10k tombstones.
+    let t = root.stats_tree();
+    assert_eq!(t.children.len(), 0);
+    assert_eq!(root.subtree_used(), 0);
+}
