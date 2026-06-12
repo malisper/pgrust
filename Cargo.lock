@@ -102,6 +102,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execAmi-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execProcnode-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execTuples-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execUtils-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-nodeMaterial"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-storage-seams",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-libpq-ifaddr"
 version = "0.0.0"
 dependencies = [
@@ -156,6 +207,14 @@ dependencies = [
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "backend-tcop-postgres-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-core",
 ]
 
@@ -271,6 +330,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-init-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
 name = "backend-utils-mb-wstrcmp"
 version = "0.0.0"
 dependencies = [
@@ -310,6 +377,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-storage-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
 name = "contrib-earthdistance"
 version = "0.0.0"
 dependencies = [
@@ -345,6 +421,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-hashvalidate",
  "backend-access-transam-xlogstats",
+ "backend-executor-nodeMaterial",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
  "backend-storage-page-checksum",
@@ -367,6 +444,9 @@ dependencies = [
 [[package]]
 name = "types-core"
 version = "0.0.0"
+dependencies = [
+ "types-error",
+]
 
 [[package]]
 name = "types-datum"
@@ -381,6 +461,13 @@ version = "0.0.0"
 
 [[package]]
 name = "types-hash"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-nodes"
 version = "0.0.0"
 dependencies = [
  "types-core",

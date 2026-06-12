@@ -1,12 +1,12 @@
 [package]
-name = "types-core"
+name = "types-nodes"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "types_core"
+name = "types_nodes"
 path = "src/lib.rs"
 
 [dependencies]
-types-error = { path = "../types-error" }
+types-core = { path = "../types-core" }
