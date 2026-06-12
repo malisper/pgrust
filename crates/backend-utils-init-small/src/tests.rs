@@ -123,6 +123,56 @@ fn accessors_update_backend_local_state() {
 }
 
 #[test]
+fn elog_visible_globals_share_a_single_store() {
+    // FrontendProtocol / CritSectionCount / IsUnderPostmaster /
+    // ExitOnAnyError / OutputFileName are one variable each in C, read by
+    // elog.c; the accessors must hit the same store elog.c uses.
+    std::thread::spawn(|| {
+        globals::SetExitOnAnyError(true);
+        assert!(backend_utils_error::config::exit_on_any_error());
+        assert!(globals::ExitOnAnyError());
+
+        globals::SetCritSectionCount(3);
+        assert_eq!(backend_utils_error::config::crit_section_count(), 3);
+        // errfinish's ERROR recovery writes the shared store; the C-named
+        // reader must observe it.
+        backend_utils_error::config::set_crit_section_count(0);
+        assert_eq!(globals::CritSectionCount(), 0);
+
+        globals::SetIsUnderPostmaster(true);
+        assert!(backend_utils_error::config::is_under_postmaster());
+
+        globals::SetFrontendProtocol(0x0003_0000);
+        assert_eq!(
+            backend_utils_error::config::frontend_protocol(),
+            0x0003_0000
+        );
+
+        globals::SetOutputFileNameStr("/tmp/out.log");
+        assert_eq!(
+            backend_utils_error::config::output_file_name().as_deref(),
+            Some("/tmp/out.log")
+        );
+        let buf = globals::OutputFileName();
+        assert_eq!(&buf[..12], b"/tmp/out.log");
+        assert_eq!(buf[12], 0);
+
+        let mut raw = [0u8; types_core::MAXPGPATH];
+        raw[..7].copy_from_slice(b"out.txt");
+        globals::SetOutputFileName(raw);
+        assert_eq!(
+            backend_utils_error::config::output_file_name().as_deref(),
+            Some("out.txt")
+        );
+        globals::SetOutputFileName([0; types_core::MAXPGPATH]);
+        assert_eq!(backend_utils_error::config::output_file_name(), None);
+        assert_eq!(globals::OutputFileName(), [0; types_core::MAXPGPATH]);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn globals_are_per_backend_thread() {
     let a = std::thread::spawn(|| {
         globals::SetMyDatabaseId(111);

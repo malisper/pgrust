@@ -11,6 +11,13 @@
 //! Names, types-widths, and initial values match the C declarations
 //! one-to-one. (`EXEC_BACKEND`'s `postgres_exec_path` is compiled out, as in
 //! the unix build.)
+//!
+//! Five of these variables (`FrontendProtocol`, `CritSectionCount`,
+//! `IsUnderPostmaster`, `ExitOnAnyError`, `OutputFileName`) are also read —
+//! and for `CritSectionCount`, written — by the already-ported elog.c, whose
+//! backend-local store for them lives in `backend_utils_error::config`. To
+//! keep each C variable a single variable, the accessors here delegate to
+//! that store rather than keeping a second copy.
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -49,10 +56,24 @@ macro_rules! scalar_global {
     };
 }
 
-scalar_global!(
-    /// `ProtocolVersion FrontendProtocol;`
-    FRONTEND_PROTOCOL, FrontendProtocol, SetFrontendProtocol, ProtocolVersion, 0
-);
+// `FrontendProtocol`, `CritSectionCount`, `IsUnderPostmaster`,
+// `ExitOnAnyError`, and `OutputFileName` are globals.c variables that elog.c
+// also reads (and, for `CritSectionCount`, writes during ERROR recovery). The
+// error crate already keeps the backend-local store for them in
+// `backend_utils_error::config`; a second cell here would split the single C
+// variable into two diverging copies, so the C-named accessors delegate to
+// that store instead.
+
+/// `ProtocolVersion FrontendProtocol;`
+#[inline]
+pub fn FrontendProtocol() -> ProtocolVersion {
+    backend_utils_error::config::frontend_protocol()
+}
+
+#[inline]
+pub fn SetFrontendProtocol(value: ProtocolVersion) {
+    backend_utils_error::config::set_frontend_protocol(value);
+}
 
 // `volatile sig_atomic_t` interrupt/signal flags. C stores them as 0/1;
 // presented as `bool`.
@@ -116,10 +137,18 @@ scalar_global!(
     /// `volatile uint32 QueryCancelHoldoffCount = 0;`
     QUERY_CANCEL_HOLDOFF_COUNT, QueryCancelHoldoffCount, SetQueryCancelHoldoffCount, uint32, 0
 );
-scalar_global!(
-    /// `volatile uint32 CritSectionCount = 0;`
-    CRIT_SECTION_COUNT, CritSectionCount, SetCritSectionCount, uint32, 0
-);
+/// `volatile uint32 CritSectionCount = 0;` — single store in
+/// `backend_utils_error::config` (errfinish resets it to 0 during ERROR
+/// recovery, exactly as C does).
+#[inline]
+pub fn CritSectionCount() -> uint32 {
+    backend_utils_error::config::crit_section_count()
+}
+
+#[inline]
+pub fn SetCritSectionCount(value: uint32) {
+    backend_utils_error::config::set_crit_section_count(value);
+}
 
 scalar_global!(
     /// `int MyProcPid;`
@@ -154,10 +183,42 @@ scalar_global!(
     DATA_DIRECTORY_MODE, data_directory_mode, set_data_directory_mode, i32, PG_DIR_MODE_OWNER
 );
 
-scalar_global!(
-    /// `char OutputFileName[MAXPGPATH];` — debugging output file.
-    OUTPUT_FILE_NAME, OutputFileName, SetOutputFileName, [u8; MAXPGPATH], [0; MAXPGPATH]
-);
+/// `char OutputFileName[MAXPGPATH];` — debugging output file. Single store
+/// in `backend_utils_error::config` (`DebugFileOpen` reads it there), which
+/// keeps it as the C string contents (`None`/empty == `'\0'`-empty buffer);
+/// the C-shaped fixed-size buffer is reconstructed on read.
+#[inline]
+pub fn OutputFileName() -> [u8; MAXPGPATH] {
+    let mut buf = [0u8; MAXPGPATH];
+    if let Some(name) = backend_utils_error::config::output_file_name() {
+        let bytes = name.as_bytes();
+        // Like C's strlcpy into a MAXPGPATH buffer: keep at most
+        // MAXPGPATH - 1 bytes and NUL-terminate.
+        let len = bytes.len().min(MAXPGPATH - 1);
+        buf[..len].copy_from_slice(&bytes[..len]);
+    }
+    buf
+}
+
+pub fn SetOutputFileName(value: [u8; MAXPGPATH]) {
+    let len = value.iter().position(|&b| b == 0).unwrap_or(MAXPGPATH);
+    let name = String::from_utf8_lossy(&value[..len]).into_owned();
+    backend_utils_error::config::set_output_file_name(if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    });
+}
+
+/// String-typed setter for `OutputFileName` (the value is always written
+/// from `argv` text in C).
+pub fn SetOutputFileNameStr(value: &str) {
+    backend_utils_error::config::set_output_file_name(if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    });
+}
 scalar_global!(
     /// `char my_exec_path[MAXPGPATH];` — full path to my executable.
     MY_EXEC_PATH, my_exec_path, set_my_exec_path, [u8; MAXPGPATH], [0; MAXPGPATH]
@@ -207,18 +268,32 @@ scalar_global!(
     /// `bool IsPostmasterEnvironment = false;`
     IS_POSTMASTER_ENVIRONMENT, IsPostmasterEnvironment, SetIsPostmasterEnvironment, bool, false
 );
-scalar_global!(
-    /// `bool IsUnderPostmaster = false;`
-    IS_UNDER_POSTMASTER, IsUnderPostmaster, SetIsUnderPostmaster, bool, false
-);
+/// `bool IsUnderPostmaster = false;` — single store in
+/// `backend_utils_error::config` (elog.c reads it).
+#[inline]
+pub fn IsUnderPostmaster() -> bool {
+    backend_utils_error::config::is_under_postmaster()
+}
+
+#[inline]
+pub fn SetIsUnderPostmaster(value: bool) {
+    backend_utils_error::config::set_is_under_postmaster(value);
+}
 scalar_global!(
     /// `bool IsBinaryUpgrade = false;`
     IS_BINARY_UPGRADE, IsBinaryUpgrade, SetIsBinaryUpgrade, bool, false
 );
-scalar_global!(
-    /// `bool ExitOnAnyError = false;`
-    EXIT_ON_ANY_ERROR, ExitOnAnyError, SetExitOnAnyError, bool, false
-);
+/// `bool ExitOnAnyError = false;` — single store in
+/// `backend_utils_error::config` (errstart promotes ERROR to FATAL on it).
+#[inline]
+pub fn ExitOnAnyError() -> bool {
+    backend_utils_error::config::exit_on_any_error()
+}
+
+#[inline]
+pub fn SetExitOnAnyError(value: bool) {
+    backend_utils_error::config::set_exit_on_any_error(value);
+}
 
 scalar_global!(
     /// `int DateStyle = USE_ISO_DATES;`
