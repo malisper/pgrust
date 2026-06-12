@@ -2,17 +2,18 @@
 //!
 //! PostgreSQL keeps three process-global `sigset_t` values used to block and
 //! unblock signals around critical sections, and `pqinitmask()` initializes
-//! them. These are per-process backend globals (not shared memory), set once
-//! during single-threaded startup, so the port keeps them as an owned
-//! [`SignalMasks`] value plus a process-global snapshot guarded by a lock.
+//! them. These are backend-private globals (not shared memory), so the port
+//! keeps them as an owned [`SignalMasks`] value plus a per-backend
+//! `thread_local!` snapshot (one backend per thread; no cross-thread
+//! sharing).
 //!
 //! Scope note: `pqsignal_be`/`pqsignal_fe` (reliable-signal installers) live
 //! in `src/port/pqsignal.c`, a *different* C unit; the legacy libpq
 //! `pqsignal()` lives in `src/interfaces/libpq/legacy-pqsignal.c` (the
 //! `interfaces-libpq-legacy-pqsignal` crate). Neither is part of this crate.
 
+use std::cell::Cell;
 use std::mem::MaybeUninit;
-use std::sync::{OnceLock, RwLock};
 
 /// Install this crate's seams. The unit is a leaf with no inward seam
 /// declarations, so there is nothing to `set()`.
@@ -118,28 +119,24 @@ impl Default for SignalMasks {
     }
 }
 
-/// Process-global snapshot of the masks, standing in for the C globals
-/// `UnBlockSig`/`BlockSig`/`StartupBlockSig`. Initialized lazily and rewritten
-/// by [`pqinitmask`] (single-set-at-startup in C).
-fn global_masks() -> &'static RwLock<SignalMasks> {
-    static MASKS: OnceLock<RwLock<SignalMasks>> = OnceLock::new();
-    MASKS.get_or_init(|| RwLock::new(SignalMasks::new()))
+thread_local! {
+    /// Per-backend snapshot of the masks, standing in for the C globals
+    /// `UnBlockSig`/`BlockSig`/`StartupBlockSig` (backend-private memory in
+    /// C, so one copy per backend thread here). Initialized lazily and
+    /// rewritten by [`pqinitmask`] (single-set-at-startup in C).
+    static MASKS: Cell<SignalMasks> = Cell::new(SignalMasks::new());
 }
 
-/// Initialize `BlockSig`, `UnBlockSig`, and `StartupBlockSig`.
-///
-/// The C version returns void and mutates the globals; this also returns the
-/// computed masks for the caller's convenience.
-pub fn pqinitmask() -> SignalMasks {
-    let masks = SignalMasks::new();
-    *global_masks().write().expect("signal masks lock poisoned") = masks;
-    masks
+/// Initialize `BlockSig`, `UnBlockSig`, and `StartupBlockSig` for the calling
+/// backend (void, like the C `pqinitmask()`).
+pub fn pqinitmask() {
+    MASKS.set(SignalMasks::new());
 }
 
-/// Reads the current process-global masks snapshot (the analog of referencing
-/// the `BlockSig`/`UnBlockSig`/`StartupBlockSig` globals after `pqinitmask`).
+/// Reads the calling backend's masks snapshot (the analog of referencing the
+/// `BlockSig`/`UnBlockSig`/`StartupBlockSig` globals after `pqinitmask`).
 pub fn signal_masks() -> SignalMasks {
-    *global_masks().read().expect("signal masks lock poisoned")
+    MASKS.get()
 }
 
 fn empty_signal_set() -> libc::sigset_t {
@@ -222,19 +219,12 @@ mod tests {
     }
 
     #[test]
-    fn pqinitmask_updates_global_snapshot() {
-        let masks = pqinitmask();
-        let global = signal_masks();
-        assert_eq!(
-            masks.block_sig_contains(libc::SIGTERM),
-            global.block_sig_contains(libc::SIGTERM)
-        );
-        assert_eq!(
-            masks.startup_block_sig_contains(libc::SIGTERM),
-            global.startup_block_sig_contains(libc::SIGTERM)
-        );
+    fn pqinitmask_updates_thread_local_snapshot() {
+        pqinitmask();
+        let masks = signal_masks();
         // SIGTERM is startup-unblocked but block-blocked.
-        assert!(global.block_sig_contains(libc::SIGTERM));
-        assert!(!global.startup_block_sig_contains(libc::SIGTERM));
+        assert!(masks.block_sig_contains(libc::SIGTERM));
+        assert!(!masks.startup_block_sig_contains(libc::SIGTERM));
+        assert!(!masks.unblock_sig_contains(libc::SIGTERM));
     }
 }

@@ -60,7 +60,7 @@ use types_error::{
     LOG_DESTINATION_STDERR,
 };
 use types_pgstat::wait_event::WAIT_EVENT_SYSLOGGER_MAIN;
-use types_signal::{disposition_from_handler, SigDisposition};
+use types_signal::SigHandler;
 use types_storage::waiteventset::{WL_LATCH_SET, WL_SOCKET_READABLE};
 
 pub mod config;
@@ -304,17 +304,17 @@ pub fn SysLoggerMain(startup_data: &[u8]) -> PgResult<()> {
     // upstream processes are gone, to ensure we don't miss any dying gasps of
     // broken backends...
     let pqsignal = port_pqsignal_seams::pqsignal::call;
-    pqsignal(libc::SIGHUP, disposition_from_handler(sighup_handler));
-    pqsignal(libc::SIGINT, SigDisposition::Ignore);
-    pqsignal(libc::SIGTERM, SigDisposition::Ignore);
-    pqsignal(libc::SIGQUIT, SigDisposition::Ignore);
-    pqsignal(libc::SIGALRM, SigDisposition::Ignore);
-    pqsignal(libc::SIGPIPE, SigDisposition::Ignore);
-    pqsignal(libc::SIGUSR1, disposition_from_handler(sigUsr1Handler)); /* request log rotation */
-    pqsignal(libc::SIGUSR2, SigDisposition::Ignore);
+    pqsignal(libc::SIGHUP, SigHandler::Handler(sighup_handler));
+    pqsignal(libc::SIGINT, SigHandler::Ignore);
+    pqsignal(libc::SIGTERM, SigHandler::Ignore);
+    pqsignal(libc::SIGQUIT, SigHandler::Ignore);
+    pqsignal(libc::SIGALRM, SigHandler::Ignore);
+    pqsignal(libc::SIGPIPE, SigHandler::Ignore);
+    pqsignal(libc::SIGUSR1, SigHandler::Handler(sigUsr1Handler)); /* request log rotation */
+    pqsignal(libc::SIGUSR2, SigHandler::Ignore);
 
     // Reset some signals that are accepted by postmaster but not here.
-    pqsignal(libc::SIGCHLD, SigDisposition::Default);
+    pqsignal(libc::SIGCHLD, SigHandler::Default);
 
     let masks = backend_libpq_pqsignal::signal_masks();
     unsafe {
