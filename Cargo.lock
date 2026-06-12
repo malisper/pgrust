@@ -137,6 +137,7 @@ dependencies = [
 name = "backend-executor-execProcnode-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -146,6 +147,7 @@ dependencies = [
 name = "backend-executor-execTuples-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -171,6 +173,7 @@ dependencies = [
  "backend-tcop-postgres-seams",
  "backend-utils-init-small-seams",
  "backend-utils-sort-storage-seams",
+ "mcx",
  "types-core",
  "types-nodes",
 ]
@@ -412,6 +415,7 @@ dependencies = [
 name = "backend-utils-sort-storage-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -572,6 +576,7 @@ dependencies = [
 name = "types-nodes"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
 ]
 

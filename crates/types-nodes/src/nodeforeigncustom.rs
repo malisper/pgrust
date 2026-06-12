@@ -3,7 +3,8 @@
 //! src-idiomatic hosts `Material` / `MaterialState` in this module; the name
 //! is preserved.
 
-use alloc::boxed::Box;
+use mcx::{Mcx, PgBox};
+use types_core::PgResult;
 
 use crate::execnodes::{PlanStateData, ScanStateData};
 use crate::funcapi::Tuplestorestate;
@@ -13,10 +14,20 @@ use crate::funcapi::Tuplestorestate;
 /// ```c
 /// typedef struct Material { Plan plan; } Material;
 /// ```
-#[derive(Clone, Debug, Default)]
-pub struct Material {
+#[derive(Debug, Default)]
+pub struct Material<'mcx> {
     /// `Plan plan` — the abstract plan-node base.
-    pub plan: crate::nodeindexscan::Plan,
+    pub plan: crate::nodeindexscan::Plan<'mcx>,
+}
+
+impl Material<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Material<'b>> {
+        Ok(Material {
+            plan: self.plan.clone_in(mcx)?,
+        })
+    }
 }
 
 /// `MaterialState` (execnodes.h):
@@ -30,27 +41,29 @@ pub struct Material {
 /// } MaterialState;
 /// ```
 #[derive(Debug, Default)]
-pub struct MaterialState {
+pub struct MaterialState<'mcx> {
     /// `ScanState ss` — its first field is `NodeTag`.
-    pub ss: ScanStateData,
+    pub ss: ScanStateData<'mcx>,
     /// `int eflags` — capability flags to pass to the tuplestore.
     pub eflags: i32,
     /// `bool eof_underlying` — reached end of underlying plan?
     pub eof_underlying: bool,
-    /// `Tuplestorestate *tuplestorestate` — the materialized rows.
-    pub tuplestorestate: Option<Box<Tuplestorestate>>,
+    /// `Tuplestorestate *tuplestorestate` — the materialized rows. The box is
+    /// context-allocated (C: `tuplestore_begin_heap` pallocs the state in the
+    /// caller's current context).
+    pub tuplestorestate: Option<PgBox<'mcx, Tuplestorestate>>,
 }
 
-impl MaterialState {
+impl<'mcx> MaterialState<'mcx> {
     /// `&node->ss.ps` — the embedded `PlanState` head.
     #[inline]
-    pub fn ps(&self) -> &PlanStateData {
+    pub fn ps(&self) -> &PlanStateData<'mcx> {
         &self.ss.ps
     }
 
     /// `&mut node->ss.ps`.
     #[inline]
-    pub fn ps_mut(&mut self) -> &mut PlanStateData {
+    pub fn ps_mut(&mut self) -> &mut PlanStateData<'mcx> {
         &mut self.ss.ps
     }
 }
