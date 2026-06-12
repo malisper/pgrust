@@ -18,4 +18,5 @@ backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
+backend-utils-misc-sampling = { path = "../backend-utils-misc-sampling" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }

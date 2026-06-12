@@ -214,6 +214,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-sampling"
+version = "0.0.0"
+dependencies = [
+ "pg-prng",
+ "types-core",
+]
+
+[[package]]
 name = "interfaces-libpq-legacy-pqsignal"
 version = "0.0.0"
 dependencies = [
@@ -246,6 +254,7 @@ dependencies = [
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-pg-rusage",
+ "backend-utils-misc-sampling",
  "interfaces-libpq-legacy-pqsignal",
 ]
 
