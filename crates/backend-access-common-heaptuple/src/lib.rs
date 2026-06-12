@@ -166,15 +166,25 @@ fn varsize(b: &[u8]) -> usize {
     varsize_4b(b)
 }
 
-/// `VARTAG_SIZE(tag)` (varatt.h): on-disk payload size of a TOAST pointer of
-/// the given `va_tag` (16 bytes for all three valid tags on 64-bit).
+/// `VARTAG_SIZE(tag)` (varatt.h): payload size of a TOAST pointer of the given
+/// `va_tag` — `sizeof(varatt_indirect)` (a `varlena *`, 8 bytes on 64-bit) for
+/// `VARTAG_INDIRECT`, `sizeof(varatt_expanded)` (an `ExpandedObjectHeader *`,
+/// 8 bytes) for the expanded tags, and `sizeof(varatt_external)` (4×4 = 16
+/// bytes) for `VARTAG_ONDISK`.
 #[inline]
 fn vartag_size(tag: u8) -> usize {
     const VARTAG_INDIRECT: u8 = 1;
     const VARTAG_EXPANDED_RO: u8 = 2;
     const VARTAG_ONDISK: u8 = 18;
-    let is_expanded = (tag & !1) == VARTAG_EXPANDED_RO;
-    if tag == VARTAG_INDIRECT || is_expanded || tag == VARTAG_ONDISK {
+    if tag == VARTAG_INDIRECT {
+        // sizeof(varatt_indirect) == sizeof(struct varlena *)
+        8
+    } else if (tag & !1) == VARTAG_EXPANDED_RO {
+        // sizeof(varatt_expanded) == sizeof(ExpandedObjectHeader *)
+        8
+    } else if tag == VARTAG_ONDISK {
+        // sizeof(varatt_external): va_rawsize + va_extinfo + va_valueid +
+        // va_toastrelid, 4 bytes each.
         16
     } else {
         debug_assert!(false, "invalid varlena TOAST tag");
@@ -337,10 +347,11 @@ pub fn heap_compute_data_size(
     data_length
 }
 
-/// `COMPACT_ATTR_IS_PACKABLE(att)` (tupdesc.h): `att->attispackable`.
+/// `COMPACT_ATTR_IS_PACKABLE(att)` (heaptuple.c:87):
+/// `att->attlen == -1 && att->attispackable`.
 #[inline]
 fn compact_attr_is_packable(att: &CompactAttribute) -> bool {
-    att.attispackable
+    att.attlen == -1 && att.attispackable
 }
 
 /// `att_datum_alignby(cur_offset, attalignby, attlen, attdatum)` (tupmacs.h):
@@ -892,6 +903,10 @@ pub fn getmissingattr(tuple_desc: &TupleDescData, attnum: i32) -> DeformedColumn
 
     if att.atthasmissing {
         // Assert(tupleDesc->constr); Assert(tupleDesc->constr->missing);
+        debug_assert!(
+            constr_missing(tuple_desc).is_some(),
+            "getmissingattr: atthasmissing set but tupleDesc has no missing-values array"
+        );
         if let Some(constr) = constr_missing(tuple_desc) {
             let attrmiss = &constr[(attnum - 1) as usize];
             if attrmiss.am_present {
@@ -1585,8 +1600,12 @@ fn expand_tuple(
         }
         // C: nullBits += sourceNullLen - 1; bitMask = 1 << ((sourceNatts-1)&7).
         // fill_val advances the mask first, so seed the cursor at the last source
-        // byte with the bit mask for the last source attr.
-        walk.byte = source_null_len - 1;
+        // byte with the bit mask for the last source attr.  For sourceNatts == 0
+        // (sourceNullLen == 0) C's nullBits points one byte BEFORE the bitmap and
+        // bitMask == HIGHBIT, so the first fill_val call advances onto bits[0];
+        // wrapping_sub models that &bits[-1] cursor exactly (cf. heap_fill_tuple's
+        // usize::MAX seed).
+        walk.byte = source_null_len.wrapping_sub(1);
         walk.bitmask = 1 << (source_natts.wrapping_sub(1) & 0x07);
     }
 
