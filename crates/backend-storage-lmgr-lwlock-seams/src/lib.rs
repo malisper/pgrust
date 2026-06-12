@@ -24,3 +24,24 @@ seam_core::seam!(
     /// `elog(ERROR, "lock %s is not held")`.
     pub fn lwlock_release(lock: &mut LWLock) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `LWLockAcquire(&MainLWLockArray[lock_offset].lock, mode)` — acquire one
+    /// of the individual built-in locks (`lwlocklist.h` offsets, e.g.
+    /// `types_storage::DYNAMIC_SHARED_MEMORY_CONTROL_LOCK`). `MainLWLockArray`
+    /// lives in main shared memory owned by `lwlock.c`, so the lock is named
+    /// by offset rather than by reference.
+    pub fn lwlock_acquire_main(lock_offset: usize, mode: LWLockMode) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `LWLockRelease(&MainLWLockArray[lock_offset].lock)` — release a
+    /// built-in lock previously taken via [`lwlock_acquire_main`].
+    pub fn lwlock_release_main(lock_offset: usize) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LWLockReleaseAll()` — release all LWLocks held by this backend; used
+    /// during error recovery and at shmem exit.
+    pub fn lwlock_release_all()
+);

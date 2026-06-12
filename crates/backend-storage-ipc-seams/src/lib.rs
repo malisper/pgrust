@@ -1,7 +1,6 @@
-//! Seam declarations for the `backend-storage-ipc` unit (`storage/ipc/ipc.c`).
-//!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly.
+//! Seam declarations for `storage/ipc/ipc.c`, installed by
+//! `backend-storage-ipc-dsm-core` (which owns the ipc.c port) from its
+//! `init_seams()`.
 
 seam_core::seam!(
     /// `proc_exit(code)` (`storage/ipc/ipc.c`) — run the on_proc_exit

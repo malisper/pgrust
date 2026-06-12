@@ -9,4 +9,5 @@ name = "types_storage"
 path = "src/lib.rs"
 
 [dependencies]
+libc = { version = "0.2", default-features = false }
 types-core = { path = "../types-core" }

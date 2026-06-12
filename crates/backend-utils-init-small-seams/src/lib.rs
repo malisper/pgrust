@@ -10,3 +10,45 @@ seam_core::seam!(
     /// budget in kilobytes.
     pub fn work_mem() -> i32
 );
+
+seam_core::seam!(
+    /// `MyProcPid` (globals.c): this backend's PID, set at process start.
+    pub fn my_proc_pid() -> i32
+);
+
+seam_core::seam!(
+    /// `MaxBackends` (globals.c): the computed backend-slot count, fixed at
+    /// postmaster startup.
+    pub fn max_backends() -> i32
+);
+
+seam_core::seam!(
+    /// `InterruptPending = value` (globals.c).
+    pub fn set_interrupt_pending(value: bool)
+);
+
+seam_core::seam!(
+    /// `ProcDiePending = value` (globals.c).
+    pub fn set_proc_die_pending(value: bool)
+);
+
+seam_core::seam!(
+    /// `QueryCancelPending = value` (globals.c).
+    pub fn set_query_cancel_pending(value: bool)
+);
+
+seam_core::seam!(
+    /// `InterruptHoldoffCount = value` (globals.c).
+    pub fn set_interrupt_holdoff_count(value: u32)
+);
+
+seam_core::seam!(
+    /// `HOLD_INTERRUPTS()` (miscadmin.h): `InterruptHoldoffCount++`.
+    pub fn hold_interrupts()
+);
+
+seam_core::seam!(
+    /// `RESUME_INTERRUPTS()` (miscadmin.h): `InterruptHoldoffCount--` (with
+    /// the underflow Assert).
+    pub fn resume_interrupts()
+);

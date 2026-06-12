@@ -9,3 +9,12 @@ pub const PGC_SU_BACKEND: GucContext = 3;
 pub const PGC_BACKEND: GucContext = 4;
 pub const PGC_SUSET: GucContext = 5;
 pub const PGC_USERSET: GucContext = 6;
+
+/// `struct config_enum_entry` (`utils/guc.h`): one allowed value of an enum
+/// GUC. C's NULL-terminated arrays become plain slices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct config_enum_entry {
+    pub name: &'static str,
+    pub val: i32,
+    pub hidden: bool,
+}
