@@ -139,3 +139,72 @@ fn nested_scopes_thread_explicitly() {
     assert_eq!(rows.len(), 16);
     assert_eq!(per_query.used(), 64);
 }
+
+#[test]
+fn child_charges_propagate_to_ancestors() {
+    let root = MemoryContext::new("root");
+    let query = root.new_child("per-query");
+    let tuple = query.new_child("per-tuple");
+
+    let v = vec_with_capacity_in::<u8>(tuple.mcx(), 100).unwrap();
+    assert_eq!(tuple.used(), 100);
+    assert_eq!(query.used(), 0, "parent's own bytes unaffected");
+    assert_eq!(query.subtree_used(), 100);
+    assert_eq!(root.subtree_used(), 100);
+
+    let w = vec_with_capacity_in::<u8>(query.mcx(), 50).unwrap();
+    assert_eq!(query.subtree_used(), 150);
+    assert_eq!(root.subtree_used(), 150);
+
+    drop(v);
+    drop(w);
+    assert_eq!(root.subtree_used(), 0);
+    assert_eq!(root.subtree_peak(), 150);
+}
+
+#[test]
+fn ancestor_limit_caps_descendants() {
+    let root = MemoryContext::new("hash-agg").with_limit(1000);
+    let child = root.new_child("batch");
+
+    let _a = vec_with_capacity_in::<u8>(root.mcx(), 600).unwrap();
+    let mut v: PgVec<u8> = PgVec::new_in(child.mcx());
+    assert!(v.try_reserve_exact(500).is_err(), "600+500 exceeds ancestor limit");
+    // failed charge applied nothing anywhere
+    assert_eq!(root.subtree_used(), 600);
+    assert_eq!(child.subtree_used(), 0);
+    v.try_reserve_exact(400).expect("exactly at the ancestor limit");
+    assert_eq!(root.subtree_used(), 1000);
+}
+
+#[test]
+fn stats_tree_reflects_hierarchy_and_prunes_dropped() {
+    let root = MemoryContext::new("root");
+    let a = root.new_child("a");
+    let _hold = vec_with_capacity_in::<u8>(a.mcx(), 64).unwrap();
+    {
+        let b = root.new_child("b");
+        let t = root.stats_tree();
+        assert_eq!(t.children.len(), 2);
+        drop(b);
+    }
+    let t = root.stats_tree();
+    assert_eq!(t.name, "root");
+    assert_eq!(t.children.len(), 1, "dropped child pruned");
+    assert_eq!(t.children[0].name, "a");
+    assert_eq!(t.children[0].used, 64);
+    assert_eq!(t.subtree_used, 64);
+}
+
+#[test]
+fn child_may_outlive_parent_accounting_safely() {
+    let child;
+    {
+        let root = MemoryContext::new("root");
+        child = root.new_child("survivor");
+    } // root dropped; its Acct node stays alive via the child's parent Rc
+    let v = vec_with_capacity_in::<u8>(child.mcx(), 32).unwrap();
+    assert_eq!(child.used(), 32);
+    drop(v);
+    assert_eq!(child.used(), 0);
+}

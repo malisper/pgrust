@@ -48,20 +48,51 @@ enum Backend {
     Bump(bumpalo::Bump),
 }
 
+/// The accounting node: one per context, linked into a tree that is
+/// **separate from ownership**. Parent links are strong (`Rc`) so a child's
+/// charges always reach live ancestor counters; child links are weak, used
+/// only for stats traversal. Cleanup-cascade is NOT this tree's job — that is
+/// Rust ownership (hold child `MemoryContext`s in your state struct).
+///
+/// Charges propagate eagerly: `subtree_used` at every ancestor moves on each
+/// allocate/free, so `MemoryContextMemAllocated(ctx, recurse=true)`-style
+/// reads (nodeAgg's spill decision) are O(1).
+struct Acct {
+    name: &'static str,
+    /// Live requested bytes allocated *in this context* (collection
+    /// capacities, not lengths).
+    self_used: Cell<usize>,
+    /// `self_used` + descendants', maintained eagerly.
+    subtree_used: Cell<usize>,
+    /// High-water marks of the two counters above.
+    self_peak: Cell<usize>,
+    subtree_peak: Cell<usize>,
+    /// Ceiling on `subtree_used` at this node; `usize::MAX` = unlimited. An
+    /// allocation that would push any ancestor past its limit fails
+    /// (surfacing through `try_` collection APIs), mirroring
+    /// `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`.
+    limit: Cell<usize>,
+    parent: Option<alloc::rc::Rc<Acct>>,
+    children: RefCell<alloc::vec::Vec<alloc::rc::Weak<Acct>>>,
+}
+
+impl Acct {
+    fn ancestors(self: &alloc::rc::Rc<Self>) -> impl Iterator<Item = &Acct> {
+        let mut cur: Option<&Acct> = Some(self);
+        core::iter::from_fn(move || {
+            let node = cur?;
+            cur = node.parent.as_deref();
+            Some(node)
+        })
+    }
+}
+
 /// A named allocation domain with exact accounting and an optional byte limit.
 ///
-/// `!Sync` by construction (interior `Cell`s): a context belongs to one
+/// `!Sync` by construction (interior `Cell`s/`Rc`): a context belongs to one
 /// backend process/thread, as in PG.
 pub struct MemoryContext {
-    name: &'static str,
-    /// Live requested bytes (collection capacities, not lengths).
-    used: Cell<usize>,
-    /// High-water mark of `used`.
-    peak: Cell<usize>,
-    /// Allocation ceiling in bytes; `usize::MAX` = unlimited. An allocation
-    /// that would push `used` past this fails (surfacing through `try_`
-    /// collection APIs), mirroring `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`.
-    limit: usize,
+    acct: alloc::rc::Rc<Acct>,
     backend: Backend,
     /// `MemoryContextRegisterResetCallback`: fired LIFO on `reset` and drop,
     /// popped-before-call so a re-entrant registration cannot double-fire.
@@ -69,32 +100,59 @@ pub struct MemoryContext {
 }
 
 impl MemoryContext {
-    /// Malloc-backed context (`AllocSetContextCreate` semantics).
+    /// Malloc-backed root context (`AllocSetContextCreate` semantics).
     pub fn new(name: &'static str) -> Self {
-        Self::with_backend(name, Backend::Malloc)
+        Self::with_backend(name, Backend::Malloc, None)
     }
 
-    /// Bump-arena context (`BumpContextCreate` semantics): per-chunk free is a
-    /// no-op; memory is reclaimed wholesale by [`reset`](Self::reset) / drop.
+    /// Bump-arena root context (`BumpContextCreate` semantics): per-chunk free
+    /// is a no-op; memory is reclaimed wholesale by [`reset`](Self::reset) /
+    /// drop.
     pub fn new_bump(name: &'static str) -> Self {
-        Self::with_backend(name, Backend::Bump(bumpalo::Bump::new()))
+        Self::with_backend(name, Backend::Bump(bumpalo::Bump::new()), None)
     }
 
-    fn with_backend(name: &'static str, backend: Backend) -> Self {
-        MemoryContext {
+    /// Child context for accounting purposes: its allocations also count
+    /// toward (and are limited by) this context and its ancestors, and it
+    /// appears in [`stats_tree`](Self::stats_tree). The child is an
+    /// independently owned value — *cleanup* nesting is expressed by storing
+    /// it in the state struct that should own it, not by this link.
+    pub fn new_child(&self, name: &'static str) -> MemoryContext {
+        Self::with_backend(name, Backend::Malloc, Some(self.acct.clone()))
+    }
+
+    /// [`new_child`](Self::new_child) with a bump backend.
+    pub fn new_child_bump(&self, name: &'static str) -> MemoryContext {
+        Self::with_backend(name, Backend::Bump(bumpalo::Bump::new()), Some(self.acct.clone()))
+    }
+
+    fn with_backend(
+        name: &'static str,
+        backend: Backend,
+        parent: Option<alloc::rc::Rc<Acct>>,
+    ) -> Self {
+        let acct = alloc::rc::Rc::new(Acct {
             name,
-            used: Cell::new(0),
-            peak: Cell::new(0),
-            limit: usize::MAX,
-            backend,
-            reset_cbs: RefCell::new(alloc::vec::Vec::new()),
+            self_used: Cell::new(0),
+            subtree_used: Cell::new(0),
+            self_peak: Cell::new(0),
+            subtree_peak: Cell::new(0),
+            limit: Cell::new(usize::MAX),
+            parent,
+            children: RefCell::new(alloc::vec::Vec::new()),
+        });
+        if let Some(p) = &acct.parent {
+            p.children.borrow_mut().push(alloc::rc::Rc::downgrade(&acct));
         }
+        MemoryContext { acct, backend, reset_cbs: RefCell::new(alloc::vec::Vec::new()) }
     }
 
-    /// Builder: cap `used` at `limit` bytes (0 is a real, always-full limit —
-    /// pass `usize::MAX` for unlimited, or just don't call this).
-    pub fn with_limit(mut self, limit: usize) -> Self {
-        self.limit = limit;
+    /// Builder: cap this context's **subtree** bytes at `limit` (0 is a real,
+    /// always-full limit — pass `usize::MAX` for unlimited, or just don't
+    /// call this). Subtree semantics match how PG uses recursive
+    /// `MemoryContextMemAllocated` for work_mem-style decisions.
+    pub fn with_limit(self, limit: usize) -> Self {
+        self.acct.limit.set(limit);
         self
     }
 
@@ -105,21 +163,33 @@ impl MemoryContext {
     }
 
     pub fn name(&self) -> &'static str {
-        self.name
+        self.acct.name
     }
 
-    /// Live requested bytes.
+    /// Live requested bytes allocated in this context itself.
     pub fn used(&self) -> usize {
-        self.used.get()
+        self.acct.self_used.get()
+    }
+
+    /// Live requested bytes in this context plus all its accounting
+    /// descendants — C's `MemoryContextMemAllocated(ctx, recurse=true)`,
+    /// maintained eagerly so this is O(1).
+    pub fn subtree_used(&self) -> usize {
+        self.acct.subtree_used.get()
     }
 
     /// High-water mark of [`used`](Self::used).
     pub fn peak(&self) -> usize {
-        self.peak.get()
+        self.acct.self_peak.get()
+    }
+
+    /// High-water mark of [`subtree_used`](Self::subtree_used).
+    pub fn subtree_peak(&self) -> usize {
+        self.acct.subtree_peak.get()
     }
 
     pub fn limit(&self) -> usize {
-        self.limit
+        self.acct.limit.get()
     }
 
     /// `MemoryContextRegisterResetCallback`. Callbacks run LIFO on
@@ -136,32 +206,62 @@ impl MemoryContext {
     pub fn reset(&mut self) {
         self.fire_reset_callbacks();
         debug_assert_eq!(
-            self.used.get(),
+            self.acct.self_used.get(),
             0,
             "context {:?} reset with {} bytes still charged (leaked allocation?)",
-            self.name,
-            self.used.get(),
+            self.acct.name,
+            self.acct.self_used.get(),
         );
         if let Backend::Bump(bump) = &mut self.backend {
             bump.reset();
         }
-        self.used.set(0);
-        self.peak.set(0);
+        // High-water marks restart; subtree_peak can't drop below what
+        // descendants still hold.
+        self.acct.self_peak.set(0);
+        self.acct.subtree_peak.set(self.acct.subtree_used.get());
     }
 
     /// Point-in-time accounting snapshot (`MemoryContextStats` per-node line;
-    /// hierarchy and log emission live with the eventual caller).
+    /// log emission lives with the eventual caller).
     pub fn stats(&self) -> ContextStats {
         ContextStats {
-            name: self.name,
-            used: self.used.get(),
-            peak: self.peak.get(),
-            limit: self.limit,
+            name: self.acct.name,
+            used: self.acct.self_used.get(),
+            peak: self.acct.self_peak.get(),
+            subtree_used: self.acct.subtree_used.get(),
+            subtree_peak: self.acct.subtree_peak.get(),
+            limit: self.acct.limit.get(),
             arena_footprint: match &self.backend {
-                Backend::Malloc => self.used.get(),
+                Backend::Malloc => self.acct.self_used.get(),
                 Backend::Bump(b) => b.allocated_bytes(),
             },
         }
+    }
+
+    /// Hierarchical accounting snapshot of this context and its live
+    /// accounting descendants (`MemoryContextStatsDetail` shape). Children
+    /// whose contexts have been dropped are pruned as encountered.
+    pub fn stats_tree(&self) -> TreeStats {
+        fn node(acct: &Acct) -> TreeStats {
+            let mut children = alloc::vec::Vec::new();
+            acct.children.borrow_mut().retain(|w| match w.upgrade() {
+                Some(c) => {
+                    children.push(node(&c));
+                    true
+                }
+                None => false,
+            });
+            TreeStats {
+                name: acct.name,
+                used: acct.self_used.get(),
+                peak: acct.self_peak.get(),
+                subtree_used: acct.subtree_used.get(),
+                subtree_peak: acct.subtree_peak.get(),
+                limit: acct.limit.get(),
+                children,
+            }
+        }
+        node(&self.acct)
     }
 
     /// The `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)` this context produces when
@@ -172,7 +272,7 @@ impl MemoryContext {
             .with_detail(alloc::format!(
                 "Failed on request of size {} in memory context \"{}\".",
                 request,
-                self.name
+                self.acct.name
             ))
     }
 
@@ -188,47 +288,69 @@ impl MemoryContext {
         }
     }
 
-    #[inline]
+    /// Validate against every ancestor's limit, then apply to every
+    /// ancestor's subtree counter — two passes so a failure applies nothing.
     fn charge(&self, n: usize) -> Result<(), AllocError> {
-        let used = self.used.get();
-        let new = used.checked_add(n).ok_or(AllocError)?;
-        if new > self.limit {
-            return Err(AllocError);
+        for node in self.acct.ancestors() {
+            let new = node.subtree_used.get().checked_add(n).ok_or(AllocError)?;
+            if new > node.limit.get() {
+                return Err(AllocError);
+            }
         }
-        self.used.set(new);
-        if new > self.peak.get() {
-            self.peak.set(new);
+        let self_new = self.acct.self_used.get() + n;
+        self.acct.self_used.set(self_new);
+        if self_new > self.acct.self_peak.get() {
+            self.acct.self_peak.set(self_new);
+        }
+        for node in self.acct.ancestors() {
+            let new = node.subtree_used.get() + n;
+            node.subtree_used.set(new);
+            if new > node.subtree_peak.get() {
+                node.subtree_peak.set(new);
+            }
         }
         Ok(())
     }
 
-    #[inline]
     fn uncharge(&self, n: usize) {
         debug_assert!(
-            self.used.get() >= n,
+            self.acct.self_used.get() >= n,
             "context {:?} uncharging {} with only {} charged",
-            self.name,
+            self.acct.name,
             n,
-            self.used.get(),
+            self.acct.self_used.get(),
         );
-        self.used.set(self.used.get().saturating_sub(n));
+        self.acct.self_used.set(self.acct.self_used.get().saturating_sub(n));
+        for node in self.acct.ancestors() {
+            node.subtree_used.set(node.subtree_used.get().saturating_sub(n));
+        }
     }
 }
 
 impl Drop for MemoryContext {
-    /// `MemoryContextDelete` fires reset callbacks too.
+    /// `MemoryContextDelete` fires reset callbacks too. Any bytes still
+    /// charged (possible only via `mem::forget` of a collection) are returned
+    /// to ancestor counters so the accounting tree never holds phantom bytes.
     fn drop(&mut self) {
         self.fire_reset_callbacks();
+        let residual = self.acct.self_used.get();
+        if residual > 0 {
+            for node in self.acct.ancestors() {
+                node.subtree_used.set(node.subtree_used.get().saturating_sub(residual));
+            }
+            self.acct.self_used.set(0);
+        }
     }
 }
 
 impl fmt::Debug for MemoryContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MemoryContext")
-            .field("name", &self.name)
-            .field("used", &self.used.get())
-            .field("peak", &self.peak.get())
-            .field("limit", &self.limit)
+            .field("name", &self.acct.name)
+            .field("used", &self.acct.self_used.get())
+            .field("subtree_used", &self.acct.subtree_used.get())
+            .field("peak", &self.acct.self_peak.get())
+            .field("limit", &self.acct.limit.get())
             .finish_non_exhaustive()
     }
 }
@@ -237,14 +359,31 @@ impl fmt::Debug for MemoryContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContextStats {
     pub name: &'static str,
-    /// Live requested bytes.
+    /// Live requested bytes in this context itself.
     pub used: usize,
-    /// High-water mark since creation/reset.
+    /// High-water mark of `used` since creation/reset.
     pub peak: usize,
+    /// Live requested bytes including accounting descendants.
+    pub subtree_used: usize,
+    pub subtree_peak: usize,
     pub limit: usize,
     /// Bytes the backend actually holds (== `used` for malloc; the arena size
     /// for bump, which retains freed bytes until reset).
     pub arena_footprint: usize,
+}
+
+/// Hierarchical stats: one context's numbers plus its accounting children's.
+/// (No `arena_footprint` — backends live with each owned context, not in the
+/// accounting tree.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeStats {
+    pub name: &'static str,
+    pub used: usize,
+    pub peak: usize,
+    pub subtree_used: usize,
+    pub subtree_peak: usize,
+    pub limit: usize,
+    pub children: alloc::vec::Vec<TreeStats>,
 }
 
 /// Copyable allocator handle: `&'mcx MemoryContext` + the `Allocator` impl.
@@ -288,7 +427,7 @@ impl<'mcx> Mcx<'mcx> {
 
 impl fmt::Debug for Mcx<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Mcx({:?})", self.0.name)
+        write!(f, "Mcx({:?})", self.0.acct.name)
     }
 }
 
