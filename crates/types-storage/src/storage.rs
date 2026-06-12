@@ -75,3 +75,15 @@ pub const LWTRANCHE_PER_XACT_PREDICATE_LIST: i32 = LWTRANCHE_PARALLEL_APPEND + 1
 pub const LWTRANCHE_PGSTATS_DSA: i32 = LWTRANCHE_PER_XACT_PREDICATE_LIST + 1;
 pub const LWTRANCHE_PGSTATS_HASH: i32 = LWTRANCHE_PGSTATS_DSA + 1;
 pub const LWTRANCHE_PGSTATS_DATA: i32 = LWTRANCHE_PGSTATS_HASH + 1;
+
+/// `LOCKMODE` (`storage/lockdefs.h`) — a relation/object lock level.
+pub type LOCKMODE = i32;
+pub const NoLock: LOCKMODE = 0;
+pub const AccessShareLock: LOCKMODE = 1;
+pub const RowShareLock: LOCKMODE = 2;
+pub const RowExclusiveLock: LOCKMODE = 3;
+pub const ShareUpdateExclusiveLock: LOCKMODE = 4;
+pub const ShareLock: LOCKMODE = 5;
+pub const ShareRowExclusiveLock: LOCKMODE = 6;
+pub const ExclusiveLock: LOCKMODE = 7;
+pub const AccessExclusiveLock: LOCKMODE = 8;

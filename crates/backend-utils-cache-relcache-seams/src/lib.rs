@@ -17,3 +17,32 @@ seam_core::seam!(
         relation: types_core::primitive::Oid,
     ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
 );
+
+seam_core::seam!(
+    /// `relation->rd_rel->reltoastrelid` (utils/rel.h field read): the OID of
+    /// the relation's TOAST table, or `InvalidOid` if none. `Err` carries the
+    /// by-OID relcache resolution failure surface.
+    pub fn relation_reltoastrelid(
+        relation: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `RelationGetRelationName(relation)` (utils/rel.h):
+    /// `relation->rd_rel->relname` as an owned string. `Err` carries the
+    /// by-OID relcache resolution failure surface.
+    pub fn relation_get_relation_name(
+        relation: types_core::primitive::Oid,
+    ) -> types_error::PgResult<std::string::String>
+);
+
+seam_core::seam!(
+    /// `RelationGetToastTupleTarget(relation, defaulttarg)` (utils/rel.h):
+    /// `((StdRdOptions *) relation->rd_options)->toast_tuple_target`, or
+    /// `default_target` when the relation has no reloptions. `Err` carries
+    /// the by-OID relcache resolution failure surface.
+    pub fn relation_get_toast_tuple_target(
+        relation: types_core::primitive::Oid,
+        default_target: i32,
+    ) -> types_error::PgResult<i32>
+);
