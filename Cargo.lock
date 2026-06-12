@@ -14,6 +14,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-hashvalidate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amvalidate-seams",
+ "backend-access-transam-xact-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error-seams",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
+ "types-hash",
+]
+
+[[package]]
 name = "backend-access-heap-heaptoast-seams"
 version = "0.0.0"
 dependencies = [
@@ -22,10 +39,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-index-amvalidate-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-transam-parallel-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-access-transam-xact-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -98,10 +133,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-format-type-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-utils-adt-regproc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -110,6 +163,33 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+]
+
+[[package]]
+name = "backend-utils-cache-lsyscache-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-cache-syscache-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-hash",
+]
+
+[[package]]
+name = "backend-utils-error-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -159,6 +239,7 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-hashvalidate",
  "backend-libpq-pqsignal",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
@@ -169,11 +250,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-amvalidate"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
 name = "types-core"
 version = "0.0.0"
 
 [[package]]
 name = "types-datum"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-error"
+version = "0.0.0"
+
+[[package]]
+name = "types-hash"
 version = "0.0.0"
 dependencies = [
  "types-core",
