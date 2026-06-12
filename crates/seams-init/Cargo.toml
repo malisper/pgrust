@@ -11,8 +11,10 @@ path = "src/lib.rs"
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
+interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }

@@ -1,0 +1,12 @@
+[package]
+name = "backend-libpq-pqsignal"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_libpq_pqsignal"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"

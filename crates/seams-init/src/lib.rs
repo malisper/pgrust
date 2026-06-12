@@ -7,9 +7,11 @@
 pub fn init_all() {
     // One line per ported crate, kept sorted:
     backend_access_common_heaptuple::init_seams();
+    backend_libpq_pqsignal::init_seams();
     backend_storage_page_checksum::init_seams();
     backend_utils_activity_small::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();
     backend_utils_misc_pg_rusage::init_seams();
+    interfaces_libpq_legacy_pqsignal::init_seams();
 }

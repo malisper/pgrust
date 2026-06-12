@@ -36,6 +36,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-pqsignal"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lwlock-seams"
 version = "0.0.0"
 dependencies = [
@@ -127,6 +134,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "interfaces-libpq-legacy-pqsignal"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -145,11 +159,13 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-libpq-pqsignal",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-pg-rusage",
+ "interfaces-libpq-legacy-pqsignal",
 ]
 
 [[package]]
