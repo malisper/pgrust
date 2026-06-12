@@ -14,7 +14,7 @@
 
 use std::cell::RefCell;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
 
 use types_dest::{DestNone, DestRemote};
 use types_error::{
@@ -50,14 +50,14 @@ thread_local! {
 /// string is owned by tcop (behind the context provider), so suppression is
 /// recorded here and honored by `check_log_of_query`. tcop clears it when it
 /// installs a new statement.
-static STATEMENT_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+thread_local! { static STATEMENT_SUPPRESSED: Cell<bool> = const { Cell::new(false) }; }
 
 pub(crate) fn statement_suppressed() -> bool {
-    STATEMENT_SUPPRESSED.load(Ordering::Relaxed)
+    STATEMENT_SUPPRESSED.with(Cell::get)
 }
 
 pub fn reset_statement_suppressed() {
-    STATEMENT_SUPPRESSED.store(false, Ordering::Relaxed);
+    STATEMENT_SUPPRESSED.with(|c| c.set(false));
 }
 
 fn errstart_not_called() -> PgError {
@@ -128,7 +128,7 @@ pub fn errstart(elevel: ErrorLevel, domain: Option<&str>) -> bool {
                 // statement logging — either could be the source of the
                 // recursive failure.
                 context_chain::error_context_stack_clear();
-                STATEMENT_SUPPRESSED.store(true, Ordering::Relaxed);
+                STATEMENT_SUPPRESSED.with(|c| c.set(true));
             }
         }
 
