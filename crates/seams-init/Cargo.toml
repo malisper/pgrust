@@ -14,6 +14,7 @@ backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" 
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
+backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
