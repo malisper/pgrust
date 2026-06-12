@@ -24,3 +24,10 @@ seam_core::seam!(
     /// `elog(ERROR, "lock %s is not held")`.
     pub fn lwlock_release(lock: &mut LWLock) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `LWLockRelease(&MainLWLockArray[lock_id].lock)` — release one of the
+    /// individual (named) LWLocks by its `lwlocklist.h` index (e.g.
+    /// `types_storage::LWLOCK_PROC_ARRAY`, `types_storage::LWLOCK_XID_GEN`).
+    pub fn lwlock_release_builtin(lock_id: i32) -> PgResult<()>
+);

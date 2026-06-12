@@ -21,3 +21,15 @@ seam_core::seam!(
     /// cannot `ereport`.
     pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool
 );
+
+seam_core::seam!(
+    /// `GetCurrentTransactionId()` — assigns an xid if none yet; assignment
+    /// can `ereport(ERROR)`.
+    pub fn get_current_transaction_id() -> PgResult<types_core::TransactionId>
+);
+
+seam_core::seam!(
+    /// `MyXactFlags |= XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK` (xact.c
+    /// backend-global).
+    pub fn set_my_xact_flags_acquired_access_exclusive_lock()
+);

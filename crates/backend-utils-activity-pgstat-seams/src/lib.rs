@@ -76,3 +76,9 @@ seam_core::seam!(
     /// there is no other known cause.
     pub fn pgstat_set_session_end_cause_fatal()
 );
+
+seam_core::seam!(
+    /// `pgstat_report_stat(force)` (pgstat.c) — flush pending stats; returns
+    /// the soonest time another flush could be useful (0 if idle).
+    pub fn pgstat_report_stat(force: bool) -> types_error::PgResult<i64>
+);

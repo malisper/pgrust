@@ -10,3 +10,18 @@ seam_core::seam!(
     /// budget in kilobytes.
     pub fn work_mem() -> i32
 );
+
+seam_core::seam!(
+    /// `MyProcNumber` (globals.c).
+    pub fn my_proc_number() -> types_core::ProcNumber
+);
+
+seam_core::seam!(
+    /// `MyDatabaseId` (globals.c).
+    pub fn my_database_id() -> types_core::Oid
+);
+
+seam_core::seam!(
+    /// `MyDatabaseTableSpace` (globals.c).
+    pub fn my_database_table_space() -> types_core::Oid
+);
