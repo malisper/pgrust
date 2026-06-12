@@ -22,8 +22,9 @@ pub type bitmapword = u64;
 ///
 /// The word storage is context-allocated (C: the `bms_*` constructors palloc
 /// in `CurrentMemoryContext`), so the set carries the allocator lifetime.
-/// Derived `Clone` clones within the same context.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// No `Clone`: copying allocates, so it must go through a fallible
+/// `bms_copy`-shaped constructor when the owning unit lands.
+#[derive(Debug, Eq, PartialEq)]
 pub struct Bitmapset<'mcx> {
     /// `int nwords` — number of words in array.
     pub nwords: i32,
