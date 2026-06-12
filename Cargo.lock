@@ -22,6 +22,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-port-atomics"
+version = "0.0.0"
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
@@ -75,6 +79,7 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-port-atomics",
  "backend-storage-page-checksum",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
