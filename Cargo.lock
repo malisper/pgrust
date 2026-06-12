@@ -22,6 +22,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-table-table-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
@@ -33,6 +42,15 @@ name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-utils-cache-relcache-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-tuple",
 ]
 
 [[package]]
@@ -54,6 +72,16 @@ name = "backend-utils-misc-pg-rusage"
 version = "0.0.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "backend-utils-misc-queryenvironment"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table-seams",
+ "backend-utils-cache-relcache-seams",
+ "types-core",
+ "types-tuple",
 ]
 
 [[package]]
@@ -79,6 +107,7 @@ dependencies = [
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-pg-rusage",
+ "backend-utils-misc-queryenvironment",
 ]
 
 [[package]]
