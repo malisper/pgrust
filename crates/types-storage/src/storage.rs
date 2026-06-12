@@ -44,6 +44,43 @@ pub struct LWLock {
 /// `NUM_INDIVIDUAL_LWLOCKS` — generated from `lwlocklist.h`.
 pub const NUM_INDIVIDUAL_LWLOCKS: i32 = 54;
 
+/// `DynamicSharedMemoryControlLock` (`lwlocklist.h`): offset of the DSM
+/// control lock in `MainLWLockArray` (`&MainLWLockArray[34].lock`).
+pub const DYNAMIC_SHARED_MEMORY_CONTROL_LOCK: usize = 34;
+
+/// `dsm_handle` (`storage/dsm_impl.h`) — a "name" for a dynamic shared memory
+/// segment.
+pub type dsm_handle = uint32;
+
+/// `DSM_HANDLE_INVALID` (`(dsm_handle) 0`).
+pub const DSM_HANDLE_INVALID: dsm_handle = 0;
+
+/// `PGShmemHeader` (`storage/pg_shmem.h`) — standard header for all Postgres
+/// shared memory segments, resident at the start of the main segment.
+/// `repr(C)` because it lives in real shared memory.
+#[repr(C)]
+pub struct PGShmemHeader {
+    /// `magic` — magic # to identify Postgres segments.
+    pub magic: i32,
+    /// `creatorPID` — PID of creating process (set but unread).
+    pub creatorPID: libc::pid_t,
+    /// `totalsize` — total size of segment.
+    pub totalsize: usize,
+    /// `freeoffset` — offset to first free space.
+    pub freeoffset: usize,
+    /// `dsm_control` — ID of dynamic shared memory control segment.
+    pub dsm_control: dsm_handle,
+    /// `index` — pointer to ShmemIndex table.
+    pub index: *mut core::ffi::c_void,
+    /// `device` — device data directory is on (non-Windows only).
+    pub device: libc::dev_t,
+    /// `inode` — inode number of data directory (non-Windows only).
+    pub inode: libc::ino_t,
+}
+
+/// `PGShmemMagic` (`storage/pg_shmem.h`).
+pub const PGShmemMagic: i32 = 679834894;
+
 // `BuiltinTrancheIds` (`storage/lwlock.h`) — the chain from
 // `LWTRANCHE_XACT_BUFFER = NUM_INDIVIDUAL_LWLOCKS` down to the tranche the
 // pgstat ports consume (`LWTRANCHE_PGSTATS_DATA`).

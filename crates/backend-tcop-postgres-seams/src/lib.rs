@@ -11,3 +11,10 @@ seam_core::seam!(
     /// `ereport(ERROR/FATAL, ...)` longjmp).
     pub fn check_for_interrupts() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `debug_query_string = NULL` (tcop/postgres.c): reset the
+    /// currently-executing query string before exit-time cleanup clobbers it
+    /// (`proc_exit_prepare`).
+    pub fn reset_debug_query_string()
+);

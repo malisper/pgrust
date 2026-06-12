@@ -117,3 +117,12 @@ pub const GUC_UNIT_S: i32 = 0x20000000;
 pub const GUC_UNIT_MIN: i32 = 0x30000000;
 pub const GUC_UNIT_TIME: i32 = 0x70000000;
 pub const GUC_UNIT: i32 = GUC_UNIT_MEMORY | GUC_UNIT_TIME;
+
+/// `struct config_enum_entry` (`utils/guc.h`): one allowed value of an enum
+/// GUC. C's NULL-terminated arrays become plain slices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct config_enum_entry {
+    pub name: &'static str,
+    pub val: i32,
+    pub hidden: bool,
+}
