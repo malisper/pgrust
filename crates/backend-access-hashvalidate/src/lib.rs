@@ -238,7 +238,7 @@ pub fn hashvalidate(opclassoid: Oid) -> PgResult<bool> {
         })
         .collect();
     let grouplist =
-        amvalidate_seams::identify_opfamily_groups::call(&amv_oprlist, &amv_proclist);
+        amvalidate_seams::identify_opfamily_groups::call(&amv_oprlist, &amv_proclist)?;
 
     let mut opclassgroup: Option<&types_amvalidate::OpFamilyOpFuncGroup> = None;
     for thisgroup in &grouplist {
@@ -350,7 +350,7 @@ pub fn hashadjustmembers(
                     HASH_AM_OID,
                     opfamilyoid,
                     opcintype,
-                );
+                )?;
             }
             if OidIsValid(opclassoid) {
                 // Hard dependency on opclass.

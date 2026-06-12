@@ -17,10 +17,12 @@ use crate::changecount::{
 };
 use backend_storage_lmgr_lwlock_seams::{lwlock_acquire, lwlock_initialize, lwlock_release};
 use backend_utils_activity_pgstat_seams::{
-    assert_is_up, shmem_checkpointer, shmem_is_shutdown, snapshot_checkpointer, snapshot_fixed,
+    assert_is_up, shmem_is_shutdown, snapshot_fixed, with_shmem_checkpointer,
+    with_snapshot_checkpointer,
 };
 use backend_utils_activity_stat_seams::pgstat_flush_io;
 use types_core::TimestampTz;
+use types_error::PgResult;
 use types_pgstat::activity_pgstat::{PgStatShared_Checkpointer, PgStat_CheckpointerStats};
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
@@ -57,7 +59,7 @@ pub fn pending_checkpointer_stats() -> &'static mut PgStat_CheckpointerStats {
 /// Report checkpointer and IO statistics.
 ///
 /// Port of `void pgstat_report_checkpointer(void)`.
-pub fn pgstat_report_checkpointer() {
+pub fn pgstat_report_checkpointer() -> PgResult<()> {
     // Assert(!pgStatLocal.shmem->is_shutdown);
     debug_assert!(!shmem_is_shutdown::call());
     // pgstat_assert_is_up();
@@ -71,45 +73,49 @@ pub fn pgstat_report_checkpointer() {
     //     return;
     let pending = *pending_checkpointer_stats();
     if pending.is_all_zeros() {
-        return;
+        return Ok(());
     }
 
     // PgStatShared_Checkpointer *stats_shmem = &pgStatLocal.shmem->checkpointer;
-    let stats_shmem: &mut PgStatShared_Checkpointer = shmem_checkpointer::call();
+    with_shmem_checkpointer::call(&mut |stats_shmem: &mut PgStatShared_Checkpointer| {
+        pgstat_begin_changecount_write(&mut stats_shmem.changecount);
 
-    pgstat_begin_changecount_write(&mut stats_shmem.changecount);
+        // #define CHECKPOINTER_ACC(fld) stats_shmem->stats.fld += PendingCheckpointerStats.fld
+        stats_shmem.stats.num_timed += pending.num_timed;
+        stats_shmem.stats.num_requested += pending.num_requested;
+        stats_shmem.stats.num_performed += pending.num_performed;
+        stats_shmem.stats.restartpoints_timed += pending.restartpoints_timed;
+        stats_shmem.stats.restartpoints_requested += pending.restartpoints_requested;
+        stats_shmem.stats.restartpoints_performed += pending.restartpoints_performed;
+        stats_shmem.stats.write_time += pending.write_time;
+        stats_shmem.stats.sync_time += pending.sync_time;
+        stats_shmem.stats.buffers_written += pending.buffers_written;
+        stats_shmem.stats.slru_written += pending.slru_written;
 
-    // #define CHECKPOINTER_ACC(fld) stats_shmem->stats.fld += PendingCheckpointerStats.fld
-    stats_shmem.stats.num_timed += pending.num_timed;
-    stats_shmem.stats.num_requested += pending.num_requested;
-    stats_shmem.stats.num_performed += pending.num_performed;
-    stats_shmem.stats.restartpoints_timed += pending.restartpoints_timed;
-    stats_shmem.stats.restartpoints_requested += pending.restartpoints_requested;
-    stats_shmem.stats.restartpoints_performed += pending.restartpoints_performed;
-    stats_shmem.stats.write_time += pending.write_time;
-    stats_shmem.stats.sync_time += pending.sync_time;
-    stats_shmem.stats.buffers_written += pending.buffers_written;
-    stats_shmem.stats.slru_written += pending.slru_written;
-
-    pgstat_end_changecount_write(&mut stats_shmem.changecount);
+        pgstat_end_changecount_write(&mut stats_shmem.changecount);
+    });
 
     // Clear out the statistics buffer, so it can be re-used.
     // MemSet(&PendingCheckpointerStats, 0, sizeof(PendingCheckpointerStats));
     *pending_checkpointer_stats() = PgStat_CheckpointerStats::default();
 
     // Report IO statistics
-    pgstat_flush_io::call(false);
+    pgstat_flush_io::call(false)?;
+    Ok(())
 }
 
 /// `pgstat_fetch_stat_checkpointer()` —
 ///
-/// Support function for the SQL-callable `pgstat*` functions. Returns a
-/// pointer to the checkpointer statistics struct.
-pub fn pgstat_fetch_stat_checkpointer() -> &'static mut PgStat_CheckpointerStats {
-    snapshot_fixed::call(PGSTAT_KIND_CHECKPOINTER);
+/// Support function for the SQL-callable `pgstat*` functions. In C this
+/// returns a pointer to the snapshot's checkpointer statistics struct; here
+/// it is a copy of that snapshot entry.
+pub fn pgstat_fetch_stat_checkpointer() -> PgResult<PgStat_CheckpointerStats> {
+    snapshot_fixed::call(PGSTAT_KIND_CHECKPOINTER)?;
 
     // return &pgStatLocal.snapshot.checkpointer;
-    snapshot_checkpointer::call()
+    let mut snap = PgStat_CheckpointerStats::default();
+    with_snapshot_checkpointer::call(&mut |s: &mut PgStat_CheckpointerStats| snap = *s);
+    Ok(snap)
 }
 
 /// Port of `void pgstat_checkpointer_init_shmem_cb(void *stats)`.
@@ -118,45 +124,58 @@ pub fn pgstat_checkpointer_init_shmem_cb(stats: &mut PgStatShared_Checkpointer) 
 }
 
 /// Port of `void pgstat_checkpointer_reset_all_cb(TimestampTz ts)`.
-pub fn pgstat_checkpointer_reset_all_cb(ts: TimestampTz) {
-    let stats_shmem: &mut PgStatShared_Checkpointer = shmem_checkpointer::call();
-
-    // see explanation above PgStatShared_Checkpointer for the reset protocol
-    lwlock_acquire::call(&mut stats_shmem.lock, LW_EXCLUSIVE);
-    {
-        // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
-        //                                 &stats_shmem->stats, sizeof(...),
-        //                                 &stats_shmem->changecount);
-        let PgStatShared_Checkpointer {
-            ref mut reset_offset,
-            ref stats,
-            ref changecount,
-            ..
-        } = *stats_shmem;
-        pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
-    }
-    stats_shmem.stats.stat_reset_timestamp = ts;
-    lwlock_release::call(&mut stats_shmem.lock);
+pub fn pgstat_checkpointer_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
+    let mut res: PgResult<()> = Ok(());
+    with_shmem_checkpointer::call(&mut |stats_shmem: &mut PgStatShared_Checkpointer| {
+        res = (|| {
+            // see explanation above PgStatShared_Checkpointer for the reset protocol
+            lwlock_acquire::call(&mut stats_shmem.lock, LW_EXCLUSIVE)?;
+            {
+                // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
+                //                                 &stats_shmem->stats, sizeof(...),
+                //                                 &stats_shmem->changecount);
+                let PgStatShared_Checkpointer {
+                    ref mut reset_offset,
+                    ref stats,
+                    ref changecount,
+                    ..
+                } = *stats_shmem;
+                pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
+            }
+            stats_shmem.stats.stat_reset_timestamp = ts;
+            lwlock_release::call(&mut stats_shmem.lock)
+        })();
+    });
+    res
 }
 
 /// Port of `void pgstat_checkpointer_snapshot_cb(void)`.
-pub fn pgstat_checkpointer_snapshot_cb() {
-    let mut snap = *snapshot_checkpointer::call();
-    let reset: PgStat_CheckpointerStats = {
-        let stats_shmem: &mut PgStatShared_Checkpointer = shmem_checkpointer::call();
+pub fn pgstat_checkpointer_snapshot_cb() -> PgResult<()> {
+    let mut snap = PgStat_CheckpointerStats::default();
+    with_snapshot_checkpointer::call(&mut |s: &mut PgStat_CheckpointerStats| snap = *s);
 
-        // pgstat_copy_changecounted_stats(&pgStatLocal.snapshot.checkpointer,
-        //                                 &stats_shmem->stats, sizeof(...),
-        //                                 &stats_shmem->changecount);
-        pgstat_copy_changecounted_stats(&mut snap, &stats_shmem.stats, &stats_shmem.changecount);
+    let mut shmem_res: PgResult<PgStat_CheckpointerStats> =
+        Ok(PgStat_CheckpointerStats::default());
+    with_shmem_checkpointer::call(&mut |stats_shmem: &mut PgStatShared_Checkpointer| {
+        shmem_res = (|| {
+            // pgstat_copy_changecounted_stats(&pgStatLocal.snapshot.checkpointer,
+            //                                 &stats_shmem->stats, sizeof(...),
+            //                                 &stats_shmem->changecount);
+            pgstat_copy_changecounted_stats(
+                &mut snap,
+                &stats_shmem.stats,
+                &stats_shmem.changecount,
+            );
 
-        lwlock_acquire::call(&mut stats_shmem.lock, LW_SHARED);
-        // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
-        let reset = stats_shmem.reset_offset;
-        lwlock_release::call(&mut stats_shmem.lock);
+            lwlock_acquire::call(&mut stats_shmem.lock, LW_SHARED)?;
+            // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
+            let reset = stats_shmem.reset_offset;
+            lwlock_release::call(&mut stats_shmem.lock)?;
 
-        reset
-    };
+            Ok(reset)
+        })();
+    });
+    let reset: PgStat_CheckpointerStats = shmem_res?;
 
     // compensate by reset offsets
     // #define CHECKPOINTER_COMP(fld) pgStatLocal.snapshot.checkpointer.fld -= reset.fld;
@@ -171,7 +190,8 @@ pub fn pgstat_checkpointer_snapshot_cb() {
     snap.buffers_written -= reset.buffers_written;
     snap.slru_written -= reset.slru_written;
 
-    *snapshot_checkpointer::call() = snap;
+    with_snapshot_checkpointer::call(&mut |s: &mut PgStat_CheckpointerStats| *s = snap);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -183,7 +203,7 @@ mod tests {
     fn report_skips_when_pending_all_zeros() {
         let env = setup();
 
-        pgstat_report_checkpointer();
+        pgstat_report_checkpointer().unwrap();
 
         assert_eq!(env.checkpointer_shmem.borrow().changecount, 0);
         assert_eq!(env.flush_io_calls.get(), 0);
@@ -207,7 +227,7 @@ mod tests {
         }
         env.checkpointer_shmem.borrow_mut().stats.num_timed = 100;
 
-        pgstat_report_checkpointer();
+        pgstat_report_checkpointer().unwrap();
 
         {
             let shmem = env.checkpointer_shmem.borrow();
@@ -232,7 +252,7 @@ mod tests {
         let env = setup();
         env.checkpointer_snapshot.borrow_mut().num_performed = 11;
 
-        let stats = pgstat_fetch_stat_checkpointer();
+        let stats = pgstat_fetch_stat_checkpointer().unwrap();
         assert_eq!(stats.num_performed, 11);
         assert_eq!(
             env.snapshot_fixed_kinds.borrow().clone(),
@@ -259,7 +279,7 @@ mod tests {
             s.stats.buffers_written = 3;
         }
 
-        pgstat_checkpointer_reset_all_cb(555);
+        pgstat_checkpointer_reset_all_cb(555).unwrap();
 
         {
             let shmem = env.checkpointer_shmem.borrow();
@@ -282,7 +302,7 @@ mod tests {
             s.reset_offset.write_time = 20;
         }
 
-        pgstat_checkpointer_snapshot_cb();
+        pgstat_checkpointer_snapshot_cb().unwrap();
 
         {
             let snap = env.checkpointer_snapshot.borrow();

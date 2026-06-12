@@ -69,6 +69,7 @@ use types_tuple::heaptuple::{
     MaxTupleAttributeNumber,
 };
 use types_core::{Oid, Size};
+use types_error::{PgError, PgResult};
 use types_datum::Datum;
 
 // ---------------------------------------------------------------------------
@@ -315,7 +316,7 @@ pub fn heap_compute_data_size(
     tuple_desc: &TupleDescData,
     values: &[TupleValue],
     isnull: &[bool],
-) -> Size {
+) -> PgResult<Size> {
     let mut data_length: Size = 0;
     let number_of_attributes = tuple_desc.natts;
 
@@ -336,7 +337,8 @@ pub fn heap_compute_data_size(
             // we want to flatten the expanded value so that the constructed
             // tuple doesn't depend on it
             data_length = att_nominal_alignby(data_length, atti.attalignby);
-            data_length += backend_utils_adt_misc2_seams::eoh_get_flat_size::call(val.as_ref_bytes());
+            data_length +=
+                backend_utils_adt_misc2_seams::eoh_get_flat_size::call(val.as_ref_bytes())?;
         } else {
             // att_datum_alignby(data_length, attalignby, attlen, val)
             data_length = att_datum_alignby(data_length, atti.attalignby, atti.attlen, val);
@@ -345,7 +347,7 @@ pub fn heap_compute_data_size(
         }
     }
 
-    data_length
+    Ok(data_length)
 }
 
 /// `COMPACT_ATTR_IS_PACKABLE(att)` (heaptuple.c:87):
@@ -417,7 +419,7 @@ fn fill_val(
     infomask: &mut u16,
     datum: &TupleValue,
     isnull: bool,
-) {
+) -> PgResult<()> {
     let mut off = *data_off;
 
     // If we're building a null bitmap, set the appropriate bit here.
@@ -433,7 +435,7 @@ fn fill_val(
 
         if isnull {
             *infomask |= HEAP_HASNULL;
-            return;
+            return Ok(());
         }
 
         // **bit |= *bitmask;
@@ -455,8 +457,11 @@ fn fill_val(
             if varatt_is_external_expanded(val) {
                 // flatten the expanded value so the tuple doesn't depend on it
                 off = att_nominal_alignby(off, att.attalignby);
-                data_length = backend_utils_adt_misc2_seams::eoh_get_flat_size::call(val);
-                backend_utils_adt_misc2_seams::eoh_flatten_into::call(val, &mut data[off..off + data_length]);
+                data_length = backend_utils_adt_misc2_seams::eoh_get_flat_size::call(val)?;
+                backend_utils_adt_misc2_seams::eoh_flatten_into::call(
+                    val,
+                    &mut data[off..off + data_length],
+                )?;
             } else {
                 *infomask |= HEAP_HASEXTERNAL;
                 // no alignment, since it's short by definition
@@ -503,6 +508,7 @@ fn fill_val(
 
     off += data_length;
     *data_off = off;
+    Ok(())
 }
 
 /// `VARSIZE_SHORT(PTR)` == `VARSIZE_1B(PTR)`.
@@ -553,7 +559,7 @@ pub fn heap_fill_tuple(
     isnull: &[bool],
     data_size: Size,
     with_bitmap: bool,
-) -> FilledData {
+) -> PgResult<FilledData> {
     let number_of_attributes = tuple_desc.natts as usize;
     let mut data = vec![0u8; data_size];
     let mut infomask: u16 = 0;
@@ -589,7 +595,7 @@ pub fn heap_fill_tuple(
                 &mut infomask,
                 &datum,
                 this_isnull,
-            );
+            )?;
         } else {
             fill_val(
                 attr,
@@ -600,17 +606,17 @@ pub fn heap_fill_tuple(
                 &mut infomask,
                 &datum,
                 this_isnull,
-            );
+            )?;
         }
     }
 
     debug_assert_eq!(data_off, data_size);
 
-    FilledData {
+    Ok(FilledData {
         data,
         infomask,
         bits,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -675,12 +681,12 @@ pub fn heap_form_tuple(
     len = maxalign(len);
     let hoff = len;
 
-    let data_len = heap_compute_data_size(tuple_descriptor, values, isnull);
+    let data_len = heap_compute_data_size(tuple_descriptor, values, isnull)?;
 
     len += data_len;
 
     // Fill the data area + null bitmap + infomask.
-    let filled = heap_fill_tuple(tuple_descriptor, values, isnull, data_len, hasnull);
+    let filled = heap_fill_tuple(tuple_descriptor, values, isnull, data_len, hasnull)?;
 
     // Build the owned header.  ItemPointerSetInvalid sets blockid = (0xffff,
     // 0xffff) and posid = 0 (== InvalidOffsetNumber).
@@ -938,13 +944,22 @@ fn constr_missing(tuple_desc: &TupleDescData) -> Option<&[types_tuple::heaptuple
 
 /// Errors raised by the tuple constructors (the `ereport(ERROR, ...)` sites in
 /// heaptuple.c that the form/deform core can hit).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeapTupleError {
     /// `ERRCODE_TOO_MANY_COLUMNS`: `number of columns (%d) exceeds limit (%d)`.
     TooManyColumns { columns: i32, limit: i32 },
     /// `elog(ERROR, "invalid column number %d", attnum)` —
     /// `heap_modify_tuple_by_cols` got a target column outside `1..=natts`.
     InvalidColumnNumber { attnum: i32 },
+    /// An `ereport(ERROR)` propagated from a callee (e.g. the expanded-object
+    /// flatten path reached from `heap_compute_data_size` / `fill_val`).
+    Pg(PgError),
+}
+
+impl From<PgError> for HeapTupleError {
+    fn from(err: PgError) -> Self {
+        HeapTupleError::Pg(err)
+    }
 }
 
 // ===========================================================================
@@ -1242,7 +1257,7 @@ pub fn heap_form_minimal_tuple(
     len = maxalign(len);
     let hoff = len;
 
-    let data_len = heap_compute_data_size(tuple_descriptor, values, isnull);
+    let data_len = heap_compute_data_size(tuple_descriptor, values, isnull)?;
 
     len += data_len;
 
@@ -1250,7 +1265,7 @@ pub fn heap_form_minimal_tuple(
     // The `extra` leading-pad bytes carry no tuple content (zeroed, before the
     // tuple), so the owned tuple is built from `len`/`hoff`/`data_len` exactly as
     // C does; `extra` only had to be MAXALIGNed (asserted above).
-    let filled = heap_fill_tuple(tuple_descriptor, values, isnull, data_len, hasnull);
+    let filled = heap_fill_tuple(tuple_descriptor, values, isnull, data_len, hasnull)?;
 
     let mut tuple = types_tuple::heaptuple::MinimalTupleData {
         // tuple->t_len = len;
@@ -1495,7 +1510,7 @@ fn expand_tuple(
     target: &ExpandTarget,
     source: &FormedTuple,
     tuple_desc: &TupleDescData,
-) -> ExpandedLayout {
+) -> PgResult<ExpandedLayout> {
     let source_header = source
         .tuple
         .t_data
@@ -1629,7 +1644,7 @@ fn expand_tuple(
                 &mut infomask,
                 &value,
                 false,
-            );
+            )?;
         } else {
             fill_val(
                 att,
@@ -1640,13 +1655,13 @@ fn expand_tuple(
                 &mut infomask,
                 &TupleValue::ByVal(Datum::null()),
                 true,
-            );
+            )?;
         }
     }
 
     debug_assert_eq!(cursor, target_data_len);
 
-    ExpandedLayout {
+    Ok(ExpandedLayout {
         len,
         hoff: match target {
             ExpandTarget::Heap => hoff,
@@ -1655,7 +1670,7 @@ fn expand_tuple(
         infomask,
         data,
         bits,
-    }
+    })
 }
 
 /// The [`TupleValue`] for a present missing attribute (shared by
@@ -1684,8 +1699,8 @@ fn missing_value(attrmiss: &types_tuple::heaptuple::AttrMissing, att: &CompactAt
 pub fn minimal_expand_tuple(
     source: &FormedTuple,
     tuple_desc: &TupleDescData,
-) -> FormedMinimalTuple {
-    let layout = expand_tuple(&ExpandTarget::Minimal, source, tuple_desc);
+) -> PgResult<FormedMinimalTuple> {
+    let layout = expand_tuple(&ExpandTarget::Minimal, source, tuple_desc)?;
 
     let mut tuple = types_tuple::heaptuple::MinimalTupleData {
         t_len: layout.len as u32,
@@ -1697,16 +1712,19 @@ pub fn minimal_expand_tuple(
     };
     minimal_tuple_set_natts(&mut tuple, tuple_desc.natts as u16);
 
-    FormedMinimalTuple {
+    Ok(FormedMinimalTuple {
         tuple: alloc::boxed::Box::new(tuple),
         data: layout.data,
-    }
+    })
 }
 
 /// `heap_expand_tuple(sourceTuple, tupleDesc)` (heaptuple.c:1065) — fill in the
 /// missing values for an ordinary HeapTuple.
-pub fn heap_expand_tuple(source: &FormedTuple, tuple_desc: &TupleDescData) -> FormedTuple {
-    let layout = expand_tuple(&ExpandTarget::Heap, source, tuple_desc);
+pub fn heap_expand_tuple(
+    source: &FormedTuple,
+    tuple_desc: &TupleDescData,
+) -> PgResult<FormedTuple> {
+    let layout = expand_tuple(&ExpandTarget::Heap, source, tuple_desc)?;
 
     // C: targetTHeader->t_infomask = sourceTHeader->t_infomask (already folded
     // into layout.infomask); SetNatts/SetDatumLength/SetTypeId/SetTypMod;
@@ -1735,10 +1753,10 @@ pub fn heap_expand_tuple(source: &FormedTuple, tuple_desc: &TupleDescData) -> Fo
         t_user_data: None,
     });
 
-    FormedTuple {
+    Ok(FormedTuple {
         tuple,
         data: layout.data,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1759,7 +1777,10 @@ pub fn heap_expand_tuple(source: &FormedTuple, tuple_desc: &TupleDescData) -> Fo
 /// (`access/common/toast_helper` + `access/heap/heaptoast`) is unported here, so
 /// that branch is routed through the loud-panic
 /// `backend_access_heap_heaptoast_seams::toast_flatten_tuple_to_datum` seam.
-pub fn heap_copy_tuple_as_datum(tuple: &FormedTuple, tuple_desc: &TupleDescData) -> FormedTuple {
+pub fn heap_copy_tuple_as_datum(
+    tuple: &FormedTuple,
+    tuple_desc: &TupleDescData,
+) -> PgResult<FormedTuple> {
     let header = tuple
         .tuple
         .t_data
@@ -1782,7 +1803,7 @@ pub fn heap_copy_tuple_as_datum(tuple: &FormedTuple, tuple_desc: &TupleDescData)
             datum_typeid: tuple_desc.tdtypeid,
         });
     }
-    new
+    Ok(new)
 }
 
 // ---------------------------------------------------------------------------
