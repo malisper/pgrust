@@ -11,4 +11,6 @@ path = "src/lib.rs"
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
+backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
+backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }

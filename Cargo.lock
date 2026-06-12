@@ -10,6 +10,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-mb-wstrcmp"
+version = "0.0.0"
+dependencies = [
+ "types",
+]
+
+[[package]]
+name = "backend-utils-mb-wstrncmp"
+version = "0.0.0"
+dependencies = [
+ "types",
+]
+
+[[package]]
 name = "backend-utils-misc-pg-rusage"
 version = "0.0.0"
 dependencies = [
@@ -35,6 +49,8 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-storage-page-checksum",
+ "backend-utils-mb-wstrcmp",
+ "backend-utils-mb-wstrncmp",
  "backend-utils-misc-pg-rusage",
 ]
 

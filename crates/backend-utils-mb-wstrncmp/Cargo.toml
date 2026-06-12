@@ -1,0 +1,12 @@
+[package]
+name = "backend-utils-mb-wstrncmp"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_mb_wstrncmp"
+path = "src/lib.rs"
+
+[dependencies]
+types = { path = "../types" }
