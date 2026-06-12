@@ -425,7 +425,7 @@ pub fn RmgrNotFound(rmid: RmgrId) -> PgResult<()> {
                 "Include the extension module that implements this resource manager in \
                  \"shared_preload_libraries\".",
             )
-            .with_error_location(ErrorLocation::new(SRCFILE, 93, "RmgrNotFound")),
+            .with_error_location(ErrorLocation::new(SRCFILE, 94, "RmgrNotFound")),
     )
 }
 
@@ -443,7 +443,7 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
         _ => {
             return Err(PgError::new(ERROR, "custom resource manager name is invalid")
                 .with_hint("Provide a non-empty name for the custom resource manager.")
-                .with_error_location(ErrorLocation::new(SRCFILE, 110, "RegisterCustomRmgr")));
+                .with_error_location(ErrorLocation::new(SRCFILE, 111, "RegisterCustomRmgr")));
         }
     };
 
@@ -454,7 +454,7 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
                     "Provide a custom resource manager ID between {RM_MIN_CUSTOM_ID} and \
                      {RM_MAX_CUSTOM_ID}."
                 ))
-                .with_error_location(ErrorLocation::new(SRCFILE, 114, "RegisterCustomRmgr")),
+                .with_error_location(ErrorLocation::new(SRCFILE, 116, "RegisterCustomRmgr")),
         );
     }
 
@@ -467,7 +467,7 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
             "Custom resource manager must be registered while initializing modules in \
              \"shared_preload_libraries\".",
         )
-        .with_error_location(ErrorLocation::new(SRCFILE, 119, "RegisterCustomRmgr")));
+        .with_error_location(ErrorLocation::new(SRCFILE, 121, "RegisterCustomRmgr")));
     }
 
     if let Some(existing_name) = rmgr_table_slot(rmid as usize).rm_name {
@@ -478,7 +478,7 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
         .with_detail(format!(
             "Custom resource manager \"{existing_name}\" already registered with the same ID."
         ))
-        .with_error_location(ErrorLocation::new(SRCFILE, 124, "RegisterCustomRmgr")));
+        .with_error_location(ErrorLocation::new(SRCFILE, 127, "RegisterCustomRmgr")));
     }
 
     // check for existing rmgr with the same name
@@ -498,7 +498,7 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
             .with_detail(format!(
                 "Existing resource manager with ID {existing_rmid} has the same name."
             ))
-            .with_error_location(ErrorLocation::new(SRCFILE, 136, "RegisterCustomRmgr")));
+            .with_error_location(ErrorLocation::new(SRCFILE, 138, "RegisterCustomRmgr")));
         }
     }
 
@@ -510,7 +510,7 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
             LOG,
             format!("registered custom resource manager \"{rm_name}\" with ID {rmid}"),
         )
-        .with_error_location(ErrorLocation::new(SRCFILE, 143, "RegisterCustomRmgr")),
+        .with_error_location(ErrorLocation::new(SRCFILE, 145, "RegisterCustomRmgr")),
     )?;
 
     Ok(())
