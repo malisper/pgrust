@@ -22,6 +22,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-ifaddr"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
