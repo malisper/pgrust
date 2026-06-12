@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::cell::Cell;
 
 const FALLBACK_S0: u64 = 0x5851_f42d_4c95_7f2d;
 const FALLBACK_S1: u64 = 0x1405_7b7e_f767_814f;
@@ -140,11 +140,19 @@ impl PgPrng {
     }
 }
 
-static GLOBAL_PRNG: Mutex<PgPrng> = Mutex::new(PgPrng::from_raw_state(0, 0));
+thread_local! {
+    /// `pg_global_prng_state` — backend-private PRNG state; each backend
+    /// (thread) seeds and advances its own copy.
+    static GLOBAL_PRNG: Cell<PgPrng> = const { Cell::new(PgPrng::from_raw_state(0, 0)) };
+}
 
 pub fn global_prng<R>(f: impl FnOnce(&mut PgPrng) -> R) -> R {
-    let mut state = GLOBAL_PRNG.lock().expect("global PRNG state lock poisoned");
-    f(&mut state)
+    GLOBAL_PRNG.with(|cell| {
+        let mut state = cell.get();
+        let result = f(&mut state);
+        cell.set(state);
+        result
+    })
 }
 
 fn leftmost_one_pos64(word: u64) -> u32 {

@@ -356,8 +356,9 @@ pub fn update_spins_per_delay(shared_spins_per_delay: i32) -> i32 {
     (shared_spins_per_delay * 15 + spins_per_delay()) / 16
 }
 
-/// Read the current backend-local spin estimate (`spins_per_delay`).
-pub fn spins_per_delay() -> i32 {
+/// Read the current backend-local spin estimate (`spins_per_delay`). C keeps
+/// this as a file-private static; only the setter/updater are exported.
+pub(crate) fn spins_per_delay() -> i32 {
     SPINS_PER_DELAY.with(std::cell::Cell::get)
 }
 
