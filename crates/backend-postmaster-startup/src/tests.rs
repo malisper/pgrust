@@ -183,7 +183,6 @@ fn install_mocks() -> MutexGuard<'static, ()> {
         });
         port_pqsignal_seams::pqsignal::set(|signo, _func| {
             record(Call::Pqsignal { signo });
-            types_signal::SigDisposition::Default
         });
         backend_access_transam_xlog_seams::startup_xlog::set(|| {
             record(Call::StartupXlog);

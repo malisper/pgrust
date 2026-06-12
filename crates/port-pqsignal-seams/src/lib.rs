@@ -9,9 +9,11 @@
 use types_signal::SigDisposition;
 
 seam_core::seam!(
-    /// `pqsigfunc pqsignal(int signo, pqsigfunc func)` (`src/port/pqsignal.c`)
-    /// — install `func` as the handler for `signo` via `sigaction(2)` with
-    /// `SA_RESTART` (modern semantics: including for `SIGALRM`), returning
-    /// the previous disposition (`SigDisposition::Error` = C's `SIG_ERR`).
-    pub fn pqsignal(signo: i32, func: SigDisposition) -> SigDisposition
+    /// `void pqsignal(int signo, pqsigfunc func)` (`src/port/pqsignal.c`,
+    /// compiled as `pqsignal_be` in the backend) — install `func` as the
+    /// handler for `signo` via `sigaction(2)` with `SA_RESTART` (modern
+    /// semantics: including for `SIGALRM`). Since PostgreSQL 18 this returns
+    /// nothing; only the frozen `interfaces/libpq/legacy-pqsignal.c` shim
+    /// still returns the previous disposition.
+    pub fn pqsignal(signo: i32, func: SigDisposition)
 );
