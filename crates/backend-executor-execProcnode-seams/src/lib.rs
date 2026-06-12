@@ -7,35 +7,37 @@
 
 #![allow(non_snake_case)]
 
-extern crate alloc;
-
 seam_core::seam!(
     /// `ExecInitNode(node, estate, eflags)` (execProcnode.c): recursively
     /// initialize the plan subtree, returning its plan-state tree. A `None`
-    /// plan yields `None` (the C `if (node == NULL) return NULL;`).
-    pub fn exec_init_node(
-        node: Option<&types_nodes::nodes::Node>,
-        estate: &mut types_nodes::EStateData,
+    /// plan yields `None` (the C `if (node == NULL) return NULL;`). The state
+    /// tree is allocated in `mcx` (C: `makeNode` in `CurrentMemoryContext`,
+    /// the per-query context at init time), so the call is fallible on OOM.
+    pub fn exec_init_node<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        node: Option<&types_nodes::nodes::Node<'_>>,
+        estate: &mut types_nodes::EStateData<'mcx>,
         eflags: i32,
-    ) -> types_error::PgResult<Option<alloc::boxed::Box<types_nodes::PlanStateNode>>>
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::PlanStateNode<'mcx>>>>
 );
 
 seam_core::seam!(
     /// `ExecProcNode(node)` (executor.h/execProcnode.c): pull the next tuple
     /// from the node by dispatching through its installed `ExecProcNode`
     /// callback. Returns the `SlotId` of the produced tuple's slot, or `None`
-    /// for the C `NULL` return.
-    pub fn exec_proc_node(
-        node: &mut types_nodes::PlanStateNode,
-        estate: &mut types_nodes::EStateData,
+    /// for the C `NULL` return. Allocation during execution comes from
+    /// `estate.es_query_cxt` — the node and estate share the tree's `'mcx`.
+    pub fn exec_proc_node<'mcx>(
+        node: &mut types_nodes::PlanStateNode<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<Option<types_nodes::SlotId>>
 );
 
 seam_core::seam!(
     /// `ExecEndNode(node)` (execProcnode.c): recursively shut down the
     /// plan-state subtree.
-    pub fn exec_end_node(
-        node: &mut types_nodes::PlanStateNode,
-        estate: &mut types_nodes::EStateData,
+    pub fn exec_end_node<'mcx>(
+        node: &mut types_nodes::PlanStateNode<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
