@@ -47,16 +47,23 @@ seam_core::seam!(
 seam_core::seam!(
     /// `opclass_for_family_datatype(amoid, opfamilyoid, datatypeoid)`
     /// (amvalidate.c): the OID of the opclass belonging to the opfamily and
-    /// accepting the type as input type, or `InvalidOid` if none.
-    pub fn opclass_for_family_datatype(amoid: Oid, opfamilyoid: Oid, datatypeoid: Oid) -> Oid
+    /// accepting the type as input type, or `InvalidOid` if none. `PgResult`
+    /// carries the `SearchSysCacheList1(CLAAMNAMENSP, ...)` catalog-read
+    /// `ereport(ERROR)`s.
+    pub fn opclass_for_family_datatype(
+        amoid: Oid,
+        opfamilyoid: Oid,
+        datatypeoid: Oid,
+    ) -> PgResult<Oid>
 );
 
 seam_core::seam!(
     /// `identify_opfamily_groups(oprlist, proclist)` (amvalidate.c): group the
     /// opfamily's `AMOPSTRATEGY`/`AMPROCNUM` member rows by datatype pair and
-    /// set the operator/function presence bitmaps.
+    /// set the operator/function presence bitmaps. `PgResult` carries the C
+    /// `elog(ERROR, "cannot validate operator family without ordered data")`.
     pub fn identify_opfamily_groups(
         oprlist: &[AmopRow],
         proclist: &[AmprocRow],
-    ) -> Vec<OpFamilyOpFuncGroup>
+    ) -> PgResult<Vec<OpFamilyOpFuncGroup>>
 );

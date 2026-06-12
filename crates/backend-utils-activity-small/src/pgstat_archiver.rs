@@ -9,9 +9,12 @@ use crate::changecount::{
     pgstat_end_changecount_write,
 };
 use backend_storage_lmgr_lwlock_seams::{lwlock_acquire, lwlock_initialize, lwlock_release};
-use backend_utils_activity_pgstat_seams::{shmem_archiver, snapshot_archiver, snapshot_fixed};
+use backend_utils_activity_pgstat_seams::{
+    snapshot_fixed, with_shmem_archiver, with_snapshot_archiver,
+};
 use backend_utils_adt_timestamp_seams::get_current_timestamp;
 use types_core::TimestampTz;
+use types_error::PgResult;
 use types_pgstat::activity_pgstat::{
     PgStatShared_Archiver, PgStat_ArchiverStats, WAL_NAME_LEN,
 };
@@ -27,43 +30,47 @@ pub const PGSTAT_KIND_ARCHIVER: u32 = 7;
 /// `xlog` must be at least [`WAL_NAME_LEN`] bytes long; C copies exactly
 /// `sizeof(last_*_wal)` (= `WAL_NAME_LEN`) bytes from `xlog` with `memcpy`.
 pub fn pgstat_report_archiver(xlog: &[u8], failed: bool) {
-    // PgStatShared_Archiver *stats_shmem = &pgStatLocal.shmem->archiver;
-    let stats_shmem: &mut PgStatShared_Archiver = shmem_archiver::call();
     // TimestampTz now = GetCurrentTimestamp();
     let now: TimestampTz = get_current_timestamp::call();
 
-    pgstat_begin_changecount_write(&mut stats_shmem.changecount);
+    // PgStatShared_Archiver *stats_shmem = &pgStatLocal.shmem->archiver;
+    with_shmem_archiver::call(&mut |stats_shmem: &mut PgStatShared_Archiver| {
+        pgstat_begin_changecount_write(&mut stats_shmem.changecount);
 
-    if failed {
-        stats_shmem.stats.failed_count += 1;
-        // memcpy(&stats_shmem->stats.last_failed_wal, xlog, sizeof(...));
-        stats_shmem
-            .stats
-            .last_failed_wal
-            .copy_from_slice(&xlog[..WAL_NAME_LEN]);
-        stats_shmem.stats.last_failed_timestamp = now;
-    } else {
-        stats_shmem.stats.archived_count += 1;
-        // memcpy(&stats_shmem->stats.last_archived_wal, xlog, sizeof(...));
-        stats_shmem
-            .stats
-            .last_archived_wal
-            .copy_from_slice(&xlog[..WAL_NAME_LEN]);
-        stats_shmem.stats.last_archived_timestamp = now;
-    }
+        if failed {
+            stats_shmem.stats.failed_count += 1;
+            // memcpy(&stats_shmem->stats.last_failed_wal, xlog, sizeof(...));
+            stats_shmem
+                .stats
+                .last_failed_wal
+                .copy_from_slice(&xlog[..WAL_NAME_LEN]);
+            stats_shmem.stats.last_failed_timestamp = now;
+        } else {
+            stats_shmem.stats.archived_count += 1;
+            // memcpy(&stats_shmem->stats.last_archived_wal, xlog, sizeof(...));
+            stats_shmem
+                .stats
+                .last_archived_wal
+                .copy_from_slice(&xlog[..WAL_NAME_LEN]);
+            stats_shmem.stats.last_archived_timestamp = now;
+        }
 
-    pgstat_end_changecount_write(&mut stats_shmem.changecount);
+        pgstat_end_changecount_write(&mut stats_shmem.changecount);
+    });
 }
 
-/// Support function for the SQL-callable `pgstat*` functions. Returns a
-/// pointer to the archiver statistics struct.
+/// Support function for the SQL-callable `pgstat*` functions. In C this
+/// returns a pointer to the snapshot's archiver statistics struct; here it is
+/// a copy of that snapshot entry.
 ///
 /// Port of `PgStat_ArchiverStats *pgstat_fetch_stat_archiver(void)`.
-pub fn pgstat_fetch_stat_archiver() -> &'static mut PgStat_ArchiverStats {
-    snapshot_fixed::call(PGSTAT_KIND_ARCHIVER);
+pub fn pgstat_fetch_stat_archiver() -> PgResult<PgStat_ArchiverStats> {
+    snapshot_fixed::call(PGSTAT_KIND_ARCHIVER)?;
 
     // return &pgStatLocal.snapshot.archiver;
-    snapshot_archiver::call()
+    let mut snap = PgStat_ArchiverStats::default();
+    with_snapshot_archiver::call(&mut |s: &mut PgStat_ArchiverStats| snap = *s);
+    Ok(snap)
 }
 
 /// Port of `pgstat_archiver_init_shmem_cb(void *stats)`.
@@ -72,47 +79,55 @@ pub fn pgstat_archiver_init_shmem_cb(stats: &mut PgStatShared_Archiver) {
 }
 
 /// Port of `pgstat_archiver_reset_all_cb(TimestampTz ts)`.
-pub fn pgstat_archiver_reset_all_cb(ts: TimestampTz) {
-    let stats_shmem: &mut PgStatShared_Archiver = shmem_archiver::call();
-
-    // see explanation above PgStatShared_Archiver for the reset protocol
-    lwlock_acquire::call(&mut stats_shmem.lock, LW_EXCLUSIVE);
-    {
-        // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
-        //                                 &stats_shmem->stats, sizeof(...),
-        //                                 &stats_shmem->changecount);
-        let PgStatShared_Archiver {
-            ref mut reset_offset,
-            ref stats,
-            ref changecount,
-            ..
-        } = *stats_shmem;
-        pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
-    }
-    stats_shmem.stats.stat_reset_timestamp = ts;
-    lwlock_release::call(&mut stats_shmem.lock);
+pub fn pgstat_archiver_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
+    let mut res: PgResult<()> = Ok(());
+    with_shmem_archiver::call(&mut |stats_shmem: &mut PgStatShared_Archiver| {
+        res = (|| {
+            // see explanation above PgStatShared_Archiver for the reset protocol
+            lwlock_acquire::call(&mut stats_shmem.lock, LW_EXCLUSIVE)?;
+            {
+                // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
+                //                                 &stats_shmem->stats, sizeof(...),
+                //                                 &stats_shmem->changecount);
+                let PgStatShared_Archiver {
+                    ref mut reset_offset,
+                    ref stats,
+                    ref changecount,
+                    ..
+                } = *stats_shmem;
+                pgstat_copy_changecounted_stats(reset_offset, stats, changecount);
+            }
+            stats_shmem.stats.stat_reset_timestamp = ts;
+            lwlock_release::call(&mut stats_shmem.lock)
+        })();
+    });
+    res
 }
 
 /// Port of `pgstat_archiver_snapshot_cb(void)`.
-pub fn pgstat_archiver_snapshot_cb() {
+pub fn pgstat_archiver_snapshot_cb() -> PgResult<()> {
     // PgStat_ArchiverStats *stat_snap = &pgStatLocal.snapshot.archiver;
-    let mut stat_snap = *snapshot_archiver::call();
-    let reset: PgStat_ArchiverStats = {
-        let stats_shmem: &mut PgStatShared_Archiver = shmem_archiver::call();
+    let mut stat_snap = PgStat_ArchiverStats::default();
+    with_snapshot_archiver::call(&mut |s: &mut PgStat_ArchiverStats| stat_snap = *s);
 
-        pgstat_copy_changecounted_stats(
-            &mut stat_snap,
-            &stats_shmem.stats,
-            &stats_shmem.changecount,
-        );
+    let mut shmem_res: PgResult<PgStat_ArchiverStats> = Ok(PgStat_ArchiverStats::default());
+    with_shmem_archiver::call(&mut |stats_shmem: &mut PgStatShared_Archiver| {
+        shmem_res = (|| {
+            pgstat_copy_changecounted_stats(
+                &mut stat_snap,
+                &stats_shmem.stats,
+                &stats_shmem.changecount,
+            );
 
-        lwlock_acquire::call(&mut stats_shmem.lock, LW_SHARED);
-        // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
-        let reset = stats_shmem.reset_offset;
-        lwlock_release::call(&mut stats_shmem.lock);
+            lwlock_acquire::call(&mut stats_shmem.lock, LW_SHARED)?;
+            // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
+            let reset = stats_shmem.reset_offset;
+            lwlock_release::call(&mut stats_shmem.lock)?;
 
-        reset
-    };
+            Ok(reset)
+        })();
+    });
+    let reset: PgStat_ArchiverStats = shmem_res?;
 
     // compensate by reset offsets
     if stat_snap.archived_count == reset.archived_count {
@@ -127,7 +142,8 @@ pub fn pgstat_archiver_snapshot_cb() {
     }
     stat_snap.failed_count -= reset.failed_count;
 
-    *snapshot_archiver::call() = stat_snap;
+    with_snapshot_archiver::call(&mut |s: &mut PgStat_ArchiverStats| *s = stat_snap);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -181,7 +197,7 @@ mod tests {
         let env = setup();
         env.archiver_snapshot.borrow_mut().archived_count = 42;
 
-        let stats = pgstat_fetch_stat_archiver();
+        let stats = pgstat_fetch_stat_archiver().unwrap();
         assert_eq!(stats.archived_count, 42);
         assert_eq!(
             env.snapshot_fixed_kinds.borrow().clone(),
@@ -208,7 +224,7 @@ mod tests {
             s.stats.failed_count = 3;
         }
 
-        pgstat_archiver_reset_all_cb(555);
+        pgstat_archiver_reset_all_cb(555).unwrap();
 
         {
             let shmem = env.archiver_shmem.borrow();
@@ -237,7 +253,7 @@ mod tests {
             s.reset_offset.failed_count = 2;
         }
 
-        pgstat_archiver_snapshot_cb();
+        pgstat_archiver_snapshot_cb().unwrap();
 
         {
             let snap = env.archiver_snapshot.borrow();

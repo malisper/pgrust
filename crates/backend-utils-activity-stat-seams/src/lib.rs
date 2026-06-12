@@ -8,8 +8,10 @@
 seam_core::seam!(
     /// `pgstat_flush_io(bool nowait)` (`utils/activity/pgstat_io.c`) — flush
     /// the backend's pending IO statistics. Returns true if some stats could
-    /// not be flushed because of contention.
-    pub fn pgstat_flush_io(nowait: bool) -> bool
+    /// not be flushed because of contention (`pgstat_io_flush_cb`'s result).
+    /// `Err` carries `LWLockAcquire`'s `elog(ERROR, "too many LWLocks
+    /// taken")` on the blocking (`!nowait`) path.
+    pub fn pgstat_flush_io(nowait: bool) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(

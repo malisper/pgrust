@@ -18,7 +18,7 @@ seam_core::seam!(
         randomAccess: bool,
         interXact: bool,
         maxKBytes: i32,
-    ) -> types_core::PgResult<alloc::boxed::Box<types_nodes::Tuplestorestate>>
+    ) -> types_error::PgResult<alloc::boxed::Box<types_nodes::Tuplestorestate>>
 );
 
 seam_core::seam!(
@@ -27,7 +27,7 @@ seam_core::seam!(
     pub fn tuplestore_set_eflags(
         state: &mut types_nodes::Tuplestorestate,
         eflags: i32,
-    ) -> types_core::PgResult<()>
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -36,13 +36,13 @@ seam_core::seam!(
     pub fn tuplestore_alloc_read_pointer(
         state: &mut types_nodes::Tuplestorestate,
         eflags: i32,
-    ) -> types_core::PgResult<i32>
+    ) -> types_error::PgResult<i32>
 );
 
 seam_core::seam!(
     /// `tuplestore_ateof(state)` (tuplestore.c): is the active read pointer at
-    /// end of the stored data?
-    pub fn tuplestore_ateof(state: &types_nodes::Tuplestorestate) -> types_core::PgResult<bool>
+    /// end of the stored data? A pure field read in C — infallible.
+    pub fn tuplestore_ateof(state: &types_nodes::Tuplestorestate) -> bool
 );
 
 seam_core::seam!(
@@ -52,7 +52,7 @@ seam_core::seam!(
     pub fn tuplestore_advance(
         state: &mut types_nodes::Tuplestorestate,
         forward: bool,
-    ) -> types_core::PgResult<bool>
+    ) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -64,7 +64,7 @@ seam_core::seam!(
         forward: bool,
         copy: bool,
         slot: &mut types_nodes::TupleTableSlot,
-    ) -> types_core::PgResult<bool>
+    ) -> types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -73,7 +73,7 @@ seam_core::seam!(
     pub fn tuplestore_puttupleslot(
         state: &mut types_nodes::Tuplestorestate,
         slot: &types_nodes::TupleTableSlot,
-    ) -> types_core::PgResult<()>
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -83,25 +83,24 @@ seam_core::seam!(
         state: &mut types_nodes::Tuplestorestate,
         srcptr: i32,
         destptr: i32,
-    ) -> types_core::PgResult<()>
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `tuplestore_trim(state)` (tuplestore.c): discard tuples no longer
-    /// needed by any read pointer.
-    pub fn tuplestore_trim(state: &mut types_nodes::Tuplestorestate) -> types_core::PgResult<()>
+    /// needed by any read pointer. Frees/moves memory only — infallible.
+    pub fn tuplestore_trim(state: &mut types_nodes::Tuplestorestate)
 );
 
 seam_core::seam!(
     /// `tuplestore_rescan(state)` (tuplestore.c): rewind the active read
     /// pointer to the start.
-    pub fn tuplestore_rescan(state: &mut types_nodes::Tuplestorestate) -> types_core::PgResult<()>
+    pub fn tuplestore_rescan(state: &mut types_nodes::Tuplestorestate) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `tuplestore_end(state)` (tuplestore.c): release the tuplestore's
     /// resources. Consumes the carrier (the C caller NULLs its pointer).
-    pub fn tuplestore_end(
-        state: alloc::boxed::Box<types_nodes::Tuplestorestate>,
-    ) -> types_core::PgResult<()>
+    /// `BufFileClose`/`pfree` paths do not `ereport(ERROR)` — infallible.
+    pub fn tuplestore_end(state: alloc::boxed::Box<types_nodes::Tuplestorestate>)
 );

@@ -17,13 +17,13 @@ seam_core::seam!(
         planstate: &mut types_nodes::PlanStateData,
         estate: &mut types_nodes::EStateData,
         tts_ops: types_nodes::TupleSlotKind,
-    ) -> types_core::PgResult<()>
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `ExecClearTuple(slot)` (tuptable.h): clear the slot's contents
     /// (`slot->tts_ops->clear`).
-    pub fn exec_clear_tuple(slot: &mut types_nodes::TupleTableSlot) -> types_core::PgResult<()>
+    pub fn exec_clear_tuple(slot: &mut types_nodes::TupleTableSlot) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -32,5 +32,5 @@ seam_core::seam!(
     pub fn exec_copy_slot(
         dstslot: &mut types_nodes::TupleTableSlot,
         srcslot: &types_nodes::TupleTableSlot,
-    ) -> types_core::PgResult<()>
+    ) -> types_error::PgResult<()>
 );

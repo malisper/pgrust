@@ -206,9 +206,16 @@ fn install_seams() {
         let e = env();
         e.pending_index.set(None);
         e.pending_incr.set(None);
+        Ok(())
     });
-    pqformat::pq_sendint32::set(|v| env().pending_index.set(Some(v as i32)));
-    pqformat::pq_sendint64::set(|v| env().pending_incr.set(Some(v)));
+    pqformat::pq_sendint32::set(|v| {
+        env().pending_index.set(Some(v as i32));
+        Ok(())
+    });
+    pqformat::pq_sendint64::set(|v| {
+        env().pending_incr.set(Some(v));
+        Ok(())
+    });
     pqformat::pq_endmessage::set(|| {
         let e = env();
         let idx = e.pending_index.get().unwrap();
@@ -216,21 +223,23 @@ fn install_seams() {
         e.sent.set(Some((idx, incr)));
     });
 
-    // `&'static mut` shmem seams hand out the per-thread fixture's interior.
-    // SAFETY: tests are serialized by `LK` and use the returned borrow within
-    // a tight scope; the pointee is thread-local, so no cross-thread aliasing.
-    pgstat::shmem_archiver::set(|| unsafe { &mut *env().archiver_shmem.as_ptr() });
-    pgstat::snapshot_archiver::set(|| unsafe { &mut *env().archiver_snapshot.as_ptr() });
-    pgstat::shmem_bgwriter::set(|| unsafe { &mut *env().bgwriter_shmem.as_ptr() });
-    pgstat::snapshot_bgwriter::set(|| unsafe { &mut *env().bgwriter_snapshot.as_ptr() });
-    pgstat::shmem_checkpointer::set(|| unsafe { &mut *env().checkpointer_shmem.as_ptr() });
-    pgstat::snapshot_checkpointer::set(|| unsafe { &mut *env().checkpointer_snapshot.as_ptr() });
+    // Callback shmem seams run the body against the per-thread fixture's
+    // interior; the `RefCell` borrow lives exactly for the callback.
+    pgstat::with_shmem_archiver::set(|f| f(&mut env().archiver_shmem.borrow_mut()));
+    pgstat::with_snapshot_archiver::set(|f| f(&mut env().archiver_snapshot.borrow_mut()));
+    pgstat::with_shmem_bgwriter::set(|f| f(&mut env().bgwriter_shmem.borrow_mut()));
+    pgstat::with_snapshot_bgwriter::set(|f| f(&mut env().bgwriter_snapshot.borrow_mut()));
+    pgstat::with_shmem_checkpointer::set(|f| f(&mut env().checkpointer_shmem.borrow_mut()));
+    pgstat::with_snapshot_checkpointer::set(|f| f(&mut env().checkpointer_snapshot.borrow_mut()));
     pgstat::shmem_is_shutdown::set(|| env().is_shutdown.get());
     pgstat::assert_is_up::set(|| {
         let e = env();
         e.assert_is_up_calls.set(e.assert_is_up_calls.get() + 1);
     });
-    pgstat::snapshot_fixed::set(|kind| env().snapshot_fixed_kinds.borrow_mut().push(kind));
+    pgstat::snapshot_fixed::set(|kind| {
+        env().snapshot_fixed_kinds.borrow_mut().push(kind);
+        Ok(())
+    });
 
     timestamp::get_current_timestamp::set(|| env().now.get());
 
@@ -241,16 +250,17 @@ fn install_seams() {
     });
     lwlock::lwlock_acquire::set(|_lock, mode| {
         env().lwlock_acquires.borrow_mut().push(mode);
-        true
+        Ok(true)
     });
     lwlock::lwlock_release::set(|_lock| {
         let e = env();
         e.lwlock_releases.set(e.lwlock_releases.get() + 1);
+        Ok(())
     });
 
     stat::pgstat_flush_io::set(|_nowait| {
         let e = env();
         e.flush_io_calls.set(e.flush_io_calls.get() + 1);
-        false
+        Ok(false)
     });
 }

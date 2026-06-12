@@ -9,8 +9,10 @@ seam_core::seam!(
     /// (access/heap/heaptoast.c): inline a tuple's external TOAST pointers to
     /// produce a self-contained composite-type Datum. Reached from
     /// `heap_copy_tuple_as_datum` when the tuple has `HEAP_HASEXTERNAL` set.
+    /// `Err` carries the detoasting `ereport(ERROR)`s (e.g. `detoast_attr` /
+    /// `toast_fetch_datum`'s `missing chunk number ...`).
     pub fn toast_flatten_tuple_to_datum(
         tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple,
         tuple_desc: &types_tuple::heaptuple::TupleDescData,
-    ) -> types_tuple::backend_access_common_heaptuple::FormedTuple
+    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple>
 );
