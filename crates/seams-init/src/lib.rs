@@ -16,6 +16,7 @@ pub fn init_all() {
     backend_storage_page_checksum::init_seams();
     backend_utils_activity_small::init_seams();
     backend_utils_error::init_seams();
+    backend_utils_init_small::init_seams();
     backend_utils_mb_wstrcmp::init_seams();
     backend_utils_mb_wstrncmp::init_seams();
     backend_utils_misc_pg_rusage::init_seams();
