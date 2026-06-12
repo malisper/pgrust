@@ -22,10 +22,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-multixact-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-transam-twophase-rmgr"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-multixact-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-utils-activity-stat-seams",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-storage-lmgr-lock-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-storage-lmgr-predicate-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "backend-utils-activity-stat-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -91,6 +139,10 @@ version = "0.0.0"
 dependencies = [
  "types-core",
 ]
+
+[[package]]
+name = "types-error"
+version = "0.0.0"
 
 [[package]]
 name = "types-tuple"
