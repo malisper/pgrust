@@ -3,12 +3,22 @@
 version = 4
 
 [[package]]
+name = "backend-storage-page-checksum"
+version = "0.0.0"
+dependencies = [
+ "types",
+]
+
+[[package]]
 name = "seam-core"
 version = "0.0.0"
 
 [[package]]
 name = "seams-init"
 version = "0.0.0"
+dependencies = [
+ "backend-storage-page-checksum",
+]
 
 [[package]]
 name = "types"
