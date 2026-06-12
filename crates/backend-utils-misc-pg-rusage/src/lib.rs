@@ -11,6 +11,16 @@
 //!   code ever reads (wall clock, `ru_utime`, `ru_stime`), as plain integers;
 //! * [`pg_rusage_show`] returns an owned [`String`] instead of borrowing the
 //!   C version's non-reentrant `static char[100]`.
+//!
+//! mcx decision (2026-06-12 migration pass): this crate deliberately does NOT
+//! take `Mcx<'mcx>` / return `PgString<'mcx>`. C's `pg_rusage_show` never
+//! pallocs — it formats into a `static char result[100]` and returns a
+//! pointer into it, so there is no current-context allocation to translate.
+//! The faithful alternatives were a per-backend `thread_local!` buffer
+//! (reproducing the non-reentrancy the C comment itself calls "tacky") or an
+//! owned `String`; the owned return is strictly safer and keeps the function
+//! infallible like the C call sites expect (no palloc means OOM is not part
+//! of its failure surface, so no `PgResult`).
 
 use std::mem::MaybeUninit;
 use std::time::{SystemTime, UNIX_EPOCH};
