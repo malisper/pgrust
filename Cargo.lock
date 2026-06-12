@@ -57,6 +57,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib-earthdistance"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
