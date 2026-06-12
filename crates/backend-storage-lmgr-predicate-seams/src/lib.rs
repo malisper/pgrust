@@ -12,3 +12,29 @@ seam_core::seam!(
         recdata: &[u8],
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `RegisterPredicateLockingXid(xid)` — tell the predicate locking system
+    /// the top-level transaction's XID.
+    pub fn register_predicate_locking_xid(
+        xid: types_core::primitive::TransactionId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PreCommit_CheckForSerializationFailure()` — raise a serialization
+    /// failure detected at commit time.
+    pub fn pre_commit_check_for_serialization_failure() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AtPrepare_PredicateLocks()`.
+    pub fn at_prepare_predicate_locks() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PostPrepare_PredicateLocks(xid)`.
+    pub fn post_prepare_predicate_locks(
+        xid: types_core::primitive::TransactionId,
+    ) -> types_error::PgResult<()>
+);

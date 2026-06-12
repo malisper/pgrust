@@ -10,3 +10,25 @@ seam_core::seam!(
     /// `parallel.c`.
     pub fn is_parallel_worker() -> bool
 );
+
+seam_core::seam!(
+    /// `AtEOXact_Parallel(isCommit)` — clean up unfinished parallel workers
+    /// at top-level transaction end (warning about leaks on commit).
+    pub fn at_eoxact_parallel(is_commit: bool) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AtEOSubXact_Parallel(isCommit, mySubId)`.
+    pub fn at_eosubxact_parallel(
+        is_commit: bool,
+        my_sub_id: types_core::SubTransactionId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ParallelWorkerReportLastRecEnd(XactLastRecEnd)` — tell the leader
+    /// about WAL this worker wrote.
+    pub fn parallel_worker_report_last_rec_end(
+        last_rec_end: types_core::XLogRecPtr,
+    ) -> types_error::PgResult<()>
+);

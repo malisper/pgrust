@@ -117,3 +117,11 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
         &self.blocks
     }
 }
+
+/// `XLR_SPECIAL_REL_UPDATE` (`access/xlogrecord.h`) — flag bit in `xl_info`:
+/// the record modifies relation files outside the buffer manager's view.
+pub const XLR_SPECIAL_REL_UPDATE: uint8 = 0x01;
+
+/// `XLOG_INCLUDE_ORIGIN` (`access/xloginsert.h`) — record flag: include the
+/// replication origin in the record.
+pub const XLOG_INCLUDE_ORIGIN: uint8 = 0x01;

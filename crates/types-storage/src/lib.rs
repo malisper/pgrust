@@ -6,6 +6,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod relfilelocator;
 pub mod storage;
 
+pub use relfilelocator::*;
 pub use storage::*;

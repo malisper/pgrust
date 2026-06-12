@@ -62,3 +62,8 @@ seam_core::seam!(
     /// `MyBEEntry->st_progress_param[index] += incr`.
     pub fn incr_progress_param(index: i32, incr: int64)
 );
+
+seam_core::seam!(
+    /// `pgstat_report_xact_timestamp(tstamp)` (backend_status.c).
+    pub fn pgstat_report_xact_timestamp(tstamp: types_core::TimestampTz)
+);

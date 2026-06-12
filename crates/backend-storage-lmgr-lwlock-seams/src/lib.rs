@@ -24,3 +24,9 @@ seam_core::seam!(
     /// `elog(ERROR, "lock %s is not held")`.
     pub fn lwlock_release(lock: &mut LWLock) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `LWLockReleaseAll()` — release all held lightweight locks (abort
+    /// path; must run before anything that might re-acquire them).
+    pub fn lwlock_release_all()
+);

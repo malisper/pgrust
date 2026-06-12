@@ -10,3 +10,26 @@ seam_core::seam!(
     /// parse/apply paths can `ereport(ERROR)`.
     pub fn process_config_file(context: types_guc::GucContext) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `AtStart_GUC()` (guc.c) — sanity-reset GUC nesting at transaction
+    /// start.
+    pub fn at_start_guc()
+);
+
+seam_core::seam!(
+    /// `NewGUCNestLevel()` (guc.c).
+    pub fn new_guc_nest_level() -> i32
+);
+
+seam_core::seam!(
+    /// `AtEOXact_GUC(isCommit, nestLevel)` (guc.c) — pop GUC state at
+    /// (sub)transaction end; assign hooks can `ereport(ERROR)`.
+    pub fn at_eoxact_guc(is_commit: bool, nest_level: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Read the `log_transaction_sample_rate` GUC
+    /// (`double log_xact_sample_rate`, guc_tables.c).
+    pub fn log_xact_sample_rate() -> f64
+);
