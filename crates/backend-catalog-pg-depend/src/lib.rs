@@ -9,10 +9,13 @@
 //!   slice (callers pass the filled prefix of the C array).
 //! * `sequenceIsOwned`'s `bool` + `*tableId`/`*colId` out-params are
 //!   `Option<(Oid, i32)>` (`None` == the C `false`).
-//! * `getIdentitySequence`'s open `Relation rel` crosses as its `Oid`; the
-//!   `relispartition` field read goes through the relcache owner's seam.
+//! * `getIdentitySequence`'s open `Relation rel` crosses as `&RelationData`;
+//!   the `relispartition` field read goes through the relcache owner's seam.
 //! * The catalog `deptype` byte is the `i8` of
 //!   [`FormData_pg_depend::deptype`] / [`DependencyType::as_char`].
+//! * `table_open`..`table_close` spans are `OpenRelation` guard scopes: the
+//!   explicit `close(lockmode)` is the C `table_close`, and any `?` inside
+//!   the span releases through `Drop`.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -20,24 +23,33 @@
 #![allow(clippy::result_large_err)]
 
 use mcx::{vec_with_capacity_in, Mcx, PgString, PgVec};
-use types_catalog::backend_catalog_pg_depend::{DependIndex, DependScanKeys};
 use types_catalog::catalog::{
-    CONSTRAINT_RELATION_ID, EXTENSION_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
+    CONSTRAINT_RELATION_ID, EXTENSION_RELATION_ID, RELATION_RELATION_ID, RELKIND_SEQUENCE,
+    TYPE_RELATION_ID,
 };
 use types_catalog::catalog_dependency::{
-    DependencyType, FormData_pg_depend, ObjectAddress, DEPENDENCY_AUTO,
+    Anum_pg_depend_classid, Anum_pg_depend_deptype, Anum_pg_depend_objid,
+    Anum_pg_depend_objsubid, Anum_pg_depend_refclassid, Anum_pg_depend_refobjid,
+    Anum_pg_depend_refobjsubid, DependDependerIndexId, DependReferenceIndexId, DependencyType,
+    FormData_pg_depend, Natts_pg_depend, ObjectAddress, DEPENDENCY_AUTO,
     DEPENDENCY_AUTO_EXTENSION, DEPENDENCY_EXTENSION, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     DEPEND_RELATION_ID,
 };
+use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
+use types_datum::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERROR,
 };
-use types_tuple::access::{AccessShareLock, RowExclusiveLock, LOCKMODE, RELKIND_SEQUENCE};
+use types_rel::rel::RelationData;
+use types_scan::backend_access_index_genam::SysScanRow;
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use types_tuple::access::{AccessShareLock, RowExclusiveLock, LOCKMODE};
 
 use backend_access_index_genam_seams as genam_seams;
 use backend_access_table_table_seams as table_seams;
+use backend_access_table_table_seams::OpenRelation;
 use backend_catalog_catalog_seams as catalog_seams;
 use backend_catalog_indexing_seams as indexing_seams;
 use backend_catalog_objectaddress_seams as objectaddress_seams;
@@ -51,14 +63,49 @@ use backend_utils_init_miscinit_seams as miscinit_seams;
 /// `MAX_CATALOG_MULTI_INSERT_BYTES` (`catalog/indexing.h`).
 const MAX_CATALOG_MULTI_INSERT_BYTES: usize = 65535;
 
-/// `table_open(DependRelationId, lockmode)` — open relations cross the table
-/// seam as their `Oid`.
-fn open_depend(lockmode: LOCKMODE) -> PgResult<Oid> {
+/// `table_open(DependRelationId, lockmode)` — the guard's `Drop` is the
+/// error-path `table_close`; the success path closes explicitly.
+fn open_depend(lockmode: LOCKMODE) -> PgResult<OpenRelation> {
     table_seams::table_open::call(DEPEND_RELATION_ID, lockmode)
 }
 
-fn close_depend(rel: Oid, lockmode: LOCKMODE) -> PgResult<()> {
-    table_seams::table_close::call(rel, lockmode)
+/// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_OIDEQ,
+/// ObjectIdGetDatum(value))`.
+fn oid_key(attno: AttrNumber, value: Oid) -> ScanKeyData {
+    ScanKeyData {
+        sk_attno: attno,
+        sk_strategy: BTEqualStrategyNumber,
+        sk_func: F_OIDEQ,
+        sk_argument: Datum::from_oid(value),
+    }
+}
+
+/// `ScanKeyInit(&key[n], attno, BTEqualStrategyNumber, F_INT4EQ,
+/// Int32GetDatum(value))`.
+fn int4_key(attno: AttrNumber, value: i32) -> ScanKeyData {
+    ScanKeyData {
+        sk_attno: attno,
+        sk_strategy: BTEqualStrategyNumber,
+        sk_func: F_INT4EQ,
+        sk_argument: Datum::from_i32(value),
+    }
+}
+
+/// `(Form_pg_depend) GETSTRUCT(tup)` — interpret one deformed pg_depend row.
+/// Every pg_depend column is fixed-width and NOT NULL.
+fn form_pg_depend(row: &SysScanRow<'_>) -> FormData_pg_depend {
+    debug_assert_eq!(row.values.len(), Natts_pg_depend);
+    debug_assert!(row.isnull.iter().all(|&null| !null));
+    let col = |attno: AttrNumber| row.values[attno as usize - 1];
+    FormData_pg_depend {
+        classid: col(Anum_pg_depend_classid).as_oid(),
+        objid: col(Anum_pg_depend_objid).as_oid(),
+        objsubid: col(Anum_pg_depend_objsubid).as_i32(),
+        refclassid: col(Anum_pg_depend_refclassid).as_oid(),
+        refobjid: col(Anum_pg_depend_refobjid).as_oid(),
+        refobjsubid: col(Anum_pg_depend_refobjsubid).as_i32(),
+        deptype: col(Anum_pg_depend_deptype).as_char(),
+    }
 }
 
 /// PostgreSQL's own `snprintf` renders a NULL `%s` argument as `"(null)"`
@@ -153,7 +200,7 @@ pub fn recordMultipleDependencies(
 
         /* If slots are full, insert a batch of tuples */
         if slot_stored_count == max_slots {
-            indexing_seams::catalog_tuples_multi_insert_pg_depend::call(dependDesc, &slot)?;
+            indexing_seams::catalog_tuples_multi_insert_pg_depend::call(&dependDesc, &slot)?;
             slot.clear();
             slot_stored_count = 0;
         }
@@ -161,10 +208,10 @@ pub fn recordMultipleDependencies(
 
     /* Insert any tuples left in the buffer */
     if slot_stored_count > 0 {
-        indexing_seams::catalog_tuples_multi_insert_pg_depend::call(dependDesc, &slot)?;
+        indexing_seams::catalog_tuples_multi_insert_pg_depend::call(&dependDesc, &slot)?;
     }
 
-    close_depend(dependDesc, RowExclusiveLock)?;
+    dependDesc.close(RowExclusiveLock)?;
 
     Ok(())
 }
@@ -319,23 +366,22 @@ pub fn deleteDependencyRecordsFor(
 
     let depRel = open_depend(RowExclusiveLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: classId,
-        key1_oid: objectId,
-        key2_int4: None,
-    };
+    let key = [
+        oid_key(Anum_pg_depend_classid, classId),
+        oid_key(Anum_pg_depend_objid, objectId),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Depender, &keys, &mut |tup| {
-        if skipExtensionDeps && tup.form.deptype == DEPENDENCY_EXTENSION.as_char() {
+    genam_seams::systable_scan::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+        if skipExtensionDeps && form_pg_depend(row).deptype == DEPENDENCY_EXTENSION.as_char() {
             return Ok(true);
         }
 
-        indexing_seams::catalog_tuple_delete::call(depRel, tup.tid)?;
+        indexing_seams::catalog_tuple_delete::call(&depRel, row.tid)?;
         count += 1;
         Ok(true)
     })?;
 
-    close_depend(depRel, RowExclusiveLock)?;
+    depRel.close(RowExclusiveLock)?;
 
     Ok(count)
 }
@@ -357,23 +403,22 @@ pub fn deleteDependencyRecordsForClass(
 
     let depRel = open_depend(RowExclusiveLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: classId,
-        key1_oid: objectId,
-        key2_int4: None,
-    };
+    let key = [
+        oid_key(Anum_pg_depend_classid, classId),
+        oid_key(Anum_pg_depend_objid, objectId),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Depender, &keys, &mut |tup| {
-        let depform = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+        let depform = form_pg_depend(row);
 
         if depform.refclassid == refclassId && depform.deptype == deptype {
-            indexing_seams::catalog_tuple_delete::call(depRel, tup.tid)?;
+            indexing_seams::catalog_tuple_delete::call(&depRel, row.tid)?;
             count += 1;
         }
         Ok(true)
     })?;
 
-    close_depend(depRel, RowExclusiveLock)?;
+    depRel.close(RowExclusiveLock)?;
 
     Ok(count)
 }
@@ -392,26 +437,25 @@ pub fn deleteDependencyRecordsForSpecific(
 
     let depRel = open_depend(RowExclusiveLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: classId,
-        key1_oid: objectId,
-        key2_int4: None,
-    };
+    let key = [
+        oid_key(Anum_pg_depend_classid, classId),
+        oid_key(Anum_pg_depend_objid, objectId),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Depender, &keys, &mut |tup| {
-        let depform = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+        let depform = form_pg_depend(row);
 
         if depform.refclassid == refclassId
             && depform.refobjid == refobjectId
             && depform.deptype == deptype
         {
-            indexing_seams::catalog_tuple_delete::call(depRel, tup.tid)?;
+            indexing_seams::catalog_tuple_delete::call(&depRel, row.tid)?;
             count += 1;
         }
         Ok(true)
     })?;
 
-    close_depend(depRel, RowExclusiveLock)?;
+    depRel.close(RowExclusiveLock)?;
 
     Ok(count)
 }
@@ -485,25 +529,24 @@ pub fn changeDependencyFor(
     let depRel = open_depend(RowExclusiveLock)?;
 
     /* There should be existing dependency record(s), so search. */
-    let keys = DependScanKeys {
-        key0_oid: classId,
-        key1_oid: objectId,
-        key2_int4: None,
-    };
+    let key = [
+        oid_key(Anum_pg_depend_classid, classId),
+        oid_key(Anum_pg_depend_objid, objectId),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Depender, &keys, &mut |tup| {
-        let depform = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+        let depform = form_pg_depend(row);
 
         if depform.refclassid == refClassId && depform.refobjid == oldRefObjectId {
             if newIsPinned {
-                indexing_seams::catalog_tuple_delete::call(depRel, tup.tid)?;
+                indexing_seams::catalog_tuple_delete::call(&depRel, row.tid)?;
             } else {
                 /* make a modifiable copy */
-                let mut newform = *depform;
+                let mut newform = depform;
 
                 newform.refobjid = newRefObjectId;
 
-                indexing_seams::catalog_tuple_update_pg_depend::call(depRel, tup.tid, &newform)?;
+                indexing_seams::catalog_tuple_update_pg_depend::call(&depRel, row.tid, &newform)?;
             }
 
             count += 1;
@@ -511,7 +554,7 @@ pub fn changeDependencyFor(
         Ok(true)
     })?;
 
-    close_depend(depRel, RowExclusiveLock)?;
+    depRel.close(RowExclusiveLock)?;
 
     Ok(count)
 }
@@ -528,25 +571,24 @@ pub fn changeDependenciesOf(classId: Oid, oldObjectId: Oid, newObjectId: Oid) ->
 
     let depRel = open_depend(RowExclusiveLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: classId,
-        key1_oid: oldObjectId,
-        key2_int4: None,
-    };
+    let key = [
+        oid_key(Anum_pg_depend_classid, classId),
+        oid_key(Anum_pg_depend_objid, oldObjectId),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Depender, &keys, &mut |tup| {
+    genam_seams::systable_scan::call(&depRel, DependDependerIndexId, &key, &mut |row| {
         /* make a modifiable copy */
-        let mut newform = tup.form;
+        let mut newform = form_pg_depend(row);
 
         newform.objid = newObjectId;
 
-        indexing_seams::catalog_tuple_update_pg_depend::call(depRel, tup.tid, &newform)?;
+        indexing_seams::catalog_tuple_update_pg_depend::call(&depRel, row.tid, &newform)?;
 
         count += 1;
         Ok(true)
     })?;
 
-    close_depend(depRel, RowExclusiveLock)?;
+    depRel.close(RowExclusiveLock)?;
 
     Ok(count)
 }
@@ -601,29 +643,28 @@ pub fn changeDependenciesOn(
     let newIsPinned = isObjectPinned(&objAddr);
 
     /* Now search for dependency records */
-    let keys = DependScanKeys {
-        key0_oid: refClassId,
-        key1_oid: oldRefObjectId,
-        key2_int4: None,
-    };
+    let key = [
+        oid_key(Anum_pg_depend_refclassid, refClassId),
+        oid_key(Anum_pg_depend_refobjid, oldRefObjectId),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Reference, &keys, &mut |tup| {
+    genam_seams::systable_scan::call(&depRel, DependReferenceIndexId, &key, &mut |row| {
         if newIsPinned {
-            indexing_seams::catalog_tuple_delete::call(depRel, tup.tid)?;
+            indexing_seams::catalog_tuple_delete::call(&depRel, row.tid)?;
         } else {
             /* make a modifiable copy */
-            let mut newform = tup.form;
+            let mut newform = form_pg_depend(row);
 
             newform.refobjid = newRefObjectId;
 
-            indexing_seams::catalog_tuple_update_pg_depend::call(depRel, tup.tid, &newform)?;
+            indexing_seams::catalog_tuple_update_pg_depend::call(&depRel, row.tid, &newform)?;
         }
 
         count += 1;
         Ok(true)
     })?;
 
-    close_depend(depRel, RowExclusiveLock)?;
+    depRel.close(RowExclusiveLock)?;
 
     Ok(count)
 }
@@ -654,14 +695,13 @@ pub fn getExtensionOfObject(classId: Oid, objectId: Oid) -> PgResult<Oid> {
 
     let depRel = open_depend(AccessShareLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: classId,
-        key1_oid: objectId,
-        key2_int4: None,
-    };
+    let key = [
+        oid_key(Anum_pg_depend_classid, classId),
+        oid_key(Anum_pg_depend_objid, objectId),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Depender, &keys, &mut |tup| {
-        let depform = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+        let depform = form_pg_depend(row);
 
         if depform.refclassid == EXTENSION_RELATION_ID
             && depform.deptype == DEPENDENCY_EXTENSION.as_char()
@@ -672,7 +712,7 @@ pub fn getExtensionOfObject(classId: Oid, objectId: Oid) -> PgResult<Oid> {
         Ok(true)
     })?;
 
-    close_depend(depRel, AccessShareLock)?;
+    depRel.close(AccessShareLock)?;
 
     Ok(result)
 }
@@ -688,14 +728,13 @@ pub fn getAutoExtensionsOfObject<'mcx>(
 
     let depRel = open_depend(AccessShareLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: classId,
-        key1_oid: objectId,
-        key2_int4: None,
-    };
+    let key = [
+        oid_key(Anum_pg_depend_classid, classId),
+        oid_key(Anum_pg_depend_objid, objectId),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Depender, &keys, &mut |tup| {
-        let depform = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+        let depform = form_pg_depend(row);
 
         if depform.refclassid == EXTENSION_RELATION_ID
             && depform.deptype == DEPENDENCY_AUTO_EXTENSION.as_char()
@@ -709,7 +748,7 @@ pub fn getAutoExtensionsOfObject<'mcx>(
         Ok(true)
     })?;
 
-    close_depend(depRel, AccessShareLock)?;
+    depRel.close(AccessShareLock)?;
 
     Ok(result)
 }
@@ -730,14 +769,14 @@ pub fn getExtensionType(mcx: Mcx<'_>, extensionOid: Oid, typname: &str) -> PgRes
 
     let depRel = open_depend(AccessShareLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: EXTENSION_RELATION_ID,
-        key1_oid: extensionOid,
-        key2_int4: Some(0),
-    };
+    let key = [
+        oid_key(Anum_pg_depend_refclassid, EXTENSION_RELATION_ID),
+        oid_key(Anum_pg_depend_refobjid, extensionOid),
+        int4_key(Anum_pg_depend_refobjsubid, 0),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Reference, &keys, &mut |tup| {
-        let depform = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependReferenceIndexId, &key, &mut |row| {
+        let depform = form_pg_depend(row);
 
         if depform.classid == TYPE_RELATION_ID && depform.deptype == DEPENDENCY_EXTENSION.as_char()
         {
@@ -754,7 +793,7 @@ pub fn getExtensionType(mcx: Mcx<'_>, extensionOid: Oid, typname: &str) -> PgRes
         Ok(true)
     })?;
 
-    close_depend(depRel, AccessShareLock)?;
+    depRel.close(AccessShareLock)?;
 
     Ok(result)
 }
@@ -772,14 +811,13 @@ pub fn sequenceIsOwned(seqId: Oid, deptype: i8) -> PgResult<Option<(Oid, i32)>> 
 
     let depRel = open_depend(AccessShareLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: RELATION_RELATION_ID,
-        key1_oid: seqId,
-        key2_int4: None,
-    };
+    let key = [
+        oid_key(Anum_pg_depend_classid, RELATION_RELATION_ID),
+        oid_key(Anum_pg_depend_objid, seqId),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Depender, &keys, &mut |tup| {
-        let depform = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+        let depform = form_pg_depend(row);
 
         if depform.refclassid == RELATION_RELATION_ID && depform.deptype == deptype {
             ret = Some((depform.refobjid, depform.refobjsubid));
@@ -788,7 +826,7 @@ pub fn sequenceIsOwned(seqId: Oid, deptype: i8) -> PgResult<Option<(Oid, i32)>> 
         Ok(true)
     })?;
 
-    close_depend(depRel, AccessShareLock)?;
+    depRel.close(AccessShareLock)?;
 
     Ok(ret)
 }
@@ -806,14 +844,16 @@ fn getOwnedSequences_internal<'mcx>(
 
     let depRel = open_depend(AccessShareLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: RELATION_RELATION_ID,
-        key1_oid: relid,
-        key2_int4: if attnum != 0 { Some(attnum as i32) } else { None },
-    };
+    let key = [
+        oid_key(Anum_pg_depend_refclassid, RELATION_RELATION_ID),
+        oid_key(Anum_pg_depend_refobjid, relid),
+        int4_key(Anum_pg_depend_refobjsubid, attnum as i32),
+    ];
+    /* the C nkeys is `attnum ? 3 : 2` */
+    let key = if attnum != 0 { &key[..] } else { &key[..2] };
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Reference, &keys, &mut |tup| {
-        let deprec = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependReferenceIndexId, key, &mut |row| {
+        let deprec = form_pg_depend(row);
 
         /*
          * We assume any auto or internal dependency of a sequence on a column
@@ -837,7 +877,7 @@ fn getOwnedSequences_internal<'mcx>(
         Ok(true)
     })?;
 
-    close_depend(depRel, AccessShareLock)?;
+    depRel.close(AccessShareLock)?;
 
     Ok(result)
 }
@@ -850,16 +890,15 @@ pub fn getOwnedSequences<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<PgVec<'mc
 
 /// Get owned identity sequence, error if not exactly one.
 ///
-/// `rel` is the open relation, crossing as its `Oid`
-/// (`RelationGetRelid(rel)`); the `relispartition` field read goes through
-/// the relcache owner's seam.
+/// `rel` is the caller's open relation; the `relispartition` field read goes
+/// through the relcache owner's seam.
 pub fn getIdentitySequence(
     mcx: Mcx<'_>,
-    rel: Oid,
+    rel: &RelationData,
     mut attnum: AttrNumber,
     missing_ok: bool,
 ) -> PgResult<Oid> {
-    let mut relid = rel;
+    let mut relid = rel.rd_id; /* RelationGetRelid(rel) */
 
     /*
      * The identity sequence is associated with the topmost partitioned table,
@@ -867,6 +906,12 @@ pub fn getIdentitySequence(
      */
     if relcache_seams::relation_is_partition::call(rel)? {
         let ancestors = partition_seams::get_partition_ancestors::call(mcx, relid)?;
+        /*
+         * The C get_attname elogs ERROR before it can return NULL when
+         * missing_ok is false (lsyscache.c), so Ok(None) is
+         * contract-impossible on this call; the expect is the Assert
+         * analogue of that seam contract.
+         */
         let attname = lsyscache_seams::get_attname::call(mcx, relid, attnum, false)?
             .expect("get_attname(missing_ok = false) returned no name");
 
@@ -910,14 +955,14 @@ pub fn get_index_constraint(indexId: Oid) -> PgResult<Oid> {
     /* Search the dependency table for the index */
     let depRel = open_depend(AccessShareLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: RELATION_RELATION_ID,
-        key1_oid: indexId,
-        key2_int4: Some(0),
-    };
+    let key = [
+        oid_key(Anum_pg_depend_classid, RELATION_RELATION_ID),
+        oid_key(Anum_pg_depend_objid, indexId),
+        int4_key(Anum_pg_depend_objsubid, 0),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Depender, &keys, &mut |tup| {
-        let deprec = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependDependerIndexId, &key, &mut |row| {
+        let deprec = form_pg_depend(row);
 
         /*
          * We assume any internal dependency on a constraint must be what we
@@ -933,7 +978,7 @@ pub fn get_index_constraint(indexId: Oid) -> PgResult<Oid> {
         Ok(true)
     })?;
 
-    close_depend(depRel, AccessShareLock)?;
+    depRel.close(AccessShareLock)?;
 
     Ok(constraintId)
 }
@@ -951,14 +996,14 @@ pub fn get_index_ref_constraints<'mcx>(
     /* Search the dependency table for the index */
     let depRel = open_depend(AccessShareLock)?;
 
-    let keys = DependScanKeys {
-        key0_oid: RELATION_RELATION_ID,
-        key1_oid: indexId,
-        key2_int4: Some(0),
-    };
+    let key = [
+        oid_key(Anum_pg_depend_refclassid, RELATION_RELATION_ID),
+        oid_key(Anum_pg_depend_refobjid, indexId),
+        int4_key(Anum_pg_depend_refobjsubid, 0),
+    ];
 
-    genam_seams::systable_scan_pg_depend::call(depRel, DependIndex::Reference, &keys, &mut |tup| {
-        let deprec = &tup.form;
+    genam_seams::systable_scan::call(&depRel, DependReferenceIndexId, &key, &mut |row| {
+        let deprec = form_pg_depend(row);
 
         /*
          * We assume any normal dependency from a constraint must be what we
@@ -976,7 +1021,7 @@ pub fn get_index_ref_constraints<'mcx>(
         Ok(true)
     })?;
 
-    close_depend(depRel, AccessShareLock)?;
+    depRel.close(AccessShareLock)?;
 
     Ok(result)
 }
@@ -1023,6 +1068,8 @@ mod tests {
     fn catalog_oids_match_postgres() {
         /* genbki-assigned catalog OIDs the scan-key construction relies on */
         assert_eq!(DEPEND_RELATION_ID, 2608);
+        assert_eq!(DependDependerIndexId, 2673);
+        assert_eq!(DependReferenceIndexId, 2674);
         assert_eq!(RELATION_RELATION_ID, 1259);
         assert_eq!(TYPE_RELATION_ID, 1247);
         assert_eq!(CONSTRAINT_RELATION_ID, 2606);
@@ -1031,5 +1078,22 @@ mod tests {
         /* RowExclusiveLock for mutators, AccessShareLock for readers */
         assert_eq!(AccessShareLock, 1);
         assert_eq!(RowExclusiveLock, 3);
+    }
+
+    #[test]
+    fn scan_key_vocabulary_matches_postgres() {
+        /* ScanKeyInit arguments (stratnum.h, pg_proc.dat) */
+        assert_eq!(BTEqualStrategyNumber, 3);
+        assert_eq!(F_INT4EQ, 65);
+        assert_eq!(F_OIDEQ, 184);
+        /* pg_depend attribute numbers follow the CATALOG field order */
+        assert_eq!(Anum_pg_depend_classid, 1);
+        assert_eq!(Anum_pg_depend_objid, 2);
+        assert_eq!(Anum_pg_depend_objsubid, 3);
+        assert_eq!(Anum_pg_depend_refclassid, 4);
+        assert_eq!(Anum_pg_depend_refobjid, 5);
+        assert_eq!(Anum_pg_depend_refobjsubid, 6);
+        assert_eq!(Anum_pg_depend_deptype, 7);
+        assert_eq!(Natts_pg_depend, 7);
     }
 }

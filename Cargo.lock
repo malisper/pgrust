@@ -77,9 +77,10 @@ name = "backend-access-index-genam-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-catalog",
  "types-core",
  "types-error",
+ "types-rel",
+ "types-scan",
 ]
 
 [[package]]
@@ -89,6 +90,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
  "types-tuple",
 ]
 
@@ -154,6 +156,7 @@ dependencies = [
  "types-catalog",
  "types-core",
  "types-error",
+ "types-rel",
  "types-tuple",
 ]
 
@@ -196,7 +199,10 @@ dependencies = [
  "mcx",
  "types-catalog",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-rel",
+ "types-scan",
  "types-tuple",
 ]
 
@@ -209,6 +215,7 @@ dependencies = [
  "types-catalog",
  "types-core",
  "types-error",
+ "types-rel",
 ]
 
 [[package]]
@@ -491,6 +498,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
  "types-tuple",
 ]
 
@@ -765,7 +773,6 @@ name = "types-catalog"
 version = "0.0.0"
 dependencies = [
  "types-core",
- "types-tuple",
 ]
 
 [[package]]
@@ -816,6 +823,23 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-storage",
+]
+
+[[package]]
+name = "types-rel"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-scan"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+ "types-hash",
+ "types-tuple",
 ]
 
 [[package]]

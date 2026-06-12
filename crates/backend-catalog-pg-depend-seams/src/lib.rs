@@ -157,11 +157,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `getIdentitySequence(rel, attnum, missing_ok)` — the open `Relation`
-    /// crosses as its `Oid` (the table-seams convention).
+    /// `getIdentitySequence(rel, attnum, missing_ok)` — the caller's open
+    /// `Relation` crosses as `&RelationData`.
     pub fn getIdentitySequence(
         mcx: Mcx<'_>,
-        rel: Oid,
+        rel: &types_rel::rel::RelationData,
         attnum: AttrNumber,
         missing_ok: bool,
     ) -> PgResult<Oid>

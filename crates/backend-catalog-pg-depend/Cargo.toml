@@ -24,5 +24,8 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 mcx = { path = "../mcx" }
 types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-rel = { path = "../types-rel" }
+types-scan = { path = "../types-scan" }
 types-tuple = { path = "../types-tuple" }

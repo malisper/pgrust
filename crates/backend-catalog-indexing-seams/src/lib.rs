@@ -2,21 +2,21 @@
 //! (`catalog/indexing.c` catalog-tuple mutators).
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly. Open relations cross as their `Oid` (the
-//! table-seams convention); pg_depend tuples cross as the deformed
+//! then a call panics loudly. Open relations cross as
+//! `&types_rel::rel::RelationData`; pg_depend tuples cross as the deformed
 //! `FormData_pg_depend` row (the caller-shaped projection precedent) — the
 //! owner forms the heap tuple against the pg_depend descriptor.
 
 use types_catalog::catalog_dependency::FormData_pg_depend;
-use types_core::primitive::Oid;
 use types_error::PgResult;
+use types_rel::rel::RelationData;
 use types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
     /// `CatalogTupleDelete(rel, tid)` (catalog/indexing.c): delete the
     /// addressed tuple from a catalog relation (`simple_heap_delete`). `Err`
     /// carries the heap-mutation `ereport(ERROR)`s.
-    pub fn catalog_tuple_delete(rel: Oid, tid: ItemPointerData) -> PgResult<()>
+    pub fn catalog_tuple_delete(rel: &RelationData, tid: ItemPointerData) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -25,7 +25,7 @@ seam_core::seam!(
     /// maintenance. The replacement tuple crosses as its deformed form. `Err`
     /// carries the heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_depend(
-        rel: Oid,
+        rel: &RelationData,
         tid: ItemPointerData,
         form: &FormData_pg_depend,
     ) -> PgResult<()>
@@ -41,7 +41,7 @@ seam_core::seam!(
     /// logic-invisible. `Err` carries the heap/index-mutation
     /// `ereport(ERROR)`s.
     pub fn catalog_tuples_multi_insert_pg_depend(
-        rel: Oid,
+        rel: &RelationData,
         forms: &[FormData_pg_depend],
     ) -> PgResult<()>
 );

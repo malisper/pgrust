@@ -3,12 +3,33 @@
 //! `catalog/dependency.h` (`DependencyType`), and `catalog/pg_depend.h`
 //! (`FormData_pg_depend`), trimmed to the items the current ports consume.
 
-use types_core::primitive::Oid;
+use types_core::primitive::AttrNumber;
 use types_core::primitive::InvalidOid;
+use types_core::primitive::Oid;
 
 /// `DependRelationId` — `pg_depend` (`pg_depend_d.h`,
 /// `CATALOG(pg_depend,2608,DependRelationId)`).
 pub const DEPEND_RELATION_ID: Oid = 2608;
+
+/// `DependDependerIndexId` — `pg_depend_depender_index`, btree on
+/// (classid, objid, objsubid) (`catalog/pg_depend.h` `DECLARE_INDEX`).
+pub const DependDependerIndexId: Oid = 2673;
+/// `DependReferenceIndexId` — `pg_depend_reference_index`, btree on
+/// (refclassid, refobjid, refobjsubid) (`catalog/pg_depend.h`
+/// `DECLARE_INDEX`).
+pub const DependReferenceIndexId: Oid = 2674;
+
+/* `Anum_pg_depend_*` (`pg_depend_d.h`) — attribute numbers in the CATALOG
+ * field order of `catalog/pg_depend.h`. */
+pub const Anum_pg_depend_classid: AttrNumber = 1;
+pub const Anum_pg_depend_objid: AttrNumber = 2;
+pub const Anum_pg_depend_objsubid: AttrNumber = 3;
+pub const Anum_pg_depend_refclassid: AttrNumber = 4;
+pub const Anum_pg_depend_refobjid: AttrNumber = 5;
+pub const Anum_pg_depend_refobjsubid: AttrNumber = 6;
+pub const Anum_pg_depend_deptype: AttrNumber = 7;
+/// `Natts_pg_depend` (`pg_depend_d.h`).
+pub const Natts_pg_depend: usize = 7;
 
 /// `typedef struct ObjectAddress` — a database object of any type
 /// (`catalog/objectaddress.h`).

@@ -21,9 +21,6 @@ pub const AccessShareLock: LOCKMODE = 1;
 /// `RowExclusiveLock` (`storage/lockdefs.h`) — INSERT, UPDATE, DELETE.
 pub const RowExclusiveLock: LOCKMODE = 3;
 
-/// `RELKIND_SEQUENCE` (`catalog/pg_class.h`).
-pub const RELKIND_SEQUENCE: u8 = b'S';
-
 /// `EphemeralNameRelationType` (`utils/queryenvironment.h`).
 pub type EphemeralNameRelationType = u32;
 /// `ENR_NAMED_TUPLESTORE` — named tuplestore relation (e.g. a trigger

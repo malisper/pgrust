@@ -23,6 +23,9 @@ pub type TimeADT = i64;
 pub type Size = usize;
 pub type NodeTag = u32;
 pub type AttrNumber = i16;
+/// `RegProcedure` (`c.h`) — a pg_proc OID ("RegProcedure is the preferred
+/// name in C code" for `regproc`).
+pub type RegProcedure = Oid;
 /// `Cost` (`nodes.h`) — abstract plan cost, a `double`.
 pub type Cost = f64;
 /// `Cardinality` (`nodes.h`) — estimated row count, a `double`.
