@@ -22,9 +22,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execAmi-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execProcnode-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execTuples-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execUtils-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-nodeMaterial"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-storage-seams",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "backend-tcop-postgres-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-core",
 ]
 
@@ -33,6 +92,14 @@ name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-utils-init-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
 ]
 
 [[package]]
@@ -57,6 +124,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-storage-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -75,6 +151,7 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-executor-nodeMaterial",
  "backend-storage-page-checksum",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
@@ -87,6 +164,13 @@ version = "0.0.0"
 
 [[package]]
 name = "types-datum"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-nodes"
 version = "0.0.0"
 dependencies = [
  "types-core",

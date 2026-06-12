@@ -8,9 +8,11 @@
 #![allow(non_upper_case_globals)]
 
 pub mod fmgr;
+pub mod pg_error;
 pub mod primitive;
 pub mod xact;
 
 pub use fmgr::*;
+pub use pg_error::{PgError, PgResult};
 pub use primitive::*;
 pub use xact::*;
