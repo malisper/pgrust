@@ -1,5 +1,6 @@
 //! Storage/lmgr type vocabulary (`storage/lwlock.h`, `storage/proclist_types.h`,
-//! `port/atomics.h`), trimmed to the items ports consume so far.
+//! `port/atomics.h`, `storage/waiteventset.h`), trimmed to the items ports
+//! consume so far.
 
 #![no_std]
 #![allow(non_camel_case_types)]
@@ -8,6 +9,7 @@
 
 pub mod lock;
 pub mod storage;
+pub mod waiteventset;
 
 pub use lock::*;
 pub use storage::*;

@@ -223,6 +223,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-be-secure-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-net",
+]
+
+[[package]]
 name = "backend-libpq-ifaddr"
 version = "0.0.0"
 dependencies = [
@@ -232,10 +241,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-libpq-pqcomm"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-be-secure-seams",
+ "backend-libpq-pqcomm-seams",
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-seams",
+ "backend-storage-ipc-waiteventset-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "common-ip-seams",
+ "libc",
+ "port-noblock-seams",
+ "port-pgsleep-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-net",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-libpq-pqcomm-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -343,6 +376,7 @@ name = "backend-storage-ipc-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-datum",
 ]
 
 [[package]]
@@ -351,6 +385,16 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-ipc-waiteventset-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -694,11 +738,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-init-miscinit-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-init-small-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-net",
 ]
 
 [[package]]
@@ -811,6 +864,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "common-ip-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-net",
+]
+
+[[package]]
 name = "contrib-earthdistance"
 version = "0.0.0"
 dependencies = [
@@ -862,6 +923,21 @@ name = "pg-prng"
 version = "0.0.0"
 
 [[package]]
+name = "port-noblock-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
+name = "port-pgsleep-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,6 +967,7 @@ dependencies = [
  "backend-access-hashvalidate",
  "backend-access-transam-xlogstats",
  "backend-executor-nodeMaterial",
+ "backend-libpq-pqcomm",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
  "backend-postmaster-interrupt",
@@ -970,6 +1047,13 @@ name = "types-hash"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "types-core",
+]
+
+[[package]]
+name = "types-net"
+version = "0.0.0"
+dependencies = [
  "types-core",
 ]
 

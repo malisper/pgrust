@@ -2,26 +2,30 @@
 //! the low-level frontend message send/flush primitives elog.c's
 //! `send_message_to_frontend` uses.
 //!
-//! The owning unit installs these from its `init_seams()` when it lands; until
-//! then a call panics loudly.
+//! Failure surface: each of these reaches `internal_putbytes`/`internal_flush`
+//! → `socket_set_nonblocking`, which `ereport(ERROR)`s when `MyProcPort` is
+//! NULL, and `secure_write`, whose blocking-mode wait loop can raise through
+//! interrupt processing — so they return `PgResult`. Socket-level trouble is
+//! *not* an `Err`: as in C it is logged at COMMERROR and surfaced as the
+//! `Ok(EOF)` (= `Ok(-1)`) return.
 
 seam_core::seam!(
     /// `pq_putmessage(msgtype, s, len)` (`PqCommMethods->putmessage`) — send
     /// one complete protocol-3 message. `body` is the message payload
-    /// (everything after the type byte and length word). Returns 0 on
-    /// success, EOF (-1) on failure; never `ereport(ERROR)`s (internal
-    /// trouble is COMMERROR).
-    pub fn pq_putmessage(msgtype: u8, body: &[u8]) -> i32
+    /// (everything after the type byte and length word). `Ok(0)` on success,
+    /// `Ok(EOF)` (-1) on socket failure; suppressed (returns `Ok(0)`) while
+    /// pqcomm is busy.
+    pub fn pq_putmessage(msgtype: u8, body: &[u8]) -> types_error::PgResult<i32>
 );
 
 seam_core::seam!(
     /// `pq_putmessage_v2(msgtype, s, len)` — send one protocol-2 style
-    /// message (no length word). Returns 0 on success, EOF (-1) on failure.
-    pub fn pq_putmessage_v2(msgtype: u8, body: &[u8]) -> i32
+    /// message (no length word). `Ok(0)` on success, `Ok(EOF)` on failure.
+    pub fn pq_putmessage_v2(msgtype: u8, body: &[u8]) -> types_error::PgResult<i32>
 );
 
 seam_core::seam!(
     /// `pq_flush()` (`PqCommMethods->flush`) — flush buffered output to the
-    /// client. Returns 0 on success, EOF (-1) on failure.
-    pub fn pq_flush() -> i32
+    /// client. `Ok(0)` on success, `Ok(EOF)` on failure.
+    pub fn pq_flush() -> types_error::PgResult<i32>
 );

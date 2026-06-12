@@ -71,3 +71,14 @@ pub const PG_DIR_MODE_OWNER: i32 = 0o700;
 pub const USE_ISO_DATES: i32 = 1;
 pub const DATEORDER_MDY: i32 = 2;
 pub const INTSTYLE_POSTGRES: i32 = 0;
+
+/// `pgsocket` (`port.h`) — a socket file descriptor (`int` on Unix).
+pub type pgsocket = core::ffi::c_int;
+
+/// `PGINVALID_SOCKET` (`port.h`) — the invalid-socket sentinel (`-1` on Unix).
+pub const PGINVALID_SOCKET: pgsocket = -1;
+
+/// `STATUS_OK` (`c.h`).
+pub const STATUS_OK: i32 = 0;
+/// `STATUS_ERROR` (`c.h`).
+pub const STATUS_ERROR: i32 = -1;

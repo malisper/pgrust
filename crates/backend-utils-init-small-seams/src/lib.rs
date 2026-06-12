@@ -23,6 +23,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MaxConnections` (globals.c): the `max_connections` GUC.
+    pub fn max_connections() -> i32
+);
+
+seam_core::seam!(
+    /// `MyProcPort` (globals.c): run `f` with mutable access to this
+    /// backend's connection `Port`, or `None` when there is no client
+    /// connection (`MyProcPort == NULL`). Callback shape per the seam rules:
+    /// a seam must not hand out `&'static mut`.
+    pub fn with_my_proc_port(f: &mut dyn FnMut(Option<&mut types_net::Port>))
+);
+
+seam_core::seam!(
+    /// `ClientConnectionLost = value` (globals.c / miscadmin.h).
+    pub fn set_client_connection_lost(value: bool)
+);
+
+seam_core::seam!(
     /// `InterruptPending = value` (globals.c).
     pub fn set_interrupt_pending(value: bool)
 );
