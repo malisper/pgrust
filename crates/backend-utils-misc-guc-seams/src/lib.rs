@@ -10,3 +10,10 @@ seam_core::seam!(
     /// parse/apply paths can `ereport(ERROR)`.
     pub fn process_config_file(context: types_guc::GucContext) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `GUC_check_errdetail(fmt, ...)` (guc.h): record errdetail for the
+    /// in-progress GUC check-hook failure (`GUC_check_errdetail_string`).
+    /// Plain backend-local state write.
+    pub fn guc_check_errdetail(detail: String)
+);

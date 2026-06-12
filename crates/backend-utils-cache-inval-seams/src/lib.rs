@@ -1,0 +1,27 @@
+//! Seam declarations for the `backend-utils-cache-inval` unit
+//! (`utils/cache/inval.c`).
+//!
+//! The owning unit installs these from its `init_seams()` when it lands; until
+//! then a call panics loudly.
+
+use types_error::PgResult;
+use types_syscache::SysCacheIdentifier;
+
+seam_core::seam!(
+    /// `AcceptInvalidationMessages()` (inval.c): process pending shared
+    /// invalidation messages. Invalidation callbacks can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn accept_invalidation_messages() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CacheRegisterSyscacheCallback(cacheid, func, (Datum) 0)` (inval.c):
+    /// register a syscache-invalidation callback. The C `Datum arg` is fixed
+    /// at 0 by every current caller and dropped here; the callback receives
+    /// `(cacheid, hashvalue)`. C `elog(FATAL)`s when the callback table is
+    /// full, carried on `Err`.
+    pub fn cache_register_syscache_callback(
+        cacheid: SysCacheIdentifier,
+        callback: fn(cacheid: i32, hashvalue: u32),
+    ) -> PgResult<()>
+);

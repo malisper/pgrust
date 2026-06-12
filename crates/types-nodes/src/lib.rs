@@ -21,6 +21,7 @@ pub mod funcapi;
 pub mod nodeforeigncustom;
 pub mod nodeindexscan;
 pub mod nodes;
+pub mod parsenodes;
 pub mod planstate;
 
 pub use bitmapset::Bitmapset;

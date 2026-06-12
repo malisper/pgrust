@@ -5,3 +5,9 @@
 
 /// `CommandId` (`c.h`) — a `uint32`.
 pub type CommandId = u32;
+
+/// `SubTransactionId` (`c.h`) — a `uint32`.
+pub type SubTransactionId = u32;
+
+/// `InvalidSubTransactionId` (`c.h`).
+pub const InvalidSubTransactionId: SubTransactionId = 0;

@@ -63,6 +63,8 @@ pub const fn OidIsValid(oid: Oid) -> bool {
 
 pub const INVALID_PROC_NUMBER: ProcNumber = -1;
 pub const MAX_CANCEL_KEY_LENGTH: usize = 32;
+/// `FUNC_MAX_ARGS` (`pg_config_manual.h`) — maximum function arguments.
+pub const FUNC_MAX_ARGS: usize = 100;
 pub const MAXPGPATH: usize = 1024;
 /// `PG_DIR_MODE_OWNER` — `0700`, was C `int`.
 pub const PG_DIR_MODE_OWNER: i32 = 0o700;

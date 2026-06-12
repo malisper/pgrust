@@ -15,6 +15,9 @@ pub type LOCKMODE = i32;
 /// (the caller relies on a lock already being held).
 pub const NoLock: LOCKMODE = 0;
 
+/// `AccessShareLock` (`storage/lockdefs.h`) — acquired by SELECT.
+pub const AccessShareLock: LOCKMODE = 1;
+
 /// `EphemeralNameRelationType` (`utils/queryenvironment.h`).
 pub type EphemeralNameRelationType = u32;
 /// `ENR_NAMED_TUPLESTORE` — named tuplestore relation (e.g. a trigger
