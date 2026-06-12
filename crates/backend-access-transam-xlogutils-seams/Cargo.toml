@@ -1,13 +1,13 @@
 [package]
-name = "backend-storage-ipc-seams"
+name = "backend-access-transam-xlogutils-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_storage_ipc_seams"
+name = "backend_access_transam_xlogutils_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
-types-datum = { path = "../types-datum" }
+types-wal = { path = "../types-wal" }

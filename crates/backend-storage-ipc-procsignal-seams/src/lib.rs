@@ -17,3 +17,10 @@ seam_core::seam!(
     /// so an `ereport(ERROR)` propagates to the caller.
     pub fn process_proc_signal_barrier() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `procsignal_sigusr1_handler(SIGNAL_ARGS)` (procsignal.c): the SIGUSR1
+    /// handler that dispatches multiplexed proc signals. Runs in
+    /// signal-handler context; sets flags and the process latch only.
+    pub fn procsignal_sigusr1_handler(postgres_signal_arg: i32)
+);
