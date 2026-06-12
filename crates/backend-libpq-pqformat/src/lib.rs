@@ -58,8 +58,10 @@ pub fn init_seams() {
 fn enlarge_string_info(buf: &mut StringInfo<'_>, needed: usize) -> PgResult<()> {
     let len = buf.data.len();
     if needed >= MAX_ALLOC_SIZE.saturating_sub(len) {
-        return Err(PgError::error("out of memory")
-            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        return Err(PgError::error(format!(
+            "string buffer exceeds maximum allowed length ({MAX_ALLOC_SIZE} bytes)"
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
             .with_detail(format!(
                 "Cannot enlarge string buffer containing {len} bytes by {needed} more bytes."
             )));
@@ -417,7 +419,7 @@ pub fn pq_getmsgfloat8(msg: &mut StringInfo<'_>) -> PgResult<f64> {
 /// C also rejects `datalen < 0`, which `usize` makes unrepresentable; the
 /// insufficient-data half of the check is preserved exactly.
 pub fn pq_getmsgbytes<'a>(msg: &'a mut StringInfo<'_>, datalen: usize) -> PgResult<&'a [u8]> {
-    if datalen > msg.data.len() - msg.cursor {
+    if datalen > msg.data.len().saturating_sub(msg.cursor) {
         return Err(protocol_violation("insufficient data left in message"));
     }
     let start = msg.cursor;
@@ -430,7 +432,7 @@ pub fn pq_getmsgbytes<'a>(msg: &'a mut StringInfo<'_>, datalen: usize) -> PgResu
 /// `sizeof(dest)`).
 pub fn pq_copymsgbytes(msg: &mut StringInfo<'_>, buf: &mut [u8]) -> PgResult<()> {
     let datalen = buf.len();
-    if datalen > msg.data.len() - msg.cursor {
+    if datalen > msg.data.len().saturating_sub(msg.cursor) {
         return Err(protocol_violation("insufficient data left in message"));
     }
     let start = msg.cursor;
@@ -451,7 +453,7 @@ pub fn pq_getmsgtext<'mcx>(
     msg: &mut StringInfo<'_>,
     rawbytes: usize,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    if rawbytes > msg.data.len() - msg.cursor {
+    if rawbytes > msg.data.len().saturating_sub(msg.cursor) {
         return Err(protocol_violation("insufficient data left in message"));
     }
     let start = msg.cursor;

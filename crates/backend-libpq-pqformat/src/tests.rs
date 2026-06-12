@@ -288,9 +288,14 @@ fn enlarge_cap_matches_stringinfo_error() {
     let f = setup();
     let mut buf = pq_beginmessage(f.ctx.mcx(), b'X').unwrap();
     // A request that crosses MaxAllocSize must fail with stringinfo.c's
-    // PROGRAM_LIMIT_EXCEEDED "out of memory" before any allocation happens.
+    // PROGRAM_LIMIT_EXCEEDED error before any allocation happens (PG 18.3
+    // wording: errmsg("string buffer exceeds maximum allowed length (%zu
+    // bytes)", MaxAllocSize)).
     let err = enlarge_string_info(&mut buf, 0x4000_0000).unwrap_err();
-    assert_eq!(err.message(), "out of memory");
+    assert_eq!(
+        err.message(),
+        "string buffer exceeds maximum allowed length (1073741823 bytes)"
+    );
     assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
     assert_eq!(
         err.detail(),
