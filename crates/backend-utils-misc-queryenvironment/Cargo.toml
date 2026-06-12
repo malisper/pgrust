@@ -1,0 +1,15 @@
+[package]
+name = "backend-utils-misc-queryenvironment"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_misc_queryenvironment"
+path = "src/lib.rs"
+
+[dependencies]
+backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+types-core = { path = "../types-core" }
+types-tuple = { path = "../types-tuple" }

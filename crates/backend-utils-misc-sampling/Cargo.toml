@@ -1,0 +1,13 @@
+[package]
+name = "backend-utils-misc-sampling"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_misc_sampling"
+path = "src/lib.rs"
+
+[dependencies]
+pg-prng = { path = "../pg-prng" }
+types-core = { path = "../types-core" }

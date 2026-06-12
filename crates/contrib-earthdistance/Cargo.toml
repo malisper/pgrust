@@ -1,0 +1,13 @@
+[package]
+name = "contrib-earthdistance"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "contrib_earthdistance"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }

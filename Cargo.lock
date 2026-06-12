@@ -14,11 +14,193 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-hashvalidate"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amvalidate-seams",
+ "backend-access-transam-xact-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error-seams",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
+ "types-hash",
+]
+
+[[package]]
 name = "backend-access-heap-heaptoast-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-access-index-amvalidate-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-amvalidate",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-table-table-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-transam-multixact-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-transam-parallel-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-access-transam-twophase-rmgr"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-multixact-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-predicate-seams",
+ "backend-utils-activity-stat-seams",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-transam-xact-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-transam-xlogstats"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-executor-execAmi-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execProcnode-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execTuples-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-execUtils-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-executor-nodeMaterial"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-storage-seams",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "backend-libpq-ifaddr"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "backend-libpq-pqformat-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-libpq-pqsignal"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "backend-port-atomics"
+version = "0.0.0"
+
+[[package]]
+name = "backend-storage-lmgr-lock-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-storage-lmgr-lwlock-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-lmgr-predicate-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -29,10 +211,130 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tcop-postgres-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
+name = "backend-utils-activity-pgstat-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-pgstat",
+]
+
+[[package]]
+name = "backend-utils-activity-small"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-libpq-pqformat-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-activity-status-seams",
+ "backend-utils-adt-timestamp-seams",
+ "types-core",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-utils-activity-stat-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-activity-status-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-pgstat",
+]
+
+[[package]]
+name = "backend-utils-adt-format-type-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-utils-adt-regproc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-timestamp-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
+name = "backend-utils-cache-lsyscache-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-cache-relcache-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-syscache-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-hash",
+]
+
+[[package]]
+name = "backend-utils-error-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-init-small-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
 ]
 
 [[package]]
@@ -57,6 +359,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-queryenvironment"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table-seams",
+ "backend-utils-cache-relcache-seams",
+ "types-core",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-misc-sampling"
+version = "0.0.0"
+dependencies = [
+ "pg-prng",
+ "types-core",
+]
+
+[[package]]
+name = "backend-utils-sort-storage-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nodes",
+]
+
+[[package]]
+name = "contrib-earthdistance"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+]
+
+[[package]]
+name = "interfaces-libpq-legacy-pqsignal"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -75,15 +419,34 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-hashvalidate",
+ "backend-access-transam-xlogstats",
+ "backend-executor-nodeMaterial",
+ "backend-libpq-pqsignal",
+ "backend-port-atomics",
  "backend-storage-page-checksum",
+ "backend-utils-activity-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-pg-rusage",
+ "backend-utils-misc-queryenvironment",
+ "backend-utils-misc-sampling",
+ "interfaces-libpq-legacy-pqsignal",
+]
+
+[[package]]
+name = "types-amvalidate"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
 name = "types-core"
 version = "0.0.0"
+dependencies = [
+ "types-error",
+]
 
 [[package]]
 name = "types-datum"
@@ -97,11 +460,47 @@ name = "types-error"
 version = "0.0.0"
 
 [[package]]
+name = "types-hash"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-nodes"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-pgstat"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-storage",
+]
+
+[[package]]
+name = "types-storage"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
 name = "types-tuple"
 version = "0.0.0"
 dependencies = [
  "types-core",
  "types-datum",
+]
+
+[[package]]
+name = "types-wal"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]

@@ -9,10 +9,14 @@
 
 extern crate alloc;
 
+pub mod access;
 pub mod backend_access_common_heaptuple;
 pub mod heap;
 pub mod heaptuple;
+pub mod parse;
 
+pub use access::*;
 pub use backend_access_common_heaptuple::*;
 pub use heap::*;
 pub use heaptuple::*;
+pub use parse::*;

@@ -1,0 +1,21 @@
+[package]
+name = "backend-utils-activity-small"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_activity_small"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-storage = { path = "../types-storage" }
+types-pgstat = { path = "../types-pgstat" }
+backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
+backend-libpq-pqformat-seams = { path = "../backend-libpq-pqformat-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
+backend-utils-activity-stat-seams = { path = "../backend-utils-activity-stat-seams" }
+backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }

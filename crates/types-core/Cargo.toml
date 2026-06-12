@@ -7,3 +7,6 @@ publish.workspace = true
 [lib]
 name = "types_core"
 path = "src/lib.rs"
+
+[dependencies]
+types-error = { path = "../types-error" }
