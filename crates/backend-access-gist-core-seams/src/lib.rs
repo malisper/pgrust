@@ -10,14 +10,14 @@
 seam_core::seam!(
     /// `gist_redo(record)` (gistxlog.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn gist_redo(record: &mut types_wal::rmgr::XLogReaderState) -> types_error::PgResult<()>
+    pub fn gist_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `gist_xlog_startup()` (gistxlog.c) — create this AM's recovery temporary memory
-    /// context at the start of WAL replay (`rm_startup` slot); OOM
+    /// context under `parent` at the start of WAL replay (`rm_startup` slot); OOM
     /// `ereport(ERROR)` carried on `Err`.
-    pub fn gist_xlog_startup() -> types_error::PgResult<()>
+    pub fn gist_xlog_startup(parent: mcx::Mcx<'_>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

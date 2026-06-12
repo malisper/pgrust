@@ -41,6 +41,6 @@ seam_core::seam!(
     /// records (`rm_redo` slot of `RmgrTable`). Can `ereport(ERROR)`, carried
     /// on `Err`.
     pub fn multixact_redo(
-        record: &mut types_wal::rmgr::XLogReaderState,
+        record: &mut types_wal::rmgr::XLogReaderState<'_>,
     ) -> types_error::PgResult<()>
 );

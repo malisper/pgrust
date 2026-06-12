@@ -10,5 +10,5 @@
 seam_core::seam!(
     /// `smgr_redo(record)` (storage.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn smgr_redo(record: &mut types_wal::rmgr::XLogReaderState) -> types_error::PgResult<()>
+    pub fn smgr_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
 );

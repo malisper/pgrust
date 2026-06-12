@@ -47,6 +47,7 @@ dependencies = [
 name = "backend-access-gin-core-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -57,6 +58,7 @@ dependencies = [
 name = "backend-access-gist-core-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -126,6 +128,7 @@ dependencies = [
 name = "backend-access-nbt-xlog-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -136,6 +139,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-brindesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -146,6 +150,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-clogdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -156,6 +161,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-committsdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -166,6 +172,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-dbasedesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -176,6 +183,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-genericdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -186,6 +194,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-gindesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -196,6 +205,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-gistdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -206,6 +216,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-hashdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -216,6 +227,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-heapdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -226,6 +238,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-logicalmsgdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -236,6 +249,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-mxactdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -246,6 +260,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-nbtdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -256,6 +271,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-relmapdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -266,6 +282,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-replorigindesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -276,6 +293,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-seqdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -286,6 +304,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-smgrdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -296,6 +315,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-spgdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -306,6 +326,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-standbydesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -316,6 +337,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-tblspcdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -326,6 +348,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-xactdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -336,6 +359,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-xlogdesc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -346,6 +370,7 @@ dependencies = [
 name = "backend-access-spg-xlog-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -461,9 +486,11 @@ dependencies = [
  "backend-utils-fmgr-funcapi-seams",
  "backend-utils-init-miscinit-seams",
  "mcx",
+ "port-pgstrcasecmp",
  "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
  "types-wal",
 ]
 
@@ -928,9 +955,9 @@ name = "backend-utils-fmgr-funcapi-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
- "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -1094,6 +1121,13 @@ name = "pg-prng"
 version = "0.0.0"
 
 [[package]]
+name = "port-pgstrcasecmp"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1196,6 +1230,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-tuple",
 ]
 
 [[package]]

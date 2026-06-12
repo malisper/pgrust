@@ -10,5 +10,5 @@
 seam_core::seam!(
     /// `replorigin_redo(record)` (origin.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn replorigin_redo(record: &mut types_wal::rmgr::XLogReaderState) -> types_error::PgResult<()>
+    pub fn replorigin_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
 );

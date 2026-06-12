@@ -10,7 +10,7 @@
 seam_core::seam!(
     /// `generic_redo(record)` (generic_xlog.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn generic_redo(record: &mut types_wal::rmgr::XLogReaderState) -> types_error::PgResult<()>
+    pub fn generic_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

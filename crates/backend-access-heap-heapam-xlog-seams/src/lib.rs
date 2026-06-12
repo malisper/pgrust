@@ -10,13 +10,13 @@
 seam_core::seam!(
     /// `heap_redo(record)` (heapam_xlog.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn heap_redo(record: &mut types_wal::rmgr::XLogReaderState) -> types_error::PgResult<()>
+    pub fn heap_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `heap2_redo(record)` (heapam_xlog.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn heap2_redo(record: &mut types_wal::rmgr::XLogReaderState) -> types_error::PgResult<()>
+    pub fn heap2_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

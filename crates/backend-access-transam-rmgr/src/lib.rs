@@ -18,10 +18,11 @@
 use std::cell::RefCell;
 
 use mcx::Mcx;
-use types_core::fmgr::FunctionCallInfoHandle;
+use port_pgstrcasecmp::pg_strcasecmp;
 use types_core::RmgrId;
 use types_datum::Datum;
 use types_error::{ErrorLocation, PgError, PgResult, ERROR, LOG};
+use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_wal::rmgr::{
     RmgrData, RmgrIdIsBuiltin, RmgrIdIsCustom, RM_MAX_CUSTOM_ID, RM_MIN_CUSTOM_ID,
     RM_N_BUILTIN_IDS, RM_N_IDS,
@@ -389,15 +390,17 @@ pub fn GetRmgr(rmid: RmgrId) -> PgResult<RmgrData> {
 
 /// `RmgrStartup(void)` (rmgr.c:58) — start up all resource managers.
 /// Fallible because `rm_startup` callbacks can `ereport(ERROR)` (recovery
-/// context allocation).
-pub fn RmgrStartup() -> PgResult<()> {
+/// context allocation). `parent` is the context the callbacks create their
+/// recovery contexts under (C: their `AllocSetContextCreate` parent is
+/// `CurrentMemoryContext` at this call).
+pub fn RmgrStartup(parent: Mcx<'_>) -> PgResult<()> {
     for rmid in 0..RM_N_IDS {
         if !RmgrIdExists(rmid as RmgrId) {
             continue;
         }
 
         if let Some(startup) = rmgr_table_slot(rmid).rm_startup {
-            startup()?;
+            startup(parent)?;
         }
     }
     Ok(())
@@ -490,7 +493,7 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
         let existing_name = rmgr_table_slot(existing_rmid)
             .rm_name
             .expect("RmgrIdExists guarantees rm_name");
-        if pg_strcasecmp(existing_name, rm_name) == 0 {
+        if pg_strcasecmp(existing_name.as_bytes(), rm_name.as_bytes()) == 0 {
             return Err(PgError::new(
                 ERROR,
                 format!("failed to register custom resource manager \"{rm_name}\" with ID {rmid}"),
@@ -519,27 +522,33 @@ pub fn RegisterCustomRmgr(rmid: RmgrId, rmgr: &RmgrData) -> PgResult<()> {
 /// `pg_get_wal_resource_managers(PG_FUNCTION_ARGS)` (rmgr.c:151) — SQL SRF
 /// showing loaded resource managers.
 ///
-/// The fmgr argument decoding and tuplestore materialization cross the
-/// funcapi seams (the fmgr layer owns `fcinfo`); `mcx` is the per-query
-/// context the C function's `CStringGetTextDatum` pallocs in.
+/// The tuplestore materialization crosses the funcapi seams (funcapi owns
+/// `InitMaterializedSRF` and the `setResult`/`setDesc` resolution); `mcx` is
+/// the per-query context the C function's `CStringGetTextDatum` pallocs in.
 pub fn pg_get_wal_resource_managers(
     mcx: Mcx<'_>,
-    fcinfo: FunctionCallInfoHandle,
+    fcinfo: &mut FunctionCallInfoBaseData<'_>,
 ) -> PgResult<Datum> {
     const PG_GET_RESOURCE_MANAGERS_COLS: usize = 3;
 
-    let srf = funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
+    funcapi::InitMaterializedSRF::call(fcinfo, 0)?;
+
+    // ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    let rsinfo = fcinfo
+        .resultinfo
+        .as_mut()
+        .expect("InitMaterializedSRF establishes fcinfo->resultinfo");
 
     for rmid in 0..RM_N_IDS {
         if !RmgrIdExists(rmid as RmgrId) {
             continue;
         }
 
-        // Datum values[3]; bool nulls[3] = {0};  (stack arrays in C)
         let name = GetRmgr(rmid as RmgrId)?
             .rm_name
             .expect("RmgrIdExists guarantees rm_name");
-        let values: Vec<Datum> = vec![
+        // Datum values[3]; bool nulls[3] = {0};  (stack arrays in C)
+        let values: [Datum; PG_GET_RESOURCE_MANAGERS_COLS] = [
             // values[0] = Int32GetDatum(rmid)
             Datum::from_i32(rmid as i32),
             // values[1] = CStringGetTextDatum(GetRmgr(rmid).rm_name)
@@ -547,37 +556,14 @@ pub fn pg_get_wal_resource_managers(
             // values[2] = BoolGetDatum(RmgrIdIsBuiltin(rmid))
             Datum::from_bool(RmgrIdIsBuiltin(rmid as i32)),
         ];
-        let nulls = vec![false; PG_GET_RESOURCE_MANAGERS_COLS];
+        let nulls = [false; PG_GET_RESOURCE_MANAGERS_COLS];
 
         // tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls)
-        funcapi::materialized_srf_putvalues::call(srf, values, nulls)?;
+        funcapi::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
     }
 
     // return (Datum) 0;
     Ok(Datum::null())
-}
-
-/// `pg_strcasecmp(s1, s2)` (src/port/pgstrcasecmp.c) — case-insensitive
-/// comparison folding ASCII A-Z. The C original additionally applies the
-/// locale's `tolower` to high-bit bytes; that locale-dependent fold is not
-/// reproduced (resource-manager names are ASCII).
-fn pg_strcasecmp(s1: &str, s2: &str) -> i32 {
-    let mut a = s1.bytes();
-    let mut b = s2.bytes();
-    loop {
-        match (a.next(), b.next()) {
-            (None, None) => return 0,
-            (None, Some(_)) => return -1,
-            (Some(_), None) => return 1,
-            (Some(x), Some(y)) => {
-                let xl = x.to_ascii_lowercase();
-                let yl = y.to_ascii_lowercase();
-                if xl != yl {
-                    return xl as i32 - yl as i32;
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

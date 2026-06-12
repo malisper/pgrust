@@ -10,9 +10,11 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }
 types-wal = { path = "../types-wal" }
 # Every non-NULL builtin RmgrTable slot is a callback owned by another
 # subsystem; each is reached through its owner's seam crate (the owners

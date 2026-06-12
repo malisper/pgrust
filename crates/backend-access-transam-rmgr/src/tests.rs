@@ -30,34 +30,35 @@ fn setup() {
 
         // The four AMs with replay contexts (rmgrlist.h startup/cleanup
         // columns).
-        nbtxlog::btree_xlog_startup::set(|| {
+        nbtxlog::btree_xlog_startup::set(|_parent| {
             STARTUPS.with(|c| c.set(c.get() + 1));
             Ok(())
         });
         nbtxlog::btree_xlog_cleanup::set(|| CLEANUPS.with(|c| c.set(c.get() + 1)));
-        ginxlog::gin_xlog_startup::set(|| {
+        ginxlog::gin_xlog_startup::set(|_parent| {
             STARTUPS.with(|c| c.set(c.get() + 1));
             Ok(())
         });
         ginxlog::gin_xlog_cleanup::set(|| CLEANUPS.with(|c| c.set(c.get() + 1)));
-        gistxlog::gist_xlog_startup::set(|| {
+        gistxlog::gist_xlog_startup::set(|_parent| {
             STARTUPS.with(|c| c.set(c.get() + 1));
             Ok(())
         });
         gistxlog::gist_xlog_cleanup::set(|| CLEANUPS.with(|c| c.set(c.get() + 1)));
-        spgxlog::spg_xlog_startup::set(|| {
+        spgxlog::spg_xlog_startup::set(|_parent| {
             STARTUPS.with(|c| c.set(c.get() + 1));
             Ok(())
         });
         spgxlog::spg_xlog_cleanup::set(|| CLEANUPS.with(|c| c.set(c.get() + 1)));
 
         // SRF plumbing for pg_get_wal_resource_managers.
-        funcapi::InitMaterializedSRF::set(|_fcinfo, _flags| {
+        funcapi::InitMaterializedSRF::set(|fcinfo, _flags| {
             SRF_INITS.with(|c| c.set(c.get() + 1));
-            Ok(0)
+            fcinfo.resultinfo = Some(types_nodes::funcapi::ReturnSetInfo::default());
+            Ok(())
         });
-        funcapi::materialized_srf_putvalues::set(|_srf, values, nulls| {
-            ROWS.with(|r| r.borrow_mut().push((values, nulls)));
+        funcapi::materialized_srf_putvalues::set(|_rsinfo, values, nulls| {
+            ROWS.with(|r| r.borrow_mut().push((values.to_vec(), nulls.to_vec())));
             Ok(())
         });
         // Stand-in text Datum: encode the name length so tests can assert it
@@ -157,7 +158,8 @@ fn get_rmgr_unknown_id_errors() {
 #[test]
 fn startup_and_cleanup_invoke_each_defined_callback_once() {
     setup();
-    RmgrStartup().unwrap();
+    let root = mcx::MemoryContext::new("test");
+    RmgrStartup(root.mcx()).unwrap();
     assert_eq!(STARTUPS.with(|c| c.get()), 4, "btree/gin/gist/spgist");
     RmgrCleanup();
     assert_eq!(CLEANUPS.with(|c| c.get()), 4, "btree/gin/gist/spgist");
@@ -253,8 +255,11 @@ fn register_custom_happy_path_then_visible() {
 fn pg_get_wal_resource_managers_emits_one_row_per_existing_rmgr() {
     setup();
     let root = mcx::MemoryContext::new("test");
-    let ret = pg_get_wal_resource_managers(root.mcx(), 0).expect("SRF should succeed");
+    let mut fcinfo = FunctionCallInfoBaseData::default();
+    let ret =
+        pg_get_wal_resource_managers(root.mcx(), &mut fcinfo).expect("SRF should succeed");
     assert_eq!(ret, Datum::null());
+    assert!(fcinfo.resultinfo.is_some(), "InitMaterializedSRF ran");
 
     assert_eq!(SRF_INITS.with(|c| c.get()), 1);
     ROWS.with(|r| {
@@ -279,14 +284,4 @@ fn pg_get_wal_resource_managers_emits_one_row_per_existing_rmgr() {
         assert_eq!(values[1], Datum::from_usize("LogicalMessage".len()));
         assert_eq!(values[2], Datum::from_bool(true));
     });
-}
-
-#[test]
-fn pg_strcasecmp_matches_c_semantics() {
-    setup();
-    assert_eq!(pg_strcasecmp("Heap", "heap"), 0);
-    assert_eq!(pg_strcasecmp("XLOG", "xlog"), 0);
-    assert!(pg_strcasecmp("abc", "ab") > 0);
-    assert!(pg_strcasecmp("ab", "abc") < 0);
-    assert!(pg_strcasecmp("a", "b") < 0);
 }

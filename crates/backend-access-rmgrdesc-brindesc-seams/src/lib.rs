@@ -11,7 +11,7 @@ seam_core::seam!(
     /// `brin_desc(buf, record)` (brindesc.c) — append the record's description to
     /// `buf` (`rm_desc` slot). Appending allocates, so the C OOM
     /// `ereport(ERROR)` surface is `Err`.
-    pub fn brin_desc(buf: &mut String, record: &types_wal::rmgr::XLogReaderState) -> types_error::PgResult<()>
+    pub fn brin_desc(buf: &mut mcx::PgString<'_>, record: &types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

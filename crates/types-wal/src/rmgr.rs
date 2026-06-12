@@ -9,15 +9,17 @@
 //! `ereport(ERROR)` returns `PgResult`).
 //!
 //! [`XLogReaderState`], [`LogicalDecodingContext`], and [`XLogRecordBuffer`]
-//! are placeholders: rmgr-table dispatch only stores and forwards them. The
-//! xlogreader and logical-decoding ports own the real shapes and will widen
-//! these (no value can be constructed until then, so no callback taking them
-//! can be invoked).
+//! are the real C structs (access/xlogreader.h, replication/logical.h,
+//! replication/decode.h), trimmed per docs/types.md rule 3 to the fields
+//! current ports consume; the xlogreader and logical-decoding ports widen
+//! them as they land.
 
-use alloc::string::String;
+use mcx::{Mcx, PgString};
 
-use types_core::BlockNumber;
+use types_core::{BlockNumber, XLogRecPtr};
 use types_error::PgResult;
+
+use crate::wal::DecodedXLogRecord;
 
 // ---------------------------------------------------------------------------
 // access/rmgr.h
@@ -58,26 +60,45 @@ pub const fn RmgrIdIsValid(rmid: i32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Placeholder parameter types (forward declarations from the rmgr table's
-// point of view; owned by the xlogreader / logical-decoding ports).
+// Callback parameter types (access/xlogreader.h, replication/logical.h,
+// replication/decode.h), trimmed; the xlogreader / logical-decoding ports
+// widen them as they land.
 // ---------------------------------------------------------------------------
 
-/// `XLogReaderState` (access/xlogreader.h). Placeholder: the xlogreader port
-/// owns the full shape and will widen it.
-pub struct XLogReaderState {
-    _opaque: (),
+/// `XLogReaderState` (access/xlogreader.h), trimmed to the record-cursor
+/// fields the rmgr callbacks consume. `'mcx` is the reader's decode-buffer
+/// context (C pallocs oversized decoded records in the reader's context).
+#[derive(Debug)]
+pub struct XLogReaderState<'mcx> {
+    /// `XLogRecPtr ReadRecPtr` — start of last record read.
+    pub ReadRecPtr: XLogRecPtr,
+    /// `XLogRecPtr EndRecPtr` — end+1 of last record read.
+    pub EndRecPtr: XLogRecPtr,
+    /// `DecodedXLogRecord *record` — last record returned by
+    /// `XLogReadRecord()`; `None` is the C `NULL`.
+    pub record: Option<DecodedXLogRecord<'mcx>>,
 }
 
-/// `struct LogicalDecodingContext` (forward-declared in xlog_internal.h).
-/// Placeholder: the logical-decoding port owns the full shape.
-pub struct LogicalDecodingContext {
-    _opaque: (),
+/// `LogicalDecodingContext` (replication/logical.h), trimmed.
+pub struct LogicalDecodingContext<'mcx> {
+    /// `MemoryContext context` — the context this is all allocated in.
+    pub context: Mcx<'mcx>,
+    /// `bool fast_forward` — fast-forward decoding context (no output
+    /// plugin loaded).
+    pub fast_forward: bool,
 }
 
-/// `struct XLogRecordBuffer` (forward-declared in xlog_internal.h).
-/// Placeholder: the logical-decoding port owns the full shape.
-pub struct XLogRecordBuffer {
-    _opaque: (),
+/// `XLogRecordBuffer` (replication/decode.h) — the unit of WAL data handed
+/// to the `rm_decode` callbacks. Complete: the C struct has exactly these
+/// three fields.
+pub struct XLogRecordBuffer<'r, 'mcx> {
+    /// `XLogRecPtr origptr`.
+    pub origptr: XLogRecPtr,
+    /// `XLogRecPtr endptr`.
+    pub endptr: XLogRecPtr,
+    /// `XLogReaderState *record` — the reader positioned on the record being
+    /// decoded (decode.c only reads through it).
+    pub record: &'r XLogReaderState<'mcx>,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,20 +107,23 @@ pub struct XLogRecordBuffer {
 
 /// `void (*rm_redo) (XLogReaderState *record)`. Redo routines can
 /// `ereport(ERROR)` (corrupt records, I/O failures), carried on `Err`.
-pub type RmRedo = fn(record: &mut XLogReaderState) -> PgResult<()>;
+pub type RmRedo = fn(record: &mut XLogReaderState<'_>) -> PgResult<()>;
 
 /// `void (*rm_desc) (StringInfo buf, XLogReaderState *record)`. The C
-/// `StringInfo` output buffer is an owned `String`; appending allocates, so
-/// the C OOM `ereport(ERROR)` surface is `Err`.
-pub type RmDesc = fn(buf: &mut String, record: &XLogReaderState) -> PgResult<()>;
+/// `StringInfo` output buffer pallocs in `CurrentMemoryContext`, so the
+/// owned buffer is a context-allocated [`PgString`]; appending allocates,
+/// and the C OOM `ereport(ERROR)` surface is `Err`.
+pub type RmDesc = fn(buf: &mut PgString<'_>, record: &XLogReaderState<'_>) -> PgResult<()>;
 
 /// `const char *(*rm_identify) (uint8 info)`. The C callbacks return string
 /// literals or `NULL` for an unrecognized info; infallible.
 pub type RmIdentify = fn(info: u8) -> Option<&'static str>;
 
 /// `void (*rm_startup) (void)`. The implementations (btree/gin/gist/spgist)
-/// create a recovery memory context, so OOM `ereport(ERROR)` is `Err`.
-pub type RmStartup = fn() -> PgResult<()>;
+/// do `AllocSetContextCreate(CurrentMemoryContext, ...)` — they create their
+/// recovery context under the caller's current context, so the owned shape
+/// takes the parent context explicitly; OOM `ereport(ERROR)` is `Err`.
+pub type RmStartup = fn(parent: Mcx<'_>) -> PgResult<()>;
 
 /// `void (*rm_cleanup) (void)`. The implementations delete the recovery
 /// context; infallible.
@@ -112,7 +136,8 @@ pub type RmMask = fn(pagedata: &mut [u8], blkno: BlockNumber) -> PgResult<()>;
 /// `void (*rm_decode) (struct LogicalDecodingContext *ctx,
 /// struct XLogRecordBuffer *buf)`. Decode routines `elog(ERROR)` on
 /// unexpected record info, carried on `Err`.
-pub type RmDecode = fn(ctx: &mut LogicalDecodingContext, buf: &mut XLogRecordBuffer) -> PgResult<()>;
+pub type RmDecode =
+    fn(ctx: &mut LogicalDecodingContext<'_>, buf: &mut XLogRecordBuffer<'_, '_>) -> PgResult<()>;
 
 /// `typedef struct RmgrData` (access/xlog_internal.h). Field order matches C.
 ///

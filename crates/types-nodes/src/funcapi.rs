@@ -46,3 +46,19 @@ impl Clone for Tuplestorestate {
         }
     }
 }
+
+/// `ReturnSetInfo` (nodes/execnodes.h) — the node passed as
+/// `fcinfo->resultinfo` when calling a function that might return a set.
+/// Trimmed (docs/types.md rule 3) to the Materialize-mode result fields
+/// current ports consume — the fields `InitMaterializedSRF` fills and SRF
+/// bodies hand to `tuplestore_putvalues`. The funcapi/executor ports widen it
+/// (`econtext`, `expectedDesc`, `allowedModes`, `returnMode`, `isDone`).
+#[derive(Debug, Default)]
+pub struct ReturnSetInfo<'mcx> {
+    /// `Tuplestorestate *setResult` — holds the complete returned tuple set.
+    /// The carrier's empty state is the C `NULL` pointer.
+    pub setResult: Tuplestorestate,
+    /// `TupleDesc setDesc` — actual descriptor for returned tuples (`None`
+    /// is the C `NULL`).
+    pub setDesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+}

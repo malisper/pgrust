@@ -17,6 +17,7 @@ pub mod bitmapset;
 pub mod execexpr;
 pub mod execnodes;
 pub mod executor;
+pub mod fmgr;
 pub mod funcapi;
 pub mod nodeforeigncustom;
 pub mod nodeindexscan;
@@ -29,6 +30,7 @@ pub use execnodes::{
     ScanStateData, SlotId,
 };
 pub use executor::{TupleSlotKind, TupleTableSlot};
-pub use funcapi::Tuplestorestate;
+pub use fmgr::FunctionCallInfoBaseData;
+pub use funcapi::{ReturnSetInfo, Tuplestorestate};
 pub use nodeforeigncustom::{Material, MaterialState};
 pub use planstate::PlanStateNode;
