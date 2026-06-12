@@ -89,10 +89,12 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-libpq-pqsignal",
  "backend-storage-page-checksum",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
  "backend-utils-misc-pg-rusage",
+ "interfaces-libpq-legacy-pqsignal",
 ]
 
 [[package]]

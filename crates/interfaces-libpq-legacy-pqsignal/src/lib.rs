@@ -17,6 +17,10 @@
 //! address of a `fn(i32)`; convert with [`disposition_from_handler`] /
 //! [`handler_from_disposition`].
 
+/// Install this crate's seams. The unit is a leaf with no inward seam
+/// declarations, so there is nothing to `set()`.
+pub fn init_seams() {}
+
 /// A signal handler disposition, the owned stand-in for C's `pqsigfunc`
 /// (`void (*)(int)`) once the three magic pointer values are distinguished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

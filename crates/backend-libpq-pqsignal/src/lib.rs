@@ -14,6 +14,10 @@
 use std::mem::MaybeUninit;
 use std::sync::{OnceLock, RwLock};
 
+/// Install this crate's seams. The unit is a leaf with no inward seam
+/// declarations, so there is nothing to `set()`.
+pub fn init_seams() {}
+
 /// The three backend signal masks initialized by [`pqinitmask`].
 ///
 /// - `block_sig` — the set of signals to block when we are trying to block
