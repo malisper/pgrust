@@ -10,3 +10,7 @@ path = "src/lib.rs"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+mcx = { path = "../mcx" }
+types-error = { path = "../types-error" }
