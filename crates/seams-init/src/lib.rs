@@ -6,5 +6,6 @@
 
 pub fn init_all() {
     // One line per ported crate, kept sorted:
-    // backend_commands_vacuum::init_seams();
+    backend_utils_mb_wstrcmp::init_seams();
+    backend_utils_mb_wstrncmp::init_seams();
 }
