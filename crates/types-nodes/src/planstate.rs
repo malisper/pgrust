@@ -5,8 +5,9 @@
 //! Variants are added as the nodes' executor units are ported.
 
 use mcx::PgBox;
+use types_core::NodeTag;
 
-use crate::execnodes::PlanStateData;
+use crate::execnodes::{PlanStateData, T_MaterialState};
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
 /// discriminant. The state tree is context-allocated (C: `makeNode` in the
@@ -19,6 +20,13 @@ pub enum PlanStateNode<'mcx> {
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
+    /// `nodeTag(node)` — the C node tag of the concrete state node.
+    pub fn tag(&self) -> NodeTag {
+        match self {
+            PlanStateNode::Material(_) => T_MaterialState,
+        }
+    }
+
     /// `&((PlanState *) node)->...` — the embedded `PlanState` head every
     /// `<Node>State` struct begins with.
     pub fn ps_head(&self) -> &PlanStateData<'mcx> {

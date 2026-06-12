@@ -15,9 +15,22 @@ use mcx::{Mcx, PgBox, PgVec};
 use types_core::PgResult;
 
 use crate::bitmapset::Bitmapset;
-use crate::execexpr::ProjectionInfo;
+use crate::execexpr::{ProjectionInfo, SubPlanState};
 use crate::executor::TupleTableSlot;
+use crate::instrument::Instrumentation;
 use crate::planstate::PlanStateNode;
+use types_core::NodeTag;
+
+/// `T_MaterialState` (nodes/nodetags.h) — the executor-state node tag for a
+/// Material node.
+pub const T_MaterialState: NodeTag = 424;
+
+/// `ExprContext` (execnodes.h) — per-node expression-evaluation context.
+/// Trimmed to a presence marker: ports so far only test `ps_ExprContext` for
+/// NULL-ness and hand it across the `ReScanExprContext` seam; the working
+/// fields arrive with the expression-machinery owners.
+#[derive(Debug, Default)]
+pub struct ExprContext;
 
 /// `ScanDirection` (access/sdir.h). Kept as the raw C scale so direction
 /// comparisons read like the original.
@@ -63,10 +76,22 @@ pub struct PlanStateData<'mcx> {
     pub plan: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `ExecProcNodeMtd ExecProcNode` — function to return next tuple.
     pub ExecProcNode: ExecProcNodeMtd<'mcx>,
+    /// `Instrumentation *instrument` — optional runtime stats for this node.
+    pub instrument: Option<PgBox<'mcx, Instrumentation>>,
     /// `struct PlanState *lefttree` — input plan tree (`outerPlanState`).
     pub lefttree: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
+    /// `struct PlanState *righttree` — `innerPlanState(node)`.
+    pub righttree: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
+    /// `List *initPlan` — `SubPlanState` nodes for my init-plans (un-correlated
+    /// expression subselects). `None` is the C `NIL`.
+    pub initPlan: Option<PgVec<'mcx, SubPlanState<'mcx>>>,
+    /// `List *subPlan` — `SubPlanState` nodes in my expressions. `None` is the
+    /// C `NIL`.
+    pub subPlan: Option<PgVec<'mcx, SubPlanState<'mcx>>>,
     /// `Bitmapset *chgParam` — set of IDs of changed Params.
     pub chgParam: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+    /// `ExprContext *ps_ExprContext` — node's expression-evaluation context.
+    pub ps_ExprContext: Option<PgBox<'mcx, ExprContext>>,
     /// `TupleTableSlot *ps_ResultTupleSlot` — slot for my result tuples (id
     /// into `es_tupleTable`).
     pub ps_ResultTupleSlot: Option<SlotId>,

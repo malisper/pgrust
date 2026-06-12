@@ -4,7 +4,8 @@
 //! `chgParam` checks), so only the storage fields are carried; the set
 //! operations stay with their owning unit when it lands.
 
-use mcx::PgVec;
+use mcx::{slice_in, Mcx, PgVec};
+use types_core::PgResult;
 
 /// `bitmapword` — the word the bit storage is built from.
 pub type bitmapword = u64;
@@ -30,4 +31,14 @@ pub struct Bitmapset<'mcx> {
     pub nwords: i32,
     /// `bitmapword words[]` — the bit storage.
     pub words: PgVec<'mcx, bitmapword>,
+}
+
+impl Bitmapset<'_> {
+    /// `bms_copy(a)` — copy the set into `mcx`. Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Bitmapset<'b>> {
+        Ok(Bitmapset {
+            nwords: self.nwords,
+            words: slice_in(mcx, &self.words)?,
+        })
+    }
 }
