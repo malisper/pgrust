@@ -8,17 +8,18 @@
 
 #![allow(non_snake_case)]
 
-extern crate alloc;
-
 seam_core::seam!(
     /// `tuplestore_begin_heap(randomAccess, interXact, maxKBytes)`
     /// (tuplestore.c): create a new tuplestore; `maxKBytes` is the work_mem
-    /// budget in kilobytes.
-    pub fn tuplestore_begin_heap(
+    /// budget in kilobytes. The state is allocated in `mcx` (C:
+    /// `tuplestore_begin_common` pallocs in `CurrentMemoryContext` and
+    /// captures it as `state->context`), so creation is fallible on OOM.
+    pub fn tuplestore_begin_heap<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         randomAccess: bool,
         interXact: bool,
         maxKBytes: i32,
-    ) -> types_error::PgResult<alloc::boxed::Box<types_nodes::Tuplestorestate>>
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::Tuplestorestate>>
 );
 
 seam_core::seam!(
@@ -102,5 +103,5 @@ seam_core::seam!(
     /// `tuplestore_end(state)` (tuplestore.c): release the tuplestore's
     /// resources. Consumes the carrier (the C caller NULLs its pointer).
     /// `BufFileClose`/`pfree` paths do not `ereport(ERROR)` — infallible.
-    pub fn tuplestore_end(state: alloc::boxed::Box<types_nodes::Tuplestorestate>)
+    pub fn tuplestore_end(state: mcx::PgBox<'_, types_nodes::Tuplestorestate>)
 );

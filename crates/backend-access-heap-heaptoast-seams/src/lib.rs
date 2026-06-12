@@ -10,9 +10,11 @@ seam_core::seam!(
     /// produce a self-contained composite-type Datum. Reached from
     /// `heap_copy_tuple_as_datum` when the tuple has `HEAP_HASEXTERNAL` set.
     /// `Err` carries the detoasting `ereport(ERROR)`s (e.g. `detoast_attr` /
-    /// `toast_fetch_datum`'s `missing chunk number ...`).
-    pub fn toast_flatten_tuple_to_datum(
-        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple,
-        tuple_desc: &types_tuple::heaptuple::TupleDescData,
-    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple>
+    /// `toast_fetch_datum`'s `missing chunk number ...`) and OOM. The result
+    /// is allocated in `mcx` (C: palloc in `CurrentMemoryContext`).
+    pub fn toast_flatten_tuple_to_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
+        tuple_desc: &types_tuple::heaptuple::TupleDescData<'_>,
+    ) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>
 );

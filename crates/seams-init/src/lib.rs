@@ -12,6 +12,7 @@ pub fn init_all() {
     backend_executor_nodeMaterial::init_seams();
     backend_libpq_pqsignal::init_seams();
     backend_port_atomics::init_seams();
+    backend_postmaster_interrupt::init_seams();
     backend_storage_page_checksum::init_seams();
     backend_utils_activity_small::init_seams();
     backend_utils_error::init_seams();
@@ -20,5 +21,6 @@ pub fn init_all() {
     backend_utils_misc_pg_rusage::init_seams();
     backend_utils_misc_queryenvironment::init_seams();
     backend_utils_misc_sampling::init_seams();
+    backend_utils_time_combocid::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();
 }

@@ -4,7 +4,7 @@
 //! `chgParam` checks), so only the storage fields are carried; the set
 //! operations stay with their owning unit when it lands.
 
-use alloc::vec::Vec;
+use mcx::PgVec;
 
 /// `bitmapword` — the word the bit storage is built from.
 pub type bitmapword = u64;
@@ -19,10 +19,15 @@ pub type bitmapword = u64;
 ///     bitmapword  words[FLEXIBLE_ARRAY_MEMBER];
 /// } Bitmapset;
 /// ```
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Bitmapset {
+///
+/// The word storage is context-allocated (C: the `bms_*` constructors palloc
+/// in `CurrentMemoryContext`), so the set carries the allocator lifetime.
+/// No `Clone`: copying allocates, so it must go through a fallible
+/// `bms_copy`-shaped constructor when the owning unit lands.
+#[derive(Debug, Eq, PartialEq)]
+pub struct Bitmapset<'mcx> {
     /// `int nwords` — number of words in array.
     pub nwords: i32,
     /// `bitmapword words[]` — the bit storage.
-    pub words: Vec<bitmapword>,
+    pub words: PgVec<'mcx, bitmapword>,
 }

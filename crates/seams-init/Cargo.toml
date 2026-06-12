@@ -16,6 +16,7 @@ backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-port-atomics = { path = "../backend-port-atomics" }
+backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }
 backend-utils-error = { path = "../backend-utils-error" }
@@ -24,4 +25,5 @@ backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
 backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvironment" }
 backend-utils-misc-sampling = { path = "../backend-utils-misc-sampling" }
+backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }

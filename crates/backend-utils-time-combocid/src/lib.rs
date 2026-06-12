@@ -1,0 +1,363 @@
+//! Combo command ID support (`src/backend/utils/time/combocid.c`).
+//!
+//! `HeapTupleHeaderData` has a single `t_cid` field overlaying cmin and cmax.
+//! When the inserting transaction also deletes/updates the tuple, both command
+//! ids must survive, so a "combo" command id is stored instead: an index into
+//! a backend-private array mapping the combo id back to its real
+//! `(cmin, cmax)` pair. A hash table maps `(cmin, cmax)` pairs back to combo
+//! ids so identical pairs reuse one id. Combo CIDs matter only to the
+//! originating transaction; the structures live in `TopTransactionContext` and
+//! are discarded at end of transaction.
+//!
+//! The C file's module-level statics (`comboCids`, `comboHash`,
+//! `usedComboCids`, `sizeComboCids`) become [`ComboCidState`], owned by the
+//! transaction machinery and threaded to each function. The dynahash becomes a
+//! `PgHashMap`, the array a `PgVec` (whose `len()` is `usedComboCids`), and
+//! both allocate in the `Mcx` handle the state was created with — the
+//! `TopTransactionContext` equivalent. Allocating paths return `PgResult`,
+//! mirroring C's OOM `ereport(ERROR)` surface.
+
+#![allow(non_snake_case)]
+
+use mcx::{Mcx, PgHashMap, PgVec};
+use types_core::{CommandId, Size};
+use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use types_tuple::heaptuple::{
+    HeapTupleHeaderData, HeapTupleHeaderGetRawCommandId, HeapTupleHeaderGetRawXmin,
+    HeapTupleHeaderXminCommitted, HEAP_COMBOCID, HEAP_MOVED,
+};
+
+/// Install this crate's seam implementations. This unit owns no seams.
+pub fn init_seams() {}
+
+/// `CCID_HASH_SIZE` — initial size of the hash table.
+const CCID_HASH_SIZE: usize = 100;
+
+/// `CCID_ARRAY_SIZE` — initial size of the array.
+const CCID_ARRAY_SIZE: usize = 100;
+
+/// `ComboCidKeyData` — the `(cmin, cmax)` pair a combo id stands for.
+///
+/// The C dynahash keys on this struct's raw bytes (`HASH_BLOBS`, "we assume
+/// there is no struct padding"); derived `Hash`/`Eq` over the two fields cover
+/// the same value space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ComboCidKeyData {
+    pub cmin: CommandId,
+    pub cmax: CommandId,
+}
+
+/// The C file's backend-private statics as one owned value, allocated in (and
+/// bound to) the `TopTransactionContext` equivalent whose handle it stores.
+///
+/// * `combo_cids` — `comboCids`/`usedComboCids`/`sizeComboCids`: combo id
+///   (index) -> `(cmin, cmax)`.
+/// * `combo_hash` — `comboHash`: `(cmin, cmax)` -> combo id. `None` mirrors
+///   C's `comboHash == NULL` "not yet created this transaction" sentinel, so
+///   the first `GetComboCommandId` performs the same one-time setup.
+pub struct ComboCidState<'mcx> {
+    mcx: Mcx<'mcx>,
+    combo_cids: PgVec<'mcx, ComboCidKeyData>,
+    combo_hash: Option<PgHashMap<'mcx, ComboCidKeyData, CommandId>>,
+}
+
+impl<'mcx> ComboCidState<'mcx> {
+    /// Fresh, empty state for a transaction. `mcx` is the
+    /// `TopTransactionContext` handle all combo-cid structures allocate in.
+    /// Does not allocate; the C lazy creation happens on first use.
+    pub fn new(mcx: Mcx<'mcx>) -> Self {
+        Self {
+            mcx,
+            combo_cids: PgVec::new_in(mcx),
+            combo_hash: None,
+        }
+    }
+}
+
+/*
+ * GetCmin and GetCmax assert that they are only called in situations where
+ * they make sense, that is, can deliver a useful answer.  If you have
+ * reason to examine a tuple's t_cid field from a transaction other than
+ * the originating one, use HeapTupleHeaderGetRawCommandId() directly.
+ */
+
+/// `HeapTupleHeaderGetCmin(tup)`.
+///
+/// C also asserts `TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin
+/// (tup))`; that debug-only cross-subsystem check is not replicated.
+pub fn HeapTupleHeaderGetCmin(state: &ComboCidState<'_>, tup: &HeapTupleHeaderData<'_>) -> CommandId {
+    let cid = HeapTupleHeaderGetRawCommandId(tup);
+
+    debug_assert!((tup.t_infomask & HEAP_MOVED) == 0);
+
+    if (tup.t_infomask & HEAP_COMBOCID) != 0 {
+        GetRealCmin(state, cid)
+    } else {
+        cid
+    }
+}
+
+/// `HeapTupleHeaderGetCmax(tup)`.
+///
+/// C also asserts `CritSectionCount > 0 || TransactionIdIsCurrentTransactionId
+/// (HeapTupleHeaderGetUpdateXid(tup))` (weakened inside critical sections
+/// because `GetUpdateXid()` can allocate when xmax is a multixact); that
+/// debug-only cross-subsystem check is not replicated.
+pub fn HeapTupleHeaderGetCmax(state: &ComboCidState<'_>, tup: &HeapTupleHeaderData<'_>) -> CommandId {
+    let cid = HeapTupleHeaderGetRawCommandId(tup);
+
+    debug_assert!((tup.t_infomask & HEAP_MOVED) == 0);
+
+    if (tup.t_infomask & HEAP_COMBOCID) != 0 {
+        GetRealCmax(state, cid)
+    } else {
+        cid
+    }
+}
+
+/// `HeapTupleHeaderAdjustCmax(tup, &cmax, &iscombo)`.
+///
+/// Given a tuple we are about to delete, determine the correct value to store
+/// into its t_cid field: `(cmax, false)` if no combo CID is needed, or
+/// `(combo_cid, true)` if the tuple was inserted by (any subtransaction of)
+/// our own transaction.
+///
+/// This is separate from the actual `HeapTupleHeaderSetCmax()` operation
+/// because it can fail due to out-of-memory conditions (hence `PgResult`); it
+/// must run before entering the critical section that changes the tuple in
+/// shared buffers. The C out-parameters become the returned tuple.
+pub fn HeapTupleHeaderAdjustCmax(
+    state: &mut ComboCidState<'_>,
+    tup: &HeapTupleHeaderData<'_>,
+    cmax: CommandId,
+) -> PgResult<(CommandId, bool)> {
+    // Test for HeapTupleHeaderXminCommitted() first, because it's cheaper
+    // than a TransactionIdIsCurrentTransactionId call.
+    if !HeapTupleHeaderXminCommitted(tup)
+        && backend_access_transam_xact_seams::transaction_id_is_current_transaction_id::call(
+            HeapTupleHeaderGetRawXmin(tup),
+        )
+    {
+        let cmin = HeapTupleHeaderGetCmin(state, tup);
+        Ok((GetComboCommandId(state, cmin, cmax)?, true))
+    } else {
+        Ok((cmax, false))
+    }
+}
+
+/// `AtEOXact_ComboCid()`.
+///
+/// Combo command ids are only interesting to the inserting and deleting
+/// transaction, so we can forget about them at the end of transaction. C just
+/// nulls the pointers and lets the `TopTransactionContext` reset reclaim the
+/// memory; dropping the owned containers reclaims it here.
+pub fn AtEOXact_ComboCid(state: &mut ComboCidState<'_>) {
+    state.combo_hash = None;
+    state.combo_cids = PgVec::new_in(state.mcx);
+}
+
+/// `GetComboCommandId(cmin, cmax)` (static).
+///
+/// Get a combo command id that maps to `cmin` and `cmax`, reusing an existing
+/// one when possible.
+fn GetComboCommandId(
+    state: &mut ComboCidState<'_>,
+    cmin: CommandId,
+    cmax: CommandId,
+) -> PgResult<CommandId> {
+    // Create the hash table and array the first time we need to use combo
+    // cids in the transaction. Make array first; existence of hash table
+    // asserts array exists.
+    if state.combo_hash.is_none() {
+        state
+            .combo_cids
+            .try_reserve_exact(CCID_ARRAY_SIZE)
+            .map_err(|_| {
+                state
+                    .mcx
+                    .oom(CCID_ARRAY_SIZE * core::mem::size_of::<ComboCidKeyData>())
+            })?;
+
+        let mut hash = PgHashMap::new_in(state.mcx);
+        hash.try_reserve(CCID_HASH_SIZE).map_err(|_| {
+            state
+                .mcx
+                .oom(CCID_HASH_SIZE * core::mem::size_of::<(ComboCidKeyData, CommandId)>())
+        })?;
+        state.combo_hash = Some(hash);
+    }
+
+    // Grow the array if there's not at least one free slot.  We must do this
+    // before possibly entering a new hashtable entry, else failure to grow
+    // would leave a corrupt hashtable entry behind.
+    if state.combo_cids.len() >= state.combo_cids.capacity() {
+        let newslots = state.combo_cids.capacity(); // newsize = sizeComboCids * 2
+        state.combo_cids.try_reserve_exact(newslots).map_err(|_| {
+            state
+                .mcx
+                .oom(newslots * core::mem::size_of::<ComboCidKeyData>())
+        })?;
+    }
+
+    let mcx = state.mcx;
+    let key = ComboCidKeyData { cmin, cmax };
+
+    // hash_search(comboHash, &key, HASH_ENTER, &found)
+    let combo_cids = &mut state.combo_cids;
+    let combo_hash = state.combo_hash.as_mut().expect("created above");
+
+    if let Some(&combocid) = combo_hash.get(&key) {
+        // Reuse an existing combo CID.
+        return Ok(combocid);
+    }
+
+    // Entering a new hash entry allocates; in C HASH_ENTER ereports on OOM.
+    combo_hash
+        .try_reserve(1)
+        .map_err(|_| mcx.oom(core::mem::size_of::<(ComboCidKeyData, CommandId)>()))?;
+
+    // We have to create a new combo CID; we already made room in the array.
+    let combocid = combo_cids.len() as CommandId;
+    combo_cids.push(key);
+    combo_hash.insert(key, combocid);
+
+    Ok(combocid)
+}
+
+/// `GetRealCmin(combocid)` (static). The index expression carries C's
+/// `Assert(combocid < usedComboCids)` (out of range panics).
+fn GetRealCmin(state: &ComboCidState<'_>, combocid: CommandId) -> CommandId {
+    state.combo_cids[combocid as usize].cmin
+}
+
+/// `GetRealCmax(combocid)` (static). The index expression carries C's
+/// `Assert(combocid < usedComboCids)` (out of range panics).
+fn GetRealCmax(state: &ComboCidState<'_>, combocid: CommandId) -> CommandId {
+    state.combo_cids[combocid as usize].cmax
+}
+
+/// On-the-wire size of the leading element count (a C `int`).
+const SIZEOF_INT: usize = 4;
+
+/// On-the-wire size of `ComboCidKeyData`: two `uint32`s, no padding.
+const SIZEOF_COMBO_CID_KEY_DATA: usize = 8;
+
+/// `EstimateComboCIDStateSpace()`.
+///
+/// Estimate the amount of space required to serialize the current combo CID
+/// state. Fallible because C computes it with `add_size`/`mul_size`, which
+/// `ereport(ERROR)` on overflow.
+pub fn EstimateComboCIDStateSpace(state: &ComboCidState<'_>) -> PgResult<Size> {
+    // Add space required for saving usedComboCids
+    let size: Size = SIZEOF_INT;
+
+    // Add space required for saving ComboCidKeyData
+    add_size(
+        size,
+        mul_size(SIZEOF_COMBO_CID_KEY_DATA, state.combo_cids.len())?,
+    )
+}
+
+/// `SerializeComboCIDState(maxsize, start_address)`.
+///
+/// Serialize the combo CID state into `buf` (C's `start_address` pointer plus
+/// `maxsize` become one slice; `maxsize == buf.len()`), which should be at
+/// least as large as the value returned by [`EstimateComboCIDStateSpace`].
+/// Layout: a native-endian C `int` count, then the raw `(cmin, cmax)` pairs.
+///
+/// C stores the count before performing the size check; with a bounds-checked
+/// slice the check runs first, changing nothing on the success path.
+pub fn SerializeComboCIDState(state: &ComboCidState<'_>, buf: &mut [u8]) -> PgResult<()> {
+    let used = state.combo_cids.len();
+
+    // If maxsize is too small, throw an error.
+    let needed = SIZEOF_INT + SIZEOF_COMBO_CID_KEY_DATA * used;
+    if needed > buf.len() {
+        // elog(ERROR, "not enough space to serialize ComboCID state")
+        return Err(PgError::error(
+            "not enough space to serialize ComboCID state",
+        ));
+    }
+
+    // First, we store the number of currently-existing combo CIDs.
+    buf[0..SIZEOF_INT].copy_from_slice(&(used as i32).to_ne_bytes());
+
+    // Now, copy the actual cmin/cmax pairs.
+    let mut off = SIZEOF_INT;
+    for entry in &state.combo_cids {
+        buf[off..off + 4].copy_from_slice(&entry.cmin.to_ne_bytes());
+        buf[off + 4..off + 8].copy_from_slice(&entry.cmax.to_ne_bytes());
+        off += SIZEOF_COMBO_CID_KEY_DATA;
+    }
+
+    Ok(())
+}
+
+/// `RestoreComboCIDState(comboCIDstate)`.
+///
+/// Read the combo CID state serialized into `buf` and initialize this backend
+/// with the same combo CIDs. Only valid in a backend that currently has no
+/// combo CIDs (and only makes sense if the transaction state is serialized
+/// and restored as well).
+///
+/// C trusts the producer's pointer arithmetic; the slice reads are
+/// bounds-checked, with a short buffer surfacing as the same restore error.
+pub fn RestoreComboCIDState(state: &mut ComboCidState<'_>, buf: &[u8]) -> PgResult<()> {
+    // Assert(!comboCids && !comboHash)
+    debug_assert!(state.combo_cids.is_empty() && state.combo_hash.is_none());
+
+    // First, we retrieve the number of combo CIDs that were serialized.
+    if buf.len() < SIZEOF_INT {
+        return Err(PgError::error(
+            "unexpected command ID while restoring combo CIDs",
+        ));
+    }
+    let num_elements = i32::from_ne_bytes(buf[0..SIZEOF_INT].try_into().expect("4 bytes"));
+
+    // keydata = (ComboCidKeyData *) (comboCIDstate + sizeof(int))
+    let mut off = SIZEOF_INT;
+
+    // Use GetComboCommandId to restore each combo CID.
+    for i in 0..num_elements {
+        if off + SIZEOF_COMBO_CID_KEY_DATA > buf.len() {
+            return Err(PgError::error(
+                "unexpected command ID while restoring combo CIDs",
+            ));
+        }
+        let cmin = CommandId::from_ne_bytes(buf[off..off + 4].try_into().expect("4 bytes"));
+        let cmax = CommandId::from_ne_bytes(buf[off + 4..off + 8].try_into().expect("4 bytes"));
+        off += SIZEOF_COMBO_CID_KEY_DATA;
+
+        let cid = GetComboCommandId(state, cmin, cmax)?;
+
+        // Verify that we got the expected answer.
+        if cid != i as CommandId {
+            // elog(ERROR, "unexpected command ID while restoring combo CIDs")
+            return Err(PgError::error(
+                "unexpected command ID while restoring combo CIDs",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// `add_size(s1, s2)` (`storage/shmem.c`): overflow-checked addition raising
+/// C's error. Local private mirror of the unported shmem.c helper.
+fn add_size(s1: Size, s2: Size) -> PgResult<Size> {
+    s1.checked_add(s2).ok_or_else(size_overflow)
+}
+
+/// `mul_size(s1, s2)` (`storage/shmem.c`): overflow-checked multiplication
+/// raising C's error. Local private mirror of the unported shmem.c helper.
+fn mul_size(s1: Size, s2: Size) -> PgResult<Size> {
+    s1.checked_mul(s2).ok_or_else(size_overflow)
+}
+
+fn size_overflow() -> PgError {
+    PgError::error("requested shared memory size overflows size_t")
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+}
+
+#[cfg(test)]
+mod tests;

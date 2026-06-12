@@ -8,6 +8,16 @@
 //! `pg_foreach_ifaddr` is the `getifaddrs()` build variant (BSDs, macOS,
 //! Solaris, illumos and Linux) on Unix; on other targets it is the C file's
 //! last-resort fallback that reports only the standard loopback addresses.
+//!
+//! mcx audit (per `docs/mctx-design.md`): `ifaddr.c` performs no
+//! memory-context allocation. Its only heap use is libc `malloc`/`realloc`
+//! scratch buffers in the WIN32/SIOCGIFCONF variants (freed before return,
+//! failure surfaced as `-1`/`ENOMEM`, never `ereport`); the getifaddrs
+//! buffer is libc-owned and released via `freeifaddrs`. Every function here
+//! is therefore a pure scalar computation or a callback-driven enumerator:
+//! nothing takes `Mcx` and nothing returns `PgResult` — `PgResult` would
+//! misstate the C failure surface, which is an int return code. Callers
+//! that collect addresses allocate in their own context inside the callback.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -480,6 +490,52 @@ mod tests {
         let mask = IpAddr::V4(Ipv4Addr::new(255, 0, 0, 0));
         run_ifaddr_callback(&mut |a, m| seen.push((a, m)), addr, Some(mask));
         assert_eq!(seen, vec![(addr, mask)]);
+    }
+
+    /// The caller-side mcx pattern this crate's docs prescribe: the
+    /// enumerator itself is allocation-free, and a caller that wants an
+    /// address list builds it in its own context inside the callback
+    /// (fallibly, per the OOM rule), so the bytes are charged there.
+    fn collect_ifaddrs_in(
+        mcx: mcx::Mcx<'_>,
+    ) -> types_error::PgResult<mcx::PgVec<'_, (IpAddr, IpAddr)>> {
+        let mut list = mcx::PgVec::new_in(mcx);
+        let mut oom = Ok(());
+        pg_foreach_ifaddr(|addr, mask| {
+            if oom.is_err() {
+                return;
+            }
+            match list.try_reserve(1) {
+                Ok(()) => list.push((addr, mask)),
+                Err(_) => oom = Err(mcx.oom(core::mem::size_of::<(IpAddr, IpAddr)>())),
+            }
+        })
+        .expect("interface enumeration succeeds");
+        oom?;
+        Ok(list)
+    }
+
+    #[test]
+    fn collected_address_list_is_charged_to_the_context() {
+        let ctx = mcx::MemoryContext::new("ifaddr-test");
+        let list = collect_ifaddrs_in(ctx.mcx()).expect("no OOM");
+        assert!(!list.is_empty(), "every machine has a loopback interface");
+        assert_eq!(
+            ctx.used(),
+            list.capacity() * core::mem::size_of::<(IpAddr, IpAddr)>(),
+            "the list's bytes are accounted in the caller's context"
+        );
+    }
+
+    #[test]
+    fn collected_address_list_bytes_return_on_drop() {
+        let ctx = mcx::MemoryContext::new("ifaddr-test");
+        {
+            let list = collect_ifaddrs_in(ctx.mcx()).expect("no OOM");
+            assert!(ctx.used() > 0, "collected list charges the context");
+            drop(list);
+        }
+        assert_eq!(ctx.used(), 0, "dropping the list returns every byte");
     }
 
     #[cfg(unix)]

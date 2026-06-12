@@ -18,3 +18,4 @@ backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 types-core = { path = "../types-core" }
 types-nodes = { path = "../types-nodes" }
+mcx = { path = "../mcx" }

@@ -28,6 +28,7 @@ use backend_executor_execUtils_seams as execUtils;
 use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_init_small_seams as globals;
 use backend_utils_sort_storage_seams as tuplestore;
+use mcx::{alloc_in, PgBox};
 use types_core::PgResult;
 use types_nodes::execnodes::ScanDirectionIsForward;
 use types_nodes::{
@@ -58,7 +59,14 @@ pub fn init_seams() {}
 ///
 /// Returns `Ok(true)` when a tuple is available in
 /// `node.ss.ps.ps_ResultTupleSlot`, `Ok(false)` when there is none.
-pub fn ExecMaterial(node: &mut MaterialState, estate: &mut EStateData) -> PgResult<bool> {
+///
+/// Allocation (the lazily created tuplestore) happens in
+/// `estate.es_query_cxt`, the C `CurrentMemoryContext` while the executor
+/// runs.
+pub fn ExecMaterial<'mcx>(
+    node: &mut MaterialState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
     tcop_postgres::check_for_interrupts::call()?;
 
     // get state info from node
@@ -67,8 +75,12 @@ pub fn ExecMaterial(node: &mut MaterialState, estate: &mut EStateData) -> PgResu
 
     // If first time through, and we need a tuplestore, initialize it.
     if node.tuplestorestate.is_none() && node.eflags != 0 {
-        let mut tuplestorestate =
-            tuplestore::tuplestore_begin_heap::call(true, false, globals::work_mem::call())?;
+        let mut tuplestorestate = tuplestore::tuplestore_begin_heap::call(
+            estate.es_query_cxt,
+            true,
+            false,
+            globals::work_mem::call(),
+        )?;
         tuplestore::tuplestore_set_eflags::call(&mut tuplestorestate, node.eflags)?;
         if node.eflags & EXEC_FLAG_MARK != 0 {
             // Allocate a second read pointer to serve as the mark. We know it
@@ -160,8 +172,9 @@ pub fn ExecMaterial(node: &mut MaterialState, estate: &mut EStateData) -> PgResu
         }
 
         // ExecCopySlot(slot, outerslot); return slot;
+        let mcx = estate.es_query_cxt;
         let (dst, src) = estate.slot_pair_mut(slot, outerslot);
-        execTuples::exec_copy_slot::call(dst, src)?;
+        execTuples::exec_copy_slot::call(mcx, dst, src)?;
         return Ok(true);
     }
 
@@ -174,9 +187,9 @@ pub fn ExecMaterial(node: &mut MaterialState, estate: &mut EStateData) -> PgResu
 /// `castNode(MaterialState, pstate)` then run [`ExecMaterial`], returning the
 /// result slot's id (the C `return slot`) or `None` (the C `return NULL` /
 /// the cleared slot).
-fn exec_material_node(
-    pstate: &mut PlanStateNode,
-    estate: &mut EStateData,
+fn exec_material_node<'mcx>(
+    pstate: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
         PlanStateNode::Material(node) => node,
@@ -190,11 +203,17 @@ fn exec_material_node(
 }
 
 /// `ExecInitMaterial(node, estate, eflags)`.
-pub fn ExecInitMaterial(
-    node: &Material,
-    estate: &mut EStateData,
+///
+/// The state tree is allocated in `estate.es_query_cxt` (C: `makeNode` in the
+/// per-query context current during `ExecInitNode`), so initialization is
+/// fallible on OOM.
+pub fn ExecInitMaterial<'mcx>(
+    node: &Material<'_>,
+    estate: &mut EStateData<'mcx>,
     mut eflags: i32,
-) -> PgResult<Box<MaterialState>> {
+) -> PgResult<PgBox<'mcx, MaterialState<'mcx>>> {
+    let mcx = estate.es_query_cxt;
+
     // create state structure
     //
     // makeNode(MaterialState); matstate->ss.ps.plan = (Plan *) node;
@@ -203,8 +222,11 @@ pub fn ExecInitMaterial(
     // The plan back-link holds an owned copy of the (read-only at execution
     // time) plan node; the EState back-link is the threaded `estate`
     // parameter.
-    let mut matstate = Box::new(MaterialState::default());
-    matstate.ss.ps.plan = Some(Box::new(types_nodes::nodes::Node::Material(node.clone())));
+    let mut matstate = alloc_in(mcx, MaterialState::default())?;
+    matstate.ss.ps.plan = Some(alloc_in(
+        mcx,
+        types_nodes::nodes::Node::Material(node.clone_in(mcx)?),
+    )?);
     matstate.ss.ps.ExecProcNode = Some(exec_material_node);
 
     // We must have a tuplestore buffering the subplan output to do backward
@@ -239,7 +261,7 @@ pub fn ExecInitMaterial(
     // outerPlan = outerPlan(node);
     // outerPlanState(matstate) = ExecInitNode(outerPlan, estate, eflags);
     let outerPlan = node.plan.lefttree.as_deref();
-    matstate.ss.ps.lefttree = execProcnode::exec_init_node::call(outerPlan, estate, eflags)?;
+    matstate.ss.ps.lefttree = execProcnode::exec_init_node::call(mcx, outerPlan, estate, eflags)?;
 
     // Initialize result type and slot. No need to initialize projection info
     // because this node doesn't do projections.
@@ -263,7 +285,10 @@ pub fn ExecInitMaterial(
 }
 
 /// `ExecEndMaterial(node)`.
-pub fn ExecEndMaterial(node: &mut MaterialState, estate: &mut EStateData) -> PgResult<()> {
+pub fn ExecEndMaterial<'mcx>(
+    node: &mut MaterialState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     // Release tuplestore resources
     if let Some(tuplestorestate) = node.tuplestorestate.take() {
         tuplestore::tuplestore_end::call(tuplestorestate);
@@ -281,7 +306,7 @@ pub fn ExecEndMaterial(node: &mut MaterialState, estate: &mut EStateData) -> PgR
 
 /// `ExecMaterialMarkPos(node)` — calls tuplestore to save the current position
 /// in the stored file.
-pub fn ExecMaterialMarkPos(node: &mut MaterialState) -> PgResult<()> {
+pub fn ExecMaterialMarkPos(node: &mut MaterialState<'_>) -> PgResult<()> {
     debug_assert!(node.eflags & EXEC_FLAG_MARK != 0);
 
     // if we haven't materialized yet, just return.
@@ -299,7 +324,7 @@ pub fn ExecMaterialMarkPos(node: &mut MaterialState) -> PgResult<()> {
 
 /// `ExecMaterialRestrPos(node)` — calls tuplestore to restore the last saved
 /// file position.
-pub fn ExecMaterialRestrPos(node: &mut MaterialState) -> PgResult<()> {
+pub fn ExecMaterialRestrPos(node: &mut MaterialState<'_>) -> PgResult<()> {
     debug_assert!(node.eflags & EXEC_FLAG_MARK != 0);
 
     // if we haven't materialized yet, just return.
@@ -312,7 +337,10 @@ pub fn ExecMaterialRestrPos(node: &mut MaterialState) -> PgResult<()> {
 }
 
 /// `ExecReScanMaterial(node)` — rescans the materialized relation.
-pub fn ExecReScanMaterial(node: &mut MaterialState, estate: &mut EStateData) -> PgResult<()> {
+pub fn ExecReScanMaterial<'mcx>(
+    node: &mut MaterialState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     // ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     let slot = node
         .ss
@@ -395,3 +423,6 @@ pub fn ExecReScanMaterial(node: &mut MaterialState, estate: &mut EStateData) -> 
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

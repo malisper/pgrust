@@ -2,10 +2,9 @@
 //! scalars (`storage/lockdefs.h`) and the ephemeral-named-relation types
 //! (`utils/queryenvironment.h`).
 
-use alloc::boxed::Box;
-use alloc::string::String;
-
+use mcx::{alloc_in, Mcx, PgBox, PgString};
 use types_core::primitive::Oid;
+use types_error::PgResult;
 
 use crate::heaptuple::TupleDesc;
 
@@ -25,21 +24,42 @@ pub const ENR_NAMED_TUPLESTORE: EphemeralNameRelationType = 0;
 /// `EphemeralNamedRelationMetadataData` (`utils/queryenvironment.h`) —
 /// metadata for an ephemeral named relation. Exactly one of `reliddesc` /
 /// `tupdesc` is filled (a relation OID whose descriptor is read from the
-/// catalogs, or an inline tuple descriptor).
-#[derive(Clone, Debug)]
-pub struct EphemeralNamedRelationMetadataData {
+/// catalogs, or an inline tuple descriptor). The owned `name`/`tupdesc` are
+/// context-allocated (C pallocs them in the registering caller's context).
+#[derive(Debug)]
+pub struct EphemeralNamedRelationMetadataData<'mcx> {
     /// name used to identify the relation
-    pub name: Option<String>,
+    pub name: Option<PgString<'mcx>>,
     /// OID of relation to get the TupleDesc from
     pub reliddesc: Oid,
     /// inline TupleDesc, if relid not used
-    pub tupdesc: TupleDesc,
+    pub tupdesc: TupleDesc<'mcx>,
     pub enrtype: EphemeralNameRelationType,
     /// estimated number of tuples
     pub enrtuples: f64,
 }
 
-pub type EphemeralNamedRelationMetadata = Option<Box<EphemeralNamedRelationMetadataData>>;
+impl EphemeralNamedRelationMetadataData<'_> {
+    /// Deep copy into `mcx`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<EphemeralNamedRelationMetadataData<'b>> {
+        Ok(EphemeralNamedRelationMetadataData {
+            name: match &self.name {
+                Some(n) => Some(n.clone_in(mcx)?),
+                None => None,
+            },
+            reliddesc: self.reliddesc,
+            tupdesc: match &self.tupdesc {
+                Some(td) => Some(alloc_in(mcx, td.clone_in(mcx)?)?),
+                None => None,
+            },
+            enrtype: self.enrtype,
+            enrtuples: self.enrtuples,
+        })
+    }
+}
+
+pub type EphemeralNamedRelationMetadata<'mcx> =
+    Option<PgBox<'mcx, EphemeralNamedRelationMetadataData<'mcx>>>;
 
 /// `void *reldata` (`utils/queryenvironment.h`) — the execution-time backing
 /// payload for a named relation. PostgreSQL declares it as an untyped
@@ -48,12 +68,12 @@ pub type EphemeralNamedRelationMetadata = Option<Box<EphemeralNamedRelationMetad
 pub struct EphemeralRelationData {}
 
 /// `EphemeralNamedRelationData` (`utils/queryenvironment.h`).
-#[derive(Clone, Debug)]
-pub struct EphemeralNamedRelationData {
-    pub md: EphemeralNamedRelationMetadataData,
+#[derive(Debug)]
+pub struct EphemeralNamedRelationData<'mcx> {
+    pub md: EphemeralNamedRelationMetadataData<'mcx>,
     /// structure for execution-time access to data; can be left `None` if the
     /// ENR is intended exclusively for planning purposes
-    pub reldata: Option<Box<EphemeralRelationData>>,
+    pub reldata: Option<PgBox<'mcx, EphemeralRelationData>>,
 }
 
-pub type EphemeralNamedRelation = Option<Box<EphemeralNamedRelationData>>;
+pub type EphemeralNamedRelation<'mcx> = Option<PgBox<'mcx, EphemeralNamedRelationData<'mcx>>>;

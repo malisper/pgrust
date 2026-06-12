@@ -60,10 +60,13 @@ seam_core::seam!(
 seam_core::seam!(
     /// `identify_opfamily_groups(oprlist, proclist)` (amvalidate.c): group the
     /// opfamily's `AMOPSTRATEGY`/`AMPROCNUM` member rows by datatype pair and
-    /// set the operator/function presence bitmaps. `PgResult` carries the C
-    /// `elog(ERROR, "cannot validate operator family without ordered data")`.
-    pub fn identify_opfamily_groups(
+    /// set the operator/function presence bitmaps. The group list is allocated
+    /// in `mcx` (C: `palloc` in the current context). `PgResult` carries the C
+    /// `elog(ERROR, "cannot validate operator family without ordered data")`
+    /// and OOM.
+    pub fn identify_opfamily_groups<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         oprlist: &[AmopRow],
         proclist: &[AmprocRow],
-    ) -> PgResult<Vec<OpFamilyOpFuncGroup>>
+    ) -> PgResult<mcx::PgVec<'mcx, OpFamilyOpFuncGroup>>
 );
