@@ -10,12 +10,15 @@ use types_error::PgResult;
 
 seam_core::seam!(
     /// `deserialize_deflist(txt)` (tsearchcmds.c): build a `List` of
-    /// `DefElem` from a stored `text` datum's string contents. Every produced
-    /// `DefElem` has a `String`-node argument, so the list crosses as typed
-    /// rows allocated in `mcx`. `Err` carries the C `ereport(ERROR, "invalid
-    /// deserialize_deflist syntax")` and OOM.
+    /// `DefElem` from a stored `text` datum. `txt` is the verbatim varlena
+    /// bytes a `SysCacheGetAttr` read produced (including the header,
+    /// possibly compressed); the owner performs the C `TextDatumGetCString`
+    /// detoast + conversion. Every produced `DefElem` has a `String`-node
+    /// argument, so the list crosses as typed rows allocated in `mcx`. `Err`
+    /// carries the C `ereport(ERROR, "invalid deserialize_deflist syntax")`
+    /// and OOM.
     pub fn deserialize_deflist<'mcx>(
         mcx: Mcx<'mcx>,
-        txt: &str,
+        txt: &[u8],
     ) -> PgResult<PgVec<'mcx, DefElemString<'mcx>>>
 );

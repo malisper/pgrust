@@ -278,26 +278,6 @@ fn getattr_name(
     }
 }
 
-/// The string payload of a `text` varlena (little-endian 1-byte short or
-/// 4-byte header), i.e. `TextDatumGetCString`.
-fn text_to_string(bytes: &[u8]) -> PgResult<String> {
-    if bytes.is_empty() {
-        return elog_error("ts_cache: empty text datum".into());
-    }
-    let (start, total) = if bytes[0] & 0x01 != 0 {
-        // 1-byte header: VARSIZE_1B == va_header >> 1, includes the header.
-        (1usize, (bytes[0] >> 1) as usize)
-    } else {
-        // 4-byte header: VARSIZE_4B == word >> 2, includes the header.
-        let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        (4usize, (word >> 2) as usize)
-    };
-    if total > bytes.len() || start > total {
-        return elog_error("ts_cache: corrupt text datum".into());
-    }
-    Ok(String::from_utf8_lossy(&bytes[start..total]).into_owned())
-}
-
 /* ---------------------------------------------------------------------------
  * lookup_ts_parser_cache
  * ------------------------------------------------------------------------- */
@@ -560,13 +540,16 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<TSDictionaryCacheEntr
                 let dictoptions = if isnull {
                     PgVec::new_in(mcx) // NIL
                 } else {
-                    let text = match &opt {
-                        TupleValue::ByRef(b) => text_to_string(b)?,
+                    // deserialize_deflist(opt): the owner performs the C
+                    // TextDatumGetCString detoast + conversion; the verbatim
+                    // varlena bytes cross the seam.
+                    let bytes = match &opt {
+                        TupleValue::ByRef(b) => &b[..],
                         TupleValue::ByVal(_) => {
                             return elog_error("dictinitoption is not by-reference".into())
                         }
                     };
-                    tsearchcmds_seams::deserialize_deflist::call(mcx, &text)?
+                    tsearchcmds_seams::deserialize_deflist::call(mcx, bytes)?
                 };
                 dict_data = Some(fmgr_seams::oid_function_call_1_deflist::call(
                     tmplinit,

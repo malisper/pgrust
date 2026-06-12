@@ -170,6 +170,7 @@ fn get_tablespace(mut spcid: Oid) -> PgResult<Option<TableSpaceOpts>> {
 /// This value is not locked by the transaction, so it may be changed while a
 /// SELECT that has used these values for planning is still executing. The C
 /// nullable out-pointers are optional mutable borrows.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the C predicate, complemented exactly
 pub fn get_tablespace_page_costs(
     spcid: Oid,
     spc_random_page_cost: Option<&mut f64>,
@@ -180,15 +181,17 @@ pub fn get_tablespace_page_costs(
     // here is the entry's opts (None == C spc->opts == NULL).
 
     if let Some(out) = spc_random_page_cost {
+        // C: `!spc->opts || spc->opts->random_page_cost < 0` selects the GUC
+        // (written as the exact complement so NaN behaves identically).
         *out = match &spc {
-            Some(opts) if opts.random_page_cost >= 0.0 => opts.random_page_cost,
+            Some(opts) if !(opts.random_page_cost < 0.0) => opts.random_page_cost,
             _ => costsize_seams::random_page_cost::call(),
         };
     }
 
     if let Some(out) = spc_seq_page_cost {
         *out = match &spc {
-            Some(opts) if opts.seq_page_cost >= 0.0 => opts.seq_page_cost,
+            Some(opts) if !(opts.seq_page_cost < 0.0) => opts.seq_page_cost,
             _ => costsize_seams::seq_page_cost::call(),
         };
     }
