@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
+backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
