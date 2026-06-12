@@ -1,7 +1,7 @@
 //! Trimmed copy of the src-idiomatic `types::storage` module: the LWLock
 //! handle and its supporting pieces.
 
-use types_core::{uint16, uint32, ProcNumber, INVALID_PROC_NUMBER};
+use types_core::{uint16, uint32, uint64, uint8, ProcNumber, INVALID_PROC_NUMBER};
 
 /// `LWLockMode` (`storage/lwlock.h`).
 pub type LWLockMode = u32;
@@ -13,6 +13,33 @@ pub const LW_WAIT_UNTIL_FREE: LWLockMode = 2;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct pg_atomic_uint32 {
     pub value: uint32,
+}
+
+/// `pg_atomic_uint64` (`port/atomics.h`) — a shmem-resident atomic 8-byte word.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct pg_atomic_uint64 {
+    pub value: uint64,
+}
+
+/// `LWLockWaitState` (`storage/lwlock.h`) — the `PGPROC.lwWaiting` state byte
+/// set and read by the LWLock wait-list machinery.
+pub type LWLockWaitState = uint8;
+/// not currently waiting / woken up
+pub const LW_WS_NOT_WAITING: LWLockWaitState = 0;
+/// currently waiting
+pub const LW_WS_WAITING: LWLockWaitState = 1;
+/// removed from waitlist, but not yet signaled
+pub const LW_WS_PENDING_WAKEUP: LWLockWaitState = 2;
+
+/// `proclist_node` (`storage/proclist_types.h`) — a node in a doubly-linked
+/// list of PGPROCs identified by pgprocno. A node not in any list has
+/// `next == prev == 0`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct proclist_node {
+    /// pgprocno of the next PGPROC
+    pub next: ProcNumber,
+    /// pgprocno of the prev PGPROC
+    pub prev: ProcNumber,
 }
 
 /// `proclist_head` (`storage/proclist_types.h`) — head/tail pgprocno indexes of
@@ -41,12 +68,44 @@ pub struct LWLock {
     pub waiters: proclist_head,
 }
 
+/// `LWLOCK_PADDED_SIZE` (`storage/lwlock.h`) — `PG_CACHE_LINE_SIZE`.
+pub const LWLOCK_PADDED_SIZE: usize = 128;
+
+/// `LWLockPadded` (`storage/lwlock.h`) — in C a union of an `LWLock` with a
+/// pad to `LWLOCK_PADDED_SIZE`, so each lock in an array sits on its own
+/// cache line. The alignment attribute reproduces both the size and the
+/// placement guarantee.
+#[repr(align(128))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LWLockPadded {
+    pub lock: LWLock,
+}
+
+const _: () = assert!(core::mem::size_of::<LWLockPadded>() == LWLOCK_PADDED_SIZE);
+
+/// `MAX_BACKENDS_BITS` / `MAX_BACKENDS` (`storage/procnumber.h`).
+pub const MAX_BACKENDS_BITS: i32 = 18;
+pub const MAX_BACKENDS: uint32 = (1_u32 << MAX_BACKENDS_BITS) - 1;
+
 /// `NUM_INDIVIDUAL_LWLOCKS` — generated from `lwlocklist.h`.
 pub const NUM_INDIVIDUAL_LWLOCKS: i32 = 54;
 
-// `BuiltinTrancheIds` (`storage/lwlock.h`) — the chain from
-// `LWTRANCHE_XACT_BUFFER = NUM_INDIVIDUAL_LWLOCKS` down to the tranche the
-// pgstat ports consume (`LWTRANCHE_PGSTATS_DATA`).
+// Fixed-partition layout of the main LWLock array (`storage/lwlock.h`).
+pub const NUM_BUFFER_PARTITIONS: i32 = 128;
+pub const LOG2_NUM_LOCK_PARTITIONS: i32 = 4;
+pub const NUM_LOCK_PARTITIONS: i32 = 1 << LOG2_NUM_LOCK_PARTITIONS;
+pub const LOG2_NUM_PREDICATELOCK_PARTITIONS: i32 = 4;
+pub const NUM_PREDICATELOCK_PARTITIONS: i32 = 1 << LOG2_NUM_PREDICATELOCK_PARTITIONS;
+pub const BUFFER_MAPPING_LWLOCK_OFFSET: i32 = NUM_INDIVIDUAL_LWLOCKS;
+pub const LOCK_MANAGER_LWLOCK_OFFSET: i32 = BUFFER_MAPPING_LWLOCK_OFFSET + NUM_BUFFER_PARTITIONS;
+pub const PREDICATELOCK_MANAGER_LWLOCK_OFFSET: i32 =
+    LOCK_MANAGER_LWLOCK_OFFSET + NUM_LOCK_PARTITIONS;
+pub const NUM_FIXED_LWLOCKS: i32 =
+    PREDICATELOCK_MANAGER_LWLOCK_OFFSET + NUM_PREDICATELOCK_PARTITIONS;
+
+// `BuiltinTrancheIds` (`storage/lwlock.h`) — the full chain from
+// `LWTRANCHE_XACT_BUFFER = NUM_INDIVIDUAL_LWLOCKS` to
+// `LWTRANCHE_FIRST_USER_DEFINED`.
 pub const LWTRANCHE_XACT_BUFFER: i32 = NUM_INDIVIDUAL_LWLOCKS;
 pub const LWTRANCHE_COMMITTS_BUFFER: i32 = LWTRANCHE_XACT_BUFFER + 1;
 pub const LWTRANCHE_SUBTRANS_BUFFER: i32 = LWTRANCHE_COMMITTS_BUFFER + 1;
@@ -75,3 +134,17 @@ pub const LWTRANCHE_PER_XACT_PREDICATE_LIST: i32 = LWTRANCHE_PARALLEL_APPEND + 1
 pub const LWTRANCHE_PGSTATS_DSA: i32 = LWTRANCHE_PER_XACT_PREDICATE_LIST + 1;
 pub const LWTRANCHE_PGSTATS_HASH: i32 = LWTRANCHE_PGSTATS_DSA + 1;
 pub const LWTRANCHE_PGSTATS_DATA: i32 = LWTRANCHE_PGSTATS_HASH + 1;
+pub const LWTRANCHE_LAUNCHER_DSA: i32 = LWTRANCHE_PGSTATS_DATA + 1;
+pub const LWTRANCHE_LAUNCHER_HASH: i32 = LWTRANCHE_LAUNCHER_DSA + 1;
+pub const LWTRANCHE_DSM_REGISTRY_DSA: i32 = LWTRANCHE_LAUNCHER_HASH + 1;
+pub const LWTRANCHE_DSM_REGISTRY_HASH: i32 = LWTRANCHE_DSM_REGISTRY_DSA + 1;
+pub const LWTRANCHE_COMMITTS_SLRU: i32 = LWTRANCHE_DSM_REGISTRY_HASH + 1;
+pub const LWTRANCHE_MULTIXACTMEMBER_SLRU: i32 = LWTRANCHE_COMMITTS_SLRU + 1;
+pub const LWTRANCHE_MULTIXACTOFFSET_SLRU: i32 = LWTRANCHE_MULTIXACTMEMBER_SLRU + 1;
+pub const LWTRANCHE_NOTIFY_SLRU: i32 = LWTRANCHE_MULTIXACTOFFSET_SLRU + 1;
+pub const LWTRANCHE_SERIAL_SLRU: i32 = LWTRANCHE_NOTIFY_SLRU + 1;
+pub const LWTRANCHE_SUBTRANS_SLRU: i32 = LWTRANCHE_SERIAL_SLRU + 1;
+pub const LWTRANCHE_XACT_SLRU: i32 = LWTRANCHE_SUBTRANS_SLRU + 1;
+pub const LWTRANCHE_PARALLEL_VACUUM_DSA: i32 = LWTRANCHE_XACT_SLRU + 1;
+pub const LWTRANCHE_AIO_URING_COMPLETION: i32 = LWTRANCHE_PARALLEL_VACUUM_DSA + 1;
+pub const LWTRANCHE_FIRST_USER_DEFINED: i32 = LWTRANCHE_AIO_URING_COMPLETION + 1;

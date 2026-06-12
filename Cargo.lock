@@ -3,11 +3,30 @@
 version = 4
 
 [[package]]
+name = "ahash"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+dependencies = [
+ "cfg-if",
+ "once_cell",
+ "version_check",
+ "zerocopy",
+]
+
+[[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "backend-access-common-heaptuple"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-heaptoast-seams",
  "backend-utils-adt-misc2-seams",
+ "mcx",
  "types-core",
  "types-datum",
  "types-error",
@@ -25,6 +44,7 @@ dependencies = [
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error-seams",
+ "mcx",
  "types-amvalidate",
  "types-core",
  "types-error",
@@ -35,6 +55,7 @@ dependencies = [
 name = "backend-access-heap-heaptoast-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-tuple",
@@ -44,6 +65,7 @@ dependencies = [
 name = "backend-access-index-amvalidate-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-amvalidate",
  "types-core",
@@ -93,6 +115,7 @@ name = "backend-access-transam-xact-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -100,6 +123,7 @@ dependencies = [
 name = "backend-access-transam-xlogstats"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
  "types-wal",
 ]
@@ -117,6 +141,7 @@ dependencies = [
 name = "backend-executor-execProcnode-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -126,6 +151,7 @@ dependencies = [
 name = "backend-executor-execTuples-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-error",
  "types-nodes",
@@ -151,6 +177,7 @@ dependencies = [
  "backend-tcop-postgres-seams",
  "backend-utils-init-small-seams",
  "backend-utils-sort-storage-seams",
+ "mcx",
  "types-core",
  "types-nodes",
 ]
@@ -160,6 +187,8 @@ name = "backend-libpq-ifaddr"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "mcx",
+ "types-error",
 ]
 
 [[package]]
@@ -189,10 +218,39 @@ name = "backend-port-atomics"
 version = "0.0.0"
 
 [[package]]
+name = "backend-postmaster-interrupt"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-ipc-procsignal-seams",
+ "backend-storage-ipc-seams",
+ "backend-utils-misc-guc-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "libc",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
 name = "backend-postmaster-syslogger-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-storage-ipc-latch-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
+name = "backend-storage-ipc-procsignal-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -203,12 +261,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-shmem-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lock-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-lmgr-lwlock"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
 ]
 
 [[package]]
@@ -227,6 +311,15 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-lmgr-proc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-storage",
 ]
 
 [[package]]
@@ -289,6 +382,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-activity-waitevent-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
 name = "backend-utils-adt-format-type-seams"
 version = "0.0.0"
 dependencies = [
@@ -326,6 +427,7 @@ dependencies = [
 name = "backend-utils-cache-lsyscache-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -335,8 +437,10 @@ dependencies = [
 name = "backend-utils-cache-relcache-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
+ "types-error",
  "types-tuple",
 ]
 
@@ -344,6 +448,7 @@ dependencies = [
 name = "backend-utils-cache-syscache-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -382,6 +487,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-init-miscinit-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-utils-init-small-seams"
 version = "0.0.0"
 dependencies = [
@@ -404,6 +516,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-guc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-guc",
+]
+
+[[package]]
 name = "backend-utils-misc-pg-rusage"
 version = "0.0.0"
 dependencies = [
@@ -416,6 +537,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-table-table-seams",
  "backend-utils-cache-relcache-seams",
+ "mcx",
  "types-core",
  "types-error",
  "types-tuple",
@@ -430,13 +552,48 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-utils-sort-storage-seams"
+name = "backend-utils-mmgr-mcxt-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-sort-storage-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
  "types-nodes",
 ]
+
+[[package]]
+name = "backend-utils-time-combocid"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
+name = "bumpalo"
+version = "3.20.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+dependencies = [
+ "allocator-api2",
+]
+
+[[package]]
+name = "cfg-if"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "contrib-earthdistance"
@@ -444,6 +601,16 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-datum",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+ "allocator-api2",
 ]
 
 [[package]]
@@ -460,8 +627,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "mcx"
+version = "0.0.0"
+dependencies = [
+ "allocator-api2",
+ "bumpalo",
+ "hashbrown",
+ "types-error",
+]
+
+[[package]]
+name = "once_cell"
+version = "1.21.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
 name = "pg-prng"
 version = "0.0.0"
+
+[[package]]
+name = "proc-macro2"
+version = "1.0.106"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+dependencies = [
+ "unicode-ident",
+]
+
+[[package]]
+name = "quote"
+version = "1.0.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+dependencies = [
+ "proc-macro2",
+]
 
 [[package]]
 name = "seam-core"
@@ -477,6 +678,8 @@ dependencies = [
  "backend-executor-nodeMaterial",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
+ "backend-postmaster-interrupt",
+ "backend-storage-lmgr-lwlock",
  "backend-storage-page-checksum",
  "backend-utils-activity-small",
  "backend-utils-error",
@@ -485,7 +688,19 @@ dependencies = [
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
+ "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
+]
+
+[[package]]
+name = "syn"
+version = "2.0.117"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -518,9 +733,14 @@ name = "types-error"
 version = "0.0.0"
 
 [[package]]
+name = "types-guc"
+version = "0.0.0"
+
+[[package]]
 name = "types-hash"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
 ]
 
@@ -528,6 +748,7 @@ dependencies = [
 name = "types-nodes"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
 ]
 
@@ -550,14 +771,17 @@ dependencies = [
 name = "types-tuple"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
  "types-datum",
+ "types-error",
 ]
 
 [[package]]
 name = "types-wal"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
 ]
 
@@ -566,4 +790,36 @@ name = "types-wchar"
 version = "0.0.0"
 dependencies = [
  "types-core",
+]
+
+[[package]]
+name = "unicode-ident"
+version = "1.0.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "zerocopy"
+version = "0.8.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce1022995ff5ff5d841ad7d994facc23098cd40152f2c1d11cd607c6f530653f"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ae7f38b72ec2a254e2b87ef277cf2cd4fb97cbebf944faa6f33354da0867930"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
