@@ -93,6 +93,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-error"
+version = "0.0.0"
+
+[[package]]
 name = "types-tuple"
 version = "0.0.0"
 dependencies = [
