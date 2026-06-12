@@ -17,3 +17,12 @@ seam_core::seam!(
         relation: types_core::primitive::Oid,
     ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
 );
+
+seam_core::seam!(
+    /// `RelationGetForm(relation)->relispartition` (utils/rel.h): is the open
+    /// relation a partition? The relation crosses as its `Oid`; the relcache
+    /// re-resolves it (`Err` if the entry cannot be resolved).
+    pub fn relation_is_partition(
+        relation: types_core::primitive::Oid,
+    ) -> types_error::PgResult<bool>
+);

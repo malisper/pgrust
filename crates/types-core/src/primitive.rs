@@ -55,6 +55,9 @@ pub const INVALID_OID: Oid = InvalidOid;
 /// `InvalidRepOriginId` — `#define InvalidRepOriginId 0` (`origin.h`).
 pub const InvalidRepOriginId: RepOriginId = 0;
 
+/// `InvalidAttrNumber` — `#define InvalidAttrNumber 0` (`access/attnum.h`).
+pub const InvalidAttrNumber: AttrNumber = 0;
+
 /// `OidIsValid(oid)` — `(oid) != InvalidOid` (`c.h`).
 #[inline]
 pub const fn OidIsValid(oid: Oid) -> bool {
