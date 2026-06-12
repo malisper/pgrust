@@ -1131,7 +1131,11 @@ fn logfile_getname(timestamp: pg_time_t, suffix: Option<&str>) -> String {
 
     if let Some(suffix) = suffix {
         let mut len = filename.len();
-        if len > 4 && &filename[len - 4..] == ".log" {
+        // Byte comparison, like C's strcmp: a String slice (`&filename[len -
+        // 4..]`) would panic when `len - 4` splits a multibyte character;
+        // since ".log" is ASCII, a byte match guarantees `len - 4` is a char
+        // boundary, making the truncate safe.
+        if len > 4 && &filename.as_bytes()[len - 4..] == b".log" {
             len -= 4;
             filename.truncate(len);
         }
