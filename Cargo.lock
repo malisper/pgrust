@@ -22,6 +22,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogstats"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-storage-page-checksum"
 version = "0.0.0"
 dependencies = [
@@ -75,6 +83,7 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-transam-xlogstats",
  "backend-storage-page-checksum",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
@@ -98,6 +107,13 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-datum",
+]
+
+[[package]]
+name = "types-wal"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]

@@ -11,6 +11,7 @@ path = "src/lib.rs"
 # Every ported crate that exposes init_seams() gets a dependency line here.
 [dependencies]
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }
 backend-utils-mb-wstrcmp = { path = "../backend-utils-mb-wstrcmp" }
 backend-utils-mb-wstrncmp = { path = "../backend-utils-mb-wstrncmp" }
