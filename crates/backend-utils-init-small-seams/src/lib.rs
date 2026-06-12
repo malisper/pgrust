@@ -10,3 +10,9 @@ seam_core::seam!(
     /// budget in kilobytes.
     pub fn work_mem() -> i32
 );
+
+seam_core::seam!(
+    /// `NBuffers` (globals.c): the `shared_buffers` GUC — number of shared
+    /// buffers. Pure read of backend-local state.
+    pub fn nbuffers() -> i32
+);

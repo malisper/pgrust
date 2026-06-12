@@ -1,7 +1,7 @@
 //! Trimmed copy of the src-idiomatic `types::storage` module: the LWLock
 //! handle and its supporting pieces.
 
-use types_core::{uint16, uint32, ProcNumber, INVALID_PROC_NUMBER};
+use types_core::{uint16, uint32, Oid, ProcNumber, RelFileNumber, INVALID_PROC_NUMBER};
 
 /// `LWLockMode` (`storage/lwlock.h`).
 pub type LWLockMode = u32;
@@ -75,3 +75,21 @@ pub const LWTRANCHE_PER_XACT_PREDICATE_LIST: i32 = LWTRANCHE_PARALLEL_APPEND + 1
 pub const LWTRANCHE_PGSTATS_DSA: i32 = LWTRANCHE_PER_XACT_PREDICATE_LIST + 1;
 pub const LWTRANCHE_PGSTATS_HASH: i32 = LWTRANCHE_PGSTATS_DSA + 1;
 pub const LWTRANCHE_PGSTATS_DATA: i32 = LWTRANCHE_PGSTATS_HASH + 1;
+
+/// `RelFileLocator` (`storage/relfilelocator.h`) — the physical identity of a
+/// relation: tablespace, database, and relfilenumber.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct RelFileLocator {
+    /// `spcOid` — tablespace.
+    pub spcOid: Oid,
+    /// `dbOid` — database.
+    pub dbOid: Oid,
+    /// `relNumber` — relation storage number.
+    pub relNumber: RelFileNumber,
+}
+
+/// `RelFileLocatorEquals(locator1, locator2)` (`storage/relfilelocator.h`).
+#[inline]
+pub fn RelFileLocatorEquals(a: &RelFileLocator, b: &RelFileLocator) -> bool {
+    a == b
+}

@@ -5,3 +5,12 @@
 
 /// `CommandId` (`c.h`) — a `uint32`.
 pub type CommandId = u32;
+
+/// `InvalidTransactionId` (`access/transam.h`).
+pub const InvalidTransactionId: crate::primitive::TransactionId = 0;
+
+/// `TransactionIdIsValid(xid)` (`access/transam.h`).
+#[inline]
+pub const fn TransactionIdIsValid(xid: crate::primitive::TransactionId) -> bool {
+    xid != InvalidTransactionId
+}

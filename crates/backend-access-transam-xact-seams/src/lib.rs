@@ -21,3 +21,24 @@ seam_core::seam!(
     /// cannot `ereport`.
     pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool
 );
+
+seam_core::seam!(
+    /// `GetCurrentCommandId(used)` (xact.c): the current command id; with
+    /// `used` true the caller intends to use it to mark inserted/updated/
+    /// deleted tuples, which is forbidden in parallel mode — that check
+    /// `elog(ERROR)`s, carried on `Err`.
+    pub fn get_current_command_id(used: bool) -> PgResult<types_core::xact::CommandId>
+);
+
+seam_core::seam!(
+    /// `CheckXidAlive` (xact.c global): the xid being checked during logical
+    /// decoding via the historic snapshot (`InvalidTransactionId` outside
+    /// that path). Pure read of backend-local state.
+    pub fn check_xid_alive() -> types_core::TransactionId
+);
+
+seam_core::seam!(
+    /// `bsysscan` (xact.c global): true while inside a catalog scan started
+    /// with a valid `CheckXidAlive`. Pure read of backend-local state.
+    pub fn bsysscan() -> bool
+);
