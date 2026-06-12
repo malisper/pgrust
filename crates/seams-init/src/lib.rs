@@ -7,4 +7,5 @@
 pub fn init_all() {
     // One line per ported crate, kept sorted:
     backend_storage_page_checksum::init_seams();
+    backend_utils_misc_pg_rusage::init_seams();
 }

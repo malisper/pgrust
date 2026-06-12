@@ -1,0 +1,12 @@
+[package]
+name = "backend-utils-misc-pg-rusage"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_misc_pg_rusage"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
