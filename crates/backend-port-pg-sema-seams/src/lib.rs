@@ -18,3 +18,22 @@ seam_core::seam!(
     /// Scaffolded slot.
     pub fn pg_reserve_semaphores(max_semas: i32) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `PGSemaphoreReset(GetPGProcByNumber(procno)->sem)` (pg_sema) — reset the
+    /// named PGPROC's wait semaphore to zero. Called from `InitProcess` /
+    /// `InitAuxiliaryProcess` to ensure the slot's semaphore starts at zero.
+    pub fn pg_semaphore_reset(procno: types_core::ProcNumber)
+);
+
+seam_core::seam!(
+    /// `PGSemaphoreLock(GetPGProcByNumber(procno)->sem)` (pg_sema) — block on
+    /// the named PGPROC's wait semaphore (the proc-sleep wait primitive).
+    pub fn pg_semaphore_lock(procno: types_core::ProcNumber)
+);
+
+seam_core::seam!(
+    /// `PGSemaphoreUnlock(GetPGProcByNumber(procno)->sem)` (pg_sema) — signal
+    /// the named PGPROC's wait semaphore to wake a sleeping waiter.
+    pub fn pg_semaphore_unlock(procno: types_core::ProcNumber)
+);

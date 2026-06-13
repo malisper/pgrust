@@ -318,6 +318,22 @@ fn errcontext_msg_appends_to_in_flight_error() {
 }
 
 #[test]
+fn get_error_context_stack_walks_retired_chain() {
+    let _guard = lock();
+    reset_guc();
+    FlushErrorState();
+
+    // The error_context_stack callback chain is retired (attach-on-propagation),
+    // so the walk fires no callbacks and the scratch entry accumulates nothing.
+    assert_eq!(GetErrorContextStack(), None);
+    // recursion_depth is balanced (not left elevated): a fresh report can start.
+    assert!(!in_error_recursion_trouble());
+    assert!(errstart(ERROR, None));
+    errmsg("ok").unwrap();
+    let _ = pg_re_throw::<()>();
+}
+
+#[test]
 fn errsave_soft_path_saves_details() {
     let _guard = lock();
     reset_guc();
