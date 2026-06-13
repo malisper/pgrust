@@ -741,9 +741,9 @@ pub fn ExecParallelHashRepartitionRest<'mcx>(
 
     for i in 1..old_nbatch {
         let accessor = old_inner_tuples[i as usize].unwrap();
-        sts::sts_begin_parallel_scan::call(accessor)?;
+        sts::sts_begin_parallel_scan_handle::call(accessor)?;
         let mut meta = [0u8; 4];
-        while let Some(tuple) = sts::sts_parallel_scan_next::call(mcx, accessor, &mut meta)? {
+        while let Some(tuple) = sts::sts_parallel_scan_next_handle::call(mcx, accessor, &mut meta)? {
             let hashvalue = u32::from_ne_bytes(meta);
             let t_len = tuple.t_len as usize;
             let tuple_size = MAXALIGN(HJTUPLE_OVERHEAD + t_len);
@@ -756,10 +756,10 @@ pub fn ExecParallelHashRepartitionRest<'mcx>(
             let inner = hashtable.batches[bb.batchno as usize]
                 .inner_tuples
                 .expect("repartition rest: inner_tuples accessor missing");
-            sts::sts_puttuple::call(inner, &meta, &tuple)?;
+            sts::sts_puttuple_handle::call(inner, &meta, &tuple)?;
             // CHECK_FOR_INTERRUPTS();
         }
-        sts::sts_end_parallel_scan::call(accessor);
+        sts::sts_end_parallel_scan_handle::call(accessor);
     }
     Ok(())
 }
@@ -982,10 +982,10 @@ pub fn ExecParallelPrepHashTableForUnmatched<'mcx>(
             let inner = hashtable.batches[curbatch as usize].inner_tuples;
             let outer = hashtable.batches[curbatch as usize].outer_tuples;
             if let Some(a) = inner {
-                sts::sts_end_parallel_scan::call(a);
+                sts::sts_end_parallel_scan_handle::call(a);
             }
             if let Some(a) = outer {
-                sts::sts_end_parallel_scan::call(a);
+                sts::sts_end_parallel_scan_handle::call(a);
             }
         }
         // Track largest batch.
@@ -1304,16 +1304,16 @@ pub fn ExecParallelHashCloseBatchAccessors<'mcx>(
         let inner = hashtable.batches[i as usize].inner_tuples;
         let outer = hashtable.batches[i as usize].outer_tuples;
         if let Some(a) = inner {
-            sts::sts_end_write::call(a)?;
+            sts::sts_end_write_handle::call(a)?;
         }
         if let Some(a) = outer {
-            sts::sts_end_write::call(a)?;
+            sts::sts_end_write_handle::call(a)?;
         }
         if let Some(a) = inner {
-            sts::sts_end_parallel_scan::call(a);
+            sts::sts_end_parallel_scan_handle::call(a);
         }
         if let Some(a) = outer {
-            sts::sts_end_parallel_scan::call(a);
+            sts::sts_end_parallel_scan_handle::call(a);
         }
     }
     hashtable.batches.clear();
@@ -1414,10 +1414,10 @@ pub fn ExecHashTableDetachBatch<'mcx>(hashtable: &mut HashJoinTableData<'mcx>) -
         let inner = hashtable.batches[curbatch as usize].inner_tuples;
         let outer = hashtable.batches[curbatch as usize].outer_tuples;
         if let Some(a) = inner {
-            sts::sts_end_parallel_scan::call(a);
+            sts::sts_end_parallel_scan_handle::call(a);
         }
         if let Some(a) = outer {
-            sts::sts_end_parallel_scan::call(a);
+            sts::sts_end_parallel_scan_handle::call(a);
         }
 
         let mut attached = true;
@@ -1500,16 +1500,16 @@ pub fn ExecHashTableDetach<'mcx>(hashtable: &mut HashJoinTableData<'mcx>) -> PgR
                     let inner = hashtable.batches[i as usize].inner_tuples;
                     let outer = hashtable.batches[i as usize].outer_tuples;
                     if let Some(a) = inner {
-                        sts::sts_end_write::call(a)?;
+                        sts::sts_end_write_handle::call(a)?;
                     }
                     if let Some(a) = outer {
-                        sts::sts_end_write::call(a)?;
+                        sts::sts_end_write_handle::call(a)?;
                     }
                     if let Some(a) = inner {
-                        sts::sts_end_parallel_scan::call(a);
+                        sts::sts_end_parallel_scan_handle::call(a);
                     }
                     if let Some(a) = outer {
-                        sts::sts_end_parallel_scan::call(a);
+                        sts::sts_end_parallel_scan_handle::call(a);
                     }
                 }
             }
@@ -1758,7 +1758,7 @@ fn sts_puttuple_raw(
     let tuple = unsafe {
         &*(mintuple_addr as *const types_tuple::heaptuple::MinimalTupleData<'_>)
     };
-    sts::sts_puttuple::call(accessor, &meta, tuple)
+    sts::sts_puttuple_handle::call(accessor, &meta, tuple)
 }
 
 /// `SHARED_TUPLESTORE_SINGLE_PASS` (sharedtuplestore.h).

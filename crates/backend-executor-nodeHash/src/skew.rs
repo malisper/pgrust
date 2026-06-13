@@ -244,7 +244,7 @@ pub fn ExecHashSkewTableInsert<'mcx>(
     // The owned model always copies into mcx, so the C shouldFree /
     // heap_free_minimal_tuple bookkeeping is internal to the owner.
     let mut tuple =
-        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple::call(mcx, slot)?;
+        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(mcx, slot)?;
 
     // Create the HashJoinTuple.
     //   hashTupleSize = HJTUPLE_OVERHEAD + tuple->t_len;

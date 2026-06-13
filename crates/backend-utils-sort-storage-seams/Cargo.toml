@@ -17,3 +17,4 @@ types-execparallel = { path = "../types-execparallel" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
+types-datum = { path = "../types-datum" }

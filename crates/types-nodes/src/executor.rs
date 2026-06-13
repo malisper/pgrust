@@ -39,6 +39,9 @@ pub struct TupleTableSlot {
     /// `const TupleTableSlotOps *const tts_ops` — slot implementation
     /// identity (the owned token for the `&TTSOps*` singleton pointer).
     pub tts_ops: TupleSlotKind,
+    /// `ItemPointerData tts_tid` — stored tuple's TID. Set by the AM when a
+    /// tuple is stored; read by recheck paths (e.g. TID-range EvalPlanQual).
+    pub tts_tid: types_tuple::heaptuple::ItemPointerData,
 }
 
 impl Default for TupleTableSlot {
@@ -48,6 +51,7 @@ impl Default for TupleTableSlot {
         TupleTableSlot {
             tts_flags: TTS_FLAG_EMPTY,
             tts_ops: TupleSlotKind::Virtual,
+            tts_tid: types_tuple::heaptuple::ItemPointerData::default(),
         }
     }
 }
