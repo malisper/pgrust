@@ -1571,6 +1571,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-numutils"
+version = "0.0.0"
+dependencies = [
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-regproc-seams"
 version = "0.0.0"
 dependencies = [
@@ -2131,6 +2138,7 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
+ "backend-utils-adt-numutils",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",

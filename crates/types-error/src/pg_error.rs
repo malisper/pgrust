@@ -408,6 +408,31 @@ impl SoftErrorContext {
     }
 }
 
+/// C `ereturn(escontext, errorval, …)` in value form: with a soft-error
+/// context the error is saved into it (full details only when wanted, per
+/// `errsave`'s decision) and `errorval` is returned; without one the error
+/// propagates as a hard error. The full `errsave_start`/`errsave_finish`
+/// driver (error-stack frames, locations, domains) lives in the
+/// error-reporting subsystem; this is the shared shortcut for code that
+/// already holds a complete [`PgError`].
+pub fn ereturn<T>(
+    escontext: Option<&mut SoftErrorContext>,
+    errorval: T,
+    error: PgError,
+) -> PgResult<T> {
+    match escontext {
+        Some(context) => {
+            if context.details_wanted() {
+                context.save(error);
+            } else {
+                context.mark_error_occurred();
+            }
+            Ok(errorval)
+        }
+        None => Err(error),
+    }
+}
+
 impl fmt::Display for PgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
