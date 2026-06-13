@@ -80,3 +80,47 @@ seam_core::seam!(
     /// Frees only; infallible.
     pub fn post_prepare_pgstat_relations()
 );
+
+seam_core::seam!(
+    /// `pgstat_get_slru_index(name)` (`utils/activity/pgstat_slru.c`) — the
+    /// SLRU statistics index for a name (`SLRU_NUM_ELEMENTS - 1`, the "other"
+    /// bucket, when the name is not a built-in SLRU). Pure table lookup;
+    /// infallible.
+    pub fn pgstat_get_slru_index(name: &str) -> i32
+);
+
+seam_core::seam!(
+    /// `pgstat_count_slru_page_zeroed(slru_idx)` (`pgstat_slru.c`) — bump the
+    /// backend-local pending SLRU counter. Infallible.
+    pub fn pgstat_count_slru_page_zeroed(slru_idx: i32)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_slru_page_hit(slru_idx)` (`pgstat_slru.c`). Infallible.
+    pub fn pgstat_count_slru_page_hit(slru_idx: i32)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_slru_page_read(slru_idx)` (`pgstat_slru.c`). Infallible.
+    pub fn pgstat_count_slru_page_read(slru_idx: i32)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_slru_page_written(slru_idx)` (`pgstat_slru.c`). Infallible.
+    pub fn pgstat_count_slru_page_written(slru_idx: i32)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_slru_page_exists(slru_idx)` (`pgstat_slru.c`). Infallible.
+    pub fn pgstat_count_slru_page_exists(slru_idx: i32)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_slru_flush(slru_idx)` (`pgstat_slru.c`). Infallible.
+    pub fn pgstat_count_slru_flush(slru_idx: i32)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_slru_truncate(slru_idx)` (`pgstat_slru.c`). Infallible.
+    pub fn pgstat_count_slru_truncate(slru_idx: i32)
+);

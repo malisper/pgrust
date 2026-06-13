@@ -651,6 +651,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-slru"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-storage-file-seams",
+ "backend-storage-lmgr-lwlock",
+ "backend-storage-sync-seams",
+ "backend-utils-activity-small",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "libc",
+ "types-core",
+ "types-error",
+ "types-pgstat",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-access-transam-subtrans-seams"
 version = "0.0.0"
 dependencies = [
@@ -700,6 +722,13 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-transam-xlogrecovery-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -1540,6 +1569,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
+name = "backend-storage-sync-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-error",
  "types-storage",
 ]

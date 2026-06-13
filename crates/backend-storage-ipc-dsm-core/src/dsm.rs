@@ -507,10 +507,11 @@ fn dsm_cleanup_for_mmap() -> PgResult<()> {
                     .finish(loc("dsm_cleanup_for_mmap"))?;
             }
         }
-        Ok(())
-    })
+        Ok(false)
+    })?;
 
     // Cleanup complete.
+    Ok(())
 }
 
 /// `dsm_postmaster_shutdown(int code, Datum arg)` — at shutdown, iterate the

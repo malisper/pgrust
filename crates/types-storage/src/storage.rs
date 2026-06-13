@@ -69,6 +69,11 @@ impl pg_atomic_uint64 {
     pub fn read(&self) -> types_core::uint64 {
         self.value.load(Ordering::Relaxed)
     }
+
+    /// `pg_atomic_write_u64(ptr, val)`.
+    pub fn write(&self, value: types_core::uint64) {
+        self.value.store(value, Ordering::Relaxed);
+    }
 }
 
 /// `LWLockWaitState` (`storage/lwlock.h`) — the `PGPROC.lwWaiting` state byte
