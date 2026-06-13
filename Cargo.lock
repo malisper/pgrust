@@ -3796,6 +3796,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-ts-small"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-spi-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tsearch",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-tsginidx"
 version = "0.0.0"
 dependencies = [
@@ -4592,6 +4606,7 @@ dependencies = [
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
+ "backend-utils-adt-ts-small",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
