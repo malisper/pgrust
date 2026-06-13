@@ -13,7 +13,14 @@ seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
+types-catalog = { path = "../types-catalog" }
 mcx = { path = "../mcx" }
+libc = "0.2"
+pg-prng = { path = "../pg-prng" }
+backend-utils-error = { path = "../backend-utils-error" }
 # Seam crates this unit OWNS (installs every decl from its own init_seams()).
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+# Per-owner seams for UNPORTED neighbors this unit consumes.
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-activity-stat-seams = { path = "../backend-utils-activity-stat-seams" }
