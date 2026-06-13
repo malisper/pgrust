@@ -241,14 +241,37 @@ fn relation_get_identity_key_bitmap<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::RelationData<'_>,
 ) -> PgResult<Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
-    todo!("relcache seam: relation_get_identity_key_bitmap (derived family)")
+    // Resolve the owned entry and run the derived-family build (own logic over
+    // the store); it yields the replica-identity key columns as offset members.
+    let rd = match crate::core_entry_store::cache_lookup(rel.rd_id) {
+        Some(rd) => rd,
+        None => return Ok(None),
+    };
+    let _members = crate::derived::RelationGetIdentityKeyBitmap(rd)?;
+    // Encoding the offset members into a node `Bitmapset` (the `bms_add_member`
+    // word layout) is node vocabulary owned by `nodes/bitmapset.c`; that encode
+    // lands with the bitmapset owner (seam-and-panic boundary).
+    let _ = mcx;
+    todo!("relcache seam: relation_get_identity_key_bitmap node-encode (bitmapset owner)")
 }
 
 fn relation_get_index_list<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'_>,
 ) -> PgResult<PgVec<'mcx, Oid>> {
-    todo!("relcache seam: relation_get_index_list (derived family)")
+    // Resolve the owned entry and run the derived-family build (own logic).
+    let rd = crate::core_entry_store::cache_lookup(rel.rd_id);
+    let list = match rd {
+        Some(rd) => crate::derived::RelationGetIndexList(rd)?,
+        None => Vec::new(),
+    };
+    // Copy the OID list into the caller's `mcx` (C: `list_copy` in the caller's
+    // context).
+    let mut out = PgVec::new_in(mcx);
+    for oid in list {
+        out.push(oid);
+    }
+    Ok(out)
 }
 
 /* ==========================================================================
