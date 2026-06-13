@@ -44,10 +44,12 @@ pub mod queryenvironment;
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
-    EStateData, EcxtId, ExecProcNodeMtd, ExprContext, ExprContextCallbackFunction,
-    ExprContext_CB, ModifyTableState, Opaque, ParamExecData, PlanStateData, ResultRelInfo, RriId,
-    ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId, T_MaterialState,
+    CurrentOfTid, EStateData, EcxtId, ExecProcNodeMtd, ExecRowMark, ExprContext, FetchedCursorParam,
+    ExprContextCallbackFunction, ExprContext_CB, ModifyTableState, Opaque, ParamExecData,
+    PlanStateData, ResultRelInfo, RowMarkType, RriId, RunningCursorState, ScanDirection,
+    ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, T_MaterialState,
 };
+pub use primnodes::CurrentOfExpr;
 pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,

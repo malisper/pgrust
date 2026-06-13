@@ -10,4 +10,5 @@
 pub mod catalog;
 pub mod catalog_dependency;
 pub mod catalog_shdepend;
+pub mod opclasscmds_catalog;
 pub mod pg_publication;
