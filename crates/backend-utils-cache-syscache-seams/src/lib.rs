@@ -610,6 +610,7 @@ seam_core::seam!(
 );
 
 /* ------------------------------------------------------------------------
+<<<<<<< HEAD
  *  pg_operator / pg_amop / pg_proc reads driven by lsyscache.c's
  *  operator-and-opfamily helpers (backend-utils-cache-lsyscache's
  *  `opfamily_operator` family). All are `SearchSysCache*(OPEROID / AMOPOPID /
@@ -785,4 +786,59 @@ seam_core::seam!(
     /// (`get_transform_fromsql` / `get_transform_tosql`, lsyscache.c).
     /// `Ok(None)` on a cache miss (the C `InvalidOid` return).
     pub fn transform_funcs(typid: Oid, langid: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+/* ------------------------------------------------------------------------
+ *  lsyscache.c `pg_class` / `pg_index` reads (backend-utils-cache-lsyscache,
+ *  `relation` family). Each is a `SearchSysCache1` + `GETSTRUCT` field read +
+ *  `ReleaseSysCache`; a cache miss is `Ok(None)` so the caller applies the
+ *  exact C "not found" return (NULL / '\0' / false / elog).
+ * ------------------------------------------------------------------------ */
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to
+    /// `pstrdup(NameStr(Form_pg_class.relname))` (`get_rel_name`), copied into
+    /// `mcx`. `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the installer
+    /// owns the `ReleaseSysCache`. `Err` includes OOM from the copy.
+    pub fn rel_name<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_class.relkind` (`get_rel_relkind`). `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`); the installer owns the `ReleaseSysCache`.
+    pub fn rel_relkind(relid: Oid) -> PgResult<Option<u8>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_class.relispartition` (`get_rel_relispartition`). `Ok(None)`
+    /// on a cache miss (`!HeapTupleIsValid`); the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn rel_relispartition(relid: Oid) -> PgResult<Option<bool>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(RELOID, ObjectIdGetDatum(relid))` projected to
+    /// `Form_pg_class.relnamespace` (`get_rel_namespace`). `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`); the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn rel_namespace(relid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `GetSysCacheOid2(RELNAMENSP, Anum_pg_class_oid,
+    /// PointerGetDatum(relname), ObjectIdGetDatum(relnamespace))`
+    /// (`get_relname_relid`): the relation's OID or `InvalidOid`. `Err`
+    /// carries the catcache-path `ereport(ERROR)`s.
+    pub fn relname_relid(relname: &str, relnamespace: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid))` projected to
+    /// `Form_pg_index.indisclustered` (`get_index_isclustered`). `Ok(None)` on
+    /// a cache miss (`!HeapTupleIsValid`) so the caller raises the exact
+    /// `elog(ERROR, "cache lookup failed for index %u")`; the installer owns
+    /// the `ReleaseSysCache`.
+    pub fn index_isclustered(index_oid: Oid) -> PgResult<Option<bool>>
 );
