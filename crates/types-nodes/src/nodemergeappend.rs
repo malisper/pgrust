@@ -25,8 +25,9 @@ use crate::nodes::NodeTag;
 /// `T_MergeAppend` (nodes/nodetags.h) — the plan-node tag for a MergeAppend.
 pub const T_MergeAppend: NodeTag = NodeTag(335);
 /// `T_MergeAppendState` (nodes/nodetags.h) — the executor-state node tag.
-/// Value verified against the PostgreSQL 18.3 generated `nodetags.h`.
-pub const T_MergeAppendState: NodeTag = NodeTag(401);
+/// Value verified against the PostgreSQL 18.3 generated `nodetags.h`
+/// (`T_MergeAppendState = 398`).
+pub const T_MergeAppendState: NodeTag = NodeTag(398);
 
 /// `MergeAppend` plan node (plannodes.h):
 ///
