@@ -7138,6 +7138,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-numeric"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-numeric-seams",
+ "common-hashfn",
+ "mcx",
+ "pg-prng",
+ "seam-core",
+ "types-datum",
+ "types-error",
+ "types-numeric",
+ "types-sortsupport",
+]
+
+[[package]]
 name = "backend-utils-adt-numeric-seams"
 version = "0.0.0"
 dependencies = [
@@ -9330,6 +9345,7 @@ dependencies = [
  "backend-utils-adt-format-type",
  "backend-utils-adt-json",
  "backend-utils-adt-multirangetypes",
+ "backend-utils-adt-numeric",
  "backend-utils-adt-numutils",
  "backend-utils-adt-pg-locale-icu",
  "backend-utils-adt-range-selfuncs",
@@ -9746,6 +9762,7 @@ dependencies = [
 name = "types-numeric"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-datum",
 ]
 
