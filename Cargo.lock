@@ -2911,6 +2911,7 @@ dependencies = [
  "backend-utils-adt-varlena-seams",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-misc-stack-depth-seams",
+ "backend-utils-sort-tuplesort-seams",
  "mcx",
  "types-core",
  "types-datum",

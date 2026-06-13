@@ -24,3 +24,4 @@ backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
