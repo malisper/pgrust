@@ -2640,16 +2640,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend-storage-lmgr-deadlock-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-storage",
-]
-
-[[package]]
 name = "backend-storage-lmgr-lmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -2712,20 +2702,10 @@ dependencies = [
 name = "backend-storage-lmgr-proc"
 version = "0.0.0"
 dependencies = [
- "backend-access-transam-xlog-seams",
- "backend-access-transam-xlogrecovery-seams",
- "backend-access-transam-xlogutils-seams",
  "backend-storage-ipc-latch-seams",
- "backend-storage-ipc-standby-seams",
- "backend-storage-lmgr-deadlock-seams",
- "backend-storage-lmgr-lock-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc-seams",
  "backend-tcop-postgres-seams",
- "backend-utils-adt-timestamp-seams",
- "backend-utils-error",
- "backend-utils-init-small-seams",
- "backend-utils-misc-timeout-seams",
  "mcx",
  "seam-core",
  "types-core",
@@ -2733,8 +2713,6 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-stringinfo",
- "types-timeout",
- "types-wal",
 ]
 
 [[package]]

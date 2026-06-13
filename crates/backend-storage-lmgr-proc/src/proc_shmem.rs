@@ -21,8 +21,9 @@ use core::cell::RefCell;
 use core::mem::size_of;
 
 use mcx::Mcx;
-use types_core::{Oid, Size, TransactionId, INVALID_PROC_NUMBER};
+use types_core::{Oid, ProcNumber, Size, TransactionId, INVALID_PROC_NUMBER};
 use types_error::PgResult;
+use types_storage::latch::LatchHandle;
 use types_storage::storage::{
     XidCacheStatus, FP_LOCK_SLOTS_PER_GROUP, LWTRANCHE_LOCK_FASTPATH, NUM_AUXILIARY_PROCS,
     NUM_LOCK_PARTITIONS, NUM_SPECIAL_WORKER_PROCS, PGPROC, PROC_HDR, PROC_WAIT_STATUS_OK,
@@ -313,4 +314,18 @@ pub fn InitProcGlobal(_mcx: Mcx<'_>) -> PgResult<()> {
     });
 
     Ok(())
+}
+
+/// `ProcGlobal->allProcCount` — the total number of `PGPROC` slots in the
+/// array. (Owner accessor for [`crate::proc_misc::ProcSendSignal`]'s range
+/// check; `ProcGlobal` storage belongs to this module.)
+pub(crate) fn all_proc_count() -> u32 {
+    todo!("proc.c: ProcGlobal->allProcCount")
+}
+
+/// `&ProcGlobal->allProcs[procNumber].procLatch` as a `LatchHandle` — the
+/// process latch of the backend owning slot `procNumber`. (Owner accessor for
+/// [`crate::proc_misc::ProcSendSignal`]'s `SetLatch`.)
+pub(crate) fn proc_latch_handle(_procNumber: ProcNumber) -> LatchHandle {
+    todo!("proc.c: &ProcGlobal->allProcs[procNumber].procLatch")
 }

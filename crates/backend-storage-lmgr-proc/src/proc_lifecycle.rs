@@ -33,6 +33,7 @@ use types_core::{
 };
 use types_datum::Datum;
 use types_error::PgResult;
+use types_storage::lock::LOCKMASK;
 use types_storage::storage::{
     LW_WS_NOT_WAITING, PGPROC, PROC_IS_AUTOVACUUM, PROC_WAIT_STATUS_OK,
 };
@@ -520,4 +521,79 @@ pub fn IsWaitingForLock() -> bool {
 #[allow(dead_code)]
 pub(crate) fn my_proc() -> &'static PGPROC {
     seam::my_proc_ref()
+}
+
+// ---- MyProc / PGPROC-array owner accessors --------------------------------
+//
+// `MyProc` and the `ProcGlobal->allProcs[]` array (and the intrusive
+// `lockGroupMembers` lists threaded through it) are owned by this crate but
+// are stood up by `InitProcess` / `proc_shmem::InitProcGlobal`, which have not
+// landed. proc_misc's lock-group logic reaches that state through these
+// accessors (the `my_proc()` convention); each panics until the owner state
+// lands, exactly as the C `MyProc`/`ProcGlobal` globals are undefined before
+// `InitProcGlobal`.
+
+/// `GetNumberFromPGProc(MyProc)` (`MyProcNumber`) — this backend's slot index.
+#[allow(dead_code)]
+pub(crate) fn my_proc_number() -> ProcNumber {
+    todo!("proc.c: GetNumberFromPGProc(MyProc)")
+}
+
+/// `GetNumberFromPGProc(proc)` — the slot index of an arbitrary `PGPROC`
+/// (pointer arithmetic against `ProcGlobal->allProcs` in C).
+#[allow(dead_code)]
+pub(crate) fn proc_number_of(_proc: &PGPROC) -> ProcNumber {
+    todo!("proc.c: GetNumberFromPGProc(proc)")
+}
+
+/// `GetPGProcByNumber(procno)->lockGroupLeader == GetPGProcByNumber(leaderno)`
+/// — whether the proc in slot `procno` has slot `leaderno` as its lock-group
+/// leader.
+#[allow(dead_code)]
+pub(crate) fn proc_lock_group_leader_is(_procno: ProcNumber, _leaderno: ProcNumber) -> bool {
+    todo!("proc.c: GetPGProcByNumber(procno)->lockGroupLeader == GetPGProcByNumber(leaderno)")
+}
+
+/// `GetPGProcByNumber(procno)->lockGroupLeader == NULL`.
+#[allow(dead_code)]
+pub(crate) fn proc_lock_group_leader_is_none(_procno: ProcNumber) -> bool {
+    todo!("proc.c: GetPGProcByNumber(procno)->lockGroupLeader == NULL")
+}
+
+/// `MyProc->lockGroupLeader = GetPGProcByNumber(leaderno)`.
+#[allow(dead_code)]
+pub(crate) fn set_my_proc_lock_group_leader(_leaderno: ProcNumber) {
+    todo!("proc.c: MyProc->lockGroupLeader = GetPGProcByNumber(leaderno)")
+}
+
+/// `dlist_push_head(&GetPGProcByNumber(leaderno)->lockGroupMembers,
+///  &GetPGProcByNumber(memberno)->lockGroupLink)`.
+#[allow(dead_code)]
+pub(crate) fn lock_group_members_push_head(_leaderno: ProcNumber, _memberno: ProcNumber) {
+    todo!("proc.c: dlist_push_head(&leader->lockGroupMembers, &member->lockGroupLink)")
+}
+
+/// `dlist_push_tail(&GetPGProcByNumber(leaderno)->lockGroupMembers,
+///  &GetPGProcByNumber(memberno)->lockGroupLink)`.
+#[allow(dead_code)]
+pub(crate) fn lock_group_members_push_tail(_leaderno: ProcNumber, _memberno: ProcNumber) {
+    todo!("proc.c: dlist_push_tail(&leader->lockGroupMembers, &member->lockGroupLink)")
+}
+
+/// `dlist_foreach(iter, &GetPGProcByNumber(leaderno)->lockGroupMembers)` —
+/// iterate the slot indices of every member of `leaderno`'s lock group
+/// (`dlist_container(PGPROC, lockGroupLink, iter.cur)`).
+#[allow(dead_code)]
+pub(crate) fn lock_group_members_iter(_leaderno: ProcNumber) -> Vec<ProcNumber> {
+    todo!("proc.c: walk GetPGProcByNumber(leaderno)->lockGroupMembers")
+}
+
+/// The `holdMask` of every `PROCLOCK` on
+/// `GetPGProcByNumber(procno)->myProcLocks[partition]`.
+#[allow(dead_code)]
+pub(crate) fn my_proc_locks_hold_masks(
+    _procno: ProcNumber,
+    _partition: usize,
+) -> Vec<LOCKMASK> {
+    todo!("proc.c: hold masks on GetPGProcByNumber(procno)->myProcLocks[partition]")
 }
