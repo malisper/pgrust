@@ -5348,6 +5348,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-file-fd"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-postmaster-startup-seams",
+ "backend-storage-aio-aio-seams",
+ "backend-storage-aio-core-seams",
+ "backend-storage-aio-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-file-seams",
+ "backend-storage-ipc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-stat-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-error",
+ "backend-utils-error-seams",
+ "backend-utils-init-small-seams",
+ "libc",
+ "mcx",
+ "pg-prng",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-guc",
+ "types-storage",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-storage-file-fd-seams"
 version = "0.0.0"
 dependencies = [
@@ -8479,12 +8511,10 @@ dependencies = [
  "backend-postmaster-launch-backend",
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
- "backend-regex-core",
  "backend-replication-logical-conflict",
  "backend-replication-logical-logical",
  "backend-replication-logical-proto",
- "backend-storage-file-buffile",
- "backend-storage-ipc",
+ "backend-storage-file-fd",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
  "backend-storage-ipc-procsignal",
@@ -8500,11 +8530,8 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
- "backend-utils-adt-acl",
- "backend-utils-adt-multirangetypes",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
- "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
@@ -8515,7 +8542,6 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
- "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
