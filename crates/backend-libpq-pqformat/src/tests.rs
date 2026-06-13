@@ -12,12 +12,18 @@ thread_local! {
     /// When true, the conversion fixtures "convert" by uppercasing ASCII and
     /// return `Some`; when false they return `None` (no conversion needed).
     static CONVERT: Cell<bool> = const { Cell::new(false) };
+    /// When true, the transport fixture fails with an `ereport(ERROR)`-style
+    /// `PgError` instead of capturing the message.
+    static PUT_FAIL: Cell<bool> = const { Cell::new(false) };
 }
 
 fn install_fixtures() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
         backend_libpq_pqcomm_seams::pq_putmessage::set(|msgtype, body| {
+            if PUT_FAIL.with(|c| c.get()) {
+                return Err(PgError::error("putmessage failed"));
+            }
             SENT.with(|s| s.borrow_mut().push((msgtype, body.to_vec())));
             Ok(0)
         });
@@ -43,6 +49,7 @@ fn setup() -> Fixture {
     install_fixtures();
     SENT.with(|s| s.borrow_mut().clear());
     CONVERT.with(|c| c.set(false));
+    PUT_FAIL.with(|c| c.set(false));
     Fixture { ctx: mcx::MemoryContext::new("pqformat-test") }
 }
 
@@ -64,7 +71,7 @@ fn message_assembly_roundtrip() {
     pq_sendint64(&mut buf, 0x0102030405060708).unwrap();
     pq_sendbyte(&mut buf, 7).unwrap();
     pq_sendbytes(&mut buf, b"raw").unwrap();
-    pq_endmessage(buf);
+    pq_endmessage(buf).unwrap();
 
     let msgs = sent();
     assert_eq!(msgs.len(), 1);
@@ -81,10 +88,10 @@ fn beginmessage_reuse_and_endmessage_reuse() {
     let f = setup();
     let mut buf = pq_beginmessage(f.ctx.mcx(), b'A').unwrap();
     pq_sendint32(&mut buf, 1).unwrap();
-    pq_endmessage_reuse(&buf);
+    pq_endmessage_reuse(&buf).unwrap();
     pq_beginmessage_reuse(&mut buf, b'B');
     pq_sendint32(&mut buf, 2).unwrap();
-    pq_endmessage_reuse(&buf);
+    pq_endmessage_reuse(&buf).unwrap();
 
     let msgs = sent();
     assert_eq!(msgs[0], (b'A', vec![0, 0, 0, 1]));
@@ -155,17 +162,20 @@ fn typsend_writes_varlena_header() {
     let mut buf = pq_begintypsend(f.ctx.mcx()).unwrap();
     pq_sendbytes(&mut buf, b"payload").unwrap();
     let bytea = pq_endtypsend(buf);
-    let len = bytea.len();
+    let len = bytea.as_bytes().len();
     assert_eq!(len, 4 + 7);
-    assert_eq!(&bytea[..4], ((len as u32) << 2).to_le_bytes());
-    assert_eq!(&bytea[4..], b"payload");
+    assert_eq!(bytea.varsize(), len);
+    assert_eq!(bytea.data(), b"payload");
+    // SET_VARSIZE_4B on this little-endian target: header = len << 2.
+    #[cfg(target_endian = "little")]
+    assert_eq!(&bytea.as_bytes()[..4], ((len as u32) << 2).to_le_bytes());
 }
 
 #[test]
 fn puttextmessage_and_putemptymessage() {
     let f = setup();
     pq_puttextmessage(f.ctx.mcx(), b'N', b"note").unwrap();
-    pq_putemptymessage(b'Z');
+    pq_putemptymessage(b'Z').unwrap();
     CONVERT.with(|c| c.set(true));
     pq_puttextmessage(f.ctx.mcx(), b'N', b"note").unwrap();
 
@@ -173,6 +183,19 @@ fn puttextmessage_and_putemptymessage() {
     assert_eq!(msgs[0], (b'N', b"note\0".to_vec()));
     assert_eq!(msgs[1], (b'Z', vec![]));
     assert_eq!(msgs[2], (b'N', b"NOTE\0".to_vec()));
+}
+
+#[test]
+fn putmessage_errors_propagate() {
+    let f = setup();
+    PUT_FAIL.with(|c| c.set(true));
+    let buf = pq_beginmessage(f.ctx.mcx(), b'P').unwrap();
+    assert_eq!(pq_endmessage(buf).unwrap_err().message(), "putmessage failed");
+    let buf = pq_beginmessage(f.ctx.mcx(), b'P').unwrap();
+    assert!(pq_endmessage_reuse(&buf).is_err());
+    assert!(pq_putemptymessage(b'Z').is_err());
+    assert!(pq_puttextmessage(f.ctx.mcx(), b'N', b"note").is_err());
+    assert!(sent().is_empty());
 }
 
 #[test]

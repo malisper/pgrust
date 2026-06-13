@@ -28,6 +28,7 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
+use types_datum::Bytea;
 use types_error::{
     PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_PROTOCOL_VIOLATION,
 };
@@ -189,18 +190,23 @@ pub fn pq_sendfloat8(buf: &mut StringInfo<'_>, f: f64) -> PgResult<()> {
 /// `pq_endmessage` — send the completed message to the frontend and free the
 /// buffer (consumed; C pfrees `buf->data` and NULLs it).
 ///
-/// No need to complain about any send failure: pqcomm.c already did
-/// (`ereport(COMMERROR)`), and the C caller discards the return value.
-pub fn pq_endmessage(buf: StringInfo<'_>) {
+/// C discards only `pq_putmessage`'s `int` EOF result ("no need to complain
+/// about any failure, since pqcomm.c already did" — `ereport(COMMERROR)`);
+/// any `ereport(ERROR)` underneath the putmessage method still propagates,
+/// so this returns `PgResult<()>` and discards only the `Ok` value.
+pub fn pq_endmessage(buf: StringInfo<'_>) -> PgResult<()> {
     // msgtype was saved in the cursor field
-    let _ = pq_putmessage::call(buf.cursor as u8, &buf.data);
+    let _eof = pq_putmessage::call(buf.cursor as u8, &buf.data)?;
     // pfree(buf->data) on drop
+    Ok(())
 }
 
 /// `pq_endmessage_reuse` — send the completed message but do *not* free the
-/// buffer, allowing reuse with [`pq_beginmessage_reuse`].
-pub fn pq_endmessage_reuse(buf: &StringInfo<'_>) {
-    let _ = pq_putmessage::call(buf.cursor as u8, &buf.data);
+/// buffer, allowing reuse with [`pq_beginmessage_reuse`]. Same failure
+/// surface as [`pq_endmessage`].
+pub fn pq_endmessage_reuse(buf: &StringInfo<'_>) -> PgResult<()> {
+    let _eof = pq_putmessage::call(buf.cursor as u8, &buf.data)?;
+    Ok(())
 }
 
 // ===========================================================================
@@ -282,32 +288,23 @@ fn unsupported_integer_size(b: i32) -> PgError {
 // typsend support
 // ===========================================================================
 
-/// `VARHDRSZ` (`c.h`): the 4-byte varlena length word.
-const VARHDRSZ: usize = 4;
-
 /// `pq_begintypsend` — initialize for constructing a bytea result: a fresh
 /// buffer with four bytes reserved for the bytea length word.
 pub fn pq_begintypsend(mcx: Mcx<'_>) -> PgResult<StringInfo<'_>> {
     let mut buf = init_string_info(mcx)?;
     // Reserve four bytes for the bytea length word
-    append_binary(&mut buf, &[0, 0, 0, 0])?;
+    append_binary(&mut buf, &[0u8; types_datum::VARHDRSZ])?;
     Ok(buf)
 }
 
 /// `pq_endtypsend` — finish constructing a bytea result.
 ///
-/// Returns the buffer's bytes as the complete varlena image: the 4-byte
-/// length word (written with `SET_VARSIZE`, i.e. `len << 2` as a
-/// little-endian uint32 on this little-endian target) followed by the
-/// payload. C returns `buf->data` itself as the palloc'd `bytea *`.
-pub fn pq_endtypsend(buf: StringInfo<'_>) -> PgVec<'_, u8> {
-    let mut data = buf.data;
-    let len = data.len();
-    // Assert(buf->len >= VARHDRSZ); SET_VARSIZE(result, buf->len);
-    assert!(len >= VARHDRSZ);
-    let header = ((len as u32) << 2).to_le_bytes();
-    data[..VARHDRSZ].copy_from_slice(&header);
-    data
+/// C stamps the reserved length word (`SET_VARSIZE(result, buf->len)`, with
+/// `Assert(buf->len >= VARHDRSZ)`) and returns `buf->data` itself as the
+/// palloc'd `bytea *`; here that is [`Bytea::from_image`] over the buffer's
+/// storage, which owns the varatt.h header encoding.
+pub fn pq_endtypsend(buf: StringInfo<'_>) -> Bytea<'_> {
+    Bytea::from_image(buf.data)
 }
 
 // ===========================================================================
@@ -321,10 +318,11 @@ pub fn pq_endtypsend(buf: StringInfo<'_>) -> PgVec<'_, u8> {
 pub fn pq_puttextmessage(mcx: Mcx<'_>, msgtype: u8, s: &[u8]) -> PgResult<()> {
     match pg_server_to_client::call(mcx, s)? {
         Some(mut p) => {
-            // (void) pq_putmessage(msgtype, p, strlen(p) + 1); pfree(p);
+            // (void) pq_putmessage(msgtype, p, strlen(p) + 1); pfree(p) —
+            // C discards only the int EOF result.
             p.try_reserve(1).map_err(|_| mcx.oom(1))?;
             p.push(0);
-            let _ = pq_putmessage::call(msgtype, &p);
+            let _eof = pq_putmessage::call(msgtype, &p)?;
         }
         None => {
             // (void) pq_putmessage(msgtype, str, slen + 1) — the C body
@@ -333,15 +331,18 @@ pub fn pq_puttextmessage(mcx: Mcx<'_>, msgtype: u8, s: &[u8]) -> PgResult<()> {
             let mut body = mcx::vec_with_capacity_in::<u8>(mcx, s.len() + 1)?;
             body.extend_from_slice(s);
             body.push(0);
-            let _ = pq_putmessage::call(msgtype, &body);
+            let _eof = pq_putmessage::call(msgtype, &body)?;
         }
     }
     Ok(())
 }
 
 /// `pq_putemptymessage` — convenience routine for a message with empty body.
-pub fn pq_putemptymessage(msgtype: u8) {
-    let _ = pq_putmessage::call(msgtype, &[]);
+/// Same failure surface as [`pq_endmessage`] (C discards only the EOF
+/// result).
+pub fn pq_putemptymessage(msgtype: u8) -> PgResult<()> {
+    let _eof = pq_putmessage::call(msgtype, &[])?;
+    Ok(())
 }
 
 // ===========================================================================
