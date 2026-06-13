@@ -2103,10 +2103,129 @@ fn oid_output_function_call_seam<'mcx>(
     bytes_into(mcx, s.as_bytes())
 }
 
-/// Install every seam in `backend-utils-fmgr-fmgr-seams`.
+/// `FunctionCall1Coll(flinfo, collation, arg1)` seam: the caller's resolved
+/// `FmgrInfo` cannot cross, so re-resolve by `function_id` (C: `fmgr_info`) and
+/// invoke under `collation`. The transient resolution context is dropped on
+/// return; the result `Datum` is by-value or a per-backend registry token.
+fn function_call1_coll_seam(function_id: Oid, collation: Oid, arg1: Datum) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("function_call1_coll");
+    oid_function_call1_coll(ctx.mcx(), function_id, collation, arg1)
+}
+
+/// `FunctionCall2Coll(flinfo, collation, arg1, arg2)` seam (re-resolve by OID).
+fn function_call2_coll_seam(
+    function_id: Oid,
+    collation: Oid,
+    arg1: Datum,
+    arg2: Datum,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("function_call2_coll");
+    oid_function_call2_coll(ctx.mcx(), function_id, collation, arg1, arg2)
+}
+
+/// `FunctionCall3(flinfo, arg1, arg2, arg3)` seam: three non-collation arguments
+/// under the default (invalid) collation (C: `FunctionCall3Coll(flinfo,
+/// InvalidOid, ...)`), re-resolved by OID.
+fn function_call3_seam(
+    function_id: Oid,
+    arg1: Datum,
+    arg2: Datum,
+    arg3: Datum,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("function_call3");
+    oid_function_call3_coll(ctx.mcx(), function_id, InvalidOid, arg1, arg2, arg3)
+}
+
+/// `OutputFunctionCall(flinfo, val)` seam: the resolved `FmgrInfo` carries only
+/// the lookup `fn_oid`, so re-resolve and invoke the type's text output function
+/// on the per-attribute value, returning the cstring's bytes (no terminating
+/// NUL) charged to `mcx`.
+fn output_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    flinfo: &types_core::fmgr::FmgrInfo,
+    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    oid_output_function_call_seam(mcx, flinfo.fn_oid, val)
+}
+
+/// `SendFunctionCall(flinfo, val)` seam: re-resolve by the `FmgrInfo`'s lookup
+/// `fn_oid` and invoke the type's binary send function, returning the `bytea`
+/// PAYLOAD bytes (varlena header stripped) charged to `mcx`.
+fn send_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    flinfo: &types_core::fmgr::FmgrInfo,
+    val: &types_tuple::backend_access_common_heaptuple::TupleValue<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    oid_send_function_call_seam(mcx, flinfo.fn_oid, val)
+}
+
+/// `OidInputFunctionCall(functionId, str, typioparam, typmod)` seam used by
+/// bootstrap's `InsertOneValue`: one-shot lookup + call of a type's text input
+/// function on `str_`. A by-reference result is minted into the per-backend
+/// [`datum_ref_registry`] (the owned `PointerGetDatum(palloc'd result)`); the
+/// returned `Datum` is that token (or the by-value word).
+fn oid_input_function_call_seam(
+    function_id: Oid,
+    str_: &str,
+    typioparam: Oid,
+    typmod: i32,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("oid_input_function_call");
+    oid_input_function_call_typed(ctx.mcx(), function_id, Some(str_), typioparam, typmod)
+}
+
+/// `OidOutputFunctionCall(functionId, val)` seam over a bare `Datum` (bootstrap's
+/// `InsertOneValue` DEBUG4 trace): one-shot lookup + call of a type's text output
+/// function on the `Datum` just built. A by-reference `Datum` is a
+/// [`datum_ref_registry`] token (probed via the registry); a by-value `Datum` is
+/// the literal word. Returns the rendered cstring (no NUL) as a `PgString` in
+/// `mcx`.
+fn oid_output_function_call_datum_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    function_id: Oid,
+    val: Datum,
+) -> PgResult<PgString<'mcx>> {
+    let resolved = fmgr_info(mcx, function_id)?;
+    // A by-reference `Datum` is a token into the per-backend payload table; a
+    // by-value `Datum` is the literal word. Probe the table to decide which
+    // boundary arm the output function expects.
+    let s = match datum_ref_registry::fetch(val) {
+        Ok(payload) => output_function_call_typed(
+            mcx,
+            &resolved.resolution,
+            resolved.finfo,
+            FmgrArg::Ref(&payload),
+        )?,
+        Err(_) => output_function_call_typed(
+            mcx,
+            &resolved.resolution,
+            resolved.finfo,
+            FmgrArg::ByVal(val),
+        )?,
+    };
+    PgString::from_str_in(&s, mcx)
+}
+
+/// Install every seam in `backend-utils-fmgr-fmgr-seams` whose implementation is
+/// `fmgr.c`'s own logic.
+///
+/// `render_slot_columns` (`ri_triggers.c`'s violator-column rendering) and
+/// `call_bgworker_entrypoint` (the bgworker library/function dispatch) are
+/// declared in this seam crate but are NOT `fmgr.c` logic; they are installed by
+/// their real owners (`backend-utils-adt-ri-triggers` / loader) and panic until
+/// those land, which is the correct frontier state.
 pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::fmgr_info_check::set(fmgr_info_check);
     backend_utils_fmgr_fmgr_seams::oid_function_call_1_deflist::set(oid_function_call_1_deflist);
     backend_utils_fmgr_fmgr_seams::oid_send_function_call::set(oid_send_function_call_seam);
     backend_utils_fmgr_fmgr_seams::oid_output_function_call::set(oid_output_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::function_call1_coll::set(function_call1_coll_seam);
+    backend_utils_fmgr_fmgr_seams::function_call2_coll::set(function_call2_coll_seam);
+    backend_utils_fmgr_fmgr_seams::function_call3::set(function_call3_seam);
+    backend_utils_fmgr_fmgr_seams::output_function_call::set(output_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::send_function_call::set(send_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::oid_input_function_call::set(oid_input_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::set(
+        oid_output_function_call_datum_seam,
+    );
 }
