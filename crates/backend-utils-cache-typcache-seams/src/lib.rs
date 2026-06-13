@@ -33,6 +33,58 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(element_type, TYPECACHE_EQ_OPR_FINFO)->eq_opr_finfo.fn_oid`
+    /// (typcache.c): resolve the OID of `element_type`'s default equality
+    /// operator's underlying function (the cached `eq_opr_finfo`), as
+    /// `array_eq` / `arrayoverlap` / `array_contain_compare` use it. Returns
+    /// `InvalidOid` (0) when the type has no equality operator (the C then
+    /// `ereport(ERROR, ERRCODE_UNDEFINED_FUNCTION)`; the caller does that
+    /// check). `Err` carries the typcache lookup surface
+    /// (`ERRCODE_UNDEFINED_OBJECT`, "type ... does not exist").
+    pub fn lookup_element_eq_opr(
+        element_type: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)->cmp_proc_finfo.fn_oid`
+    /// (typcache.c): resolve the OID of `element_type`'s btree comparison
+    /// support function (the cached `cmp_proc_finfo`), as `array_cmp` /
+    /// `btarraycmp` use it. Returns `InvalidOid` (0) when the type has no
+    /// comparison function (the C then `ereport(ERROR,
+    /// ERRCODE_UNDEFINED_FUNCTION)`; the caller does that check). `Err` carries
+    /// the typcache lookup surface.
+    pub fn lookup_element_cmp_proc(
+        element_type: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(element_type, TYPECACHE_HASH_PROC_FINFO)->hash_proc_finfo.fn_oid`
+    /// (typcache.c): resolve the OID of `element_type`'s hash support function
+    /// (the cached `hash_proc_finfo`), as `hash_array` uses it. Returns
+    /// `InvalidOid` (0) when the type has no hash function; `hash_array`'s
+    /// `RECORDOID` special case substitutes `F_HASH_RECORD` itself. `Err`
+    /// carries the typcache lookup surface.
+    pub fn lookup_element_hash_proc(
+        element_type: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(element_type, TYPECACHE_HASH_EXTENDED_PROC_FINFO)->hash_extended_proc_finfo.fn_oid`
+    /// (typcache.c): resolve the OID of `element_type`'s extended (64-bit,
+    /// seeded) hash support function (the cached `hash_extended_proc_finfo`),
+    /// as `hash_array_extended` uses it. Returns `InvalidOid` (0) when the type
+    /// has no extended hash function (the C then `ereport(ERROR,
+    /// ERRCODE_UNDEFINED_FUNCTION)`; the caller does that check). `Err` carries
+    /// the typcache lookup surface.
+    pub fn lookup_element_hash_extended_proc(
+        element_type: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
     /// `AtEOXact_TypeCache()`.
     pub fn at_eoxact_type_cache()
 );
