@@ -371,6 +371,24 @@ pub struct VariableSetStmt {
     pub location: ParseLoc,
 }
 
+/// `typedef enum DiscardMode` (`nodes/parsenodes.h`) — verified against
+/// PostgreSQL 18.3 (`DISCARD { ALL | PLANS | SEQUENCES | TEMP }`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscardMode {
+    DISCARD_ALL,
+    DISCARD_PLANS,
+    DISCARD_SEQUENCES,
+    DISCARD_TEMP,
+}
+
+/// `typedef struct DiscardStmt` (`nodes/parsenodes.h`). The C `NodeTag type`
+/// header field carries no information for the dispatcher (it switches solely
+/// on `target`) and there is no `NodeTag` enum in this tree, so it is dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiscardStmt {
+    pub target: DiscardMode,
+}
+
 /// `typedef struct DropRoleStmt` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DropRoleStmt {
