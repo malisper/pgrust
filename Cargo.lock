@@ -6043,7 +6043,6 @@ dependencies = [
  "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
- "backend-access-transam-xlogutils",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
