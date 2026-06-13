@@ -17,9 +17,16 @@
 //! per-backend registry here. C's `pcxt_list` `dlist` of live contexts becomes
 //! an ordered list of handles over a slab of contexts.
 //!
-//! The DSM segment is owned here as a byte buffer; `shm_toc` estimate/allocate/
-//! insert/lookup and the typed chunk store/load helpers operate on it. A
-//! [`SerializeCursor`] is `(ctx_slot << 32) | offset` into that buffer.
+//! The DSM segment is a *real* `dsm-core` segment: `pcxt.seg` carries the real
+//! [`DsmSegmentId`] and the context owns the [`DsmSegment`] RAII guard (or, for
+//! the no-worker fallback, a `TopMemoryContext`-allocated private buffer). The
+//! `shm_toc` estimate/allocate/insert/lookup helpers delegate to a real
+//! [`ShmToc`] built over the segment base. A [`SerializeCursor`] is
+//! `(ctx_slot << 32) | offset`, where `offset` is now the real segment-relative
+//! byte offset the `ShmToc` hands back (preserving the execParallel-visible
+//! contract while the chunk addresses are real). The typed chunk payloads still
+//! live in per-(slot,offset) side tables here; reshaping those into in-segment
+//! `repr(C)` writes is the follow-up `shm-toc-address` family's job.
 //!
 //! Everything genuinely external (DSM creation, `shm_mq`, background workers,
 //! the latch/wait layer, the transaction/snapshot/GUC/namespace/relmapper/
@@ -33,10 +40,16 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+use std::alloc::Layout;
 use std::cell::RefCell;
+use std::ptr::NonNull;
 
+use backend_storage_ipc_dsm_core::dsm::{
+    dsm_create, dsm_segment_address, DsmSegment, DsmSegmentId, DSM_CREATE_NULL_IF_MAXSEGMENTS,
+};
+use backend_storage_ipc_shm_toc::{shm_toc_estimate, ShmToc};
 use backend_utils_error::{elog, ereport, PgResult};
-use mcx::Mcx;
+use mcx::{Allocator, Mcx};
 use types_core::{pid_t, Size, SubTransactionId, XLogRecPtr};
 use types_datum::Datum;
 use types_error::{
@@ -52,6 +65,7 @@ use types_parallel::{
     dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState, ShmMqHandleHandle,
     ShmMqResult,
 };
+use types_storage::storage::shm_toc_estimator;
 
 use backend_access_transam_parallel_rt_seams as rt;
 
@@ -147,25 +161,21 @@ impl ParallelWorkerInfo {
     }
 }
 
-/// A live `shm_toc` over a context's DSM buffer: a magic + the key→chunk table.
-#[derive(Clone, Debug, Default)]
-struct ShmToc {
-    /// `(key, offset, nbytes)` of each inserted chunk.
-    entries: Vec<(u64, usize, usize)>,
-    /// Next free offset in the buffer (chunks allocated bump-style, BUFFERALIGN'd).
-    alloc_cursor: usize,
+/// A `TopMemoryContext`-allocated private buffer backing the `shm_toc` when no
+/// workers are budgeted (C: `pcxt->private_memory = MemoryContextAlloc(...)`).
+/// Holds the raw allocation so `DestroyParallelContext`'s `pfree` can return it.
+struct PrivateSeg {
+    ptr: NonNull<u8>,
+    layout: Layout,
 }
 
-/// `shm_toc_estimator` (storage/shm_toc.h:38-42) — accumulated estimate.
-#[derive(Clone, Copy, Debug, Default)]
-struct Estimator {
-    space_for_chunks: Size,
-    number_of_keys: Size,
-}
+// SAFETY: the parallel registry is thread-local (the `G` thread_local), so the
+// pointer never crosses threads; `NonNull` is `!Send`/`!Sync` only out of
+// caution. The buffer is a backend-private `MemoryContextAlloc` allocation.
+unsafe impl Send for PrivateSeg {}
 
 /// A parallel execution context (`ParallelContext`, access/parallel.h:30-46)
-/// plus the DSM buffer this subsystem owns for it.
-#[derive(Clone, Debug)]
+/// plus the real DSM segment / private buffer this subsystem owns for it.
 struct ParallelContext {
     subid: SubTransactionId,
     nworkers: i32,
@@ -175,14 +185,20 @@ struct ParallelContext {
     function_name: String,
     /// `ErrorContextCallback *error_context_stack` — opaque pointer handle.
     error_context_stack: usize,
-    estimator: Estimator,
-    /// `dsm_segment *seg` (NULL when running in private memory).
+    /// `shm_toc_estimator estimator` (`storage/shm_toc.h`).
+    estimator: shm_toc_estimator,
+    /// `dsm_segment *seg` (NULL when running in private memory). Carries the
+    /// real [`DsmSegmentId`] (opacity-inherited: the handle value *is* the id).
     seg: DsmSegmentHandle,
-    /// `void *private_memory` base handle (0 == NULL).
-    private_memory: usize,
-    /// The DSM (or private) byte buffer backing the `shm_toc`.
-    buffer: Vec<u8>,
-    toc: ShmToc,
+    /// The real `DsmSegment` RAII guard — owns the segment's mapping until the
+    /// context is destroyed (C: `pcxt->seg`).
+    seg_guard: Option<DsmSegment>,
+    /// `void *private_memory` — the no-worker fallback backing buffer.
+    private_memory: Option<PrivateSeg>,
+    /// The real `shm_toc` over the segment (or private) base, plus that base
+    /// address (so the offset<->address helpers can relativize chunks).
+    toc: Option<ShmToc>,
+    toc_base: usize,
     /// `ParallelWorkerInfo *worker` — empty until `InitializeParallelDSM`.
     worker: Vec<ParallelWorkerInfo>,
     nknown_attached_workers: i32,
@@ -307,11 +323,18 @@ fn toc_slot(toc: ExecShmToc) -> usize {
     toc.0
 }
 
-/// `BUFFERALIGN` (c.h) — align to `MAXIMUM_ALIGNOF`-padded 8 KB buffer line; the
-/// shm_toc rounds chunk sizes up to `BUFFERALIGN`.
-const BUFFER_ALIGNMENT: usize = 64;
-fn buffer_align(n: usize) -> usize {
-    (n + BUFFER_ALIGNMENT - 1) & !(BUFFER_ALIGNMENT - 1)
+/// The leader-side `DsmSegmentHandle` carries the real [`DsmSegmentId`]: the
+/// handle value *is* `DsmSegmentId::as_u64()` (opacity-inherited), and `0`
+/// remains the NULL sentinel because `dsm-core` never hands out id `0`
+/// (`DSM_NEXT_ID` starts at 1).
+fn seg_handle_of(id: DsmSegmentId) -> DsmSegmentHandle {
+    DsmSegmentHandle(id.as_u64() as usize)
+}
+// Used by the runtime test (and the worker-side follow-up family); the inverse
+// of `seg_handle_of`, recovering the real id from the opacity-inherited handle.
+#[cfg_attr(not(test), allow(dead_code))]
+fn seg_id_of(seg: DsmSegmentHandle) -> DsmSegmentId {
+    DsmSegmentId::from_u64(seg.0 as u64)
 }
 
 /// `shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false)` missing — the corruption
@@ -347,65 +370,86 @@ fn estimator_slot_of(_e: ShmTocEstimatorHandle) -> usize {
     _e.0
 }
 
+/// `shm_toc_estimate_chunk(&pcxt->estimator, sz)` — delegates to the real
+/// `shm-toc` estimator inline. `space_for_chunks += BUFFERALIGN(sz)`; an
+/// `add_size` overflow `ereport(ERROR)`s in C. The execParallel contract is
+/// infallible here and the requests are bounded, so an overflow is a
+/// programming error: panic loudly (matches the `ereport(ERROR)` non-return).
 fn shm_toc_estimate_chunk(e: ShmTocEstimatorHandle, sz: Size) {
     with_globals(|g| {
         let c = g.get_mut(ParallelContextHandle(estimator_slot_of(e)));
-        // shm_toc_estimate: space_for_chunks += BUFFERALIGN(nbytes).
-        c.estimator.space_for_chunks += buffer_align(sz);
+        backend_storage_ipc_shm_toc::shm_toc_estimate_chunk(&mut c.estimator, sz)
+            .expect("shm_toc_estimate_chunk overflow");
     });
 }
 
+/// `shm_toc_estimate_keys(&pcxt->estimator, nkeys)`.
 fn shm_toc_estimate_keys(e: ShmTocEstimatorHandle, nkeys: i32) {
     with_globals(|g| {
         let c = g.get_mut(ParallelContextHandle(estimator_slot_of(e)));
-        c.estimator.number_of_keys += nkeys as Size;
+        backend_storage_ipc_shm_toc::shm_toc_estimate_keys(&mut c.estimator, nkeys as Size)
+            .expect("shm_toc_estimate_keys overflow");
     });
 }
 
-/// `shm_toc_allocate(toc, nbytes)` — bump-allocate a BUFFERALIGN'd chunk.
-fn shm_toc_allocate(toc: ExecShmToc, nbytes: Size) -> SerializeCursor {
+/// Run `f` on the live real `ShmToc` and segment base for the context owning
+/// `toc`. Panics on a `toc` for a context whose DSM has not been created
+/// (a programming error — `shm_toc_*` is never called before the segment is
+/// established, mirroring C's `shm_toc_allocate(pcxt->toc, ...)` after
+/// `shm_toc_create`).
+fn with_toc<R>(toc: ExecShmToc, f: impl FnOnce(&ShmToc, usize) -> R) -> R {
     with_globals(|g| {
-        let slot = toc_slot(toc);
-        let c = g.get_mut(ParallelContextHandle(slot));
-        let offset = c.toc.alloc_cursor;
-        let nalloc = buffer_align(nbytes);
-        let end = offset + nalloc;
-        if end > c.buffer.len() {
-            c.buffer.resize(end, 0);
-        }
-        c.toc.alloc_cursor = end;
-        make_cursor(slot, offset)
+        let c = g.get(ParallelContextHandle(toc_slot(toc)));
+        let real = c.toc.expect("shm_toc not yet created for parallel context");
+        f(&real, c.toc_base)
     })
 }
 
+/// `shm_toc_allocate(toc, nbytes)` — delegate to the real `ShmToc`; return the
+/// chunk as a `(slot, offset)` cursor (offset relative to the real base, so the
+/// execParallel-visible `SerializeCursor` contract is preserved).
+///
+/// The real `shm_toc_allocate` `ereport(ERROR)`s ("out of shared memory") on
+/// exhaustion; the segment is sized exactly by `shm_toc_estimate`, so this
+/// cannot happen in correct operation. The execParallel contract is infallible,
+/// so an allocation failure is a programming error: panic loudly (matches the
+/// `ereport(ERROR)` non-return).
+fn shm_toc_allocate(toc: ExecShmToc, nbytes: Size) -> SerializeCursor {
+    let slot = toc_slot(toc);
+    let offset = with_toc(toc, |real, base| {
+        let ptr = real
+            .allocate(nbytes)
+            .expect("shm_toc_allocate out of shared memory");
+        (ptr.as_ptr() as usize) - base
+    });
+    make_cursor(slot, offset)
+}
+
+/// `shm_toc_insert(toc, key, address)` — relativize the cursor to the real base
+/// and register it in the real in-segment entry table.
 fn shm_toc_insert(toc: ExecShmToc, key: u64, address: SerializeCursor) {
-    with_globals(|g| {
-        let slot = toc_slot(toc);
-        let (_aslot, offset) = cursor_parts(address);
-        let c = g.get_mut(ParallelContextHandle(slot));
-        c.toc.entries.push((key, offset, 0));
+    let (_aslot, offset) = cursor_parts(address);
+    with_toc(toc, |real, base| {
+        let addr = NonNull::new((base + offset) as *mut u8)
+            .expect("shm_toc chunk address is non-null");
+        // SAFETY: `addr` is a chunk previously handed out by `real.allocate`,
+        // so it lies within the segment, strictly past the TOC start.
+        unsafe { real.insert(key, addr) }.expect("shm_toc_insert out of shared memory");
     });
 }
 
-/// `shm_toc_lookup(toc, key, noError)` — `None` when `noError` and absent.
+/// `shm_toc_lookup(toc, key, noError)` — `None` when `noError` and absent. The
+/// chunk address is returned as a `(slot, offset)` cursor against the real base.
 fn shm_toc_lookup(toc: ExecShmToc, key: u64, no_error: bool) -> Option<SerializeCursor> {
-    with_globals(|g| {
-        let slot = toc_slot(toc);
-        let c = g.get(ParallelContextHandle(slot));
-        match c.toc.entries.iter().find(|(k, _, _)| *k == key) {
-            Some((_, offset, _)) => Some(make_cursor(slot, *offset)),
-            None => {
-                if no_error {
-                    None
-                } else {
-                    // shm_toc_lookup elog(ERROR) on missing key. The execParallel
-                    // contract is infallible here, so a missing required key is a
-                    // programming error: panic loudly (matches elog(ERROR) which
-                    // never returns).
-                    panic!("could not find key {key:#x} in shm TOC");
-                }
-            }
-        }
+    let slot = toc_slot(toc);
+    with_toc(toc, |real, base| {
+        // shm_toc_lookup elog(ERROR) on a missing required key. The execParallel
+        // contract is infallible, so a missing required key is a programming
+        // error: the `?`-less `expect` matches elog(ERROR) which never returns.
+        let found = real
+            .lookup(key, no_error)
+            .expect("shm_toc_lookup on missing required key");
+        found.map(|ptr| make_cursor(slot, (ptr.as_ptr() as usize) - base))
     })
 }
 
@@ -606,6 +650,8 @@ fn pcxt_seg(pcxt: ParallelContextHandle) -> Option<ExecDsmSeg> {
         if c.seg.is_null() {
             None
         } else {
+            // The execParallel-visible `DsmSegmentHandle` carries the same real
+            // id value (no contract change; both are the segment's identity).
             Some(ExecDsmSeg(c.seg.0))
         }
     })
@@ -686,11 +732,12 @@ pub fn create_parallel_context<'mcx>(
         library_name,
         function_name,
         error_context_stack: rt::error_context_stack::call()?,
-        estimator: Estimator::default(),
+        estimator: shm_toc_estimator::default(),
         seg: DsmSegmentHandle::NULL,
-        private_memory: 0,
-        buffer: Vec::new(),
-        toc: ShmToc::default(),
+        seg_guard: None,
+        private_memory: None,
+        toc: None,
+        toc_base: 0,
         worker: Vec::new(),
         nknown_attached_workers: 0,
         known_attached_workers: Vec::new(),
@@ -708,20 +755,85 @@ pub fn create_parallel_context<'mcx>(
 // InitializeParallelDSM (parallel.c:210-501).
 // ===========================================================================
 
-/// Fallibly allocate the zeroed `segsize`-byte buffer that backs the TOC.
+/// Alignment for the no-worker private buffer: it backs an `InSegmentShmToc`
+/// header (laid out at the buffer start by `ShmToc::create`), so it must be at
+/// least as aligned as that header. The atomic-safety note in `shm_toc.c` wants
+/// `BUFFERALIGN` (`ALIGNOF_BUFFER`, 32); a real `dsm_segment_address` is page
+/// aligned, so we match that floor for the private fallback too.
+const PRIVATE_SEG_ALIGN: usize = 64;
+
+/// Create the DSM segment (or no-worker private buffer) backing `pcxt`'s
+/// `shm_toc`, build the real [`ShmToc`] over its base, and record the segment
+/// id / toc / base in the context. Mirrors the
+/// `segsize = shm_toc_estimate(...)` ... `shm_toc_create(PARALLEL_MAGIC, base,
+/// segsize)` block of `InitializeParallelDSM` (parallel.c:325-339).
 ///
-/// This stands in for the segment storage (`dsm_create` on the worker path,
-/// `MemoryContextAlloc(TopMemoryContext, segsize)` on the no-worker fallback)
-/// until a real cross-process DSM layout lands. `segsize` is caller-controlled
-/// (the estimator total), so the allocation must be fallible: OOM converts to
-/// the context's `mcx.oom(segsize)` (`ERRCODE_OUT_OF_MEMORY` + context name)
-/// rather than aborting the process via `vec![0u8; segsize]`.
-fn alloc_zeroed_buffer(mcx: Mcx<'_>, segsize: usize) -> PgResult<Vec<u8>> {
-    mcx::check_alloc_size(segsize)?;
-    let mut buffer: Vec<u8> = Vec::new();
-    buffer.try_reserve_exact(segsize).map_err(|_| mcx.oom(segsize))?;
-    buffer.resize(segsize, 0);
-    Ok(buffer)
+/// `segsize` is the `shm_toc_estimate` total. When the context budgets workers
+/// we try the real `dsm_create(segsize, DSM_CREATE_NULL_IF_MAXSEGMENTS)`; if it
+/// returns `None` (max segments) we fall back to backend-private memory and
+/// plan for no workers, exactly like the C.
+fn establish_parallel_segment(
+    pcxt: ParallelContextHandle,
+    segsize: Size,
+) -> PgResult<()> {
+    // dsm_create allocates its descriptor in TopMemoryContext (the C global);
+    // the descriptor outlives this (possibly short-lived) caller context.
+    let top = rt::top_memory_context::call();
+
+    let seg: Option<DsmSegment> = if pcxt_nworkers(pcxt) > 0 {
+        dsm_create(segsize, DSM_CREATE_NULL_IF_MAXSEGMENTS, top)?
+    } else {
+        None
+    };
+
+    match seg {
+        Some(seg) => {
+            // The TOC lives in the real DSM segment.
+            let id = seg.id();
+            let base = dsm_segment_address(id);
+            debug_assert!(!base.is_null(), "dsm_segment_address returned NULL");
+            let base_nn = NonNull::new(base).expect("dsm segment base is non-null");
+            // SAFETY: `base` addresses `>= segsize` writable, page-aligned bytes
+            // of the freshly created segment, which outlives the toc handle
+            // (held in the same context as the `DsmSegment` guard).
+            let toc = unsafe { ShmToc::create(PARALLEL_MAGIC, base_nn, segsize) };
+            with_globals(|g| {
+                let c = g.get_mut(pcxt);
+                c.seg = seg_handle_of(id);
+                c.seg_guard = Some(seg);
+                c.toc = Some(toc);
+                c.toc_base = base as usize;
+            });
+        }
+        None => {
+            // No workers (or max segments hit): use backend-private memory.
+            // C: pcxt->private_memory = MemoryContextAlloc(TopMemoryContext,
+            // segsize). Fallible: OOM on the caller-controlled segsize carries
+            // ERRCODE_OUT_OF_MEMORY (the context's oom), not a process abort.
+            mcx::check_alloc_size(segsize)?;
+            let layout = Layout::from_size_align(segsize, PRIVATE_SEG_ALIGN)
+                .expect("valid private-segment layout");
+            let ptr = top
+                .allocate(layout)
+                .map_err(|_| top.oom(segsize))?
+                .cast::<u8>();
+            // MemoryContextAlloc does not zero; shm_toc_create writes the header
+            // and the chunks are filled before use, matching the C.
+            let base_nn = ptr;
+            // SAFETY: `ptr` is a fresh `segsize`-byte allocation aligned to
+            // PRIVATE_SEG_ALIGN (>= the header alignment), live until the
+            // context frees it in DestroyParallelContext.
+            let toc = unsafe { ShmToc::create(PARALLEL_MAGIC, base_nn, segsize) };
+            with_globals(|g| {
+                let c = g.get_mut(pcxt);
+                c.nworkers = 0;
+                c.private_memory = Some(PrivateSeg { ptr, layout });
+                c.toc = Some(toc);
+                c.toc_base = ptr.as_ptr() as usize;
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Establish the dynamic shared memory segment for a parallel context and copy
@@ -806,38 +918,13 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
         shm_toc_estimate_keys(est, 1);
     }
 
-    // Create DSM and initialize TOC. If no workers, use backend-private memory.
-    // Also fall back if dsm_create hits the max-segments limit.
-    let segsize = with_globals(|g| {
-        let c = g.get(pcxt);
-        c.estimator.space_for_chunks
-    });
-    if pcxt_nworkers(pcxt) > 0 {
-        let seg = rt::dsm_create_null_if_maxsegments::call(segsize)?;
-        with_globals(|g| g.get_mut(pcxt).seg = DsmSegmentHandle(seg.0));
-    }
-    if !with_globals(|g| g.get(pcxt).seg).is_null() {
-        // The TOC lives in the DSM segment; back it with a context buffer.
-        // C: dsm_create(segsize). Fallible alloc: OOM on the caller-controlled
-        // segsize must carry ERRCODE_OUT_OF_MEMORY (mcx.oom), not abort.
-        let buffer = alloc_zeroed_buffer(mcx, segsize)?;
-        with_globals(|g| {
-            let c = g.get_mut(pcxt);
-            c.buffer = buffer;
-            c.toc = ShmToc::default();
-        });
-    } else {
-        let pm = rt::top_memory_context_alloc::call(segsize)?;
-        // C: MemoryContextAlloc(TopMemoryContext, segsize). Same fallible rule.
-        let buffer = alloc_zeroed_buffer(mcx, segsize)?;
-        with_globals(|g| {
-            let c = g.get_mut(pcxt);
-            c.nworkers = 0;
-            c.private_memory = pm;
-            c.buffer = buffer;
-            c.toc = ShmToc::default();
-        });
-    }
+    // Create DSM and initialize with a new table of contents. But if the user
+    // didn't request any workers, just use backend-private memory; also fall
+    // back to private memory (and no workers) if dsm_create hits the
+    // max-segments limit. segsize is the full shm_toc_estimate total (TOC
+    // header + entry array + chunk space), not just the chunk space.
+    let segsize = with_globals(|g| shm_toc_estimate(&g.get(pcxt).estimator))?;
+    establish_parallel_segment(pcxt, segsize)?;
 
     let toc = pcxt_toc(pcxt);
 
@@ -1273,7 +1360,7 @@ pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgRes
     }
 
     let toc = pcxt_toc(pcxt);
-    if !with_globals(|g| g.get(pcxt).buffer.is_empty()) {
+    if with_globals(|g| g.get(pcxt).toc.is_some()) {
         let fps = shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false).ok_or_else(missing_fixed_key)?;
         let last = rt::fps_get_last_xlog_end::call(cursor_parts(fps).1)?;
         if last > rt::xact_last_rec_end::call()? {
@@ -1351,18 +1438,31 @@ pub fn destroy_parallel_context(pcxt: ParallelContextHandle) -> PgResult<()> {
         }
     }
 
-    // If we allocated a shared memory segment, detach it.
-    let seg = with_globals(|g| g.get(pcxt).seg);
-    if !seg.is_null() {
-        rt::dsm_detach::call(seg_to_parallel(seg))?;
-        with_globals(|g| g.get_mut(pcxt).seg = DsmSegmentHandle::NULL);
-    }
+    // If we allocated a shared memory segment, detach it (C: dsm_detach(seg);
+    // seg = NULL). Dropping the real `DsmSegment` guard runs `dsm_detach`.
+    let seg_guard = with_globals(|g| {
+        let c = g.get_mut(pcxt);
+        c.seg = DsmSegmentHandle::NULL;
+        c.toc = None;
+        c.toc_base = 0;
+        c.seg_guard.take()
+    });
+    drop(seg_guard);
 
-    // If this context is in backend-private memory, free that instead.
-    let private_memory = with_globals(|g| g.get(pcxt).private_memory);
-    if private_memory != 0 {
-        rt::pfree::call(private_memory)?;
-        with_globals(|g| g.get_mut(pcxt).private_memory = 0);
+    // If this context is in backend-private memory, free that instead (C:
+    // pfree(private_memory); private_memory = NULL). The buffer was allocated in
+    // TopMemoryContext, so it is freed back there.
+    let private_memory = with_globals(|g| {
+        let c = g.get_mut(pcxt);
+        c.toc = None;
+        c.toc_base = 0;
+        c.private_memory.take()
+    });
+    if let Some(pm) = private_memory {
+        let top = rt::top_memory_context::call();
+        // SAFETY: `pm.ptr`/`pm.layout` are exactly the allocation made from this
+        // same TopMemoryContext in `establish_parallel_segment`, freed once.
+        unsafe { top.deallocate(pm.ptr, pm.layout) };
     }
 
     // We can't finish transaction commit/abort until all workers have exited; in
@@ -1877,4 +1977,227 @@ pub fn init_seams() {
     seams::store_jit_instrumentation_header::set(store_jit_instrumentation_header);
     seams::jit_instrumentation_from_chunk::set(jit_instrumentation_from_chunk);
     seams::shared_jit_num_workers::set(shared_jit_num_workers);
+}
+
+// ===========================================================================
+// Runtime test: the DSM-init core over a REAL dsm-core segment.
+// ===========================================================================
+
+#[cfg(test)]
+mod dsm_substrate_tests {
+    //! Drive `InitializeParallelDSM`'s DSM-init core
+    //! ([`establish_parallel_segment`] + the `shm_toc` allocate/insert/lookup
+    //! helpers) over a *real* `dsm-core` segment, using the merged
+    //! `dsm_test_bringup()` harness (feature `test-bringup`). This proves the
+    //! conversion off the `Vec<u8>` emulation actually creates a real DSM
+    //! segment and that the TOC chunks resolve to real, in-segment addresses —
+    //! the whole point of family `dsm-substrate-convert`.
+
+    use std::sync::{Mutex, Once};
+
+    use backend_storage_ipc_dsm_core::dsm::{dsm_segment_address, dsm_segment_map_length};
+    use backend_storage_ipc_dsm_core::test_bringup::dsm_test_bringup;
+
+    use super::*;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    static INSTALL_TOP_MCX: Once = Once::new();
+
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The `top_memory_context()` seam body for the test: the bring-up's
+    /// `TopMemoryContext` stand-in. `dsm_test_bringup()` is idempotent per
+    /// thread and returns that same thread-local `Mcx<'static>`, so the seam
+    /// (a plain `fn` pointer, no captures) can recover it here.
+    fn test_top_mcx() -> Mcx<'static> {
+        dsm_test_bringup()
+    }
+
+    /// Install the `top_memory_context` seam once for the whole test process
+    /// (seam slots are process-global; a second `set` panics "installed twice").
+    fn install_top_mcx_once() {
+        INSTALL_TOP_MCX.call_once(|| rt::top_memory_context::set(test_top_mcx));
+    }
+
+    /// Push a bare context into the registry directly (the seam-driven
+    /// `create_parallel_context` would need the transaction/error-stack seams,
+    /// which are out of family A's scope). Mirrors the post-`palloc0`
+    /// `ParallelContext` with `nworkers` set.
+    fn new_test_context(nworkers: i32) -> ParallelContextHandle {
+        with_globals(|g| {
+            let slot = g.slots.len();
+            g.slots.push(Some(ParallelContext {
+                subid: 0,
+                nworkers,
+                nworkers_to_launch: nworkers,
+                nworkers_launched: 0,
+                library_name: "postgres".to_string(),
+                function_name: "ParallelQueryMain".to_string(),
+                error_context_stack: 0,
+                estimator: shm_toc_estimator::default(),
+                seg: DsmSegmentHandle::NULL,
+                seg_guard: None,
+                private_memory: None,
+                toc: None,
+                toc_base: 0,
+                worker: Vec::new(),
+                nknown_attached_workers: 0,
+                known_attached_workers: Vec::new(),
+            }));
+            let h = ParallelContextHandle(slot);
+            g.list.insert(0, h);
+            h
+        })
+    }
+
+    /// Tear a test context back down (the registry slot drop + segment detach /
+    /// private-memory free), mirroring `DestroyParallelContext`'s resource
+    /// release without the worker/bgworker seams.
+    fn drop_test_context(pcxt: ParallelContextHandle, top: Mcx<'static>) {
+        with_globals(|g| {
+            if let Some(pos) = g.list.iter().position(|&p| p == pcxt) {
+                g.list.remove(pos);
+            }
+        });
+        let (seg_guard, private_memory) = with_globals(|g| {
+            let c = g.get_mut(pcxt);
+            c.seg = DsmSegmentHandle::NULL;
+            c.toc = None;
+            c.toc_base = 0;
+            (c.seg_guard.take(), c.private_memory.take())
+        });
+        drop(seg_guard);
+        if let Some(pm) = private_memory {
+            // SAFETY: pm was allocated from this same TopMemoryContext.
+            unsafe { top.deallocate(pm.ptr, pm.layout) };
+        }
+        with_globals(|g| {
+            if let Some(slot) = g.slots.get_mut(pcxt.0) {
+                *slot = None;
+            }
+        });
+    }
+
+    /// With workers budgeted, the DSM-init core creates a REAL dsm-core segment,
+    /// builds a real `shm_toc` over its base, and the allocate/insert/lookup
+    /// helpers round-trip chunks to real, in-segment addresses.
+    #[test]
+    fn dsm_init_core_creates_real_segment_and_resolves_chunks() {
+        let _g = guard();
+        let top = dsm_test_bringup();
+        // The DSM-init core reaches TopMemoryContext through this seam; point it
+        // at the bring-up's TopMemoryContext stand-in.
+        install_top_mcx_once();
+
+        let pcxt = new_test_context(/* nworkers */ 2);
+
+        // Estimate: fixed state + one error queue + an entrypoint string, plus
+        // their keys — enough to size a non-trivial segment.
+        let est = pcxt_estimator(pcxt);
+        shm_toc_estimate_chunk(est, core::mem::size_of::<FixedParallelState>());
+        shm_toc_estimate_keys(est, 1);
+        shm_toc_estimate_chunk(est, PARALLEL_ERROR_QUEUE_SIZE * 2);
+        shm_toc_estimate_keys(est, 1);
+        shm_toc_estimate_chunk(est, 32);
+        shm_toc_estimate_keys(est, 1);
+
+        let segsize = with_globals(|g| shm_toc_estimate(&g.get(pcxt).estimator)).unwrap();
+        assert!(segsize >= PARALLEL_ERROR_QUEUE_SIZE * 2);
+
+        // The DSM-init core: real dsm_create + ShmToc::create.
+        establish_parallel_segment(pcxt, segsize).expect("establish_parallel_segment");
+
+        // A real segment was created (no private-memory fallback), and its id is
+        // the real dsm-core id carried by the handle.
+        let (seg_handle, base_recorded, has_guard, no_private) = with_globals(|g| {
+            let c = g.get(pcxt);
+            (c.seg, c.toc_base, c.seg_guard.is_some(), c.private_memory.is_none())
+        });
+        assert!(!seg_handle.is_null(), "expected a real DSM segment");
+        assert!(has_guard, "expected the real DsmSegment guard to be held");
+        assert!(no_private, "expected no private-memory fallback with workers");
+
+        // The recorded base equals the real dsm_segment_address for the id the
+        // handle carries (opacity-inherited: handle value == DsmSegmentId).
+        let id = seg_id_of(seg_handle);
+        let real_base = dsm_segment_address(id);
+        assert!(!real_base.is_null());
+        assert_eq!(base_recorded, real_base as usize);
+        assert!(dsm_segment_map_length(id) >= segsize);
+
+        // Allocate + insert + look up chunks through the real shm_toc; every
+        // resolved chunk must be a real address inside the mapped segment.
+        let toc = pcxt_toc(pcxt);
+        let fps = shm_toc_allocate(toc, core::mem::size_of::<FixedParallelState>());
+        shm_toc_insert(toc, PARALLEL_KEY_FIXED, fps);
+        let eq = shm_toc_allocate(toc, PARALLEL_ERROR_QUEUE_SIZE * 2);
+        shm_toc_insert(toc, PARALLEL_KEY_ERROR_QUEUE, eq);
+
+        let seg_lo = real_base as usize;
+        let seg_hi = seg_lo + segsize;
+        for key in [PARALLEL_KEY_FIXED, PARALLEL_KEY_ERROR_QUEUE] {
+            let found = shm_toc_lookup(toc, key, false).expect("key present");
+            let (slot, offset) = cursor_parts(found);
+            assert_eq!(slot, pcxt.0, "cursor carries the owning context slot");
+            let addr = base_recorded + offset;
+            assert!(
+                addr >= seg_lo && addr < seg_hi,
+                "chunk for key {key:#x} resolves to a real in-segment address"
+            );
+            // The chunk is genuinely writable shared memory.
+            unsafe {
+                let p = addr as *mut u8;
+                p.write(0xAB);
+                assert_eq!(p.read(), 0xAB);
+            }
+        }
+
+        // A missing key with no_error returns None (real shm_toc_lookup).
+        assert!(shm_toc_lookup(toc, PARALLEL_KEY_GUC, true).is_none());
+
+        drop_test_context(pcxt, top);
+    }
+
+    /// With no workers budgeted, the DSM-init core takes the backend-private
+    /// memory fallback: no real DSM segment, a private buffer, and the shm_toc
+    /// still resolves chunks to real addresses inside that buffer.
+    #[test]
+    fn dsm_init_core_no_workers_uses_private_memory() {
+        let _g = guard();
+        let top = dsm_test_bringup();
+        install_top_mcx_once();
+
+        let pcxt = new_test_context(/* nworkers */ 0);
+        let est = pcxt_estimator(pcxt);
+        shm_toc_estimate_chunk(est, core::mem::size_of::<FixedParallelState>());
+        shm_toc_estimate_keys(est, 1);
+
+        let segsize = with_globals(|g| shm_toc_estimate(&g.get(pcxt).estimator)).unwrap();
+        establish_parallel_segment(pcxt, segsize).expect("establish_parallel_segment");
+
+        let (seg_null, has_private, base) = with_globals(|g| {
+            let c = g.get(pcxt);
+            (c.seg.is_null(), c.private_memory.is_some(), c.toc_base)
+        });
+        assert!(seg_null, "no DSM segment when nworkers == 0");
+        assert!(has_private, "expected the private-memory fallback");
+        assert!(base != 0);
+
+        let toc = pcxt_toc(pcxt);
+        let fps = shm_toc_allocate(toc, core::mem::size_of::<FixedParallelState>());
+        shm_toc_insert(toc, PARALLEL_KEY_FIXED, fps);
+        let found = shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false).expect("fixed key present");
+        let (_slot, offset) = cursor_parts(found);
+        let addr = base + offset;
+        assert!(addr >= base && addr < base + segsize);
+        unsafe {
+            let p = addr as *mut u8;
+            p.write(0xCD);
+            assert_eq!(p.read(), 0xCD);
+        }
+
+        drop_test_context(pcxt, top);
+    }
 }

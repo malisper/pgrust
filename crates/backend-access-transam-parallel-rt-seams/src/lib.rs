@@ -29,7 +29,14 @@ use types_parallel::{
 // --- memory contexts (utils/mmgr) ------------------------------------------
 seam_core::seam!(pub fn switch_to_top_transaction_context() -> PgResult<usize>);
 seam_core::seam!(pub fn memory_context_switch_back(saved: usize) -> PgResult<()>);
-seam_core::seam!(pub fn top_memory_context_alloc(size: Size) -> PgResult<usize>);
+/// `TopMemoryContext` (`utils/mmgr/mcxt.c`) — the long-lived backend context
+/// the DSM descriptors that `dsm_create`/`dsm_attach` allocate must live in
+/// (C: the global `TopMemoryContext`; those allocations need `'static`
+/// lifetime, longer than any caller's short-lived `Mcx`).
+seam_core::seam!(pub fn top_memory_context() -> mcx::Mcx<'static>);
+// NOTE: the retired `top_memory_context_alloc(size) -> usize` seam is gone; the
+// no-worker fallback now allocates its private buffer directly in
+// `top_memory_context()` (family `dsm-substrate-convert`).
 seam_core::seam!(pub fn pfree(ptr: usize) -> PgResult<()>);
 seam_core::seam!(pub fn enter_hpm_context() -> PgResult<usize>);
 seam_core::seam!(pub fn leave_hpm_context(saved: usize) -> PgResult<()>);
@@ -48,7 +55,10 @@ seam_core::seam!(pub fn set_interrupt_pending() -> PgResult<()>);
 
 // --- DSM (storage/ipc/dsm.c) ------------------------------------------------
 seam_core::seam!(pub fn get_session_dsm_handle() -> PgResult<dsm_handle>);
-seam_core::seam!(pub fn dsm_create_null_if_maxsegments(segsize: Size) -> PgResult<DsmSegmentHandle>);
+// NOTE: `dsm_create` for the leader's segment is no longer a seam — the merged
+// `dsm-core` `dsm_create` is called directly (family `dsm-substrate-convert`).
+// `top_memory_context()` (above) supplies the `Mcx<'static>` its descriptor
+// needs. The retired `dsm_create_null_if_maxsegments` seam is gone.
 seam_core::seam!(pub fn dsm_attach(handle: dsm_handle) -> PgResult<DsmSegmentHandle>);
 seam_core::seam!(pub fn dsm_detach(seg: DsmSegmentHandle) -> PgResult<()>);
 seam_core::seam!(pub fn dsm_segment_address(seg: DsmSegmentHandle) -> PgResult<usize>);
