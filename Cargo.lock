@@ -1500,6 +1500,7 @@ dependencies = [
 name = "backend-executor-nodeAgg"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-seams",
  "backend-catalog-aclchk-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execGrouping-seams",
