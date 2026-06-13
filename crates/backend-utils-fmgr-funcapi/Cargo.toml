@@ -19,3 +19,8 @@ types-tuple = { path = "../types-tuple" }
 backend-utils-error = { path = "../backend-utils-error" }
 # Inward seam crate this unit OWNS and installs from init_seams().
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+# Neighbor seam crates this unit calls (owned by their respective units):
+#   tuplestore_putvalues — utils/sort/tuplestore.c
+#   cstring_to_text       — utils/adt/varlena.c (CStringGetTextDatum)
+backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }

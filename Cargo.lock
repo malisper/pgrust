@@ -7527,8 +7527,10 @@ dependencies = [
 name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
+ "backend-utils-adt-varlena-seams",
  "backend-utils-error",
  "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-sort-storage-seams",
  "mcx",
  "types-core",
  "types-datum",
