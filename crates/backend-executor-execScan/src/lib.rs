@@ -363,16 +363,22 @@ fn exec_scan_extended<'mcx, N: ScanNode<'mcx>>(
         // If the slot returned by the accessMtd contains NULL, there is nothing
         // more to scan, so return an empty slot --- being careful to use the
         // projection result slot so it has the correct tupleDesc.
-        let Some(slot) = slot else {
+        //   if (TupIsNull(slot))
+        // `TupIsNull` is true both for the C `NULL` return (`None` here) and for
+        // a non-NULL but cleared slot (e.g. the relsubs_done / failed-recheck
+        // branches of ExecScanFetch return `ExecClearTuple(slot)`).
+        if tup_is_null(estate, slot) {
             if has_proj {
                 // return ExecClearTuple(projInfo->pi_state.resultslot);
                 let result_slot = projection_result_slot(node.ss());
                 execTuples::exec_clear_tuple::call(estate.slot_mut(result_slot))?;
                 return Ok(Some(result_slot));
             } else {
-                return Ok(None);
+                // return slot;  (the C returns the empty/NULL slot itself)
+                return Ok(slot);
             }
-        };
+        }
+        let slot = slot.expect("ExecScanExtended: non-null slot after TupIsNull check");
 
         // Place the current tuple into the expr context.
         //   econtext->ecxt_scantuple = slot;
@@ -553,8 +559,12 @@ fn exec_scan_rescan_tablefunc<'mcx>(
 
 /// `exec_scan_indexonly` seam — `ExecScan(&node->ss, IndexOnlyNext,
 /// IndexOnlyRecheck)` for an index-only scan node. The C returns the result
-/// `TupleTableSlot *`; this seam reports whether a qualifying tuple was
-/// produced (the C non-NULL return), matching the declared `bool` contract.
+/// `TupleTableSlot *`; this seam reports whether a *qualifying* tuple was
+/// produced, i.e. `!TupIsNull(slot)`, matching the declared `bool` contract.
+/// (At end of scan the driver returns the cleared projection result slot, so a
+/// plain `is_some()` would wrongly report a tuple — the emptiness test is what
+/// distinguishes "a row" from "end of scan", exactly as the C caller's
+/// `TupIsNull` does.)
 fn exec_scan_indexonly<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -562,5 +572,5 @@ fn exec_scan_indexonly<'mcx>(
     recheck: execScan_seams::IndexOnlyScanRecheckMtd,
 ) -> PgResult<bool> {
     let produced = exec_scan_core(node, access, recheck, estate)?;
-    Ok(produced.is_some())
+    Ok(!tup_is_null(estate, produced))
 }
