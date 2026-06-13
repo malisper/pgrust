@@ -23,6 +23,7 @@ pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
 pub mod nodeforeigncustom;
+pub mod nodegather;
 pub mod nodeindexscan;
 pub mod nodemergejoin;
 pub mod nodes;
@@ -44,6 +45,7 @@ pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_SEMI,
 };
+pub use nodegather::{Gather, GatherStateData};
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};

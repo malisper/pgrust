@@ -39,6 +39,7 @@ pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 pub const T_WorkTableScan: NodeTag = NodeTag(353);
 pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
+pub const T_Gather: NodeTag = NodeTag(368);
 pub const T_Material: NodeTag = NodeTag(360);
 pub const T_Sort: NodeTag = NodeTag(362);
 
@@ -78,6 +79,8 @@ pub enum Node<'mcx> {
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_Gather`.
+    Gather(crate::nodegather::Gather<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -86,6 +89,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(_) => T_Material,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::Gather(_) => T_Gather,
         }
     }
 
@@ -94,6 +98,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::Gather(m) => &m.plan,
         }
     }
 
@@ -108,6 +113,7 @@ impl<'mcx> Node<'mcx> {
         match self {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::Gather(m) => Ok(Node::Gather(m.clone_in(mcx)?)),
         }
     }
 }

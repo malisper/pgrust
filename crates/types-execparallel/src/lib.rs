@@ -240,6 +240,7 @@ pub struct RestoredParam {
 /// `struct ParallelExecutorInfo` (execParallel.h:22-37) — the leader's handle
 /// onto a running parallel subplan. The `tqueue`/`reader` arrays are
 /// `palloc`ed into the per-query context, modeled here as `PgVec<'mcx, _>`.
+#[derive(Debug)]
 pub struct ParallelExecutorInfo<'mcx> {
     /// `PlanState *planstate`.
     pub planstate: PlanStateHandle,
