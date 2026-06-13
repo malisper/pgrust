@@ -1872,6 +1872,7 @@ version = "0.0.0"
 dependencies = [
  "backend-commands-user-seams",
  "backend-utils-error",
+ "mcx",
  "types-authid",
  "types-catalog",
  "types-core",
@@ -1884,6 +1885,7 @@ dependencies = [
 name = "backend-commands-user-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-authid",
  "types-core",

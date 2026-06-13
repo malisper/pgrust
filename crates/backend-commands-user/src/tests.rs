@@ -144,6 +144,12 @@ fn check_createrole_self_grant_keywords() {
         Ok(Some(raw.split(',').map(|s| s.trim().to_string()).collect()))
     });
 
+    use std::sync::Mutex;
+    static LAST_DETAIL: Mutex<Option<String>> = Mutex::new(None);
+    seam::guc_check_errdetail::set(|detail| {
+        *LAST_DETAIL.lock().unwrap() = Some(detail);
+    });
+
     assert_eq!(
         check_createrole_self_grant("set").unwrap(),
         Some(GRANT_ROLE_SPECIFIED_SET)
@@ -158,4 +164,9 @@ fn check_createrole_self_grant_keywords() {
     );
     assert_eq!(check_createrole_self_grant("").unwrap(), Some(0));
     assert_eq!(check_createrole_self_grant("bogus").unwrap(), None);
+    /* The detail string for the unrecognized keyword must reach the GUC seam. */
+    assert_eq!(
+        LAST_DETAIL.lock().unwrap().as_deref(),
+        Some("Unrecognized key word: \"bogus\".")
+    );
 }

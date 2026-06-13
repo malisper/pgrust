@@ -24,6 +24,15 @@
 //! Genuine cross-subsystem externals cross the [`backend_commands_user_seams`]
 //! seams; each panics until its owner installs a real implementation.
 //!
+//! The command entry points that reach an allocating cross-subsystem seam
+//! (`CreateRole`/`AlterRole`/`GrantRole`/`DropOwnedObjects`/
+//! `ReassignOwnedObjects`) and the membership helpers
+//! (`AddRoleMems`/`DelRoleMems`/`check_role_*`) take `mcx: Mcx<'mcx>`:
+//! the allocating cross-subsystem seams (`get_user_name_from_id` →
+//! `GetUserNameFromId`'s `pstrdup`, `get_rolespec_name`, `encrypt_password`)
+//! allocate their result in the caller's memory context, so they take `mcx`
+//! and return `PgString<'mcx>`, matching the C palloc surface.
+//!
 //! ## Function inventory (user.c, PostgreSQL 18.3 — 21 functions)
 //!
 //! * `have_createrole_privilege`              — C 121-125 (static)
@@ -50,6 +59,7 @@
 
 use backend_commands_user_seams as seam;
 use backend_utils_error::ereport;
+use mcx::Mcx;
 use types_authid::{
     AuthIdUpdate, AuthMemForm, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord, PasswordType,
     STATUS_OK,
@@ -208,7 +218,11 @@ fn have_createrole_privilege() -> PgResult<bool> {
  * ========================================================================= */
 
 /// `CreateRole(pstate, stmt)` — CREATE ROLE/USER/GROUP.
-pub fn CreateRole(pstate: Option<&ParseState>, stmt: &CreateRoleStmt) -> PgResult<Oid> {
+pub fn CreateRole<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&ParseState>,
+    stmt: &CreateRoleStmt,
+) -> PgResult<Oid> {
     let currentUserId = seam::get_user_id::call()?;
 
     let mut password: Option<String> = None; /* user password */
@@ -520,11 +534,12 @@ pub fn CreateRole(pstate: Option<&ParseState>, stmt: &CreateRoleStmt) -> PgResul
         } else {
             /* Encrypt the password to the requested format. */
             let shadow_pass = seam::encrypt_password::call(
+                mcx,
                 seam::password_encryption::call()?,
                 role.clone(),
                 pw.clone(),
             )?;
-            rolpassword = Some(shadow_pass);
+            rolpassword = Some(shadow_pass.to_string());
         }
     } else {
         rolpassword = None;
@@ -594,8 +609,9 @@ pub fn CreateRole(pstate: Option<&ParseState>, stmt: &CreateRoleStmt) -> PgResul
             let oldrolename = oldroleform.rolname.clone();
 
             /* can only add this role to roles for which you have rights */
-            check_role_membership_authorization(currentUserId, oldroleid, true)?;
+            check_role_membership_authorization(mcx, currentUserId, oldroleid, true)?;
             AddRoleMems(
+                mcx,
                 currentUserId,
                 &oldrolename,
                 oldroleid,
@@ -628,6 +644,7 @@ pub fn CreateRole(pstate: Option<&ParseState>, stmt: &CreateRoleStmt) -> PgResul
         };
 
         AddRoleMems(
+            mcx,
             BOOTSTRAP_SUPERUSERID,
             &role,
             roleid,
@@ -658,6 +675,7 @@ pub fn CreateRole(pstate: Option<&ParseState>, stmt: &CreateRoleStmt) -> PgResul
                 set: sg_set,
             };
             AddRoleMems(
+                mcx,
                 currentUserId,
                 &role,
                 roleid,
@@ -676,6 +694,7 @@ pub fn CreateRole(pstate: Option<&ParseState>, stmt: &CreateRoleStmt) -> PgResul
      * NB: No permissions check is required here.
      */
     AddRoleMems(
+        mcx,
         currentUserId,
         &role,
         roleid,
@@ -687,6 +706,7 @@ pub fn CreateRole(pstate: Option<&ParseState>, stmt: &CreateRoleStmt) -> PgResul
     popt.specified |= GRANT_ROLE_SPECIFIED_ADMIN;
     popt.admin = true;
     AddRoleMems(
+        mcx,
         currentUserId,
         &role,
         roleid,
@@ -712,7 +732,11 @@ pub fn CreateRole(pstate: Option<&ParseState>, stmt: &CreateRoleStmt) -> PgResul
  * ========================================================================= */
 
 /// `AlterRole(pstate, stmt)` — ALTER ROLE.
-pub fn AlterRole(pstate: Option<&ParseState>, stmt: &AlterRoleStmt) -> PgResult<Oid> {
+pub fn AlterRole<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&ParseState>,
+    stmt: &AlterRoleStmt,
+) -> PgResult<Oid> {
     let currentUserId = seam::get_user_id::call()?;
 
     let mut password: Option<String> = None; /* user password */
@@ -1029,11 +1053,12 @@ pub fn AlterRole(pstate: Option<&ParseState>, stmt: &AlterRoleStmt) -> PgResult<
         } else {
             /* Encrypt the password to the requested format. */
             let shadow_pass = seam::encrypt_password::call(
+                mcx,
                 seam::password_encryption::call()?,
                 rolename.clone(),
                 pw.clone(),
             )?;
-            upd.rolpassword = Some(Some(shadow_pass));
+            upd.rolpassword = Some(Some(shadow_pass.to_string()));
         }
     }
 
@@ -1071,6 +1096,7 @@ pub fn AlterRole(pstate: Option<&ParseState>, stmt: &AlterRoleStmt) -> PgResult<
         if stmt.action == 1 {
             /* add members to role */
             AddRoleMems(
+                mcx,
                 currentUserId,
                 &rolename,
                 roleid,
@@ -1082,6 +1108,7 @@ pub fn AlterRole(pstate: Option<&ParseState>, stmt: &AlterRoleStmt) -> PgResult<
         } else if stmt.action == -1 {
             /* drop members from role */
             DelRoleMems(
+                mcx,
                 currentUserId,
                 &rolename,
                 roleid,
@@ -1540,7 +1567,11 @@ pub fn RenameRole(oldname: &str, newname: &str) -> PgResult<ObjectAddress> {
  * ========================================================================= */
 
 /// `GrantRole(pstate, stmt)` — GRANT/REVOKE role membership.
-pub fn GrantRole(pstate: Option<&ParseState>, stmt: &GrantRoleStmt) -> PgResult<()> {
+pub fn GrantRole<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&ParseState>,
+    stmt: &GrantRoleStmt,
+) -> PgResult<()> {
     let currentUserId = seam::get_user_id::call()?;
 
     /* Parse options list. */
@@ -1622,9 +1653,10 @@ pub fn GrantRole(pstate: Option<&ParseState>, stmt: &GrantRoleStmt) -> PgResult<
         }
 
         let roleid = seam::get_role_oid::call(rolename.clone(), false)?;
-        check_role_membership_authorization(currentUserId, roleid, stmt.is_grant)?;
+        check_role_membership_authorization(mcx, currentUserId, roleid, stmt.is_grant)?;
         if stmt.is_grant {
             AddRoleMems(
+                mcx,
                 currentUserId,
                 &rolename,
                 roleid,
@@ -1635,6 +1667,7 @@ pub fn GrantRole(pstate: Option<&ParseState>, stmt: &GrantRoleStmt) -> PgResult<
             )?;
         } else {
             DelRoleMems(
+                mcx,
                 currentUserId,
                 &rolename,
                 roleid,
@@ -1660,7 +1693,7 @@ pub fn GrantRole(pstate: Option<&ParseState>, stmt: &GrantRoleStmt) -> PgResult<
  * ========================================================================= */
 
 /// `DropOwnedObjects(stmt)` — DROP OWNED BY.
-pub fn DropOwnedObjects(stmt: &DropOwnedStmt) -> PgResult<()> {
+pub fn DropOwnedObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropOwnedStmt) -> PgResult<()> {
     let role_ids = roleSpecsToIds(&rolespecs(&stmt.roles))?;
 
     /* Check privileges */
@@ -1672,7 +1705,7 @@ pub fn DropOwnedObjects(stmt: &DropOwnedStmt) -> PgResult<()> {
                 .errmsg("permission denied to drop objects")
                 .errdetail(format!(
                     "Only roles with privileges of role \"{}\" may drop objects owned by it.",
-                    seam::get_user_name_from_id::call(roleid, false)?
+                    seam::get_user_name_from_id::call(mcx, roleid, false)?
                 ))
                 .finish(here("DropOwnedObjects"));
         }
@@ -1689,7 +1722,7 @@ pub fn DropOwnedObjects(stmt: &DropOwnedStmt) -> PgResult<()> {
  * ========================================================================= */
 
 /// `ReassignOwnedObjects(stmt)` — REASSIGN OWNED BY.
-pub fn ReassignOwnedObjects(stmt: &ReassignOwnedStmt) -> PgResult<()> {
+pub fn ReassignOwnedObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &ReassignOwnedStmt) -> PgResult<()> {
     let role_ids = roleSpecsToIds(&rolespecs(&stmt.roles))?;
 
     /* Check privileges */
@@ -1701,7 +1734,7 @@ pub fn ReassignOwnedObjects(stmt: &ReassignOwnedStmt) -> PgResult<()> {
                 .errmsg("permission denied to reassign objects")
                 .errdetail(format!(
                     "Only roles with privileges of role \"{}\" may reassign objects owned by it.",
-                    seam::get_user_name_from_id::call(roleid, false)?
+                    seam::get_user_name_from_id::call(mcx, roleid, false)?
                 ))
                 .finish(here("ReassignOwnedObjects"));
         }
@@ -1721,7 +1754,7 @@ pub fn ReassignOwnedObjects(stmt: &ReassignOwnedStmt) -> PgResult<()> {
             .errmsg("permission denied to reassign objects")
             .errdetail(format!(
                 "Only roles with privileges of role \"{}\" may reassign objects to it.",
-                seam::get_user_name_from_id::call(newrole, false)?
+                seam::get_user_name_from_id::call(mcx, newrole, false)?
             ))
             .finish(here("ReassignOwnedObjects"));
     }
@@ -1752,7 +1785,8 @@ pub fn roleSpecsToIds(memberNames: &[RoleSpec]) -> PgResult<Vec<Oid>> {
  * ========================================================================= */
 
 /// `AddRoleMems` — add given members to the specified role.
-fn AddRoleMems(
+fn AddRoleMems<'mcx>(
+    mcx: Mcx<'mcx>,
     currentUserId: Oid,
     rolename: &str,
     roleid: Oid,
@@ -1764,7 +1798,7 @@ fn AddRoleMems(
     debug_assert_eq!(memberSpecs.len(), memberIds.len());
 
     /* Validate grantor (and resolve implicit grantor if not specified). */
-    let grantorId = check_role_grantor(currentUserId, roleid, grantorId, true)?;
+    let grantorId = check_role_grantor(mcx, currentUserId, roleid, grantorId, true)?;
 
     let pg_authmem_rel = seam::table_open::call(AuthMemRelationId, RowExclusiveLock)?;
 
@@ -1783,7 +1817,7 @@ fn AddRoleMems(
          * pg_database_owner is never a role member.
          */
         if memberid == ROLE_PG_DATABASE_OWNER {
-            let name = seam::get_rolespec_name::call(memberRole.clone())?;
+            let name = seam::get_rolespec_name::call(mcx, memberRole.clone())?;
             return ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!("role \"{name}\" cannot be a member of any role"))
@@ -1795,7 +1829,7 @@ fn AddRoleMems(
          * a role is made a member of itself.
          */
         if seam::is_member_of_role_nosuper::call(roleid, memberid)? {
-            let name = seam::get_rolespec_name::call(memberRole.clone())?;
+            let name = seam::get_rolespec_name::call(mcx, memberRole.clone())?;
             return ereport(ERROR)
                 .errcode(ERRCODE_INVALID_GRANT_OPERATION)
                 .errmsg(format!("role \"{rolename}\" is a member of role \"{name}\""))
@@ -1898,13 +1932,13 @@ fn AddRoleMems(
             }
 
             if !at_least_one_change {
-                let mname = seam::get_rolespec_name::call(memberRole.clone())?;
+                let mname = seam::get_rolespec_name::call(mcx, memberRole.clone())?;
                 ereport(NOTICE)
                     .errmsg(format!(
                         "role \"{}\" has already been granted membership in role \"{}\" by role \"{}\"",
                         mname,
                         rolename,
-                        seam::get_user_name_from_id::call(grantorId, false)?
+                        seam::get_user_name_from_id::call(mcx, grantorId, false)?
                     ))
                     .finish(here("AddRoleMems"))?;
                 seam::release_sys_cache::call(authmem_tuple)?;
@@ -1979,7 +2013,8 @@ fn AddRoleMems(
  * ========================================================================= */
 
 /// `DelRoleMems` — remove given members from the specified role.
-fn DelRoleMems(
+fn DelRoleMems<'mcx>(
+    mcx: Mcx<'mcx>,
     currentUserId: Oid,
     rolename: &str,
     roleid: Oid,
@@ -1992,7 +2027,7 @@ fn DelRoleMems(
     debug_assert_eq!(memberSpecs.len(), memberIds.len());
 
     /* Validate grantor (and resolve implicit grantor if not specified). */
-    let grantorId = check_role_grantor(currentUserId, roleid, grantorId, false)?;
+    let grantorId = check_role_grantor(mcx, currentUserId, roleid, grantorId, false)?;
 
     let pg_authmem_rel = seam::table_open::call(AuthMemRelationId, RowExclusiveLock)?;
 
@@ -2013,13 +2048,13 @@ fn DelRoleMems(
         let memberid = *iditem;
 
         if !plan_single_revoke(&members, &mut actions, memberid, grantorId, popt, behavior)? {
-            let mname = seam::get_rolespec_name::call(memberRole.clone())?;
+            let mname = seam::get_rolespec_name::call(mcx, memberRole.clone())?;
             ereport(WARNING)
                 .errmsg(format!(
                     "role \"{}\" has not been granted membership in role \"{}\" by role \"{}\"",
                     mname,
                     rolename,
-                    seam::get_user_name_from_id::call(grantorId, false)?
+                    seam::get_user_name_from_id::call(mcx, grantorId, false)?
                 ))
                 .finish(here("DelRoleMems"))?;
             continue;
@@ -2078,7 +2113,8 @@ fn DelRoleMems(
 
 /// `check_role_membership_authorization` — verify currentUserId may modify the
 /// membership list for roleid.  Throws an error if not.
-fn check_role_membership_authorization(
+fn check_role_membership_authorization<'mcx>(
+    mcx: Mcx<'mcx>,
     currentUserId: Oid,
     roleid: Oid,
     is_grant: bool,
@@ -2092,7 +2128,7 @@ fn check_role_membership_authorization(
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "role \"{}\" cannot have explicit members",
-                seam::get_user_name_from_id::call(roleid, false)?
+                seam::get_user_name_from_id::call(mcx, roleid, false)?
             ))
             .finish(here("check_role_membership_authorization"));
     }
@@ -2105,7 +2141,7 @@ fn check_role_membership_authorization(
                     .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
                     .errmsg(format!(
                         "permission denied to grant role \"{}\"",
-                        seam::get_user_name_from_id::call(roleid, false)?
+                        seam::get_user_name_from_id::call(mcx, roleid, false)?
                     ))
                     .errdetail(format!(
                         "Only roles with the {} attribute may grant roles with the {} attribute.",
@@ -2117,7 +2153,7 @@ fn check_role_membership_authorization(
                     .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
                     .errmsg(format!(
                         "permission denied to revoke role \"{}\"",
-                        seam::get_user_name_from_id::call(roleid, false)?
+                        seam::get_user_name_from_id::call(mcx, roleid, false)?
                     ))
                     .errdetail(format!(
                         "Only roles with the {} attribute may revoke roles with the {} attribute.",
@@ -2136,12 +2172,12 @@ fn check_role_membership_authorization(
                     .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
                     .errmsg(format!(
                         "permission denied to grant role \"{}\"",
-                        seam::get_user_name_from_id::call(roleid, false)?
+                        seam::get_user_name_from_id::call(mcx, roleid, false)?
                     ))
                     .errdetail(format!(
                         "Only roles with the {} option on role \"{}\" may grant this role.",
                         "ADMIN",
-                        seam::get_user_name_from_id::call(roleid, false)?
+                        seam::get_user_name_from_id::call(mcx, roleid, false)?
                     ))
                     .finish(here("check_role_membership_authorization"));
             } else {
@@ -2149,12 +2185,12 @@ fn check_role_membership_authorization(
                     .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
                     .errmsg(format!(
                         "permission denied to revoke role \"{}\"",
-                        seam::get_user_name_from_id::call(roleid, false)?
+                        seam::get_user_name_from_id::call(mcx, roleid, false)?
                     ))
                     .errdetail(format!(
                         "Only roles with the {} option on role \"{}\" may revoke this role.",
                         "ADMIN",
-                        seam::get_user_name_from_id::call(roleid, false)?
+                        seam::get_user_name_from_id::call(mcx, roleid, false)?
                     ))
                     .finish(here("check_role_membership_authorization"));
             }
@@ -2170,7 +2206,8 @@ fn check_role_membership_authorization(
 
 /// `check_role_grantor` — sanity-check, or infer, the grantor for a GRANT or
 /// REVOKE statement targeting a role.  Returns the OID to record as grantor.
-fn check_role_grantor(
+fn check_role_grantor<'mcx>(
+    mcx: Mcx<'mcx>,
     currentUserId: Oid,
     roleid: Oid,
     grantorId: Oid,
@@ -2210,11 +2247,11 @@ fn check_role_grantor(
                 .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
                 .errmsg(format!(
                     "permission denied to grant privileges as role \"{}\"",
-                    seam::get_user_name_from_id::call(grantorId, false)?
+                    seam::get_user_name_from_id::call(mcx, grantorId, false)?
                 ))
                 .errdetail(format!(
                     "Only roles with privileges of role \"{}\" may grant privileges as this role.",
-                    seam::get_user_name_from_id::call(grantorId, false)?
+                    seam::get_user_name_from_id::call(mcx, grantorId, false)?
                 ))
                 .finish(here("check_role_grantor"))
                 .map(|()| InvalidOid);
@@ -2227,12 +2264,12 @@ fn check_role_grantor(
                 .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
                 .errmsg(format!(
                     "permission denied to grant privileges as role \"{}\"",
-                    seam::get_user_name_from_id::call(grantorId, false)?
+                    seam::get_user_name_from_id::call(mcx, grantorId, false)?
                 ))
                 .errdetail(format!(
                     "The grantor must have the {} option on role \"{}\".",
                     "ADMIN",
-                    seam::get_user_name_from_id::call(roleid, false)?
+                    seam::get_user_name_from_id::call(mcx, roleid, false)?
                 ))
                 .finish(here("check_role_grantor"))
                 .map(|()| InvalidOid);
@@ -2242,11 +2279,11 @@ fn check_role_grantor(
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
                 "permission denied to revoke privileges granted by role \"{}\"",
-                seam::get_user_name_from_id::call(grantorId, false)?
+                seam::get_user_name_from_id::call(mcx, grantorId, false)?
             ))
             .errdetail(format!(
                 "Only roles with privileges of role \"{}\" may revoke privileges granted by this role.",
-                seam::get_user_name_from_id::call(grantorId, false)?
+                seam::get_user_name_from_id::call(mcx, grantorId, false)?
             ))
             .finish(here("check_role_grantor"))
             .map(|()| InvalidOid);
@@ -2440,7 +2477,8 @@ pub fn check_createrole_self_grant(newval: &str) -> PgResult<Option<u32>> {
     let elemlist = match seam::split_identifier_string::call(newval.to_string())? {
         Some(list) => list,
         None => {
-            /* syntax error in list (GUC_check_errdetail "List syntax is invalid.") */
+            /* syntax error in list */
+            seam::guc_check_errdetail::call("List syntax is invalid.".to_string());
             return Ok(None);
         }
     };
@@ -2452,7 +2490,7 @@ pub fn check_createrole_self_grant(newval: &str) -> PgResult<Option<u32>> {
         } else if tok.eq_ignore_ascii_case("INHERIT") {
             options |= GRANT_ROLE_SPECIFIED_INHERIT;
         } else {
-            /* GUC_check_errdetail "Unrecognized key word: \"%s\"." */
+            seam::guc_check_errdetail::call(format!("Unrecognized key word: \"{tok}\"."));
             return Ok(None);
         }
     }

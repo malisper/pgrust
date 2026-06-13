@@ -14,6 +14,7 @@
 //! function's failure surface (`PgResult<_>` where the C path can `ereport` at
 //! ERROR+).
 
+use mcx::{Mcx, PgString};
 use seam_core::seam;
 use types_authid::{
     AuthIdForm, AuthIdUpdate, AuthMemForm, AuthMemUpdate, CatCListHandle, NewAuthMemRecord,
@@ -47,8 +48,13 @@ seam!(
     pub fn superuser_arg(roleid: Oid) -> PgResult<bool>
 );
 seam!(
-    /// `GetUserNameFromId(roleid, noerr)`.
-    pub fn get_user_name_from_id(roleid: Oid, noerr: bool) -> PgResult<String>
+    /// `GetUserNameFromId(roleid, noerr)` — the role name `pstrdup`'d into the
+    /// caller's context (`mcx`).
+    pub fn get_user_name_from_id<'mcx>(
+        mcx: Mcx<'mcx>,
+        roleid: Oid,
+        noerr: bool,
+    ) -> PgResult<PgString<'mcx>>
 );
 
 /* --- acl.c role-membership / privilege helpers --- */
@@ -98,8 +104,9 @@ seam!(
     pub fn get_rolespec_oid(role: RoleSpec, missing_ok: bool) -> PgResult<Oid>
 );
 seam!(
-    /// `get_rolespec_name(role)`.
-    pub fn get_rolespec_name(role: RoleSpec) -> PgResult<String>
+    /// `get_rolespec_name(role)` — the resolved role name allocated in `mcx`
+    /// (C: `pstrdup`).
+    pub fn get_rolespec_name<'mcx>(mcx: Mcx<'mcx>, role: RoleSpec) -> PgResult<PgString<'mcx>>
 );
 seam!(
     /// `check_rolespec_name(role, detail_msg)` — reject reserved RoleSpecs.
@@ -321,12 +328,14 @@ seam!(
 /* --- password / crypt subsystem (auth-scram.c, crypt.c) --- */
 
 seam!(
-    /// `encrypt_password(Password_encryption, role, password)`.
-    pub fn encrypt_password(
+    /// `encrypt_password(Password_encryption, role, password)` — the encrypted
+    /// password string allocated in the caller's context (`mcx`).
+    pub fn encrypt_password<'mcx>(
+        mcx: Mcx<'mcx>,
         password_encryption: i32,
         role: String,
         password: String,
-    ) -> PgResult<String>
+    ) -> PgResult<PgString<'mcx>>
 );
 seam!(
     /// `plain_crypt_verify(role, shadow_pass, client_pass, &logdetail)` — the
@@ -407,4 +416,10 @@ seam!(
     /// `SplitIdentifierString(rawstring, ',', &elemlist)` — `Some(tokens)` on
     /// success, `None` on a list-syntax error.
     pub fn split_identifier_string(rawstring: String) -> PgResult<Option<Vec<String>>>
+);
+seam!(
+    /// `GUC_check_errdetail(fmt, ...)` — records the detail string for the
+    /// in-progress GUC check-hook failure (the GUC machinery owns the
+    /// `GUC_check_errdetail_string` slot). Infallible (just stashes the text).
+    pub fn guc_check_errdetail(detail: String)
 );
