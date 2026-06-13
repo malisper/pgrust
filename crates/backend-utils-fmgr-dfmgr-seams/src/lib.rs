@@ -3,7 +3,8 @@
 //! hook body belongs to whatever extension/module registered it), plus the
 //! output-plugin load + dispatch surface (`load_external_function` plus the
 //! loaded plugin's `_PG_output_plugin_init` vtable) consumed by logical
-//! decoding. Calls panic until the owners land.
+//! decoding, and the archiver's `_PG_archive_module_init` loader. Calls panic
+//! until the owners land.
 
 #![allow(non_snake_case)]
 
@@ -28,6 +29,18 @@ seam_core::seam!(
 seam_core::seam!(
     /// `shmem_request_hook()` — invoke the installed shared-memory request hook.
     pub fn shmem_request_hook() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `load_external_function(filename, funcname, signalNotFound, filehandle)`
+    /// specialized to the archiver's use: load `filename` and resolve the
+    /// `_PG_archive_module_init` symbol. The archiver passes
+    /// `signalNotFound = false`, so a missing symbol yields `Ok(None)` (the C
+    /// returns NULL) rather than an `ereport(ERROR)`; the library load itself
+    /// can still `ereport(ERROR)` (carried on `Err`).
+    pub fn load_archive_module_init(
+        filename: &str,
+    ) -> types_error::PgResult<Option<types_pgarch::ArchiveModuleInit>>
 );
 
 seam_core::seam!(

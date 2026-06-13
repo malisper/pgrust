@@ -1,11 +1,8 @@
-//! Seam declarations for the GUC numeric value parsers
-//! (`utils/misc/guc.c`): `parse_int` / `parse_real`.
-//!
-//! The reloptions parser calls `parse_int(value, &result, 0, NULL)` and
-//! `parse_real(value, &result, 0, NULL)` (flags `0`, no hint message). Both
-//! return a C `bool` success and never `ereport` — they are infallible and
-//! pure, so the seams return `Option<_>` (`Some` on success, `None` on a parse
-//! failure) and take no `Mcx`.
+//! Seam declarations for the GUC subsystem (`utils/misc/guc.c`): the numeric
+//! value parsers (`parse_int`/`parse_real`), the bootstrap-mode entry points,
+//! and the transactional-SET calls `ri_triggers.c` makes to bump
+//! `work_mem`/`hash_mem_multiplier` for its bulk validation queries and to
+//! unwind them at transaction end.
 //!
 //! The owning unit (`backend-utils-misc-guc`) installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
@@ -89,4 +86,24 @@ seam_core::seam!(
     /// `perform_relmap_update` reads it to decide `add_okay` when merging map
     /// updates. Pure backend-local GUC read.
     pub fn allow_system_table_mods() -> bool
+);
+
+seam_core::seam!(
+    /// `NewGUCNestLevel()` (guc.c): begin a new GUC nesting level for
+    /// transactional/function SET, returning the save-nestlevel to pass to
+    /// `AtEOXact_GUC`.
+    pub fn new_guc_nest_level() -> i32
+);
+
+seam_core::seam!(
+    /// `AtEOXact_GUC(isCommit, nestLevel)` (guc.c): roll back the GUC settings
+    /// made above `nestLevel`. Can `ereport(ERROR)` on a bad assign hook,
+    /// carried on `Err`.
+    pub fn at_eoxact_guc(is_commit: bool, nest_level: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `maintenance_work_mem` (guc.c global, KB): the value `ri_triggers.c`
+    /// installs as `work_mem` for its validation query.
+    pub fn maintenance_work_mem() -> i32
 );

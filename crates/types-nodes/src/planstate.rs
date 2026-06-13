@@ -7,7 +7,8 @@
 use mcx::PgBox;
 use crate::nodes::NodeTag;
 
-use crate::execnodes::{PlanStateData, T_MaterialState};
+use crate::execnodes::{PlanStateData, ScanStateData, T_MaterialState};
+use crate::nodeappend::{AppendStateData, T_AppendState};
 use crate::nodelimit::T_LimitState;
 use crate::execstate_tags::T_SortState;
 use crate::nodemergeappend::T_MergeAppendState;
@@ -22,6 +23,8 @@ use crate::nodehashjoin::{HashJoinState, T_HashJoinState};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PlanStateNode<'mcx> {
+    /// `T_AppendState`.
+    Append(PgBox<'mcx, AppendStateData<'mcx>>),
     /// `T_MaterialState`.
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
     /// `T_MergeAppendState`.
@@ -44,6 +47,7 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// `nodeTag(node)` — the C node tag of the concrete state node.
     pub fn tag(&self) -> NodeTag {
         match self {
+            PlanStateNode::Append(_) => T_AppendState,
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeAppend(_) => T_MergeAppendState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
@@ -59,6 +63,7 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// `<Node>State` struct begins with.
     pub fn ps_head(&self) -> &PlanStateData<'mcx> {
         match self {
+            PlanStateNode::Append(a) => &a.ps,
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeAppend(m) => &m.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
@@ -73,6 +78,7 @@ impl<'mcx> PlanStateNode<'mcx> {
     /// `&mut ((PlanState *) node)->...`.
     pub fn ps_head_mut(&mut self) -> &mut PlanStateData<'mcx> {
         match self {
+            PlanStateNode::Append(a) => &mut a.ps,
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeAppend(m) => &mut m.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
@@ -81,6 +87,43 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
+        }
+    }
+
+    /// `(ScanState *) node` — the embedded `ScanState` of a relation-scan-node
+    /// state (`SeqScanState`, `IndexScanState`, ... — every concrete scan-node
+    /// struct begins with a `ScanState`). `None` for non-scan nodes. Returns
+    /// `None` for every current variant; relation-scan variants add their arm
+    /// here as their executor units land.
+    pub fn as_scan_state(&self) -> Option<&ScanStateData<'mcx>> {
+        match self {
+            // No current variant is a relation-scan node (the C
+            // `search_plan_tree` `default:` / join cases). Relation-scan
+            // variants add their own arm here as their executor units land.
+            _ => None,
+        }
+    }
+
+    /// `outerPlanState(node)` (execnodes.h) — `node->lefttree`, the input plan
+    /// state descended through by `Result`/`Limit`. `None` when there is none.
+    pub fn outer_plan_state(&self) -> Option<&PlanStateNode<'mcx>> {
+        self.ps_head().lefttree.as_deref()
+    }
+
+    /// `((AppendState *) node)->appendplans[0..as_nplans]` — the Append's input
+    /// plan states. `None` until the `AppendState` variant lands.
+    pub fn append_input_states(&self) -> Option<&[PgBox<'mcx, PlanStateNode<'mcx>>]> {
+        match self {
+            _ => None,
+        }
+    }
+
+    /// `((SubqueryScanState *) node)->subplan` — the SubqueryScan's child plan
+    /// state (kept separately from `lefttree`). `None` until the
+    /// `SubqueryScanState` variant lands.
+    pub fn subquery_subplan_state(&self) -> Option<&PlanStateNode<'mcx>> {
+        match self {
+            _ => None,
         }
     }
 }

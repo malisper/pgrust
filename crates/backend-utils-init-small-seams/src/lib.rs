@@ -36,6 +36,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `max_worker_processes` (globals.c): the GUC capping the number of
+    /// background-worker slots.
+    pub fn max_worker_processes() -> i32
+);
+
+seam_core::seam!(
+    /// `max_parallel_workers` (globals.c): the GUC capping concurrently
+    /// active parallel workers.
+    pub fn max_parallel_workers() -> i32
+);
+
+seam_core::seam!(
+    /// `PostAuthDelay` (globals.c): seconds to sleep after authentication, to
+    /// allow attaching a debugger. Read by `BackgroundWorkerMain`.
+    pub fn post_auth_delay() -> i32
+);
+
+seam_core::seam!(
     /// `MyProcPort` (globals.c): run `f` with mutable access to this
     /// backend's connection `Port`, or `None` when there is no client
     /// connection (`MyProcPort == NULL`). Callback shape per the seam rules:

@@ -54,14 +54,22 @@ use types_execparallel::{
     ShmTocHandle, Size,
 };
 
-/// `CreateParallelContext(library_name, function_name, nworkers)`.
-seam_core::seam!(pub fn create_parallel_context(
+/// `CreateParallelContext(library_name, function_name, nworkers)`. C does its
+/// allocation in `TopTransactionContext` (it switches to it internally); the
+/// caller hands that context's `Mcx` so the `palloc0` of the context and the
+/// `pstrdup`'d names go through the fallible allocator with the owning context's
+/// OOM error, rather than an ambient global crossing the seam.
+seam_core::seam!(pub fn create_parallel_context<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     library_name: String,
     function_name: String,
     nworkers: i32,
 ) -> PgResult<ParallelContextHandle>);
-/// `InitializeParallelDSM(pcxt)`.
-seam_core::seam!(pub fn initialize_parallel_dsm(pcxt: ParallelContextHandle) -> PgResult<()>);
+/// `InitializeParallelDSM(pcxt)`. The worker array (`palloc0` in
+/// `TopTransactionContext`) and the segment-backing buffer
+/// (`MemoryContextAlloc(TopMemoryContext, segsize)` / `dsm_create`) allocate
+/// fallibly through the caller-supplied `Mcx`.
+seam_core::seam!(pub fn initialize_parallel_dsm<'mcx>(mcx: mcx::Mcx<'mcx>, pcxt: ParallelContextHandle) -> PgResult<()>);
 /// `ReinitializeParallelDSM(pcxt)`.
 seam_core::seam!(pub fn reinitialize_parallel_dsm(pcxt: ParallelContextHandle) -> PgResult<()>);
 /// `WaitForParallelWorkersToFinish(pcxt)`.
@@ -85,6 +93,8 @@ seam_core::seam!(pub fn make_parallel_worker_context(
     seg: DsmSegmentHandle,
     toc: ShmTocHandle,
 ) -> ParallelWorkerContextHandle);
+/// `pwcxt->toc` — the worker context's `shm_toc *`.
+seam_core::seam!(pub fn pwcxt_toc(pwcxt: ParallelWorkerContextHandle) -> ShmTocHandle);
 /// `ParallelWorkerNumber`.
 seam_core::seam!(pub fn parallel_worker_number() -> i32);
 

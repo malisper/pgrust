@@ -124,3 +124,18 @@ seam_core::seam!(
     /// by an invalidation callback.
     pub fn invalidate_system_caches() -> PgResult<()>
 );
+
+/* ---- CLUSTER catalog invalidations (backend-commands-cluster) ------------ */
+
+seam_core::seam!(
+    /// `CacheInvalidateCatalog(catalogId)` (inval.c).
+    pub fn cache_invalidate_catalog(catalog_id: Oid) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `CacheInvalidateRelcacheByTuple(classTuple)` (inval.c): invalidate the
+    /// relcache entry described by the (reformed) pg_class row.
+    pub fn cache_invalidate_relcache_by_pg_class(
+        tid: types_tuple::heaptuple::ItemPointerData,
+        form: &types_cluster::PgClassForm,
+    ) -> PgResult<()>
+);

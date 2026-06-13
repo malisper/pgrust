@@ -41,6 +41,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecGetCommonSlotOps(planstates, nplans)` (execUtils.c): if all the
+    /// child `PlanState`s return the same fixed slot type, return that slot
+    /// ops identity; otherwise `None`. `nplans <= 0` returns `None`. Reads
+    /// each child's result slot ops, which it computes from the node — fallible
+    /// because `ExecGetResultSlotOps` can run node-init work that
+    /// `ereport(ERROR)`s.
+    pub fn exec_get_common_slot_ops<'mcx>(
+        planstates: &[Option<mcx::PgBox<'mcx, types_nodes::PlanStateNode<'mcx>>>],
+        nplans: i32,
+    ) -> types_error::PgResult<Option<types_nodes::TupleSlotKind>>
+);
+
+seam_core::seam!(
+    /// `UpdateChangedParamSet(node, newchg)` (execUtils.c): add the params in
+    /// `newchg` that this node depends on (`node->allParam`) to the node's
+    /// `chgParam` set. Growth allocates `chgParam` in the per-query context,
+    /// so the call takes that context and is fallible on OOM.
+    pub fn update_changed_param_set<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        node: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        newchg: &types_nodes::Bitmapset<'_>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecAssignProjectionInfo(planstate, inputDesc)` (execUtils.c): build
     /// the node's `ps_ProjInfo` from its result slot and target list (using the
     /// node's `ps_ResultTupleSlot`/`ps_ExprContext`). The owned model lends the

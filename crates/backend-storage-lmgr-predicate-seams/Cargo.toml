@@ -12,3 +12,5 @@ path = "src/lib.rs"
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+types-snapshot = { path = "../types-snapshot" }
+types-storage = { path = "../types-storage" }

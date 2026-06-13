@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod bitmapset;
+pub mod copy_query;
 pub mod execexpr;
 pub mod execnodes;
 pub mod execstate_tags;
@@ -22,6 +23,7 @@ pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
+pub mod nodeappend;
 pub mod nodeforeigncustom;
 pub mod nodehashjoin;
 pub mod nodeindexscan;
@@ -43,10 +45,12 @@ pub mod queryenvironment;
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
-    EStateData, EcxtId, ExecProcNodeMtd, ExprContext, ExprContextCallbackFunction,
-    ExprContext_CB, Opaque, ParamExecData, PlanStateData, ResultRelInfo, RriId,
-    ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId, T_MaterialState,
+    CurrentOfTid, EStateData, EcxtId, ExecProcNodeMtd, ExecRowMark, ExprContext, FetchedCursorParam,
+    ExprContextCallbackFunction, ExprContext_CB, Opaque, ParamExecData, PlanStateData,
+    ResultRelInfo, RowMarkType, RriId, RunningCursorState, ScanDirection,
+    ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, T_MaterialState,
 };
+pub use primnodes::CurrentOfExpr;
 pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
@@ -58,6 +62,10 @@ pub use nodemergeappend::{
 };
 pub use nodelimit::{
     Limit, LimitOption, LimitStateCond, LimitStateData, LIMIT_OPTION_COUNT, LIMIT_OPTION_WITH_TIES,
+};
+pub use nodeappend::{
+    Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
+    T_Append, T_AppendState,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use nodesort::{

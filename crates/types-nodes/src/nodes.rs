@@ -44,6 +44,23 @@ pub const T_Material: NodeTag = NodeTag(360);
 pub const T_Sort: NodeTag = NodeTag(362);
 pub const T_Limit: NodeTag = NodeTag(373);
 
+// Executor-state node tags (nodes/nodetags.h), copied as ports consume them
+// (`T_MaterialState`/`T_MergeJoinState` live with their state structs). The
+// values are PostgreSQL 18.3's generated enumeration order.
+pub const T_ResultState: NodeTag = NodeTag(394);
+pub const T_AppendState: NodeTag = NodeTag(397);
+pub const T_SeqScanState: NodeTag = NodeTag(403);
+pub const T_SampleScanState: NodeTag = NodeTag(404);
+pub const T_IndexScanState: NodeTag = NodeTag(405);
+pub const T_IndexOnlyScanState: NodeTag = NodeTag(406);
+pub const T_BitmapHeapScanState: NodeTag = NodeTag(408);
+pub const T_TidScanState: NodeTag = NodeTag(409);
+pub const T_TidRangeScanState: NodeTag = NodeTag(410);
+pub const T_SubqueryScanState: NodeTag = NodeTag(411);
+pub const T_ForeignScanState: NodeTag = NodeTag(418);
+pub const T_CustomScanState: NodeTag = NodeTag(419);
+pub const T_LimitState: NodeTag = NodeTag(437);
+
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
@@ -76,6 +93,8 @@ pub use CmdType::{
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Node<'mcx> {
+    /// `T_Append`.
+    Append(crate::nodeappend::Append<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeAppend`.
@@ -102,6 +121,7 @@ impl<'mcx> Node<'mcx> {
     /// `nodeTag(node)` — the C node tag of the concrete plan node.
     pub fn tag(&self) -> NodeTag {
         match self {
+            Node::Append(_) => T_Append,
             Node::Material(_) => T_Material,
             Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
@@ -118,6 +138,7 @@ impl<'mcx> Node<'mcx> {
     /// `&((Plan *) node)->...` — the embedded `Plan` base.
     pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
         match self {
+            Node::Append(a) => &a.plan,
             Node::Material(m) => &m.plan,
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
@@ -140,6 +161,7 @@ impl<'mcx> Node<'mcx> {
     /// (C: `copyObject` shape). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
+            Node::Append(a) => Ok(Node::Append(a.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),

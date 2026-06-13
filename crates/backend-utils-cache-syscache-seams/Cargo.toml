@@ -16,5 +16,8 @@ types-error = { path = "../types-error" }
 types-hash = { path = "../types-hash" }
 types-namespace = { path = "../types-namespace" }
 types-cache = { path = "../types-cache" }
+types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
 types-partition = { path = "../types-partition" }
 types-fmgr = { path = "../types-fmgr" }
+types-cluster = { path = "../types-cluster" }

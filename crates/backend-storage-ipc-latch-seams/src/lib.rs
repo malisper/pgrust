@@ -29,6 +29,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyLatch` (globals.c): this backend's own process-latch identity. The
+    /// latch unit resolves it when installing, matching the existing
+    /// [`set_latch_my_latch`]/[`reset_latch_my_latch`] convention (a few C
+    /// callers — e.g. `AddWaitEventToSet(set, WL_LATCH_SET, …, MyLatch, …)` —
+    /// need the handle, not just an action on it). Infallible.
+    pub fn my_latch() -> types_storage::latch::LatchHandle
+);
+
+seam_core::seam!(
     /// `SetLatch(latch)`: set the given latch (possibly another backend's —
     /// e.g. `SetLatch(&proc->procLatch)`), waking any wait on it. Infallible
     /// in C.
@@ -99,4 +108,26 @@ seam_core::seam!(
     /// unit maps the PID to that backend's shared latch. Async-signal-safe and
     /// infallible in C.
     pub fn set_latch_for_proc_pid(pid: i32)
+);
+
+seam_core::seam!(
+    /// `WaitLatch(NULL, wake_events, timeout, wait_event_info)`: the
+    /// no-latch wait the summarizer uses for its post-error back-off (it
+    /// waits only on the timeout and `WL_EXIT_ON_PM_DEATH`, never on a
+    /// latch). Returns the bitmask of occurred events; the underlying
+    /// `WaitEventSetWait` can `elog(ERROR)`, hence `PgResult`.
+    pub fn wait_latch_no_latch(
+        wake_events: u32,
+        timeout: i64,
+        wait_event_info: u32,
+    ) -> types_error::PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `SetLatch(&ProcGlobal->allProcs[pgprocno].procLatch)`: set another
+    /// backend's process latch, named by its proc number (the PGPROC array
+    /// is shared memory; latch.c sets the embedded latch). The
+    /// no-ambient-global rule forbids a getter for the foreign latch, so the
+    /// procno is passed explicitly. Infallible in C.
+    pub fn set_latch_by_proc_number(pgprocno: types_core::ProcNumber)
 );

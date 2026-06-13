@@ -26,3 +26,11 @@ seam_core::seam!(
     /// exec'd subprograms. `ereport(FATAL)` on failure.
     pub fn set_postmaster_death_watch_cloexec() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `SendPostmasterSignal(PMSIGNAL_BACKGROUND_WORKER_CHANGE)` (pmsignal.c)
+    /// — set the shared `PMSignalFlags` slot and `kill(PostmasterPid, SIGUSR1)`
+    /// so the postmaster runs `BackgroundWorkerStateChange`. Narrow seam for
+    /// the single reason bgworker.c sends.
+    pub fn send_postmaster_signal_bgworker_change()
+);

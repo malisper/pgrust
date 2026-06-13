@@ -97,6 +97,21 @@ seam_core::seam!(
 // than break the existing call sites. New consumers should prefer the owners'
 // own seam crates.
 seam_core::seam!(
+    /// Set the `DatabasePath` global (globals.c, owned via miscinit) to `path`.
+    /// `ProcessCommittedInvalidationMessages` uses this during recovery to set
+    /// `DatabasePath` directly (the comment in inval.c calls it "a quick hack")
+    /// rather than `SetDatabasePath`, which is one-shot for normal backends.
+    pub fn set_database_path(path: &str)
+);
+
+seam_core::seam!(
+    /// Clear the `DatabasePath` global back to NULL (pairs with
+    /// [`set_database_path`] in the recovery hack of
+    /// `ProcessCommittedInvalidationMessages`).
+    pub fn clear_database_path()
+);
+
+seam_core::seam!(
     /// `GetBackendTypeDesc(backendType)` (miscinit.c): the human-readable
     /// process-type description string for `backendType` (a static table
     /// lookup; the C returns a `const char *` into static text). Infallible.
@@ -207,4 +222,17 @@ seam_core::seam!(
     /// `fmgr_security_definer` to pick `PGC_SUSET` vs `PGC_USERSET` when
     /// applying a function's `proconfig` SET items. Reads the catalog cache.
     pub fn superuser() -> bool
+);
+
+seam_core::seam!(
+    /// `MyBackendType = B_WAL_SUMMARIZER` — set this backend's type to the WAL
+    /// summarizer (globals.c stores `MyBackendType`; the WAL summarizer sets
+    /// it before `AuxiliaryProcessMainCommon`). Plain backend-local write.
+    pub fn set_my_backend_type_wal_summarizer()
+);
+
+seam_core::seam!(
+    /// `AmWalSummarizerProcess()` (miscadmin.h): `MyBackendType ==
+    /// B_WAL_SUMMARIZER`. Pure backend-local read.
+    pub fn am_wal_summarizer_process() -> bool
 );
