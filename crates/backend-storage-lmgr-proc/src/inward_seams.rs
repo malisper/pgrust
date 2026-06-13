@@ -78,29 +78,34 @@ fn set_proc_cv_wait_link(procno: ProcNumber, node: proclist_node) {
 // ---- latch / semaphore (foreign: latch.c / sysv_sema) ----
 
 fn set_proc_latch(_procno: ProcNumber) {
-    todo!("latch: SetLatch(&GetPGProcByNumber(procno)->procLatch)")
+    // `SetLatch(&GetPGProcByNumber(procno)->procLatch)` reaches the latch
+    // embedded in the PGPROC. latch.c's `SetLatch` resolves a registry
+    // `LatchHandle`, which does not yet know the PGPROC-embedded `procLatch`;
+    // registering it is the latch <-> proc integration step, so this aborts
+    // loudly until that bridge lands.
+    panic!("SetLatch(&proc->procLatch): latch <-> proc PGPROC-latch bridge not yet wired")
 }
 
-fn pg_semaphore_lock(_procno: ProcNumber) {
-    todo!("sysv_sema: PGSemaphoreLock(GetPGProcByNumber(procno)->sem)")
+fn pg_semaphore_lock(procno: ProcNumber) {
+    backend_port_pg_sema_seams::pg_semaphore_lock::call(procno);
 }
 
-fn pg_semaphore_unlock(_procno: ProcNumber) {
-    todo!("sysv_sema: PGSemaphoreUnlock(GetPGProcByNumber(procno)->sem)")
+fn pg_semaphore_unlock(procno: ProcNumber) {
+    backend_port_pg_sema_seams::pg_semaphore_unlock::call(procno);
 }
 
 fn proc_wait_for_signal(wait_event_info: u32) -> PgResult<()> {
     crate::proc_misc::ProcWaitForSignal(wait_event_info)
 }
 
-// ---- timeout GUCs (foreign: timeout.c owns DeadlockTimeout/TransactionTimeout) ----
+// ---- timeout GUCs (DeadlockTimeout/TransactionTimeout live in guc_tables.c) ----
 
 fn deadlock_timeout() -> i32 {
-    todo!("timeout: DeadlockTimeout GUC")
+    backend_utils_misc_guc_tables::vars::DeadlockTimeout.read()
 }
 
 fn transaction_timeout() -> i32 {
-    todo!("timeout: TransactionTimeout GUC")
+    backend_utils_misc_guc_tables::vars::TransactionTimeout.read()
 }
 
 // ---- MyProc scalar fields (own state) ----
@@ -143,25 +148,92 @@ fn my_proc_set_delay_chkpt_start(on: bool) {
     set_delay_chkpt_start(on);
 }
 
-// ---- latch handle (foreign: latch.c owns the LatchHandle convention) ----
+// ---- latch handle (own: a PGPROC slot's procLatch named by its proc number) ----
 
-fn proc_latch(_procno: ProcNumber) -> LatchHandle {
-    todo!("latch: &GetPGProcByNumber(procno)->procLatch as a LatchHandle")
+fn proc_latch(procno: ProcNumber) -> LatchHandle {
+    // `&GetPGProcByNumber(procno)->procLatch` as a `LatchHandle`. The latch
+    // unit identifies a per-PGPROC latch by the owning slot's proc number; the
+    // slot identity is this unit's own state.
+    crate::proc_shmem::proc_latch_handle(procno)
 }
 
-// ---- twophase dummy-PGPROC init (foreign: twophase.c) ----
+// ---- twophase dummy-PGPROC init ----
+//
+// `MarkAsPreparingGuts` / `GXactLoadSubxactData` (twophase.c) initialize the
+// dummy `PGPROC` slot backing a prepared transaction. The `gxact`-side writes
+// stay in twophase; the `proc->...` field initialization is over this unit's
+// own PGPROC array, so it is realized here against `proc_shmem`'s storage.
 
 fn proc_init_prepared(
-    _pgprocno: ProcNumber,
-    _xid: TransactionId,
-    _owner: Oid,
-    _databaseid: Oid,
+    pgprocno: ProcNumber,
+    xid: TransactionId,
+    owner: Oid,
+    databaseid: Oid,
 ) -> PgResult<()> {
-    todo!("twophase: MarkAsPreparingGuts dummy-PGPROC init")
+    use types_storage::storage::{LWLockWaitState, PROC_WAIT_STATUS_OK};
+
+    // Clone the caller's VXID when it has a valid lxid (so
+    // TwoPhaseGetXidByVirtualXID() can find it); otherwise the caller is the
+    // startup process / a standalone backend and we wait on the XID instead.
+    let my_lxid = with_my_proc_ref(|p| p.vxid.lxid);
+    let my_procnumber = crate::proc_shmem::my_proc_number();
+
+    with_proc_by_number(pgprocno, |proc| {
+        // MemSet(proc, 0, sizeof(PGPROC)); dlist_node_init(&proc->links).
+        *proc = types_storage::storage::PGPROC::new_zeroed();
+        proc.waitStatus = PROC_WAIT_STATUS_OK;
+
+        if my_lxid != types_core::InvalidLocalTransactionId {
+            proc.vxid.lxid = my_lxid;
+            proc.vxid.procNumber = my_procnumber;
+        } else {
+            debug_assert!(
+                crate::seam::am_startup_process()
+                    || !backend_utils_init_small_seams::is_postmaster_environment::call()
+            );
+            proc.vxid.lxid = xid;
+            proc.vxid.procNumber = types_core::INVALID_PROC_NUMBER;
+        }
+
+        proc.xid = xid;
+        debug_assert_eq!(proc.xmin, types_core::InvalidTransactionId);
+        proc.delayChkptFlags = 0;
+        proc.statusFlags = 0;
+        proc.pid = 0;
+        proc.databaseId = databaseid;
+        proc.roleId = owner;
+        proc.tempNamespaceId = types_core::InvalidOid;
+        proc.isRegularBackend = false;
+        proc.lwWaiting = LWLockWaitState::LW_WS_NOT_WAITING as u8;
+        proc.lwWaitMode = 0;
+        proc.waitLock = None;
+        proc.waitProcLock = None;
+        proc.waitStart.write(0);
+        // dlist_init(&proc->myProcLocks[i]) for each partition — PGPROC::default
+        // already leaves each partition empty.
+        proc.subxidStatus.overflowed = false;
+        proc.subxidStatus.count = 0;
+    });
+
+    Ok(())
 }
 
-fn gxact_load_subxact_data(_pgprocno: ProcNumber, _children: &[TransactionId]) -> PgResult<()> {
-    todo!("twophase: GXactLoadSubxactData")
+fn gxact_load_subxact_data(pgprocno: ProcNumber, children: &[TransactionId]) -> PgResult<()> {
+    use types_storage::storage::PGPROC_MAX_CACHED_SUBXIDS;
+
+    with_proc_by_number(pgprocno, |proc| {
+        let mut nsubxacts = children.len();
+        if nsubxacts > PGPROC_MAX_CACHED_SUBXIDS {
+            proc.subxidStatus.overflowed = true;
+            nsubxacts = PGPROC_MAX_CACHED_SUBXIDS;
+        }
+        if nsubxacts > 0 {
+            proc.subxids.xids[..nsubxacts].copy_from_slice(&children[..nsubxacts]);
+            proc.subxidStatus.count = nsubxacts as u8;
+        }
+    });
+
+    Ok(())
 }
 
 // ---- MyProc / PGPROC field reads used by twophase & others (own state) ----
@@ -314,7 +386,13 @@ fn proc_lock_wakeup(_space: &mut types_deadlock::LockSpace, _lock: types_deadloc
     // a `&mut LOCK` + the lock.c wait-queue seams, is the faithful body and is
     // reached the other way, from `ProcSleep`/`LockReleaseAll` once lock.c
     // supplies the LOCK.)
-    todo!("lock.c: ProcLockWakeup over the lock.c-built LockSpace arena")
+    //
+    // This panic-through is the lock.c-integration boundary: lock.c, which owns
+    // the `LockSpace` arena, supplies the `&mut LOCK` adapter that lets the
+    // detector reach proc.c's real `ProcLockWakeup`. Until it lands, calling
+    // this aborts loudly (matching a not-yet-wired seam) rather than silently
+    // doing nothing.
+    panic!("ProcLockWakeup over the lock.c-built LockSpace arena: lock.c not yet ported")
 }
 
 /// Install every inward seam this unit owns.
