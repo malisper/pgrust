@@ -30,3 +30,11 @@ backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-sea
 # get_opcode / get_op_hash_functions) the hashed-subplan combining-op
 # resolution routes through.
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# nodeFuncs owns exprType()/exprTypmod()/exprCollation() — pure node-type
+# inspections ExecBuildProjectionInfo / ExecBuildUpdateProjection read to pick
+# the ASSIGN_TMP[_MAKE_RO] opcode and to run the ExecCheckPlanOutput-equivalent
+# type-mismatch checks.
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+# bitmapset owns bms_add_member/bms_is_member — ExecBuildUpdateProjection builds
+# the assignedCols set to drive the old-column copy-over loop.
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
