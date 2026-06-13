@@ -4630,6 +4630,7 @@ name = "backend-regex-core"
 version = "0.0.0"
 dependencies = [
  "backend-regex-core-seams",
+ "backend-utils-misc-stack-depth-seams",
  "mcx",
  "seam-core",
  "types-core",
