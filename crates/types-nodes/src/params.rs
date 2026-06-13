@@ -1,0 +1,137 @@
+//! `ParamListInfo` vocabulary (`nodes/params.h`) — the parameter-list carrier
+//! types owned by the `params` family of `backend-nodes-core` (`nodes/params.c`).
+//!
+//! These mirror the C structs field-for-field (verified against
+//! `src/include/nodes/params.h`, PostgreSQL 18.3). In C a `ParamListInfoData` is
+//! a variable-length palloc'd object whose flexible array member `params[]` has
+//! `numParams` entries; here `params` is an owned `Vec<ParamExternData>` of that
+//! length (length zero when a dynamic `paramFetch` hook is supplied).
+//!
+//! The opaque [`crate::parsestmt::ParamListInfoHandle`] is the cross-crate
+//! pass-through token for a live `ParamListInfo`; the params family backs each
+//! handle with one of these structs in its handle-keyed store.
+//!
+//! ## Hooks
+//!
+//! C's three hook function pointers (`ParamFetchHook`, `ParamCompileHook`,
+//! `ParserSetupHook`) plus their `void *` arg fields are caller-supplied
+//! callbacks into other subsystems. The dynamic-fetch path is the only one the
+//! params operations themselves inspect (they branch on `paramFetch != NULL`),
+//! so the hooks are modeled as plain booleans / opaque arg slots here: the
+//! params operations only ever need to know *whether* a fetch hook is present
+//! (the static array path is the overwhelmingly common case). The compile and
+//! parser-setup hooks are never invoked from `params.c` itself.
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use types_core::primitive::{Oid, ParseLoc};
+use types_datum::Datum;
+
+use crate::nodes::NodeTag;
+
+/// `PARAM_FLAG_CONST` (`nodes/params.h`) — the planner may treat this parameter
+/// as a constant.
+pub const PARAM_FLAG_CONST: u16 = 0x0001;
+
+/// `ParamExternData` (`nodes/params.h`) — one external parameter value.
+#[derive(Clone, Copy, Debug)]
+pub struct ParamExternData {
+    /// `Datum value` — parameter value.
+    pub value: Datum,
+    /// `bool isnull` — is it NULL?
+    pub isnull: bool,
+    /// `uint16 pflags` — flag bits, see [`PARAM_FLAG_CONST`].
+    pub pflags: u16,
+    /// `Oid ptype` — parameter's datatype, or `0` for an unused slot.
+    pub ptype: Oid,
+}
+
+impl ParamExternData {
+    /// A fresh, fully-NULL slot — the `palloc`'d initial state of each
+    /// flexible-array entry and the C stack `prmdata` workspace.
+    pub const fn empty() -> Self {
+        ParamExternData {
+            value: Datum::null(),
+            isnull: false,
+            pflags: 0,
+            ptype: 0,
+        }
+    }
+}
+
+/// Opaque `void *paramFetchArg` / `paramCompileArg` / `parserSetupArg`
+/// (`nodes/params.h`) — caller-supplied callback user-data. PostgreSQL defines
+/// no concrete struct; stays a placeholder reached through `Option<Box<_>>`.
+#[derive(Clone, Debug, Default)]
+pub struct ParamHookArg {
+    _private: (),
+}
+
+/// `ParamListInfoData` (`nodes/params.h`) — the bound-parameter payload.
+///
+/// `params` is the C flexible array member: length `numParams`, or length zero
+/// when `param_fetch` is supplied (the dynamic path).
+#[derive(Clone, Debug)]
+pub struct ParamListInfoData {
+    /// `ParamFetchHook paramFetch` — whether a dynamic parameter-fetch hook is
+    /// installed. The hook itself lives in the caller's subsystem; the params
+    /// operations only branch on its presence (`paramFetch != NULL`).
+    pub param_fetch: bool,
+    /// `void *paramFetchArg`.
+    pub param_fetch_arg: Option<Box<ParamHookArg>>,
+    /// `ParamCompileHook paramCompile` — present-flag (never called from
+    /// `params.c`; consumed by `execExpr.c`'s PARAM_EXTERN compilation).
+    pub param_compile: bool,
+    /// `void *paramCompileArg`.
+    pub param_compile_arg: Option<Box<ParamHookArg>>,
+    /// `ParserSetupHook parserSetup` — present-flag. C defaults this to
+    /// `paramlist_parser_setup`; the parser installs the resolver explicitly in
+    /// the owned model (see `backend_nodes_core::params`).
+    pub parser_setup: bool,
+    /// `void *parserSetupArg`.
+    pub parser_setup_arg: Option<Box<ParamHookArg>>,
+    /// `char *paramValuesStr` — params as a single string for error context.
+    pub param_values_str: Option<String>,
+    /// `int numParams` — nominal/maximum number of params represented.
+    pub num_params: i32,
+    /// `ParamExternData params[FLEXIBLE_ARRAY_MEMBER]`.
+    pub params: Vec<ParamExternData>,
+}
+
+/// `ParamsErrorCbData` (`nodes/params.h`) — argument for `ParamsErrorCallback`.
+#[derive(Clone, Debug)]
+pub struct ParamsErrorCbData {
+    /// `const char *portalName`.
+    pub portal_name: Option<String>,
+    /// `ParamListInfo params`.
+    pub params: Option<Box<ParamListInfoData>>,
+}
+
+/// `T_Param` (`nodes/nodetags.h`) — node tag of a [`crate::primnodes::Param`]
+/// (generated PostgreSQL 18.3 value).
+pub const T_Param: NodeTag = NodeTag(8);
+
+/// `T_ParamRef` (`nodes/nodetags.h`) — node tag of a [`ParamRef`] (generated
+/// PostgreSQL 18.3 value).
+pub const T_ParamRef: NodeTag = NodeTag(70);
+
+/// `ParamRef` (`nodes/parsenodes.h`) — a `$n` parameter reference produced by
+/// the grammar; transformed into a [`crate::primnodes::Param`] by
+/// `paramlist_param_ref`. Not a node-support struct, so it lives here with the
+/// params vocabulary rather than in `parsenodes`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ParamRef {
+    /// `int number` — the number of the parameter.
+    pub number: i32,
+    /// `ParseLoc location` — token location, or `-1` if unknown.
+    pub location: ParseLoc,
+}
+
+impl ParamRef {
+    /// `makeNode(ParamRef)` with the given parameter number and location.
+    pub fn new(number: i32, location: ParseLoc) -> Self {
+        ParamRef { number, location }
+    }
+}
