@@ -1574,6 +1574,15 @@ mod seam_layer {
         token_from_mq(mq)
     }
 
+    /// `(shm_mq *) (chunk + i*size)` — name an already-created in-segment queue
+    /// without re-initializing it (the worker side's plain cast). The token is
+    /// just the real base address; no header write.
+    fn shm_mq_at(chunk: SerializeCursor, index: i32, size: Size) -> ExecShmMq {
+        let addr = chunk.0 + (index as Size) * size;
+        debug_assert!(addr != 0, "shm_mq chunk address non-null");
+        ExecShmMq(addr)
+    }
+
     fn shm_mq_set_receiver_to_myproc(mq: ExecShmMq) {
         shm_mq_set_receiver(mq_from_token(mq), my_proc());
     }
@@ -1643,6 +1652,7 @@ mod seam_layer {
     pub fn install() {
         use backend_storage_ipc_shm_mq_seams as seams;
         seams::shm_mq_create_at::set(shm_mq_create_at);
+        seams::shm_mq_at::set(shm_mq_at);
         seams::shm_mq_set_receiver_to_myproc::set(shm_mq_set_receiver_to_myproc);
         seams::shm_mq_set_sender_to_myproc::set(shm_mq_set_sender_to_myproc);
         seams::shm_mq_get_sender::set(shm_mq_get_sender);

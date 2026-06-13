@@ -27,6 +27,11 @@ use types_parallel::ShmMqResult;
 /// the queue DSM chunk that starts at `chunk` (the real chunk address). Returns
 /// the in-segment queue named by its real base address.
 seam_core::seam!(pub fn shm_mq_create_at(chunk: SerializeCursor, index: i32, size: Size) -> ShmMqHandle);
+/// `(shm_mq *) (address + i * size)` — name the `i`th *already-created* queue in
+/// the queue DSM chunk without re-initializing its header. This is the worker
+/// side's plain cast (`parallel_worker_main`: `mq = (shm_mq *) (error_queue_space
+/// + ParallelWorkerNumber * SIZE)`); only the leader runs `shm_mq_create`.
+seam_core::seam!(pub fn shm_mq_at(chunk: SerializeCursor, index: i32, size: Size) -> ShmMqHandle);
 /// `shm_mq_set_receiver(mq, MyProc)`.
 seam_core::seam!(pub fn shm_mq_set_receiver_to_myproc(mq: ShmMqHandle));
 /// `shm_mq_set_sender(mq, MyProc)`.

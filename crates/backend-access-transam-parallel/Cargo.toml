@@ -27,3 +27,10 @@ backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-p
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core", features = ["test-bringup"] }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
+backend-storage-ipc-shm-mq = { path = "../backend-storage-ipc-shm-mq" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
+types-storage = { path = "../types-storage" }
