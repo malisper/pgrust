@@ -18,3 +18,9 @@ seam_core::seam!(
         fork_num: types_core::primitive::ForkNumber,
     ) -> types_error::PgResult<types_core::primitive::BlockNumber>
 );
+
+seam_core::seam!(
+    /// `HoldingBufferPinThatDelaysRecovery()` — does this backend hold the
+    /// buffer pin the Startup process is waiting for?
+    pub fn holding_buffer_pin_that_delays_recovery() -> bool
+);

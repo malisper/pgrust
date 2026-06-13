@@ -43,9 +43,19 @@ pub struct XlXactStatsItem {
     pub objid: u64,
 }
 
+
+/// `MaxTransactionId` (access/transam.h) — the largest 32-bit `TransactionId`.
+pub const MaxTransactionId: TransactionId = 0xFFFF_FFFF;
+
+/// `TransactionIdIsNormal(xid)` (access/transam.h).
+#[inline]
+pub const fn TransactionIdIsNormal(xid: TransactionId) -> bool {
+    xid >= FirstNormalTransactionId
+}
+
 /// `FullTransactionId` (`access/transam.h`) — a 64-bit transaction id
 /// (epoch in the high 32 bits, xid in the low 32).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FullTransactionId {
     pub value: u64,
 }
@@ -53,6 +63,13 @@ pub struct FullTransactionId {
 impl FullTransactionId {
     pub const fn from_u64(value: u64) -> Self {
         Self { value }
+    }
+
+    /// `FullTransactionIdFromEpochAndXid` (access/transam.h).
+    pub const fn from_epoch_and_xid(epoch: u32, xid: TransactionId) -> Self {
+        Self {
+            value: ((epoch as u64) << 32) | xid as u64,
+        }
     }
 
     /// `EpochFromFullTransactionId(x)` — `(uint32) ((x).value >> 32)`.

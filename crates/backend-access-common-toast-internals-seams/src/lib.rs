@@ -30,7 +30,7 @@ seam_core::seam!(
     pub fn toast_open_indexes<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         toastrel: types_core::Oid,
-        lock: types_storage::storage::LOCKMODE,
+        lock: types_storage::lock::LOCKMODE,
     ) -> types_error::PgResult<(mcx::PgVec<'mcx, types_core::Oid>, i32)>
 );
 
@@ -41,7 +41,7 @@ seam_core::seam!(
     /// `pfree(toastidxs)`). `Err` carries the relation-close error surface.
     pub fn toast_close_indexes(
         toastidxs: &[types_core::Oid],
-        lock: types_storage::storage::LOCKMODE,
+        lock: types_storage::lock::LOCKMODE,
     ) -> types_error::PgResult<()>
 );
 

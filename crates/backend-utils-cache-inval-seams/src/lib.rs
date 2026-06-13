@@ -7,6 +7,8 @@
 use types_cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
 use types_datum::Datum;
 use types_error::PgResult;
+use types_core::Oid;
+use types_storage::SharedInvalidationMessage;
 
 seam_core::seam!(
     /// `CacheRegisterSyscacheCallback(cacheid, func, arg)` (inval.c):
@@ -34,4 +36,16 @@ seam_core::seam!(
     /// invalidation queue. `Err` carries any error raised by an invalidation
     /// callback or the catchup machinery.
     pub fn accept_invalidation_messages() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ProcessCommittedInvalidationMessages(msgs, nmsgs,
+    /// RelcacheInitFileInval, dbid, tsid)` — apply invalidation messages from
+    /// a committed transaction during WAL replay.
+    pub fn process_committed_invalidation_messages(
+        msgs: &[SharedInvalidationMessage],
+        relcache_init_file_inval: bool,
+        dbid: Oid,
+        tsid: Oid,
+    ) -> PgResult<()>
 );

@@ -108,17 +108,18 @@ pub fn standby_desc_invalidations(
     buf.try_push_str("; inval msgs:")?;
     for i in 0..nmsgs as usize {
         match msgs.get(i) {
-            SharedInvalidationMessage::Catcache { id } => appendf!(buf, " catcache {}", id),
-            SharedInvalidationMessage::Catalog { catId } => appendf!(buf, " catalog {}", catId),
-            SharedInvalidationMessage::Relcache { relId } => appendf!(buf, " relcache {}", relId),
+            Some(SharedInvalidationMessage::Catcache(m)) => appendf!(buf, " catcache {}", m.id),
+            Some(SharedInvalidationMessage::Catalog(m)) => appendf!(buf, " catalog {}", m.catId),
+            Some(SharedInvalidationMessage::Relcache(m)) => appendf!(buf, " relcache {}", m.relId),
             // not expected, but print something anyway
-            SharedInvalidationMessage::Smgr => buf.try_push_str(" smgr")?,
+            Some(SharedInvalidationMessage::Smgr(_)) => buf.try_push_str(" smgr")?,
             // not expected, but print something anyway
-            SharedInvalidationMessage::Relmap { dbId } => appendf!(buf, " relmap db {}", dbId),
-            SharedInvalidationMessage::Snapshot { relId } => appendf!(buf, " snapshot {}", relId),
-            SharedInvalidationMessage::RelSync { relid } => appendf!(buf, " relsync {}", relid),
-            SharedInvalidationMessage::Unrecognized { id } => {
-                appendf!(buf, " unrecognized id {}", id)
+            Some(SharedInvalidationMessage::Relmap(m)) => appendf!(buf, " relmap db {}", m.dbId),
+            Some(SharedInvalidationMessage::Snapshot(m)) => appendf!(buf, " snapshot {}", m.relId),
+            Some(SharedInvalidationMessage::RelSync(m)) => appendf!(buf, " relsync {}", m.relid),
+            None => {
+                // An id outside the union's vocabulary.
+                appendf!(buf, " unrecognized id {}", msgs.raw_id(i))
             }
         }
     }

@@ -102,3 +102,13 @@ seam_core::seam!(
     /// buffers. Pure read of backend-local state.
     pub fn nbuffers() -> i32
 );
+
+seam_core::seam!(
+    /// `MyDatabaseId` (globals.c).
+    pub fn my_database_id() -> types_core::Oid
+);
+
+seam_core::seam!(
+    /// `MyDatabaseTableSpace` (globals.c).
+    pub fn my_database_table_space() -> types_core::Oid
+);

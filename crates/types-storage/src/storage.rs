@@ -3,7 +3,7 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use types_core::{uint16, uint32, Oid, ProcNumber, RelFileNumber, uint8, INVALID_PROC_NUMBER};
+use types_core::{uint16, uint32, uint8, Oid, ProcNumber, RelFileNumber, TransactionId, INVALID_PROC_NUMBER};
 
 /// `enum LWLockMode` (`storage/lwlock.h:112`).
 #[repr(u32)]
@@ -280,17 +280,6 @@ pub const LWTRANCHE_PARALLEL_VACUUM_DSA: i32 = LWTRANCHE_XACT_SLRU + 1;
 pub const LWTRANCHE_AIO_URING_COMPLETION: i32 = LWTRANCHE_PARALLEL_VACUUM_DSA + 1;
 pub const LWTRANCHE_FIRST_USER_DEFINED: i32 = LWTRANCHE_AIO_URING_COMPLETION + 1;
 
-/// `LOCKMODE` (`storage/lockdefs.h`) — a relation/object lock level.
-pub type LOCKMODE = i32;
-pub const NoLock: LOCKMODE = 0;
-pub const AccessShareLock: LOCKMODE = 1;
-pub const RowShareLock: LOCKMODE = 2;
-pub const RowExclusiveLock: LOCKMODE = 3;
-pub const ShareUpdateExclusiveLock: LOCKMODE = 4;
-pub const ShareLock: LOCKMODE = 5;
-pub const ShareRowExclusiveLock: LOCKMODE = 6;
-pub const ExclusiveLock: LOCKMODE = 7;
-pub const AccessExclusiveLock: LOCKMODE = 8;
 
 /// `RelFileLocator` (`storage/relfilelocator.h`) — the physical identity of a
 /// relation: tablespace, database, and relfilenumber.
@@ -308,4 +297,77 @@ pub struct RelFileLocator {
 #[inline]
 pub fn RelFileLocatorEquals(a: &RelFileLocator, b: &RelFileLocator) -> bool {
     a == b
+}
+
+/// `VirtualTransactionId` (`storage/lock.h`).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct VirtualTransactionId {
+    pub procNumber: ProcNumber,
+    pub localTransactionId: types_core::LocalTransactionId,
+}
+
+impl VirtualTransactionId {
+    /// `SetInvalidVirtualTransactionId(vxid)`.
+    pub const fn invalid() -> Self {
+        Self {
+            procNumber: INVALID_PROC_NUMBER,
+            localTransactionId: 0,
+        }
+    }
+
+    /// `VirtualTransactionIdIsValid(vxid)` —
+    /// `LocalTransactionIdIsValid((vxid).localTransactionId)`.
+    pub const fn is_valid(self) -> bool {
+        self.localTransactionId != 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `storage/standby.h` / `storage/procarray.h` running-xacts vocabulary.
+// ---------------------------------------------------------------------------
+
+/// `subxids_array_status` (`storage/standby.h`).
+pub type subxids_array_status = u32;
+pub const SUBXIDS_IN_ARRAY: subxids_array_status = 0;
+pub const SUBXIDS_MISSING: subxids_array_status = 1;
+pub const SUBXIDS_IN_SUBTRANS: subxids_array_status = 2;
+
+/// `RunningTransactionsData` (`storage/standby.h`). The C `xids` pointer
+/// (length `xcnt + subxcnt`) is context-allocated (C builds it in
+/// TopMemoryContext / the current context), so it is a `PgVec` carrying its
+/// allocator lifetime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunningTransactionsData<'mcx> {
+    pub xcnt: i32,
+    pub subxcnt: i32,
+    pub subxid_status: subxids_array_status,
+    pub nextXid: TransactionId,
+    pub oldestRunningXid: TransactionId,
+    pub oldestDatabaseRunningXid: TransactionId,
+    pub latestCompletedXid: TransactionId,
+    pub xids: mcx::PgVec<'mcx, TransactionId>,
+}
+
+/// Handle to the LWLocks `GetRunningTransactionData` (`procarray.c`) holds
+/// while its caller's callback runs: the C contract "returns with
+/// ProcArrayLock and XidGenLock held" becomes a with-locks callback shape.
+/// The owner releases every lock still held when the callback returns —
+/// success and error path alike — so no lock is ever held across `?` without
+/// a guard.
+pub trait RunningTransactionLocksHeld {
+    /// `LWLockRelease(ProcArrayLock)` before the callback finishes — the
+    /// hot-standby (`wal_level < logical`) path in `LogStandbySnapshot`.
+    /// `Err` carries the C `elog(ERROR, "lock ... is not held")`.
+    fn release_proc_array_lock(&mut self) -> types_error::PgResult<()>;
+}
+
+/// `xl_standby_lock` (`storage/standbydefs.h`): one logged
+/// AccessExclusiveLock — 12 bytes, no padding.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct xl_standby_lock {
+    /// xid of the holding transaction.
+    pub xid: TransactionId,
+    /// `InvalidOid` when locking a shared relation.
+    pub dbOid: Oid,
+    pub relOid: Oid,
 }

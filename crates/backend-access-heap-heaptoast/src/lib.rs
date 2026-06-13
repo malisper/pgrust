@@ -55,7 +55,7 @@ use types_scan::scankey::{
     StrategyNumber,
 };
 use types_scan::sdir::ForwardScanDirection;
-use types_storage::storage::AccessShareLock;
+use types_storage::lock::AccessShareLock;
 use types_tuple::heap::SizeofHeapTupleHeader;
 use types_tuple::heaptuple::{
     HeapTupleHeaderSetNatts, TupleDescData, BITMAPLEN, HEAP2_XACT_MASK, HEAP_HASEXTERNAL,

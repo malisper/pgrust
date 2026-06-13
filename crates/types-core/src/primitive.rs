@@ -33,6 +33,8 @@ pub type Selectivity = f64;
 pub type ProtocolVersion = uint32;
 /// `ProcNumber` (`procnumber.h`) — was C `int`.
 pub type ProcNumber = i32;
+/// `LocalTransactionId` (`c.h`) — a `uint32`.
+pub type LocalTransactionId = u32;
 pub type uint8 = u8;
 pub type uint16 = u16;
 pub type uint32 = u32;

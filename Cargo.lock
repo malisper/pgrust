@@ -671,6 +671,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-transam-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-transam-twophase-rmgr"
 version = "0.0.0"
 dependencies = [
@@ -680,6 +689,23 @@ dependencies = [
  "backend-utils-activity-stat-seams",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-access-transam-twophase-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-transam-varsup-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
 ]
 
 [[package]]
@@ -703,11 +729,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xloginsert-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-transam-xlogrecovery-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
 name = "backend-access-transam-xlogstats"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-transam-xlogutils-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
  "types-wal",
 ]
 
@@ -1276,6 +1327,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-slot-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-replication-walsender-seams"
 version = "0.0.0"
 dependencies = [
@@ -1364,6 +1425,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-procarray-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-ipc-procsignal"
 version = "0.0.0"
 dependencies = [
@@ -1421,15 +1493,57 @@ name = "backend-storage-ipc-sinval-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-storage-ipc-standby"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-transam-seams",
+ "backend-access-transam-twophase-seams",
+ "backend-access-transam-varsup-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xloginsert-seams",
+ "backend-access-transam-xlogrecovery-seams",
+ "backend-access-transam-xlogutils-seams",
+ "backend-replication-slot-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-sinval-seams",
+ "backend-storage-ipc-standby-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-seams",
+ "backend-utils-activity-waitevent-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-error",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-ps-status-seams",
+ "backend-utils-misc-timeout-seams",
+ "mcx",
+ "port-pgsleep-seams",
+ "types-core",
+ "types-error",
+ "types-storage",
+ "types-timeout",
+ "types-wal",
 ]
 
 [[package]]
 name = "backend-storage-ipc-standby-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+ "types-storage",
  "types-wal",
 ]
 
@@ -1465,6 +1579,7 @@ dependencies = [
 name = "backend-storage-lmgr-lock-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -1512,6 +1627,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
  "types-storage",
 ]
 
@@ -1773,8 +1889,10 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-cache",
+ "types-core",
  "types-datum",
  "types-error",
+ "types-storage",
 ]
 
 [[package]]
@@ -2048,6 +2166,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-ps-status-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-utils-misc-queryenvironment"
 version = "0.0.0"
 dependencies = [
@@ -2066,6 +2191,15 @@ version = "0.0.0"
 dependencies = [
  "pg-prng",
  "types-core",
+]
+
+[[package]]
+name = "backend-utils-misc-timeout-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-timeout",
 ]
 
 [[package]]
@@ -2274,6 +2408,7 @@ dependencies = [
  "backend-postmaster-syslogger",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-procsignal",
+ "backend-storage-ipc-standby",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
@@ -2448,7 +2583,9 @@ name = "types-storage"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "mcx",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2469,6 +2606,13 @@ dependencies = [
  "types-snapshot",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-timeout"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]

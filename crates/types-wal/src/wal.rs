@@ -238,3 +238,48 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
     }
 }
 
+/// The trimmed `XLogReaderState` view handed to an rmgr `rm_redo` entry
+/// point: `XLogRecGetInfo(record)`, `XLogRecGetData(record)` (with
+/// `XLogRecGetDataLen` folded into the slice), and
+/// `XLogRecHasAnyBlockRefs(record)`. All rmgr redo seams share this shape;
+/// the dispatcher marshals it from the decoded record.
+#[derive(Clone, Copy, Debug)]
+pub struct RedoRecord<'a> {
+    /// The raw `xl_info` byte (rmgr bits plus `XLR_INFO_MASK` bits).
+    pub info: uint8,
+    /// The record's main data.
+    pub data: &'a [u8],
+    /// Whether any block references are present.
+    pub has_any_block_refs: bool,
+}
+
+/// `RM_STANDBY_ID` — the Standby resource manager (rmgrlist.h entry 8).
+pub const RM_STANDBY_ID: RmgrId = 8;
+
+/// `XLOG_MARK_UNIMPORTANT` (access/xlog.h) — record flag: not important for
+/// durability decisions (checkpoint / archive-timeout triggering).
+pub const XLOG_MARK_UNIMPORTANT: uint8 = 0x02;
+
+/// `WalLevel` (access/xlog.h) — the `wal_level` GUC.
+pub type WalLevel = i32;
+pub const WAL_LEVEL_MINIMAL: WalLevel = 0;
+pub const WAL_LEVEL_REPLICA: WalLevel = 1;
+pub const WAL_LEVEL_LOGICAL: WalLevel = 2;
+
+/// `HotStandbyState` (access/xlogutils.h) — the hot-standby state machine
+/// driven by the startup process (`standbyState` global, owned by the
+/// xlogutils unit).
+pub type HotStandbyState = u32;
+pub const STANDBY_DISABLED: HotStandbyState = 0;
+pub const STANDBY_INITIALIZED: HotStandbyState = 1;
+pub const STANDBY_SNAPSHOT_PENDING: HotStandbyState = 2;
+pub const STANDBY_SNAPSHOT_READY: HotStandbyState = 3;
+
+/// `ReplicationSlotInvalidationCause` (replication/slot.h) — bitmask of
+/// invalidation causes.
+pub type ReplicationSlotInvalidationCause = u32;
+pub const RS_INVAL_NONE: ReplicationSlotInvalidationCause = 0;
+pub const RS_INVAL_WAL_REMOVED: ReplicationSlotInvalidationCause = 1 << 0;
+pub const RS_INVAL_HORIZON: ReplicationSlotInvalidationCause = 1 << 1;
+pub const RS_INVAL_WAL_LEVEL: ReplicationSlotInvalidationCause = 1 << 2;
+pub const RS_INVAL_IDLE_TIMEOUT: ReplicationSlotInvalidationCause = 1 << 3;

@@ -141,3 +141,68 @@ pub fn lock_acquire(
         held: result != types_storage::lock::LOCKACQUIRE_NOT_AVAIL,
     })
 }
+
+seam_core::seam!(
+    /// `LockAcquire(locktag, lockmode, sessionLock, dontWait)` — can
+    /// `ereport(ERROR)` (out of shared memory, deadlock).
+    pub fn lock_acquire(
+        locktag: &types_storage::LOCKTAG,
+        lockmode: types_storage::LOCKMODE,
+        session_lock: bool,
+        dont_wait: bool,
+    ) -> types_error::PgResult<types_storage::LockAcquireResult>
+);
+
+seam_core::seam!(
+    /// `LockRelease(locktag, lockmode, sessionLock)` — false (with a WARNING)
+    /// when the lock was not held.
+    pub fn lock_release(
+        locktag: &types_storage::LOCKTAG,
+        lockmode: types_storage::LOCKMODE,
+        session_lock: bool,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `GetLockConflicts(locktag, lockmode, countp)` — VXIDs of transactions
+    /// holding conflicting locks; the C terminator is dropped and `countp`
+    /// folds into the length. The result array is allocated in `mcx` (C
+    /// reuses a TopMemoryContext-static array; the owner copies into the
+    /// caller's context instead).
+    pub fn get_lock_conflicts<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        locktag: &types_storage::LOCKTAG,
+        lockmode: types_storage::LOCKMODE,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_storage::VirtualTransactionId>>
+);
+
+seam_core::seam!(
+    /// `GetRunningTransactionLocks(*nlocks)` — every held AccessExclusiveLock
+    /// with an assigned xid, for snapshot logging. C pallocs the array in the
+    /// caller's context (the caller pfrees it), so the seam takes the target
+    /// context.
+    pub fn get_running_transaction_locks<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_storage::xl_standby_lock>>
+);
+
+seam_core::seam!(
+    /// `VirtualXactLock(vxid, wait)` — true if the vxid has ended (or its
+    /// lock was acquired); false when `wait == false` and it is still around.
+    pub fn virtual_xact_lock(
+        vxid: types_storage::VirtualTransactionId,
+        wait: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `VirtualXactLockTableInsert(vxid)`.
+    pub fn virtual_xact_lock_table_insert(
+        vxid: types_storage::VirtualTransactionId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `VirtualXactLockTableCleanup()`.
+    pub fn virtual_xact_lock_table_cleanup() -> types_error::PgResult<()>
+);
