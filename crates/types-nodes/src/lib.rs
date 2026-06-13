@@ -27,6 +27,7 @@ pub mod nodeindexscan;
 pub mod nodemergejoin;
 pub mod nodes;
 pub mod parsenodes;
+pub mod partition;
 pub mod pathnodes;
 pub mod planstate;
 pub mod primnodes;
@@ -36,7 +37,7 @@ pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
     EStateData, EcxtId, ExecProcNodeMtd, ExprContext, ExprContextCallbackFunction,
-    ExprContext_CB, Opaque, ParamExecData, PlanStateData, ResultRelInfo, RriId,
+    ExprContext_CB, ModifyTableState, Opaque, ParamExecData, PlanStateData, ResultRelInfo, RriId,
     ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId, T_MaterialState,
 };
 pub use instrument::Instrumentation;
@@ -50,6 +51,11 @@ pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{Material, MaterialState};
 pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
+pub use partition::{
+    PartitionBoundInfo, PartitionBoundInfoData, PartitionDesc, PartitionDescData, PartitionKey,
+    PartitionKeyData, PartitionPruneContext, PartitionPruneState, PartitionPruningData,
+    PartitionRangeDatumKind, PartitionStrategy, PartitionedRelPruningData,
+};
 pub use planstate::PlanStateNode;
 pub use primnodes::{Expr, TargetEntry, Var};
 pub use queryenvironment::{

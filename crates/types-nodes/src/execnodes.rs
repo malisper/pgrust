@@ -272,6 +272,24 @@ pub struct ScanStateData<'mcx> {
     pub ss_ScanTupleSlot: Option<SlotId>,
 }
 
+/// `ModifyTableState` (execnodes.h), trimmed to the fields the partition
+/// tuple-routing port consumes. Owned by `nodeModifyTable.c`; the rest of its
+/// fields land with that port.
+#[derive(Debug)]
+pub struct ModifyTableState<'mcx> {
+    /// `PlanState ps` — its first field is `NodeTag`; `ps.plan` is the
+    /// `ModifyTable` plan node, `ps.state` the EState (threaded explicitly in
+    /// the owned model), `ps.ps_ResultTupleSlot`/`ps.ps_ExprContext` reused for
+    /// per-partition projections.
+    pub ps: PlanStateData<'mcx>,
+    /// `ResultRelInfo *resultRelInfo` — per-subplan result rels (ids into the
+    /// EState pool); `resultRelInfo[0]` is the "first" relation execPartition
+    /// maps attnos against.
+    pub resultRelInfo: PgVec<'mcx, RriId>,
+    /// `ResultRelInfo *rootResultRelInfo` — the partitioned-table root target.
+    pub rootResultRelInfo: Option<RriId>,
+}
+
 /// `EState` (execnodes.h) — working storage for one Executor invocation,
 /// trimmed to the fields ports consume (unconsumed C fields — `es_snapshot`,
 /// `es_crosscheck_snapshot`, `es_rowmarks`, `es_junkFilter`,
@@ -295,6 +313,13 @@ pub struct EStateData<'mcx> {
     pub es_plannedstmt: Option<PgBox<'mcx, PlannedStmt<'mcx>>>,
     /// `List *es_part_prune_infos` — `PlannedStmt.partPruneInfos`.
     pub es_part_prune_infos: PgVec<'mcx, Opaque>,
+    /// `List *es_part_prune_states` — the `PartitionPruneState`s built by
+    /// `ExecDoInitialPruning`, parallel to `es_part_prune_infos`.
+    pub es_part_prune_states: PgVec<'mcx, crate::partition::PartitionPruneState<'mcx>>,
+    /// `List *es_part_prune_results` — per-pruneinfo bitmapset of subplans that
+    /// survived initial pruning (a `None` element is the C `NULL`), parallel to
+    /// `es_part_prune_infos`.
+    pub es_part_prune_results: PgVec<'mcx, Option<PgBox<'mcx, Bitmapset<'mcx>>>>,
     /// `CommandId es_output_cid` — the inserted/updated tuples' cmin/cmax.
     pub es_output_cid: CommandId,
     /// `ResultRelInfo **es_result_relations` — per-RTE result-rel info (ids
@@ -380,6 +405,9 @@ impl<'mcx> EStateData<'mcx> {
             es_plannedstmt: None,
             // es_part_prune_infos = NIL;
             es_part_prune_infos: PgVec::new_in(mcx),
+            // es_part_prune_states = NIL; es_part_prune_results = NIL;
+            es_part_prune_states: PgVec::new_in(mcx),
+            es_part_prune_results: PgVec::new_in(mcx),
             // es_output_cid = (CommandId) 0;
             es_output_cid: 0,
             // es_result_relations = NULL; the relation lists = NIL;
