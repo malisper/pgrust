@@ -9,7 +9,6 @@
 
 use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
-use types_cache::typcache::{TYPECACHE_HASH_EXTENDED_PROC_FINFO, TYPECACHE_HASH_PROC_FINFO};
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::error::ERRCODE_UNDEFINED_FUNCTION;
