@@ -469,6 +469,7 @@ mod recurrence_guard {
         ("backend_access_transam_xlog", "data_checksums_enabled"),
         ("backend_access_transam_xlog", "enable_fsync"),
         ("backend_access_transam_xlog", "enable_hot_standby"),
+        ("backend_access_transam_xlog", "recovery_in_progress"),
         ("backend_access_transam_xlog", "startup_xlog"),
         ("backend_access_transam_xlog", "wal_level"),
         ("backend_access_transam_xlog", "wal_sync_method"),
@@ -539,6 +540,7 @@ mod recurrence_guard {
         ("backend_utils_init_small", "reserved_connections"),
         ("backend_utils_init_small", "superuser_reserved_connections"),
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
+        ("backend_utils_misc_guc_file", "guc_check_errdetail"),
         ("backend_utils_misc_guc_file", "new_guc_nest_level"),
         ("backend_utils_misc_guc_file", "set_config_with_handle"),
     ];
