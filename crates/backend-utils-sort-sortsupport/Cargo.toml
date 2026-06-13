@@ -1,0 +1,32 @@
+[package]
+name = "backend-utils-sort-sortsupport"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_sort_sortsupport"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-fmgr = { path = "../types-fmgr" }
+types-rel = { path = "../types-rel" }
+types-sortsupport = { path = "../types-sortsupport" }
+
+# fmgr machinery (the comparison-shim FunctionCallInvoke / fmgr_info_cxt /
+# OidFunctionCall1) — direct dep, no cycle.
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+
+# inward seam crate (this unit installs these)
+backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsupport-seams" }
+
+# outward seam crates (callees; panic until owners land)
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+
+[dev-dependencies]
+seam-core = { path = "../seam-core" }

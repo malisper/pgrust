@@ -70,6 +70,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-detoast"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-common-toast-compression-seams",
+ "backend-access-common-toast-internals-seams",
+ "backend-utils-adt-misc2-seams",
+ "common-pglz-seams",
+ "mcx",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-common-detoast-seams"
 version = "0.0.0"
 dependencies = [
@@ -220,6 +234,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-common-toast-compression-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
  "types-error",
 ]
 
@@ -791,6 +814,21 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-wal",
+]
+
+[[package]]
+name = "backend-access-rmgrdesc-xactdesc"
+version = "0.0.0"
+dependencies = [
+ "backend-access-rmgrdesc-xactdesc-seams",
+ "backend-rmgrdesc-next",
+ "backend-utils-adt-timestamp-seams",
+ "common-relpath-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-storage",
  "types-wal",
 ]
 
@@ -3680,6 +3718,22 @@ name = "backend-jit-jit-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-lib-dshash"
+version = "0.0.0"
+dependencies = [
+ "backend-lib-dshash-seams",
+ "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mmgr-dsa-seams",
+ "common-hashfn-seams",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-storage",
 ]
 
 [[package]]
@@ -7623,6 +7677,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-sort-sortsupport"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-fmgr-core",
+ "backend-utils-sort-sortsupport-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-rel",
+ "types-sortsupport",
+]
+
+[[package]]
 name = "backend-utils-sort-sortsupport-seams"
 version = "0.0.0"
 dependencies = [
@@ -7769,6 +7841,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-hashfn-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
 name = "common-ip-seams"
 version = "0.0.0"
 dependencies = [
@@ -7781,6 +7861,14 @@ name = "common-path-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "common-pglz-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -7862,6 +7950,14 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pg-prng"
 version = "0.0.0"
+
+[[package]]
+name = "port-crc32c"
+version = "0.0.0"
+dependencies = [
+ "port-crc32c-seams",
+ "port-pg-crc32c-seams",
+]
 
 [[package]]
 name = "port-crc32c-seams"
@@ -7979,7 +8075,6 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
- "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
@@ -7992,7 +8087,6 @@ dependencies = [
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
- "backend-catalog-objectaccess",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
@@ -8031,7 +8125,6 @@ dependencies = [
  "backend-timezone-strftime",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
- "backend-utils-adt-format-type",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
@@ -8044,15 +8137,12 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
- "backend-utils-misc-more",
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
- "backend-utils-misc-timeout",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
- "port-pqsignal",
 ]
 
 [[package]]

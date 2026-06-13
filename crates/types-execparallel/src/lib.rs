@@ -49,6 +49,13 @@ pub const fn dsa_pointer_is_valid(x: DsaPointer) -> bool {
     x != INVALID_DSA_POINTER
 }
 
+/// `DSA_ALLOC_HUGE` (`utils/dsa.h:73`) — allow huge allocation (> 1 GB).
+pub const DSA_ALLOC_HUGE: i32 = 0x01;
+/// `DSA_ALLOC_NO_OOM` (`utils/dsa.h:74`) — no failure if out-of-memory.
+pub const DSA_ALLOC_NO_OOM: i32 = 0x02;
+/// `DSA_ALLOC_ZERO` (`utils/dsa.h:75`) — zero allocated memory.
+pub const DSA_ALLOC_ZERO: i32 = 0x04;
+
 /// Tuple-bound value (`int64 tuples_needed`).
 pub type TuplesNeeded = int64;
 
