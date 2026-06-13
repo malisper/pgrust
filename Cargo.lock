@@ -1610,6 +1610,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-xlogbackup"
+version = "0.0.0"
+dependencies = [
+ "backend-timezone-localtime",
+ "backend-timezone-strftime",
+ "backend-utils-error",
+ "state-pgtz",
+ "types-core",
+ "types-pgtime",
+ "types-wal",
+]
+
+[[package]]
 name = "backend-access-transam-xloginsert-seams"
 version = "0.0.0"
 dependencies = [
@@ -3435,6 +3448,7 @@ dependencies = [
  "backend-nodes-nodeFuncs-seams",
  "backend-storage-buffer-bufmgr-seams",
  "backend-tcop-dest-seams",
+ "backend-utils-adt-misc2-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-typcache-seams",

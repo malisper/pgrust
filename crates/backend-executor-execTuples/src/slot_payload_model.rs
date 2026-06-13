@@ -14,6 +14,7 @@ use types_nodes::tuptable::{
     TupleTableSlotOps, VirtualTupleTableSlot, TTS_FLAG_FIXED,
 };
 use types_nodes::{TupleSlotKind, TupleTableSlot};
+use types_tuple::backend_access_common_heaptuple::TupleValue;
 use types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};
 
 use crate::slot_ops_vtables;
@@ -115,10 +116,12 @@ pub fn MakeTupleTableSlot<'mcx>(
         header.tts_flags |= TTS_FLAG_FIXED;
 
         let natts = desc.natts as usize;
-        // palloc0 of the Datum/bool arrays.
-        let mut values: mcx::PgVec<'mcx, Datum> = vec_with_capacity_in(mcx, natts)?;
+        // palloc0 of the Datum/bool arrays. A freshly-allocated slot has
+        // tts_nvalid = 0, so the array contents are don't-care until deform
+        // fills them; the zero word maps to `ByVal(Datum::null())`.
+        let mut values: mcx::PgVec<'mcx, TupleValue<'mcx>> = vec_with_capacity_in(mcx, natts)?;
         let mut isnull: mcx::PgVec<'mcx, bool> = vec_with_capacity_in(mcx, natts)?;
-        values.resize(natts, Datum::null());
+        values.resize(natts, TupleValue::ByVal(Datum::null()));
         isnull.resize(natts, false);
         tts_values = values;
         tts_isnull = isnull;

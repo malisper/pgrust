@@ -338,10 +338,15 @@ pub fn do_tup_output<'mcx>(
 
     // insert data: memcpy(slot->tts_values, values, natts * sizeof(Datum));
     //              memcpy(slot->tts_isnull, isnull, natts * sizeof(bool));
+    //
+    // `do_tup_output`'s caller passes a bare `Datum *values` (C ABI); the slot's
+    // expanded tts_values holds a `TupleValue`. These are the convenience-output
+    // path's already-formed column words, carried verbatim as `ByVal` (matching
+    // C's direct `tts_values[i] = values[i]` word copy).
     {
         let base = tstate.slot.base_mut();
         for i in 0..natts {
-            base.tts_values[i] = values[i];
+            base.tts_values[i] = TupleValue::ByVal(values[i]);
             base.tts_isnull[i] = isnull[i];
         }
     }
