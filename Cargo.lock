@@ -1224,6 +1224,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-explain-format"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-xml-seams",
+ "mcx",
+ "types-error",
+ "types-explain",
+]
+
+[[package]]
 name = "backend-commands-extension-seams"
 version = "0.0.0"
 dependencies = [
@@ -2823,6 +2834,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-json-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
@@ -2957,6 +2977,15 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-datum",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-xml-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
  "types-error",
 ]
 
@@ -3601,6 +3630,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-explain-format",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -3748,6 +3778,13 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+]
+
+[[package]]
+name = "types-explain"
+version = "0.0.0"
+dependencies = [
+ "mcx",
 ]
 
 [[package]]
