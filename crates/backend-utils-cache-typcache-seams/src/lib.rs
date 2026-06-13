@@ -19,6 +19,50 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(type_id, flags)` (typcache.c), range/multirange view:
+    /// the same cache build as [`lookup_type_cache`] but returning the trimmed
+    /// `types_cache::typcache::TypeCacheEntry` the range/multirange ADTs read
+    /// (carrying the `rngtype` / `rngelemtype` sub-entries and the range
+    /// `cmp`/`subdiff` support `FmgrInfo`s). The owning typcache unit installs
+    /// this when it lands; until then a call panics loudly. `Err` carries
+    /// `ereport(ERROR, ERRCODE_UNDEFINED_OBJECT, "type ... does not exist")`
+    /// and the catalog-lookup surface.
+    pub fn lookup_type_cache_range(
+        type_id: types_core::primitive::Oid,
+        flags: i32,
+    ) -> types_error::PgResult<types_cache::typcache::TypeCacheEntry>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(type_id, flags)` (typcache.c), range/multirange-ADT
+    /// view: same as [`lookup_type_cache`] but hands back the
+    /// `types_cache::TypeCacheEntry` shape the range/multirange ports use
+    /// (with the `hash_proc_finfo` / `hash_extended_proc_finfo` support
+    /// fields). `hash_multirange` calls this to resolve the subtype's hash
+    /// support function when it was not already cached. `Err` carries the
+    /// catalog-lookup `ereport(ERROR)` surface.
+    pub fn lookup_type_cache_entry(
+        type_id: types_core::primitive::Oid,
+        flags: i32,
+    ) -> types_error::PgResult<types_cache::TypeCacheEntry>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(type_id, TYPECACHE_HASH_PROC_FINFO |
+    /// TYPECACHE_HASH_EXTENDED_PROC_FINFO)` then read `hash_proc_finfo.fn_oid` /
+    /// `hash_extended_proc_finfo.fn_oid` (the `hash_range` / `hash_range_extended`
+    /// element-type fallback re-lookup, rangetypes.c:1419 / :1482): resolve the
+    /// element type's (extended, when `extended`) hash support function and
+    /// return its OID. `Err` carries the C `ereport(ERROR,
+    /// ERRCODE_UNDEFINED_FUNCTION, "could not identify a hash function for type
+    /// %s")` raised when no hash function exists.
+    pub fn lookup_range_elem_hash_proc(
+        elem_type_id: types_core::primitive::Oid,
+        extended: bool,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
     /// `lookup_rowtype_tupdesc(type_id, typmod)` (typcache.c): the tuple
     /// descriptor of a composite rowtype, cloned out of the typcache into
     /// `mcx` (the C returns a refcounted pointer into the cache; the safe

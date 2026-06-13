@@ -8,6 +8,19 @@ use mcx::{Mcx, PgString, PgVec};
 use types_error::PgResult;
 
 seam_core::seam!(
+    /// `textToQualifiedNameList(textval)` (varlena.c): split a (possibly
+    /// qualified) name `text` on `.` into its identifier parts, downcasing
+    /// and dequoting per `SplitIdentifierString`. `textval` is the `text`
+    /// payload bytes (database encoding). Invalid name syntax (or an empty
+    /// list) raises `ERRCODE_INVALID_NAME` (`Err`); the returned parts are
+    /// `pstrdup`'d into `mcx`. `Err` includes OOM.
+    pub fn text_to_qualified_name_list<'mcx>(
+        mcx: Mcx<'mcx>,
+        textval: &[u8],
+    ) -> PgResult<PgVec<'mcx, PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `cstring_to_text(s)` (varlena.c) — build a `text` varlena from a
     /// string, allocated in `mcx` (C: palloc in the caller's current
     /// context), returned as the `Datum` callers pass on (the
