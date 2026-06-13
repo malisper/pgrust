@@ -12,6 +12,6 @@ seam_core::seam!(
     /// ereport level.
     pub fn pqsignal(
         signo: i32,
-        func: types_signal::SigDisposition
+        func: types_signal::SigHandler
     ) -> types_signal::SigDisposition
 );

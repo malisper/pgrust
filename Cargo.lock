@@ -1451,6 +1451,7 @@ name = "interfaces-libpq-legacy-pqsignal"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "types-signal",
 ]
 
 [[package]]
