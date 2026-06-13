@@ -62,7 +62,6 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
             relallvisible: 0,
             reltoastrelid: 0,
             reltablespace: 0,
-            relowner: 0,
             relfilenode: 0,
             relisshared: false,
             relhassubclass: false,
