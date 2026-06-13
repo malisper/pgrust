@@ -304,3 +304,14 @@ seam_core::seam!(
         opername: &str,
     ) -> PgResult<(PgVec<'mcx, OperRow<'mcx>>, bool)>
 );
+
+seam_core::seam!(
+    /// The collation's schema-qualified name for `ri_GenerateQualCollation`:
+    /// `SearchSysCache1(COLLOID)` then `(get_namespace_name(collnamespace),
+    /// NameStr(collname))`, both copied into `mcx` as raw name bytes.
+    /// `Ok(None)` on a cache miss (the C `elog(ERROR)`s); `Err` carries OOM.
+    pub fn collation_qualified_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        collation: Oid,
+    ) -> PgResult<Option<(PgVec<'mcx, u8>, PgVec<'mcx, u8>)>>
+);

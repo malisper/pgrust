@@ -36,3 +36,31 @@ seam_core::seam!(
         options: &[DefElemString<'_>],
     ) -> PgResult<Datum>
 );
+
+seam_core::seam!(
+    /// `ri_CompareWithCast(eq_opr, typeid, collid, lhs, rhs)` (ri_triggers.c
+    /// caller; fmgr owns the cached `ri_compare_cache` `FmgrInfo`s): apply the
+    /// equality (or contained-by) operator after the optional input cast,
+    /// returning the boolean result. The cache + `fmgr_info` lookups +
+    /// `FunctionCall2Coll` all belong to the fmgr/coercion layer, so the whole
+    /// computation crosses as one seam. Can `ereport(ERROR)`.
+    pub fn ri_compare_with_cast(
+        eq_opr: Oid,
+        typeid: Oid,
+        collid: Oid,
+        lhs: Datum,
+        rhs: Datum,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// Render the given (1-based, relation) `attnums` of a violator
+    /// `TupleTableSlot` into printable [`ResultColumn`]s for
+    /// `ri_ReportViolation` (`getTypeOutputInfo` + `OidOutputFunctionCall`;
+    /// NULL → C's `"null"`). Allocated into `mcx`. Can `ereport(ERROR)`.
+    pub fn render_slot_columns<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: types_ri_triggers::TupleTableSlotRef,
+        attnums: &[i16],
+    ) -> PgResult<mcx::PgVec<'mcx, types_ri_triggers::ResultColumn<'mcx>>>
+);

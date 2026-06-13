@@ -23,3 +23,19 @@ seam_core::seam!(
         instrument_options: i32,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecCheckPermissions(rangeTable, rteperminfos, ereport_on_violation)`
+    /// (execMain.c) for `RI_Initial_Check`'s SELECT probe on two relations.
+    /// Each entry is `(relid, relkind, selected_col_attnums)` for an
+    /// `RTE_RELATION` requiring `ACL_SELECT` on the listed columns
+    /// (`AccessShareLock`); the owner builds the `RangeTblEntry` /
+    /// `RTEPermissionInfo` nodes and runs the access-method-level permission
+    /// check. Returns `true` if every check passes; with
+    /// `ereport_on_violation = false` a denial is `Ok(false)`. Catalog/ACL
+    /// lookups can `ereport(ERROR)`.
+    pub fn exec_check_permissions_select(
+        rels: &[(types_core::Oid, u8, &[i16])],
+        ereport_on_violation: bool,
+    ) -> types_error::PgResult<bool>
+);

@@ -60,3 +60,17 @@ seam_core::seam!(
         f: &mut dyn FnMut() -> PgResult<()>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `GetLatestSnapshot()` (snapmgr.c): a fresh MVCC snapshot reflecting all
+    /// committed transactions as of now. Snapshot acquisition can
+    /// `ereport(ERROR)` (e.g. too-old-snapshot / xmin), carried on `Err`.
+    pub fn get_latest_snapshot() -> PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
+    /// `GetTransactionSnapshot()` (snapmgr.c): the transaction snapshot
+    /// (serializable: the registered xact snapshot; otherwise a fresh one).
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn get_transaction_snapshot() -> PgResult<types_snapshot::SnapshotData>
+);

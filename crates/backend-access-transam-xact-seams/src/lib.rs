@@ -104,3 +104,10 @@ seam_core::seam!(
     /// (at any nesting level) and return to default state.
     pub fn abort_out_of_any_transaction() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `IsolationUsesXactSnapshot()` (xact.h/xact.c): true under REPEATABLE
+    /// READ or SERIALIZABLE (`XactIsoLevel >= XACT_REPEATABLE_READ`). Pure read
+    /// of the per-backend isolation level.
+    pub fn isolation_uses_xact_snapshot() -> bool
+);

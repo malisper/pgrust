@@ -14,3 +14,17 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn member_can_set_role(member: Oid, role: Oid) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `has_bypassrls_privilege(roleid)` (acl.c): whether the role has the
+    /// `BYPASSRLS` attribute (superusers always do). Catalog lookup; can
+    /// `ereport(ERROR)`.
+    pub fn has_bypassrls_privilege(roleid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `object_ownercheck(classid, objectid, roleid)` (catalog/aclchk.c):
+    /// whether `roleid` owns the catalog object. Catalog lookup; can
+    /// `ereport(ERROR)`.
+    pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<bool>
+);

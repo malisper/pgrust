@@ -36,6 +36,12 @@ use types_tuple::heaptuple::TupleDescData;
 pub struct FormData_pg_class<'mcx> {
     /// `NameData relname` — name of the relation.
     pub relname: PgString<'mcx>,
+    /// `Oid relnamespace` — the relation's schema OID.
+    pub relnamespace: Oid,
+    /// `Oid relowner` — the relation's owning role OID.
+    pub relowner: Oid,
+    /// `bool relrowsecurity` — row-level security is enabled on the relation.
+    pub relrowsecurity: bool,
     /// `int32 relpages` — page-count estimate from pg_class.
     pub relpages: i32,
     /// `float4 reltuples` — row-count estimate (negative: never vacuumed).
