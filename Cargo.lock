@@ -1534,6 +1534,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-backup-sink"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-backup-walsummary-seams"
 version = "0.0.0"
 dependencies = [
@@ -8523,6 +8532,7 @@ dependencies = [
  "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
+ "backend-backup-sink",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",
