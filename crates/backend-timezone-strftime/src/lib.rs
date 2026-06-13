@@ -420,8 +420,20 @@ fn isleap_sum(a: i32, b: i32) -> bool {
     sum % 4 == 0 && (sum % 100 != 0 || sum % 400 == 0)
 }
 
-/// This crate owns no seams; nothing to install.
-pub fn init_seams() {}
+/// Install the seams owned by this crate.
+pub fn init_seams() {
+    backend_timezone_strftime_seams::pg_strftime::set(
+        |buf: &mut [u8], format: &str, t: &types_pgtime::pg_tm| {
+            // The seam takes &str; the implementation requires &CStr.
+            // Build a CString from the format string; if it contains an
+            // interior NUL the format is malformed and we return 0 (overflow).
+            let Ok(cformat) = std::ffi::CString::new(format) else {
+                return 0;
+            };
+            pg_strftime(buf, &cformat, t).unwrap_or(0)
+        },
+    );
+}
 
 #[cfg(test)]
 mod tests {

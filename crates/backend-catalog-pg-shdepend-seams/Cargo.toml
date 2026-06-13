@@ -9,6 +9,9 @@ name = "backend_catalog_pg_shdepend_seams"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
+types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+types-nodes = { path = "../types-nodes" }

@@ -47,6 +47,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RangeVarGetRelid(makeRangeVarFromNameList(textToQualifiedNameList(name)),
+    /// lockmode, missing_ok)` — the SQL-function idiom for resolving a
+    /// possibly-qualified relation name text to its OID without holding a lock
+    /// (callers that lack privileges to lock it). With `missing_ok = false` a
+    /// missing relation raises `ERRCODE_UNDEFINED_TABLE`, carried on `Err`.
+    pub fn range_var_get_relid_from_text(
+        mcx: Mcx<'_>,
+        name: &str,
+        lockmode: LOCKMODE,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `AtEOXact_Namespace(isCommit, parallel)` — end-of-xact temp-namespace
     /// and search-path cleanup.
     pub fn at_eoxact_namespace(is_commit: bool, parallel: bool)

@@ -9,6 +9,7 @@ name = "backend_postmaster_launch_backend"
 path = "src/lib.rs"
 
 [dependencies]
+backend-postmaster-launch-backend-seams = { path = "../backend-postmaster-launch-backend-seams" }
 types-core = { path = "../types-core" }
 types-net = { path = "../types-net" }
 types-startup = { path = "../types-startup" }
