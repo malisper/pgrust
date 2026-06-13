@@ -79,6 +79,7 @@ backend-lib-dshash = { path = "../backend-lib-dshash" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }
 backend-libpq-pqformat = { path = "../backend-libpq-pqformat" }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
+backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-extensible = { path = "../backend-nodes-extensible" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-postmaster-autovacuum = { path = "../backend-postmaster-autovacuum" }

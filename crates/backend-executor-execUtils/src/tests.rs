@@ -192,6 +192,7 @@ fn var_tle<'mcx>(
                     vartype: typid,
                     vartypmod: typmod,
                     varlevelsup: 0,
+                    ..Default::default()
                 }),
             )
             .unwrap(),
