@@ -27,7 +27,31 @@ pub enum relopt_type {
     RELOPT_TYPE_STRING = 4,
 }
 
-/// `relopt_gen` (reloptions.h) — the generic option definition header.
+/// Type-specific payload of a reloption definition. In C the typed option
+/// structs (`relopt_bool`, `relopt_int`, `relopt_real`, `relopt_enum`,
+/// `relopt_string`; reloptions.c) embed `relopt_gen` as their first member and
+/// add the default/range fields; here that tail is carried as this variant,
+/// selected by [`relopt_gen::type_`]. Without it the default/min/max an option
+/// registers (e.g. `add_local_int_reloption`) would be lost.
+#[derive(Clone, Debug)]
+pub enum relopt_typed {
+    /// `relopt_bool`.
+    Bool { default_val: bool },
+    /// `relopt_int`.
+    Int { default_val: i32, min: i32, max: i32 },
+    /// `relopt_real`.
+    Real { default_val: f64, min: f64, max: f64 },
+    /// `relopt_enum` — `default_val` is the resolved symbol value.
+    Enum { default_val: i32 },
+    /// `relopt_string`.
+    Str {
+        default_val: Option<String>,
+        default_isnull: bool,
+    },
+}
+
+/// `relopt_gen` (reloptions.h) — the generic option definition header plus its
+/// type-specific tail ([`relopt_typed`], the embedding typed struct's fields).
 #[derive(Clone, Debug)]
 pub struct relopt_gen {
     /// must be first (used as list termination marker)
@@ -37,6 +61,8 @@ pub struct relopt_gen {
     pub lockmode: LOCKMODE,
     pub namelen: i32,
     pub type_: relopt_type,
+    /// type-specific default/range payload
+    pub data: relopt_typed,
 }
 
 /// `relopt_value` (reloptions.h) — a parsed option value handed to a
