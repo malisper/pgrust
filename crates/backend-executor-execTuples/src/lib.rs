@@ -27,10 +27,26 @@
 //!   `ExecTypeFromExprList`/`BlessTupleDesc`/`TupleDescGetAttInMetadata` plus
 //!   the `begin/do/end_tup_output` convenience routines.
 //!
-//! SCAFFOLD STAGE: every routine has its real signature (mirroring the C and
-//! verified against `executor/tuptable.h` / `funcapi.h` / `executor.h`) and a
-//! `todo!()` body. The crate compiles and wires `init_seams()`; the logic
-//! lands in follow-up passes.
+//! STATUS: every routine has its real signature (mirroring the C and verified
+//! against `executor/tuptable.h` / `funcapi.h` / `executor.h`). The control
+//! flow that the landed payload model supports — slot creation/teardown, the
+//! clear/store-header callbacks, the byte-deform state machine, the
+//! `ExecForceStore*`/`ExecStore*`/`ExecFetch*` dispatch, the tuple-descriptor
+//! constructors and the `begin/do/end_tup_output` family — is implemented.
+//!
+//! The tuple-bearing bodies that must store, copy, form, return, or deform a
+//! *physical heap/minimal tuple with its user-data bytes* are blocked on a
+//! genuine carrier gap in the landed model and `panic!` (mirror-PG-and-panic):
+//! the slot fields hold a header-only `HeapTuple`/`MinimalTuple`
+//! (`HeapTupleData.t_data` is the header struct, no trailing data area), while
+//! `heap_form_tuple`/`heap_copytuple` produce a `FormedTuple { tuple, data }`
+//! whose `data: PgVec<u8>` body has nowhere to live in the slot; and
+//! `tts_values: PgVec<Datum>` carries bare machine words that cannot hold a
+//! by-reference column (`TupleValue::ByRef`). Closing these requires expanding
+//! the slot structs (a `FormedTuple`-shaped body carrier + a by-reference lane
+//! in `tts_values`), which is the separate workspace-wide
+//! `TupleTableSlot`-header / `es_tupleTable` convergence campaign; the
+//! provisional bridge seams in [`exec_init_slots`] stay until it lands.
 
 #![allow(non_snake_case)]
 
