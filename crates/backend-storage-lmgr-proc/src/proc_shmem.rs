@@ -142,6 +142,17 @@ thread_local! {
 }
 
 thread_local! {
+    /// `slock_t *ProcStructLock` (proc.c file-scope global) — the spinlock that
+    /// serializes access to the `ProcGlobal` freelists / `AuxiliaryProcs` slots.
+    /// In C this is a separate `ShmemInitStruct` word; here the crate owns the
+    /// `Spinlock` word (initialized free, matching `SpinLockInit` in
+    /// `InitProcGlobal`), acquired/released through the merged `s_lock.c`
+    /// primitive.
+    static PROC_STRUCT_LOCK: types_storage::storage::Spinlock =
+        types_storage::storage::Spinlock::new();
+}
+
+thread_local! {
     /// `ProcNumber MyProcNumber` (proc.c backend-local global): the slot number
     /// of this backend's `PGPROC` in `ProcGlobal->allProcs`, or
     /// `INVALID_PROC_NUMBER` when none is claimed. In C `MyProc` is the
@@ -166,6 +177,22 @@ pub(crate) fn with_proc_global<R>(f: impl FnOnce(&mut PROC_HDR) -> R) -> R {
 /// Whether [`InitProcGlobal`] has already built `ProcGlobal`.
 pub(crate) fn proc_global_initialized() -> bool {
     PROC_GLOBAL.with(|cell| cell.borrow().is_some())
+}
+
+/// `SpinLockAcquire(ProcStructLock)` — uncontended test-and-set fast path,
+/// falling back to the `s_lock.c` backoff loop on contention.
+pub(crate) fn spin_lock_acquire_proc_struct_lock() {
+    PROC_STRUCT_LOCK.with(|lock| {
+        // SpinLockAcquire: TAS_SPIN; on failure, s_lock() the backoff loop.
+        if lock.tas_spin() != 0 {
+            backend_storage_lmgr_s_lock::s_lock(lock, Some(file!()), line!() as i32, None);
+        }
+    });
+}
+
+/// `SpinLockRelease(ProcStructLock)` — fence-ordered store of zero.
+pub(crate) fn spin_lock_release_proc_struct_lock() {
+    PROC_STRUCT_LOCK.with(|lock| lock.unlock());
 }
 
 // ---- per-backend MyProc / MyProcNumber / MyProcPid (proc.c backend-locals) ----
@@ -533,6 +560,11 @@ pub(crate) fn all_proc_count() -> u32 {
 /// `&ProcGlobal->allProcs[procNumber].procLatch` as a `LatchHandle` — the
 /// process latch of the backend owning slot `procNumber`. (Owner accessor for
 /// [`crate::proc_misc::ProcSendSignal`]'s `SetLatch`.)
-pub(crate) fn proc_latch_handle(_procNumber: ProcNumber) -> LatchHandle {
-    todo!("proc.c: &ProcGlobal->allProcs[procNumber].procLatch")
+pub(crate) fn proc_latch_handle(procNumber: ProcNumber) -> LatchHandle {
+    // The latch unit identifies a per-PGPROC `procLatch` by the owning slot's
+    // proc number (`storage/latch.h`: "C call sites that read `&proc->procLatch`
+    // translate to an explicit `LatchHandle`, obtained from the caller's own
+    // state"). The slot index is exactly that state; `+1` keeps `0` reserved as
+    // the never-valid handle.
+    LatchHandle::new(procNumber as usize + 1)
 }

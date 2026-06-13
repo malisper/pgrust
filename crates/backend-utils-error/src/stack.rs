@@ -678,9 +678,64 @@ pub fn pg_re_throw<T>() -> PgResult<T> {
     }
 }
 
-// (C's `GetErrorContextStack` fires the error_context_stack callbacks into a
-// scratch entry; with attach-on-propagation there is no ambient chain to walk,
-// so it has no counterpart — context lives on the propagating PgError.)
+/// `GetErrorContextStack` — return the context stack, for display/diags.
+///
+/// Cranks up a scratch stack entry, sets its assoc_context to the caller's
+/// memory context (no arena in the owned model, same elision as errstart), and
+/// fires each registered `error_context_stack` callback so that the callbacks'
+/// `errcontext()` calls accumulate into the scratch entry's `context` field.
+/// The accumulated string is then returned and the scratch entry popped.
+///
+/// Under this crate's sanctioned divergence the `error_context_stack` callback
+/// chain is retired in favor of attach-on-propagation (see the crate docs), so
+/// the callback walk fires nothing — exactly as errfinish's callback walk is
+/// elided. The C control flow (recursion_depth bracket, scratch entry, walk,
+/// pop) is reproduced faithfully; the returned context is whatever the (empty)
+/// chain produced, i.e. `None`.
+pub fn GetErrorContextStack() -> Option<String> {
+    // Crank up a stack entry to store the info in. recursion_depth is elevated
+    // around the callbacks (feeds in_error_recursion_trouble), as in C.
+    let overflow = STACK.with(|s| {
+        let mut st = s.borrow_mut();
+        st.recursion_depth += 1;
+        // get_error_stack_entry(): stack not big enough -> make room and PANIC.
+        if st.frames.len() >= ERRORDATA_STACK_SIZE {
+            st.frames.clear();
+            return true;
+        }
+        // Zero-init scratch entry. assoc_context = CurrentMemoryContext has no
+        // counterpart in the owned model (no palloc arena); the entry's context
+        // String accumulates in-place.
+        let mut error = PgError::new(types_error::LOG, String::new());
+        error.saved_errno = Some(errno::current_errno());
+        error.domain = Some("postgres".to_owned());
+        error.context_domain = Some("postgres".to_owned());
+        st.frames.push(Frame {
+            error,
+            output_to_server: false,
+            output_to_client: false,
+        });
+        false
+    });
+    if overflow {
+        // ereport(PANIC, (errmsg_internal("ERRORDATA_STACK_SIZE exceeded")))
+        let _ = ThrowErrorData(PgError::new(PANIC, "ERRORDATA_STACK_SIZE exceeded"));
+        std::process::abort();
+    }
+
+    // Call any context callback functions to collect the context information
+    // into the scratch entry. The error_context_stack chain is retired (see the
+    // crate docs / divergence #10), so there are no callbacks to fire here.
+
+    // Clean ourselves off the stack and decrement recursion depth, then return
+    // the accumulated context string.
+    STACK.with(|s| {
+        let mut st = s.borrow_mut();
+        let frame = st.frames.pop();
+        st.recursion_depth -= 1;
+        frame.and_then(|f| f.error.context)
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Soft-error support (errsave_start / errsave_finish)
