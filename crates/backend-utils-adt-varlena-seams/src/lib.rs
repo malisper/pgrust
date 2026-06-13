@@ -15,3 +15,11 @@ seam_core::seam!(
         s: &str,
     ) -> types_error::PgResult<types_datum::Datum>
 );
+
+seam_core::seam!(
+    /// `bool SplitIdentifierString(char *rawstring, char separator,
+    /// List **namelist)` (varlena.c) — parse a comma-separated identifier
+    /// list, downcasing/de-quoting each. Returns the parsed names, or `None`
+    /// when the list syntax is invalid (the C `return false`).
+    pub fn split_identifier_string(rawstring: &str, separator: char) -> Option<Vec<String>>
+);

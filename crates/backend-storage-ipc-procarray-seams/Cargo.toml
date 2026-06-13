@@ -1,13 +1,13 @@
 [package]
-name = "backend-replication-walsender-seams"
+name = "backend-storage-ipc-procarray-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_replication_walsender_seams"
+name = "backend_storage_ipc_procarray_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
-types-condvar = { path = "../types-condvar" }
+types-core = { path = "../types-core" }

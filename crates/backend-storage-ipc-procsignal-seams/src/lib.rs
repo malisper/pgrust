@@ -17,3 +17,15 @@ seam_core::seam!(
     /// so an `ereport(ERROR)` propagates to the caller.
     pub fn process_proc_signal_barrier() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `int SendProcSignal(pid_t pid, ProcSignalReason reason,
+    /// ProcNumber procNumber)` (procsignal.c). Returns the `kill()` result
+    /// (0 success, -1 on failure). `procNumber == INVALID_PROC_NUMBER` makes
+    /// it search the proc array for `pid`.
+    pub fn send_proc_signal(
+        pid: i32,
+        reason: types_storage::ProcSignalReason,
+        proc_number: types_core::ProcNumber,
+    ) -> i32
+);

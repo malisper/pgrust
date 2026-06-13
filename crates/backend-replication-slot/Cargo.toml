@@ -1,0 +1,49 @@
+[package]
+name = "backend-replication-slot"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_replication_slot"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-condvar = { path = "../types-condvar" }
+types-tuple = { path = "../types-tuple" }
+types-guc = { path = "../types-guc" }
+types-datum = { path = "../types-datum" }
+types-pgstat = { path = "../types-pgstat" }
+types-replication-slot = { path = "../types-replication-slot" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
+backend-access-transam-transam = { path = "../backend-access-transam-transam" }
+backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
+backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-storage-ipc-procsignal-seams = { path = "../backend-storage-ipc-procsignal-seams" }
+backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+backend-replication-logical-slotsync-seams = { path = "../backend-replication-logical-slotsync-seams" }
+backend-utils-activity-pgstat-replslot-seams = { path = "../backend-utils-activity-pgstat-replslot-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }
+backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
+backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
+backend-utils-misc-guc-file-seams = { path = "../backend-utils-misc-guc-file-seams" }
+port-pg-crc32c-seams = { path = "../port-pg-crc32c-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+libc = "0.2"
+
+[dev-dependencies]

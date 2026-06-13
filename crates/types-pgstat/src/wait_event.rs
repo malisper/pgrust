@@ -28,3 +28,18 @@ pub const WAIT_EVENT_SYSLOGGER_MAIN: u32 = PG_WAIT_ACTIVITY + 13;
 /// 7th entry (0-based 6) of the `WaitEventTimeout` section, so the generated
 /// enum value is `PG_WAIT_TIMEOUT | 6` (= 150994950, matching c2rust).
 pub const WAIT_EVENT_SPIN_DELAY: u32 = PG_WAIT_TIMEOUT | 6;
+
+// Replication-slot wait events (`wait_event_names.txt`), values matching the
+// generated `wait_event_types.h` (verified against the c2rust rendering).
+/// IPC: waiting for a replication slot to become inactive (drop/acquire).
+pub const WAIT_EVENT_REPLICATION_SLOT_DROP: u32 = PG_WAIT_IPC + 49;
+/// CLIENT: waiting for physical standbys to confirm a logical-decoding LSN.
+pub const WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION: u32 = PG_WAIT_CLIENT + 6;
+/// IO: writing a replication slot's state file.
+pub const WAIT_EVENT_REPLICATION_SLOT_WRITE: u32 = PG_WAIT_IO + 49;
+/// IO: fsyncing a replication slot's state file at save time.
+pub const WAIT_EVENT_REPLICATION_SLOT_SYNC: u32 = PG_WAIT_IO + 48;
+/// IO: fsyncing a replication slot's state file at restore time.
+pub const WAIT_EVENT_REPLICATION_SLOT_RESTORE_SYNC: u32 = PG_WAIT_IO + 47;
+/// IO: reading a replication slot's state file.
+pub const WAIT_EVENT_REPLICATION_SLOT_READ: u32 = PG_WAIT_IO + 46;
