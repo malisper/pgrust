@@ -6,12 +6,13 @@
 //! `backend-utils-activity-status-seams` `with_my_beentry` slot; the
 //! `PGSTAT_BEGIN_WRITE_ACTIVITY` / `PGSTAT_END_WRITE_ACTIVITY` bracketing and
 //! the field writes — the logic this file owns — stay here. `IsParallelWorker()`
-//! and the libpq message helpers are reached through their owners' seam crates.
+//! is reached through its owner's seam crate; the libpq message helpers are a
+//! direct (acyclic) dependency on `backend-libpq-pqformat`.
 
 use core::sync::atomic::{fence, AtomicU32, Ordering};
 
 use backend_access_transam_parallel_seams::is_parallel_worker;
-use backend_libpq_pqformat_seams::{pq_beginmessage, pq_endmessage, pq_sendint32, pq_sendint64};
+use backend_libpq_pqformat::{pq_beginmessage, pq_endmessage, pq_sendint32, pq_sendint64};
 use backend_utils_activity_status_seams::{my_be_entry_present, track_activities, with_my_beentry};
 use mcx::Mcx;
 use types_core::{int64, InvalidOid, Oid};
@@ -102,17 +103,19 @@ pub fn pgstat_progress_incr_param(index: i32, incr: int64) {
 ///
 /// A variant of [`pgstat_progress_incr_param`] to allow a worker to poke at
 /// a leader to do an incremental progress update. `Err` carries the libpq
-/// message-build `ereport(ERROR)`s (StringInfo growth). The message buffer
-/// is allocated in `mcx` (C: `initStringInfo` in `CurrentMemoryContext`).
+/// message-build `ereport(ERROR)`s (StringInfo growth) and any
+/// `ereport(ERROR)` under `pq_putmessage` (C discards only its EOF result).
+/// The message buffer is allocated in `mcx` (C: `initStringInfo` in
+/// `CurrentMemoryContext`).
 pub fn pgstat_progress_parallel_incr_param(mcx: Mcx<'_>, index: i32, incr: int64) -> PgResult<()> {
     // Parallel workers notify a leader through a PqMsg_Progress message to
     // update progress, passing the progress index and incremented value.
     // Leaders can just call pgstat_progress_incr_param directly.
     if is_parallel_worker::call() {
-        let mut msgbuf = pq_beginmessage::call(mcx, PQ_MSG_PROGRESS)?;
-        pq_sendint32::call(&mut msgbuf, index as u32)?;
-        pq_sendint64::call(&mut msgbuf, incr as u64)?;
-        pq_endmessage::call(msgbuf);
+        let mut msgbuf = pq_beginmessage(mcx, PQ_MSG_PROGRESS)?;
+        pq_sendint32(&mut msgbuf, index as u32)?;
+        pq_sendint64(&mut msgbuf, incr as u64)?;
+        pq_endmessage(msgbuf)?;
     } else {
         pgstat_progress_incr_param(index, incr);
     }

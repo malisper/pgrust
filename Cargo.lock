@@ -1388,16 +1388,7 @@ dependencies = [
  "backend-libpq-pqcomm-seams",
  "backend-utils-mb-mbutils-seams",
  "mcx",
- "types-error",
- "types-stringinfo",
-]
-
-[[package]]
-name = "backend-libpq-pqformat-seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam-core",
+ "types-datum",
  "types-error",
  "types-stringinfo",
 ]
@@ -2217,7 +2208,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel-seams",
  "backend-libpq-pqcomm-seams",
- "backend-libpq-pqformat-seams",
+ "backend-libpq-pqformat",
  "backend-storage-lmgr-lwlock-seams",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-activity-stat-seams",
@@ -2229,7 +2220,6 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-storage",
- "types-stringinfo",
 ]
 
 [[package]]
@@ -3019,6 +3009,7 @@ version = "0.0.0"
 name = "types-datum"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "types-core",
 ]
 
