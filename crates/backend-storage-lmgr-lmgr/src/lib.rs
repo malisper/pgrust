@@ -1091,4 +1091,8 @@ pub fn init_seams() {
     inward::lock_database_object::set(seam_lock_database_object);
     inward::unlock_relation_oid::set(UnlockRelationOid);
     inward::unlock_database_object::set(UnlockDatabaseObject);
+    // XactLockTableInsert/XactLockTableDelete are lmgr.c functions this crate
+    // owns; install the inward seams that xact.c consumes.
+    inward::xact_lock_table_insert::set(XactLockTableInsert);
+    inward::xact_lock_table_delete::set(XactLockTableDelete);
 }
