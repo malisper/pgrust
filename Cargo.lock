@@ -1281,6 +1281,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-user"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-user-seams",
+ "backend-utils-error",
+ "types-authid",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+]
+
+[[package]]
+name = "backend-commands-user-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-authid",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-parsenodes",
+]
+
+[[package]]
 name = "backend-executor-execAmi"
 version = "0.0.0"
 dependencies = [
@@ -3543,6 +3569,7 @@ dependencies = [
  "backend-access-transam-xlogstats",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-commands-user",
  "backend-executor-execAmi",
  "backend-executor-execParallel",
  "backend-executor-execUtils",
@@ -3623,6 +3650,13 @@ version = "0.0.0"
 
 [[package]]
 name = "types-amvalidate"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-authid"
 version = "0.0.0"
 dependencies = [
  "types-core",
@@ -3740,6 +3774,14 @@ dependencies = [
  "types-sortsupport",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-parsenodes"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-nodes",
 ]
 
 [[package]]
