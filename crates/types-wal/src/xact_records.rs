@@ -41,6 +41,43 @@ pub struct XactLogCommitRecordArgs {
     pub origin: Option<XlXactOrigin>,
 }
 
+/// Argument bundle the xact consumer (`PrepareTransaction`) hands to the
+/// `StartPrepare` seam. C's `StartPrepare(gxact)` reads these from the current
+/// backend transaction (`xactGetCommittedChildren`, `smgrGetPendingDeletes`,
+/// `pgstat_get_transactional_drops`, `xactGetCommittedInvalidationMessages`,
+/// `proc->databaseId`); the consumer gathers them — the data is the committing
+/// backend's — and the owner writes them into the 2PC state-file builder.
+///
+/// Each `*` segment arrives already serialized into the C on-disk byte layout
+/// the 2PC state file expects (`RelFileLocator` = 12B, `xl_xact_stats_item` =
+/// 16B, `SharedInvalidationMessage`), with the element count alongside. The
+/// consumer serializes them because it holds the canonical struct mirrors and
+/// already has the WAL-record serializers; the owner appends the bytes raw,
+/// matching C's `save_state_data(ptr, n * sizeof(...))`. `children` stays typed
+/// because the owner also stuffs it into the dummy PGPROC (`GXactLoadSubxactData`).
+#[derive(Clone, Debug)]
+pub struct StartPrepareArgs {
+    pub xid: TransactionId,
+    pub gid: String,
+    pub prepared_at: TimestampTz,
+    pub owner: Oid,
+    pub databaseid: Oid,
+    pub children: Vec<TransactionId>,
+    /// Serialized commit `RelFileLocator[]` and its element count.
+    pub commitrels: Vec<u8>,
+    pub ncommitrels: i32,
+    /// Serialized abort `RelFileLocator[]` and its element count.
+    pub abortrels: Vec<u8>,
+    pub nabortrels: i32,
+    pub commitstats: Vec<u8>,
+    pub ncommitstats: i32,
+    pub abortstats: Vec<u8>,
+    pub nabortstats: i32,
+    pub invalmsgs: Vec<u8>,
+    pub ninvalmsgs: i32,
+    pub initfileinval: bool,
+}
+
 /// Full argument list for `XactLogAbortRecord`, mirroring the C signature.
 #[derive(Clone, Debug)]
 pub struct XactLogAbortRecordArgs {
