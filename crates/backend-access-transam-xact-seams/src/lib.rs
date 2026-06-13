@@ -36,6 +36,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsolationUsesXactSnapshot()` (xact.h): true when the current
+    /// transaction isolation level is REPEATABLE READ or higher
+    /// (`XactIsoLevel >= XACT_REPEATABLE_READ`). Pure read of the backend-local
+    /// `XactIsoLevel`.
+    pub fn isolation_uses_xact_snapshot() -> bool
+);
+
+seam_core::seam!(
     /// `GetCurrentCommandId(used)` (xact.c): the current command id; with
     /// `used` true the caller intends to use it to mark inserted/updated/
     /// deleted tuples, which is forbidden in parallel mode — that check

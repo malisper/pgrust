@@ -1394,6 +1394,9 @@ dependencies = [
 name = "backend-executor-execPartition"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-next-seams",
+ "backend-access-common-relation-seams",
+ "backend-access-transam-xact-seams",
  "backend-catalog-partition-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execMain-seams",
@@ -1415,6 +1418,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-storage",
  "types-tuple",
 ]
 

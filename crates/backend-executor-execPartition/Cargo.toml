@@ -16,6 +16,7 @@ types-datum = { path = "../types-datum" }
 types-nodes = { path = "../types-nodes" }
 types-rel = { path = "../types-rel" }
 types-tuple = { path = "../types-tuple" }
+types-storage = { path = "../types-storage" }
 
 # Seam crates for the unported owners this unit calls (bodies dispatch through
 # these; they panic until the owner lands).
@@ -34,3 +35,6 @@ backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache
 backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-access-common-next-seams = { path = "../backend-access-common-next-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
