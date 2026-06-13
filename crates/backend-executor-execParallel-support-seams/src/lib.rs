@@ -377,3 +377,52 @@ seam_core::seam!(pub fn hash_retrieve_shared_info(
     planstate: PlanStateHandle,
     size: Size,
 ) -> PgResult<()>);
+
+// ===========================================================================
+// Append parallel support (nodeAppend.c — AppendState fields and the
+// DSM-resident ParallelAppendState, owned by the executor/parallel subsystem).
+// nodeAppend owns the C control flow (the pstate_len sizing, the choose-strategy
+// selection); these handle-addressed operations on the not-yet-ported
+// ParallelContext, the shm_toc, and the live AppendState node go through the
+// owning subsystem, mirroring the sort_*/hash_* families above. The Append node
+// handle is resolved to a live `AppendState *` by execParallel's
+// planstate-tree dispatch (access/parallel.c), which installs these when it
+// lands; until then each call panics loudly.
+// ===========================================================================
+
+/// `((AppendState *) planstate)->as_nplans`.
+seam_core::seam!(pub fn append_as_nplans(planstate: PlanStateHandle) -> i32);
+/// `((AppendState *) planstate)->ps.plan->plan_node_id`.
+seam_core::seam!(pub fn append_plan_node_id(planstate: PlanStateHandle) -> i32);
+/// `((AppendState *) planstate)->pstate_len = len`.
+seam_core::seam!(pub fn append_set_pstate_len(planstate: PlanStateHandle, len: Size));
+/// `((AppendState *) planstate)->pstate_len`.
+seam_core::seam!(pub fn append_pstate_len(planstate: PlanStateHandle) -> Size);
+/// `pstate = shm_toc_allocate(pcxt->toc, node->pstate_len); memset(pstate, 0,
+/// node->pstate_len); LWLockInitialize(&pstate->pa_lock,
+/// LWTRANCHE_PARALLEL_APPEND); shm_toc_insert(pcxt->toc,
+/// node->ps.plan->plan_node_id, pstate); node->as_pstate = pstate;
+/// node->choose_next_subplan = choose_next_subplan_for_leader` — allocate and
+/// zero the `ParallelAppendState` in DSM, init its lock, register it under the
+/// node's id, install it as `as_pstate`, and switch the node to leader strategy.
+seam_core::seam!(pub fn append_initialize_dsm_pstate(
+    planstate: PlanStateHandle,
+    pcxt: ParallelContextHandle,
+    plan_node_id: i32,
+    pstate_len: Size,
+) -> PgResult<()>);
+/// `pstate = node->as_pstate; pstate->pa_next_plan = 0; memset(pstate->pa_finished,
+/// 0, sizeof(bool) * node->as_nplans)` — reset the shared coordination struct
+/// before a fresh scan.
+seam_core::seam!(pub fn append_reinitialize_dsm_pstate(
+    planstate: PlanStateHandle,
+) -> PgResult<()>);
+/// `node->as_pstate = shm_toc_lookup(pwcxt->toc, node->ps.plan->plan_node_id,
+/// false); node->choose_next_subplan = choose_next_subplan_for_worker` — attach
+/// the worker to the leader's `ParallelAppendState` in DSM and switch the node
+/// to worker strategy.
+seam_core::seam!(pub fn append_initialize_worker_pstate(
+    planstate: PlanStateHandle,
+    pwcxt: ParallelWorkerContextHandle,
+    plan_node_id: i32,
+) -> PgResult<()>);

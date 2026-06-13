@@ -37,6 +37,7 @@ use backend_access_transam_parallel_seams as parallel;
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execAsync_seams as execAsync;
 use backend_executor_execPartition_seams as execPartition;
+use backend_executor_execParallel_support_seams as parallel_sup;
 use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
@@ -51,16 +52,16 @@ use backend_utils_init_small_seams as globals;
 use mcx::{Mcx, PgBox};
 use types_core::PGINVALID_SOCKET;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
+use types_execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
 use types_nodes::executor::EXEC_FLAG_MARK;
 use types_nodes::nodeappend::{
-    Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
+    Append, AppendChooseStrategy, AppendStateData, AsyncRequestData,
 };
 use types_nodes::nodes::Node;
 use types_nodes::{Bitmapset, EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
 use types_pgstat::wait_event::WAIT_EVENT_APPEND_READY;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_SOCKET_READABLE};
-use types_storage::{LWLockMode, LWTRANCHE_PARALLEL_APPEND};
+use types_storage::LWLockMode;
 
 /// `INVALID_SUBPLAN_INDEX` (nodeAppend.c).
 const INVALID_SUBPLAN_INDEX: i32 = -1;
@@ -70,42 +71,26 @@ const EVENT_BUFFER_SIZE: i32 = 16;
 // ===========================================================================
 // Install this crate's implementations into its inward seam slots.
 //
-// `backend-executor-nodeAppend-seams` declares the four parallel-Append
-// methods in the handle-based shape execParallel.c calls them with
-// (`PlanStateHandle`/`ParallelContextHandle`). Resolving a live `PlanState *`
-// from its handle is the executor's parallel-worker dispatch — owned by
-// `execParallel.c`/`access/parallel.c`, neither ported. Until that resolution
-// lands, the installed bridges panic loudly (mirror-PG-and-panic); the real
-// per-node logic lives in the borrow-based [`ExecAppendEstimate`] &c. below,
-// which the dispatch will call once it can hand over the live node.
+// `backend-executor-nodeAppend-seams` declares the four parallel-Append methods
+// in the handle-based shape execParallel.c calls them with
+// (`PlanStateHandle`/`ParallelContextHandle`). Each installed function owns the
+// C control flow of its `nodeAppend.c` counterpart (the `pstate_len` sizing, the
+// choose-strategy selection) and reaches the live `AppendState` node's fields
+// and the not-yet-ported DSM/`ParallelContext` through the
+// `execParallel-support-seams` `append_*` family — exactly as nodeSort/nodeHash
+// drive their parallel methods. Those support seams are installed by
+// execParallel/`access/parallel.c` when that planstate-handle dispatch lands;
+// until then a call panics loudly (mirror-PG-and-panic).
 // ===========================================================================
 
 /// Install every seam in `backend-executor-nodeAppend-seams`.
 pub fn init_seams() {
-    backend_executor_nodeAppend_seams::exec_append_estimate::set(|_node, _pcxt| {
-        unimplemented!(
-            "ExecAppendEstimate handle dispatch needs execParallel's PlanState-handle \
-             resolution (access/parallel.c unported); call ExecAppendEstimate directly"
-        )
-    });
-    backend_executor_nodeAppend_seams::exec_append_initialize_dsm::set(|_node, _pcxt| {
-        unimplemented!(
-            "ExecAppendInitializeDSM handle dispatch needs execParallel's PlanState-handle \
-             resolution (access/parallel.c unported); call ExecAppendInitializeDSM directly"
-        )
-    });
-    backend_executor_nodeAppend_seams::exec_append_reinitialize_dsm::set(|_node, _pcxt| {
-        unimplemented!(
-            "ExecAppendReInitializeDSM handle dispatch needs execParallel's PlanState-handle \
-             resolution (access/parallel.c unported); call ExecAppendReInitializeDSM directly"
-        )
-    });
-    backend_executor_nodeAppend_seams::exec_append_initialize_worker::set(|_node, _pwcxt| {
-        unimplemented!(
-            "ExecAppendInitializeWorker handle dispatch needs execParallel's PlanState-handle \
-             resolution (access/parallel.c unported); call ExecAppendInitializeWorker directly"
-        )
-    });
+    backend_executor_nodeAppend_seams::exec_append_estimate::set(ExecAppendEstimate);
+    backend_executor_nodeAppend_seams::exec_append_initialize_dsm::set(ExecAppendInitializeDSM);
+    backend_executor_nodeAppend_seams::exec_append_reinitialize_dsm::set(ExecAppendReInitializeDSM);
+    backend_executor_nodeAppend_seams::exec_append_initialize_worker::set(
+        ExecAppendInitializeWorker,
+    );
 }
 
 // ===========================================================================
@@ -534,16 +519,22 @@ pub fn ExecReScanAppend<'mcx>(
 
 /// `ExecAppendEstimate(node, pcxt)` — compute the amount of space we'll need in
 /// the parallel query DSM, and inform `pcxt->estimator` about our needs.
+///
+/// nodeAppend owns this control flow; the live `AppendState` node's `as_nplans`
+/// read / `pstate_len` write are reached through `execParallel-support-seams`
+/// (the handle is resolved to a live node by execParallel's parallel-worker
+/// dispatch, `access/parallel.c`).
 pub fn ExecAppendEstimate(
-    node: &mut AppendStateData<'_>,
+    node: PlanStateHandle,
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // node->pstate_len = add_size(offsetof(ParallelAppendState, pa_finished),
     //                             sizeof(bool) * node->as_nplans);
+    let as_nplans = parallel_sup::append_as_nplans::call(node);
     let base = pa_finished_offset();
-    let tail = shmem::add_size::call(0, node.as_nplans as usize)?; // sizeof(bool) == 1
+    let tail = shmem::add_size::call(0, as_nplans as usize)?; // sizeof(bool) == 1
     let len = shmem::add_size::call(base, tail)?;
-    node.pstate_len = len;
+    parallel_sup::append_set_pstate_len::call(node, len);
 
     let estimator = parallel::pcxt_estimator::call(pcxt);
     parallel::shm_toc_estimate_chunk::call(estimator, len);
@@ -553,93 +544,50 @@ pub fn ExecAppendEstimate(
 
 /// `ExecAppendInitializeDSM(node, pcxt)` — set up shared state for Parallel
 /// Append.
+///
+/// The DSM allocation/zeroing, `pa_lock` init, TOC insert, `as_pstate`
+/// install, and `choose_next_subplan = choose_next_subplan_for_leader` switch
+/// all act on the live node and the not-yet-ported `ParallelContext`/`shm_toc`,
+/// so they run inside the `append_initialize_dsm_pstate` support seam (mirrors
+/// `LWTRANCHE_PARALLEL_APPEND` from the C). nodeAppend owns reading
+/// `pstate_len`/`plan_node_id` to drive it.
 pub fn ExecAppendInitializeDSM(
-    node: &mut AppendStateData<'_>,
+    node: PlanStateHandle,
     pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // pstate = shm_toc_allocate(pcxt->toc, node->pstate_len);
     // memset(pstate, 0, node->pstate_len);
     // LWLockInitialize(&pstate->pa_lock, LWTRANCHE_PARALLEL_APPEND);
     // shm_toc_insert(pcxt->toc, node->ps.plan->plan_node_id, pstate);
-    let toc = parallel::pcxt_toc::call(pcxt);
-    let cursor = parallel::shm_toc_allocate::call(toc, node.pstate_len);
-    let plan_node_id = plan_node_id(node)?;
-    parallel::shm_toc_insert::call(toc, plan_node_id as u64, cursor);
-
-    // Construct the (zeroed) coordination struct backing the reserved DSM
-    // chunk and initialize its lock. The owned struct mirrors the in-segment
-    // bytes the leader and workers share by `plan_node_id` key.
-    let mut pa_lock = types_storage::LWLock::default();
-    lwlock::lwlock_initialize::call(&mut pa_lock, LWTRANCHE_PARALLEL_APPEND);
-    let mut pa_finished = alloc::vec::Vec::new();
-    pa_finished
-        .try_reserve(node.as_nplans as usize)
-        .map_err(|_| elog_error("Append parallel state allocation failed"))?;
-    pa_finished.resize(node.as_nplans as usize, false);
-    node.as_pstate = Some(alloc::boxed::Box::new(ParallelAppendState {
-        pa_lock,
-        pa_next_plan: 0,
-        pa_finished,
-    }));
-
-    node.choose_next_subplan = AppendChooseStrategy::Leader;
-    Ok(())
+    // node->as_pstate = pstate;
+    // node->choose_next_subplan = choose_next_subplan_for_leader;
+    let plan_node_id = parallel_sup::append_plan_node_id::call(node);
+    let pstate_len = parallel_sup::append_pstate_len::call(node);
+    parallel_sup::append_initialize_dsm_pstate::call(node, pcxt, plan_node_id, pstate_len)
 }
 
 /// `ExecAppendReInitializeDSM(node, pcxt)` — reset shared state before
 /// beginning a fresh scan.
 pub fn ExecAppendReInitializeDSM(
-    node: &mut AppendStateData<'_>,
+    node: PlanStateHandle,
     _pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
     // pstate->pa_next_plan = 0;
     // memset(pstate->pa_finished, 0, sizeof(bool) * node->as_nplans);
-    let nplans = node.as_nplans as usize;
-    let pstate = node
-        .as_pstate
-        .as_deref_mut()
-        .ok_or_else(|| elog_error("Append has no parallel state"))?;
-    pstate.pa_next_plan = 0;
-    pstate.pa_finished.clear();
-    pstate
-        .pa_finished
-        .try_reserve(nplans)
-        .map_err(|_| elog_error("Append parallel state allocation failed"))?;
-    pstate.pa_finished.resize(nplans, false);
-    Ok(())
+    parallel_sup::append_reinitialize_dsm_pstate::call(node)
 }
 
 /// `ExecAppendInitializeWorker(node, pwcxt)` — copy relevant information from
 /// the TOC into planstate, and initialize whatever is required to choose and
 /// execute the optimal subplan.
 pub fn ExecAppendInitializeWorker(
-    node: &mut AppendStateData<'_>,
+    node: PlanStateHandle,
     pwcxt: ParallelWorkerContextHandle,
 ) -> PgResult<()> {
     // node->as_pstate = shm_toc_lookup(pwcxt->toc, node->ps.plan->plan_node_id, false);
-    let toc = parallel::pwcxt_toc::call(pwcxt);
-    let plan_node_id = plan_node_id(node)?;
-    let _cursor = parallel::shm_toc_lookup::call(toc, plan_node_id as u64, false)
-        .ok_or_else(|| elog_error("Append parallel state not found in worker TOC"))?;
-
-    // The worker shares the leader's already-initialized coordination struct
-    // (looked up by `plan_node_id`); the in-DSM bytes are the same the leader
-    // wrote. The owned model materializes a view of that struct sized to this
-    // node's plan count.
-    let nplans = node.as_nplans as usize;
-    let mut pa_finished = alloc::vec::Vec::new();
-    pa_finished
-        .try_reserve(nplans)
-        .map_err(|_| elog_error("Append parallel state allocation failed"))?;
-    pa_finished.resize(nplans, false);
-    node.as_pstate = Some(alloc::boxed::Box::new(ParallelAppendState {
-        pa_lock: types_storage::LWLock::default(),
-        pa_next_plan: 0,
-        pa_finished,
-    }));
-
-    node.choose_next_subplan = AppendChooseStrategy::Worker;
-    Ok(())
+    // node->choose_next_subplan = choose_next_subplan_for_worker;
+    let plan_node_id = parallel_sup::append_plan_node_id::call(node);
+    parallel_sup::append_initialize_worker_pstate::call(node, pwcxt, plan_node_id)
 }
 
 /// Dispatch `node->choose_next_subplan(node)` (the C function-pointer call).
@@ -1302,15 +1250,6 @@ fn tup_is_null(slot: Option<SlotId>, estate: &EStateData<'_>) -> bool {
 /// EPQ port); no Append-over-EPQ path reaches here, so it reads as "no EPQ".
 fn estate_epq_active(_estate: &EStateData<'_>) -> bool {
     false
-}
-
-/// `node->ps.plan->plan_node_id`.
-fn plan_node_id(node: &AppendStateData<'_>) -> PgResult<i32> {
-    let plan = node
-        .ps
-        .plan
-        .ok_or_else(|| elog_error("Append node has no plan"))?;
-    Ok(plan.plan_head().plan_node_id)
 }
 
 /// `pstate->pa_finished[i]`.
