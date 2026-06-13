@@ -93,6 +93,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `construct_array_builtin(elems, nelems, elmtype)` (arrayfuncs.c): build
+    /// a one-dimensional array `Datum` from `nelems` pass-by-value element
+    /// `Datum`s of the built-in type `elmtype` (e.g. `REGTYPEOID`). An empty
+    /// input yields a zero-element array, not NULL. The result varlena is
+    /// allocated in `mcx`; the carried `Datum` is its pointer word. Can
+    /// `ereport(ERROR)` (unsupported element type).
+    pub fn construct_array_builtin<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[Datum],
+        elmtype: Oid,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
     /// `deconstruct_array_builtin(DatumGetArrayTypeP(array), TEXTOID, ...)`
     /// (arrayfuncs.c): split a non-null `text[]` varlena (verbatim catalog
     /// bytes) into its element strings, in order. The C result is a palloc'd

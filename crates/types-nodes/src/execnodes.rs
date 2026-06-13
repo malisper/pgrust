@@ -608,9 +608,8 @@ impl Default for RowMarkType {
 
 /// `EState` (execnodes.h) — working storage for one Executor invocation,
 /// trimmed to the fields ports consume (unconsumed C fields — `es_snapshot`,
-/// `es_crosscheck_snapshot`, `es_junkFilter`, `es_param_list_info`,
-/// `es_queryEnv` — are trimmed outright and land with their first consumer,
-/// per docs/types.md rule 3).
+/// `es_crosscheck_snapshot`, `es_junkFilter`, `es_queryEnv` — are trimmed
+/// outright and land with their first consumer, per docs/types.md rule 3).
 #[derive(Debug)]
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
@@ -676,6 +675,11 @@ pub struct EStateData<'mcx> {
     pub es_insert_pending_result_relations: PgVec<'mcx, RriId>,
     /// `List *es_insert_pending_modifytables` — their ModifyTableStates.
     pub es_insert_pending_modifytables: PgVec<'mcx, Opaque>,
+    /// `ParamListInfo es_param_list_info` — values of external params. The
+    /// `ParamListInfo` lives in the (unported) params unit, so this carries the
+    /// opaque handle (`NULL` == no external params). The PREPARE/EXECUTE driver
+    /// sets it on the throwaway EState before evaluating EXECUTE parameters.
+    pub es_param_list_info: crate::parsestmt::ParamListInfoHandle,
     /// `ParamExecData *es_param_exec_vals` — values of internal params.
     /// Empty = the C `NULL`.
     pub es_param_exec_vals: PgVec<'mcx, ParamExecData>,
@@ -771,6 +775,8 @@ impl<'mcx> EStateData<'mcx> {
             // es_insert_pending_* = NIL;
             es_insert_pending_result_relations: PgVec::new_in(mcx),
             es_insert_pending_modifytables: PgVec::new_in(mcx),
+            // es_param_list_info = NULL;
+            es_param_list_info: crate::parsestmt::ParamListInfoHandle::NULL,
             // es_param_exec_vals = NULL;
             es_param_exec_vals: PgVec::new_in(mcx),
             // es_query_cxt = qcontext;

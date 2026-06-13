@@ -1,7 +1,7 @@
 //! Seam declarations for the resource-owner unit
 //! (`utils/resowner/resowner.c`).
 //!
-//! Two distinct consumers, two distinct seams:
+//! Consumers:
 //!
 //! 1. portalcmds models the C `saveResourceOwner = CurrentResourceOwner;
 //!    CurrentResourceOwner = portal->resowner; ...; CurrentResourceOwner =
@@ -11,10 +11,13 @@
 //!    anti-pattern the lifecycle model forbids (docs/query-lifecycle-raii.md;
 //!    resowner dissolves into RAII/scoped capability).
 //!
-//! 2. logical decoding's slot-advance helper needs the raw
-//!    get/set on `CurrentResourceOwner` (it saves/restores the executor's
-//!    resource owner across decoding), so the bare global accessors are also
-//!    exposed.
+//! 2. logical decoding's slot-advance helper needs the raw get/set on
+//!    `CurrentResourceOwner` (it saves/restores the executor's resource owner
+//!    across decoding), so the bare global accessors are also exposed.
+//!
+//! 3. the PREPARE/EXECUTE EXPLAIN driver threads the current resource owner
+//!    handle into `GetCachedPlan`/`ReleaseCachedPlan`, so a plain read of the
+//!    current owner (as the parsestmt opaque handle) is exposed too.
 //!
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
@@ -23,6 +26,7 @@
 
 use types_error::PgResult;
 use types_logical::ResourceOwnerHandle;
+use types_nodes::parsestmt::ResourceOwnerHandle as ParsestmtResourceOwnerHandle;
 use types_portal::ResourceOwner;
 
 seam_core::seam!(
@@ -45,6 +49,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `CurrentResourceOwner = value`.
     pub fn set_CurrentResourceOwner(value: ResourceOwnerHandle)
+);
+
+seam_core::seam!(
+    /// `CurrentResourceOwner` (resowner.c global) — the backend's current
+    /// resource owner, as the parsestmt opaque handle the PREPARE/EXECUTE
+    /// driver threads into the plan-cache calls. Pure read of backend-local
+    /// state.
+    pub fn current_resource_owner() -> PgResult<ParsestmtResourceOwnerHandle>
 );
 
 seam_core::seam!(

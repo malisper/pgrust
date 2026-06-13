@@ -19,7 +19,9 @@ seam_core::seam!(
     /// caller keeps a resolved `FmgrInfo *`; the owned model dispatches by
     /// `fn_oid` and re-resolves at call time, as elsewhere here). Used by
     /// `ExecHashBuildSkewHash` to hash each MCV through
-    /// `hashstate->skew_hashfunction` under `hashstate->skew_collation`. The
+    /// `hashstate->skew_hashfunction` under `hashstate->skew_collation`, and by
+    /// Memoize's `MemoizeHash_hash` to invoke a cache key's hash function
+    /// (`DatumGetUInt32` applied by the caller). The
     /// C strict-null `elog(ERROR, "function %u returned NULL")` and whatever
     /// the function raises are carried on `Err`.
     pub fn function_call1_coll(

@@ -173,6 +173,11 @@ impl TidScan<'_> {
 /// `PlannedStmt` (nodes/plannodes.h), trimmed to the fields ports consume.
 #[derive(Debug, Default)]
 pub struct PlannedStmt<'mcx> {
+    /// `CmdType commandType` — select|insert|update|delete|merge|utility.
+    pub commandType: crate::nodes::CmdType,
+    /// `Node *utilityStmt` — non-null if this is a `CMD_UTILITY` PlannedStmt;
+    /// the utility parse node to dispatch.
+    pub utilityStmt: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `List *resultRelations` — integer list of RT indexes of the query's
     /// target relations (`None` = the C `NIL`).
     pub resultRelations: Option<PgVec<'mcx, i32>>,
@@ -226,6 +231,11 @@ impl PlannedStmt<'_> {
             None => None,
         };
         Ok(PlannedStmt {
+            commandType: self.commandType,
+            utilityStmt: match &self.utilityStmt {
+                Some(n) => Some(alloc_in(mcx, n.clone_in(mcx)?)?),
+                None => None,
+            },
             resultRelations,
             relationOids,
             planTree: match &self.planTree {

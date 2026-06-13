@@ -84,6 +84,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The `SlotId` (into the EState slot pool) of the named projection's
+    /// result slot — `node->proj*->pi_state.resultslot`. The slot is
+    /// execExpr-owned (created by `ExecBuildProjectionInfo`); its id is exposed
+    /// here so the canonical execGrouping `TupleHashTable` operations
+    /// (`LookupTupleHashEntry` / `FindTupleHashEntry`) can be driven over the
+    /// just-projected tuple. Infallible (the slot exists once the projection
+    /// was built at init).
+    pub fn sub_proj_result_slot_id<'mcx>(
+        node: &SubPlanState<'mcx>,
+        estate: &EStateData<'mcx>,
+        which: ProjectionKind,
+    ) -> types_nodes::SlotId
+);
+
+seam_core::seam!(
     /// `ExecClearTuple(node->proj*->pi_state.resultslot)` (executor.h): clear
     /// the named projection's result slot. Infallible per the C (no allocation).
     pub fn sub_clear_proj_result_slot<'mcx>(
@@ -176,6 +191,42 @@ seam_core::seam!(
         estate: &mut EStateData<'mcx>,
         lhs_hash_funcs: &[types_core::fmgr::FmgrInfo],
         cross_eq_funcoids: &[types_core::Oid],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CreateExecutorState()` (execUtils.c): build a throwaway `EState` in a
+    /// fresh per-query context, owned by the caller (the PREPARE/EXECUTE/EXPLAIN
+    /// drivers create it only to evaluate parameter expressions). Returns the
+    /// real owned [`EStateData`]; the driver sets `es_param_list_info` on it and
+    /// threads `&mut` into the parameter-evaluation seams. Allocates.
+    pub fn create_executor_state<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, EStateData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `FreeExecutorState(estate)` (execUtils.c): release the throwaway
+    /// executor state and its per-query context, consuming the owned `EState`.
+    pub fn free_executor_state<'mcx>(
+        estate: mcx::PgBox<'mcx, EStateData<'mcx>>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// For the `i`-th prepared `ExprState`, set `paramLI->params[i]`:
+    /// `ptype = param_types[i]`, `pflags = PARAM_FLAG_CONST`,
+    /// `value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
+    /// &prm->isnull)` (prepare.c `EvaluateParams`). fmgr/`Datum` value layer.
+    /// `param_li` is the still-opaque `ParamListInfo` (params unit unported);
+    /// `exprstate` is the real compiled [`ExprState`] from `exec_prepare_expr_list`.
+    /// Can `ereport(ERROR)`.
+    pub fn eval_exec_param_into_list<'mcx>(
+        param_li: types_nodes::parsestmt::ParamListInfoHandle,
+        exprstate: &types_nodes::execexpr::ExprState,
+        param_index: i32,
+        ptype: types_core::Oid,
+        estate: &mut EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 

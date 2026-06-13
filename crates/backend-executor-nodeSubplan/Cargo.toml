@@ -15,6 +15,9 @@ backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execGrouping-seams = { path = "../backend-executor-execGrouping-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }

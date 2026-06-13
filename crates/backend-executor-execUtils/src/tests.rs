@@ -328,6 +328,8 @@ fn relation_is_target_relation() {
             alloc_in(
                 mcx,
                 types_nodes::nodeindexscan::PlannedStmt {
+                    commandType: types_nodes::nodes::CmdType::default(),
+                    utilityStmt: None,
                     resultRelations: Some(rels),
                     relationOids: None,
                     planTree: None,

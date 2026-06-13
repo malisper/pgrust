@@ -8,6 +8,21 @@
 
 #![allow(non_snake_case)]
 
+extern crate alloc;
+
+seam_core::seam!(
+    /// `MemoryContextStrdup(context, string)` (mcxt.c): duplicate `s` into the
+    /// given (foreign-owned) memory context. The PREPARE/EXECUTE driver copies
+    /// the plan's query string into the portal's `portalContext` (owned by the
+    /// portalmem unit, hence the opaque handle); the canonical copy lives in
+    /// that context, and the returned owned `String` is the value the driver
+    /// hands to `PortalDefineQuery`. Allocates / can `ereport(ERROR)`.
+    pub fn memory_context_strdup(
+        context: types_nodes::parsestmt::MemoryContextHandle,
+        s: &str,
+    ) -> types_error::PgResult<alloc::string::String>
+);
+
 seam_core::seam!(
     /// Read `LogMemoryContextPending` (mcxt.c), the per-backend
     /// `volatile sig_atomic_t` set by `HandleLogMemoryContextInterrupt()`

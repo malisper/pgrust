@@ -1,6 +1,6 @@
 //! Expression-evaluation vocabulary (executor/execExpr.h), trimmed.
 
-use mcx::{PgBox, PgVec};
+use mcx::{MemoryContext, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
 use types_datum::datum::Datum;
@@ -83,20 +83,25 @@ pub struct SubPlanState<'mcx> {
     /// `ProjectionInfo *projRight` — for projecting subselect output
     /// (execExpr-owned).
     pub projRight: Opaque,
-    /// `TupleHashTable hashtable` — hash table for no-nulls subselect rows
-    /// (execGrouping-owned).
-    pub hashtable: Opaque,
-    /// `TupleHashTable hashnulls` — hash table for rows with null(s)
-    /// (execGrouping-owned).
-    pub hashnulls: Opaque,
+    /// `TupleHashTable hashtable` — hash table for no-nulls subselect rows.
+    /// The real owned execGrouping table (`TupleHashTable` in C is
+    /// `TupleHashTableData *`; carried by box here).
+    pub hashtable: Option<alloc::boxed::Box<crate::nodeagg::TupleHashTable<'mcx>>>,
+    /// `TupleHashTable hashnulls` — hash table for rows with null(s).
+    pub hashnulls: Option<alloc::boxed::Box<crate::nodeagg::TupleHashTable<'mcx>>>,
     /// `bool havehashrows` — true if `hashtable` is not empty.
     pub havehashrows: bool,
     /// `bool havenullrows` — true if `hashnulls` is not empty.
     pub havenullrows: bool,
     /// `MemoryContext hashtablecxt` — memory context containing hash tables.
-    pub hashtablecxt: Opaque,
+    pub hashtablecxt: Option<MemoryContext>,
     /// `MemoryContext hashtempcxt` — temp memory context for hash tables.
-    pub hashtempcxt: Opaque,
+    pub hashtempcxt: Option<MemoryContext>,
+    /// `TupleHashIterator` cursor used by `findPartialMatch`'s full-table scan
+    /// (the C `findPartialMatch` keeps a stack-local `hashiter`; the owned
+    /// model carries it on the node so the canonical iterator seams can
+    /// advance over the real table). One scan is active at a time.
+    pub hashiter: crate::nodeagg::TupleHashIterator,
     /// `ExprContext *innerecontext` — econtext for computing inner tuples (id
     /// into the EState's `es_exprcontexts`).
     pub innerecontext: Option<EcxtId>,

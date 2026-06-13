@@ -70,9 +70,10 @@ pub const T_MergeActionState: NodeTag = NodeTag(387);
 pub const T_MergeAction: NodeTag = NodeTag(54);
 
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum CmdType {
+    #[default]
     CMD_UNKNOWN = 0,
     /// select stmt
     CMD_SELECT = 1,
@@ -124,6 +125,8 @@ pub enum Node<'mcx> {
     MergeAppend(crate::nodemergeappend::MergeAppend<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_Memoize`.
+    Memoize(crate::nodememoize::Memoize<'mcx>),
     /// `T_IndexOnlyScan`.
     IndexOnlyScan(crate::nodeindexonlyscan::IndexOnlyScan<'mcx>),
     /// `T_Limit`.
@@ -154,6 +157,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(_) => T_Material,
             Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::Memoize(_) => crate::nodememoize::T_Memoize,
             Node::IndexOnlyScan(_) => T_IndexOnlyScan,
             Node::Limit(_) => T_Limit,
             Node::Sort(_) => T_Sort,
@@ -174,6 +178,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(m) => &m.plan,
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::Memoize(m) => &m.plan,
             Node::IndexOnlyScan(m) => &m.scan.plan,
             Node::Limit(m) => &m.plan,
             Node::Sort(s) => &s.plan,
@@ -200,6 +205,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::Memoize(m) => Ok(Node::Memoize(m.clone_in(mcx)?)),
             Node::IndexOnlyScan(m) => Ok(Node::IndexOnlyScan(m.clone_in(mcx)?)),
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),

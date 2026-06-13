@@ -24,6 +24,7 @@ pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
 pub mod modifytable;
+pub mod nodeagg;
 pub mod nodeappend;
 pub mod nodeforeigncustom;
 pub mod nodehash;
@@ -31,6 +32,7 @@ pub mod nodehashjoin;
 pub mod nodeindexonlyscan;
 pub mod nodeindexscan;
 pub mod nodelimit;
+pub mod nodememoize;
 pub mod nodemergeappend;
 pub mod nodemergejoin;
 pub mod nodenestloop;
@@ -40,6 +42,7 @@ pub mod nodesort;
 pub mod nodetablefuncscan;
 pub mod nodetidrangescan;
 pub mod parsenodes;
+pub mod parsestmt;
 pub mod partition;
 pub mod pathnodes;
 pub mod portalcmds;
@@ -90,6 +93,12 @@ pub use nodeappend::{
     Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
     T_Append, T_AppendState,
 };
+pub use nodeagg::{
+    Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
+    AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,
+    Aggref, AggregateInstrumentation, HashAggBatch, HashAggSpill, SharedAggInfo,
+    AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
+};
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use nodesort::{
     SharedSortInfo, Sort, SortStateData, Tuplesortstate, TuplesortInstrumentation,
@@ -104,6 +113,10 @@ pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{
     AsyncRequest, FdwRoutine, ForeignScan, ForeignScanState, Material, MaterialState,
     ParallelContext, ParallelWorkerContext,
+};
+pub use nodememoize::{
+    CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,
+    MemoizeScanState, SharedMemoizeInfo, T_Memoize, T_MemoizeState,
 };
 pub use nodetablefuncscan::{
     TableFuncRoutineKind, TableFuncScan, TableFuncScanState, T_TableFuncScanState,

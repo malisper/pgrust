@@ -1,6 +1,7 @@
 //! Seam declarations for the `backend-access-common-tupdesc` unit
 //! (`access/common/tupdesc.c`): the row-type structural hash/equality and
-//! tuple-descriptor copy algorithms the typcache's record cache needs.
+//! tuple-descriptor copy algorithms the typcache's record cache needs, plus
+//! the flat descriptor copy the PREPARE/EXECUTE driver uses.
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
@@ -31,4 +32,14 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         tupdesc: &TupleDescData<'_>,
     ) -> PgResult<PgBox<'mcx, TupleDescData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `CreateTupleDescCopy(tupdesc)` (tupdesc.c) — a flat copy of the
+    /// descriptor (dropping constraints/defaults) into `mcx`, returned by
+    /// value for the PREPARE/EXECUTE result-descriptor accessor. Allocates.
+    pub fn create_tuple_desc_copy<'mcx>(
+        mcx: Mcx<'mcx>,
+        tupdesc: &TupleDescData<'mcx>,
+    ) -> PgResult<TupleDescData<'mcx>>
 );
