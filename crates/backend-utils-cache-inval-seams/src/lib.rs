@@ -125,6 +125,16 @@ seam_core::seam!(
     pub fn invalidate_system_caches() -> PgResult<()>
 );
 
+seam_core::seam!(
+    /// `CallSyscacheCallbacks(cacheid, hashvalue)` (inval.c): invoke every
+    /// registered syscache callback for `cacheid` with `hashvalue` (a
+    /// `hashvalue` of 0 means "flush all"). Exported so that
+    /// `CatalogCacheFlushCatalog` can call it, saving inval.c from knowing
+    /// which catcache IDs correspond to which catalogs. `Err` carries the C
+    /// `elog(ERROR, "invalid cache ID: %d")` plus any callback error.
+    pub fn call_syscache_callbacks(cacheid: i32, hashvalue: u32) -> PgResult<()>
+);
+
 /* ---- CLUSTER catalog invalidations (backend-commands-cluster) ------------ */
 
 seam_core::seam!(

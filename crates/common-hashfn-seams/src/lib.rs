@@ -11,6 +11,16 @@
 use types_core::{uint32, Size};
 
 seam_core::seam!(
+    /// `uint32 hash_bytes(const unsigned char *k, int keylen)`
+    /// (`common/hashfn.c`): the lookup3 hash over `keylen` arbitrary bytes —
+    /// the primitive `hash_any` wraps (`UInt32GetDatum(hash_bytes(k,
+    /// keylen))`). `namehashfast` / `texthashfast` / `oidvectorhashfast` reduce
+    /// to this. The key crosses as `&[u8]` (the C `k` over its first `keylen`
+    /// bytes).
+    pub fn hash_bytes(k: &[u8]) -> uint32
+);
+
+seam_core::seam!(
     /// `hash_bytes_uint32(k)` (`common/hashfn.c`): hash a 32-bit value to a
     /// 32-bit value (the murmur-style mixer behind `hash_uint32`).
     pub fn hash_bytes_uint32(k: u32) -> u32

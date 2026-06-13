@@ -237,6 +237,7 @@ pub fn init_seams() {
     seams::post_prepare_inval::set(|| at_eoxact::PostPrepare_Inval().expect("PostPrepare_Inval"));
     seams::log_logical_invalidations::set(at_eoxact::LogLogicalInvalidations);
     seams::invalidate_system_caches::set(local_list::InvalidateSystemCaches);
+    seams::call_syscache_callbacks::set(cache_invalidate::CallSyscacheCallbacks);
 
     // These two seams' installed signatures differ from at_eoxact's native
     // shape (the seam folds C's `nmsgs` out-param into the slice / returns a

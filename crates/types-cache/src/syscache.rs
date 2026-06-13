@@ -6,6 +6,44 @@
 //! enum: by-value scalars keep the word, by-reference keys carry their bytes.
 
 use types_datum::Datum;
+use mcx::PgVec;
+use types_core::primitive::{AttrNumber, Oid as OidT};
+
+/// Projection of the `pg_index` row (`catalog/pg_index.h`) the relcache's
+/// `RelationInitIndexAccessInfo` consumes off `SearchSysCache1(INDEXRELID)`.
+///
+/// In C, relcache `heap_copytuple`s the whole `pg_index` tuple into
+/// `rd_indextuple` and reads the variable-length `indkey`/`indcollation`/
+/// `indclass`/`indoption` arrays out of it with `fastgetattr` (they sit after
+/// the variable-width `indkey`, so the fixed `Form_pg_index` C struct can't
+/// reach them). This projection carries the fixed `Form_pg_index` scalar
+/// fields plus those four vararrays, copied into the caller's `mcx`.
+#[derive(Debug)]
+pub struct PgIndexInfo<'mcx> {
+    pub indexrelid: OidT,
+    pub indrelid: OidT,
+    pub indnatts: i16,
+    pub indnkeyatts: i16,
+    pub indisunique: bool,
+    pub indnullsnotdistinct: bool,
+    pub indisprimary: bool,
+    pub indisexclusion: bool,
+    pub indimmediate: bool,
+    pub indisclustered: bool,
+    pub indisvalid: bool,
+    pub indcheckxmin: bool,
+    pub indisready: bool,
+    pub indislive: bool,
+    pub indisreplident: bool,
+    /// `int2vector indkey` — table column numbers of the index columns.
+    pub indkey: PgVec<'mcx, AttrNumber>,
+    /// `oidvector indcollation` — per key-column collation OIDs.
+    pub indcollation: PgVec<'mcx, OidT>,
+    /// `oidvector indclass` — per key-column opclass OIDs.
+    pub indclass: PgVec<'mcx, OidT>,
+    /// `int2vector indoption` — per key-column AM option flags.
+    pub indoption: PgVec<'mcx, i16>,
+}
 
 /// One search key (`Datum key1..key4` of `SearchSysCache`).
 #[derive(Clone, Copy, Debug)]
