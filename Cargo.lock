@@ -7044,8 +7044,10 @@ dependencies = [
 name = "backend-utils-cache-catcache"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-common-relation",
  "backend-access-common-tupdesc",
+ "backend-access-index-genam-seams",
  "backend-access-index-indexam-seams",
  "backend-access-transam-xact-seams",
  "backend-storage-lmgr-lmgr-seams",
