@@ -14,8 +14,9 @@
 //! SCAFFOLD STAGE: bodies are `todo!()`.
 
 use mcx::Mcx;
-use types_core::Size;
+use types_core::{ProcNumber, Size};
 use types_error::PgResult;
+use types_storage::latch::LatchHandle;
 
 /// `PGProcShmemSize(void)` — bytes for the `PGPROC` array (regular + special
 /// worker + aux + prepared-xact dummies) plus the dense mirror arrays.
@@ -45,4 +46,18 @@ pub fn ProcGlobalSemas() -> i32 {
 /// fast-path arrays, and the four by-class freelists.
 pub fn InitProcGlobal(_mcx: Mcx<'_>) -> PgResult<()> {
     todo!("proc.c:InitProcGlobal")
+}
+
+/// `ProcGlobal->allProcCount` — the total number of `PGPROC` slots in the
+/// array. (Owner accessor for [`crate::proc_misc::ProcSendSignal`]'s range
+/// check; `ProcGlobal` storage belongs to this module.)
+pub(crate) fn all_proc_count() -> u32 {
+    todo!("proc.c: ProcGlobal->allProcCount")
+}
+
+/// `&ProcGlobal->allProcs[procNumber].procLatch` as a `LatchHandle` — the
+/// process latch of the backend owning slot `procNumber`. (Owner accessor for
+/// [`crate::proc_misc::ProcSendSignal`]'s `SetLatch`.)
+pub(crate) fn proc_latch_handle(_procNumber: ProcNumber) -> LatchHandle {
+    todo!("proc.c: &ProcGlobal->allProcs[procNumber].procLatch")
 }

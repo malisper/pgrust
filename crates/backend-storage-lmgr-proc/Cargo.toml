@@ -19,3 +19,8 @@ types-stringinfo = { path = "../types-stringinfo" }
 
 # Inward seams this unit owns and installs from init_seams().
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+
+# Outward seams: neighbors proc.c calls into.
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

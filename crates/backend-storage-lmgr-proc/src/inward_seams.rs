@@ -58,8 +58,8 @@ fn pg_semaphore_unlock(_procno: ProcNumber) {
     todo!("proc.c: PGSemaphoreUnlock(GetPGProcByNumber(procno)->sem)")
 }
 
-fn proc_wait_for_signal(_wait_event_info: u32) -> PgResult<()> {
-    todo!("proc.c: ProcWaitForSignal — see proc_misc::ProcWaitForSignal")
+fn proc_wait_for_signal(wait_event_info: u32) -> PgResult<()> {
+    crate::proc_misc::ProcWaitForSignal(wait_event_info)
 }
 
 fn deadlock_timeout() -> i32 {
