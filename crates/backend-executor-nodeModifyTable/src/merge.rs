@@ -134,19 +134,21 @@ pub fn ExecMergeNotMatched<'mcx>(
         // ExprState pi_state / ProjectionInfo are small trimmed structs; clone
         // the action's whenqual + projection out of the pool so the estate
         // borrow is free for ExecQual / ExecProject / ExecInsert.
-        let (command_type, whenqual, proj) = {
+        let (command_type, action_match_kind, action_overriding, whenqual, proj) = {
             let action = &estate.result_rel(result_rel_info).ri_MergeActions
                 [MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize]
                 .as_ref()
                 .expect("not-matched-by-target action list present")[idx];
-            let command_type = action
+            let mas_action = action
                 .mas_action
                 .as_ref()
-                .expect("MergeActionState has a MergeAction")
-                .commandType;
+                .expect("MergeActionState has a MergeAction");
+            let command_type = mas_action.commandType;
+            let action_match_kind = mas_action.matchKind;
+            let action_overriding = mas_action.overriding;
             let whenqual = action.mas_whenqual.as_ref().map(|w| (**w).clone());
             let proj = action.mas_proj.as_ref().map(|p| (**p).clone());
-            (command_type, whenqual, proj)
+            (command_type, action_match_kind, action_overriding, whenqual, proj)
         };
 
         // Test condition, if any.  In the absence of any condition, we perform
@@ -175,11 +177,31 @@ pub fn ExecMergeNotMatched<'mcx>(
 
                 // mtstate->mt_merge_action = action;
                 //
-                // (The current-action pointer is consumed by transition-capture
-                // and the rootRelInfo INSERT path; setting it requires aliasing a
-                // pooled MergeActionState, which the owned model expresses by
-                // re-reading it by id where needed. The INSERT below proceeds
-                // against rootResultRelInfo as in C.)
+                // ExecInsert reads `mtstate->mt_merge_action->mas_action->commandType`
+                // to pick the RLS WCO kind (UPDATE vs INSERT) under MERGE, so the
+                // active action must be tracked. The owned-by-value tree can't
+                // alias the pooled `MergeActionState`, so we materialize an owned
+                // one carrying the active action's identity, mirroring how
+                // ExecInitMerge builds the pooled state.
+                mtstate.mt_merge_action = Some(mcx::alloc_in(
+                    mcx,
+                    types_nodes::modifytable::MergeActionState {
+                        type_: types_nodes::nodes::T_MergeActionState,
+                        mas_action: Some(mcx::alloc_in(
+                            mcx,
+                            types_nodes::modifytable::MergeAction {
+                                matchKind: action_match_kind,
+                                commandType: command_type,
+                                overriding: action_overriding,
+                                qual: None,
+                                targetList: None,
+                                updateColnos: None,
+                            },
+                        )?),
+                        mas_proj: None,
+                        mas_whenqual: None,
+                    },
+                )?);
 
                 // rslot = ExecInsert(context, mtstate->rootResultRelInfo,
                 //                    newslot, canSetTag, NULL, NULL);
