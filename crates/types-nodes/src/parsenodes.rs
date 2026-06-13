@@ -161,3 +161,36 @@ pub enum DropBehavior {
 }
 
 pub use DropBehavior::{Cascade as DROP_CASCADE, Restrict as DROP_RESTRICT};
+
+/// `RoleSpecType` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RoleSpecType {
+    /// `ROLESPEC_CSTRING` — role name stored as a C string.
+    Cstring = 0,
+    /// `ROLESPEC_CURRENT_ROLE`.
+    CurrentRole = 1,
+    /// `ROLESPEC_CURRENT_USER`.
+    CurrentUser = 2,
+    /// `ROLESPEC_SESSION_USER`.
+    SessionUser = 3,
+    /// `ROLESPEC_PUBLIC` — role name is "public".
+    Public = 4,
+}
+
+pub use RoleSpecType::{
+    Cstring as ROLESPEC_CSTRING, CurrentRole as ROLESPEC_CURRENT_ROLE,
+    CurrentUser as ROLESPEC_CURRENT_USER, Public as ROLESPEC_PUBLIC,
+    SessionUser as ROLESPEC_SESSION_USER,
+};
+
+/// `RoleSpec` (`nodes/parsenodes.h`) — a role name or one of the
+/// CURRENT_ROLE/CURRENT_USER/SESSION_USER/PUBLIC specials, trimmed to the
+/// fields consumers read.
+#[derive(Debug)]
+pub struct RoleSpec<'mcx> {
+    /// `roletype`.
+    pub roletype: RoleSpecType,
+    /// `rolename` — filled only for `ROLESPEC_CSTRING`.
+    pub rolename: Option<mcx::PgString<'mcx>>,
+}

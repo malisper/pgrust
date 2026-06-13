@@ -12,3 +12,11 @@ seam_core::seam!(
     /// `PostmasterIsAliveInternal()` pipe probe.
     pub fn postmaster_is_alive() -> bool
 );
+
+seam_core::seam!(
+    /// `SendPostmasterSignal(PMSIGNAL_BACKGROUND_WORKER_CHANGE)` (pmsignal.c)
+    /// — set the shared `PMSignalFlags` slot and `kill(PostmasterPid, SIGUSR1)`
+    /// so the postmaster runs `BackgroundWorkerStateChange`. Narrow seam for
+    /// the single reason bgworker.c sends.
+    pub fn send_postmaster_signal_bgworker_change()
+);

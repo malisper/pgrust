@@ -26,6 +26,42 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InvokeObjectPostCreateHook(classId, objectId, subId)` (objectaccess.h
+    /// macro / `RunObjectPostCreateHook`): fire the post-create object-access
+    /// hook if one is installed; a no-op otherwise. The hook may raise,
+    /// carried on `Err`.
+    pub fn invoke_object_post_create_hook(
+        class_id: Oid,
+        object_id: Oid,
+        sub_id: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InvokeObjectPostAlterHook(classId, objectId, subId)` (objectaccess.h
+    /// macro / `RunObjectPostAlterHook`): fire the post-alter object-access
+    /// hook if one is installed; a no-op otherwise. The hook may raise,
+    /// carried on `Err`.
+    pub fn invoke_object_post_alter_hook(
+        class_id: Oid,
+        object_id: Oid,
+        sub_id: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InvokeObjectPostAlterHookArg(classId, objectId, subId, auxObjId,
+    /// is_internal)` (objectaccess.h): fire the post-alter object-access hook.
+    pub fn invoke_object_post_alter_hook_arg(
+        class_id: Oid,
+        object_id: Oid,
+        sub_id: i32,
+        aux_obj_id: Oid,
+        is_internal: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `RunObjectPostCreateHook(classId, objectId, subId, is_internal)`
     /// (objectaccess.c) — the post-create object-access hook body. The
     /// `InvokeObjectPostCreateHook` macro's `if (object_access_hook)` guard is

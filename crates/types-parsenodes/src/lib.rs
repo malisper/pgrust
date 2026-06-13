@@ -9,8 +9,15 @@
 //!
 //! Variants and structs are added as command ports consume them; only the
 //! fields a port reads are carried (docs/types.md rule 3).
+//!
+//! `RoleStmtType`/`RoleSpecType`/`DefElemAction` values are verified against
+//! PostgreSQL 18.3 headers.
+
+#![allow(non_camel_case_types)]
+#![allow(non_upper_case_globals)]
 
 use types_core::Oid;
+use types_nodes::parsenodes::DropBehavior;
 
 /// `int ParseLoc` (`nodes/parsenodes.h`) — token location, `-1` if unknown.
 pub type ParseLoc = i32;
@@ -90,6 +97,7 @@ pub enum DefElemAction {
     DEFELEM_ADD = 2,
     DEFELEM_DROP = 3,
 }
+pub use DefElemAction::{DEFELEM_ADD, DEFELEM_DROP, DEFELEM_SET, DEFELEM_UNSPEC};
 
 /// `typedef struct DefElem` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -158,6 +166,52 @@ pub enum CoercionContext {
     COERCION_PLPGSQL = 2,
     /// explicit cast operation.
     COERCION_EXPLICIT = 3,
+}
+
+// ---------------------------------------------------------------------------
+// AccessPriv (nodes/parsenodes.h)
+// ---------------------------------------------------------------------------
+
+/// `typedef struct AccessPriv` (`nodes/parsenodes.h`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccessPriv {
+    /// string name of privilege
+    pub priv_name: Option<String>,
+    /// list of String
+    pub cols: Vec<Node>,
+}
+
+// ---------------------------------------------------------------------------
+// RoleSpec (nodes/parsenodes.h)
+// ---------------------------------------------------------------------------
+
+/// `typedef enum RoleSpecType` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RoleSpecType {
+    /// role name is stored as a C string
+    ROLESPEC_CSTRING = 0,
+    /// role spec is CURRENT_ROLE
+    ROLESPEC_CURRENT_ROLE = 1,
+    /// role spec is CURRENT_USER
+    ROLESPEC_CURRENT_USER = 2,
+    /// role spec is SESSION_USER
+    ROLESPEC_SESSION_USER = 3,
+    /// role name is "public"
+    ROLESPEC_PUBLIC = 4,
+}
+pub use RoleSpecType::{
+    ROLESPEC_CSTRING, ROLESPEC_CURRENT_ROLE, ROLESPEC_CURRENT_USER, ROLESPEC_PUBLIC,
+    ROLESPEC_SESSION_USER,
+};
+
+/// `typedef struct RoleSpec` (`nodes/parsenodes.h`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoleSpec {
+    pub roletype: RoleSpecType,
+    /// filled only for `ROLESPEC_CSTRING`
+    pub rolename: Option<String>,
+    pub location: ParseLoc,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +292,102 @@ pub struct CreateCastStmt {
 }
 
 // ---------------------------------------------------------------------------
+// Role statement nodes (nodes/parsenodes.h) consumed by user.c
+// ---------------------------------------------------------------------------
+
+/// `typedef enum RoleStmtType` (`nodes/parsenodes.h`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RoleStmtType {
+    ROLESTMT_ROLE = 0,
+    ROLESTMT_USER = 1,
+    ROLESTMT_GROUP = 2,
+}
+pub use RoleStmtType::{ROLESTMT_GROUP, ROLESTMT_ROLE, ROLESTMT_USER};
+
+/// `typedef struct CreateRoleStmt` (`nodes/parsenodes.h`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateRoleStmt {
+    pub stmt_type: RoleStmtType,
+    /// role name
+    pub role: Option<String>,
+    /// List of DefElem nodes
+    pub options: Vec<Node>,
+}
+
+/// `typedef struct AlterRoleStmt` (`nodes/parsenodes.h`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlterRoleStmt {
+    /// role
+    pub role: Option<Box<Node>>,
+    /// List of DefElem nodes
+    pub options: Vec<Node>,
+    /// +1 = add members, -1 = drop members
+    pub action: i32,
+}
+
+/// `typedef struct AlterRoleSetStmt` (`nodes/parsenodes.h`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlterRoleSetStmt {
+    /// role
+    pub role: Option<Box<Node>>,
+    /// database name, or None
+    pub database: Option<String>,
+    /// SET or RESET subcommand (a `VariableSetStmt`, carried opaquely)
+    pub setstmt: Option<Box<Node>>,
+}
+
+/// `typedef struct DropRoleStmt` (`nodes/parsenodes.h`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropRoleStmt {
+    /// List of roles to remove
+    pub roles: Vec<Node>,
+    /// skip error if a role is missing?
+    pub missing_ok: bool,
+}
+
+/// `typedef struct GrantRoleStmt` (`nodes/parsenodes.h`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GrantRoleStmt {
+    /// list of roles to be granted/revoked (list of `AccessPriv`)
+    pub granted_roles: Vec<Node>,
+    /// list of member roles to add/delete
+    pub grantee_roles: Vec<Node>,
+    /// true = GRANT, false = REVOKE
+    pub is_grant: bool,
+    /// options e.g. WITH GRANT OPTION (list of `DefElem`)
+    pub opt: Vec<Node>,
+    /// set grantor to other than current role
+    pub grantor: Option<Box<Node>>,
+    /// drop behavior (for REVOKE)
+    pub behavior: DropBehavior,
+}
+
+/// `typedef struct DropOwnedStmt` (`nodes/parsenodes.h`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropOwnedStmt {
+    pub roles: Vec<Node>,
+    pub behavior: DropBehavior,
+}
+
+/// `typedef struct ReassignOwnedStmt` (`nodes/parsenodes.h`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReassignOwnedStmt {
+    pub roles: Vec<Node>,
+    pub newrole: Option<Box<Node>>,
+}
+
+/// `typedef struct ParseState` (`parser/parse_node.h`), trimmed. user.c only
+/// passes the `ParseState *` through to `errorConflictingDefElem` /
+/// `parser_errposition` for error positioning; the parser (its owner) fills
+/// the source text. Kept opaque-but-real with the consumed field only.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ParseState {
+    /// `p_sourcetext` — the source text, used for error positioning.
+    pub p_sourcetext: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // The parse-tree Node enum (nodes/nodes.h `Node *` over the structs above)
 // ---------------------------------------------------------------------------
 
@@ -254,6 +404,10 @@ pub enum Node {
     DefElem(DefElem),
     ObjectWithArgs(ObjectWithArgs),
     FunctionParameter(FunctionParameter),
+    /// `T_RoleSpec`
+    RoleSpec(RoleSpec),
+    /// `T_AccessPriv`
+    AccessPriv(AccessPriv),
 }
 
 impl Node {
@@ -261,6 +415,14 @@ impl Node {
     pub fn as_string(&self) -> Option<&StringNode> {
         match self {
             Node::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// `IsA(node, Integer)` accessor.
+    pub fn as_integer(&self) -> Option<&Integer> {
+        match self {
+            Node::Integer(i) => Some(i),
             _ => None,
         }
     }
@@ -301,6 +463,22 @@ impl Node {
     pub fn as_objectwithargs(&self) -> Option<&ObjectWithArgs> {
         match self {
             Node::ObjectWithArgs(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// `IsA(node, RoleSpec)` accessor.
+    pub fn as_rolespec(&self) -> Option<&RoleSpec> {
+        match self {
+            Node::RoleSpec(rs) => Some(rs),
+            _ => None,
+        }
+    }
+
+    /// `IsA(node, AccessPriv)` accessor.
+    pub fn as_accesspriv(&self) -> Option<&AccessPriv> {
+        match self {
+            Node::AccessPriv(a) => Some(a),
             _ => None,
         }
     }
