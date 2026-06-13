@@ -429,6 +429,94 @@ impl LWLockTable {
     }
 }
 
+/// The published `MainLWLockArray` global (lwlock.c). The array lives in main
+/// shared memory, which in the threaded-server model is process memory shared
+/// by every backend thread — legitimately cross-thread state.
+///
+/// SAFETY of `Sync`: after publication the table is never structurally
+/// mutated; the `LWLock` state words are manipulated only through their
+/// atomics, and the `waiters` proclists only under the `LW_FLAG_LOCKED`
+/// wait-list spinlock — the same shared-access contract every `LWLock` in
+/// this crate already relies on.
+struct PublishedMainLWLocks(LWLockTable);
+unsafe impl Sync for PublishedMainLWLocks {}
+
+static MAIN_LWLOCKS: std::sync::OnceLock<PublishedMainLWLocks> = std::sync::OnceLock::new();
+
+/// `MainLWLockArray = ...` — publish the table built by [`CreateLWLocks`] as
+/// the process's main LWLock array, making the built-in individual locks
+/// reachable by their `lwlocklist.h` offsets (e.g.
+/// `types_storage::DYNAMIC_SHARED_MEMORY_CONTROL_LOCK`). Called once at
+/// shared-memory creation (ipci.c's `CreateOrAttachShmemStructs` path when it
+/// lands); publishing twice panics, like a duplicate seam install.
+pub fn PublishMainLWLocks(table: LWLockTable) {
+    if MAIN_LWLOCKS.set(PublishedMainLWLocks(table)).is_err() {
+        panic!("MainLWLockArray published twice");
+    }
+}
+
+/// `&MainLWLockArray[offset].lock` — panics loudly (like an uninstalled seam)
+/// if the array has not been published yet.
+fn main_lock_ptr(offset: usize) -> *mut LWLock {
+    let table = MAIN_LWLOCKS
+        .get()
+        .expect("MainLWLockArray not published (CreateLWLocks has not run)");
+    let slot = table
+        .0
+        .locks
+        .get(offset)
+        .expect("main LWLock offset out of range");
+    &slot.lock as *const LWLock as *mut LWLock
+}
+
+/// RAII hold on one of the built-in main-array locks, returned by
+/// [`LWLockAcquireMain`]. `Drop` is the error-path release (what C leaves to
+/// error recovery's `LWLockReleaseAll`); the success path calls
+/// [`MainLWLockGuard::release`] where C calls `LWLockRelease`.
+pub struct MainLWLockGuard {
+    offset: usize,
+    armed: bool,
+}
+
+impl MainLWLockGuard {
+    /// `LWLockRelease(&MainLWLockArray[offset].lock)` — explicit release,
+    /// surfacing the C `elog(ERROR, "lock ... is not held")`.
+    pub fn release(mut self) -> PgResult<()> {
+        self.armed = false;
+        // SAFETY: see `LWLockAcquireMain`.
+        LWLockRelease(unsafe { &mut *main_lock_ptr(self.offset) })
+    }
+}
+
+impl Drop for MainLWLockGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // Unwind-path release. If something already swept the lock away
+            // (LWLockReleaseAll during shmem exit), the not-held error is
+            // exactly the situation; ignore it.
+            // SAFETY: see `LWLockAcquireMain`.
+            let _ = LWLockRelease(unsafe { &mut *main_lock_ptr(self.offset) });
+        }
+    }
+}
+
+/// `LWLockAcquire(&MainLWLockArray[offset].lock, mode)` — acquire a built-in
+/// individual lock by its `lwlocklist.h` offset, returning a guard so the
+/// hold can never leak across a `?` (AGENTS.md "Locks and held resources").
+pub fn LWLockAcquireMain(offset: usize, mode: LWLockMode) -> PgResult<MainLWLockGuard> {
+    // SAFETY: the published array is structurally immutable and every
+    // concurrent accessor follows the LWLock shared-access protocol
+    // (atomics + wait-list spinlock), so materializing `&mut LWLock` for the
+    // acquire/release protocol is the crate's established shared-memory
+    // contract (see `release_held_by_addr`).
+    let lock = unsafe { &mut *main_lock_ptr(offset) };
+    LWLockAcquire(lock, mode)?;
+    Ok(MainLWLockGuard {
+        offset,
+        armed: true,
+    })
+}
+
 /// `CreateLWLocks` (lwlock.c:472) — allocate the main LWLock array, initialize
 /// it (postmaster only), and register named extension tranches in the current
 /// process. `!IsUnderPostmaster` ALLOCATES + INITIALIZES (and resets the

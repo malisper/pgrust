@@ -400,7 +400,8 @@ fn socket_comm_reset() {
 
 /// `socket_close(code, arg)` — shutdown libpq at backend exit (the
 /// `on_proc_exit` callback registered by [`pq_init`]). Must be safe to run at
-/// any instant.
+/// any instant. Never errors itself; the `PgResult` is the
+/// `pg_on_exit_callback` surface.
 fn socket_close(_code: i32, _arg: Datum) -> PgResult<()> {
     // Nothing to do in a standalone backend, where MyProcPort is NULL.
     with_my_proc_port(&mut |port| {

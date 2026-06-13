@@ -3,31 +3,24 @@
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
-//!
-//! `DIR *` handles are carried as opaque `u64` tokens (`0` is the C `NULL`);
-//! the owner mints and resolves them.
 
 use types_error::PgResult;
 
 seam_core::seam!(
-    /// `AllocateDir(const char *dirname)` — open a directory through the fd
-    /// bookkeeping layer. Returns the opaque `DIR *` token, `0` on open
-    /// failure (with `errno` left set, as in C). `Err` carries the
-    /// `ereport(ERROR, "exceeded maxAllocatedDescs ...")`.
-    pub fn allocate_dir(dirname: &str) -> PgResult<u64>
-);
-
-seam_core::seam!(
-    /// `ReadDir(DIR *dir, const char *dirname)` — next entry's `d_name`, or
-    /// `None` at end of directory. `Err` carries the `ereport(ERROR)` for a
-    /// read failure or a `0` (NULL) dir token.
-    pub fn read_dir(dir: u64, dirname: &str) -> PgResult<Option<String>>
-);
-
-seam_core::seam!(
-    /// `FreeDir(DIR *dir)` — close a directory opened with `allocate_dir`;
-    /// returns the `closedir()` result (`0` tokens are a no-op returning 0).
-    pub fn free_dir(dir: u64) -> i32
+    /// The `AllocateDir(dirname)` / `ReadDir(dir, dirname)` / `FreeDir(dir)`
+    /// triple (`storage/file/fd.c`) as one owned walk: the owner opens the
+    /// directory through the fd bookkeeping layer, invokes `f` with each
+    /// entry's `d_name`, and closes the directory on every path (including
+    /// when `f` errors) — the `DIR *` never crosses the seam, so there is no
+    /// bare-token release to leak. `Err` carries `AllocateDir`'s
+    /// `ereport(ERROR, "exceeded maxAllocatedDescs ...")`, `ReadDir`'s
+    /// could-not-open / could-not-read `ereport(ERROR)` (as in C, an open
+    /// failure surfaces from the first `ReadDir` call, naming `dirname`), or
+    /// an `Err` from `f` itself.
+    pub fn with_allocated_dir(
+        dirname: &str,
+        f: &mut dyn FnMut(&str) -> PgResult<()>,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

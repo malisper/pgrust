@@ -3,9 +3,12 @@
 //! `init_seams()`.
 
 seam_core::seam!(
-    /// `proc_exit(code)` (`storage/ipc/ipc.c`) — run the on_proc_exit
-    /// callbacks and terminate the process. Never returns.
-    pub fn proc_exit(code: i32) -> !
+    /// `proc_exit(code, my_pid)` (`storage/ipc/ipc.c`) — run the on_proc_exit
+    /// callbacks and terminate the process. Never returns. `my_pid` is the
+    /// caller's `MyProcPid` (globals.c), passed explicitly per the
+    /// no-ambient-global rule; it backs the C "called in child process"
+    /// PANIC check against `getpid()`.
+    pub fn proc_exit(code: i32, my_pid: i32) -> !
 );
 
 seam_core::seam!(

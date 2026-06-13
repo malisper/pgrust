@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 types-core = { path = "../types-core" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 types-error = { path = "../types-error" }
 types-dest = { path = "../types-dest" }
 backend-utils-error-seams = { path = "../backend-utils-error-seams" }

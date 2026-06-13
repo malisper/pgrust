@@ -13,16 +13,18 @@ backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
 backend-storage-ipc-seams = { path = "../backend-storage-ipc-seams" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
-backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-mmgr-freepage-seams = { path = "../backend-utils-mmgr-freepage-seams" }
 libc = "0.2"
+mcx = { path = "../mcx" }
 pg-prng = { path = "../pg-prng" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-freepage = { path = "../types-freepage" }
 types-guc = { path = "../types-guc" }
 types-storage = { path = "../types-storage" }

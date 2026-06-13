@@ -259,7 +259,10 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
         backend_utils_activity_pgstat_seams::pgstat_set_session_end_cause_fatal::call();
 
         // Normal process-exit cleanup, exit code 1 for FATAL termination.
-        backend_storage_ipc_seams::proc_exit::call(1);
+        backend_storage_ipc_seams::proc_exit::call(
+            1,
+            backend_utils_init_small_seams::my_proc_pid::call(),
+        );
     }
 
     if elevel >= PANIC {

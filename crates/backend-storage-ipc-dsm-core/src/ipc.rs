@@ -83,10 +83,13 @@ fn pop_callback(list: &'static std::thread::LocalKey<RefCell<OnExitList>>) -> Op
 }
 
 /// `proc_exit(int code)` — run all the registered callbacks and then exit.
-/// This should be the only function that calls `exit()`.
-pub fn proc_exit(code: i32) -> ! {
+/// This should be the only function that calls `exit()`. `my_pid` is the
+/// caller's `MyProcPid` (globals.c), passed explicitly per the
+/// no-ambient-global rule; the caller reads it off its own state when the
+/// miscinit owner lands.
+pub fn proc_exit(code: i32, my_pid: i32) -> ! {
     // Not safe if forked by system(), etc.
-    if backend_utils_init_small_seams::my_proc_pid::call() != unsafe { libc::getpid() } as i32 {
+    if my_pid != unsafe { libc::getpid() } as i32 {
         // PANIC aborts the process inside the report cycle.
         let _ = elog(PANIC, "proc_exit() called in child process");
     }
@@ -158,8 +161,10 @@ pub fn shmem_exit(code: i32) -> PgResult<()> {
 
     // Release any LWLocks we might be holding before callbacks run: this
     // prevents accessing locks in detached DSM segments and lets callbacks
-    // acquire new locks.
-    backend_storage_lmgr_lwlock_seams::lwlock_release_all::call();
+    // acquire new locks. (Infallible in C; the Rust surface's only Err is an
+    // internal held-lock-table invariant, folded into this function's
+    // callback-error surface.)
+    backend_storage_lmgr_lwlock::LWLockReleaseAll()?;
 
     // Call before_shmem_exit callbacks: things that need most of the system
     // still up, such as cleanup of temp relations (catalog access).
