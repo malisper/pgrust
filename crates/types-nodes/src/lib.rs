@@ -22,6 +22,7 @@ pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
+pub mod nodeagg;
 pub mod nodeforeigncustom;
 pub mod nodeindexscan;
 pub mod nodemergejoin;
@@ -43,6 +44,12 @@ pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_SEMI,
+};
+pub use nodeagg::{
+    Agg, AggSplit, AggStateData, AggStatePerAggData, AggStatePerGroupData,
+    AggStatePerHashData, AggStatePerPhaseData, AggStatePerTransData, AggStrategy,
+    Aggref, AggregateInstrumentation, HashAggBatch, HashAggSpill, SharedAggInfo, Sort,
+    AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use pathnodes::PathNode;
