@@ -7112,6 +7112,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-lsyscache"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "seam-core",
+ "types-array",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-selfuncs",
+]
+
+[[package]]
 name = "backend-utils-cache-lsyscache-seams"
 version = "0.0.0"
 dependencies = [
@@ -8573,6 +8588,7 @@ dependencies = [
  "backend-utils-adt-rangetypes",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
+ "backend-utils-cache-lsyscache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",

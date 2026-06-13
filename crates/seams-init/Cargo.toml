@@ -73,6 +73,7 @@ backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
 backend-utils-cache-attoptcache = { path = "../backend-utils-cache-attoptcache" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-cache-relfilenumbermap = { path = "../backend-utils-cache-relfilenumbermap" }
 backend-utils-cache-spccache = { path = "../backend-utils-cache-spccache" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
