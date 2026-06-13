@@ -7,9 +7,12 @@
 
 #![no_std]
 #![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
 
 pub mod attoptcache;
+pub mod relopts;
 pub mod tablespace;
 
 pub use attoptcache::*;
+pub use relopts::*;
 pub use tablespace::*;

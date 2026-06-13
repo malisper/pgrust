@@ -2,7 +2,7 @@
 
 /// Parsed `pg_attribute.attoptions` (`attribute_reloptions`). A negative
 /// value means "not set" (the reloptions defaults are `-1`).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AttributeOpts {
     /// `n_distinct` (`float8`).
     pub n_distinct: f64,

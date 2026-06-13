@@ -64,6 +64,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-printtup"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-pqformat",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-dest",
+ "types-error",
+ "types-stringinfo",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-relation-seams"
 version = "0.0.0"
 dependencies = [
@@ -72,6 +86,24 @@ dependencies = [
  "types-core",
  "types-error",
  "types-rel",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-common-reloptions"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-reloptions-seams",
+ "backend-access-index-amapi-seams",
+ "backend-commands-define-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-misc-guc-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-reloptions",
  "types-storage",
  "types-tuple",
 ]
@@ -202,6 +234,7 @@ dependencies = [
 name = "backend-access-index-amapi-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -1074,6 +1107,15 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-commands-define-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2350,6 +2392,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-arrayfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-format-type-seams"
 version = "0.0.0"
 dependencies = [
@@ -2713,6 +2765,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-guc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "backend-utils-misc-guc-tables"
 version = "0.0.0"
 dependencies = [
@@ -2998,6 +3057,7 @@ name = "seams-init"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-reloptions",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
  "backend-access-rmgrdesc-small",
@@ -3206,6 +3266,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-reloptions",
  "types-storage",
  "types-tuple",
 ]
