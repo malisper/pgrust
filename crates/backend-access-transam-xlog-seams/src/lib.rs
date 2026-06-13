@@ -123,3 +123,16 @@ seam_core::seam!(
     /// `set_my_backend_type` (see DESIGN_DEBT.md).
     pub fn count_ckpt_slru_written()
 );
+
+seam_core::seam!(
+    /// `RecoveryInProgress()` (xlog.c): true while the server is in archive
+    /// recovery / standby mode. Shared-state read; infallible.
+    pub fn RecoveryInProgress() -> bool
+);
+
+seam_core::seam!(
+    /// `GetActiveWalLevelOnStandby()` (xlog.c): the effective `wal_level` on a
+    /// standby, read from the control file's last checkpoint. Shared-state
+    /// read; infallible.
+    pub fn GetActiveWalLevelOnStandby() -> types_logical::WalLevel
+);

@@ -923,6 +923,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-logical",
  "types-wal",
 ]
 
@@ -962,6 +963,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-logical",
  "types-wal",
 ]
 
@@ -2126,6 +2128,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-logical",
  "types-wal",
 ]
 
@@ -2137,10 +2140,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-logical"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogreader-seams",
+ "backend-replication-logical-decode-seams",
+ "backend-replication-logical-logical-seams",
+ "backend-replication-logical-reorderbuffer-seams",
+ "backend-replication-logical-snapbuild-seams",
+ "backend-replication-slot-seams",
+ "backend-replication-walsender-seams",
+ "backend-storage-ipc-procarray-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-mmgr-mcxt-seams",
+ "backend-utils-resowner-resowner-seams",
+ "types-core",
+ "types-error",
+ "types-logical",
+]
+
+[[package]]
 name = "backend-replication-logical-logical-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
+ "types-logical",
 ]
 
 [[package]]
@@ -2191,6 +2221,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-replication-logical-reorderbuffer-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-logical",
+]
+
+[[package]]
 name = "backend-replication-logical-slotsync-seams"
 version = "0.0.0"
 dependencies = [
@@ -2203,6 +2241,8 @@ name = "backend-replication-logical-snapbuild-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-logical",
 ]
 
 [[package]]
@@ -2219,6 +2259,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-logical",
  "types-wal",
 ]
 
@@ -2251,6 +2292,8 @@ name = "backend-replication-walsender-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -3286,6 +3329,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-fmgr-dfmgr-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-logical",
+]
+
+[[package]]
 name = "backend-utils-fmgr-fmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -3507,6 +3559,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+ "types-logical",
 ]
 
 [[package]]
@@ -3516,6 +3569,14 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-resowner-resowner-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-logical",
 ]
 
 [[package]]
@@ -3737,6 +3798,7 @@ dependencies = [
  "backend-postmaster-startup",
  "backend-postmaster-syslogger",
  "backend-replication-logical-conflict",
+ "backend-replication-logical-logical",
  "backend-replication-logical-proto",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch",
@@ -3888,6 +3950,13 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-amvalidate",
+ "types-core",
+]
+
+[[package]]
+name = "types-logical"
+version = "0.0.0"
+dependencies = [
  "types-core",
 ]
 
