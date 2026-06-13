@@ -51,3 +51,13 @@ seam_core::seam!(
         opfamilyoid: Oid,
     ) -> PgResult<PgVec<'mcx, AmprocRow>>
 );
+
+seam_core::seam!(
+    /// `SearchSysCache1(TYPEOID, ObjectIdGetDatum(typoid))` projected to
+    /// `NameStr(Form_pg_type->typname)`, copied into `mcx`. `Ok(None)` on a
+    /// cache miss (`!HeapTupleIsValid`); `Err` includes OOM from the copy.
+    pub fn search_type_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        typoid: Oid,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);

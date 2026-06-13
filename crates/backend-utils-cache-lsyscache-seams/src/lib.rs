@@ -44,3 +44,32 @@ seam_core::seam!(
         nspid: Oid,
     ) -> PgResult<Option<PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `get_rel_relkind(relid)` (lsyscache.c): the relation's `relkind`, or 0
+    /// when there is no such pg_class row (the C `'\0'` return). `Err`
+    /// carries the syscache machinery's `ereport(ERROR)`s.
+    pub fn get_rel_relkind(relid: Oid) -> PgResult<u8>
+);
+
+seam_core::seam!(
+    /// `get_attname(relid, attnum, missing_ok)` (lsyscache.c): the
+    /// attribute's name, copied out of the syscache into `mcx` (C: `pstrdup`
+    /// in the current context). With `missing_ok = false` a missing attribute
+    /// is the C `elog(ERROR, "cache lookup failed for attribute %d of
+    /// relation %u")`, carried on `Err`; with `missing_ok = true` it is
+    /// `Ok(None)`. `Err` includes OOM from the copy.
+    pub fn get_attname<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+        missing_ok: bool,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `get_attnum(relid, attname)` (lsyscache.c): the attribute's number, or
+    /// `InvalidAttrNumber` (0) if no such attribute. `Err` carries the
+    /// syscache machinery's `ereport(ERROR)`s.
+    pub fn get_attnum(relid: Oid, attname: &str) -> PgResult<types_core::AttrNumber>
+);

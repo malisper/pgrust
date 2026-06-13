@@ -30,3 +30,9 @@ seam_core::seam!(
     /// initialization window. A backend-local global read.
     pub fn process_shared_preload_libraries_in_progress() -> bool
 );
+
+seam_core::seam!(
+    /// `IsBootstrapProcessingMode()` (miscadmin.h): `Mode ==
+    /// BootstrapProcessing`. A plain global read — infallible.
+    pub fn is_bootstrap_processing_mode() -> bool
+);

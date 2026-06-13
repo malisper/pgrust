@@ -227,6 +227,7 @@ dependencies = [
  "types-cache",
  "types-core",
  "types-error",
+ "types-rel",
  "types-scan",
  "types-tuple",
 ]
@@ -711,9 +712,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-catalog-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+]
+
+[[package]]
+name = "backend-catalog-indexing-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-namespace-seams"
 version = "0.0.0"
 dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-catalog-objectaddress-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-error",
+]
+
+[[package]]
+name = "backend-catalog-partition-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -725,6 +766,46 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-depend"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-indexing-seams",
+ "backend-catalog-objectaddress-seams",
+ "backend-catalog-partition-seams",
+ "backend-catalog-pg-depend-seams",
+ "backend-commands-extension-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-catalog-pg-depend-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-rel",
 ]
 
 [[package]]
@@ -752,6 +833,16 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-commands-extension-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -1800,6 +1891,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
  "types-tuple",
 ]
 
@@ -2143,6 +2235,7 @@ dependencies = [
  "backend-access-table-table",
  "backend-access-table-tableam",
  "backend-access-transam-xlogstats",
+ "backend-catalog-pg-depend",
  "backend-executor-execAmi",
  "backend-executor-execUtils",
  "backend-executor-instrument",
@@ -2203,6 +2296,13 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+]
+
+[[package]]
+name = "types-catalog"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
@@ -2305,6 +2405,7 @@ version = "0.0.0"
 dependencies = [
  "types-core",
  "types-datum",
+ "types-tuple",
 ]
 
 [[package]]

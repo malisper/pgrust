@@ -22,3 +22,10 @@ impl FmgrInfo {
         Self { fn_oid: 0 }
     }
 }
+
+/// `F_INT4EQ` (`catalog/fmgroids.h`) — `int4eq`, pg_proc OID 65
+/// (`pg_proc.dat`).
+pub const F_INT4EQ: crate::primitive::RegProcedure = 65;
+/// `F_OIDEQ` (`catalog/fmgroids.h`) — `oideq`, pg_proc OID 184
+/// (`pg_proc.dat`).
+pub const F_OIDEQ: crate::primitive::RegProcedure = 184;

@@ -89,3 +89,23 @@ seam_core::seam!(
         sysscan: types_scan::genam::SysScanHandle,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `systable_beginscan(rel, indexId, true, NULL, nkeys, key)` + the
+    /// `systable_getnext` loop + `systable_endscan` over an already-open
+    /// catalog relation: invoke `body` once per matching row (the deformed
+    /// columns + `t_self`), in scan order. `body` returning `Ok(false)` stops
+    /// the scan early (the C `break`); an `Err` from `body` propagates after
+    /// the owner ends the scan. The scan uses the catalog snapshot taken at
+    /// beginscan, so `body` may delete/update the current row through the
+    /// indexing seams without affecting which rows the scan visits — exactly
+    /// the C pattern. `Err` carries the scan machinery's own
+    /// `ereport(ERROR)`s as well. (The by-OID batched [`systable_scan`] above
+    /// serves consumers without an open relation or per-row write legs.)
+    pub fn systable_scan_foreach(
+        rel: &types_rel::RelationData<'_>,
+        index_id: Oid,
+        keys: &[ScanKeyInit],
+        body: &mut dyn FnMut(&types_scan::backend_access_index_genam::SysScanRow<'_>) -> PgResult<bool>,
+    ) -> PgResult<()>
+);

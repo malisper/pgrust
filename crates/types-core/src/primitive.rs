@@ -21,6 +21,16 @@ pub type AttrNumber = i16;
 pub type Index = u32;
 /// `InvalidAttrNumber` (`access/attnum.h`).
 pub const InvalidAttrNumber: AttrNumber = 0;
+/// `RegProcedure` (`c.h`) — a pg_proc OID ("RegProcedure is the preferred
+/// name in C code" for `regproc`).
+pub type RegProcedure = Oid;
+/// `Cost` (`nodes.h`) — abstract plan cost, a `double`.
+pub type Cost = f64;
+/// `Cardinality` (`nodes.h`) — estimated row count, a `double`.
+pub type Cardinality = f64;
+/// `Selectivity` (`nodes.h`) — fraction-of-rows estimate, a `double`.
+pub type Selectivity = f64;
+pub type ProtocolVersion = uint32;
 /// `ProcNumber` (`procnumber.h`) — was C `int`.
 pub type ProcNumber = i32;
 pub type uint8 = u8;
@@ -32,13 +42,17 @@ pub type RmgrId = uint8;
 pub type XLogSegNo = uint64;
 pub type pg_crc32c = uint32;
 pub type RelFileNumber = Oid;
-/// `RegProcedure` (`postgres_ext.h`) — a pg_proc OID.
-pub type RegProcedure = Oid;
 pub type OffsetNumber = uint16;
+/// `RepOriginId` (`xlogdefs.h`) — a `uint16`.
+pub type RepOriginId = uint16;
 
 pub const BLCKSZ: usize = 8192;
 pub const InvalidOid: Oid = 0;
 pub const INVALID_OID: Oid = InvalidOid;
+
+
+/// `InvalidRepOriginId` — `#define InvalidRepOriginId 0` (`origin.h`).
+pub const InvalidRepOriginId: RepOriginId = 0;
 
 /// `OidIsValid(oid)` — `(oid) != InvalidOid` (`c.h`).
 #[inline]
