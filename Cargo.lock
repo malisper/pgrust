@@ -7149,6 +7149,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-catcache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation",
+ "backend-access-common-tupdesc",
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-cache-catcache-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-cache-catcache-seams"
 version = "0.0.0"
 dependencies = [
@@ -8849,6 +8878,7 @@ dependencies = [
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
  "backend-utils-cache-attoptcache",
+ "backend-utils-cache-catcache",
  "backend-utils-cache-inval",
  "backend-utils-cache-relcache",
  "backend-utils-cache-relfilenumbermap",
