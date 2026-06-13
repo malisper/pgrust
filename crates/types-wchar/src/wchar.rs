@@ -2,6 +2,14 @@ pub use types_core::PgWChar;
 
 pub type pg_wchar = PgWChar;
 
+/// A range of Unicode code points (`struct mbinterval` in `wchar.c`), used by
+/// the display-width tables consulted by `mbbisearch`/`ucs_wcwidth`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct mbinterval {
+    pub first: u32,
+    pub last: u32,
+}
+
 /// Null-terminated PostgreSQL wide-character string.
 #[derive(Debug, Eq, PartialEq)]
 pub struct PgWCharStr<'a> {
