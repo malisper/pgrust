@@ -32,7 +32,6 @@ use backend_storage_lmgr_lock_seams as lock_seams;
 use backend_utils_cache_catcache_seams as catcache_seams;
 use backend_utils_cache_inval_seams as inval_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
-use backend_utils_init_small_seams as init_seams_globals;
 use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgVec};
 use types_cache::SysCacheKey;
 use types_core::{AttrNumber, Oid, OidIsValid, InvalidOid};
@@ -290,8 +289,12 @@ pub fn ReleaseSysCache(tuple: FormedTuple<'_>) {
 /// `SearchSysCacheLocked1` — combine [`SearchSysCache1`] with acquiring a
 /// `LOCKTAG_TUPLE` at mode `InplaceUpdateTupleLock`. A tool for complying
 /// with the README.tuplock section "Locking to write inplace-updated tables";
-/// after the caller's `heap_update()`, it should
-/// `UnlockTuple(InplaceUpdateTupleLock)` and [`ReleaseSysCache`].
+/// the C contract ("after heap_update(), UnlockTuple and ReleaseSysCache")
+/// is the returned [`lock_seams::LockGuard`]: the lock stays held for as
+/// long as the guard lives and is released on its drop.
+///
+/// `my_database_id` is C's `MyDatabaseId` (globals.c), passed explicitly —
+/// no ambient-global seams.
 ///
 /// Since inplace updates may happen just before our LockTuple(), we must
 /// return content acquired after LockTuple() of the TID we return; in the
@@ -303,33 +306,40 @@ pub fn ReleaseSysCache(tuple: FormedTuple<'_>) {
 /// doesn't prevent the "tuple concurrently updated" error.
 pub fn SearchSysCacheLocked1<'mcx>(
     mcx: Mcx<'mcx>,
+    my_database_id: Oid,
     cacheId: i32,
     key1: SysCacheKey<'_>,
-) -> PgResult<Option<FormedTuple<'mcx>>> {
+) -> PgResult<Option<(lock_seams::LockGuard, FormedTuple<'mcx>)>> {
     let mut tid = item_pointer_invalid(); // ItemPointerSetInvalid(&tid)
-    let mut tag = LOCKTAG::default();
+    let mut held: Option<lock_seams::LockGuard> = None;
     loop {
         let lockmode: LOCKMODE = InplaceUpdateTupleLock;
 
         let tuple = SearchSysCache1(mcx, cacheId, key1)?;
-        if item_pointer_is_valid(&tid) {
-            match &tuple {
+        let tup = if let Some(guard) = held.take() {
+            debug_assert!(item_pointer_is_valid(&tid));
+            match tuple {
                 None => {
-                    lock_seams::lock_release::call(&tag, lockmode, false)?;
-                    return Ok(tuple);
+                    // C releases explicitly here; propagate that surface.
+                    guard.release()?;
+                    return Ok(None);
                 }
                 Some(tup) if item_pointer_equals(&tid, &tup.tuple.t_self) => {
-                    return Ok(tuple);
+                    return Ok(Some((guard, tup)));
                 }
-                Some(_) => {
-                    lock_seams::lock_release::call(&tag, lockmode, false)?;
+                Some(tup) => {
+                    // TID changed under us: release and retry with the new TID.
+                    guard.release()?;
+                    tup
                 }
             }
-        } else if tuple.is_none() {
-            return Ok(tuple);
-        }
+        } else {
+            match tuple {
+                None => return Ok(None),
+                Some(tup) => tup,
+            }
+        };
 
-        let tup = tuple.expect("checked valid above");
         tid = tup.tuple.t_self;
         ReleaseSysCache(tup);
 
@@ -339,8 +349,9 @@ pub fn SearchSysCacheLocked1<'mcx>(
         let dboid = if catcache_seams::cache_relisshared::call(cacheId) {
             InvalidOid
         } else {
-            init_seams_globals::my_database_id::call()
+            my_database_id
         };
+        let mut tag = LOCKTAG::default();
         set_locktag_tuple(
             &mut tag,
             dboid,
@@ -348,7 +359,7 @@ pub fn SearchSysCacheLocked1<'mcx>(
             tid.ip_blkid.block_number(),
             tid.ip_posid,
         );
-        lock_seams::lock_acquire::call(&tag, lockmode, false, false)?;
+        held = Some(lock_seams::lock_acquire(&tag, lockmode, false, false)?);
 
         // If an inplace update just finished, ensure we process the syscache
         // inval.
@@ -385,20 +396,21 @@ pub fn SearchSysCacheCopy<'mcx>(
 }
 
 /// `SearchSysCacheLockedCopy1` — meld [`SearchSysCacheLocked1`] with
-/// [`SearchSysCacheCopy`]. After the caller's `heap_update()`, it should
-/// `UnlockTuple(InplaceUpdateTupleLock)` and `heap_freetuple()`.
+/// [`SearchSysCacheCopy`]. The C contract ("after heap_update(),
+/// UnlockTuple and heap_freetuple") is the returned guard + owned copy.
 pub fn SearchSysCacheLockedCopy1<'mcx>(
     mcx: Mcx<'mcx>,
+    my_database_id: Oid,
     cacheId: i32,
     key1: SysCacheKey<'_>,
-) -> PgResult<Option<FormedTuple<'mcx>>> {
-    let tuple = SearchSysCacheLocked1(mcx, cacheId, key1)?;
-    let Some(tup) = tuple else {
+) -> PgResult<Option<(lock_seams::LockGuard, FormedTuple<'mcx>)>> {
+    let tuple = SearchSysCacheLocked1(mcx, my_database_id, cacheId, key1)?;
+    let Some((guard, tup)) = tuple else {
         return Ok(None);
     };
     let newtuple = heap_copytuple(mcx, Some(&tup))?;
     ReleaseSysCache(tup);
-    Ok(newtuple)
+    Ok(newtuple.map(|t| (guard, t)))
 }
 
 /// `SearchSysCacheExists` — probe whether a tuple can be found. No lock is
@@ -861,6 +873,7 @@ fn set_locktag_tuple(tag: &mut LOCKTAG, dboid: Oid, reloid: Oid, blocknum: u32, 
 /// Install this unit's inward seams (the caller-shaped projected-row lookups
 /// in `backend-utils-cache-syscache-seams`).
 pub fn init_seams() {
+    backend_utils_cache_syscache_seams::search_relation_relam::set(projections::search_relation_relam);
     backend_utils_cache_syscache_seams::search_opclass::set(projections::search_opclass);
     backend_utils_cache_syscache_seams::search_amop_list::set(projections::search_amop_list);
     backend_utils_cache_syscache_seams::search_amproc_list::set(projections::search_amproc_list);

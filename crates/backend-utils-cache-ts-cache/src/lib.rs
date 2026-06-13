@@ -33,7 +33,6 @@ use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_cache_syscache as syscache;
 use backend_utils_error_seams as error_seams;
 use backend_utils_fmgr_fmgr_seams as fmgr_seams;
-use backend_utils_init_small_seams as globals_seams;
 use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgHashMap, PgVec};
 use types_cache::{BTEqualStrategyNumber, ScanKeyInit, SysCacheKey, F_OIDEQ};
 use types_core::{InvalidOid, Oid, OidIsValid};
@@ -237,7 +236,10 @@ fn InvalidateTSCacheCallBack(arg: Datum, _cacheid: i32, _hashvalue: u32) {
                 // pg_ts_config.
                 st.ts_current_config_cache = InvalidOid;
             }
-            _ => unreachable!("unknown TS cache tag in invalidation arg"),
+            // The tag rides a Datum (not type-constrained), so an unknown
+            // value is a wiring bug, not an impossible arm: assert in debug
+            // builds, no-op in release (the C callback has no such arm).
+            _ => debug_assert!(false, "unknown TS cache tag in invalidation arg"),
         }
     });
 }
@@ -837,16 +839,19 @@ pub fn getTSCurrentConfig(emitError: bool) -> PgResult<Oid> {
 /// `default_text_search_config`. On success may rewrite `*newval` to the
 /// fully qualified name, so later `search_path` changes don't affect it.
 /// `Ok(false)` means "reject the value" (the C `return false`).
+///
+/// `my_database_id` is C's `MyDatabaseId` (globals.c), passed explicitly —
+/// no ambient-global seams; the GUC machinery reads it off its own state
+/// when it lands.
 pub fn check_default_text_search_config(
     newval: &mut String,
+    my_database_id: Oid,
     source: GucSource,
 ) -> PgResult<bool> {
     // If we aren't inside a transaction, or connected to a database, we
     // cannot do the catalog accesses necessary to verify the config name.
     // Must accept it on faith.
-    if xact_seams::is_transaction_state::call()
-        && globals_seams::my_database_id::call() != InvalidOid
-    {
+    if xact_seams::is_transaction_state::call() && my_database_id != InvalidOid {
         let scratch = MemoryContext::new("check_default_text_search_config");
         let mcx = scratch.mcx();
 
