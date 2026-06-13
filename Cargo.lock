@@ -3778,7 +3778,15 @@ dependencies = [
 name = "backend-libpq-pqsignal"
 version = "0.0.0"
 dependencies = [
+ "backend-libpq-pqsignal-seams",
  "libc",
+]
+
+[[package]]
+name = "backend-libpq-pqsignal-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
 ]
 
 [[package]]
@@ -4132,6 +4140,7 @@ dependencies = [
 name = "backend-postmaster-bgworker"
 version = "0.0.0"
 dependencies = [
+ "backend-libpq-pqsignal-seams",
  "backend-postmaster-bgworker-seams",
  "backend-postmaster-postmaster-seams",
  "backend-storage-ipc-latch-seams",
@@ -4149,7 +4158,6 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-misc-ps-status-seams",
  "port-pgsleep-seams",
- "port-pqsignal-seams",
  "types-bgworker",
  "types-core",
  "types-error",

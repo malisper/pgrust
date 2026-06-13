@@ -13,28 +13,3 @@ seam_core::seam!(
     /// (`Assert(false)` in C), not an ereport, so the seam is infallible.
     pub fn pqsignal(signo: i32, func: types_signal::SigHandler)
 );
-
-seam_core::seam!(
-    /// The `BackgroundWorkerMain` signal-handler block: install
-    /// `StatementCancelHandler`/`procsignal_sigusr1_handler`/
-    /// `FloatExceptionHandler` (database-connection workers) or `SIG_IGN`
-    /// (others) for SIGINT/SIGUSR1/SIGFPE, the `bgworker_die` SIGTERM handler,
-    /// `SIG_IGN` for SIGHUP/SIGPIPE/SIGUSR2, `SIG_DFL` for SIGCHLD, and run
-    /// `InitializeTimeouts()`. Composite because the handler fn-pointers and
-    /// the timeout manager are owned by other subsystems; `db_connection`
-    /// selects the connection-handler variant.
-    pub fn install_bgworker_signal_handlers(db_connection: bool)
-);
-
-seam_core::seam!(
-    /// `sigprocmask(SIG_SETMASK, &BlockSig, NULL)` — block all signals
-    /// (`BackgroundWorkerBlockSignals`). `BlockSig` is owned by the signal
-    /// setup; infallible.
-    pub fn block_signals()
-);
-
-seam_core::seam!(
-    /// `sigprocmask(SIG_SETMASK, &UnBlockSig, NULL)` — restore the normal
-    /// signal mask (`BackgroundWorkerUnblockSignals`). Infallible.
-    pub fn unblock_signals()
-);
