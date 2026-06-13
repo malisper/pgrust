@@ -1566,7 +1566,6 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
- "types-snapshot",
 ]
 
 [[package]]
@@ -1861,16 +1860,6 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
-]
-
-[[package]]
-name = "backend-catalog-pg-largeobject-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
- "types-snapshot",
 ]
 
 [[package]]
@@ -2483,15 +2472,6 @@ dependencies = [
  "types-nodes",
  "types-scan",
  "types-tuple",
-]
-
-[[package]]
-name = "backend-commands-proclang-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
- "types-core",
- "types-error",
 ]
 
 [[package]]
@@ -3738,6 +3718,14 @@ name = "backend-jit-jit-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-lib-bloomfilter-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -6202,31 +6190,23 @@ dependencies = [
 name = "backend-utils-adt-acl"
 version = "0.0.0"
 dependencies = [
- "backend-catalog-aclchk-seams",
- "backend-catalog-namespace-seams",
- "backend-catalog-pg-largeobject-seams",
- "backend-commands-dbcommands-seams",
- "backend-commands-proclang-seams",
- "backend-commands-tablespace-seams",
- "backend-foreign-foreign-seams",
+ "backend-commands-user-seams",
+ "backend-lib-bloomfilter-seams",
  "backend-utils-adt-acl-seams",
- "backend-utils-adt-regproc-seams",
- "backend-utils-adt-varlena-seams",
- "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-inval-seams",
  "backend-utils-cache-syscache-seams",
- "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit",
  "backend-utils-init-miscinit-seams",
- "backend-utils-misc-guc-tables",
- "backend-utils-time-snapmgr-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-superuser-seams",
  "mcx",
- "port-pgstrcasecmp",
  "types-acl",
+ "types-cache",
  "types-core",
  "types-datum",
  "types-error",
  "types-nodes",
- "types-storage",
- "types-tuple",
+ "types-syscache",
 ]
 
 [[package]]
@@ -7139,7 +7119,6 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
- "types-nodes",
  "types-ri-triggers",
  "types-tuple",
 ]
