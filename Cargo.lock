@@ -53,6 +53,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-indextuple-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-common-next-seams"
 version = "0.0.0"
 dependencies = [
@@ -274,6 +287,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-nbtree",
  "types-rel",
  "types-storage",
 ]
@@ -287,6 +301,59 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-access-nbtree-core-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nbtree",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-nbtree-nbtree"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-indextuple-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-nbtree-core-seams",
+ "backend-access-nbtree-nbtree-seams",
+ "backend-commands-vacuum-seams",
+ "backend-nodes-core-seams",
+ "backend-storage-aio-seams",
+ "backend-storage-buffer-bufmgr-seams",
+ "backend-storage-freespace-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-activity-small",
+ "backend-utils-cache-relcache-seams",
+ "mcx",
+ "types-amapi",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nbtree",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-nbtree-nbtree-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-nbtree",
+ "types-rel",
 ]
 
 [[package]]
@@ -1281,6 +1348,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-commands-vacuum-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-execAmi"
 version = "0.0.0"
 dependencies = [
@@ -1783,6 +1859,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2259,15 +2336,21 @@ name = "backend-storage-aio-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
+ "types-storage",
 ]
 
 [[package]]
 name = "backend-storage-buffer-bufmgr-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
  "types-storage",
 ]
 
@@ -2285,6 +2368,16 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-storage-freespace-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-rel",
 ]
 
 [[package]]
@@ -2556,6 +2649,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-rel",
  "types-storage",
  "types-tuple",
 ]
@@ -3533,6 +3627,7 @@ dependencies = [
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
+ "backend-access-nbtree-nbtree",
  "backend-access-rmgrdesc-small",
  "backend-access-table-table",
  "backend-access-table-tableam",
@@ -3620,6 +3715,15 @@ dependencies = [
 [[package]]
 name = "types-acl"
 version = "0.0.0"
+
+[[package]]
+name = "types-amapi"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-nodes",
+ "types-scan",
+]
 
 [[package]]
 name = "types-amvalidate"
@@ -3717,6 +3821,18 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "types-core",
+]
+
+[[package]]
+name = "types-nbtree"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

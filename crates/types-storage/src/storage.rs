@@ -6,6 +6,22 @@ use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use types_core::{uint16, uint32, uint8, Oid, ProcNumber, RelFileNumber, Size, TransactionId, INVALID_PROC_NUMBER};
 
+/// `Buffer` (`storage/buf.h`) — a shared-buffer-pool index (or, when
+/// negative, a local-buffer index). Zero is `InvalidBuffer`.
+pub type Buffer = i32;
+
+/// `InvalidBuffer` (`storage/buf.h`).
+pub const InvalidBuffer: Buffer = 0;
+
+/// `BufferIsValid(bufnum)` (`storage/bufmgr.h`).
+#[inline]
+pub fn BufferIsValid(bufnum: Buffer) -> bool {
+    bufnum != InvalidBuffer
+}
+
+/// `LocationIndex` (`storage/bufpage.h`) — a byte offset within a page.
+pub type LocationIndex = uint16;
+
 /// `enum LWLockMode` (`storage/lwlock.h:112`).
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

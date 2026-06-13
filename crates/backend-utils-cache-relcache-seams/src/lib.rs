@@ -18,6 +18,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `RelationNeedsWAL(relation)` (utils/rel.h): true if the relation needs
+    /// WAL — permanent and not skipping WAL for a new relfilenode this
+    /// transaction. Reads `rd_createSubid`/`rd_firstRelfilelocatorSubid` (not
+    /// in the trimmed `RelationData`) and the `wal_level` GUC, so the owner
+    /// evaluates the whole macro. Pure read.
+    pub fn relation_needs_wal(rel: &types_rel::RelationData<'_>) -> bool
+);
+
+seam_core::seam!(
+    /// `RELATION_IS_LOCAL(relation)` (utils/rel.h): true if the relation is
+    /// temp or newly created this transaction (accessible only to this
+    /// backend). Reads `rd_islocaltemp`/`rd_createSubid` (not in the trimmed
+    /// `RelationData`), so the owner evaluates the macro. Pure read.
+    pub fn relation_is_local(rel: &types_rel::RelationData<'_>) -> bool
+);
+
+seam_core::seam!(
     /// `AtEOXact_RelationCache(isCommit)` — relcache cleanup at top-level
     /// transaction end.
     pub fn at_eoxact_relation_cache(is_commit: bool) -> types_error::PgResult<()>

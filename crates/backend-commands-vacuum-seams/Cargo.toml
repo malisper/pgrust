@@ -1,17 +1,14 @@
 [package]
-name = "backend-storage-lmgr-lmgr-seams"
+name = "backend-commands-vacuum-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_storage_lmgr_lmgr_seams"
+name = "backend_commands_vacuum_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
-types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
-types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
-types-rel = { path = "../types-rel" }

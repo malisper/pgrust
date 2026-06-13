@@ -50,3 +50,49 @@ seam_core::seam!(
         block_num: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<types_storage::PrefetchBufferResult>
 );
+
+seam_core::seam!(
+    /// `BufferGetBlockNumber(buffer)` (bufmgr.c): the block number the buffer
+    /// currently holds. Pure read of a valid pinned buffer.
+    pub fn buffer_get_block_number(
+        buf: types_storage::storage::Buffer,
+    ) -> types_core::primitive::BlockNumber
+);
+
+seam_core::seam!(
+    /// `BufferGetPage(buffer)` (bufmgr.h): a snapshot copy of the buffer's
+    /// page image in `mcx` (the consumer reads page-format fields off it).
+    /// `Err` carries OOM.
+    pub fn buffer_get_page<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        buf: types_storage::storage::Buffer,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `ReleaseBuffer(buffer)` (bufmgr.c): drop one pin on a buffer.
+    pub fn release_buffer(buf: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `IncrBufferRefCount(buffer)` (bufmgr.c): bump the local pin count on a
+    /// buffer the backend already has pinned.
+    pub fn incr_buffer_ref_count(buf: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `MarkBufferDirtyHint(buffer, buffer_std = false)` (bufmgr.c): mark a
+    /// buffer dirty for a non-WAL-logged hint-bit-style change (the nbtree
+    /// cycle-id clear passes `buffer_std = false`).
+    pub fn mark_buffer_dirty_hint(buf: types_storage::storage::Buffer)
+);
+
+seam_core::seam!(
+    /// `ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL, strategy)`
+    /// (bufmgr.c): pin (reading in if needed) a block, using the VACUUM
+    /// buffer-access strategy. `Err` carries the smgr read ereports.
+    pub fn read_buffer_extended<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+        blkno: types_core::primitive::BlockNumber,
+    ) -> types_error::PgResult<types_storage::storage::Buffer>
+);
