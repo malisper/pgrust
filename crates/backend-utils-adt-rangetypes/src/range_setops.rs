@@ -117,7 +117,7 @@ pub fn range_union_internal<'mcx>(
 
     if strict
         && !range_overlaps_internal(typcache, r1, r2)?
-        && !range_adjacent_internal(typcache, r1, r2)?
+        && !range_adjacent_internal(mcx, typcache, r1, r2)?
     {
         return Err(
             PgError::error("result of range union would not be contiguous")

@@ -426,7 +426,7 @@ pub fn range_adjacent<'mcx>(
     let r1 = getarg_range_p(mcx, fcinfo, 0)?;
     let r2 = getarg_range_p(mcx, fcinfo, 1)?;
     let typcache = range_get_typcache(range_type_get_oid(r1))?;
-    Ok(Datum::from_bool(range_adjacent_internal(&typcache, r1, r2)?))
+    Ok(Datum::from_bool(range_adjacent_internal(mcx, &typcache, r1, r2)?))
 }
 
 /// `range_overlaps(PG_FUNCTION_ARGS)` (rangetypes.c:876).
