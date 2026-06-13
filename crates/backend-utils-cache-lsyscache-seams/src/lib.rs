@@ -52,6 +52,48 @@ seam_core::seam!(
     pub fn get_typlenbyvalalign(typid: Oid) -> PgResult<TypLenByValAlign>
 );
 
+/// `IOFuncSelector` (`lsyscache.h`): which I/O function `get_type_io_data`
+/// resolves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IOFuncSelector {
+    /// `IOFunc_input`
+    Input,
+    /// `IOFunc_output`
+    Output,
+    /// `IOFunc_receive`
+    Receive,
+    /// `IOFunc_send`
+    Send,
+}
+
+/// The output of `get_type_io_data` (lsyscache.c): the `pg_type` storage
+/// parameters plus the resolved I/O proc OID and its I/O parameter OID.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TypeIoData {
+    /// `typlen` — `pg_type.typlen`.
+    pub typlen: i16,
+    /// `typbyval` — `pg_type.typbyval`.
+    pub typbyval: bool,
+    /// `typalign` — `pg_type.typalign`.
+    pub typalign: i8,
+    /// `typdelim` — `pg_type.typdelim`.
+    pub typdelim: i8,
+    /// `typioparam` — `getTypeIOParam(typeTuple)`.
+    pub typioparam: Oid,
+    /// `func` — the resolved I/O function OID (`InvalidOid` when none, which
+    /// can only happen for receive/send).
+    pub func: Oid,
+}
+
+seam_core::seam!(
+    /// `get_type_io_data(typid, which_func, &typlen, &typbyval, &typalign,
+    /// &typdelim, &typioparam, &func)` (lsyscache.c): the storage parameters,
+    /// I/O parameter OID and selected I/O proc OID of a type, from its
+    /// `pg_type` row. `Err` carries the `elog(ERROR, "cache lookup failed for
+    /// type %u")` and the catcache machinery's `ereport(ERROR)`s.
+    pub fn get_type_io_data(typid: Oid, which_func: IOFuncSelector) -> PgResult<TypeIoData>
+);
+
 seam_core::seam!(
     /// `get_rel_relispartition(relid)` (lsyscache.c): whether the relation is
     /// a partition (`pg_class.relispartition`); `false` if there is no such
