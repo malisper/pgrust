@@ -38,12 +38,24 @@ pub type CommandTag = i32;
 
 /// `CMDTAG_UNKNOWN` (cmdtaglist.h list position 0).
 pub const CMDTAG_UNKNOWN: CommandTag = 0;
+/// `CMDTAG_DELETE` (cmdtaglist.h list position 103).
+pub const CMDTAG_DELETE: CommandTag = 103;
 /// `CMDTAG_FETCH` (cmdtaglist.h list position 154).
 pub const CMDTAG_FETCH: CommandTag = 154;
+/// `CMDTAG_INSERT` (cmdtaglist.h list position 158).
+pub const CMDTAG_INSERT: CommandTag = 158;
+/// `CMDTAG_MERGE` (cmdtaglist.h list position 163).
+pub const CMDTAG_MERGE: CommandTag = 163;
 /// `CMDTAG_MOVE` (cmdtaglist.h list position 164).
 pub const CMDTAG_MOVE: CommandTag = 164;
 /// `CMDTAG_SELECT` (cmdtaglist.h list position 179).
 pub const CMDTAG_SELECT: CommandTag = 179;
+/// `CMDTAG_UPDATE` (cmdtaglist.h list position 191).
+pub const CMDTAG_UPDATE: CommandTag = 191;
+
+/// `COMPLETION_TAG_BUFSIZE` (`tcop/cmdtag.h`) — required size of the
+/// caller-supplied buffer for the command-completion string.
+pub const COMPLETION_TAG_BUFSIZE: usize = 64;
 
 /// `QueryCompletion` (`tcop/cmdtag.h`) — command completion status data.
 #[derive(Clone, Copy, Debug, Default)]

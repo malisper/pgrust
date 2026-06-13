@@ -2586,6 +2586,9 @@ fn pg_nextpower2_32(num: u32) -> u32 {
 /// across a cycle).
 pub fn init_seams() {
     backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::set(lookup_rowtype_tupdesc);
+    backend_utils_cache_typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);
     backend_utils_cache_typcache_seams::at_eoxact_type_cache::set(at_eoxact_type_cache);
     backend_utils_cache_typcache_seams::at_eosubxact_type_cache::set(at_eosubxact_type_cache);
+    // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
+    backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_copy::set(lookup_rowtype_tupdesc_copy);
 }

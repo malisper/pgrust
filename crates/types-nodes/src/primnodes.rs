@@ -339,6 +339,8 @@ pub enum Expr {
 pub struct TargetEntry<'mcx> {
     /// `Expr *expr` — expression to evaluate.
     pub expr: Option<PgBox<'mcx, Expr>>,
+    /// `char *resname` — name of the column (could be NULL).
+    pub resname: Option<PgString<'mcx>>,
     /// `bool resjunk` — set to true to eliminate the attribute from the
     /// final target list.
     pub resjunk: bool,
@@ -351,6 +353,10 @@ impl TargetEntry<'_> {
         Ok(TargetEntry {
             expr: match &self.expr {
                 Some(e) => Some(alloc_in(mcx, (**e).clone())?),
+                None => None,
+            },
+            resname: match &self.resname {
+                Some(s) => Some(PgString::from_str_in(s.as_str(), mcx)?),
                 None => None,
             },
             resjunk: self.resjunk,

@@ -280,3 +280,29 @@ seam_core::seam!(
     /// the horizon to catalog tables. Called with `ProcArrayLock` held.
     pub fn get_oldest_safe_decoding_transaction_id(catalog_only: bool) -> TransactionId
 );
+
+seam_core::seam!(
+    /// `ProcArrayShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn proc_array_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `ProcArrayShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn proc_array_shmem_init() -> types_error::PgResult<()>
+);
+
+// --- backend-storage-ipc-signalfuncs consumer (signalfuncs.c) ---
+
+seam_core::seam!(
+    /// `BackendPidGetProc(pid)` (procarray.c) followed by `GetNumberFromPGProc(proc)`
+    /// (`storage/proc.h`): look up the live backend whose PID is `pid`, returning
+    /// the `roleId` it advertises (`proc->roleId`, `InvalidOid` if none) and its
+    /// proc number. `None` mirrors `BackendPidGetProc` returning `NULL` — the pid
+    /// is not a live backend (it may be an auxiliary process, the postmaster, or
+    /// already gone). Shared-memory scan; cannot `ereport`.
+    pub fn backend_pid_get_proc_role(pid: i32) -> Option<(Oid, ProcNumber)>
+);

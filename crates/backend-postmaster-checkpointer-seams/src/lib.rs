@@ -32,3 +32,17 @@ seam_core::seam!(
     /// bookkeeping; infallible.
     pub fn checkpoint_stats_set(ckpt_sync_rels: i32, ckpt_longest_sync: u64, ckpt_agg_sync_time: u64)
 );
+
+seam_core::seam!(
+    /// `CheckpointerShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn checkpointer_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `CheckpointerShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn checkpointer_shmem_init() -> types_error::PgResult<()>
+);

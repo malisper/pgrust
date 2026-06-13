@@ -370,4 +370,12 @@ pub(crate) fn install() {
     seams::proc_pgxactoff::set(proc_pgxactoff);
     seams::proc_global_status_flags::set(proc_global_status_flags);
     seams::proc_pid::set(proc_pid);
+
+    // Pure-wiring install (assemble/seam-wiring-guard): the deadlock-timeout
+    // signal handler is an exact match for its declared seam and is installed
+    // alongside the other inward seams (keeps proc out of init_all, matching
+    // its existing convention). The remaining declared proc seams either
+    // diverge (extra Mcx / out-param) or are mis-homed in miscadmin/globals
+    // and are tracked in DESIGN_DEBT.
+    seams::check_dead_lock_alert::set(crate::proc_waitqueue::CheckDeadLockAlert);
 }

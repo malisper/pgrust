@@ -8,8 +8,15 @@ publish.workspace = true
 name = "backend_storage_ipc_dsm_core"
 path = "src/lib.rs"
 
+[features]
+# Exposes `test_bringup::dsm_test_bringup()` for downstream unit tests (e.g.
+# the real-DSM re-port of the parallel crate). Pulls in the merged
+# FreePageManager owner so its real `init_seams()` can be wired.
+test-bringup = ["dep:backend-utils-mmgr-freepage"]
+
 [dependencies]
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage", optional = true }
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-storage-file-seams = { path = "../backend-storage-file-seams" }
 backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
@@ -30,3 +37,9 @@ types-error = { path = "../types-error" }
 types-freepage = { path = "../types-freepage" }
 types-guc = { path = "../types-guc" }
 types-storage = { path = "../types-storage" }
+
+# Available under cfg(test) so the in-crate gating test can use test_bringup
+# without enabling the `test-bringup` feature; the feature pulls the same crate
+# in for downstream consumers.
+[dev-dependencies]
+backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }

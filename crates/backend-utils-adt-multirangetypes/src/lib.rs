@@ -36,9 +36,6 @@
 //! `datum_get_multirange_type_p`) are declared in
 //! `backend-utils-adt-multirangetypes-seams` and installed here in
 //! [`init_seams`].
-//!
-//! SCAFFOLD STAGE: signatures mirror the C surface; bodies are `todo!()` until
-//! the families are ported.
 
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]

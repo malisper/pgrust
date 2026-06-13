@@ -19,6 +19,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `isTempNamespace(namespaceId)` (namespace.c): whether the given
+    /// namespace OID is this backend's temporary-schema namespace
+    /// (`namespaceId == myTempNamespace && OidIsValid(myTempNamespace)`). No
+    /// catalog access, so infallible; `Err` is reserved for the per-owner
+    /// error channel only. Consumed by lsyscache.c's
+    /// `get_namespace_name_or_temp`.
+    pub fn is_temp_namespace(namespace_id: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `get_ts_config_oid(names, missing_ok)` (namespace.c): the OID of a
     /// text-search configuration given its possibly-qualified name list.
     /// With `missing_ok = false` a missing configuration raises
@@ -32,6 +42,15 @@ seam_core::seam!(
     /// namespace's OID; with `missing_ok = false` a missing schema raises
     /// `ERRCODE_UNDEFINED_SCHEMA`, carried on `Err`.
     pub fn get_namespace_oid(nspname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `makeRangeVarFromNameList(names)` (namespace.c): build a `RangeVar`
+    /// from a 1-to-3-element qualified name list (relname / schema.relname /
+    /// catalog.schema.relname). More than three dotted names raises
+    /// `ERRCODE_SYNTAX_ERROR` (`Err`). The `RangeVar` strings are owned
+    /// `String`s (the type's own representation).
+    pub fn make_range_var_from_name_list(names: &[&str]) -> PgResult<RangeVar>
 );
 
 seam_core::seam!(

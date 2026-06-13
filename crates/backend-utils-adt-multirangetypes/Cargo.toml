@@ -23,3 +23,4 @@ backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 common-hashfn-seams = { path = "../common-hashfn-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

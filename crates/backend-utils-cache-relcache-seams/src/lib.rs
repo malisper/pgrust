@@ -404,3 +404,27 @@ seam_core::seam!(
     /// miss (the C dereferences `rd_indam` unconditionally).
     pub fn rd_indam_amcanorder(index: &types_rel::Relation<'_>) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `criticalRelcachesBuilt` (relcache.c): true once relcache
+    /// initialization has built the critical relcache entries (the catcaches
+    /// may then use indexscans; cf. catcache.c `IndexScanOK`).
+    pub fn critical_relcaches_built() -> bool
+);
+
+seam_core::seam!(
+    /// `criticalSharedRelcachesBuilt` (relcache.c): true once the critical
+    /// *shared* relcache entries (the shared catalogs' indexes) have been
+    /// built; gates indexscans on the authentication syscaches in
+    /// catcache.c `IndexScanOK`.
+    pub fn critical_shared_relcaches_built() -> bool
+);
+
+seam_core::seam!(
+    /// `AssertCouldGetRelation()` (relcache.c): the assertion-build-only check
+    /// that the current process is in a state where it could open a relation
+    /// (a live transaction / parallel worker context). A no-op in
+    /// non-assert builds; routed here because the state it inspects is owned
+    /// by the relcache/xact layer.
+    pub fn assert_could_get_relation()
+);

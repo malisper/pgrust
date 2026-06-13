@@ -23,6 +23,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetLWLockIdentifier(uint32 classId, uint16 eventId)` — the tranche name
+    /// for an LWLock wait event. Returns a `'static` tranche name owned by
+    /// `lwlock.c`'s built-in/registered tranche tables.
+    pub fn get_lwlock_identifier(class_id: types_core::uint32, event_id: types_core::uint16) -> &'static str
+);
+
+seam_core::seam!(
     /// `LWLockAcquire(LWLock *lock, LWLockMode mode)` — acquire the lock,
     /// returning a guard that releases it on drop (`was_free` carries the C
     /// return value: true if the lock was free, false if it had to wait).
@@ -222,4 +229,19 @@ seam_core::seam!(
     /// `LWLockHeldByMeInMode(&MainLWLockArray[lock_offset].lock, mode)` — does
     /// this backend hold the built-in lock at `lock_offset` in exactly `mode`?
     pub fn lwlock_held_by_me_in_mode_main(lock_offset: usize, mode: LWLockMode) -> bool
+);
+
+seam_core::seam!(
+    /// `LWLockShmemSize()` (`storage/lmgr/lwlock.c`) — shared-memory bytes for
+    /// the LWLock arrays/tranches; summed by ipci.c `CalculateShmemSize`.
+    /// `Err` carries the `add_size`/`mul_size` overflow `ereport`. Owner
+    /// unported; scaffolded slot.
+    pub fn lwlock_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `CreateLWLocks()` (lwlock.c) — allocate the LWLocks (must run first in
+    /// `CreateOrAttachShmemStructs`, before `InitShmemIndex`). `Err` carries
+    /// the out-of-shmem `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn create_lwlocks() -> types_error::PgResult<()>
 );

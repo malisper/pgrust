@@ -31,6 +31,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PostmasterPid` (globals.c): the postmaster's process id, used as the
+    /// `kill(2)` target when a child signals the postmaster (`SIGUSR1`/`SIGHUP`).
+    pub fn postmaster_pid() -> i32
+);
+
+seam_core::seam!(
+    /// `MyPMChildSlot` (globals.c): this child's index (1-based) into the
+    /// postmaster's `PMChildFlags[]` slot array; 0 outside a postmaster child.
+    pub fn my_pm_child_slot() -> i32
+);
+
+seam_core::seam!(
     /// `MaxBackends` (globals.c): the computed backend-slot count, fixed at
     /// postmaster startup.
     pub fn max_backends() -> i32
@@ -84,6 +96,14 @@ seam_core::seam!(
     /// connection (`MyProcPort == NULL`). Callback shape per the seam rules:
     /// a seam must not hand out `&'static mut`.
     pub fn with_my_proc_port(f: &mut dyn FnMut(Option<&mut types_net::Port>))
+);
+
+seam_core::seam!(
+    /// `MyProcPort = port` (globals.c): install the per-connection `Port` as
+    /// `MyProcPort`. C's `port = MyProcPort = pq_init(client_sock)` assigns the
+    /// `pq_init` result; the owner `pq_init` returns the `Port` and the caller
+    /// stores it here.
+    pub fn set_my_proc_port(port: types_net::Port)
 );
 
 seam_core::seam!(

@@ -1328,6 +1328,8 @@ pub fn init_seams() {
     s::replorigin_session_advance::set(replorigin_session_advance);
     s::replorigin_advance::set(replorigin_advance);
     s::replorigin_by_oid::set(replorigin_by_oid_seam);
+    // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
+    s::replication_origin_shmem_init::set(ReplicationOriginShmemInit);
 }
 
 #[cfg(test)]

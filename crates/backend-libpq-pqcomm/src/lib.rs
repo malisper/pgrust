@@ -2026,6 +2026,57 @@ pub fn pq_check_connection() -> PgResult<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// pq_modify_fe_be_wait_set_latch
+// ---------------------------------------------------------------------------
+
+/// `if (FeBeWaitSet) ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetLatchPos,
+/// WL_LATCH_SET, latch)` (miscinit.c's `SwitchToSharedLatch` /
+/// `SwitchBackToLocalLatch`) — repoint the backend wait set's latch event at
+/// the new `MyLatch`. A no-op when `FeBeWaitSet` is unset.
+///
+/// The latch logic was inline in `pq_init` (it registers `WL_LATCH_SET` at
+/// `FeBeWaitSetLatchPos`); this is the matching mutator that miscinit needs
+/// when `MyLatch` is switched. The crate-owned `FE_BE_WAIT_SET` also tracks
+/// the registered latch alongside the set (so `pq_check_connection` can reset
+/// it), so the stored latch is updated to match the new event registration.
+pub fn pq_modify_fe_be_wait_set_latch(latch: LatchHandle) -> PgResult<()> {
+    FE_BE_WAIT_SET.with(|c| {
+        let mut slot = c.borrow_mut();
+        if let Some((set, stored_latch)) = slot.as_mut() {
+            set.modify_event(FeBeWaitSetLatchPos, WL_LATCH_SET, Some(latch))?;
+            *stored_latch = latch;
+        }
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Seam adapters.
+// ---------------------------------------------------------------------------
+
+/// Adapter for the `pq_getbytes` seam. The seam reads exactly `len` bytes into
+/// a fresh buffer allocated in `mcx` and returns `Ok(Some(buf))` on success,
+/// `Ok(None)` for the C `EOF` (-1) return (peer closed / incomplete), `Err`
+/// for the buffer-alloc OOM and the blocking-wait interrupt-processing
+/// `ereport(ERROR)`. The owner's [`pq_getbytes`] fills a caller `&mut [u8]`
+/// and returns `Ok(0)`/`Ok(EOF)`; this wrapper bridges the two shapes.
+fn pq_getbytes_seam(mcx: Mcx<'_>, len: usize) -> PgResult<Option<PgVec<'_, u8>>> {
+    let mut buf: PgVec<u8> = PgVec::new_in(mcx);
+    buf.try_reserve_exact(len).map_err(|_| mcx.oom(len))?;
+    buf.resize(len, 0);
+    if pq_getbytes(&mut buf)? == EOF {
+        return Ok(None);
+    }
+    Ok(Some(buf))
+}
+
+/// Adapter for the `pq_buffer_remaining_data` seam (`-> i64`). The owner's
+/// [`pq_buffer_remaining_data`] returns `isize`.
+fn pq_buffer_remaining_data_seam() -> i64 {
+    pq_buffer_remaining_data() as i64
+}
+
+// ---------------------------------------------------------------------------
 // Seam installation.
 // ---------------------------------------------------------------------------
 
@@ -2037,6 +2088,13 @@ pub fn init_seams() {
     backend_libpq_pqcomm_seams::pq_putmessage::set(pq_putmessage);
     backend_libpq_pqcomm_seams::pq_putmessage_v2::set(pq_putmessage_v2);
     backend_libpq_pqcomm_seams::pq_flush::set(pq_flush);
+    backend_libpq_pqcomm_seams::pq_init::set(pq_init);
+    backend_libpq_pqcomm_seams::pq_startmsgread::set(pq_startmsgread);
+    backend_libpq_pqcomm_seams::pq_endmsgread::set(pq_endmsgread);
+    backend_libpq_pqcomm_seams::pq_getbytes::set(pq_getbytes_seam);
+    backend_libpq_pqcomm_seams::pq_peekbyte::set(pq_peekbyte);
+    backend_libpq_pqcomm_seams::pq_buffer_remaining_data::set(pq_buffer_remaining_data_seam);
+    backend_libpq_pqcomm_seams::modify_fe_be_wait_set_latch::set(pq_modify_fe_be_wait_set_latch);
 
     vars::Unix_socket_permissions.install(GucVarAccessors {
         get: config::unix_socket_permissions,

@@ -1,10 +1,11 @@
 //! Seam declarations for the `backend-utils-hash-dynahash` unit
 //! (`utils/hash/dynahash.c`).
 //!
-//! The owning unit installs these from its `init_seams()` when it lands;
-//! until then a call panics loudly. Entry pointers are raw (`*mut u8` for the
-//! C `void *` user entry, `*mut HTAB` for the opaque per-backend table
-//! handle) because shared hash tables live in genuinely shared memory.
+//! The owning unit (`backend-utils-hash-dynahash`) installs these from its
+//! `init_seams()`. Entry pointers are raw (`*mut u8` for the C `void *` user
+//! entry, `*mut HTAB` for the per-backend table handle) because shared hash
+//! tables live in genuinely shared memory; the `HTAB`/`HASHHDR` bodies are
+//! defined in `types_hash::hsearch` (owned by that crate).
 
 #![allow(non_snake_case)]
 
@@ -42,6 +43,21 @@ seam_core::seam!(
     /// `hash_get_shared_size(info, flags)` (dynahash.c) — bytes of shared
     /// memory the table's fixed structures require. Infallible.
     pub fn hash_get_shared_size(info: &HASHCTL, flags: i32) -> usize
+);
+
+seam_core::seam!(
+    /// `hash_estimate_size(long num_entries, Size entrysize)` (dynahash.c) —
+    /// estimate the shared-memory bytes a hash table with `num_entries` of
+    /// `entrysize` bytes each will consume (header + directory + segments +
+    /// elements). Summed by ipci.c `CalculateShmemSize` for the shmem index.
+    /// Infallible (pure arithmetic). Owner unported; scaffolded slot.
+    pub fn hash_estimate_size(num_entries: i64, entrysize: usize) -> usize
+);
+
+seam_core::seam!(
+    /// `hash_get_num_entries(hashp)` (dynahash.c) — number of entries currently
+    /// in the table. Infallible.
+    pub fn hash_get_num_entries(hashp: *mut HTAB) -> i64
 );
 
 seam_core::seam!(

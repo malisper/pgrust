@@ -92,3 +92,17 @@ seam_core::seam!(
     /// standby mode (continuous recovery awaiting more WAL). Pure read.
     pub fn standby_mode() -> bool
 );
+
+seam_core::seam!(
+    /// `XLogRecoveryShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn xlog_recovery_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `XLogRecoveryShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn xlog_recovery_shmem_init() -> types_error::PgResult<()>
+);

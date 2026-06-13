@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
 use types_error::PgResult;
-use types_wal::{ArchiveMode, WalLevel};
+use types_wal::{ArchiveMode, WalLevel, WalSyncMethod};
 
 seam_core::seam!(
     /// `xlog_redo(record)` (xlog.c) — WAL redo for this resource manager's
@@ -44,6 +44,27 @@ seam_core::seam!(
 seam_core::seam!(
     /// `int wal_level` (xlog.c GUC) — the effective `wal_level` value.
     pub fn wal_level() -> WalLevel
+);
+
+seam_core::seam!(
+    /// `enableFsync` (xlog.c GUC) — whether the server issues `fsync`/
+    /// `fdatasync` for durability. fd.c's `pg_fsync` family early-outs when
+    /// this is off.
+    pub fn enable_fsync() -> bool
+);
+
+seam_core::seam!(
+    /// `DataChecksumsEnabled()` (xlog.c) — whether data-page checksums are on
+    /// for this cluster. Read from the control file's
+    /// `data_checksum_version`; `bufpage.c`'s verify/set-checksum paths gate on
+    /// it. Panics until xlog installs the control-file-backed implementation.
+    pub fn data_checksums_enabled() -> bool
+);
+
+seam_core::seam!(
+    /// `wal_sync_method` (xlog.c GUC) — the WAL sync method, consulted by
+    /// fd.c's `pg_fsync` to choose the writethrough vs. plain fsync path.
+    pub fn wal_sync_method() -> WalSyncMethod
 );
 
 seam_core::seam!(
@@ -304,4 +325,18 @@ seam_core::seam!(
     /// by any replication slot, or `InvalidXLogRecPtr` if none. Read under the
     /// `info_lck` spinlock by the owner.
     pub fn xlog_get_replication_slot_minimum_lsn() -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `XLOGShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn xlog_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `XLOGShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn xlog_shmem_init() -> types_error::PgResult<()>
 );

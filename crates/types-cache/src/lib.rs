@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+pub mod backend_utils_cache_catcache;
 pub mod deflist;
 pub mod inval;
 pub mod syscache;

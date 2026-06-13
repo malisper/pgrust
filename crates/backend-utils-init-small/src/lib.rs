@@ -18,8 +18,13 @@ pub fn init_seams() {
     backend_utils_init_small_seams::my_proc_pid::set(globals::MyProcPid);
     backend_utils_init_small_seams::my_proc_number::set(globals::MyProcNumber);
     backend_utils_init_small_seams::is_under_postmaster::set(globals::IsUnderPostmaster);
+    backend_utils_init_small_seams::postmaster_pid::set(globals::PostmasterPid);
+    backend_utils_init_small_seams::my_pm_child_slot::set(globals::MyPMChildSlot);
     backend_utils_init_small_seams::max_backends::set(globals::MaxBackends);
     backend_utils_init_small_seams::with_my_proc_port::set(globals::with_my_proc_port_seam);
+    backend_utils_init_small_seams::set_my_proc_port::set(|port| {
+        globals::SetMyProcPort(Some(Box::new(port)))
+    });
     backend_utils_init_small_seams::set_client_connection_lost::set(globals::SetClientConnectionLost);
     backend_utils_init_small_seams::set_interrupt_pending::set(globals::SetInterruptPending);
     backend_utils_init_small_seams::set_proc_die_pending::set(globals::SetProcDiePending);
@@ -39,6 +44,16 @@ pub fn init_seams() {
     backend_utils_init_small_seams::exit_on_any_error::set(globals::ExitOnAnyError);
     backend_utils_init_small_seams::set_exit_on_any_error::set(globals::SetExitOnAnyError);
     backend_utils_init_small_seams::my_backend_type::set(globals::MyBackendType);
+    // Pure-wiring installs (assemble/seam-wiring-guard): owner globals match.
+    backend_utils_init_small_seams::max_connections::set(globals::MaxConnections);
+    backend_utils_init_small_seams::set_max_backends::set(globals::SetMaxBackends);
+    backend_utils_init_small_seams::is_binary_upgrade::set(globals::IsBinaryUpgrade);
+    backend_utils_init_small_seams::set_my_database_id::set(globals::SetMyDatabaseId);
+    backend_utils_init_small_seams::set_my_database_table_space::set(globals::SetMyDatabaseTableSpace);
+    backend_utils_init_small_seams::set_my_database_has_login_event_triggers::set(
+        globals::SetMyDatabaseHasLoginEventTriggers,
+    );
+    backend_utils_init_small_seams::has_my_proc_port::set(globals::MyProcPortIsSet);
 }
 
 #[cfg(test)]

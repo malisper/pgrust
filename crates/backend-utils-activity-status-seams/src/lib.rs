@@ -86,3 +86,30 @@ seam_core::seam!(
     /// `conn_timing.auth_end = tstamp` (backend_status.c).
     pub fn set_conn_timing_auth_end(tstamp: types_core::TimestampTz)
 );
+
+seam_core::seam!(
+    /// `BackendStatusShmemSize()` (backend_status.c) — shared-memory bytes for
+    /// the per-backend status array (`PgBackendStatus` entries, activity
+    /// buffers, app-name and client-host buffers); summed by ipci.c
+    /// `CalculateShmemSize`. `Err` carries the `add_size`/`mul_size` overflow
+    /// `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn backend_status_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `BackendStatusShmemInit()` (backend_status.c) — allocate-or-attach the
+    /// per-backend status array in shared memory (called from ipci.c
+    /// `CreateOrAttachShmemStructs`). `Err` carries the out-of-shmem
+    /// `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn backend_status_shmem_init() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `pgstat_get_backend_type_by_proc_number(procNumber)` (backend_status.c):
+    /// the `BackendType` advertised by the backend status entry at `procNumber`.
+    /// Used by `signalfuncs.c` to recognize autovacuum workers (which do not
+    /// advertise a role). Pure read of the shared status array; cannot `ereport`.
+    pub fn pgstat_get_backend_type_by_proc_number(
+        proc_number: types_core::ProcNumber,
+    ) -> types_core::init::BackendType
+);

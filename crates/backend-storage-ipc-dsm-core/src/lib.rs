@@ -35,6 +35,14 @@ pub mod dsm;
 pub mod dsm_impl;
 pub mod ipc;
 
+/// Reusable in-process DSM control-segment bring-up for unit tests. Gated
+/// behind the `test-bringup` feature so the substrate-owner dependencies it
+/// wires (the merged LWLock manager + FreePageManager owners) are pulled in
+/// only for test builds, never for the production dependency graph. Enabled
+/// automatically under `cfg(test)` for this crate's own gating test.
+#[cfg(any(test, feature = "test-bringup"))]
+pub mod test_bringup;
+
 /// Install this crate's implementations into the seam crates it owns, plus
 /// its GUC option array and storage variables into the GUC tables' slots.
 pub fn init_seams() {
@@ -42,6 +50,18 @@ pub fn init_seams() {
 
     backend_storage_ipc_dsm_core_seams::dsm_detach_all::set(|| {
         dsm::dsm_detach_all().expect("dsm_detach_all failed")
+    });
+
+    // `dsm_estimate_size()` is infallible in-crate (`usize`); the seam carries
+    // the `add_size`/`mul_size` overflow `ereport` surface, so wrap as `Ok`.
+    backend_storage_ipc_dsm_core_seams::dsm_estimate_size::set(|| Ok(dsm::dsm_estimate_size()));
+    backend_storage_ipc_dsm_core_seams::dsm_shmem_init::set(dsm::dsm_shmem_init);
+    // `dsm_postmaster_startup(PGShmemHeader *shim)` reads the global
+    // `MaxBackends` (globals.c); the in-crate port takes it explicitly per the
+    // no-ambient-global rule, so resolve it through the init-small seam.
+    backend_storage_ipc_dsm_core_seams::dsm_postmaster_startup::set(|shim| {
+        let max_backends = backend_utils_init_small_seams::max_backends::call();
+        dsm::dsm_postmaster_startup(shim, max_backends)
     });
 
     backend_storage_ipc_seams::proc_exit::set(ipc::proc_exit);
@@ -58,3 +78,6 @@ pub fn init_seams() {
         set: dsm_impl::set_min_dynamic_shared_memory,
     });
 }
+
+#[cfg(test)]
+mod tests;

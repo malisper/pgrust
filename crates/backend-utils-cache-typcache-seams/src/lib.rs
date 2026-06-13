@@ -19,32 +19,45 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `lookup_type_cache(type_id, flags)` (typcache.c), range/multirange view:
-    /// the same cache build as [`lookup_type_cache`] but returning the trimmed
-    /// `types_cache::typcache::TypeCacheEntry` the range/multirange ADTs read
-    /// (carrying the `rngtype` / `rngelemtype` sub-entries and the range
-    /// `cmp`/`subdiff` support `FmgrInfo`s). The owning typcache unit installs
-    /// this when it lands; until then a call panics loudly. `Err` carries
-    /// `ereport(ERROR, ERRCODE_UNDEFINED_OBJECT, "type ... does not exist")`
-    /// and the catalog-lookup surface.
-    pub fn lookup_type_cache_range(
+    /// `lookup_type_cache(type_id, flags)` (typcache.c), range/multirange-ADT
+    /// view: same as [`lookup_type_cache`] but hands back the
+    /// `types_cache::TypeCacheEntry` shape the range/multirange ports use
+    /// (with the `hash_proc_finfo` / `hash_extended_proc_finfo` support
+    /// fields). `hash_multirange` calls this to resolve the subtype's hash
+    /// support function when it was not already cached. `Err` carries the
+    /// catalog-lookup `ereport(ERROR)` surface.
+    pub fn lookup_type_cache_entry(
         type_id: types_core::primitive::Oid,
         flags: i32,
-    ) -> types_error::PgResult<types_cache::typcache::TypeCacheEntry>
+    ) -> types_error::PgResult<types_cache::TypeCacheEntry>
 );
 
 seam_core::seam!(
-    /// `lookup_type_cache(type_id, TYPECACHE_HASH[_EXTENDED]_PROC_FINFO)` then
-    /// read `->hash_proc_finfo.fn_oid` (or `->hash_extended_proc_finfo.fn_oid`
-    /// when `extended`) (typcache.c): the OID of `type_id`'s standard or
-    /// extended hash support function, used by `hash_multirange` /
-    /// `hash_multirange_extended` when the range element's cached entry has not
-    /// yet computed it. Returns `InvalidOid` (`0`) when the type has no such
-    /// hash function. `Err` carries the catalog-lookup surface.
-    pub fn lookup_type_hash_proc(
-        type_id: types_core::primitive::Oid,
+    /// `lookup_type_cache(type_id, TYPECACHE_HASH_PROC_FINFO |
+    /// TYPECACHE_HASH_EXTENDED_PROC_FINFO)` then read `hash_proc_finfo.fn_oid` /
+    /// `hash_extended_proc_finfo.fn_oid` (the `hash_range` / `hash_range_extended`
+    /// element-type fallback re-lookup, rangetypes.c:1419 / :1482; also the
+    /// `hash_multirange` / `hash_multirange_extended` subtype fallback): resolve
+    /// the element type's (extended, when `extended`) hash support function and
+    /// return its OID. `Err` carries the C `ereport(ERROR,
+    /// ERRCODE_UNDEFINED_FUNCTION, "could not identify a hash function for type
+    /// %s")` raised when no hash function exists.
+    pub fn lookup_range_elem_hash_proc(
+        elem_type_id: types_core::primitive::Oid,
         extended: bool,
     ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `assign_record_type_typmod(tupDesc)` (typcache.c): for an anonymous
+    /// RECORD `TupleDesc`, find or create the matching entry in the record-type
+    /// cache and stamp its assigned `tdtypmod` (and `tdtypeid = RECORDOID`) back
+    /// into the descriptor in place, so it can be used to build composite
+    /// rowtype Datums (`BlessTupleDesc`). `Err` carries the cache-insert /
+    /// allocation surface.
+    pub fn assign_record_type_typmod(
+        tup_desc: &mut types_tuple::heaptuple::TupleDescData<'_>,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -59,6 +72,73 @@ seam_core::seam!(
         type_id: types_core::primitive::Oid,
         typmod: i32,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `lookup_rowtype_tupdesc_copy(type_id, typmod)` (typcache.c): like
+    /// `lookup_rowtype_tupdesc`, but returns an independent
+    /// (`CreateTupleDescCopyConstr`) copy with no refcount bookkeeping —
+    /// `TypeGetTupleDesc` renames its attributes and re-stamps the rowtype, so
+    /// it needs a freestanding descriptor. Cloned into `mcx`. `Err` carries the
+    /// C `ereport(ERROR)`s (type is not composite / record type not registered)
+    /// and OOM from the copy.
+    pub fn lookup_rowtype_tupdesc_copy<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_id: types_core::primitive::Oid,
+        typmod: i32,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(element_type, TYPECACHE_EQ_OPR_FINFO)->eq_opr_finfo.fn_oid`
+    /// (typcache.c): resolve the OID of `element_type`'s default equality
+    /// operator's underlying function (the cached `eq_opr_finfo`), as
+    /// `array_eq` / `arrayoverlap` / `array_contain_compare` use it. Returns
+    /// `InvalidOid` (0) when the type has no equality operator (the C then
+    /// `ereport(ERROR, ERRCODE_UNDEFINED_FUNCTION)`; the caller does that
+    /// check). `Err` carries the typcache lookup surface
+    /// (`ERRCODE_UNDEFINED_OBJECT`, "type ... does not exist").
+    pub fn lookup_element_eq_opr(
+        element_type: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)->cmp_proc_finfo.fn_oid`
+    /// (typcache.c): resolve the OID of `element_type`'s btree comparison
+    /// support function (the cached `cmp_proc_finfo`), as `array_cmp` /
+    /// `btarraycmp` use it. Returns `InvalidOid` (0) when the type has no
+    /// comparison function (the C then `ereport(ERROR,
+    /// ERRCODE_UNDEFINED_FUNCTION)`; the caller does that check). `Err` carries
+    /// the typcache lookup surface.
+    pub fn lookup_element_cmp_proc(
+        element_type: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(element_type, TYPECACHE_HASH_PROC_FINFO)->hash_proc_finfo.fn_oid`
+    /// (typcache.c): resolve the OID of `element_type`'s hash support function
+    /// (the cached `hash_proc_finfo`), as `hash_array` uses it. Returns
+    /// `InvalidOid` (0) when the type has no hash function; `hash_array`'s
+    /// `RECORDOID` special case substitutes `F_HASH_RECORD` itself. `Err`
+    /// carries the typcache lookup surface.
+    pub fn lookup_element_hash_proc(
+        element_type: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
+    /// `lookup_type_cache(element_type, TYPECACHE_HASH_EXTENDED_PROC_FINFO)->hash_extended_proc_finfo.fn_oid`
+    /// (typcache.c): resolve the OID of `element_type`'s extended (64-bit,
+    /// seeded) hash support function (the cached `hash_extended_proc_finfo`),
+    /// as `hash_array_extended` uses it. Returns `InvalidOid` (0) when the type
+    /// has no extended hash function (the C then `ereport(ERROR,
+    /// ERRCODE_UNDEFINED_FUNCTION)`; the caller does that check). `Err` carries
+    /// the typcache lookup surface.
+    pub fn lookup_element_hash_extended_proc(
+        element_type: types_core::primitive::Oid,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
 );
 
 seam_core::seam!(

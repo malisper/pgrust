@@ -46,24 +46,24 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `pq_init(client_sock)` (`libpq/pqcomm.c`) — allocate the per-connection
-    /// `Port` in the caller's context, install it as `MyProcPort`, set the
-    /// socket non-blocking, and register the close-socket `on_proc_exit`. The
-    /// owner stores the `Port` in `MyProcPort` (globals.c) rather than
-    /// returning it (per the no-`&'static mut` rule, consumers read it back via
-    /// `with_my_proc_port`). `mcx` is the context the `Port` is allocated in
-    /// (C: `TopMemoryContext`). `client_sock` is the accepted socket (C's
-    /// `MyClientSocket`), passed explicitly. `Err` carries the palloc OOM
-    /// `ereport(ERROR)`.
-    pub fn pq_init<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        client_sock: types_net::ClientSocket,
-    ) -> types_error::PgResult<()>
+    /// `Port`, apply the TCP options, initialize the message buffers, register
+    /// the close-socket `on_proc_exit`, set the socket non-blocking, and build
+    /// `FeBeWaitSet`. Returns the `Port` (C: `port = MyProcPort = pq_init(...)`
+    /// — the caller installs it as `MyProcPort`). `latch` is C's `MyLatch`
+    /// (globals.c), registered at `FeBeWaitSetLatchPos` — an explicit parameter
+    /// per the no-ambient-global rule. `Err` carries the `ereport(FATAL)` setup
+    /// failures.
+    pub fn pq_init(
+        client_sock: &types_net::ClientSocket,
+        latch: types_storage::latch::LatchHandle,
+    ) -> types_error::PgResult<types_net::Port>
 );
 
 seam_core::seam!(
     /// `pq_startmsgread()` (`libpq/pqcomm.c`) — mark the start of a message
-    /// read (the partial-read consistency guard). Infallible.
-    pub fn pq_startmsgread()
+    /// read (the partial-read consistency guard). `ereport(FATAL)` (the
+    /// non-returning `Err`) on lost protocol synchronization.
+    pub fn pq_startmsgread() -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -86,8 +86,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `pq_peekbyte()` (`libpq/pqcomm.c`) — peek at the next input byte without
-    /// consuming it; returns the byte (0-255) or `EOF` (-1). Infallible.
-    pub fn pq_peekbyte() -> i32
+    /// consuming it; returns the byte (0-255) or `EOF` (-1). `Err` carries the
+    /// blocking-wait interrupt-processing `ereport(ERROR)` reachable through
+    /// `pq_recvbuf`.
+    pub fn pq_peekbyte() -> types_error::PgResult<i32>
 );
 
 seam_core::seam!(

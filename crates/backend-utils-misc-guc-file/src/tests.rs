@@ -227,6 +227,119 @@ fn parses_non_utf8_bytes() {
     assert!(vars[0].value.as_deref().unwrap().starts_with("caf"));
 }
 
+/// flex tokenizes by maximal munch over the *regex char classes*, not by
+/// splitting on whitespace/`=`/`#`. A value run that contains a char outside
+/// the UNQUOTED_STRING class (here `,`) must tokenize as the leading valid
+/// value followed by a separate error token, so the `near token` diagnostic
+/// names the offending byte the same way flex does (`","`), not the whole run.
+#[test]
+fn tokenizer_splits_value_run_at_unquoted_class_boundary() {
+    let mut vars = Vec::new();
+    let err = ParseConfigFp(
+        "name = a,b\n".as_bytes(),
+        Path::new("/tmp/postgresql.conf"),
+        0,
+        ERROR,
+        &mut vars,
+    )
+    .unwrap_err();
+    // flex: value UNQUOTED_STRING `a`, then `,` -> GUC_ERROR (extra token).
+    assert!(
+        err.message().contains("near token \",\""),
+        "message was: {}",
+        err.message()
+    );
+}
+
+/// flex maximal munch on the bare `'''` (three quotes): the longest STRING that
+/// reaches a closing quote is `''` (an empty string), leaving the third `'` to
+/// the catch-all `.` as a separate GUC_ERROR. The earlier hand-scanner greedily
+/// treated `''` as an embedded doubled quote and ran off the end.
+#[test]
+fn tokenizer_string_takes_shortest_terminating_match() {
+    let mut lexer = Lexer::new(b"'''");
+    let first = lexer.next_token().unwrap();
+    assert_eq!(first.kind, TokenKind::String);
+    assert_eq!(first.text, "''");
+    let second = lexer.next_token().unwrap();
+    assert_eq!(second.kind, TokenKind::Error);
+    assert_eq!(second.text, "'");
+    assert!(lexer.next_token().is_none());
+}
+
+/// An escaped quote inside a string is body content (`\\.`), and a doubled `''`
+/// only stays inside when the string still terminates. `'a''b'` is one STRING
+/// whose body is `a''b`.
+#[test]
+fn tokenizer_string_doubled_quote_when_terminating() {
+    let mut lexer = Lexer::new(b"'a''b' rest");
+    let tok = lexer.next_token().unwrap();
+    assert_eq!(tok.kind, TokenKind::String);
+    assert_eq!(tok.text, "'a''b'");
+    assert_eq!(DeescapeQuotedString(&tok.text), "a'b");
+}
+
+/// `1e5` is not a REAL (flex REAL requires a literal `.`): flex tokenizes it as
+/// INTEGER `1e` (digit then UNIT_LETTER) followed by `5`. The mantissa-then-unit
+/// boundary must match so the value/diagnostic match flex.
+#[test]
+fn tokenizer_integer_unit_letters_without_dot() {
+    let mut lexer = Lexer::new(b"1e5");
+    let first = lexer.next_token().unwrap();
+    assert_eq!(first.kind, TokenKind::Integer);
+    assert_eq!(first.text, "1e");
+    let second = lexer.next_token().unwrap();
+    assert_eq!(second.kind, TokenKind::Integer);
+    assert_eq!(second.text, "5");
+}
+
+/// A bare exponent letter with no exponent digits is not consumed by REAL: `1.5e`
+/// is REAL `1.5` then a separate `e` (UNQUOTED_STRING / ID), matching flex's
+/// `{EXPONENT}?` only-if-it-fully-matches behavior.
+#[test]
+fn tokenizer_real_does_not_swallow_bare_exponent() {
+    let mut lexer = Lexer::new(b"1.5e");
+    let first = lexer.next_token().unwrap();
+    assert_eq!(first.kind, TokenKind::Real);
+    assert_eq!(first.text, "1.5");
+    let second = lexer.next_token().unwrap();
+    assert_eq!(second.kind, TokenKind::Id);
+    assert_eq!(second.text, "e");
+}
+
+/// `0x` with no hex digits is not an INTEGER; flex matches ID `x`? No — `0` is
+/// not a LETTER, so `0` falls to the catch-all and `x` is a separate ID. Verify
+/// the INTEGER rule rejects the bare `0x` prefix at this position.
+#[test]
+fn tokenizer_rejects_bare_0x() {
+    let mut lexer = Lexer::new(b"0xZ");
+    let first = lexer.next_token().unwrap();
+    // `0` matches no token rule -> catch-all GUC_ERROR, one byte.
+    assert_eq!(first.kind, TokenKind::Error);
+    assert_eq!(first.text, "0");
+}
+
+/// QUALIFIED_ID matches exactly one dot; a three-part dotted run is longer as an
+/// UNQUOTED_STRING (`.` is in its extra class), so flex picks UNQUOTED_STRING and
+/// it is rejected as a name. Confirms the longest-match-then-rule-order pick.
+#[test]
+fn tokenizer_three_part_dotted_is_unquoted_string() {
+    let mut lexer = Lexer::new(b"a.b.c");
+    let tok = lexer.next_token().unwrap();
+    assert_eq!(tok.kind, TokenKind::UnquotedString);
+    assert_eq!(tok.text, "a.b.c");
+}
+
+/// A hex integer with trailing unit letters keeps the whole run: `0x1fkB` is
+/// INTEGER `0x1f` + UNIT_LETTER* `kB`.
+#[test]
+fn tokenizer_hex_integer_with_units() {
+    let mut lexer = Lexer::new(b"0x1fkB");
+    let tok = lexer.next_token().unwrap();
+    assert_eq!(tok.kind, TokenKind::Integer);
+    assert_eq!(tok.text, "0x1fkB");
+}
+
 #[test]
 fn free_config_variables_clears_list() {
     let mut vars = vec![ConfigVariable::setting(

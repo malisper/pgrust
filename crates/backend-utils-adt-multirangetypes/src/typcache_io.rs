@@ -89,7 +89,7 @@ fn at(bytes: &[u8], i: usize) -> u8 {
 pub fn multirange_get_typcache(mltrngtypid: Oid) -> PgResult<TypeCacheEntry> {
     // typcache = lookup_type_cache(mltrngtypid, TYPECACHE_MULTIRANGE_INFO);
     let typcache =
-        typcache_seams::lookup_type_cache_range::call(mltrngtypid, TYPECACHE_MULTIRANGE_INFO)?;
+        typcache_seams::lookup_type_cache_entry::call(mltrngtypid, TYPECACHE_MULTIRANGE_INFO)?;
     // if (typcache->rngtype == NULL) elog(ERROR, "type %u is not a multirange type", ...);
     if typcache.rngtype.is_none() {
         return Err(PgError::error(format!(
@@ -112,7 +112,7 @@ pub fn get_multirange_io_data(
 ) -> PgResult<MultirangeIOData> {
     // cache->typcache = lookup_type_cache(mltrngtypid, TYPECACHE_MULTIRANGE_INFO);
     let typcache =
-        typcache_seams::lookup_type_cache_range::call(mltrngtypid, TYPECACHE_MULTIRANGE_INFO)?;
+        typcache_seams::lookup_type_cache_entry::call(mltrngtypid, TYPECACHE_MULTIRANGE_INFO)?;
     // if (cache->typcache->rngtype == NULL) elog(ERROR, "type %u is not a multirange type", ...);
     let rngtype = match typcache.rngtype.as_deref() {
         Some(r) => r,

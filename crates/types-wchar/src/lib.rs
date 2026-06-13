@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+pub mod encoding;
 pub mod wchar;
 
 pub use wchar::*;

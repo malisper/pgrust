@@ -9,6 +9,7 @@
 
 use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
+use types_cache::typcache::{TYPECACHE_HASH_EXTENDED_PROC_FINFO, TYPECACHE_HASH_PROC_FINFO};
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::error::ERRCODE_UNDEFINED_FUNCTION;
@@ -428,7 +429,7 @@ pub fn hash_multirange(rangetyp: &TypeCacheEntry, mr: MultirangeTypeP<'_>) -> Pg
         // C: scache = lookup_type_cache(scache->type_id,
         // TYPECACHE_HASH_PROC_FINFO); then read scache->hash_proc_finfo.fn_oid.
         let scache_fn_oid =
-            typcache_seams::lookup_type_hash_proc::call(rngelemtype.type_id, false)?;
+            typcache_seams::lookup_range_elem_hash_proc::call(rngelemtype.type_id, false)?;
         if scache_fn_oid == 0 {
             return Err(could_not_identify_hash_fn(rngelemtype.type_id));
         }
@@ -496,7 +497,7 @@ pub fn hash_multirange_extended(
         // TYPECACHE_HASH_EXTENDED_PROC_FINFO); then read
         // scache->hash_extended_proc_finfo.fn_oid.
         let scache_fn_oid =
-            typcache_seams::lookup_type_hash_proc::call(rngelemtype.type_id, true)?;
+            typcache_seams::lookup_range_elem_hash_proc::call(rngelemtype.type_id, true)?;
         if scache_fn_oid == 0 {
             return Err(could_not_identify_hash_fn(rngelemtype.type_id));
         }

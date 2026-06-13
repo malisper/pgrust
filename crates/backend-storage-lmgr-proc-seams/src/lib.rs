@@ -397,3 +397,32 @@ seam_core::seam!(
     /// with the database OID.
     pub fn set_my_proc_database_id(dboid: types_core::Oid)
 );
+
+seam_core::seam!(
+    /// `ProcGlobalSemas()` (`storage/lmgr/proc.c`) — number of semaphores the
+    /// PGPROC array needs; summed into the semaphore count by ipci.c
+    /// `CalculateShmemSize`. Owner unported; scaffolded slot.
+    pub fn proc_global_semas() -> i32
+);
+
+seam_core::seam!(
+    /// `ProcGlobalShmemSize()` (proc.c) — shared-memory bytes for the PGPROC
+    /// array. `Err` carries the `add_size`/`mul_size` overflow `ereport`.
+    /// Owner unported; scaffolded slot.
+    pub fn proc_global_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `InitProcGlobal()` (proc.c) — allocate and initialize the PGPROC array
+    /// in shared memory (postmaster/standalone only, the C `!IsUnderPostmaster`
+    /// arm of `CreateOrAttachShmemStructs`). `Err` carries the out-of-shmem
+    /// `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn init_proc_global() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `InitializeFastPathLocks()` (proc.c) — recompute the number of
+    /// fast-path lock groups; called from the EXEC_BACKEND attach path
+    /// (`AttachSharedMemoryStructs`). Owner unported; scaffolded slot.
+    pub fn initialize_fast_path_locks()
+);

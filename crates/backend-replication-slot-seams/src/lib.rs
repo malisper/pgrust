@@ -459,3 +459,10 @@ seam_core::seam!(pub fn slot_active_pid(slot: ReplicationSlotHandle) -> i32);
 seam_core::seam!(
     pub fn slot_data_invalidated(slot: ReplicationSlotHandle) -> ReplicationSlotInvalidationCause
 );
+
+seam_core::seam!(
+    /// `ReplicationSlotsShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn replication_slots_shmem_size() -> types_error::PgResult<types_core::Size>
+);
