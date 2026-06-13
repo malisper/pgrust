@@ -445,8 +445,14 @@ pub struct EStateData<'mcx> {
     /// `List *es_part_prune_infos` — `PlannedStmt.partPruneInfos`.
     pub es_part_prune_infos: PgVec<'mcx, Opaque>,
     /// `List *es_part_prune_states` — the `PartitionPruneState`s built by
-    /// `ExecDoInitialPruning`, parallel to `es_part_prune_infos`.
-    pub es_part_prune_states: PgVec<'mcx, crate::partition::PartitionPruneState<'mcx>>,
+    /// `ExecDoInitialPruning`, parallel to `es_part_prune_infos`. Each is a
+    /// `PgBox` because the consuming plan node (e.g. `MergeAppendState`) takes
+    /// ownership of its entry (C aliases the same object the list holds; the
+    /// owned model moves it out of the pool with `.take()`, leaving a `None`
+    /// tombstone so the parallel indexing with `es_part_prune_infos` /
+    /// `es_part_prune_results` stays stable).
+    pub es_part_prune_states:
+        PgVec<'mcx, Option<PgBox<'mcx, crate::partition::PartitionPruneState<'mcx>>>>,
     /// `List *es_part_prune_results` — per-pruneinfo bitmapset of subplans that
     /// survived initial pruning (a `None` element is the C `NULL`), parallel to
     /// `es_part_prune_infos`.

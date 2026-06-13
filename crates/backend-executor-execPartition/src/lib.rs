@@ -106,11 +106,20 @@ pub struct PartitionTupleRouting<'mcx> {
     pub memcxt: Opaque,
 }
 
-/// Install this unit's seams. execPartition exposes no functions across a
-/// dependency cycle (its consumers — nodeModifyTable, copyfrom, nodeAppend —
-/// take a direct dependency), so there is nothing to install here yet; the
-/// aggregator still calls it for uniformity.
-pub fn init_seams() {}
+/// Install this unit's seams. The two run-time-pruning entry points are reached
+/// across a dependency cycle by the Append/MergeAppend executor nodes (which
+/// cannot take a direct dependency on the executor's own pruning unit), so they
+/// are wired through `backend-executor-execPartition-seams`. The tuple-routing
+/// functions (`ExecFindPartition`, `ExecSetupPartitionTupleRouting`, …) are
+/// reached by direct dependency and need no seam.
+pub fn init_seams() {
+    backend_executor_execPartition_seams::exec_init_partition_exec_pruning::set(
+        pruning::ExecInitPartitionExecPruning,
+    );
+    backend_executor_execPartition_seams::exec_find_matching_subplans::set(
+        pruning::ExecFindMatchingSubPlans,
+    );
+}
 
 // Re-export the family entry points so consumers depend on the crate root.
 pub use pruning::{

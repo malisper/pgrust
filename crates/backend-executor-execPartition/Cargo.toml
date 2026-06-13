@@ -19,6 +19,10 @@ types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
 types-acl = { path = "../types-acl" }
 
+# This unit's own seam crate — its run-time-pruning entry points are installed
+# here (init_seams) and reached across the Append/MergeAppend dependency cycle.
+backend-executor-execPartition-seams = { path = "../backend-executor-execPartition-seams" }
+
 # Seam crates for the unported owners this unit calls (bodies dispatch through
 # these; they panic until the owner lands).
 backend-executor-execUtils = { path = "../backend-executor-execUtils" }

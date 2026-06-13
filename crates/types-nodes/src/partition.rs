@@ -163,9 +163,11 @@ pub struct PartitionPruneContext<'mcx> {
     pub partnatts: i32,
     /// `int nparts` — number of partitions in this table.
     pub nparts: i32,
-    /// `PartitionBoundInfo boundinfo` — partition boundary info (aliased from
-    /// the relcache PartitionDesc; carried as the partdesc-owned handle).
-    pub boundinfo: Opaque,
+    /// `PartitionBoundInfo boundinfo` — partition boundary info. C aliases
+    /// `partdesc->boundinfo`; in the owned model the boundinfo is moved out of
+    /// the (freshly looked-up, owned) `PartitionDirectoryLookup` result into the
+    /// context.
+    pub boundinfo: PartitionBoundInfo<'mcx>,
     /// `Oid *partcollation` — collations of the partition key columns.
     pub partcollation: PgVec<'mcx, Oid>,
     /// `FmgrInfo *partsupfunc` — comparison/hash support funcs (aliased from

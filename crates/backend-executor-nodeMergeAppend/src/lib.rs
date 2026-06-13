@@ -133,6 +133,7 @@ pub fn ExecInitMergeAppend<'mcx>(
         let (prunestate, vsubplans) = execPartition::exec_init_partition_exec_pruning::call(
             mcx,
             &mut ps,
+            estate,
             list_length(&node.mergeplans),
             node.part_prune_index,
             node.apprelids.as_deref(),
@@ -338,7 +339,7 @@ pub fn ExecMergeAppend<'mcx>(
                 .as_deref_mut()
                 .ok_or_else(|| elog_error("MergeAppend has no prune state to match subplans"))?;
             node.ms_valid_subplans =
-                execPartition::exec_find_matching_subplans::call(mcx, prune_state, false)?;
+                execPartition::exec_find_matching_subplans::call(mcx, prune_state, estate, false)?;
         }
 
         // First time through: pull the first tuple from each valid subplan, and

@@ -175,26 +175,35 @@ pub fn ExecDoInitialPruning<'mcx>(
 
         // prunestate = CreatePartitionPruneState(estate, pruneinfo,
         //                                        &all_leafpart_rtis);
-        let prunestate = CreatePartitionPruneState(mcx, estate, idx, &mut all_leafpart_rtis)?;
-        // estate->es_part_prune_states = lappend(..., prunestate);
-        let prune_idx = estate.es_part_prune_states.len();
-        estate.es_part_prune_states.try_reserve(1).map_err(|_| {
-            mcx.oom(core::mem::size_of::<PartitionPruneState<'mcx>>())
-        })?;
-        estate.es_part_prune_states.push(prunestate);
+        let mut prunestate = CreatePartitionPruneState(mcx, estate, idx, &mut all_leafpart_rtis)?;
 
         // if (prunestate->do_initial_prune)
-        if estate.es_part_prune_states[prune_idx].do_initial_prune {
+        if prunestate.do_initial_prune {
             //     validsubplans = ExecFindMatchingSubPlans(prunestate, true,
             //                                              &validsubplan_rtis);
+            // (the internal worker carries the `validsubplan_rtis` out-param;
+            // the trimmed `exec_find_matching_subplans` seam wraps it with
+            // `validsubplan_rtis = NULL`.)
             let mut rtis: Option<PgBox<'mcx, Bitmapset<'mcx>>> = None;
             validsubplans =
-                ExecFindMatchingSubPlans(mcx, estate, prune_idx, true, Some(&mut rtis))?;
+                find_matching_subplans(mcx, estate, &mut prunestate, true, Some(&mut rtis))?;
             validsubplan_rtis = rtis;
         } else {
             //     validsubplan_rtis = all_leafpart_rtis;
             validsubplan_rtis = all_leafpart_rtis;
         }
+
+        // estate->es_part_prune_states = lappend(..., prunestate);
+        // (C lappends right after CreatePartitionPruneState; here the find
+        // worker above operated on the local `&mut prunestate`, so the box is
+        // installed into the pool now — index stays parallel to
+        // es_part_prune_infos / es_part_prune_results.)
+        let boxed = alloc_in(mcx, prunestate)?;
+        estate
+            .es_part_prune_states
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<Option<PgBox<'mcx, PartitionPruneState<'mcx>>>>()))?;
+        estate.es_part_prune_states.push(Some(boxed));
 
         // estate->es_unpruned_relids =
         //     bms_add_members(estate->es_unpruned_relids, validsubplan_rtis);
@@ -214,10 +223,18 @@ pub fn ExecDoInitialPruning<'mcx>(
 
 /// `ExecInitPartitionExecPruning(planstate, n_total_subplans, part_prune_index,
 /// relids, &initially_valid_subplans)` — initialize the data needed for "exec"
-/// pruning and return the matching `PartitionPruneState` (id into
-/// `es_part_prune_states`) along with the initial-pruning result. Validates the
-/// pruneinfo relids against the plan node's (`elog(ERROR)` on mismatch).
-/// Fallible (context init, OOM).
+/// pruning and return the matching `PartitionPruneState` (the one
+/// `ExecDoInitialPruning` already built into `es_part_prune_states`) along with
+/// the initial-pruning result. Validates the pruneinfo relids against the plan
+/// node's (`elog(ERROR)` on mismatch). Fallible (context init, OOM).
+///
+/// In C `estate = planstate->state` and the prunestate is fetched with
+/// `list_nth(es_part_prune_states, part_prune_index)`, leaving the object in the
+/// list while returning an aliasing pointer the node stores. The owned model
+/// threads `estate` explicitly (no `state` back-pointer) and *moves* the owned
+/// `PgBox<PartitionPruneState>` out of the pool into the caller (the consuming
+/// node owns it as `ms_prune_state`), leaving a `None` tombstone so the parallel
+/// list indexing is preserved.
 pub fn ExecInitPartitionExecPruning<'mcx>(
     mcx: Mcx<'mcx>,
     planstate: &mut PlanStateData<'mcx>,
@@ -225,7 +242,10 @@ pub fn ExecInitPartitionExecPruning<'mcx>(
     n_total_subplans: i32,
     part_prune_index: i32,
     relids: Option<&Bitmapset<'_>>,
-) -> PgResult<(usize, Option<PgBox<'mcx, Bitmapset<'mcx>>>)> {
+) -> PgResult<(
+    PgBox<'mcx, PartitionPruneState<'mcx>>,
+    Option<PgBox<'mcx, Bitmapset<'mcx>>>,
+)> {
     let part_prune_index = part_prune_index as usize;
 
     // pruneinfo = list_nth_node(PartitionPruneInfo, estate->es_part_prune_infos,
@@ -244,10 +264,16 @@ pub fn ExecInitPartitionExecPruning<'mcx>(
 
     // prunestate = list_nth(estate->es_part_prune_states, part_prune_index);
     // Assert(prunestate != NULL);
+    // (The owned model moves the prebuilt box out of the pool; a missing entry
+    // is the C `Assert(prunestate != NULL)` — ExecDoInitialPruning must have
+    // run first.)
+    let mut prunestate = estate.es_part_prune_states[part_prune_index]
+        .take()
+        .expect("es_part_prune_states[part_prune_index] is NULL (ExecDoInitialPruning not run)");
 
     // Use the result of initial pruning done by ExecDoInitialPruning().
-    let do_initial_prune = estate.es_part_prune_states[part_prune_index].do_initial_prune;
-    let do_exec_prune = estate.es_part_prune_states[part_prune_index].do_exec_prune;
+    let do_initial_prune = prunestate.do_initial_prune;
+    let do_exec_prune = prunestate.do_exec_prune;
 
     let initially_valid_subplans: Option<PgBox<'mcx, Bitmapset<'mcx>>>;
     if do_initial_prune {
@@ -272,7 +298,7 @@ pub fn ExecInitPartitionExecPruning<'mcx>(
         InitExecPartitionPruneContexts(
             mcx,
             estate,
-            part_prune_index,
+            &mut prunestate,
             planstate,
             initially_valid_subplans.as_deref(),
             n_total_subplans,
@@ -280,7 +306,7 @@ pub fn ExecInitPartitionExecPruning<'mcx>(
     }
 
     // return prunestate;
-    Ok((part_prune_index, initially_valid_subplans))
+    Ok((prunestate, initially_valid_subplans))
 }
 
 /// `CreatePartitionPruneState(estate, pruneinfo, &all_leafpart_rtis)` — build
@@ -522,7 +548,7 @@ pub(crate) fn CreatePartitionPruneState<'mcx>(
                     estate,
                     &mut pprune.initial_context,
                     &steps,
-                    &partdesc,
+                    partdesc,
                     partkey_ref,
                     None,
                     econtext,
@@ -620,14 +646,17 @@ pub(crate) fn CreatePartitionPruneState<'mcx>(
 /// pruning steps: copy the strategy/bounds, allocate the per-step comparison
 /// and `ExprState` arrays, and compile the non-Const lookup expressions
 /// (through the planstate when available, else with the econtext's params).
-/// `econtext` is an id into the EState pool. Fallible (expression compile, OOM).
+/// `econtext` is an id into the EState pool. `partdesc` is taken by value (the
+/// owned `PartitionDirectoryLookup` result) so its `boundinfo` can be moved into
+/// the context, matching C's `context->boundinfo = partdesc->boundinfo`.
+/// Fallible (expression compile, OOM).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn InitPartitionPruneContext<'mcx>(
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
     context: &mut PartitionPruneContext<'mcx>,
     pruning_steps: &[PartitionPruneStep],
-    partdesc: &PartitionDescData<'mcx>,
+    mut partdesc: PgBox<'mcx, PartitionDescData<'mcx>>,
     partkey: &PartitionKeyData<'mcx>,
     planstate: Option<&mut PlanStateData<'mcx>>,
     econtext: EcxtId,
@@ -643,8 +672,10 @@ pub(crate) fn InitPartitionPruneContext<'mcx>(
     context.partnatts = partnatts;
     // context->nparts = partdesc->nparts;
     context.nparts = partdesc.nparts;
-    // context->boundinfo = partdesc->boundinfo;   (aliased relcache data)
-    context.boundinfo = clone_boundinfo_handle(mcx, partdesc)?;
+    // context->boundinfo = partdesc->boundinfo;
+    // C aliases the relcache PartitionDesc's boundinfo; the owned model moves it
+    // out of the freshly looked-up (owned) partdesc into the context.
+    context.boundinfo = partdesc.boundinfo.take();
     // context->partcollation = partkey->partcollation;
     context.partcollation = slice_in(mcx, partkey.partcollation.as_slice())?;
     // context->partsupfunc = partkey->partsupfunc; (aliased relcache data)
@@ -749,18 +780,17 @@ pub(crate) fn InitPartitionPruneContext<'mcx>(
 /// initially_valid_subplans, n_total_subplans)` — initialize the deferred
 /// exec-pruning contexts of a `PartitionPruneState` (those needing the parent
 /// plan's `PlanState`) and re-sequence the subplan/present-part maps to account
-/// for subplans removed during initial pruning. `prunestate` is addressed by
-/// its index into `es_part_prune_states`. Fallible (context init, OOM).
+/// for subplans removed during initial pruning. Fallible (context init, OOM).
 pub(crate) fn InitExecPartitionPruneContexts<'mcx>(
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
-    prunestate_index: usize,
+    prunestate: &mut PartitionPruneState<'mcx>,
     parent_plan: &mut PlanStateData<'mcx>,
     initially_valid_subplans: Option<&Bitmapset<'_>>,
     n_total_subplans: i32,
 ) -> PgResult<()> {
     // Assert(prunestate->do_exec_prune);
-    debug_assert!(estate.es_part_prune_states[prunestate_index].do_exec_prune);
+    debug_assert!(prunestate.do_exec_prune);
 
     // int *new_subplan_indexes = NULL;
     // bool fix_subplan_map = false;
@@ -788,23 +818,15 @@ pub(crate) fn InitExecPartitionPruneContexts<'mcx>(
         new_subplan_indexes = Some(nsi);
     }
 
-    // Move the prunestate out of the EState so we can mutate it together with
-    // the estate (C reaches it through a raw pointer; the owned model takes it
-    // out and re-inserts it at the same index to preserve list order).
-    let mut prunestate = estate.es_part_prune_states.remove(prunestate_index);
-    let result = init_exec_contexts_inner(
+    init_exec_contexts_inner(
         mcx,
         estate,
-        &mut prunestate,
+        prunestate,
         parent_plan,
         new_subplan_indexes.as_deref(),
         fix_subplan_map,
         n_total_subplans,
-    );
-    estate
-        .es_part_prune_states
-        .insert(prunestate_index, prunestate);
-    result
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -873,7 +895,7 @@ fn init_exec_contexts_inner<'mcx>(
                     estate,
                     &mut exec_context,
                     &steps,
-                    &partdesc,
+                    partdesc,
                     partkey_ref,
                     Some(parent_plan),
                     econtext,
@@ -977,22 +999,38 @@ fn init_exec_contexts_inner<'mcx>(
     Ok(())
 }
 
-/// `ExecFindMatchingSubPlans(prunestate, initial_prune, &validsubplan_rtis)` —
-/// determine which subplans match the pruning steps for the current comparison
-/// values. `prunestate` is addressed by its index into `es_part_prune_states`.
-/// `validsubplan_rtis` must be `Some` during initial pruning (collects the leaf
-/// RT indexes whose subnodes will run). Fallible (pruning evaluation, OOM).
+/// `ExecFindMatchingSubPlans(prunestate, initial_prune, NULL)` (the trimmed
+/// seam) — determine which subplans match the pruning steps for the current
+/// comparison values. This is the public seam the consuming node calls on its
+/// owned `PartitionPruneState`; the MergeAppend caller always passes `NULL` for
+/// the C `validsubplan_rtis` out-parameter, so this wrapper drops it. The
+/// `ExecDoInitialPruning` internal call (which *does* want the RT indexes) goes
+/// through [`find_matching_subplans`]. Fallible (pruning evaluation, OOM).
 pub fn ExecFindMatchingSubPlans<'mcx>(
     mcx: Mcx<'mcx>,
+    prunestate: &mut PartitionPruneState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    prunestate_index: usize,
+    initial_prune: bool,
+) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
+    find_matching_subplans(mcx, estate, prunestate, initial_prune, None)
+}
+
+/// The full `ExecFindMatchingSubPlans(prunestate, initial_prune,
+/// &validsubplan_rtis)` worker (execPartition.c). `validsubplan_rtis` must be
+/// `Some` during initial pruning (collects the leaf RT indexes whose subnodes
+/// will run); the trimmed seam passes `None`. Operates directly on the
+/// caller-owned `&mut PartitionPruneState` (C reaches everything through the
+/// prunestate pointer; estate is threaded for the `get_matching_partitions`
+/// seam, which the owned model takes `&mut EStateData` for). Fallible.
+pub(crate) fn find_matching_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    prunestate: &mut PartitionPruneState<'mcx>,
     initial_prune: bool,
     validsubplan_rtis: Option<&mut Option<PgBox<'mcx, Bitmapset<'mcx>>>>,
 ) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
     // Assert(initial_prune || prunestate->do_exec_prune);
-    debug_assert!(
-        initial_prune || estate.es_part_prune_states[prunestate_index].do_exec_prune
-    );
+    debug_assert!(initial_prune || prunestate.do_exec_prune);
     // Assert(validsubplan_rtis != NULL || !initial_prune);
     debug_assert!(validsubplan_rtis.is_some() || !initial_prune);
 
@@ -1000,9 +1038,6 @@ pub fn ExecFindMatchingSubPlans<'mcx>(
     // owned model the temp allocations go through `mcx`; the surviving result
     // is what C copies out before MemoryContextReset.
     let mut result: Option<PgBox<'mcx, Bitmapset<'mcx>>> = None;
-
-    // Move the prunestate out so we can mutate it and the estate together.
-    let mut prunestate = estate.es_part_prune_states.remove(prunestate_index);
 
     let mut rtis_local: Option<PgBox<'mcx, Bitmapset<'mcx>>> = None;
     let want_rtis = validsubplan_rtis.is_some();
@@ -1061,11 +1096,6 @@ pub fn ExecFindMatchingSubPlans<'mcx>(
 
     // MemoryContextReset(prunestate->prune_context);
     prunestate.prune_context.reset();
-
-    // Re-insert the prunestate at its original index.
-    estate
-        .es_part_prune_states
-        .insert(prunestate_index, prunestate);
 
     final_result
 }
@@ -1208,24 +1238,6 @@ fn downcast_steps(o: &Opaque) -> alloc::vec::Vec<PartitionPruneStep> {
         .clone()
 }
 
-/// Build the `PartitionBoundInfo` handle a `PartitionPruneContext` carries (C
-/// aliases `partdesc->boundinfo`; the owned model carries a clone as the
-/// type-erased `Opaque` payload the partprune owner downcasts).
-fn clone_boundinfo_handle<'mcx>(
-    _mcx: Mcx<'mcx>,
-    partdesc: &PartitionDescData<'mcx>,
-) -> PgResult<Opaque> {
-    // The boundinfo is owned by the relcache PartitionDesc and lives for the
-    // executor run; the context only needs a handle to it. We cannot lend a
-    // borrow through `Opaque` (it owns its payload), so we carry the strategy
-    // and index summary the partprune owner reconstructs against. A full clone
-    // of PartitionBoundInfoData would duplicate relcache data; instead the
-    // handle is left as the C alias placeholder until the partprune owner lands
-    // and reads boundinfo off the live PartitionDesc it already has.
-    let _ = partdesc;
-    Ok(Opaque(None))
-}
-
 /// An empty `PartitionPruneContext` placeholder (the C struct is embedded and
 /// zero-initialized by the enclosing palloc; fields are filled by
 /// `InitPartitionPruneContext`).
@@ -1234,7 +1246,7 @@ fn empty_prune_context<'mcx>(mcx: Mcx<'mcx>) -> PartitionPruneContext<'mcx> {
         strategy: types_nodes::partition::PartitionStrategy::List,
         partnatts: 0,
         nparts: 0,
-        boundinfo: Opaque(None),
+        boundinfo: None,
         partcollation: PgVec::new_in(mcx),
         partsupfunc: Opaque(None),
         stepcmpfuncs: PgVec::new_in(mcx),
