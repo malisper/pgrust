@@ -19,3 +19,8 @@ types-selfuncs = { path = "../types-selfuncs" }
 types-array = { path = "../types-array" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# Unported-neighbor seams the `statistics` family routes through (panic until
+# the owner lands): the `pg_statistic` syscache reads and the array
+# detoast/deconstruct used by `get_attstatsslot`.
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

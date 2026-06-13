@@ -592,3 +592,71 @@ seam_core::seam!(
         memberid: Oid,
     ) -> PgResult<Vec<types_cache::AuthMembersRow>>
 );
+
+/// `STATISTIC_NUM_SLOTS` (pg_statistic.h) — the number of statistics slots in
+/// a `pg_statistic` row. C: `#define STATISTIC_NUM_SLOTS 5`.
+pub const STATISTIC_NUM_SLOTS: usize = 5;
+
+/// The fixed-width slot metadata of a `pg_statistic` `GETSTRUCT`
+/// (`Form_pg_statistic`), namely the `stakindN` / `staopN` / `stacollN`
+/// arrays that `get_attstatsslot` scans to find a matching slot. These are the
+/// non-`CATALOG_VARLEN` slot fields, so they read straight off the struct with
+/// no detoast.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PgStatisticSlotMeta {
+    /// `(&stats->stakind1)[i]` for `i in 0..STATISTIC_NUM_SLOTS`.
+    pub stakind: [i16; STATISTIC_NUM_SLOTS],
+    /// `(&stats->staop1)[i]`.
+    pub staop: [Oid; STATISTIC_NUM_SLOTS],
+    /// `(&stats->stacoll1)[i]`.
+    pub stacoll: [Oid; STATISTIC_NUM_SLOTS],
+}
+
+seam_core::seam!(
+    /// `((Form_pg_statistic) GETSTRUCT(statstuple))` projected to its
+    /// fixed-width slot metadata (`stakindN` / `staopN` / `stacollN` arrays),
+    /// for `get_attstatsslot`'s slot-matching loop. A pure struct read of the
+    /// caller-supplied `pg_statistic` tuple (no syscache lookup, no detoast),
+    /// so it cannot miss; `Err` is reserved for the (unreachable) marshalling
+    /// surface.
+    pub fn pg_statistic_slot_meta(
+        stats_tuple: types_selfuncs::StatsTuple,
+    ) -> PgResult<PgStatisticSlotMeta>
+);
+
+seam_core::seam!(
+    /// `SysCacheGetAttrNotNull(STATRELATTINH, statstuple, attnum)`
+    /// (utils/cache/lsyscache.c, via syscache.c): fetch the (guaranteed
+    /// non-null) attribute `attnum` of the supplied `pg_statistic` tuple as a
+    /// raw `Datum` — used by `get_attstatsslot` to pull the `stavaluesN` /
+    /// `stanumbersN` array Datums. The Datum still points into the cached
+    /// tuple, so the caller must detoast/copy before the tuple is released.
+    /// `Err` carries the `elog(ERROR, "...returned NULL")` from the NotNull
+    /// assertion.
+    pub fn syscache_get_attr_not_null_statistic(
+        stats_tuple: types_selfuncs::StatsTuple,
+        attnum: types_core::AttrNumber,
+    ) -> PgResult<types_datum::Datum>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache3(STATRELATTINH, ObjectIdGetDatum(relid),
+    /// Int16GetDatum(attnum), BoolGetDatum(inherit))` (the
+    /// `ExecHashBuildSkewHash` probe): look up the `pg_statistic` row for a
+    /// column. `Ok(None)` on a cache miss (`!HeapTupleIsValid`). The returned
+    /// handle is a pinned syscache tuple; the caller must pair it with
+    /// [`release_stats_tuple`] (C `ReleaseSysCache`). `Err` carries the
+    /// catcache machinery's `ereport(ERROR)`s.
+    pub fn search_statrelattinh<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+        inherit: bool,
+    ) -> PgResult<Option<types_selfuncs::StatsTuple>>
+);
+
+seam_core::seam!(
+    /// `ReleaseSysCache(tuple)` for a `pg_statistic` tuple obtained from
+    /// [`search_statrelattinh`]: drops the syscache pin. Infallible.
+    pub fn release_stats_tuple(stats_tuple: types_selfuncs::StatsTuple)
+);
