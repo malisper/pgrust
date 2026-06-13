@@ -19,6 +19,26 @@ pub struct Var {
     pub varlevelsup: Index,
 }
 
+/// `Const` (nodes/primnodes.h), trimmed to the fields consumers read. `IsA(node,
+/// Const)` is `matches!(expr, Expr::Const(_))`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Const {
+    /// `Oid consttype` — pg_type OID of the constant's type.
+    pub consttype: Oid,
+    /// `int32 consttypmod` — typmod value, or -1.
+    pub consttypmod: i32,
+    /// `Oid constcollid` — collation, or InvalidOid.
+    pub constcollid: Oid,
+    /// `int constlen` — length in bytes, or -1 for variable-length.
+    pub constlen: i32,
+    /// `Datum constvalue` — the constant's value (undefined when `constisnull`).
+    pub constvalue: types_datum::datum::Datum,
+    /// `bool constisnull` — whether the constant is NULL.
+    pub constisnull: bool,
+    /// `bool constbyval` — whether the value is passed by value.
+    pub constbyval: bool,
+}
+
 /// Expression-tree node (`Expr *` in C). The `NodeTag` is the enum
 /// discriminant (`IsA(node, Var)` is a match on the variant). Variants are
 /// added as units consuming them are ported.
@@ -27,6 +47,8 @@ pub struct Var {
 pub enum Expr {
     /// `T_Var`.
     Var(Var),
+    /// `T_Const`.
+    Const(Const),
 }
 
 /// `TargetEntry` (nodes/primnodes.h), trimmed.

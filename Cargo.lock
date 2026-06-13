@@ -2118,10 +2118,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-multirangetypes-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rangetypes",
+]
+
+[[package]]
 name = "backend-utils-adt-numutils"
 version = "0.0.0"
 dependencies = [
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-range-selfuncs"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-multirangetypes-seams",
+ "backend-utils-adt-rangetypes-seams",
+ "backend-utils-adt-selfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rangetypes",
+ "types-selfuncs",
+]
+
+[[package]]
+name = "backend-utils-adt-rangetypes-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rangetypes",
 ]
 
 [[package]]
@@ -2141,6 +2185,19 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-selfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-selfuncs",
 ]
 
 [[package]]
@@ -2211,6 +2268,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-selfuncs",
 ]
 
 [[package]]
@@ -2733,6 +2791,7 @@ dependencies = [
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
  "backend-utils-adt-numutils",
+ "backend-utils-adt-range-selfuncs",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
@@ -2876,6 +2935,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-rangetypes"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+]
+
+[[package]]
 name = "types-rel"
 version = "0.0.0"
 dependencies = [
@@ -2897,6 +2964,16 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-tuple",
+]
+
+[[package]]
+name = "types-selfuncs"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-nodes",
 ]
 
 [[package]]
