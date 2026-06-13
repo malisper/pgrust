@@ -794,7 +794,7 @@ pub fn InsertOneValue(mcx: Mcx<'static>, value: &str, i: i32) -> PgResult<()> {
 
     let typoid = with_boot_reldesc(|rel| relation_get_attr(rel, i).atttypid);
 
-    let io = boot_get_type_io_data(mcx, typoid)?;
+    let io = boot_get_type_io_data(typoid)?;
 
     let datum = backend_utils_fmgr_fmgr_seams::oid_input_function_call::call(
         io.typinput,
@@ -925,24 +925,16 @@ fn find_in_typ(type_: &str) -> Option<(usize, Oid)> {
     })
 }
 
-/// Result of [`boot_get_type_io_data`].
-#[derive(Clone, Copy, Debug)]
-pub struct BootTypeIoData {
-    pub typlen: i16,
-    pub typbyval: bool,
-    pub typalign: i8,
-    pub typdelim: i8,
-    pub typioparam: Oid,
-    pub typinput: Oid,
-    pub typoutput: Oid,
-}
+/// Result of [`boot_get_type_io_data`]. Defined in the seam crate so the
+/// across-cycle `lsyscache.c` caller and this owner share one type.
+pub use backend_bootstrap_bootstrap_seams::BootTypeIoData;
 
 /// `boot_get_type_io_data` — obtain type I/O information at bootstrap time.
 ///
 /// Almost the same API as lsyscache.c's `get_type_io_data`, except we only
 /// support typinput/typoutput (not the binary I/O routines). Exported so that
 /// `array_in`/`array_out` can work during early bootstrap.
-pub fn boot_get_type_io_data(_mcx: Mcx<'static>, typid: Oid) -> PgResult<BootTypeIoData> {
+pub fn boot_get_type_io_data(typid: Oid) -> PgResult<BootTypeIoData> {
     if !typ_is_nil() {
         /* We have the boot-time contents of pg_type, so use it. */
         let result = STATE.with(|s| -> PgResult<BootTypeIoData> {
@@ -1364,12 +1356,16 @@ impl Getopt {
 /* ===========================================================================
  * Seam installation.
  *
- * This crate declares no inward seams (nothing calls bootstrap.c across a
- * cycle: the BKI front end calls these functions by direct dependency), so
- * `init_seams()` installs nothing.
+ * The BKI front end calls most of bootstrap.c's functions by direct
+ * dependency. The one exception is `boot_get_type_io_data`, which
+ * `lsyscache.c`'s `get_type_io_data` calls while in bootstrap mode; since
+ * bootstrap.c itself depends (via seams) on lsyscache.c, that call crosses a
+ * cycle and is wired through `backend-bootstrap-bootstrap-seams`.
  * ========================================================================= */
 
-pub fn init_seams() {}
+pub fn init_seams() {
+    backend_bootstrap_bootstrap_seams::boot_get_type_io_data::set(boot_get_type_io_data);
+}
 
 #[cfg(test)]
 mod tests;

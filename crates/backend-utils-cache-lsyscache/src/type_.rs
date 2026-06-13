@@ -14,9 +14,11 @@
 //! typcache-driven `RANGETYPE` / `TYPEOID` row probes and the arrayfuncs.c
 //! element-I/O projection.
 
+use backend_bootstrap_bootstrap_seams as bootstrap;
 use backend_nodes_makefuncs_seams as makefuncs;
 use backend_nodes_read_seams as nodes_read;
 use backend_utils_adt_format_type_seams as format_type;
+use backend_utils_init_miscinit_seams as miscinit;
 use backend_utils_cache_lsyscache_seams::{IOFuncSelector, TypLenByValAlign, TypeIoData};
 use backend_utils_cache_syscache_seams as syscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
@@ -27,8 +29,7 @@ use types_cache::typcache::{PgRangeRow, PgTypeRow};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_datum::Datum;
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_FUNCTION,
-    ERRCODE_UNDEFINED_OBJECT,
+    PgError, PgResult, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
 };
 use types_tuple::pg_type::FormData_pg_type;
 
@@ -97,7 +98,55 @@ pub fn get_typlenbyvalalign(typid: Oid) -> PgResult<TypLenByValAlign> {
 
 /// `get_type_io_data(typid, which_func, ...)` (lsyscache.c) — canonical
 /// `IOFuncSelector` / `TypeIoData` shape.
+///
+/// ```c
+/// void get_type_io_data(Oid typid, IOFuncSelector which_func, int16 *typlen,
+///                       bool *typbyval, char *typalign, char *typdelim,
+///                       Oid *typioparam, Oid *func) {
+///     /* In bootstrap mode, pass it off to bootstrap.c.  This hack allows us
+///      * to use array_in and array_out during bootstrap. */
+///     if (IsBootstrapProcessingMode()) {
+///         Oid typinput, typoutput;
+///         boot_get_type_io_data(typid, typlen, typbyval, typalign, typdelim,
+///                               typioparam, &typinput, &typoutput);
+///         switch (which_func) {
+///             case IOFunc_input:  *func = typinput;  break;
+///             case IOFunc_output: *func = typoutput; break;
+///             default: elog(ERROR, "binary I/O not supported during bootstrap"); break;
+///         }
+///         return;
+///     }
+///     typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+///     if (!HeapTupleIsValid(typeTuple)) elog(ERROR, "cache lookup failed for type %u", typid);
+///     ...
+/// }
+/// ```
 pub fn get_type_io_data(typid: Oid, which_func: IOFuncSelector) -> PgResult<TypeIoData> {
+    // In bootstrap mode, pass it off to bootstrap.c.  This hack allows us to
+    // use array_in and array_out during bootstrap.
+    if miscinit::is_bootstrap_processing_mode::call() {
+        let boot = bootstrap::boot_get_type_io_data::call(typid)?;
+        let func = match which_func {
+            IOFuncSelector::Input => boot.typinput,
+            IOFuncSelector::Output => boot.typoutput,
+            // case IOFunc_receive / IOFunc_send:
+            //   elog(ERROR, "binary I/O not supported during bootstrap");
+            IOFuncSelector::Receive | IOFuncSelector::Send => {
+                return Err(PgError::error(
+                    "binary I/O not supported during bootstrap".to_string(),
+                ));
+            }
+        };
+        return Ok(TypeIoData {
+            typlen: boot.typlen,
+            typbyval: boot.typbyval,
+            typalign: boot.typalign,
+            typdelim: boot.typdelim,
+            typioparam: boot.typioparam,
+            func,
+        });
+    }
+
     // typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
     // if (!HeapTupleIsValid(typeTuple)) elog(ERROR, "cache lookup failed for type %u", typid);
     let type_struct = match syscache::pg_type_form::call(typid)? {
@@ -130,11 +179,13 @@ pub fn get_type_io_data(typid: Oid, which_func: IOFuncSelector) -> PgResult<Type
 ///     if (!HeapTupleIsValid(typeTuple)) elog(ERROR, "cache lookup failed for type %u", type);
 ///     pt = (Form_pg_type) GETSTRUCT(typeTuple);
 ///     if (!pt->typisdefined)
-///         ereport(ERROR, errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-///                 errmsg("cannot display a value of type %s", ...));  -- shell type
+///         ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+///                 errmsg("type %s is only a shell", format_type_be(type))));
+///     if (!OidIsValid(pt->typoutput))
+///         ereport(ERROR, (errcode(ERRCODE_UNDEFINED_FUNCTION),
+///                 errmsg("no output function available for type %s", format_type_be(type))));
 ///     *typOutput = pt->typoutput;
 ///     *typIsVarlena = (!pt->typbyval) && (pt->typlen == -1);
-///     ...
 ///     ReleaseSysCache(typeTuple);
 /// }
 /// ```
@@ -144,26 +195,30 @@ pub fn get_type_output_info(typid: Oid) -> PgResult<(Oid, bool)> {
         None => return cache_lookup_failed_for_type(typid),
     };
 
-    // if (!pt->typisdefined) ereport(ERROR, "cannot output a value of type %s, which is still being defined");
+    // if (!pt->typisdefined)
+    //     ereport(ERROR, errcode(ERRCODE_UNDEFINED_OBJECT),
+    //             errmsg("type %s is only a shell", format_type_be(type)));
     if !pt.typisdefined {
         return Err(PgError::error(format!(
-            "cannot output a value of type {}, which is still being defined",
-            String::from_utf8_lossy(pt.typname.name_str())
+            "type {} is only a shell",
+            format_type::format_type_be_str::call(typid)?
         ))
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
+    }
+
+    // if (!OidIsValid(pt->typoutput))
+    //     ereport(ERROR, errcode(ERRCODE_UNDEFINED_FUNCTION),
+    //             errmsg("no output function available for type %s", format_type_be(type)));
+    if !OidIsValid(pt.typoutput) {
+        return Err(PgError::error(format!(
+            "no output function available for type {}",
+            format_type::format_type_be_str::call(typid)?
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
     }
 
     let typ_output = pt.typoutput;
     let typ_is_varlena = (!pt.typbyval) && (pt.typlen == -1);
-
-    // if (!OidIsValid(typOutput)) ereport(ERROR, "no output function available for type %s");
-    if !OidIsValid(typ_output) {
-        return Err(PgError::error(format!(
-            "no output function available for type {}",
-            String::from_utf8_lossy(pt.typname.name_str())
-        ))
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
-    }
 
     Ok((typ_output, typ_is_varlena))
 }
@@ -175,8 +230,12 @@ pub fn get_type_output_info(typid: Oid) -> PgResult<(Oid, bool)> {
 ///     HeapTuple typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
 ///     if (!HeapTupleIsValid(typeTuple)) elog(ERROR, "cache lookup failed for type %u", type);
 ///     pt = (Form_pg_type) GETSTRUCT(typeTuple);
-///     if (!pt->typisdefined) ereport(ERROR, "cannot accept a value of type %s, which is still being defined");
-///     if (!OidIsValid(pt->typinput)) ereport(ERROR, "no input function available for type %s");
+///     if (!pt->typisdefined)
+///         ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+///                 errmsg("type %s is only a shell", format_type_be(type))));
+///     if (!OidIsValid(pt->typinput))
+///         ereport(ERROR, (errcode(ERRCODE_UNDEFINED_FUNCTION),
+///                 errmsg("no input function available for type %s", format_type_be(type))));
 ///     *typInput = pt->typinput;
 ///     *typIOParam = getTypeIOParam(typeTuple);
 ///     ReleaseSysCache(typeTuple);
@@ -188,19 +247,25 @@ pub fn get_type_input_info(typ: Oid) -> PgResult<(Oid, Oid)> {
         None => return cache_lookup_failed_for_type(typ),
     };
 
+    // if (!pt->typisdefined)
+    //     ereport(ERROR, errcode(ERRCODE_UNDEFINED_OBJECT),
+    //             errmsg("type %s is only a shell", format_type_be(type)));
     if !pt.typisdefined {
         return Err(PgError::error(format!(
-            "cannot accept a value of type {}, which is still being defined",
-            String::from_utf8_lossy(pt.typname.name_str())
+            "type {} is only a shell",
+            format_type::format_type_be_str::call(typ)?
         ))
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
     }
+    // if (!OidIsValid(pt->typinput))
+    //     ereport(ERROR, errcode(ERRCODE_UNDEFINED_FUNCTION),
+    //             errmsg("no input function available for type %s", format_type_be(type)));
     if !OidIsValid(pt.typinput) {
         return Err(PgError::error(format!(
             "no input function available for type {}",
-            String::from_utf8_lossy(pt.typname.name_str())
+            format_type::format_type_be_str::call(typ)?
         ))
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
     }
 
     Ok((pt.typinput, get_type_io_param(&pt)))
@@ -213,10 +278,14 @@ pub fn get_type_input_info(typ: Oid) -> PgResult<(Oid, Oid)> {
 ///     HeapTuple typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
 ///     if (!HeapTupleIsValid(typeTuple)) elog(ERROR, "cache lookup failed for type %u", type);
 ///     pt = (Form_pg_type) GETSTRUCT(typeTuple);
-///     if (!pt->typisdefined) ereport(ERROR, "cannot send a value of type %s, which is still being defined");
+///     if (!pt->typisdefined)
+///         ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+///                 errmsg("type %s is only a shell", format_type_be(type))));
+///     if (!OidIsValid(pt->typsend))
+///         ereport(ERROR, (errcode(ERRCODE_UNDEFINED_FUNCTION),
+///                 errmsg("no binary output function available for type %s", format_type_be(type))));
 ///     *typSend = pt->typsend;
 ///     *typIsVarlena = (!pt->typbyval) && (pt->typlen == -1);
-///     if (!OidIsValid(*typSend)) ereport(ERROR, "no binary output function available for type %s");
 ///     ReleaseSysCache(typeTuple);
 /// }
 /// ```
@@ -226,24 +295,29 @@ pub fn get_type_binary_output_info(type_oid: Oid) -> PgResult<(Oid, bool)> {
         None => return cache_lookup_failed_for_type(type_oid),
     };
 
+    // if (!pt->typisdefined)
+    //     ereport(ERROR, errcode(ERRCODE_UNDEFINED_OBJECT),
+    //             errmsg("type %s is only a shell", format_type_be(type)));
     if !pt.typisdefined {
         return Err(PgError::error(format!(
-            "cannot send a value of type {}, which is still being defined",
-            String::from_utf8_lossy(pt.typname.name_str())
+            "type {} is only a shell",
+            format_type::format_type_be_str::call(type_oid)?
         ))
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
+    }
+    // if (!OidIsValid(pt->typsend))
+    //     ereport(ERROR, errcode(ERRCODE_UNDEFINED_FUNCTION),
+    //             errmsg("no binary output function available for type %s", format_type_be(type)));
+    if !OidIsValid(pt.typsend) {
+        return Err(PgError::error(format!(
+            "no binary output function available for type {}",
+            format_type::format_type_be_str::call(type_oid)?
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION));
     }
 
     let typ_send = pt.typsend;
     let typ_is_varlena = (!pt.typbyval) && (pt.typlen == -1);
-
-    if !OidIsValid(typ_send) {
-        return Err(PgError::error(format!(
-            "no binary output function available for type {}",
-            String::from_utf8_lossy(pt.typname.name_str())
-        ))
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
-    }
 
     Ok((typ_send, typ_is_varlena))
 }
