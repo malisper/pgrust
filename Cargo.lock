@@ -140,6 +140,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-tupdesc-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
 name = "backend-access-gin-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -1068,6 +1078,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-namespace-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
 name = "backend-catalog-namespace-seams"
 version = "0.0.0"
 dependencies = [
@@ -1776,6 +1796,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-copyfuncs-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
 name = "backend-nodes-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -1793,12 +1823,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-optimizer-plan-planner-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
 name = "backend-optimizer-util-plancat-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-parser-analyze-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
 ]
 
 [[package]]
@@ -2223,6 +2273,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rewrite-rewriteHandler-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
 name = "backend-rmgrdesc-next"
 version = "0.0.0"
 dependencies = [
@@ -2550,6 +2610,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-lmgr-lmgr-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
 name = "backend-storage-lmgr-lmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -2664,6 +2734,26 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-tcop-pquery-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
+name = "backend-tcop-utility-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
 ]
 
 [[package]]
@@ -2933,6 +3023,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-inval-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
 name = "backend-utils-cache-inval-seams"
 version = "0.0.0"
 dependencies = [
@@ -2954,6 +3054,30 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-cache-plancache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc-pc-seams",
+ "backend-catalog-namespace-pc-seams",
+ "backend-nodes-copyfuncs-pc-seams",
+ "backend-optimizer-plan-planner-pc-seams",
+ "backend-parser-analyze-pc-seams",
+ "backend-rewrite-rewriteHandler-pc-seams",
+ "backend-storage-lmgr-lmgr-pc-seams",
+ "backend-tcop-pquery-pc-seams",
+ "backend-tcop-utility-pc-seams",
+ "backend-utils-cache-inval-pc-seams",
+ "backend-utils-cache-syscache-pc-seams",
+ "backend-utils-misc-backendstate-pc-seams",
+ "backend-utils-mmgr-mcxt-pc-seams",
+ "backend-utils-resowner-pc-seams",
+ "backend-utils-time-snapmgr-pc-seams",
+ "types-core",
+ "types-error",
+ "types-plancache",
 ]
 
 [[package]]
@@ -3028,6 +3152,16 @@ dependencies = [
  "types-hash",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-syscache-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
 ]
 
 [[package]]
@@ -3200,6 +3334,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-backendstate-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
 name = "backend-utils-misc-guc-file-seams"
 version = "0.0.0"
 dependencies = [
@@ -3323,6 +3467,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-mmgr-mcxt-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
+]
+
+[[package]]
 name = "backend-utils-mmgr-mcxt-seams"
 version = "0.0.0"
 dependencies = [
@@ -3337,6 +3491,16 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-resowner-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
 ]
 
 [[package]]
@@ -3369,6 +3533,16 @@ dependencies = [
  "types-core",
  "types-error",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-time-snapmgr-pc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-plancache",
 ]
 
 [[package]]
@@ -3576,6 +3750,7 @@ dependencies = [
  "backend-utils-adt-numutils",
  "backend-utils-adt-regexp",
  "backend-utils-cache-attoptcache",
+ "backend-utils-cache-plancache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-spccache",
  "backend-utils-cache-syscache",
@@ -3752,6 +3927,13 @@ dependencies = [
 
 [[package]]
 name = "types-pgtime"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+]
+
+[[package]]
+name = "types-plancache"
 version = "0.0.0"
 dependencies = [
  "types-core",
