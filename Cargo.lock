@@ -238,6 +238,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-tidstore"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-lib-radixtree-seams",
+ "backend-storage-page",
+ "seam-core",
+ "types-core",
+ "types-dsa",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-tuple",
+ "types-vacuum",
+]
+
+[[package]]
 name = "backend-access-common-toast-compression-seams"
 version = "0.0.0"
 dependencies = [
@@ -4114,6 +4131,18 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-lib-radixtree-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-dsa",
+ "types-error",
+ "types-nodes",
+ "types-vacuum",
 ]
 
 [[package]]
@@ -9402,6 +9431,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-relation",
  "backend-access-common-reloptions",
+ "backend-access-common-tidstore",
  "backend-access-common-tupdesc",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",

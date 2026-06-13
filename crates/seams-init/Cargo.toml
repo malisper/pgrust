@@ -14,6 +14,7 @@ backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+backend-access-common-tidstore = { path = "../backend-access-common-tidstore" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
