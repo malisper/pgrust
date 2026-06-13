@@ -21,3 +21,5 @@ backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+common-hashfn-seams = { path = "../common-hashfn-seams" }

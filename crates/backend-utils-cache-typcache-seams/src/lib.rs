@@ -34,6 +34,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(type_id, TYPECACHE_HASH[_EXTENDED]_PROC_FINFO)` then
+    /// read `->hash_proc_finfo.fn_oid` (or `->hash_extended_proc_finfo.fn_oid`
+    /// when `extended`) (typcache.c): the OID of `type_id`'s standard or
+    /// extended hash support function, used by `hash_multirange` /
+    /// `hash_multirange_extended` when the range element's cached entry has not
+    /// yet computed it. Returns `InvalidOid` (`0`) when the type has no such
+    /// hash function. `Err` carries the catalog-lookup surface.
+    pub fn lookup_type_hash_proc(
+        type_id: types_core::primitive::Oid,
+        extended: bool,
+    ) -> types_error::PgResult<types_core::primitive::Oid>
+);
+
+seam_core::seam!(
     /// `lookup_rowtype_tupdesc(type_id, typmod)` (typcache.c): the tuple
     /// descriptor of a composite rowtype, cloned out of the typcache into
     /// `mcx` (the C returns a refcounted pointer into the cache; the safe
