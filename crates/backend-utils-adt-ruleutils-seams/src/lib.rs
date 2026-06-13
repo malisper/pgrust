@@ -5,7 +5,21 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgString};
+use types_core::Oid;
 use types_error::PgResult;
+
+seam_core::seam!(
+    /// `pg_get_partkeydef_columns(relid, pretty)` (ruleutils.c): the
+    /// comma-separated list of the relation's partition-key column/expression
+    /// definitions (the inside of the `PARTITION BY (...)` clause), allocated
+    /// in `mcx`. Reads the catalog and deparses, so it can `ereport(ERROR)`;
+    /// `Err` also carries OOM.
+    pub fn pg_get_partkeydef_columns<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        pretty: bool,
+    ) -> PgResult<PgString<'mcx>>
+);
 
 seam_core::seam!(
     /// `quote_qualified_identifier(qualifier, ident)` (ruleutils.c): each
@@ -26,6 +40,8 @@ seam_core::seam!(
     /// owned image copies either way). `Err` carries OOM.
     pub fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx>>
 );
+
+// (quote_identifier is already declared above; postinit reuses it.)
 
 seam_core::seam!(
     /// `generate_operator_clause(buf, leftop, leftoptype, opoid, rightop,

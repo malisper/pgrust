@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+pub mod array_build;
 pub mod datum;
 pub mod expandeddatum;
 pub mod varlena;

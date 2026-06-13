@@ -30,6 +30,16 @@ seam_core::seam!(
     pub fn pq_flush() -> types_error::PgResult<i32>
 );
 
+seam_core::seam!(
+    /// `if (FeBeWaitSet) ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetLatchPos,
+    /// WL_LATCH_SET, latch)` (`miscinit.c` latch switches) — repoint the
+    /// backend wait set's latch event at the new `MyLatch`. A no-op when
+    /// `FeBeWaitSet` is unset. `ModifyWaitEvent` can `ereport(ERROR)`.
+    pub fn modify_fe_be_wait_set_latch(
+        latch: types_storage::latch::LatchHandle,
+    ) -> types_error::PgResult<()>
+);
+
 // ---------------------------------------------------------------------------
 //  Input-side primitives + connection init used by backend_startup.c.
 // ---------------------------------------------------------------------------

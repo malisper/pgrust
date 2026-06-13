@@ -9,8 +9,10 @@ name = "backend_tcop_postgres_seams"
 path = "src/lib.rs"
 
 [dependencies]
+types-guc = { path = "../types-guc" }
 seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-plancache = { path = "../types-plancache" }
 types-storage = { path = "../types-storage" }

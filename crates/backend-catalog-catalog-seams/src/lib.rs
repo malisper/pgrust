@@ -15,6 +15,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsCatalogRelationOid(relid)` (catalog/catalog.c): a relation is a
+    /// system catalog iff it has a pinned OID (`relid < FirstUnpinnedObjectId`).
+    /// Pure OID-range arithmetic — infallible.
+    pub fn is_catalog_relation_oid(relid: Oid) -> bool
+);
+
+seam_core::seam!(
     /// `IsCatalogRelation(relation)` (catalog/catalog.c): is this relation a
     /// system catalog (`IsCatalogRelationOid(RelationGetRelid(relation))`)?
     /// Pure OID-range check; infallible.
@@ -51,4 +58,13 @@ seam_core::seam!(
     /// `String` is dropped). Path construction allocates, so the result is
     /// fallible (OOM).
     pub fn get_database_path(db_oid: Oid, spc_oid: Oid) -> PgResult<String>
+);
+
+seam_core::seam!(
+    /// `IsSystemRelation(rel)` (catalog.c).
+    pub fn is_system_relation(rel: &types_rel::Relation<'_>) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `IsSystemClass(relid, reltuple)` (catalog.c).
+    pub fn is_system_class(relid: Oid, form: &types_cluster::PgClassForm) -> PgResult<bool>
 );

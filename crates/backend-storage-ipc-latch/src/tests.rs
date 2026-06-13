@@ -67,7 +67,7 @@ fn install_seams_once() {
                 Ok(types_storage::waiteventset::WaitEventSetHandle::new(h))
             })
         });
-        wes_seams::add_wait_event_to_set::set(|set, events, fd, latch| {
+        wes_seams::add_wait_event_to_set::set(|set, events, fd, latch, _user_data| {
             with_mock(|m| {
                 m.calls.push(Call::Add { set: set.as_usize(), events, fd, latch });
                 let pos = m.next_add_pos;
@@ -233,7 +233,12 @@ fn wait_latch_modify_then_wait_sequence() {
 
     // Latch wake-up: the wait reports WL_LATCH_SET back.
     with_mock(|m| {
-        m.wait_result = Some(WaitEvent { pos: 0, events: WL_LATCH_SET, fd: PGINVALID_SOCKET })
+        m.wait_result = Some(WaitEvent {
+            pos: 0,
+            events: WL_LATCH_SET,
+            fd: PGINVALID_SOCKET,
+            user_data: None,
+        })
     });
     let rc = WaitLatch(Some(my), WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0, 0).unwrap();
     assert_eq!(rc, WL_LATCH_SET);
@@ -276,6 +281,7 @@ fn wait_latch_or_socket_builds_and_frees_throwaway_set() {
             pos: 2,
             events: types_storage::waiteventset::WL_SOCKET_READABLE,
             fd: sock,
+            user_data: None,
         })
     });
     let rc = WaitLatchOrSocket(

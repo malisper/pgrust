@@ -13,3 +13,5 @@ seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-execparallel = { path = "../types-execparallel" }
 types-error = { path = "../types-error" }
+mcx = { path = "../mcx" }
+types-nodes = { path = "../types-nodes" }

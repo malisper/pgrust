@@ -9,7 +9,7 @@ name = "backend_storage_file_fd_seams"
 path = "src/lib.rs"
 
 [dependencies]
+types-error = { path = "../types-error" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 mcx = { path = "../mcx" }
-types-error = { path = "../types-error" }

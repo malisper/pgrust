@@ -1,9 +1,10 @@
-//! Seam declarations for the output-plugin load + dispatch surface
-//! (`utils/fmgr/dfmgr.c` `load_external_function` plus the loaded plugin's
-//! `_PG_output_plugin_init` vtable), as consumed by logical decoding.
-//!
-//! The owning unit installs these from its `init_seams()` when it lands;
-//! until then a call panics loudly.
+//! Seam declarations for the dynamic-library loader (`utils/fmgr/dfmgr.c`) and
+//! the `shmem_request_hook` (`miscinit.c` owns the hook pointer; the installed
+//! hook body belongs to whatever extension/module registered it), plus the
+//! output-plugin load + dispatch surface (`load_external_function` plus the
+//! loaded plugin's `_PG_output_plugin_init` vtable) consumed by logical
+//! decoding, and the archiver's `_PG_archive_module_init` loader. Calls panic
+//! until the owners land.
 
 #![allow(non_snake_case)]
 
@@ -11,6 +12,36 @@ use types_logical::CallbackInvocation;
 use types_core::Oid;
 use types_error::PgResult;
 use types_fmgr::LoadedExternalFunc;
+
+seam_core::seam!(
+    /// `load_file(filename, restricted)` (`utils/fmgr/dfmgr.c`) — load and
+    /// initialize a dynamically loadable module. `ereport(ERROR)`s on a missing
+    /// or incompatible library.
+    pub fn load_file(filename: &str, restricted: bool) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `shmem_request_hook != NULL` — whether a `shmem_request_hook` is
+    /// installed.
+    pub fn shmem_request_hook_present() -> bool
+);
+
+seam_core::seam!(
+    /// `shmem_request_hook()` — invoke the installed shared-memory request hook.
+    pub fn shmem_request_hook() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `load_external_function(filename, funcname, signalNotFound, filehandle)`
+    /// specialized to the archiver's use: load `filename` and resolve the
+    /// `_PG_archive_module_init` symbol. The archiver passes
+    /// `signalNotFound = false`, so a missing symbol yields `Ok(None)` (the C
+    /// returns NULL) rather than an `ereport(ERROR)`; the library load itself
+    /// can still `ereport(ERROR)` (carried on `Err`).
+    pub fn load_archive_module_init(
+        filename: &str,
+    ) -> types_error::PgResult<Option<types_pgarch::ArchiveModuleInit>>
+);
 
 seam_core::seam!(
     /// `load_external_function(...)` + `plugin_init(callbacks)`; returns the
