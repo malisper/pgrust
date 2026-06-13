@@ -27,6 +27,20 @@ pub const FirstNormalObjectId: Oid = 16384;
 
 /// `OIDOID` (`catalog/pg_type_d.h`) — the OID of the `oid` type.
 pub const OIDOID: Oid = 26;
+/// `BOOLOID` (`catalog/pg_type_d.h`) — the OID of the `bool` type.
+pub const BOOLOID: Oid = 16;
+/// `INT8OID` (`catalog/pg_type_d.h`) — the OID of the `int8` (bigint) type.
+pub const INT8OID: Oid = 20;
+/// `INT4OID` (`catalog/pg_type_d.h`) — the OID of the `int4` (integer) type.
+pub const INT4OID: Oid = 23;
+/// `VOIDOID` (`catalog/pg_type_d.h`) — the OID of the `void` pseudo-type.
+pub const VOIDOID: Oid = 2278;
+/// `INTERNALOID` (`catalog/pg_type_d.h`) — the OID of the `internal`
+/// pseudo-type.
+pub const INTERNALOID: Oid = 2281;
+
+/// `BTREE_AM_OID` (`catalog/pg_am_d.h`) — the OID of the btree access method.
+pub const BTREE_AM_OID: Oid = 403;
 
 /// `RELPERSISTENCE_PERMANENT` (`catalog/pg_class.h`) — regular table.
 pub const RELPERSISTENCE_PERMANENT: u8 = b'p';

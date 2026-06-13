@@ -1,0 +1,30 @@
+[package]
+name = "backend-storage-ipc-shmem"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_ipc_shmem"
+path = "src/lib.rs"
+
+[dependencies]
+backend-port-sysv-shmem-seams = { path = "../backend-port-sysv-shmem-seams" }
+backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
+backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
+backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-hash-dynahash-seams = { path = "../backend-utils-hash-dynahash-seams" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+libc = "0.2"
+mcx = { path = "../mcx" }
+port-pg-numa-seams = { path = "../port-pg-numa-seams" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-hash = { path = "../types-hash" }
+types-nodes = { path = "../types-nodes" }
+types-storage = { path = "../types-storage" }
