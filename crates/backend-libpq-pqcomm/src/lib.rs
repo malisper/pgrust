@@ -2026,6 +2026,31 @@ pub fn pq_check_connection() -> PgResult<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// pq_modify_fe_be_wait_set_latch
+// ---------------------------------------------------------------------------
+
+/// `if (FeBeWaitSet) ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetLatchPos,
+/// WL_LATCH_SET, latch)` (miscinit.c's `SwitchToSharedLatch` /
+/// `SwitchBackToLocalLatch`) — repoint the backend wait set's latch event at
+/// the new `MyLatch`. A no-op when `FeBeWaitSet` is unset.
+///
+/// The latch logic was inline in `pq_init` (it registers `WL_LATCH_SET` at
+/// `FeBeWaitSetLatchPos`); this is the matching mutator that miscinit needs
+/// when `MyLatch` is switched. The crate-owned `FE_BE_WAIT_SET` also tracks
+/// the registered latch alongside the set (so `pq_check_connection` can reset
+/// it), so the stored latch is updated to match the new event registration.
+pub fn pq_modify_fe_be_wait_set_latch(latch: LatchHandle) -> PgResult<()> {
+    FE_BE_WAIT_SET.with(|c| {
+        let mut slot = c.borrow_mut();
+        if let Some((set, stored_latch)) = slot.as_mut() {
+            set.modify_event(FeBeWaitSetLatchPos, WL_LATCH_SET, Some(latch))?;
+            *stored_latch = latch;
+        }
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Seam adapters.
 // ---------------------------------------------------------------------------
 
@@ -2063,9 +2088,13 @@ pub fn init_seams() {
     backend_libpq_pqcomm_seams::pq_putmessage::set(pq_putmessage);
     backend_libpq_pqcomm_seams::pq_putmessage_v2::set(pq_putmessage_v2);
     backend_libpq_pqcomm_seams::pq_flush::set(pq_flush);
+    backend_libpq_pqcomm_seams::pq_init::set(pq_init);
+    backend_libpq_pqcomm_seams::pq_startmsgread::set(pq_startmsgread);
     backend_libpq_pqcomm_seams::pq_endmsgread::set(pq_endmsgread);
     backend_libpq_pqcomm_seams::pq_getbytes::set(pq_getbytes_seam);
+    backend_libpq_pqcomm_seams::pq_peekbyte::set(pq_peekbyte);
     backend_libpq_pqcomm_seams::pq_buffer_remaining_data::set(pq_buffer_remaining_data_seam);
+    backend_libpq_pqcomm_seams::modify_fe_be_wait_set_latch::set(pq_modify_fe_be_wait_set_latch);
 
     vars::Unix_socket_permissions.install(GucVarAccessors {
         get: config::unix_socket_permissions,
