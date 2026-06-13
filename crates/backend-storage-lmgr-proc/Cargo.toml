@@ -1,0 +1,21 @@
+[package]
+name = "backend-storage-lmgr-proc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_storage_lmgr_proc"
+path = "src/lib.rs"
+
+[dependencies]
+seam-core = { path = "../seam-core" }
+mcx = { path = "../mcx" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }
+types-error = { path = "../types-error" }
+types-storage = { path = "../types-storage" }
+types-stringinfo = { path = "../types-stringinfo" }
+
+# Inward seams this unit owns and installs from init_seams().
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }

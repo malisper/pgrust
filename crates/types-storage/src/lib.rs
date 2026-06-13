@@ -8,6 +8,9 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+extern crate alloc;
+
+pub mod ilist;
 pub mod latch;
 pub mod lock;
 pub mod relfilelocator;

@@ -45,6 +45,7 @@ pub fn init_all() {
     backend_storage_ipc_standby::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
+    backend_storage_lmgr_proc::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
     backend_storage_page_checksum::init_seams();
     backend_timezone_localtime::init_seams();
