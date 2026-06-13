@@ -35,7 +35,20 @@ pub mod dsm;
 pub mod dsm_impl;
 pub mod ipc;
 
-/// Install this crate's implementations into the seam crates it owns.
+/// Install this crate's implementations into the seam crates it owns, plus
+/// its GUC option array and storage variables into the GUC tables' slots.
 pub fn init_seams() {
+    use backend_utils_misc_guc_tables::{option_sets, vars, GucVarAccessors};
+
     backend_storage_ipc_seams::proc_exit::set(ipc::proc_exit);
+
+    option_sets::dynamic_shared_memory_options.install(dsm_impl::DYNAMIC_SHARED_MEMORY_OPTIONS);
+    vars::dynamic_shared_memory_type.install(GucVarAccessors {
+        get: dsm_impl::dynamic_shared_memory_type,
+        set: dsm_impl::set_dynamic_shared_memory_type,
+    });
+    vars::min_dynamic_shared_memory.install(GucVarAccessors {
+        get: dsm_impl::min_dynamic_shared_memory,
+        set: dsm_impl::set_min_dynamic_shared_memory,
+    });
 }

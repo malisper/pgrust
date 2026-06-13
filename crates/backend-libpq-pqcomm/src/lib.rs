@@ -2026,9 +2026,48 @@ pub fn pq_check_connection() -> PgResult<bool> {
 // Seam installation.
 // ---------------------------------------------------------------------------
 
-/// Install this crate's seams (declared in `backend-libpq-pqcomm-seams`).
+/// Install this crate's seams (declared in `backend-libpq-pqcomm-seams`),
+/// plus its GUC storage variables and hooks into the GUC tables' slots.
 pub fn init_seams() {
+    use backend_utils_misc_guc_tables::{hooks, vars, GucVarAccessors};
+
     backend_libpq_pqcomm_seams::pq_putmessage::set(pq_putmessage);
     backend_libpq_pqcomm_seams::pq_putmessage_v2::set(pq_putmessage_v2);
     backend_libpq_pqcomm_seams::pq_flush::set(pq_flush);
+
+    vars::Unix_socket_permissions.install(GucVarAccessors {
+        get: config::unix_socket_permissions,
+        set: config::set_unix_socket_permissions,
+    });
+    vars::Unix_socket_group.install(GucVarAccessors {
+        get: || Some(config::unix_socket_group()),
+        // unix_socket_group boots to "" (never NULL), and GUC string storage
+        // can never go back to NULL afterwards (guc_tables.h).
+        set: |v| config::set_unix_socket_group(v.as_deref().unwrap_or_default()),
+    });
+    vars::tcp_keepalives_idle.install(GucVarAccessors {
+        get: config::tcp_keepalives_idle,
+        set: config::set_tcp_keepalives_idle,
+    });
+    vars::tcp_keepalives_interval.install(GucVarAccessors {
+        get: config::tcp_keepalives_interval,
+        set: config::set_tcp_keepalives_interval,
+    });
+    vars::tcp_keepalives_count.install(GucVarAccessors {
+        get: config::tcp_keepalives_count,
+        set: config::set_tcp_keepalives_count,
+    });
+    vars::tcp_user_timeout.install(GucVarAccessors {
+        get: config::tcp_user_timeout,
+        set: config::set_tcp_user_timeout,
+    });
+
+    hooks::assign_tcp_keepalives_idle.install(|v, _extra| assign_tcp_keepalives_idle(v));
+    hooks::assign_tcp_keepalives_interval.install(|v, _extra| assign_tcp_keepalives_interval(v));
+    hooks::assign_tcp_keepalives_count.install(|v, _extra| assign_tcp_keepalives_count(v));
+    hooks::assign_tcp_user_timeout.install(|v, _extra| assign_tcp_user_timeout(v));
+    hooks::show_tcp_keepalives_idle.install(show_tcp_keepalives_idle);
+    hooks::show_tcp_keepalives_interval.install(show_tcp_keepalives_interval);
+    hooks::show_tcp_keepalives_count.install(show_tcp_keepalives_count);
+    hooks::show_tcp_user_timeout.install(show_tcp_user_timeout);
 }
