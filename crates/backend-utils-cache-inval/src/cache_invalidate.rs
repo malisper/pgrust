@@ -5,7 +5,7 @@
 use types_core::primitive::{OidIsValid, InvalidOid};
 use types_core::Oid;
 use types_datum::Datum;
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, FATAL};
 use types_rel::RelationData;
 use types_storage::{
     RelFileLocatorBackend, SharedInvalidationMessage, SharedInvalRelmapMsg, SharedInvalSmgrMsg,
@@ -335,13 +335,14 @@ pub fn CacheRegisterSyscacheCallback(
 ) -> PgResult<()> {
     if cacheid < 0 || cacheid >= SYS_CACHE_SIZE as i32 {
         /* elog(FATAL, "invalid cache ID: %d", cacheid) */
-        return Err(PgError::error(format!("invalid cache ID: {cacheid}")));
+        return Err(PgError::new(FATAL, format!("invalid cache ID: {cacheid}")));
     }
 
     with_state(|state| {
         if state.syscache_callback_list.len() >= MAX_SYSCACHE_CALLBACKS {
             /* elog(FATAL, "out of syscache_callback_list slots") */
-            return Err(PgError::error(
+            return Err(PgError::new(
+                FATAL,
                 "out of syscache_callback_list slots".to_string(),
             ));
         }
@@ -377,7 +378,8 @@ pub fn CacheRegisterRelcacheCallback(func: RelcacheCallbackFunction, arg: Datum)
     with_state(|state| {
         if state.relcache_callback_list.len() >= MAX_RELCACHE_CALLBACKS {
             /* elog(FATAL, "out of relcache_callback_list slots") */
-            return Err(PgError::error(
+            return Err(PgError::new(
+                FATAL,
                 "out of relcache_callback_list slots".to_string(),
             ));
         }
@@ -395,7 +397,8 @@ pub fn CacheRegisterRelSyncCallback(func: RelSyncCallbackFunction, arg: Datum) -
     with_state(|state| {
         if state.relsync_callback_list.len() >= MAX_RELSYNC_CALLBACKS {
             /* elog(FATAL, "out of relsync_callback_list slots") */
-            return Err(PgError::error(
+            return Err(PgError::new(
+                FATAL,
                 "out of relsync_callback_list slots".to_string(),
             ));
         }
