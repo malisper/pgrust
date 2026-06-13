@@ -8598,6 +8598,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-hashfn"
+version = "0.0.0"
+dependencies = [
+ "common-hashfn-seams",
+]
+
+[[package]]
 name = "common-hashfn-seams"
 version = "0.0.0"
 dependencies = [
@@ -9015,6 +9022,7 @@ dependencies = [
  "backend-utils-time-combocid",
  "backend-utils-time-snapmgr",
  "common-checksum-helper",
+ "common-hashfn",
  "common-ip",
  "common-pglz",
  "interfaces-libpq-legacy-pqsignal",

@@ -160,6 +160,7 @@ backend-utils-sort-sortsupport = { path = "../backend-utils-sort-sortsupport" }
 backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
 backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 common-checksum-helper = { path = "../common-checksum-helper" }
+common-hashfn = { path = "../common-hashfn" }
 common-ip = { path = "../common-ip" }
 common-pglz = { path = "../common-pglz" }
 interfaces-libpq-legacy-pqsignal = { path = "../interfaces-libpq-legacy-pqsignal" }
