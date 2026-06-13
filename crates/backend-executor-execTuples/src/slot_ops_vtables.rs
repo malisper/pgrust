@@ -571,6 +571,22 @@ pub fn tts_minimal_copy_minimal_tuple<'mcx>(
     todo!("execTuples.c tts_minimal_copy_minimal_tuple: heap_copy_minimal_tuple -> FormedMinimalTuple carrier bridge + materialize are the slot payload model's")
 }
 
+/// `tts_minimal_copy_heap_tuple` (execTuples.c:659).
+pub fn tts_minimal_copy_heap_tuple<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _slot: &mut MinimalTupleTableSlot<'mcx>,
+) -> PgResult<HeapTuple<'mcx>> {
+    // if (!mslot->mintuple) tts_minimal_materialize(slot);
+    // return heap_tuple_from_minimal_tuple(mslot->mintuple);
+    //
+    // Gated on tts_minimal_materialize being able to store a
+    // FormedMinimalTuple in the slot's MinimalTuple carrier;
+    // heap_tuple_from_minimal_tuple then yields a FormedTuple the slot's
+    // HeapTuple carrier cannot hold either — both the slot payload model's
+    // carrier bridge. Mirror PG and panic.
+    todo!("execTuples.c tts_minimal_copy_heap_tuple: heap_tuple_from_minimal_tuple -> FormedTuple carrier bridge + materialize are the slot payload model's")
+}
+
 /// `tts_minimal_store_tuple` (execTuples.c).
 pub fn tts_minimal_store_tuple<'mcx>(
     slot: &mut MinimalTupleTableSlot<'mcx>,

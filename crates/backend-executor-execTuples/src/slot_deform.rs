@@ -524,7 +524,7 @@ pub fn slot_getsomeattrs_int<'mcx>(
 
     // Fetch as many attributes as possible from the underlying tuple.
     //   slot->tts_ops->getsomeattrs(slot, attnum);
-    slot_ops_vtables::slot_ops_getsomeattrs(slot, attnum)?;
+    slot_ops_vtables::slot_ops_getsomeattrs(mcx, slot, attnum)?;
 
     // If the underlying tuple doesn't have enough attributes, the tuple
     // descriptor must have the missing attributes.
@@ -591,6 +591,6 @@ pub fn slot_getattr<'mcx>(
         // slot_getsysattr(slot, attnum, &isnull) (tuptable.h:420):
         //   TableOid / SelfItemPointer are handled by the dispatch helper,
         //   everything else goes through slot->tts_ops->getsysattr.
-        slot_ops_vtables::slot_getsysattr(slot, attnum)
+        slot_ops_vtables::slot_getsysattr(mcx, slot, attnum)
     }
 }
