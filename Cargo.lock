@@ -1408,6 +1408,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-ipc-shm-toc"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-shmem-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-ipc-shmem-seams"
 version = "0.0.0"
 dependencies = [
@@ -2248,6 +2260,7 @@ dependencies = [
  "backend-postmaster-syslogger",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-procsignal",
+ "backend-storage-ipc-shm-toc",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",

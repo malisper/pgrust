@@ -3,7 +3,7 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use types_core::{uint16, uint32, Oid, ProcNumber, RelFileNumber, uint8, INVALID_PROC_NUMBER};
+use types_core::{uint16, uint32, Oid, ProcNumber, RelFileNumber, Size, uint8, INVALID_PROC_NUMBER};
 
 /// `enum LWLockMode` (`storage/lwlock.h:112`).
 #[repr(u32)]
@@ -308,4 +308,14 @@ pub struct RelFileLocator {
 #[inline]
 pub fn RelFileLocatorEquals(a: &RelFileLocator, b: &RelFileLocator) -> bool {
     a == b
+}
+
+/// `shm_toc_estimator` (`storage/shm_toc.h`) — transient sizing accumulator
+/// for `shm_toc_estimate`; lives in backend-local memory, not the segment.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct shm_toc_estimator {
+    /// `Size space_for_chunks`.
+    pub space_for_chunks: Size,
+    /// `Size number_of_keys`.
+    pub number_of_keys: Size,
 }
