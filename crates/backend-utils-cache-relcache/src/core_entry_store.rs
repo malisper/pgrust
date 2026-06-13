@@ -12,7 +12,8 @@ use std::cell::RefCell;
 
 use backend_utils_error::{ereport, PgResult};
 use types_error::ERROR;
-use backend_utils_hash_dynahash::{hash_create, hash_search};
+use backend_utils_hash_dynahash::{hash_create, hash_search, hash_seq_init, hash_seq_search};
+use types_hash::hsearch::HASH_SEQ_STATUS;
 use types_core::primitive::{Oid, ProcNumber};
 use types_core::xact::SubTransactionId;
 use types_hash::hsearch::{HASHACTION, HASHCTL, HASH_BLOBS, HASH_ELEM, HTAB};
@@ -230,6 +231,33 @@ pub(crate) fn cache_delete(id: Oid) -> PgResult<()> {
             .errmsg_internal("trying to delete a reldesc that does not exist")
             .into_error()),
     }
+}
+
+/// Collect every `Oid` currently keyed in `RelationIdCache` (the C
+/// `hash_seq_init`/`hash_seq_search` walk over `RelIdCacheEnt`). Used by the
+/// init-file write and the Phase3 finish loop, which snapshot the keys before
+/// mutating/restarting (mirroring the C `restart` reseed).
+#[allow(unsafe_code)]
+pub(crate) fn id_cache_oids(st: &mut RelcacheState) -> Vec<Oid> {
+    let mut out = Vec::new();
+    if st.id_cache.is_null() {
+        return out;
+    }
+    let mut status = HASH_SEQ_STATUS::new();
+    hash_seq_init(&mut status, st.id_cache);
+    loop {
+        let ptr = match hash_seq_search(&mut status) {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        if ptr.is_null() {
+            break;
+        }
+        // SAFETY: the scan yields live `RelIdCacheEnt` element buffers.
+        let hentry = unsafe { &*(ptr as *const RelIdCacheEnt) };
+        out.push(hentry.reloid);
+    }
+    out
 }
 
 /* ==========================================================================
