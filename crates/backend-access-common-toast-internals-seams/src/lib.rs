@@ -86,6 +86,51 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_snapshot::SnapshotData>
 );
 
+seam_core::seam!(
+    /// `toast_fetch_datum(attr)` (access/common/detoast.c, static): reconstruct
+    /// an in-memory datum from the chunks saved in the TOAST relation —
+    /// `table_open(va_toastrelid, AccessShareLock)` +
+    /// `table_relation_fetch_toast_slice(..., 0, attrsize, result)` +
+    /// `table_close`. `attr` is the verbatim on-disk TOAST-pointer datum
+    /// bytes; the reassembled varlena comes back in `mcx` (C palloc's it).
+    /// Decompression is left to the caller. `Err` carries the toast-fetch
+    /// `ereport(ERROR)`s (`missing chunk number ...`, etc.). The chunk
+    /// reassembly is the TOAST-relation I/O the toast-internals subsystem
+    /// owns, so detoast reaches it across the cycle through this seam.
+    pub fn toast_fetch_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        attr: &[u8],
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `toast_fetch_datum_slice(attr, sliceoffset, slicelength)`
+    /// (access/common/detoast.c, static): reconstruct a segment of a datum
+    /// from the chunks saved in the TOAST relation. Supports non-compressed
+    /// external datums and compressed external datums (in which case the
+    /// requested slice must be a prefix, i.e. `sliceoffset == 0`). The result
+    /// comes back in `mcx`. `Err` carries the toast-fetch `ereport(ERROR)`s.
+    pub fn toast_fetch_datum_slice<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        attr: &[u8],
+        sliceoffset: i32,
+        slicelength: i32,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    /// `VARATT_EXTERNAL_GET_POINTER(redirect, attr); redirect.pointer`
+    /// (access/common/detoast.c): dereference a `VARATT_IS_EXTERNAL_INDIRECT`
+    /// datum to the in-memory `struct varlena *` it points at, returning a
+    /// `mcx` copy of that target's verbatim bytes. The indirect pointer is a
+    /// raw in-memory pointer only the writer that built it can follow, so the
+    /// dereference crosses this seam. `Err` carries OOM.
+    pub fn indirect_pointer<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        attr: &[u8],
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
 /// The held-resource token returned by [`toast_open_indexes`]: the open
 /// (locked) toast indexes plus the position of the valid one. `Drop` closes
 /// the indexes silently (the abort path); [`Self::close`] is the explicit
