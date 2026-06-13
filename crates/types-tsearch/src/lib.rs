@@ -25,6 +25,7 @@ extern crate alloc;
 
 pub mod tsearch;
 pub mod gin;
+pub mod backend_access_gin_ginlogic;
 pub mod tsgistidx;
 
 use mcx::{PgString, PgVec};
