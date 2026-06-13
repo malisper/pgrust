@@ -22,6 +22,7 @@ const Anum_pg_class_relam: i32 = 7;
 const Anum_pg_opclass_opcname: i32 = 3;
 const Anum_pg_opclass_opcfamily: i32 = 6;
 const Anum_pg_opclass_opcintype: i32 = 7;
+const Anum_pg_opclass_opckeytype: i32 = 9;
 
 // `catalog/pg_amop.h` attribute numbers.
 const Anum_pg_amop_amoplefttype: i32 = 3;
@@ -107,6 +108,7 @@ pub(crate) fn search_opclass<'mcx>(
     let form = OpclassForm {
         opcfamily: getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opcfamily)?,
         opcintype: getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opcintype)?,
+        opckeytype: getattr_oid(mcx, CLAOID, &tup, Anum_pg_opclass_opckeytype)?,
         opcname: getattr_name(mcx, CLAOID, &tup, Anum_pg_opclass_opcname)?,
     };
     ReleaseSysCache(tup);

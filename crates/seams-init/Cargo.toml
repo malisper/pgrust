@@ -15,6 +15,7 @@ backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" 
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
 backend-access-hashvalidate = { path = "../backend-access-hashvalidate" }
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
 backend-access-heap-vacuumlazy = { path = "../backend-access-heap-vacuumlazy" }

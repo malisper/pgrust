@@ -129,6 +129,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tbm_add_tuples(tbm, tids, ntids, recheck)` (tidbitmap.c): add an array
+    /// of heap TIDs to the bitmap. `Err` carries OOM from growing the bitmap.
+    pub fn tbm_add_tuples(
+        tbm: TbmHandle,
+        tids: &[types_tuple::heaptuple::ItemPointerData],
+        recheck: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `bms_num_members(a)` (bitmapset.c): count the members of `a`. A `None`
     /// set is the C NULL (empty) set, yielding 0. Infallible.
     pub fn bms_num_members(a: Option<&types_nodes::Bitmapset<'_>>) -> i32

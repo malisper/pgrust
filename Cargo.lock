@@ -320,6 +320,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-gin-core-probe"
+version = "0.0.0"
+dependencies = [
+ "backend-access-gin-core-probe-seams",
+ "backend-access-index-amvalidate-seams",
+ "backend-nodes-core-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error-seams",
+ "mcx",
+ "types-amvalidate",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-hash",
+ "types-jsonb",
+ "types-scan",
+ "types-tsearch",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-access-gin-core-probe-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-access-gin-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -9403,6 +9435,7 @@ dependencies = [
  "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-common-tupdesc",
+ "backend-access-gin-core-probe",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
  "backend-access-heap-vacuumlazy",
