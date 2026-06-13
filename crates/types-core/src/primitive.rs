@@ -19,6 +19,8 @@ pub type Size = usize;
 pub type AttrNumber = i16;
 /// `Index` (`c.h`) — index into an array (e.g. a range-table index).
 pub type Index = u32;
+/// `ParseLoc` (`nodes/nodes.h`) — a token/parse location, or -1 if unknown.
+pub type ParseLoc = i32;
 /// `InvalidAttrNumber` (`access/attnum.h`).
 pub const InvalidAttrNumber: AttrNumber = 0;
 /// `RegProcedure` (`c.h`) — a pg_proc OID ("RegProcedure is the preferred

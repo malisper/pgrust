@@ -88,6 +88,50 @@ seam_core::seam!(
     ) -> PgResult<()>
 );
 
+/* ---- CLUSTER pg_class / pg_index row updates (backend-commands-cluster) --- */
+
+seam_core::seam!(
+    /// `CatalogTupleUpdate(pg_class_rel, &tup->t_self, tup)` after reforming
+    /// the mutated `PgClassForm` (indexing.c).
+    pub fn catalog_tuple_update_pg_class<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'_>,
+        tid: ItemPointerData,
+        form: &types_cluster::PgClassForm,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `CatalogTupleUpdate(pg_index_rel, &tup->t_self, tup)` after reforming
+    /// the mutated `PgIndexForm` (indexing.c).
+    pub fn catalog_tuple_update_pg_index<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'_>,
+        tid: ItemPointerData,
+        form: &types_cluster::PgIndexForm,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `CatalogOpenIndexes(rel)` (indexing.c).
+    pub fn catalog_open_indexes<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'_>,
+    ) -> PgResult<types_cluster::CatalogIndexStateToken>
+);
+seam_core::seam!(
+    /// `CatalogTupleUpdateWithInfo(rel, &tup->t_self, tup, indstate)`.
+    pub fn catalog_tuple_update_with_info_pg_class<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'_>,
+        tid: ItemPointerData,
+        form: &types_cluster::PgClassForm,
+        indstate: &types_cluster::CatalogIndexStateToken,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `CatalogCloseIndexes(indstate)` (indexing.c).
+    pub fn catalog_close_indexes(indstate: types_cluster::CatalogIndexStateToken) -> PgResult<()>
+);
+
 seam_core::seam!(
     /// `GetNewOidWithIndex(rel, OpfamilyOidIndexId, Anum_pg_opfamily_oid)` +
     /// `heap_form_tuple` + `CatalogTupleInsert` for one pg_opfamily row

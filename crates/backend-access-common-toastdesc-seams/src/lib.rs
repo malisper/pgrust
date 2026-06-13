@@ -26,3 +26,11 @@ seam_core::seam!(
         collations: &[Oid],
     ) -> PgResult<TupleDesc<'mcx>>
 );
+
+seam_core::seam!(
+    /// `toast_get_valid_index(toastoid, lockmode)` (toast_internals.c).
+    pub fn toast_get_valid_index(
+        toastoid: Oid,
+        lockmode: types_storage::lock::LOCKMODE,
+    ) -> PgResult<Oid>
+);

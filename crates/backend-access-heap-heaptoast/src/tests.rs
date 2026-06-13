@@ -56,26 +56,10 @@ fn varlena_predicates_match_header_bits() {
     assert!(varatt_is_extended(&ext));
 }
 
-#[test]
-fn scankey_init_stamps_fields() {
-    let mut key = ScanKeyData::empty();
-    ScanKeyInit(
-        &mut key,
-        2 as AttrNumber,
-        BTGreaterEqualStrategyNumber,
-        F_INT4GE,
-        Datum::from_i32(7),
-    );
-    assert_eq!(key.sk_flags, 0);
-    assert_eq!(key.sk_attno, 2);
-    assert_eq!(key.sk_strategy, BTGreaterEqualStrategyNumber);
-    assert_eq!(key.sk_subtype, InvalidOid);
-    // C ScanKeyInit always stamps C_COLLATION_OID (pg_collation.dat oid 950).
-    assert_eq!(key.sk_collation, C_COLLATION_OID);
-    assert_eq!(key.sk_collation, 950);
-    assert_eq!(key.sk_func.fn_oid, F_INT4GE);
-    assert_eq!(key.sk_argument.as_i32(), 7);
-}
+// NB: the former `scankey_init_stamps_fields` test covered this crate's local
+// `ScanKeyInit`. That initializer is now the shared
+// `backend_access_common_scankey::ScanKeyInit` (it resolves `sk_func` through
+// the fmgr seam), so the field-stamping behavior is owned and tested there.
 
 #[test]
 fn att_isnull_matches_c_bitmap_sense() {
