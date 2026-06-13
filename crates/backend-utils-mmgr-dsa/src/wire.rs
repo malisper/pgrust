@@ -18,10 +18,11 @@ use std::cell::Cell;
 use backend_storage_ipc_dsm_core::dsm::DsmSegmentId;
 use backend_utils_mmgr_dsa_seams as seam;
 use mcx::{Mcx, MemoryContext};
-use types_dsa::{DSA_DEFAULT_INIT_SEGMENT_SIZE, DSA_MAX_SEGMENT_SIZE};
+use types_dsa::{DsaHandle, DSA_DEFAULT_INIT_SEGMENT_SIZE, DSA_MAX_SEGMENT_SIZE};
 use types_execparallel::{
     DsaAreaHandle as XDsaAreaHandle, DsaPointer, DsmSegmentHandle, SerializeCursor, Size,
 };
+use types_storage::{dsa_handle, DsaArea};
 
 use crate::runtime::{self, DsaAreaHandle};
 
@@ -60,6 +61,22 @@ fn to_runtime_handle(area: XDsaAreaHandle) -> DsaAreaHandle {
 #[inline]
 fn from_runtime_handle(area: DsaAreaHandle) -> XDsaAreaHandle {
     XDsaAreaHandle(area.as_u64() as usize)
+}
+
+/// The DSM-registry / dshash seam group crosses the boundary with the opaque
+/// `*mut DsaArea` the C code holds (`dsa_area *`). It is never dereferenced by
+/// the consumers — the registry stores it and passes it back, dshash holds the
+/// one the registry handed it — so we carry the runtime [`DsaAreaHandle`]'s
+/// `u64` inside the pointer value (the same opacity-preserving token the
+/// parallel group carries as a `usize`). Decode reverses it.
+#[inline]
+fn ptr_to_runtime_handle(area: *mut DsaArea) -> DsaAreaHandle {
+    DsaAreaHandle::from_u64(area as usize as u64)
+}
+
+#[inline]
+fn runtime_handle_to_ptr(area: DsaAreaHandle) -> *mut DsaArea {
+    area.as_u64() as usize as *mut DsaArea
 }
 
 /// Install every seam in `backend-utils-mmgr-dsa-seams`.
@@ -117,6 +134,63 @@ pub fn install_dsa_seams() {
     seam::dsa_get_address::set(|area: XDsaAreaHandle, dp: DsaPointer| {
         let addr = expect(runtime::dsa_get_address(to_runtime_handle(area), dp, dsa_top_mcx()));
         SerializeCursor(addr as usize)
+    });
+
+    // --- DSM-registry DSA seams (consumer: backend-storage-ipc-dsm-registry) ---
+    //
+    // These cross the boundary with the opaque `*mut DsaArea`; the runtime
+    // surface is fallible and carries the `ereport(ERROR)` channel, so the
+    // adapters return the `PgResult` straight through (no boundary panic).
+
+    // `dsa_create(tranche_id)` — the C macro for `dsa_create_ext` with the
+    // default init/max segment sizes.
+    seam::dsa_create::set(|tranche_id: i32| {
+        let area = runtime::dsa_create_ext(
+            tranche_id,
+            DSA_DEFAULT_INIT_SEGMENT_SIZE,
+            DSA_MAX_SEGMENT_SIZE,
+            dsa_top_mcx(),
+        )?;
+        Ok(runtime_handle_to_ptr(area))
+    });
+
+    // `dsa_attach(handle)`.
+    seam::dsa_attach::set(|handle: dsa_handle| {
+        let area = runtime::dsa_attach(handle as DsaHandle, dsa_top_mcx())?;
+        Ok(runtime_handle_to_ptr(area))
+    });
+
+    // `dsa_pin(area)`.
+    seam::dsa_pin::set(|area: *mut DsaArea| runtime::dsa_pin(ptr_to_runtime_handle(area)));
+
+    // `dsa_pin_mapping(area)` — infallible in the runtime; the seam carries a
+    // `PgResult<()>` for the C `ereport(ERROR)` on the remember-mapping alloc.
+    seam::dsa_pin_mapping::set(|area: *mut DsaArea| {
+        runtime::dsa_pin_mapping(ptr_to_runtime_handle(area));
+        Ok(())
+    });
+
+    // `dsa_get_handle(area)`.
+    seam::dsa_get_handle::set(|area: *mut DsaArea| {
+        runtime::dsa_get_handle(ptr_to_runtime_handle(area)) as dsa_handle
+    });
+
+    // --- `dsa_area *`-keyed allocation/addressing (consumer: backend-lib-dshash) ---
+
+    // `dsa_allocate_extended(area, size, flags)`.
+    seam::dsa_allocate_extended::set(|area: *mut DsaArea, size: Size, flags: i32| {
+        runtime::dsa_allocate_extended(ptr_to_runtime_handle(area), size, flags, dsa_top_mcx())
+    });
+
+    // `dsa_free(area, dp)`.
+    seam::dsa_free_ptr::set(|area: *mut DsaArea, dp: DsaPointer| {
+        runtime::dsa_free(ptr_to_runtime_handle(area), dp, dsa_top_mcx())
+    });
+
+    // `dsa_get_address(area, dp)` — the backend-local address as the `u64` it
+    // resolves to.
+    seam::dsa_get_address_ptr::set(|area: *mut DsaArea, dp: DsaPointer| {
+        runtime::dsa_get_address(ptr_to_runtime_handle(area), dp, dsa_top_mcx())
     });
 }
 

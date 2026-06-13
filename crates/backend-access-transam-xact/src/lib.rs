@@ -1654,6 +1654,15 @@ pub fn init_seams() {
     seams::xact_redo::set(seam_xact_redo);
     seams::xact_log_commit_record::set(seam_xact_log_commit_record);
     seams::xact_log_abort_record::set(seam_xact_log_abort_record);
+    // Pure-wiring installs (assemble/seam-wiring-guard): owner bodies exist
+    // with signatures matching the seam decls, they were just never set().
+    seams::abort_current_transaction::set(AbortCurrentTransaction);
+    seams::begin_transaction_block::set(engine::BeginTransactionBlock);
+    seams::end_transaction_block::set(engine::EndTransactionBlock);
+    seams::rollback_to_savepoint::set(engine::RollbackToSavepoint);
+    seams::is_transaction_block::set(IsTransactionBlock);
+    seams::isolation_uses_xact_snapshot::set(IsolationUsesXactSnapshot);
+    seams::set_current_statement_start_timestamp::set(SetCurrentStatementStartTimestamp);
 }
 
 #[cfg(test)]
