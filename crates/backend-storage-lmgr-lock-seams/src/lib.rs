@@ -209,6 +209,66 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `LockAcquireExtended(locktag, lockmode, sessionLock, dontWait,
+    /// reportMemoryError, &locallock, logLockFailure)` (lock.c). lmgr.c always
+    /// passes `reportMemoryError = true`, so OOM is modeled by the `Err` leg
+    /// rather than a parameter; the `LOCALLOCK*` out-parameter is internal to
+    /// lock.c and re-keyed by [`mark_lock_clear`] on the (tag, mode) pair.
+    /// `Err` carries the C `ereport(ERROR)` surface (deadlock detected, out of
+    /// shared memory, unrecognized lock mode).
+    pub fn lock_acquire_extended(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+        session_lock: bool,
+        dont_wait: bool,
+        log_lock_failure: bool,
+    ) -> types_error::PgResult<types_storage::lock::LockAcquireResult>
+);
+
+seam_core::seam!(
+    /// `MarkLockClear(locallock)` (lock.c) — mark that the just-acquired lock
+    /// has finished absorbing invalidation messages. Re-keyed on the
+    /// (tag, mode) pair identifying the locallock the preceding
+    /// `lock_acquire_extended` returned. Infallible.
+    pub fn mark_lock_clear(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+    )
+);
+
+seam_core::seam!(
+    /// `LockHeldByMe(locktag, lockmode, orstronger)` (lock.c) — whether the
+    /// current transaction holds `lockmode` (or, with `orstronger`, a
+    /// numerically-higher mode) on `locktag`. Pure local lock-table lookup,
+    /// infallible.
+    pub fn lock_held_by_me(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+        orstronger: bool,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `LockHasWaiters(locktag, lockmode, sessionLock)` (lock.c) — whether
+    /// anyone is waiting on a lock we hold. `Err` carries the C
+    /// `elog(ERROR, "unrecognized lock mode")` / lock-table corruption surface.
+    pub fn lock_has_waiters(
+        locktag: &types_storage::lock::LOCKTAG,
+        lockmode: types_storage::lock::LOCKMODE,
+        session_lock: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `LockWaiterCount(locktag)` (lock.c) — number of processes waiting for
+    /// `locktag`. `Err` carries the C lock-table corruption `elog(ERROR)`
+    /// surface.
+    pub fn lock_waiter_count(
+        locktag: &types_storage::lock::LOCKTAG,
+    ) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
     /// `AtPrepare_Locks()` — collect lock data for the 2PC state file;
     /// errors out for cases 2PC cannot handle (e.g. session locks).
     pub fn at_prepare_locks() -> types_error::PgResult<()>

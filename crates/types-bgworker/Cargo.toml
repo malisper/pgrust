@@ -7,3 +7,7 @@ publish.workspace = true
 [lib]
 name = "types_bgworker"
 path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }

@@ -5,6 +5,7 @@ use types_core::int64;
 use types_core::uint16;
 use types_core::uint32;
 use types_core::uint8;
+use types_core::Oid;
 
 use crate::ilist::{dclist_head, dlist_head, dlist_node};
 
@@ -37,6 +38,8 @@ pub const InplaceUpdateTupleLock: LOCKMODE = ExclusiveLock;
 
 /// `DEFAULT_LOCKMETHOD` (`storage/lock.h`).
 pub const DEFAULT_LOCKMETHOD: uint8 = 1;
+/// `USER_LOCKMETHOD` (`storage/lock.h`) — advisory user locks.
+pub const USER_LOCKMETHOD: uint8 = 2;
 
 /// `enum LockTagType` (`storage/lock.h`), as the `locktag_type` byte.
 pub const LOCKTAG_RELATION: uint8 = 0;
@@ -47,6 +50,40 @@ pub const LOCKTAG_TUPLE: uint8 = 4;
 pub const LOCKTAG_TRANSACTION: uint8 = 5;
 pub const LOCKTAG_VIRTUALTRANSACTION: uint8 = 6;
 pub const LOCKTAG_SPECULATIVE_TOKEN: uint8 = 7;
+pub const LOCKTAG_OBJECT: uint8 = 8;
+pub const LOCKTAG_USERLOCK: uint8 = 9;
+pub const LOCKTAG_ADVISORY: uint8 = 10;
+/// transaction being applied on a logical-replication subscriber
+pub const LOCKTAG_APPLY_TRANSACTION: uint8 = 11;
+/// `LOCKTAG_LAST_TYPE` (`storage/lock.h`) — the highest `LockTagType` value.
+pub const LOCKTAG_LAST_TYPE: uint8 = LOCKTAG_APPLY_TRANSACTION;
+
+/// `LockRelId` (`utils/rel.h`) — the (relation, database) pair a relcache entry
+/// carries in `rd_lockInfo.lockRelId`, identifying a relation to the lock
+/// manager. `dbId` is `InvalidOid` (0) for a shared/global relation.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct LockRelId {
+    /// `Oid relId` — a relation identifier.
+    pub relId: Oid,
+    /// `Oid dbId` — a database identifier (`InvalidOid` for shared relations).
+    pub dbId: Oid,
+}
+
+/// `enum XLTW_Oper` (`storage/lmgr.h`) — the operation that needs to wait on
+/// another transaction, used by `XactLockTableWait`'s error-context callback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub enum XLTW_Oper {
+    None = 0,
+    Update = 1,
+    Delete = 2,
+    Lock = 3,
+    LockUpdated = 4,
+    InsertIndex = 5,
+    InsertIndexUnique = 6,
+    FetchUpdated = 7,
+    RecheckExclusionConstr = 8,
+}
 
 /// `LOCKTAG` (`storage/lock.h`) — the key identifying a lockable object.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

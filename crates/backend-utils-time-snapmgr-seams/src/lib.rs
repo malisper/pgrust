@@ -100,6 +100,46 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `PushCopiedSnapshot(GetActiveSnapshot())` (copyto.c:830): push a copy of
+    /// the current active snapshot onto the active-snapshot stack, so a fresh
+    /// command id can be set without disturbing the caller's snapshot. `Err`
+    /// carries the `there is no active snapshot` `ereport`.
+    pub fn push_copied_active_snapshot() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UpdateActiveSnapshotCommandId()` (copyto.c:831): bump the active
+    /// snapshot's command id so this query sees the results of previously
+    /// executed commands. `Err` carries snapmgr `ereport(ERROR)`s.
+    pub fn update_active_snapshot_command_id() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UnregisterSnapshotFromOwner(snapshot, owner)` — drop the portal's
+    /// hold-snapshot registration against its resource owner. The snapshot
+    /// crosses as the shared `Rc<SnapshotData>` the stack/owner alias (the C
+    /// `Snapshot` is a shared pointer); the owner as the shared
+    /// `types_portal::ResourceOwner` handle.
+    pub fn unregister_snapshot_from_owner(
+        snapshot: std::rc::Rc<types_snapshot::SnapshotData>,
+        owner: types_portal::ResourceOwner,
+    )
+);
+
+seam_core::seam!(
+    /// `ActiveSnapshotSet()` — true if the active-snapshot stack is non-empty.
+    pub fn active_snapshot_set() -> bool
+);
+
+seam_core::seam!(
+    /// `InvalidateCatalogSnapshot()` (snapmgr.c): drop the backend's cached
+    /// catalog snapshot so the next catalog read takes a fresh one — driven by
+    /// most arms of `LocalExecuteInvalidationMessage`. Pure global reset;
+    /// infallible.
+    pub fn invalidate_catalog_snapshot()
+);
+
+seam_core::seam!(
     /// `GetActiveSnapshot()` (snapmgr.c) — the topmost active snapshot, or
     /// `None` (the C may return NULL when no snapshot is active). Snapshots
     /// cross as a shared `Rc<SnapshotData>` (the C `Snapshot` is a shared
@@ -118,5 +158,27 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `PopActiveSnapshot()` (snapmgr.c) — pop the topmost active snapshot.
+    /// Used by COPY-(query)-TO teardown (copyto.c:1013) to pop the snapshot
+    /// pushed by [`push_copied_active_snapshot`].
     pub fn pop_active_snapshot() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PushActiveSnapshot(GetTransactionSnapshot())` (snapmgr.c): take and
+    /// push the transaction snapshot.
+    pub fn push_active_snapshot_transaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetLatestSnapshot()` (snapmgr.c): a fresh MVCC snapshot reflecting all
+    /// committed transactions as of now. Snapshot acquisition can
+    /// `ereport(ERROR)` (e.g. too-old-snapshot / xmin), carried on `Err`.
+    pub fn get_latest_snapshot() -> PgResult<types_snapshot::SnapshotData>
+);
+
+seam_core::seam!(
+    /// `GetTransactionSnapshot()` (snapmgr.c): the transaction snapshot
+    /// (serializable: the registered xact snapshot; otherwise a fresh one).
+    /// Can `ereport(ERROR)`, carried on `Err`.
+    pub fn get_transaction_snapshot() -> PgResult<types_snapshot::SnapshotData>
 );

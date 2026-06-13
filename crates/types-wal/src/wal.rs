@@ -2,8 +2,8 @@
 
 use mcx::PgVec;
 use types_core::{
-    pg_crc32c, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, Oid, RelFileNumber, RmgrId,
-    TransactionId, XLogRecPtr,
+    pg_crc32c, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, Oid, RelFileNumber,
+    RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr,
 };
 
 /// `XLR_INFO_MASK` (access/xlogrecord.h) — the low nibble of `xl_info` is
@@ -123,6 +123,11 @@ impl XLogRecord {
     /// `XLogRecGetInfo` — `xl_info`.
     pub const fn info(&self) -> uint8 {
         self.xl_info
+    }
+
+    /// `XLogRecGetXid` — `xl_xid`.
+    pub const fn xid(&self) -> TransactionId {
+        self.xl_xid
     }
 
     /// `XLogRecGetRmid` — `xl_rmid`.
@@ -258,6 +263,9 @@ pub struct DecodedXLogRecord<'mcx> {
     /// `XLogRecGetData` — the record's main data.
     main_data: &'mcx [u8],
     blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
+    /// `DecodedXLogRecord.record_origin` — the replication origin decoded from
+    /// the record (`XLogRecGetOrigin`); `InvalidRepOriginId` when none.
+    record_origin: RepOriginId,
 }
 
 impl<'mcx> DecodedXLogRecord<'mcx> {
@@ -272,11 +280,29 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
             header,
             main_data,
             blocks,
+            record_origin: types_core::InvalidRepOriginId,
         }
+    }
+
+    /// Set `record_origin` (`XLogRecGetOrigin`), builder-style; the decoder
+    /// fills it from the record's origin block-data when present.
+    pub const fn with_origin(mut self, origin: RepOriginId) -> Self {
+        self.record_origin = origin;
+        self
     }
 
     pub const fn header(&self) -> &XLogRecord {
         &self.header
+    }
+
+    /// `XLogRecGetXid(record)` — `record->header.xl_xid`.
+    pub const fn xid(&self) -> TransactionId {
+        self.header.xid()
+    }
+
+    /// `XLogRecGetOrigin(record)` — `record->record_origin`.
+    pub const fn record_origin(&self) -> RepOriginId {
+        self.record_origin
     }
 
     pub fn blocks(&self) -> &[DecodedBkpBlock<'mcx>] {
@@ -376,6 +402,22 @@ pub const RS_INVAL_WAL_REMOVED: ReplicationSlotInvalidationCause = 1 << 0;
 pub const RS_INVAL_HORIZON: ReplicationSlotInvalidationCause = 1 << 1;
 pub const RS_INVAL_WAL_LEVEL: ReplicationSlotInvalidationCause = 1 << 2;
 pub const RS_INVAL_IDLE_TIMEOUT: ReplicationSlotInvalidationCause = 1 << 3;
+
+/// One entry of a parsed timeline-history file (`TimeLineHistoryEntry`,
+/// `access/timeline.h`): the LSN range over which `tli` was the current
+/// timeline (`begin <= lsn < end`; `end == InvalidXLogRecPtr` for the latest).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimeLineHistoryEntry {
+    pub tli: TimeLineID,
+    pub begin: XLogRecPtr,
+    pub end: XLogRecPtr,
+}
+
+impl TimeLineHistoryEntry {
+    pub const fn new(tli: TimeLineID, begin: XLogRecPtr, end: XLogRecPtr) -> Self {
+        Self { tli, begin, end }
+    }
+}
 
 /// `XLR_SPECIAL_REL_UPDATE` (`access/xlogrecord.h`) — flag bit in `xl_info`:
 /// the record modifies relation files outside the buffer manager's view.

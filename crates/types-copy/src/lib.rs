@@ -1,46 +1,40 @@
-//! Signature types for the `backend-commands-copyfromparse` parser port and its
-//! seams (`backend/commands/copyfromparse.c` — the COPY FROM CSV / text / binary
-//! input parser).
+//! COPY command shared vocabulary (`commands/copy.h` / `commands/copyfrom_internal.h`).
 //!
-//! The byte-exact codec — the raw-buffer fill / line-reading state machine
-//! (`CopyReadLineText`), the text / CSV field tokenizers
-//! (`CopyReadAttributesText` / `CopyReadAttributesCSV`), and the binary readers
-//! (`CopyReadBinaryData` / `CopyGetInt16` / `CopyGetInt32` /
-//! `CopyReadBinaryAttribute`) — is ground entirely in the parser crate, working
-//! on the owned byte buffers of [`CopyParseState`] (the parse-relevant subset of
-//! the C `CopyFromStateData`). Only genuine cross-subsystem externals cross a
-//! seam declared in `backend_commands_copyfromparse_seams`:
+//! Two consumer families live here:
 //!
-//! * the data **source** read (`CopyGetData`: file / frontend / callback legs),
-//! * **encoding** verification / conversion,
-//! * **pgstat** progress reporting,
-//! * the **list / tuple-descriptor** accessors over the un-ported parse/catalog
-//!   objects,
-//! * the **fmgr / Datum value** layer and per-row dispatch,
-//! * the **libpq frontend** (`ReceiveCopyBegin`).
+//! * The COPY **TO** drivers (`commands/copyto.c`) read a filled
+//!   [`CopyFormatOptions`] (the `commands/copy.h` struct, trimmed to the members
+//!   they consume); the owning unit is `commands/copy.c` (`ProcessCopyOptions`
+//!   fills the struct), so until that unit lands copyto obtains a filled
+//!   `CopyFormatOptions` through the copy unit's seam. The C `char *` members
+//!   carry NUL-terminated encoding strings; the owned model keeps them as
+//!   context-allocated [`PgString`]s, and the per-column `bool *force_quote_flags`
+//!   is a context-allocated [`PgVec`].
 //!
-//! The relation is the shared `types_rel::Relation` (`cstate->rel`), an alias
-//! into the relation the not-yet-ported `copyfrom.c` owner holds open. The
-//! genuinely heterogeneous cross-subsystem objects the parser only consults
-//! through seams (the `attnumlist` `List *`, the per-tuple `ExprContext`, the
-//! per-column `FmgrInfo`/`ExprState` slots, the soft-error `escontext`, the
-//! source `FILE *` / callback / frontend buffer) are carried as opaque token
-//! newtypes keyed into the owner's runtime state; a possibly-NULL C pointer
-//! becomes `Option<Token>`.
+//! * The COPY **FROM** parser (`commands/copyfromparse.c`) owns its byte-exact
+//!   codec in its own crate, working on the owned byte buffers of
+//!   [`CopyParseState`] (the parse-relevant subset of the C `CopyFromStateData`).
+//!   Genuine cross-subsystem externals cross seams declared in
+//!   `backend_commands_copyfromparse_seams`; the heterogeneous objects the parser
+//!   only consults through seams are carried as opaque token newtypes.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 
+use mcx::{PgString, PgVec};
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_rel::Relation;
 
 /* ===========================================================================
- * Copy parse enums (commands/copy.h, commands/copyfrom_internal.h).
+ * Copy enums (commands/copy.h, commands/copyfrom_internal.h).
  * =========================================================================== */
 
-/// `typedef enum CopyHeaderChoice` (commands/copy.h).
+/// `typedef enum CopyHeaderChoice` (commands/copy.h). For COPY TO only
+/// `COPY_HEADER_FALSE`/`COPY_HEADER_TRUE` occur (`COPY_HEADER_MATCH` is rejected
+/// during option processing); the TO driver tests
+/// `header_line != COPY_HEADER_FALSE`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i32)]
 pub enum CopyHeaderChoice {
@@ -86,6 +80,43 @@ pub enum EolType {
     EOL_NL,
     EOL_CR,
     EOL_CRNL,
+}
+
+/* ===========================================================================
+ * CopyFormatOptions (commands/copy.h) — consumed by the COPY TO drivers.
+ * =========================================================================== */
+
+/// `CopyFormatOptions` (`commands/copy.h`), trimmed to the members the COPY TO
+/// drivers read. The C struct's `char *` members carry NUL-terminated server-
+/// or file-encoding strings; the owned model keeps them as context-allocated
+/// [`PgString`]s (`null_print_len` collapses into the string length). The
+/// per-column `bool *force_quote_flags` is a context-allocated [`PgVec`].
+pub struct CopyFormatOptions<'mcx> {
+    /// `int file_encoding` — file/remote side's encoding, -1 if unspecified.
+    pub file_encoding: i32,
+    /// `bool binary` — binary format?
+    pub binary: bool,
+    /// `bool csv_mode` — CSV format?
+    pub csv_mode: bool,
+    /// `CopyHeaderChoice header_line` — emit a header line?
+    pub header_line: CopyHeaderChoice,
+    /// `char *null_print` — NULL marker string (server encoding).
+    pub null_print: PgString<'mcx>,
+    /// `char *null_print_client` — `null_print` converted to file encoding.
+    pub null_print_client: PgString<'mcx>,
+    /// `char *delim` — column delimiter (1 byte).
+    pub delim: u8,
+    /// `char *quote` — CSV quote char (1 byte).
+    pub quote: u8,
+    /// `char *escape` — CSV escape char (1 byte).
+    pub escape: u8,
+    /// `List *force_quote` — column names for FORCE_QUOTE (`None` ⇒ NIL).
+    pub force_quote: Option<PgVec<'mcx, PgString<'mcx>>>,
+    /// `bool force_quote_all` — FORCE_QUOTE *?
+    pub force_quote_all: bool,
+    /// `bool *force_quote_flags` — per-physical-column FORCE_QUOTE flags.
+    /// Empty until `BeginCopyTo` allocates it (`num_phys_attrs` entries).
+    pub force_quote_flags: PgVec<'mcx, bool>,
 }
 
 /* ===========================================================================

@@ -91,6 +91,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_parse_query(query_string)` (tcop/postgres.c) — run the raw parser on
+    /// a single SQL string, returning the `List *` of `RawStmt *` as their
+    /// opaque handles (the raw parse trees are owned by the parser). The IMPORT
+    /// FOREIGN SCHEMA loop parses each FDW-returned command this way. Can
+    /// `ereport(ERROR)` on a syntax error, carried on `Err`. Allocated in
+    /// `mcx`.
+    pub fn pg_parse_query<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        query_string: &str,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_plancache::RawStmtHandle>>
+);
+
+seam_core::seam!(
     /// `pg_plan_query(querytree, query_string, cursorOptions, boundParams)`
     /// (tcop/postgres.c) — plan a single already-rewritten query, returning a
     /// `PlannedStmt` allocated in `mcx`. Runs the planner; can

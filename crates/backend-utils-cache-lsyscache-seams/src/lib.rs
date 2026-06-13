@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgString};
+use mcx::{Mcx, PgString, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
 use types_selfuncs::{AttStatsSlot, StatsTuple};
@@ -150,6 +150,47 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `getTypeOutputInfo(type, &typOutput, &typIsVarlena)` (lsyscache.c):
+    /// the type's text output-function OID and varlena flag, with the C
+    /// `cache lookup failed for type %u` and "no output function" `ereport`s
+    /// carried on `Err`. Returns `(typoutput, typisvarlena)`.
+    pub fn get_type_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
+    /// `getTypeBinaryOutputInfo(type, &typSend, &typIsVarlena)` (lsyscache.c):
+    /// the type's binary send-function OID and varlena flag, with the C cache-
+    /// lookup and "no binary output function" `ereport`s carried on `Err`.
+    /// Returns `(typsend, typisvarlena)`.
+    pub fn get_type_binary_output_info(type_oid: Oid) -> PgResult<(Oid, bool)>
+);
+
+seam_core::seam!(
+    /// `get_am_name(amOid)` (lsyscache.c): the access method's name, copied
+    /// out of the syscache into `mcx` (C: `pstrdup`). A missing AM is
+    /// `Ok(None)` (C: NULL). `Err` includes OOM from the copy.
+    pub fn get_am_name<'mcx>(mcx: Mcx<'mcx>, am_oid: Oid) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `get_func_signature(funcid, &argtypes, &nargs)` (lsyscache.c): the
+    /// function's argument type OIDs (length `nargs`), palloc'd in `mcx`. A
+    /// missing pg_proc row is the C `elog(ERROR, "cache lookup failed for
+    /// function %u")`, carried on `Err` (also OOM from the copy).
+    pub fn get_func_signature<'mcx>(
+        mcx: Mcx<'mcx>,
+        func_oid: Oid,
+    ) -> PgResult<PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
+    /// `op_input_types(opno, &lefttype, &righttype)` (lsyscache.c): the
+    /// operator's input type OIDs. A missing pg_operator row is the C
+    /// `elog(ERROR, "cache lookup failed for operator %u")`, carried on `Err`.
+    pub fn op_input_types(opno: Oid) -> PgResult<(Oid, Oid)>
+);
+
+seam_core::seam!(
     /// `get_op_opfamily_properties(opno, opfamily, missing_ok, &strategy,
     /// &lefttype, &righttype)` (lsyscache.c): look up the operator's membership
     /// in the opfamily, returning its `(strategy, op_lefttype, op_righttype)`.
@@ -181,6 +222,13 @@ seam_core::seam!(
         righttype: Oid,
         procnum: i16,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_func_rettype(funcid)` (lsyscache.c): the return type OID of the
+    /// `pg_proc` entry. `elog(ERROR)` on cache lookup failure, carried on
+    /// `Err`.
+    pub fn get_func_rettype(funcid: Oid) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -279,4 +327,13 @@ seam_core::seam!(
     /// syscache hash value stored as `TypeCacheEntry.type_id_hash`. `Err`
     /// carries the catcache failure surface.
     pub fn syscache_hash_value_typeoid(type_id: Oid) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `get_index_isclustered(indexOid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_index_isclustered(index_oid: Oid) -> PgResult<bool>
+);
+seam_core::seam!(
+    /// `get_rel_namespace(relid)` (lsyscache.c) — used by CLUSTER.
+    pub fn get_rel_namespace(relid: Oid) -> PgResult<Oid>
 );
