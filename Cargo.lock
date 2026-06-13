@@ -640,6 +640,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-transam-subtrans-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-access-transam-transam"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-clog-seams",
+ "backend-access-transam-subtrans-seams",
+ "backend-utils-error",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-access-transam-twophase-rmgr"
 version = "0.0.0"
 dependencies = [
