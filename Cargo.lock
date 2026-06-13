@@ -1601,6 +1601,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-snapshot",
 ]
 
 [[package]]
@@ -1927,6 +1928,16 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-catalog-pg-largeobject-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-snapshot",
 ]
 
 [[package]]
@@ -2540,6 +2551,15 @@ dependencies = [
  "types-nodes",
  "types-scan",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-commands-proclang-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -3786,6 +3806,14 @@ name = "backend-jit-jit-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-lib-bloomfilter-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
 ]
 
 [[package]]
@@ -6217,6 +6245,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tsearch-spell"
+version = "0.0.0"
+dependencies = [
+ "backend-regex-core-seams",
+ "backend-tsearch-ispell-regis",
+ "backend-tsearch-spell-seams",
+ "backend-tsearch-ts-locale-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-regex",
+ "types-tsearch",
+]
+
+[[package]]
 name = "backend-tsearch-spell-seams"
 version = "0.0.0"
 dependencies = [
@@ -6390,6 +6437,45 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+]
+
+[[package]]
+name = "backend-utils-adt-acl"
+version = "0.0.0"
+dependencies = [
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-largeobject-seams",
+ "backend-commands-dbcommands-seams",
+ "backend-commands-proclang-seams",
+ "backend-commands-tablespace-seams",
+ "backend-commands-user-seams",
+ "backend-foreign-foreign-seams",
+ "backend-lib-bloomfilter-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
+ "backend-utils-misc-superuser-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "port-pgstrcasecmp",
+ "types-acl",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-syscache",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7302,6 +7388,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
  "types-ri-triggers",
  "types-tuple",
 ]
@@ -8293,7 +8380,9 @@ version = "0.0.0"
 name = "seams-init"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast",
  "backend-access-common-heaptuple",
+ "backend-access-common-relation",
  "backend-access-common-reloptions",
  "backend-access-hashvalidate",
  "backend-access-heap-heaptoast",
@@ -8343,8 +8432,10 @@ dependencies = [
  "backend-storage-page-checksum",
  "backend-timezone-localtime",
  "backend-timezone-strftime",
+ "backend-tsearch-spell",
  "backend-utils-activity-small",
  "backend-utils-activity-xact",
+ "backend-utils-adt-acl",
  "backend-utils-adt-numutils",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp",
@@ -8393,6 +8484,9 @@ dependencies = [
 [[package]]
 name = "types-acl"
 version = "0.0.0"
+dependencies = [
+ "types-core",
+]
 
 [[package]]
 name = "types-amapi"

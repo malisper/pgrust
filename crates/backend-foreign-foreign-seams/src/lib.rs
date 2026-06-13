@@ -70,6 +70,14 @@ seam_core::seam!(
     pub fn get_foreign_server_oid(servername: &str, missing_ok: bool) -> PgResult<Oid>
 );
 
+seam_core::seam!(
+    /// `get_foreign_data_wrapper_oid(fdwname, missing_ok)` (foreign.c): the
+    /// FDW's OID. With `missing_ok = false` a missing wrapper raises
+    /// `ERRCODE_UNDEFINED_OBJECT` (`Err`); with `missing_ok = true` it is
+    /// `Ok(InvalidOid)`.
+    pub fn get_foreign_data_wrapper_oid(fdwname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
 /* ---- FDW options validation + IMPORT (foreign.c / fdwapi.c) ---- */
 
 seam_core::seam!(
