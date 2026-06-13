@@ -1,14 +1,18 @@
 [package]
-name = "backend-storage-file-fd-seams"
+name = "backend-access-heap-heapam-seams"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "backend_storage_file_fd_seams"
+name = "backend_access_heap_heapam_seams"
 path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+mcx = { path = "../mcx" }
+types-datum = { path = "../types-datum" }
+types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }

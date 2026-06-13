@@ -115,3 +115,10 @@ seam_core::seam!(
     /// bytes. Can `ereport(ERROR)`, carried on `Err`.
     pub fn xlog_read_twophase_data(lsn: XLogRecPtr) -> PgResult<Vec<u8>>
 );
+
+seam_core::seam!(
+    /// `BootStrapXLOG(data_checksum_version)` (xlog.c): create the initial WAL
+    /// segment and control file at bootstrap. `ereport(PANIC)` on an I/O
+    /// failure (modeled as `Err`).
+    pub fn boot_strap_xlog(data_checksum_version: u32) -> types_error::PgResult<()>
+);

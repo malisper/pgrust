@@ -190,6 +190,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-heap-heapam-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-heap-heapam-xlog-seams"
 version = "0.0.0"
 dependencies = [
@@ -971,6 +984,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-bootstrap-bootparse-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-bootstrap-bootstrap"
+version = "0.0.0"
+dependencies = [
+ "backend-access-heap-heapam-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-table-table",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-bootstrap-bootparse-seams",
+ "backend-catalog-index-seams",
+ "backend-common-link-canary-seams",
+ "backend-main-main-seams",
+ "backend-postmaster-pmchild-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-ipc-ipc-seams",
+ "backend-storage-ipc-ipci-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-utils-cache-relmapper-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-postinit-seams",
+ "backend-utils-misc-guc-seams",
+ "libc",
+ "mcx",
+ "port-pqsignal-seams",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-guc",
+ "types-nodes",
+ "types-rel",
+ "types-signal",
+ "types-startup",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-aclchk-seams"
 version = "0.0.0"
 dependencies = [
@@ -1277,6 +1338,15 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-cache",
+ "types-error",
+]
+
+[[package]]
+name = "backend-common-link-canary-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -1776,6 +1846,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-main-main-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-startup",
+]
+
+[[package]]
 name = "backend-nodes-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -1936,6 +2016,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-startup",
+]
+
+[[package]]
+name = "backend-postmaster-pmchild-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2277,6 +2366,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -2318,6 +2408,24 @@ name = "backend-storage-ipc-dsm-core-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-storage-ipc-ipc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-storage-ipc-ipci-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -3151,6 +3259,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-init-postinit-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-init-small"
 version = "0.0.0"
 dependencies = [
@@ -3212,7 +3329,10 @@ dependencies = [
 name = "backend-utils-misc-guc-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-error",
+ "types-guc",
 ]
 
 [[package]]
@@ -3541,6 +3661,7 @@ dependencies = [
  "backend-access-transam-xlog",
  "backend-access-transam-xlogprefetcher",
  "backend-access-transam-xlogstats",
+ "backend-bootstrap-bootstrap",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
  "backend-executor-execAmi",

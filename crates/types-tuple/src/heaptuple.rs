@@ -117,6 +117,11 @@ const _: () = assert!(FirstLowInvalidHeapAttributeNumber == -7);
 pub const VARHDRSZ: usize = core::mem::size_of::<i32>();
 pub const HIGHBIT: i32 = 0x80;
 pub const MINIMAL_TUPLE_OFFSET: usize = 8;
+/// `ATTRIBUTE_FIXED_PART_SIZE` (access/tupdesc.h): the on-disk size of the
+/// fixed-width part of `FormData_pg_attribute`, i.e. through `attcollation`.
+/// The C macro computes `offsetof(FormData_pg_attribute, attcollation) +
+/// sizeof(Oid)`; on the catalog ABI this is a fixed 100 bytes.
+pub const ATTRIBUTE_FIXED_PART_SIZE: usize = 100;
 pub const INDEX_SIZE_MASK: uint16 = 0x1FFF;
 pub const INDEX_AM_RESERVED_BIT: uint16 = 0x2000;
 pub const INDEX_VAR_MASK: uint16 = 0x4000;

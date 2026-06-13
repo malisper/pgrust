@@ -28,3 +28,9 @@ seam_core::seam!(
         parent_subid: SubTransactionId,
     )
 );
+
+seam_core::seam!(
+    /// `set_max_safe_fds()` (fd.c): probe how many files can be opened and set
+    /// `max_safe_fds`. `ereport(FATAL)` when too few are available.
+    pub fn set_max_safe_fds() -> types_error::PgResult<()>
+);
