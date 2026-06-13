@@ -467,6 +467,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-opclass",
+ "types-tableam",
 ]
 
 [[package]]
@@ -1391,6 +1392,7 @@ dependencies = [
 name = "backend-access-transam-xlog"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlog-seams",
  "backend-utils-error",
  "mcx",
  "types-control",
@@ -1962,6 +1964,15 @@ dependencies = [
 
 [[package]]
 name = "backend-catalog-pg-namespace-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-catalog-pg-opclass-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
@@ -4098,6 +4109,8 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-parsenodes",
@@ -6779,12 +6792,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-json"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-jsonfuncs-seams",
+ "backend-utils-adt-timestamp-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn-seams",
+ "common-jsonapi-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-json",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-json-seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
+ "types-datum",
  "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonb-util"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-adt-json-seams",
+ "backend-utils-adt-numeric-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error",
+ "backend-utils-misc-stack-depth-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-jsonb",
+ "types-numeric",
+]
+
+[[package]]
+name = "backend-utils-adt-jsonfuncs-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-json",
 ]
 
 [[package]]
@@ -7060,6 +7122,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
 ]
 
@@ -7162,6 +7225,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-catcache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation",
+ "backend-access-common-tupdesc",
+ "backend-access-index-genam-seams",
+ "backend-access-index-indexam-seams",
+ "backend-access-transam-xact-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-cache-catcache-seams",
+ "backend-utils-cache-inval-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small-seams",
+ "common-hashfn-seams",
+ "mcx",
+ "seam-core",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-cache-catcache-seams"
 version = "0.0.0"
 dependencies = [
@@ -7233,6 +7325,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-cache-lsyscache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-amapi-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-pg-opclass-seams",
+ "backend-nodes-copyfuncs-pc-seams",
+ "backend-nodes-makefuncs-seams",
+ "backend-nodes-read-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "seam-core",
+ "types-array",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-hash",
+ "types-nodes",
+ "types-opclass",
+ "types-selfuncs",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-cache-lsyscache-seams"
 version = "0.0.0"
 dependencies = [
@@ -7243,6 +7365,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
  "types-selfuncs",
 ]
 
@@ -7325,6 +7448,41 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-cache-relcache"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-access-index-amapi-seams",
+ "backend-access-table-tableam-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-access-transam-xact-seams",
+ "backend-access-transam-xlog-seams",
+ "backend-catalog-catalog-seams",
+ "backend-catalog-storage-seams",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-relmapper-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash",
+ "backend-utils-init-small-seams",
+ "backend-utils-time-snapmgr-seams",
+ "mcx",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-nodes",
+ "types-partition",
+ "types-rel",
+ "types-reloptions",
+ "types-storage",
+ "types-tableam",
+ "types-tuple",
+ "types-wal",
 ]
 
 [[package]]
@@ -7454,12 +7612,14 @@ dependencies = [
  "types-cache",
  "types-cluster",
  "types-core",
+ "types-datum",
  "types-error",
  "types-fmgr",
  "types-format-type",
  "types-hash",
  "types-namespace",
  "types-partition",
+ "types-selfuncs",
  "types-storage",
  "types-tuple",
 ]
@@ -8477,6 +8637,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-jsonapi-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-json",
+]
+
+[[package]]
 name = "common-path-seams"
 version = "0.0.0"
 dependencies = [
@@ -8820,6 +8989,7 @@ dependencies = [
  "backend-utils-adt-acl",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-format-type",
+ "backend-utils-adt-json",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-numutils",
  "backend-utils-adt-pg-locale-icu",
@@ -8828,7 +8998,10 @@ dependencies = [
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",
  "backend-utils-cache-attoptcache",
+ "backend-utils-cache-catcache",
  "backend-utils-cache-inval",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-relcache",
  "backend-utils-cache-relfilenumbermap",
  "backend-utils-cache-relmapper",
  "backend-utils-cache-spccache",
@@ -9132,6 +9305,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "types-json"
+version = "0.0.0"
+dependencies = [
+ "types-core",
+ "types-datum",
+]
+
+[[package]]
+name = "types-jsonb"
+version = "0.0.0"
+dependencies = [
+ "types-datum",
+]
+
+[[package]]
 name = "types-locale"
 version = "0.0.0"
 dependencies = [
@@ -9200,6 +9388,13 @@ dependencies = [
  "types-sortsupport",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "types-numeric"
+version = "0.0.0"
+dependencies = [
+ "types-datum",
 ]
 
 [[package]]
