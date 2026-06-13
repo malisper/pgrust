@@ -237,6 +237,31 @@ fn reports_abi_extra_mismatch() {
 }
 
 #[test]
+fn abi_extra_compares_as_c_string_not_full_array() {
+    // C compares abi_extra with strcmp (stops at the first NUL). A library
+    // whose abi_extra matches "PostgreSQL\0" but differs only in bytes *after*
+    // the terminator, with every other ABI field equal, must NOT trip the ABI
+    // branch: C falls through to the field-by-field section, finds everything
+    // equal, and emits the magic-block-mismatch fallback. (This function is
+    // reached after the full-32-byte abi_fields memcmp in internal_load_library
+    // has already failed, so this padding-only case is genuinely reachable.)
+    let mut abi = PgAbiValues::server();
+    // "PostgreSQL\0" prefix identical to the server; differ only past the NUL.
+    abi.abi_extra[11] = b'X';
+    assert_ne!(abi.abi_extra, PgAbiValues::server().abi_extra);
+
+    let error = incompatible_module_error("demo", &abi);
+    assert_eq!(
+        error.message(),
+        "incompatible library \"demo\": magic block mismatch"
+    );
+    assert_eq!(
+        error.detail(),
+        Some("Magic block has unexpected length or padding difference.")
+    );
+}
+
+#[test]
 fn reports_field_mismatch_details() {
     let mut abi = PgAbiValues::server();
     abi.funcmaxargs += 1;

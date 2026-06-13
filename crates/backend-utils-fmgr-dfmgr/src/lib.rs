@@ -287,7 +287,12 @@ pub fn incompatible_module_error(libname: &str, module_magic_data: &PgAbiValues)
     // Similarly, if the ABI extra field doesn't match, error out. Other fields
     // below might also mismatch, but that isn't useful information if you're
     // using the wrong product altogether.
-    if module_magic_data.abi_extra != magic_data.abi_extra {
+    //
+    // C compares with `strcmp(module_magic_data->abi_extra, magic_data.abi_extra)`,
+    // i.e. C-string semantics that stop at the first NUL — bytes after the
+    // terminator do not participate. Mirror that exactly by comparing the
+    // NUL-terminated prefixes rather than the full 32-byte arrays.
+    if abi_extra_cstr(&module_magic_data.abi_extra) != abi_extra_cstr(&magic_data.abi_extra) {
         return PgError::error(format!(
             "incompatible library \"{libname}\": ABI mismatch"
         ))
@@ -727,6 +732,16 @@ fn first_path_var_separator(pathlist: &str) -> Option<usize> {
 /// `SAME_INODE(stat_buf, *file_scanner)` (non-Windows): same inode and device.
 fn same_inode(identity: &FileIdentity, module: &LoadedModule) -> bool {
     identity.inode == module.identity.inode && identity.device == module.identity.device
+}
+
+/// The NUL-terminated prefix of an `abi_extra` byte array, modeling C-string
+/// (`strcmp`) semantics: everything up to but not including the first NUL.
+/// `incompatible_module_error` compares two of these to mirror the C
+/// `strcmp(module_magic_data->abi_extra, magic_data.abi_extra)`, which ignores
+/// any bytes following the terminator.
+fn abi_extra_cstr(bytes: &[u8; 32]) -> &[u8] {
+    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &bytes[..nul]
 }
 
 /// Render the NUL-terminated `abi_extra` byte array as a string for error
