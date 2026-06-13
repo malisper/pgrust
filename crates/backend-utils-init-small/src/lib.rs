@@ -15,6 +15,12 @@ pub fn init_seams() {
     backend_utils_init_small_seams::work_mem::set(globals::work_mem);
     backend_utils_init_small_seams::max_worker_processes::set(globals::max_worker_processes);
     backend_utils_init_small_seams::max_parallel_workers::set(globals::max_parallel_workers);
+    backend_utils_init_small_seams::fast_path_lock_groups_per_backend::set(
+        globals::fast_path_lock_groups_per_backend,
+    );
+    backend_utils_init_small_seams::set_fast_path_lock_groups_per_backend::set(
+        globals::set_fast_path_lock_groups_per_backend,
+    );
     backend_utils_init_small_seams::my_proc_pid::set(globals::MyProcPid);
     backend_utils_init_small_seams::my_proc_number::set(globals::MyProcNumber);
     backend_utils_init_small_seams::is_under_postmaster::set(globals::IsUnderPostmaster);

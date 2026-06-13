@@ -61,12 +61,14 @@ use types_execparallel::{
     BackgroundWorkerHandle, DsmSegmentHandle as ExecDsmSeg, FixedParallelExecutorState,
     FixedStateHandle, InstrumentationHandle, JitInstrumentationHandle, ParallelContextHandle,
     ParallelWorkerContextHandle, SerializeCursor, SharedExecutorInstrumentation,
-    ShmTocEstimatorHandle, ShmTocHandle as ExecShmToc,
+    ShmMqAttachHandle, ShmTocEstimatorHandle, ShmTocHandle as ExecShmToc,
 };
 use types_parallel::{
     dsm_handle, BgwHandle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState, ShmMqHandleHandle,
     ShmMqResult,
 };
+
+use backend_storage_ipc_shm_mq_seams as shmmq;
 use types_storage::storage::shm_toc_estimator;
 
 use backend_access_transam_parallel_rt_seams as rt;
@@ -145,20 +147,31 @@ static INTERNAL_PARALLEL_WORKERS: [&str; 5] = [
 // owns).
 // ===========================================================================
 
+/// `shm_mq_handle *error_mqh` — the OPTION (i) registry id the `shm-mq` owner
+/// hands back from `shm_mq_attach`, or [`ERROR_MQH_NULL`] for the C NULL
+/// `shm_mq_handle *`. (execParallel's `ShmMqAttachHandle` has no NULL sentinel
+/// of its own; `0` is the registry's NULL because ids are 1-based.)
+const ERROR_MQH_NULL: ShmMqAttachHandle = ShmMqAttachHandle(0);
+
+/// `error_mqh == NULL`.
+fn error_mqh_is_null(h: ShmMqAttachHandle) -> bool {
+    h.0 == 0
+}
+
 /// Per-worker leader-side state (`ParallelWorkerInfo`, access/parallel.h:24-28).
 #[derive(Clone, Copy, Debug)]
 struct ParallelWorkerInfo {
     /// `BackgroundWorkerHandle *bgwhandle`.
     bgwhandle: BgwHandle,
     /// `shm_mq_handle *error_mqh`.
-    error_mqh: ShmMqHandleHandle,
+    error_mqh: ShmMqAttachHandle,
 }
 
 impl ParallelWorkerInfo {
     const fn new() -> Self {
         Self {
             bgwhandle: BgwHandle::NULL,
-            error_mqh: ShmMqHandleHandle::NULL,
+            error_mqh: ERROR_MQH_NULL,
         }
     }
 }
@@ -298,6 +311,56 @@ thread_local! {
 
 fn with_globals<R>(f: impl FnOnce(&mut ParallelGlobals) -> R) -> R {
     G.with(|g| f(&mut g.borrow_mut()))
+}
+
+// ===========================================================================
+// Worker-side DSM/shm_toc attach registry (family `worker-attach`).
+//
+// `ParallelWorkerMain` (parallel.c:1351-1360) genuinely crosses into a segment
+// the *leader* created: `dsm_attach` then `shm_toc_attach(PARALLEL_MAGIC,
+// dsm_segment_address(seg))`. Unlike the leader, the worker has no
+// `ParallelContext` to own these — and the C comment at parallel.c:1346-1349 is
+// explicit that the worker keeps no ResourceOwner, so its DSM mapping "survives
+// until process exit". We mirror that by holding the real [`DsmSegment`] RAII
+// guard and the real attached [`ShmToc`] in this process-global registry, keyed
+// by the segment's real base address (the value the worker threads onward as its
+// `ExecShmToc`). The guard is never dropped on the success path — that is the C
+// "survives until process exit" semantics, not a leak.
+// ===========================================================================
+
+/// One worker-attached segment: the real RAII guard (keeps the mapping live) and
+/// the real `ShmToc` built over its base by `ShmToc::attach`.
+struct WorkerAttached {
+    /// Real base address of the mapped segment (`dsm_segment_address(seg)`); the
+    /// registry key and the worker's `ExecShmToc` payload.
+    base: usize,
+    /// The real `DsmSegment` — held so the mapping outlives the worker call
+    /// (C: no ResourceOwner, mapping survives to process exit).
+    _seg_guard: DsmSegment,
+    /// The real `shm_toc` attached over `base` (`shm_toc_attach`).
+    toc: ShmToc,
+}
+
+thread_local! {
+    /// Live worker-attached segments for this process. A worker normally has one;
+    /// the test harness drives several sequentially, so this is a small `Vec`.
+    static WORKER_ATTACHED: RefCell<Vec<WorkerAttached>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `shm_toc_lookup(toc, key, no_error)` on the worker-attached segment. Resolves
+/// the registered real `ShmToc` for `base` and performs a real in-segment lookup,
+/// returning the chunk's real address (`0` when absent and `no_error`). Panics if
+/// `base` is not a worker-attached segment (a programming error: the worker only
+/// ever looks up the segment it just attached).
+fn worker_with_toc<R>(base: usize, f: impl FnOnce(&ShmToc) -> R) -> R {
+    WORKER_ATTACHED.with(|w| {
+        let w = w.borrow();
+        let entry = w
+            .iter()
+            .find(|e| e.base == base)
+            .expect("worker shm_toc lookup on a segment that was not attached");
+        f(&entry.toc)
+    })
 }
 
 // ===========================================================================
@@ -1050,13 +1113,14 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
         // Establish error queues in dynamic shared memory.
         let error_queue_space =
             shm_toc_allocate(toc, mul_size(PARALLEL_ERROR_QUEUE_SIZE, nworkers as Size)?);
-        let eq_base = error_queue_space.0;
         let mut i = 0;
         while i < nworkers {
-            let start = eq_base + (i as Size) * PARALLEL_ERROR_QUEUE_SIZE;
-            let mq = rt::shm_mq_create::call(start, PARALLEL_ERROR_QUEUE_SIZE)?;
-            rt::shm_mq_set_receiver_to_myproc::call(mq)?;
-            workers[i as usize].error_mqh = rt::shm_mq_attach::call(mq, seg_to_parallel(seg), BgwHandle::NULL)?;
+            // C: mq = shm_mq_create(error_queue_space + i*SIZE, SIZE);
+            //    shm_mq_set_receiver(mq, MyProc);
+            //    pcxt->worker[i].error_mqh = shm_mq_attach(mq, pcxt->seg, NULL);
+            let mq = shmmq::shm_mq_create_at::call(error_queue_space, i, PARALLEL_ERROR_QUEUE_SIZE);
+            shmmq::shm_mq_set_receiver_to_myproc::call(mq);
+            workers[i as usize].error_mqh = shmmq::shm_mq_attach::call(mq, seg_to_exec(seg))?;
             i += 1;
         }
         with_globals(|g| g.get_mut(pcxt).worker = workers);
@@ -1087,6 +1151,26 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
 /// handle the rt seams use.
 fn seg_to_parallel(seg: DsmSegmentHandle) -> DsmSegmentHandle {
     seg
+}
+
+/// The `pcxt.seg` handle as the execParallel `DsmSegmentHandle` the `shm-mq`
+/// seam consumes (both carry the real `DsmSegmentId`; `NULL`/`0` -> `None`, so
+/// the error queue gets no `on_dsm_detach` auto-detach in the private-memory
+/// no-DSM fallback — exactly C's `shm_mq_attach(mq, NULL, NULL)`).
+fn seg_to_exec(seg: DsmSegmentHandle) -> Option<ExecDsmSeg> {
+    if seg.is_null() {
+        None
+    } else {
+        Some(ExecDsmSeg(seg.0))
+    }
+}
+
+/// The `bgwhandle` as the execParallel `BackgroundWorkerHandle` the `shm-mq`
+/// seam consumes (same id value; the `shm-mq` owner resolves it to the real
+/// `BackgroundWorkerHandle` via the bgworker owner's
+/// `background_worker_handle_from_token`).
+fn bgw_to_exec(h: BgwHandle) -> BackgroundWorkerHandle {
+    BackgroundWorkerHandle(h.0)
 }
 
 // ===========================================================================
@@ -1121,15 +1205,16 @@ pub fn reinitialize_parallel_dsm(pcxt: ParallelContextHandle) -> PgResult<()> {
     if pcxt_nworkers(pcxt) > 0 {
         let error_queue_space =
             shm_toc_lookup(toc, PARALLEL_KEY_ERROR_QUEUE, false).ok_or_else(missing_error_queue_key)?;
-        let eq_base = error_queue_space.0;
         let nworkers = pcxt_nworkers(pcxt);
         let seg = with_globals(|g| g.get(pcxt).seg);
         let mut i = 0;
         while i < nworkers {
-            let start = eq_base + (i as Size) * PARALLEL_ERROR_QUEUE_SIZE;
-            let mq = rt::shm_mq_create::call(start, PARALLEL_ERROR_QUEUE_SIZE)?;
-            rt::shm_mq_set_receiver_to_myproc::call(mq)?;
-            let mqh = rt::shm_mq_attach::call(mq, seg_to_parallel(seg), BgwHandle::NULL)?;
+            // C: mq = shm_mq_create(error_queue_space + i*SIZE, SIZE);
+            //    shm_mq_set_receiver(mq, MyProc);
+            //    pcxt->worker[i].error_mqh = shm_mq_attach(mq, pcxt->seg, NULL);
+            let mq = shmmq::shm_mq_create_at::call(error_queue_space, i, PARALLEL_ERROR_QUEUE_SIZE);
+            shmmq::shm_mq_set_receiver_to_myproc::call(mq);
+            let mqh = shmmq::shm_mq_attach::call(mq, seg_to_exec(seg))?;
             with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = mqh);
             i += 1;
         }
@@ -1197,7 +1282,8 @@ pub fn launch_parallel_workers(pcxt: ParallelContextHandle) -> PgResult<()> {
                 c.worker[i as usize].bgwhandle = bgwhandle;
                 c.worker[i as usize].error_mqh
             });
-            rt::shm_mq_set_handle::call(error_mqh, bgwhandle)?;
+            // C: shm_mq_set_handle(pcxt->worker[i].error_mqh, bgwhandle);
+            shmmq::shm_mq_set_handle::call(error_mqh, bgw_to_exec(bgwhandle));
             with_globals(|g| g.get_mut(pcxt).nworkers_launched += 1);
         } else {
             // We've hit the max_worker_processes limit; future registrations
@@ -1209,8 +1295,8 @@ pub fn launch_parallel_workers(pcxt: ParallelContextHandle) -> PgResult<()> {
                 c.worker[i as usize].bgwhandle = BgwHandle::NULL;
                 c.worker[i as usize].error_mqh
             });
-            rt::shm_mq_detach::call(error_mqh)?;
-            with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ShmMqHandleHandle::NULL);
+            shmmq::shm_mq_detach::call(error_mqh);
+            with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ERROR_MQH_NULL);
         }
         i += 1;
     }
@@ -1254,7 +1340,7 @@ pub fn wait_for_parallel_workers_to_attach(pcxt: ParallelContextHandle) -> PgRes
 
             // If error_mqh is NULL, the worker has already exited cleanly.
             let error_mqh = with_globals(|g| g.get(pcxt).worker[i as usize].error_mqh);
-            if error_mqh.is_null() {
+            if error_mqh_is_null(error_mqh) {
                 with_globals(|g| {
                     let c = g.get_mut(pcxt);
                     c.known_attached_workers[i as usize] = true;
@@ -1268,8 +1354,8 @@ pub fn wait_for_parallel_workers_to_attach(pcxt: ParallelContextHandle) -> PgRes
             let (status, _pid) = rt::get_background_worker_pid::call(bgwhandle)?;
             if status == BgwHandleStatus::Started {
                 // Has the worker attached to the error queue?
-                let mq = rt::shm_mq_get_queue::call(error_mqh)?;
-                if !rt::shm_mq_get_sender::call(mq)?.is_null() {
+                let mq = shmmq::shm_mq_get_queue::call(error_mqh);
+                if shmmq::shm_mq_get_sender::call(mq).is_some() {
                     with_globals(|g| {
                         let c = g.get_mut(pcxt);
                         c.known_attached_workers[i as usize] = true;
@@ -1278,8 +1364,8 @@ pub fn wait_for_parallel_workers_to_attach(pcxt: ParallelContextHandle) -> PgRes
                 }
             } else if status == BgwHandleStatus::Stopped {
                 // If the worker stopped without attaching, throw an error.
-                let mq = rt::shm_mq_get_queue::call(error_mqh)?;
-                if rt::shm_mq_get_sender::call(mq)?.is_null() {
+                let mq = shmmq::shm_mq_get_queue::call(error_mqh);
+                if shmmq::shm_mq_get_sender::call(mq).is_none() {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                         .errmsg("parallel worker failed to initialize")
@@ -1334,7 +1420,7 @@ pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgRes
             let (error_mqh_null, known) = with_globals(|g| {
                 let c = g.get(pcxt);
                 (
-                    c.worker[i as usize].error_mqh.is_null(),
+                    error_mqh_is_null(c.worker[i as usize].error_mqh),
                     c.known_attached_workers[i as usize],
                 )
             });
@@ -1362,7 +1448,7 @@ pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgRes
                     let c = g.get(pcxt);
                     (c.worker[i as usize].error_mqh, c.worker[i as usize].bgwhandle)
                 });
-                if error_mqh.is_null()
+                if error_mqh_is_null(error_mqh)
                     || bgwhandle.is_null()
                     || rt::get_background_worker_pid::call(bgwhandle)?.0 != BgwHandleStatus::Stopped
                 {
@@ -1372,8 +1458,8 @@ pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgRes
 
                 // Check whether the worker stopped without ever attaching to the
                 // error queue. If so, throw an error.
-                let mq = rt::shm_mq_get_queue::call(error_mqh)?;
-                if rt::shm_mq_get_sender::call(mq)?.is_null() {
+                let mq = shmmq::shm_mq_get_queue::call(error_mqh);
+                if shmmq::shm_mq_get_sender::call(mq).is_none() {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                         .errmsg("parallel worker failed to initialize")
@@ -1461,10 +1547,10 @@ pub fn destroy_parallel_context(pcxt: ParallelContextHandle) -> PgResult<()> {
                 let c = g.get(pcxt);
                 (c.worker[i as usize].error_mqh, c.worker[i as usize].bgwhandle)
             });
-            if !error_mqh.is_null() {
+            if !error_mqh_is_null(error_mqh) {
                 rt::terminate_background_worker::call(bgwhandle)?;
-                rt::shm_mq_detach::call(error_mqh)?;
-                with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ShmMqHandleHandle::NULL);
+                shmmq::shm_mq_detach::call(error_mqh);
+                with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ERROR_MQH_NULL);
             }
             i += 1;
         }
@@ -1557,10 +1643,10 @@ pub fn process_parallel_messages() -> PgResult<()> {
             // without blocking.
             loop {
                 let error_mqh = with_globals(|g| g.get(pcxt).worker[i as usize].error_mqh);
-                if error_mqh.is_null() {
+                if error_mqh_is_null(error_mqh) {
                     break;
                 }
-                let (res, data) = rt::shm_mq_receive::call(error_mqh)?;
+                let (res, data) = shmmq::shm_mq_receive::call(error_mqh)?;
                 match res {
                     Some(ShmMqResult::WouldBlock) => break,
                     Some(ShmMqResult::Success) => {
@@ -1642,8 +1728,8 @@ fn process_parallel_message(pcxt: ParallelContextHandle, i: i32, msg: &[u8]) -> 
 
         m if m == PqMsg_Terminate => {
             let error_mqh = with_globals(|g| g.get(pcxt).worker[i as usize].error_mqh);
-            rt::shm_mq_detach::call(error_mqh)?;
-            with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ShmMqHandleHandle::NULL);
+            shmmq::shm_mq_detach::call(error_mqh);
+            with_globals(|g| g.get_mut(pcxt).worker[i as usize].error_mqh = ERROR_MQH_NULL);
         }
 
         _ => {
@@ -1717,25 +1803,61 @@ pub fn parallel_worker_main(main_arg: Datum) -> PgResult<()> {
     // Set up a memory context to work in.
     rt::worker_create_memory_context::call()?;
 
-    // Attach to the DSM segment and find its TOC. The worker side genuinely
-    // crosses processes (the hard core); the DSM/shm_toc attach lives in the
-    // owning subsystem behind the rt seams.
-    let seg = rt::dsm_attach::call(datum_as_u32(main_arg) as dsm_handle)?;
-    if seg.is_null() {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-            .errmsg("could not map dynamic shared memory segment")
-            .into_error());
-    }
-    let toc_base = rt::shm_toc_attach::call(rt::dsm_segment_address::call(seg)?)?;
-    if toc_base == 0 {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-            .errmsg("invalid magic number in dynamic shared memory segment")
-            .into_error());
-    }
-    // The worker-side toc lookups address the attached segment buffer; the
-    // worker uses a context-less toc handle derived from the attach base.
+    // Attach to the dynamic shared memory segment for the parallel query, and
+    // find its table of contents. The worker side genuinely crosses processes
+    // into the segment the leader created (the hard core): real `dsm_attach`
+    // returns a real `DsmSegment`, and a real `ShmToc::attach(PARALLEL_MAGIC,
+    // base)` reads the in-segment header the leader wrote.
+    //
+    // Note: at this point we have not created any ResourceOwner in this process,
+    // so our DSM mapping survives until process exit (C: parallel.c:1346-1349).
+    // We model that by parking the `DsmSegment` guard in the process-global
+    // worker registry and never dropping it on the success path.
+    let seg = worker_attach_segment(datum_as_u32(main_arg) as dsm_handle)?;
+    // C: seg == NULL -> "could not map dynamic shared memory segment".
+    let seg = match seg {
+        Some(seg) => seg,
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("could not map dynamic shared memory segment")
+                .into_error());
+        }
+    };
+    let id = seg.id();
+    let base = dsm_segment_address(id);
+    debug_assert!(!base.is_null(), "dsm_segment_address returned NULL");
+    let base_nn = NonNull::new(base).expect("dsm segment base is non-null");
+    // C: toc = shm_toc_attach(PARALLEL_MAGIC, dsm_segment_address(seg));
+    //    toc == NULL (magic mismatch) -> "invalid magic number ...".
+    // SAFETY: `base_nn` points at the live, mapped segment header; the segment
+    // outlives the toc because we hold the `DsmSegment` guard for process life.
+    let real_toc = match unsafe { ShmToc::attach(PARALLEL_MAGIC, base_nn) } {
+        Some(t) => t,
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("invalid magic number in dynamic shared memory segment")
+                .into_error());
+        }
+    };
+    let toc_base = base as usize;
+    // Park the real guard + real toc so the mapping survives the call (C: no
+    // ResourceOwner; mapping survives to process exit) and the worker lookups can
+    // recover the real `ShmToc` by base.
+    WORKER_ATTACHED.with(|w| {
+        w.borrow_mut().push(WorkerAttached {
+            base: toc_base,
+            _seg_guard: seg,
+            toc: real_toc,
+        })
+    });
+    // The execParallel-visible segment handle carries the real `DsmSegmentId`
+    // (opacity-inherited), exactly like the leader side.
+    let seg = seg_handle_of(id);
+    // The worker-side toc lookups address the attached segment buffer; the worker
+    // threads the segment's real base as its toc handle (so `invoke_entrypoint`
+    // hands the entrypoint the real `shm_toc` base).
     let toc = ExecShmToc(toc_base);
 
     // Look up fixed parallel state.
@@ -1750,13 +1872,22 @@ pub fn parallel_worker_main(main_arg: Datum) -> PgResult<()> {
     rt::register_parallel_worker_shutdown::call(seg)?;
 
     // Find and attach to the error queue provided for us.
-    let error_queue_space = worker_lookup(toc, PARALLEL_KEY_ERROR_QUEUE)?;
-    let mq_addr =
-        error_queue_space + (with_globals(|g| g.parallel_worker_number) as Size) * PARALLEL_ERROR_QUEUE_SIZE;
-    let mq = rt::shm_mq_create::call(mq_addr, PARALLEL_ERROR_QUEUE_SIZE)?;
-    rt::shm_mq_set_sender_to_myproc::call(mq)?;
-    let mqh = rt::shm_mq_attach::call(mq, seg, BgwHandle::NULL)?;
-    rt::pq_redirect_to_shm_mq::call(seg, mqh)?;
+    // C: error_queue_space = shm_toc_lookup(toc, PARALLEL_KEY_ERROR_QUEUE, false);
+    //    mq = (shm_mq *) (error_queue_space + ParallelWorkerNumber*SIZE);
+    //    shm_mq_set_sender(mq, MyProc);
+    //    mqh = shm_mq_attach(mq, seg, NULL);
+    //    pq_redirect_to_shm_mq(seg, mqh);
+    // The error_queue_space chunk is a real in-segment address; the worker just
+    // *casts* `chunk + ParallelWorkerNumber*SIZE` to the already-created queue
+    // (only the leader runs `shm_mq_create`; re-creating here would wipe the
+    // leader's `mq_set_receiver`). `seg` carries the real `DsmSegmentId`, so the
+    // queue auto-detaches with the segment.
+    let error_queue_space = SerializeCursor(worker_lookup(toc, PARALLEL_KEY_ERROR_QUEUE)?);
+    let worker_number = with_globals(|g| g.parallel_worker_number);
+    let mq = shmmq::shm_mq_at::call(error_queue_space, worker_number, PARALLEL_ERROR_QUEUE_SIZE);
+    shmmq::shm_mq_set_sender_to_myproc::call(mq);
+    let mqh = shmmq::shm_mq_attach::call(mq, seg_to_exec(seg))?;
+    rt::pq_redirect_to_shm_mq::call(seg, ShmMqHandleHandle(mqh.0))?;
     rt::pq_set_parallel_leader::call(fps.parallel_leader_pid, fps.parallel_leader_proc_number)?;
 
     // Join locking group. If we can't, the leader has gone away, so exit quietly.
@@ -1882,16 +2013,38 @@ pub fn parallel_worker_main(main_arg: Datum) -> PgResult<()> {
     Ok(())
 }
 
-/// `shm_toc_lookup(toc, key, false)` on the worker-attached segment. The base
-/// address of the chunk is what the worker threads onward. The worker side
-/// genuinely crosses into the attached DSM segment, so the lookup is a seam.
-fn worker_lookup(toc: ExecShmToc, key: u64) -> PgResult<usize> {
-    rt::worker_toc_lookup::call(toc.0, key, false)
+/// `dsm_attach(handle)` on the worker side — the real `dsm-core` attach.
+/// `Ok(None)` when the segment is unknown (everyone, including the creator,
+/// detached before we got here): C returns NULL and the caller `ereport(ERROR)`s.
+/// The descriptor is allocated in `TopMemoryContext` (C global), matching the
+/// leader's `dsm_create` so the mapping outlives the (short-lived) caller.
+fn worker_attach_segment(handle: dsm_handle) -> PgResult<Option<DsmSegment>> {
+    let top = rt::top_memory_context::call();
+    backend_storage_ipc_dsm_core::dsm::dsm_attach(handle, top)
 }
 
-/// `shm_toc_lookup(toc, key, true)` — 0 when absent.
+/// `shm_toc_lookup(toc, key, false)` on the worker-attached segment — a real
+/// in-segment lookup against the leader-written TOC. The chunk's *real address*
+/// is what the worker threads onward (family `shm-toc-address`). `shm_toc_lookup`
+/// `elog(ERROR)`s on a missing required key; the leader writes every required key
+/// before launching, so a miss is corruption — propagate the error.
+fn worker_lookup(toc: ExecShmToc, key: u64) -> PgResult<usize> {
+    worker_with_toc(toc.0, |real| {
+        let found = real.lookup(key, false)?;
+        Ok(found
+            .expect("shm_toc_lookup on missing required key")
+            .as_ptr() as usize)
+    })
+}
+
+/// `shm_toc_lookup(toc, key, true)` — 0 when absent (real in-segment lookup).
 fn worker_lookup_opt(toc: ExecShmToc, key: u64) -> usize {
-    rt::worker_toc_lookup::call(toc.0, key, true).unwrap_or(0)
+    worker_with_toc(toc.0, |real| {
+        real.lookup(key, true)
+            .ok()
+            .flatten()
+            .map_or(0, |p| p.as_ptr() as usize)
+    })
 }
 
 // Convert a `Datum` carrying a `uint32` back to that u32 (UInt32GetDatum inverse).
@@ -2329,5 +2482,460 @@ mod dsm_substrate_tests {
         }
 
         drop_test_context(pcxt, top);
+    }
+
+    /// Family `worker-attach`: a worker genuinely attaches to a segment a
+    /// *leader* created and resolves a real chunk address through the worker-side
+    /// `ShmToc`. This drives the converted `ParallelWorkerMain` attach core
+    /// (`worker_attach_segment` -> real `dsm_attach`; `ShmToc::attach` over
+    /// `dsm_segment_address`; `worker_lookup`/`worker_lookup_opt` -> real
+    /// in-segment lookups) — no emulation tokens, no fabricated ids.
+    #[test]
+    fn worker_attaches_to_leader_segment_and_resolves_real_chunk() {
+        use backend_storage_ipc_dsm_core::dsm::{
+            dsm_create, dsm_detach, dsm_pin_segment, dsm_segment_handle, dsm_unpin_segment,
+        };
+
+        let _g = guard();
+        let top = dsm_test_bringup();
+        install_top_mcx_once();
+
+        // --- LEADER: create a real DSM segment, lay a real shm_toc over it,
+        // allocate + insert a chunk, and write a recognizable value into it. ---
+        const SIZE: usize = 8192;
+        let leader_seg = dsm_create(SIZE, 0, top)
+            .expect("dsm_create errored")
+            .expect("dsm_create returned None");
+        let id = leader_seg.id();
+        let handle = dsm_segment_handle(id);
+        let leader_base = dsm_segment_address(id);
+        assert!(!leader_base.is_null());
+        let leader_base_nn = NonNull::new(leader_base).unwrap();
+        // SAFETY: freshly created, page-aligned, SIZE-byte writable segment.
+        let leader_toc = unsafe { ShmToc::create(PARALLEL_MAGIC, leader_base_nn, SIZE) };
+        const TEST_KEY: u64 = PARALLEL_KEY_FIXED;
+        const SENTINEL: u8 = 0xC7;
+        let chunk = leader_toc.allocate(64).expect("leader allocate");
+        // SAFETY: chunk is a real in-segment address from this segment.
+        unsafe { chunk.as_ptr().write(SENTINEL) };
+        let chunk_off = chunk.as_ptr() as usize - leader_base as usize;
+        // SAFETY: chunk addresses live shared memory in the segment.
+        unsafe { leader_toc.insert(TEST_KEY, chunk).expect("leader insert") };
+
+        // Pin the segment so it survives with no mapping, then detach the leader's
+        // mapping — exactly the state a freshly-started worker backend sees.
+        dsm_pin_segment(id).expect("dsm_pin_segment");
+        dsm_detach(leader_seg.into_id()).expect("dsm_detach (leader)");
+
+        // --- WORKER: the converted attach core. ---
+        let seg = worker_attach_segment(handle)
+            .expect("worker_attach_segment errored")
+            .expect("worker_attach_segment returned None for a live (pinned) segment");
+        let wid = seg.id();
+        let wbase = dsm_segment_address(wid);
+        assert!(!wbase.is_null());
+        let wbase_nn = NonNull::new(wbase).unwrap();
+        // Real shm_toc_attach over the worker's mapping: the magic the leader
+        // wrote must match.
+        // SAFETY: wbase addresses the worker's live mapping of the same segment.
+        let real_toc = unsafe { ShmToc::attach(PARALLEL_MAGIC, wbase_nn) }
+            .expect("ShmToc::attach: magic must match the leader's");
+        let toc_base = wbase as usize;
+        WORKER_ATTACHED.with(|w| {
+            w.borrow_mut().push(WorkerAttached {
+                base: toc_base,
+                _seg_guard: seg,
+                toc: real_toc,
+            })
+        });
+        let toc = ExecShmToc(toc_base);
+
+        // The worker resolves the leader's chunk to a REAL in-segment address
+        // (not the leader's address — a different mapping of the same object) and
+        // reads back the leader's sentinel through it.
+        let found = worker_lookup(toc, TEST_KEY).expect("worker_lookup");
+        assert!(
+            found >= toc_base && found < toc_base + SIZE,
+            "resolved chunk must be a real address inside the worker's mapping"
+        );
+        assert_eq!(
+            found - toc_base,
+            chunk_off,
+            "the worker resolves the same chunk offset the leader inserted"
+        );
+        // SAFETY: `found` is a real, mapped, in-segment address.
+        assert_eq!(
+            unsafe { (found as *const u8).read() },
+            SENTINEL,
+            "the worker reads the leader's bytes back across the unmap/remap"
+        );
+
+        // A missing key with no_error returns 0 (real shm_toc_lookup, noError).
+        assert_eq!(worker_lookup_opt(toc, PARALLEL_KEY_GUC), 0);
+
+        // --- teardown: drop the worker guard (detach), unpin the segment. ---
+        let guard_seg = WORKER_ATTACHED.with(|w| {
+            let mut w = w.borrow_mut();
+            let pos = w.iter().position(|e| e.base == toc_base).unwrap();
+            w.remove(pos)
+        });
+        dsm_detach(guard_seg._seg_guard.into_id()).expect("dsm_detach (worker)");
+        dsm_unpin_segment(handle).expect("dsm_unpin_segment");
+        let _ = top;
+    }
+
+    // -----------------------------------------------------------------------
+    // Family C2 (worker-shm-mq): leader/worker error-queue round-trip over a
+    // real DSM segment.
+    //
+    // This drives the exact worker error-queue attach call sites from
+    // `parallel_worker_main` — `shm_mq_at` / `shm_mq_set_sender_to_myproc`
+    // / `shm_mq_attach(seg_to_exec(seg))` (the real OPTION (i) shm_mq seam layer)
+    // — over the *real* chunk the leader laid in a real `dsm_create` segment, and
+    // verifies an actual byte round-trip through `shm_mq_send` / `shm_mq_receive`.
+    // The attach threads the real `DsmSegmentId` (so the queue gets a real
+    // `on_dsm_detach`) and the real `my_latch()`; nothing is emulated.
+    // -----------------------------------------------------------------------
+
+    use std::sync::Once as ShmMqOnce;
+
+    static INSTALL_SHM_MQ: ShmMqOnce = ShmMqOnce::new();
+
+    /// Install the OPTION (i) shm_mq seam layer plus the few harness seams the
+    /// send/receive/attach paths reach that `dsm_test_bringup` does not already
+    /// provide (it sets `my_proc_number` to 0 and the interrupt flags). Latches
+    /// are single-process no-ops: `wait_latch` returns immediately so any
+    /// blocking loop makes one extra non-blocking trip and re-examines the queue,
+    /// exactly as the shm_mq unit-test harness does.
+    fn install_shm_mq_seam_layer_once() {
+        INSTALL_SHM_MQ.call_once(|| {
+            use types_storage::latch::LatchHandle;
+            use types_storage::waiteventset::WL_LATCH_SET;
+
+            // The real OPTION (i) registry-backed seam layer.
+            backend_storage_ipc_shm_mq::init_seams();
+
+            // shm_mq allocates the handle + on_dsm_detach record in the
+            // TopMemoryContext; reuse the bring-up's thread-local stand-in.
+            backend_utils_mmgr_mcxt_seams::top_memory_context::set(test_top_mcx);
+
+            // Process-latch machinery (single-process cooperating stand-ins).
+            backend_storage_lmgr_proc_seams::proc_latch::set(|procno| {
+                LatchHandle::new(procno as usize + 1)
+            });
+            backend_storage_ipc_latch_seams::my_latch::set(|| LatchHandle::new(1));
+            backend_storage_ipc_latch_seams::set_latch::set(|_latch| {});
+            backend_storage_ipc_latch_seams::reset_latch::set(|_latch| {});
+            backend_storage_ipc_latch_seams::wait_latch::set(|_latch, _events, _timeout, _wei| {
+                Ok(WL_LATCH_SET as i32)
+            });
+
+            // CHECK_FOR_INTERRUPTS in the send/receive loops: nothing pending.
+            backend_tcop_postgres_seams::check_for_interrupts::set(|| Ok(()));
+        });
+    }
+
+    #[test]
+    fn leader_worker_error_queue_roundtrip_over_real_dsm() -> PgResult<()> {
+        use backend_storage_ipc_dsm_core::dsm::{
+            dsm_create, dsm_detach, dsm_pin_segment, dsm_segment_handle, dsm_unpin_segment,
+        };
+        use backend_storage_ipc_shm_mq::{
+            shm_mq_attach as real_attach, shm_mq_create as real_create,
+            shm_mq_receive as real_receive, shm_mq_send as real_send,
+            shm_mq_set_receiver as real_set_receiver, ShmMq, SHM_MQ_SUCCESS,
+        };
+
+        let _g = guard();
+        let top = dsm_test_bringup();
+        install_top_mcx_once();
+        install_shm_mq_seam_layer_once();
+
+        // --- LEADER: a real DSM segment + real shm_toc + a real error-queue
+        // region (one PARALLEL_ERROR_QUEUE_SIZE slot for worker 0), inserted
+        // under PARALLEL_KEY_ERROR_QUEUE exactly as initialize_parallel_dsm. ---
+        const SIZE: usize = 1 << 16;
+        let leader_seg = dsm_create(SIZE, 0, top)
+            .expect("dsm_create errored")
+            .expect("dsm_create returned None");
+        let id = leader_seg.id();
+        let handle = dsm_segment_handle(id);
+        let leader_base = dsm_segment_address(id);
+        assert!(!leader_base.is_null());
+        let leader_base_nn = NonNull::new(leader_base).unwrap();
+        // SAFETY: freshly created, page-aligned, SIZE-byte writable segment.
+        let leader_toc = unsafe { ShmToc::create(PARALLEL_MAGIC, leader_base_nn, SIZE) };
+        let eq_chunk = leader_toc
+            .allocate(PARALLEL_ERROR_QUEUE_SIZE)
+            .expect("leader allocate error-queue region");
+        // SAFETY: chunk is a real in-segment address from this segment.
+        unsafe {
+            leader_toc
+                .insert(PARALLEL_KEY_ERROR_QUEUE, eq_chunk)
+                .expect("leader insert");
+        }
+        let eq_off = eq_chunk.as_ptr() as usize - leader_base as usize;
+
+        // LEADER receiver side: create the real shm_mq over the chunk, set
+        // ourselves (MyProc == 0 under the bring-up) as receiver, and attach
+        // without a segment (NULL) — the receiver outlives the queue.
+        // SAFETY: `eq_chunk` is a real, MAXALIGN'd, in-segment region.
+        let leader_mq = unsafe { real_create(eq_chunk, PARALLEL_ERROR_QUEUE_SIZE) };
+        real_set_receiver(leader_mq, 0);
+        let mut leader_h = real_attach(
+            leader_mq,
+            top,
+            None,
+            None,
+            backend_storage_ipc_latch_seams::my_latch::call(),
+        )
+        .expect("leader shm_mq_attach");
+
+        // Pin + detach the leader's mapping: the state a fresh worker sees.
+        dsm_pin_segment(id).expect("dsm_pin_segment");
+        dsm_detach(leader_seg.into_id()).expect("dsm_detach (leader)");
+
+        // --- WORKER: the converted attach core resolves the real chunk and
+        // drives the *exact* parallel_worker_main error-queue seam calls. ---
+        let seg = worker_attach_segment(handle)
+            .expect("worker_attach_segment errored")
+            .expect("worker_attach_segment returned None for a live (pinned) segment");
+        let wid = seg.id();
+        let wbase = dsm_segment_address(wid);
+        assert!(!wbase.is_null());
+        let wbase_nn = NonNull::new(wbase).unwrap();
+        // SAFETY: wbase addresses the worker's live mapping of the same segment.
+        let real_toc = unsafe { ShmToc::attach(PARALLEL_MAGIC, wbase_nn) }
+            .expect("ShmToc::attach: magic must match the leader's");
+        let toc_base = wbase as usize;
+        WORKER_ATTACHED.with(|w| {
+            w.borrow_mut().push(WorkerAttached {
+                base: toc_base,
+                _seg_guard: seg,
+                toc: real_toc,
+            })
+        });
+        let toc = ExecShmToc(toc_base);
+        let worker_seg = seg_handle_of(wid);
+
+        // C: error_queue_space = shm_toc_lookup(...); mq = (shm_mq *)(space +
+        // ParallelWorkerNumber*SIZE); shm_mq_set_sender(mq, MyProc);
+        // mqh = shm_mq_attach(mq, seg, NULL); — through the real seam layer. The
+        // worker *casts* the leader-created queue (shm_mq_at), it does not
+        // re-create it (that would wipe the leader's receiver).
+        let error_queue_space = SerializeCursor(worker_lookup(toc, PARALLEL_KEY_ERROR_QUEUE)?);
+        assert_eq!(
+            error_queue_space.0 - toc_base,
+            eq_off,
+            "worker resolves the same error-queue offset the leader inserted"
+        );
+        let worker_mq = shmmq::shm_mq_at::call(
+            error_queue_space,
+            /* ParallelWorkerNumber */ 0,
+            PARALLEL_ERROR_QUEUE_SIZE,
+        );
+        shmmq::shm_mq_set_sender_to_myproc::call(worker_mq);
+        let worker_mqh = shmmq::shm_mq_attach::call(worker_mq, seg_to_exec(worker_seg))
+            .expect("worker shm_mq_attach over real DsmSegmentId");
+
+        // The receiver-side queue now observes the worker as the sender (this is
+        // exactly wait_for_parallel_workers_to_attach's probe).
+        let probe = shmmq::shm_mq_get_queue::call(worker_mqh);
+        assert!(
+            shmmq::shm_mq_get_sender::call(probe).is_some(),
+            "leader must see the worker attached as sender on the real chunk"
+        );
+
+        // --- DATA ROUND-TRIP: the worker sends a message; the leader receives
+        // it, proving real bytes flow worker -> leader through the real shm_mq
+        // ring over the real DSM chunk. ---
+        // SAFETY: the worker-side queue base is the real in-segment chunk address.
+        let worker_send_mq =
+            unsafe { ShmMq::from_base(NonNull::new(worker_mq.0 as *mut u8).unwrap()) };
+        let mut worker_send_h = real_attach(
+            worker_send_mq,
+            top,
+            None,
+            None,
+            backend_storage_ipc_latch_seams::my_latch::call(),
+        )
+        .expect("worker sender shm_mq_attach");
+
+        let msg = b"worker error frame";
+        // SAFETY: both handles wrap the same live, attached in-segment queue.
+        let sres = unsafe { real_send(&mut worker_send_h, msg, false, true) }.expect("shm_mq_send");
+        assert_eq!(sres, SHM_MQ_SUCCESS);
+        // SAFETY: leader_h wraps the live attached queue; non-blocking receive.
+        let (rres, payload) =
+            unsafe { real_receive(&mut leader_h, false) }.expect("shm_mq_receive");
+        assert_eq!(rres, SHM_MQ_SUCCESS);
+        assert_eq!(payload, msg, "leader reads back the worker's bytes");
+
+        // --- teardown: detach worker handles, drop the worker guard, unpin. ---
+        shmmq::shm_mq_detach::call(worker_mqh);
+        let guard_seg = WORKER_ATTACHED.with(|w| {
+            let mut w = w.borrow_mut();
+            let pos = w.iter().position(|e| e.base == toc_base).unwrap();
+            w.remove(pos)
+        });
+        dsm_detach(guard_seg._seg_guard.into_id()).expect("dsm_detach (worker)");
+        dsm_unpin_segment(handle).expect("dsm_unpin_segment");
+        let _ = top;
+        Ok(())
+    }
+
+    /// Family `tqueue-substrate-check` (integration): drive execParallel's
+    /// *tuple-queue* path — `ExecParallelSetupTupleQueues` (leader) +
+    /// `ExecParallelGetReceiver` (worker) — through the exact same real seam
+    /// layer, proving the tuple queues are real shm_mq rings over real in-segment
+    /// chunk addresses, with the real `DsmSegmentId` + `Mcx<'static>` (the handle
+    /// is allocated in `top_memory_context()`) + `MyLatch` threaded into
+    /// `shm_mq_attach`. Mirrors the error-queue round-trip but over a
+    /// multi-worker tqueue region keyed by `PARALLEL_KEY_TUPLE_QUEUE`, with the
+    /// leader as receiver and the worker as sender (the C tuple-flow direction).
+    #[test]
+    fn tuple_queue_roundtrip_over_real_dsm() -> PgResult<()> {
+        use backend_storage_ipc_dsm_core::dsm::{dsm_create, dsm_detach};
+        use backend_storage_ipc_shm_mq::{
+            shm_mq_attach as real_attach, shm_mq_send as real_send, ShmMq, SHM_MQ_SUCCESS,
+        };
+
+        // execParallel.c constants (execParallel.c:69, the TUPLE_QUEUE TOC key).
+        const PARALLEL_KEY_TUPLE_QUEUE: u64 = 0xE000000000000005;
+        const PARALLEL_TUPLE_QUEUE_SIZE: usize = 65536;
+        // Two workers — exercises the `i*SIZE` chunk arithmetic in both
+        // `shm_mq_create_at` and the worker's `shm_mq_at` cast.
+        const NWORKERS: i32 = 2;
+        // The worker we round-trip through (the C `ParallelWorkerNumber`).
+        const WORKER: i32 = 1;
+
+        let _g = guard();
+        let top = dsm_test_bringup();
+        install_top_mcx_once();
+        install_shm_mq_seam_layer_once();
+
+        // --- LEADER: real DSM segment + real shm_toc; allocate the whole
+        // `mul_size(SIZE, nworkers)` tuple-queue region and create+attach one
+        // queue per worker, exactly as ExecParallelSetupTupleQueues. ---
+        let segsize: usize = mul_size(PARALLEL_TUPLE_QUEUE_SIZE, NWORKERS as usize)? + (1 << 16);
+        let leader_seg = dsm_create(segsize, 0, top)
+            .expect("dsm_create errored")
+            .expect("dsm_create returned None");
+        let id = leader_seg.id();
+        let leader_base = dsm_segment_address(id);
+        assert!(!leader_base.is_null());
+        let leader_base_nn = NonNull::new(leader_base).unwrap();
+        // SAFETY: freshly created, page-aligned, segsize-byte writable segment.
+        let leader_toc = unsafe { ShmToc::create(PARALLEL_MAGIC, leader_base_nn, segsize) };
+        let tq_region = leader_toc
+            .allocate(mul_size(PARALLEL_TUPLE_QUEUE_SIZE, NWORKERS as usize)?)
+            .expect("leader allocate tuple-queue region");
+        // SAFETY: chunk is a real in-segment address from this segment.
+        unsafe {
+            leader_toc
+                .insert(PARALLEL_KEY_TUPLE_QUEUE, tq_region)
+                .expect("leader insert tuple-queue region");
+        }
+        let tq_off = tq_region.as_ptr() as usize - leader_base as usize;
+        let tqueuespace = SerializeCursor(tq_region.as_ptr() as usize);
+
+        // Per-worker: create the real shm_mq at `region + i*SIZE`, set ourselves
+        // (the leader, MyProc==0) as receiver, attach over the real seg. This is
+        // the verbatim ExecParallelSetupTupleQueues loop body.
+        let mut leader_handles = Vec::new();
+        for i in 0..NWORKERS {
+            let mq = shmmq::shm_mq_create_at::call(tqueuespace, i, PARALLEL_TUPLE_QUEUE_SIZE);
+            shmmq::shm_mq_set_receiver_to_myproc::call(mq);
+            leader_handles.push(shmmq::shm_mq_attach::call(mq, seg_to_exec(seg_handle_of(id)))?);
+        }
+        assert_eq!(leader_handles.len(), NWORKERS as usize);
+
+        // --- WORKER (same process): unlike the error-queue round-trip we keep
+        // the leader's mapping LIVE rather than detach+re-attach, because the
+        // faithful `ExecParallelSetupTupleQueues` attaches the leader's receiver
+        // handles with `Some(seg)` (the real C call), so detaching the leader's
+        // mapping in a single process would fire their `on_dsm_detach` and mark
+        // the queues detached. The leader's `toc`/base IS the shared segment
+        // here; the worker resolves the same tuple-queue region over it and casts
+        // + attaches its own queue (ExecParallelGetReceiver: shm_mq_at,
+        // set_sender, attach over the real `seg`). ---
+        let real_toc = unsafe { ShmToc::attach(PARALLEL_MAGIC, leader_base_nn) }
+            .expect("ShmToc::attach: magic must match the leader's");
+        let toc_base = leader_base as usize;
+        WORKER_ATTACHED.with(|w| {
+            w.borrow_mut().push(WorkerAttached {
+                base: toc_base,
+                _seg_guard: leader_seg,
+                toc: real_toc,
+            })
+        });
+        let toc = ExecShmToc(toc_base);
+        let worker_seg = seg_handle_of(id);
+
+        let mqspace = SerializeCursor(worker_lookup(toc, PARALLEL_KEY_TUPLE_QUEUE)?);
+        assert_eq!(
+            mqspace.0 - toc_base,
+            tq_off,
+            "worker resolves the same tuple-queue offset the leader inserted"
+        );
+        // C: mq = (shm_mq *)(mqspace + ParallelWorkerNumber*SIZE) — a cast, not a
+        // re-create (re-creating would wipe the leader's mq_set_receiver).
+        let worker_mq =
+            shmmq::shm_mq_at::call(mqspace, WORKER, PARALLEL_TUPLE_QUEUE_SIZE);
+        shmmq::shm_mq_set_sender_to_myproc::call(worker_mq);
+        let worker_mqh = shmmq::shm_mq_attach::call(worker_mq, seg_to_exec(worker_seg))
+            .expect("worker tuple-queue shm_mq_attach over real DsmSegmentId");
+
+        // The leader's receiver queue for WORKER now sees the worker as sender —
+        // the wait_for_parallel_workers_to_attach probe.
+        let probe = shmmq::shm_mq_get_queue::call(worker_mqh);
+        assert!(
+            shmmq::shm_mq_get_sender::call(probe).is_some(),
+            "leader must see the worker attached as sender on the real tuple chunk"
+        );
+
+        // --- DATA ROUND-TRIP: worker sends a tuple frame; leader receives it on
+        // the matching per-worker queue, proving real bytes flow over the real
+        // DSM tuple chunk. ---
+        // SAFETY: the worker-side queue base is the real in-segment chunk address.
+        let worker_send_mq =
+            unsafe { ShmMq::from_base(NonNull::new(worker_mq.0 as *mut u8).unwrap()) };
+        let mut worker_send_h = real_attach(
+            worker_send_mq,
+            top,
+            None,
+            None,
+            backend_storage_ipc_latch_seams::my_latch::call(),
+        )
+        .expect("worker tuple sender shm_mq_attach");
+
+        let frame = b"parallel tuple frame";
+        // SAFETY: both handles wrap the same live, attached in-segment queue.
+        let sres =
+            unsafe { real_send(&mut worker_send_h, frame, false, true) }.expect("shm_mq_send");
+        assert_eq!(sres, SHM_MQ_SUCCESS);
+
+        // The leader receives through the SAME registry handle it attached as
+        // receiver for WORKER (`leader_handles[WORKER]`) — no second attach
+        // (that would reset the ring). This is exactly the seam the tuple-queue
+        // readers (`TupleQueueReceiver`) use: `shm_mq_receive::call`.
+        let (rres, payload) = shmmq::shm_mq_receive::call(leader_handles[WORKER as usize])?;
+        assert_eq!(rres, Some(ShmMqResult::Success));
+        assert_eq!(payload, frame, "leader reads back the worker's tuple bytes");
+
+        // --- teardown: detach the seam handles (cancels their on_dsm_detach),
+        // then release the single shared mapping. ---
+        shmmq::shm_mq_detach::call(worker_mqh);
+        for h in leader_handles {
+            shmmq::shm_mq_detach::call(h);
+        }
+        let entry = WORKER_ATTACHED.with(|w| {
+            let mut w = w.borrow_mut();
+            let pos = w.iter().position(|e| e.base == toc_base).unwrap();
+            w.remove(pos)
+        });
+        dsm_detach(entry._seg_guard.into_id()).expect("dsm_detach (segment)");
+        let _ = (top, frame, worker_send_h);
+        Ok(())
     }
 }

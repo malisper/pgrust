@@ -63,7 +63,7 @@ backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-sea
 backend-postmaster-walsummarizer-seams = { path = "../backend-postmaster-walsummarizer-seams" }
 backend-postmaster-pgarch-seams = { path = "../backend-postmaster-pgarch-seams" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
-backend-replication-walreceiver-seams = { path = "../backend-replication-walreceiver-seams" }
+backend-replication-walreceiverfuncs-seams = { path = "../backend-replication-walreceiverfuncs-seams" }
 backend-replication-slot-seams = { path = "../backend-replication-slot-seams" }
 backend-replication-logical-origin-seams = { path = "../backend-replication-logical-origin-seams" }
 backend-replication-logical-launcher-seams = { path = "../backend-replication-logical-launcher-seams" }
