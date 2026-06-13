@@ -55,7 +55,10 @@ pub fn init_seams() {
 
 /// `enlargeStringInfo(buf, needed)`: ensure room for `needed` more bytes,
 /// enforcing the `MaxAllocSize` cap with stringinfo.c's exact error.
-fn enlarge_string_info(buf: &mut StringInfo<'_>, needed: usize) -> PgResult<()> {
+///
+/// `pub`: this is `common/stringinfo.c` logic homed here until that unit is
+/// ported; `pqcomm`'s `pq_getmessage` shares this single implementation.
+pub fn enlarge_string_info(buf: &mut StringInfo<'_>, needed: usize) -> PgResult<()> {
     let len = buf.data.len();
     if needed >= MAX_ALLOC_SIZE.saturating_sub(len) {
         return Err(PgError::error(format!(

@@ -112,3 +112,22 @@ pub struct PgAddrInfo {
     pub protocol: i32,
     pub addr: SockAddr,
 }
+
+/// Failure outcome of a `secure_read`/`secure_write`-style transport call
+/// (`libpq/be-secure.c`). The C functions return `ssize_t`: `> 0` bytes
+/// transferred, `0` for EOF, `-1` for trouble with the process `errno` set.
+/// This carries the EOF/errno distinction explicitly so no load-bearing error
+/// data crosses a seam through ambient process state.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SockError {
+    /// The peer closed the connection (C return value `0`).
+    Eof,
+    /// Transport trouble (C return value `-1`): the `errno` value the C
+    /// implementation would have left in the process errno (`EINTR`,
+    /// `EAGAIN`, `EWOULDBLOCK`, real socket errors, or `0` for the defensive
+    /// "no errno set, assume EOF" case the callers handle).
+    Errno(i32),
+}
+
+/// Result of one transport read/write: bytes transferred on success.
+pub type SockResult = Result<usize, SockError>;

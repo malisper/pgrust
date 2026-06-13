@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::sync::Once;
 
 use types_error::PgResult;
-use types_net::Port;
+use types_net::{Port, SockError, SockResult};
 
 use crate::*;
 
@@ -25,11 +25,11 @@ fn fake_with_my_proc_port(f: &mut dyn FnMut(Option<&mut Port>)) {
     FAKE_PORT.with(|p| f(p.borrow_mut().as_mut()));
 }
 
-fn fake_secure_read(_port: &mut Port, buf: &mut [u8]) -> PgResult<isize> {
+fn fake_secure_read(_port: &mut Port, buf: &mut [u8]) -> PgResult<SockResult> {
     READ_SCRIPT.with(|s| {
         let mut script = s.borrow_mut();
         match script.front_mut() {
-            None => Ok(0), // EOF
+            None => Ok(Err(SockError::Eof)),
             Some(chunk) => {
                 let n = chunk.len().min(buf.len());
                 buf[..n].copy_from_slice(&chunk[..n]);
@@ -38,17 +38,17 @@ fn fake_secure_read(_port: &mut Port, buf: &mut [u8]) -> PgResult<isize> {
                 } else {
                     chunk.drain(..n);
                 }
-                Ok(n as isize)
+                Ok(Ok(n))
             }
         }
     })
 }
 
-fn fake_secure_write(_port: &mut Port, buf: &[u8]) -> PgResult<isize> {
+fn fake_secure_write(_port: &mut Port, buf: &[u8]) -> PgResult<SockResult> {
     let cap = WRITE_CHUNK.with(Cell::get);
     let n = if cap == 0 { buf.len() } else { buf.len().min(cap) };
     WRITTEN.with(|w| w.borrow_mut().extend_from_slice(&buf[..n]));
-    Ok(n as isize)
+    Ok(Ok(n))
 }
 
 fn install_fakes() {
@@ -67,10 +67,12 @@ fn fresh_connection() {
     READ_SCRIPT.with(|s| s.borrow_mut().clear());
     WRITTEN.with(|w| w.borrow_mut().clear());
     WRITE_CHUNK.with(|c| c.set(0));
+    with_pq_alloc(|st| {
+        st.send_buffer.clear();
+        st.send_buffer.resize(PQ_SEND_BUFFER_SIZE, 0);
+    });
     PQ.with(|s| {
         let mut st = s.borrow_mut();
-        st.send_buffer = vec![0; PQ_SEND_BUFFER_SIZE];
-        st.send_buffer_size = PQ_SEND_BUFFER_SIZE;
         st.send_pointer = 0;
         st.send_start = 0;
         st.recv_buffer = [0; PQ_RECV_BUFFER_SIZE];
@@ -173,9 +175,10 @@ fn getmessage_strips_length_word() {
     script_read(&wire);
 
     pq_startmsgread().unwrap();
-    let mut s = Vec::new();
+    let ctx = mcx::MemoryContext::new("MessageContext");
+    let mut s = StringInfo::new_in(ctx.mcx());
     assert_eq!(pq_getmessage(&mut s, 0x3fffffff).unwrap(), 0);
-    assert_eq!(&s, body);
+    assert_eq!(s.as_bytes(), body);
     assert!(!pq_is_reading_msg());
 }
 
@@ -185,7 +188,8 @@ fn getmessage_rejects_bad_length() {
     script_read(&2u32.to_be_bytes()); // < 4 is invalid
 
     pq_startmsgread().unwrap();
-    let mut s = Vec::new();
+    let ctx = mcx::MemoryContext::new("MessageContext");
+    let mut s = StringInfo::new_in(ctx.mcx());
     assert_eq!(pq_getmessage(&mut s, 1000).unwrap(), EOF);
 }
 
@@ -195,7 +199,8 @@ fn getmessage_respects_maxlen() {
     script_read(&100u32.to_be_bytes());
 
     pq_startmsgread().unwrap();
-    let mut s = Vec::new();
+    let ctx = mcx::MemoryContext::new("MessageContext");
+    let mut s = StringInfo::new_in(ctx.mcx());
     assert_eq!(pq_getmessage(&mut s, 50).unwrap(), EOF);
 }
 

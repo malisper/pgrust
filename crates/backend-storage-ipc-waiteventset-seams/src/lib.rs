@@ -4,6 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
+use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{WaitEvent, WaitEventSetHandle};
 
 seam_core::seam!(
@@ -17,15 +18,16 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `AddWaitEventToSet(set, events, fd, latch, NULL /* user_data */)` —
-    /// register an event; returns its position. `attach_my_latch` marshals
-    /// the C `latch` argument: `true` = `MyLatch` (the owner resolves the
-    /// per-backend latch), `false` = `NULL`. Can `elog(ERROR)` (too many
-    /// events, bad flags, kernel registration failure).
+    /// register an event; returns its position. `latch` mirrors the C
+    /// `Latch *` argument (`None` = `NULL`); `WL_LATCH_SET` callers pass the
+    /// latch they hold (C's `MyLatch` reads become explicit parameters at
+    /// the call sites). Can `elog(ERROR)` (too many events, bad flags,
+    /// kernel registration failure).
     pub fn add_wait_event_to_set(
         set: WaitEventSetHandle,
         events: u32,
         fd: types_core::pgsocket,
-        attach_my_latch: bool,
+        latch: Option<LatchHandle>,
     ) -> types_error::PgResult<i32>
 );
 

@@ -21,11 +21,25 @@ pub const WL_SOCKET_MASK: u32 = WL_SOCKET_READABLE
     | WL_SOCKET_ACCEPT
     | WL_SOCKET_CLOSED;
 
-/// Opaque handle to a `WaitEventSet *` owned by the waiteventset unit. The
+/// Opaque handle to a `WaitEventSet *` owned by the waiteventset unit (the C
+/// type is header-opaque: `typedef struct WaitEventSet WaitEventSet`). The
 /// owner allocates the set and hands consumers a stable id; `0` is never a
 /// valid handle.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct WaitEventSetHandle(pub usize);
+pub struct WaitEventSetHandle(usize);
+
+impl WaitEventSetHandle {
+    /// Mint a handle. Only the waiteventset owner (and test fakes) creates
+    /// these.
+    pub fn new(id: usize) -> Self {
+        WaitEventSetHandle(id)
+    }
+
+    /// The owner-side id this handle names.
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+}
 
 /// `struct WaitEvent` (`storage/waiteventset.h`), trimmed (`user_data`
 /// dropped: no consumer stores per-event payloads yet).

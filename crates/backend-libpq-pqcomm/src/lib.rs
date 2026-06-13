@@ -7,12 +7,14 @@
 //!
 //! - The file-static buffers/flags (`PqSendBuffer`, `PqRecvBuffer`,
 //!   `PqCommBusy`, ...) are per-backend state and live in `thread_local!`
-//!   (AGENTS.md "Backend-global state"). The send buffer is a `Vec<u8>` whose
-//!   length is `PqSendBufferSize`; it is process-lifetime
-//!   (`TopMemoryContext` in C), so it uses the global allocator with
-//!   `try_reserve` for the fallible allocating steps, like the elog port.
+//!   (AGENTS.md "Backend-global state"). The allocated pieces (`PqSendBuffer`,
+//!   `sock_paths`; `TopMemoryContext` in C) live in a crate-owned "PqComm"
+//!   memory context (`McxOwned`), with OOM surfacing via `mcx.oom(size)`.
 //! - `MyProcPort` is owned by globals.c (unported); every touch goes through
 //!   the `backend_utils_init_small_seams::with_my_proc_port` callback seam.
+//!   `MyLatch` reads translate to explicit `LatchHandle` parameters/state
+//!   (AGENTS.md "no ambient-global seams"), as does the `MaxConnections`
+//!   read in `ListenServerPort`.
 //! - `ereport(ERROR/FATAL)` paths surface as `Err(PgError)` per the repo's
 //!   PgResult divergence; COMMERROR logs and continues, exactly as in C.
 //! - Functions whose C body can reach `socket_set_nonblocking` (which
@@ -30,18 +32,20 @@ use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 
 use backend_utils_error::ereport;
+use mcx::{McxOwned, Mcx, MemoryContext, PgString, PgVec};
 use types_core::{pgsocket, PGINVALID_SOCKET, STATUS_ERROR, STATUS_OK};
 use types_datum::Datum;
 use types_error::{
     ErrorLocation, PgResult, COMMERROR, ERRCODE_CONNECTION_DOES_NOT_EXIST,
-    ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_PROTOCOL_VIOLATION, ERROR,
-    FATAL, LOG,
+    ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG,
 };
-use types_net::{AddrInfoHint, ClientSocket, PgAddrInfo, Port, SockAddr};
+use types_net::{AddrInfoHint, ClientSocket, PgAddrInfo, Port, SockAddr, SockError, SockResult};
+use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{
     WaitEvent, WaitEventSetHandle, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_CLOSED,
     WL_SOCKET_WRITEABLE,
 };
+use types_stringinfo::StringInfo;
 
 pub mod config;
 
@@ -61,8 +65,8 @@ pub const FeBeWaitSetLatchPos: i32 = 1;
 pub const FeBeWaitSetNEvents: usize = 3;
 
 // ---------------------------------------------------------------------------
-// errno access (the C code communicates with secure_read/secure_write through
-// the process errno, and so do the installed seam implementations).
+// errno access for the direct libc calls this crate makes (the secure_read/
+// secure_write seams carry their errno explicitly as `SockError`).
 // ---------------------------------------------------------------------------
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -79,10 +83,6 @@ fn errno() -> i32 {
     unsafe { *errno_location() }
 }
 
-fn set_errno(v: i32) {
-    unsafe { *errno_location() = v }
-}
-
 fn loc(funcname: &str) -> ErrorLocation {
     ErrorLocation::new("pqcomm.c", 0, funcname)
 }
@@ -92,10 +92,6 @@ fn loc(funcname: &str) -> ErrorLocation {
 // ---------------------------------------------------------------------------
 
 struct PqCommState {
-    /// `PqSendBuffer` + `PqSendBufferSize`: `send_buffer.len()` is the
-    /// allocated size (usually 8k, enlarged by `pq_putmessage_noblock`).
-    send_buffer: Vec<u8>,
-    send_buffer_size: usize,
     /// `PqSendPointer` — next index to store a byte.
     send_pointer: usize,
     /// `PqSendStart` — next index to send a byte.
@@ -117,8 +113,6 @@ struct PqCommState {
 impl PqCommState {
     const fn new() -> Self {
         PqCommState {
-            send_buffer: Vec::new(),
-            send_buffer_size: 0,
             send_pointer: 0,
             send_start: 0,
             recv_buffer: [0; PQ_RECV_BUFFER_SIZE],
@@ -130,20 +124,63 @@ impl PqCommState {
     }
 }
 
+/// The context-allocated file statics (`TopMemoryContext` in C): the send
+/// buffer and the Unix-socket path list.
+struct PqCommAlloc<'mcx> {
+    mcx: Mcx<'mcx>,
+    /// `PqSendBuffer` + `PqSendBufferSize`: `send_buffer.len()` is the
+    /// allocated size (usually 8k, enlarged by `pq_putmessage_noblock`).
+    send_buffer: PgVec<'mcx, u8>,
+    /// `static List *sock_paths` — Unix socket file paths for maintenance.
+    sock_paths: PgVec<'mcx, PgString<'mcx>>,
+}
+
+mcx::bind!(PqCommAllocTy => PqCommAlloc<'mcx>);
+
 thread_local! {
     static PQ: RefCell<PqCommState> = const { RefCell::new(PqCommState::new()) };
+    /// The owning context for [`PqCommAlloc`], created on first use.
+    static PQ_ALLOC: RefCell<Option<McxOwned<PqCommAllocTy>>> = const { RefCell::new(None) };
     /// internal_flush_buffer's `static int last_reported_send_errno`.
     static LAST_REPORTED_SEND_ERRNO: Cell<i32> = const { Cell::new(0) };
-    /// `static List *sock_paths` — Unix socket file paths for maintenance.
-    static SOCK_PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-    /// `WaitEventSet *FeBeWaitSet`.
-    static FE_BE_WAIT_SET: Cell<Option<WaitEventSetHandle>> = const { Cell::new(None) };
+    /// `WaitEventSet *FeBeWaitSet`, paired with the latch registered at
+    /// `FeBeWaitSetLatchPos` (C: `MyLatch`), which `pq_check_connection`
+    /// resets.
+    static FE_BE_WAIT_SET: Cell<Option<(WaitEventSetHandle, LatchHandle)>> =
+        const { Cell::new(None) };
+}
+
+/// Run `f` over the context-allocated pqcomm state, creating the owning
+/// "PqComm" context on first use. (C allocates these statics in
+/// `TopMemoryContext`; the mcx model has no ambient top context, so the crate
+/// owns one — OOM details name "PqComm" instead of "TopMemoryContext".)
+fn with_pq_alloc<R>(f: impl for<'mcx> FnOnce(&mut PqCommAlloc<'mcx>) -> R) -> R {
+    PQ_ALLOC.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            let owned = McxOwned::<PqCommAllocTy>::try_new(MemoryContext::new("PqComm"), |mcx| {
+                Ok(PqCommAlloc {
+                    mcx,
+                    send_buffer: PgVec::new_in(mcx),
+                    sock_paths: PgVec::new_in(mcx),
+                })
+            })
+            .unwrap_or_else(|_| unreachable!("empty PqComm state cannot fail to build"));
+            *slot = Some(owned);
+        }
+        slot.as_mut().unwrap().with_mut(f)
+    })
+}
+
+/// `PqSendBufferSize`.
+fn send_buffer_size() -> usize {
+    with_pq_alloc(|st| st.send_buffer.len())
 }
 
 /// `FeBeWaitSet` — the backend's socket/latch/postmaster-death wait set,
 /// created by [`pq_init`].
 pub fn fe_be_wait_set() -> Option<WaitEventSetHandle> {
-    FE_BE_WAIT_SET.with(Cell::get)
+    FE_BE_WAIT_SET.with(Cell::get).map(|(set, _)| set)
 }
 
 fn comm_busy() -> bool {
@@ -182,8 +219,8 @@ fn with_my_proc_port(f: &mut dyn FnMut(Option<&mut Port>)) {
     backend_utils_init_small_seams::with_my_proc_port::call(f);
 }
 
-fn secure_read_my_port(buf: &mut [u8]) -> PgResult<isize> {
-    let mut res: Option<PgResult<isize>> = None;
+fn secure_read_my_port(buf: &mut [u8]) -> PgResult<SockResult> {
+    let mut res: Option<PgResult<SockResult>> = None;
     with_my_proc_port(&mut |port| {
         if let Some(port) = port {
             res = Some(backend_libpq_be_secure_seams::secure_read::call(port, buf));
@@ -194,8 +231,8 @@ fn secure_read_my_port(buf: &mut [u8]) -> PgResult<isize> {
     res.expect("pqcomm: secure_read with no client connection (MyProcPort is NULL)")
 }
 
-fn secure_write_my_port(buf: &[u8]) -> PgResult<isize> {
-    let mut res: Option<PgResult<isize>> = None;
+fn secure_write_my_port(buf: &[u8]) -> PgResult<SockResult> {
+    let mut res: Option<PgResult<SockResult>> = None;
     with_my_proc_port(&mut |port| {
         if let Some(port) = port {
             res = Some(backend_libpq_be_secure_seams::secure_write::call(port, buf));
@@ -212,7 +249,11 @@ fn secure_write_my_port(buf: &[u8]) -> PgResult<isize> {
 /// caller stores it as `MyProcPort`), apply TCP options, initialize the
 /// message buffers, register the exit hook, switch the socket to non-blocking
 /// mode, and build `FeBeWaitSet`.
-pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
+///
+/// `my_latch` is C's `MyLatch` (globals.c), registered at
+/// `FeBeWaitSetLatchPos` — an explicit parameter per the no-ambient-global
+/// rule.
+pub fn pq_init(client_sock: &ClientSocket, my_latch: LatchHandle) -> PgResult<Port> {
     // allocate the Port struct and copy the ClientSocket contents to it
     let mut port = Port::zeroed();
     port.sock = client_sock.sock;
@@ -290,22 +331,23 @@ pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
     }
 
     // initialize state variables
-    PQ.with(|s| -> PgResult<()> {
-        let mut st = s.borrow_mut();
-        st.send_buffer = Vec::new();
-        if st.send_buffer.try_reserve_exact(PQ_SEND_BUFFER_SIZE).is_err() {
-            return Err(out_of_memory_error(PQ_SEND_BUFFER_SIZE, "pq_init"));
-        }
+    with_pq_alloc(|st| -> PgResult<()> {
+        st.send_buffer = PgVec::new_in(st.mcx);
+        st.send_buffer
+            .try_reserve_exact(PQ_SEND_BUFFER_SIZE)
+            .map_err(|_| st.mcx.oom(PQ_SEND_BUFFER_SIZE))?;
         st.send_buffer.resize(PQ_SEND_BUFFER_SIZE, 0);
-        st.send_buffer_size = PQ_SEND_BUFFER_SIZE;
+        Ok(())
+    })?;
+    PQ.with(|s| {
+        let mut st = s.borrow_mut();
         st.send_pointer = 0;
         st.send_start = 0;
         st.recv_pointer = 0;
         st.recv_length = 0;
         st.comm_busy = false;
         st.comm_reading_msg = false;
-        Ok(())
-    })?;
+    });
 
     // set up process-exit hook to close the socket
     backend_storage_ipc_seams::on_proc_exit::call(socket_close, Datum::from_usize(0));
@@ -338,39 +380,27 @@ pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
         set,
         WL_SOCKET_WRITEABLE,
         port.sock,
-        false,
+        None,
     )?;
     let latch_pos = backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
         set,
         WL_LATCH_SET,
         PGINVALID_SOCKET,
-        true,
+        Some(my_latch),
     )?;
     backend_storage_ipc_waiteventset_seams::add_wait_event_to_set::call(
         set,
         WL_POSTMASTER_DEATH,
         PGINVALID_SOCKET,
-        false,
+        None,
     )?;
-    FE_BE_WAIT_SET.with(|c| c.set(Some(set)));
+    FE_BE_WAIT_SET.with(|c| c.set(Some((set, my_latch))));
 
     // The event positions match the order we added them.
     debug_assert_eq!(socket_pos, FeBeWaitSetSocketPos);
     debug_assert_eq!(latch_pos, FeBeWaitSetLatchPos);
 
     Ok(port)
-}
-
-fn out_of_memory_error(size: usize, funcname: &str) -> types_error::PgError {
-    match ereport(ERROR)
-        .errcode(ERRCODE_OUT_OF_MEMORY)
-        .errmsg("out of memory")
-        .errdetail(format!("Failed on request of size {}.", size))
-        .finish(loc(funcname))
-    {
-        Err(e) => e,
-        Ok(()) => unreachable!("ERROR-level report returned Ok"),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -417,7 +447,9 @@ fn unixsock_path_buflen() -> usize {
 ///
 /// `family` is `AF_UNIX` or `AF_UNSPEC`. Opened sockets are appended to
 /// `listen_sockets` (C's `ListenSockets[]` + `*NumListenSockets`);
-/// `max_listen` is C's `MaxListen`. Returns `STATUS_OK` / `STATUS_ERROR`.
+/// `max_listen` is C's `MaxListen`. `max_connections` is globals.c's
+/// `MaxConnections` (the listen-backlog basis), passed explicitly per the
+/// no-ambient-global rule. Returns `STATUS_OK` / `STATUS_ERROR`.
 pub fn ListenServerPort(
     family: i32,
     host_name: Option<&str>,
@@ -425,6 +457,7 @@ pub fn ListenServerPort(
     unix_socket_dir: Option<&str>,
     listen_sockets: &mut Vec<pgsocket>,
     max_listen: usize,
+    max_connections: i32,
 ) -> PgResult<i32> {
     let hint = AddrInfoHint {
         flags: libc::AI_PASSIVE,
@@ -637,7 +670,7 @@ pub fn ListenServerPort(
 
         // Select appropriate accept-queue length limit: similar to the
         // maximum number of child processes the postmaster will permit.
-        let maxconn = backend_utils_init_small_seams::max_connections::call() * 2;
+        let maxconn = max_connections * 2;
 
         let err = unsafe { libc::listen(fd, maxconn) };
         if err < 0 {
@@ -694,12 +727,12 @@ fn Lock_AF_UNIX(unix_socket_dir: &str, unix_socket_path: &str) -> PgResult<i32> 
     unsafe { libc::unlink(c.as_ptr()) };
 
     // Remember socket file pathnames for later maintenance.
-    SOCK_PATHS.with(|p| -> PgResult<()> {
-        let mut paths = p.borrow_mut();
-        if paths.try_reserve(1).is_err() {
-            return Err(out_of_memory_error(unix_socket_path.len(), "Lock_AF_UNIX"));
-        }
-        paths.push(unix_socket_path.to_owned());
+    with_pq_alloc(|st| -> PgResult<()> {
+        let path = PgString::from_str_in(unix_socket_path, st.mcx)?;
+        st.sock_paths
+            .try_reserve(1)
+            .map_err(|_| st.mcx.oom(std::mem::size_of::<PgString<'_>>()))?;
+        st.sock_paths.push(path);
         Ok(())
     })?;
 
@@ -851,8 +884,8 @@ pub fn AcceptConnection(server_fd: pgsocket, client_sock: &mut ClientSocket) -> 
 /// `TouchSocketFiles` — mark socket files as recently accessed, protecting
 /// them from /tmp-directory cleaners.
 pub fn TouchSocketFiles() {
-    SOCK_PATHS.with(|p| {
-        for sock_path in p.borrow().iter() {
+    with_pq_alloc(|st| {
+        for sock_path in st.sock_paths.iter() {
             // Ignore errors; there's no point in complaining
             if let Ok(c) = CString::new(sock_path.as_str()) {
                 unsafe { libc::utime(c.as_ptr(), std::ptr::null()) };
@@ -863,15 +896,14 @@ pub fn TouchSocketFiles() {
 
 /// `RemoveSocketFiles` — unlink socket files at postmaster shutdown.
 pub fn RemoveSocketFiles() {
-    SOCK_PATHS.with(|p| {
-        let mut paths = p.borrow_mut();
-        for sock_path in paths.iter() {
+    with_pq_alloc(|st| {
+        for sock_path in st.sock_paths.iter() {
             // Ignore any error.
             if let Ok(c) = CString::new(sock_path.as_str()) {
                 unsafe { libc::unlink(c.as_ptr()) };
             }
         }
-        paths.clear();
+        st.sock_paths.clear();
     });
 }
 
@@ -926,40 +958,38 @@ fn pq_recvbuf() -> PgResult<i32> {
         let start = PQ.with(|s| s.borrow().recv_length) as usize;
         let mut scratch = [0u8; PQ_RECV_BUFFER_SIZE];
 
-        set_errno(0);
-        let r = secure_read_my_port(&mut scratch[..PQ_RECV_BUFFER_SIZE - start])?;
-
-        if r < 0 {
-            let e = errno();
-            if e == libc::EINTR {
+        match secure_read_my_port(&mut scratch[..PQ_RECV_BUFFER_SIZE - start])? {
+            Err(SockError::Errno(e)) if e == libc::EINTR => {
                 continue; // Ok if interrupted
             }
-
-            // Careful: an ereport() that tries to write to the client would
-            // cause recursion to here; this message must go *only* to the
-            // postmaster log (COMMERROR). If errno is zero, assume it's EOF
-            // and let the caller complain.
-            if e != 0 {
-                let _ = ereport(COMMERROR)
-                    .with_saved_errno(e)
-                    .errcode_for_socket_access()
-                    .errmsg("could not receive data from client: %m")
-                    .finish(loc("pq_recvbuf"));
+            Err(SockError::Errno(e)) => {
+                // Careful: an ereport() that tries to write to the client
+                // would cause recursion to here; this message must go *only*
+                // to the postmaster log (COMMERROR). If errno is zero, assume
+                // it's EOF and let the caller complain.
+                if e != 0 {
+                    let _ = ereport(COMMERROR)
+                        .with_saved_errno(e)
+                        .errcode_for_socket_access()
+                        .errmsg("could not receive data from client: %m")
+                        .finish(loc("pq_recvbuf"));
+                }
+                return Ok(EOF);
             }
-            return Ok(EOF);
+            Err(SockError::Eof) => {
+                // EOF detected. The ultimate caller logs it.
+                return Ok(EOF);
+            }
+            Ok(r) => {
+                // r contains number of bytes read, so just incr length
+                PQ.with(|s| {
+                    let mut st = s.borrow_mut();
+                    st.recv_buffer[start..start + r].copy_from_slice(&scratch[..r]);
+                    st.recv_length += r as i32;
+                });
+                return Ok(0);
+            }
         }
-        if r == 0 {
-            // EOF detected. The ultimate caller logs it.
-            return Ok(EOF);
-        }
-        // r contains number of bytes read, so just incr length
-        PQ.with(|s| {
-            let mut st = s.borrow_mut();
-            let r = r as usize;
-            st.recv_buffer[start..start + r].copy_from_slice(&scratch[..r]);
-            st.recv_length += r as i32;
-        });
-        return Ok(0);
     }
 }
 
@@ -1025,17 +1055,17 @@ pub fn pq_getbyte_if_available(c: &mut u8) -> PgResult<i32> {
     // Put the socket into non-blocking mode
     socket_set_nonblocking(true)?;
 
-    set_errno(0);
     let mut buf = [0u8; 1];
-    let mut r = secure_read_my_port(&mut buf)? as i32;
-    if r < 0 {
+    let r = match secure_read_my_port(&mut buf)? {
         // Ok if no data available without blocking or interrupted (though
         // EINTR really shouldn't happen with a non-blocking socket). Report
         // other errors.
-        let e = errno();
-        if e == libc::EAGAIN || e == libc::EWOULDBLOCK || e == libc::EINTR {
-            r = 0;
-        } else {
+        Err(SockError::Errno(e))
+            if e == libc::EAGAIN || e == libc::EWOULDBLOCK || e == libc::EINTR =>
+        {
+            0
+        }
+        Err(SockError::Errno(e)) => {
             // Careful: server-log-only message (recursion hazard); errno 0 is
             // treated as EOF, caller complains.
             if e != 0 {
@@ -1045,14 +1075,15 @@ pub fn pq_getbyte_if_available(c: &mut u8) -> PgResult<i32> {
                     .errmsg("could not receive data from client: %m")
                     .finish(loc("pq_getbyte_if_available"));
             }
-            r = EOF;
+            EOF
         }
-    } else if r == 0 {
         // EOF detected
-        r = EOF;
-    } else {
-        *c = buf[0];
-    }
+        Err(SockError::Eof) => EOF,
+        Ok(r) => {
+            *c = buf[0];
+            r as i32
+        }
+    };
 
     Ok(r)
 }
@@ -1152,40 +1183,18 @@ pub fn pq_is_reading_msg() -> bool {
     PQ.with(|s| s.borrow().comm_reading_msg)
 }
 
-/// `enlargeStringInfo` over the owned message buffer: reserve room for
-/// `needed` more bytes, with stringinfo's limit check and the OOM ERROR.
-fn enlarge_message_buffer(s: &mut Vec<u8>, needed: usize, funcname: &str) -> PgResult<()> {
-    /// `MaxAllocSize` (`memutils.h`) — StringInfo's growth ceiling.
-    const MAX_ALLOC_SIZE: usize = 0x3fffffff;
-    if needed >= MAX_ALLOC_SIZE - s.len() {
-        ereport(ERROR)
-            .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
-            .errmsg("out of memory")
-            .errdetail(format!(
-                "Cannot enlarge string buffer containing {} bytes by {} more bytes.",
-                s.len(),
-                needed
-            ))
-            .finish(loc(funcname))?;
-    }
-    if s.try_reserve(needed).is_err() {
-        return Err(out_of_memory_error(needed, funcname));
-    }
-    Ok(())
-}
-
 /// `pq_getmessage` — get a message with length word from connection. Only the
-/// message body is placed in `s` (an expansible buffer the caller owns); the
-/// length word is removed. `maxlen` is the upper limit on the length we are
-/// willing to accept; the connection is aborted (`Ok(EOF)`) past it. `Ok(0)`
-/// if OK.
+/// message body is placed in `s` (a caller-owned `StringInfo`, typically
+/// reset per message in the caller's message context); the length word is
+/// removed. `maxlen` is the upper limit on the length we are willing to
+/// accept; the connection is aborted (`Ok(EOF)`) past it. `Ok(0)` if OK.
 ///
 /// The C `PG_TRY`/`PG_CATCH` around `enlargeStringInfo` (discard the body to
 /// stay in sync, clear the reading flag, re-throw) is the `Err` path here.
-pub fn pq_getmessage(s: &mut Vec<u8>, maxlen: i32) -> PgResult<i32> {
+pub fn pq_getmessage(s: &mut StringInfo<'_>, maxlen: i32) -> PgResult<i32> {
     debug_assert!(pq_is_reading_msg());
 
-    s.clear();
+    s.reset();
 
     // Read message length word
     let mut lenbuf = [0u8; 4];
@@ -1215,7 +1224,7 @@ pub fn pq_getmessage(s: &mut Vec<u8>, maxlen: i32) -> PgResult<i32> {
         // Allocate space for message. If we run out of room (ridiculously
         // large message), we will ERROR, but we want to discard the message
         // body first so as not to lose communication sync.
-        if let Err(oom) = enlarge_message_buffer(s, len, "pq_getmessage") {
+        if let Err(oom) = backend_libpq_pqformat::enlarge_string_info(s, len) {
             // An error raised inside the catch block (here: from
             // pq_discardbytes) propagates immediately in C, skipping the rest
             // of the block — hence the `?`.
@@ -1231,9 +1240,9 @@ pub fn pq_getmessage(s: &mut Vec<u8>, maxlen: i32) -> PgResult<i32> {
         }
 
         // And grab the message
-        s.resize(len, 0); // capacity reserved above; cannot fail
-        if pq_getbytes(&mut s[..])? == EOF {
-            s.clear(); // C leaves s->len == 0 on this path
+        s.data.resize(len, 0); // capacity reserved above; cannot fail
+        if pq_getbytes(&mut s.data[..])? == EOF {
+            s.data.clear(); // C leaves s->len == 0 on this path
             let _ = ereport(COMMERROR)
                 .errcode(ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg("incomplete message from client")
@@ -1262,10 +1271,8 @@ fn internal_putbytes(b: &[u8]) -> PgResult<i32> {
 
     while len > 0 {
         // If buffer is full, then flush it out
-        let (pointer, size) = PQ.with(|s| {
-            let st = s.borrow();
-            (st.send_pointer, st.send_buffer_size)
-        });
+        let size = send_buffer_size();
+        let pointer = PQ.with(|s| s.borrow().send_pointer);
         if pointer >= size {
             socket_set_nonblocking(false)?;
             if internal_flush()? != 0 {
@@ -1276,9 +1283,9 @@ fn internal_putbytes(b: &[u8]) -> PgResult<i32> {
         // If the buffer is empty and data length is larger than the buffer
         // size, send it without buffering. Otherwise, copy as much data as
         // possible into the buffer.
-        let (pointer, size, start) = PQ.with(|s| {
+        let (pointer, start) = PQ.with(|s| {
             let st = s.borrow();
-            (st.send_pointer, st.send_buffer_size, st.send_start)
+            (st.send_pointer, st.send_start)
         });
         if len >= size && start == pointer {
             let mut fstart = 0usize;
@@ -1292,18 +1299,18 @@ fn internal_putbytes(b: &[u8]) -> PgResult<i32> {
             // unchanged (unreachable in blocking mode).
             len = fend;
         } else {
-            PQ.with(|s| {
-                let mut st = s.borrow_mut();
-                let mut amount = st.send_buffer_size - st.send_pointer;
+            let amount = with_pq_alloc(|st| {
+                let mut amount = st.send_buffer.len() - pointer;
                 if amount > len {
                     amount = len;
                 }
-                let p = st.send_pointer;
-                st.send_buffer[p..p + amount].copy_from_slice(&b[off..off + amount]);
-                st.send_pointer += amount;
-                off += amount;
-                len -= amount;
+                st.send_buffer[pointer..pointer + amount]
+                    .copy_from_slice(&b[off..off + amount]);
+                amount
             });
+            PQ.with(|s| s.borrow_mut().send_pointer += amount);
+            off += amount;
+            len -= amount;
         }
     }
 
@@ -1332,20 +1339,29 @@ fn socket_flush() -> PgResult<i32> {
 
 /// `internal_flush` — flush the send buffer.
 fn internal_flush() -> PgResult<i32> {
-    // Move the buffer out for the duration of the (possibly reentrant-ish)
-    // transport call; cursors are written back afterwards, also on Err.
-    let (buf, mut start, mut end) = PQ.with(|s| {
-        let mut st = s.borrow_mut();
-        (
-            std::mem::take(&mut st.send_buffer),
-            st.send_start,
-            st.send_pointer,
-        )
+    let (mut start, mut end) = PQ.with(|s| {
+        let st = s.borrow();
+        (st.send_start, st.send_pointer)
     });
-    let res = internal_flush_buffer(&buf, &mut start, &mut end);
+    // Flush from the buffer in place (C flushes the static buffer directly).
+    // The send-state borrow is held across the secure_write seam call: code
+    // reachable from there (ProcessClientWriteInterrupt, COMMERROR logging)
+    // never touches the send buffer — reentrant client sends are suppressed
+    // by `PqCommBusy` first — and an unexpected reentrant touch fails loudly
+    // (RefCell) instead of corrupting the buffer. Cursors are written back
+    // afterwards, also on Err.
+    let res = PQ_ALLOC.with(|cell| {
+        let slot = cell.borrow();
+        match slot.as_ref() {
+            Some(owned) => {
+                owned.with(|st| internal_flush_buffer(&st.send_buffer, &mut start, &mut end))
+            }
+            // Nothing was ever buffered (pq_init not run): start == end.
+            None => internal_flush_buffer(&[], &mut start, &mut end),
+        }
+    });
     PQ.with(|s| {
         let mut st = s.borrow_mut();
-        st.send_buffer = buf;
         st.send_start = start;
         st.send_pointer = end;
     });
@@ -1357,45 +1373,53 @@ fn internal_flush() -> PgResult<i32> {
 /// mode), `Ok(EOF)` if trouble.
 fn internal_flush_buffer(buf: &[u8], start: &mut usize, end: &mut usize) -> PgResult<i32> {
     while *start < *end {
-        let r = secure_write_my_port(&buf[*start..*end])?;
-
-        if r <= 0 {
-            let e = errno();
-            if e == libc::EINTR {
-                continue; // Ok if we were interrupted
+        match secure_write_my_port(&buf[*start..*end])? {
+            Ok(r) if r > 0 => {
+                // reset after any successful send
+                LAST_REPORTED_SEND_ERRNO.with(|c| c.set(0));
+                *start += r;
             }
+            other => {
+                // C's `r <= 0` arm reads errno; `Eof`/`Ok(0)` (a zero-byte
+                // send, not produced in practice) take the same path with
+                // errno 0.
+                let e = match other {
+                    Err(SockError::Errno(e)) => e,
+                    _ => 0,
+                };
+                if e == libc::EINTR {
+                    continue; // Ok if we were interrupted
+                }
 
-            // Ok if no data writable without blocking, and the socket is in
-            // non-blocking mode.
-            if e == libc::EAGAIN || e == libc::EWOULDBLOCK {
-                return Ok(0);
+                // Ok if no data writable without blocking, and the socket is
+                // in non-blocking mode.
+                if e == libc::EAGAIN || e == libc::EWOULDBLOCK {
+                    return Ok(0);
+                }
+
+                // Careful: server-log-only message (a client write would
+                // recurse here). If a client disconnects mid-output we might
+                // come through here many times before a safe abort point, so
+                // suppress duplicate log messages.
+                if e != LAST_REPORTED_SEND_ERRNO.with(Cell::get) {
+                    LAST_REPORTED_SEND_ERRNO.with(|c| c.set(e));
+                    let _ = ereport(COMMERROR)
+                        .with_saved_errno(e)
+                        .errcode_for_socket_access()
+                        .errmsg("could not send data to client: %m")
+                        .finish(loc("internal_flush_buffer"));
+                }
+
+                // Drop the buffered data anyway so that processing can
+                // continue, and flag the next CHECK_FOR_INTERRUPTS to
+                // terminate the connection.
+                *start = 0;
+                *end = 0;
+                backend_utils_init_small_seams::set_client_connection_lost::call(true);
+                backend_utils_init_small_seams::set_interrupt_pending::call(true);
+                return Ok(EOF);
             }
-
-            // Careful: server-log-only message (a client write would recurse
-            // here). If a client disconnects mid-output we might come through
-            // here many times before a safe abort point, so suppress
-            // duplicate log messages.
-            if e != LAST_REPORTED_SEND_ERRNO.with(Cell::get) {
-                LAST_REPORTED_SEND_ERRNO.with(|c| c.set(e));
-                let _ = ereport(COMMERROR)
-                    .with_saved_errno(e)
-                    .errcode_for_socket_access()
-                    .errmsg("could not send data to client: %m")
-                    .finish(loc("internal_flush_buffer"));
-            }
-
-            // Drop the buffered data anyway so that processing can continue,
-            // and flag the next CHECK_FOR_INTERRUPTS to terminate the
-            // connection.
-            *start = 0;
-            *end = 0;
-            backend_utils_init_small_seams::set_client_connection_lost::call(true);
-            backend_utils_init_small_seams::set_interrupt_pending::call(true);
-            return Ok(EOF);
         }
-
-        LAST_REPORTED_SEND_ERRNO.with(|c| c.set(0)); // reset after any successful send
-        *start += r as usize;
     }
 
     *start = 0;
@@ -1480,15 +1504,13 @@ fn socket_putmessage_noblock(msgtype: u8, s: &[u8]) -> PgResult<()> {
     // Ensure we have enough space in the output buffer for the message header
     // as well as the message itself.
     let required = PQ.with(|st| st.borrow().send_pointer) + 1 + 4 + s.len();
-    if required > PQ.with(|st| st.borrow().send_buffer_size) {
-        PQ.with(|st| -> PgResult<()> {
-            let mut st = st.borrow_mut();
+    if required > send_buffer_size() {
+        with_pq_alloc(|st| -> PgResult<()> {
             let grow = required - st.send_buffer.len();
-            if st.send_buffer.try_reserve_exact(grow).is_err() {
-                return Err(out_of_memory_error(required, "socket_putmessage_noblock"));
-            }
+            st.send_buffer
+                .try_reserve_exact(grow)
+                .map_err(|_| st.mcx.oom(required))?;
             st.send_buffer.resize(required, 0);
-            st.send_buffer_size = required;
             Ok(())
         })?;
     }
@@ -1988,7 +2010,9 @@ pub fn show_tcp_user_timeout() -> String {
 /// `pq_check_connection` — is the client still connected? (Polls
 /// `FeBeWaitSet` for `WL_SOCKET_CLOSED`.)
 pub fn pq_check_connection() -> PgResult<bool> {
-    let set = fe_be_wait_set().expect("pq_check_connection: FeBeWaitSet not created");
+    let (set, latch) = FE_BE_WAIT_SET
+        .with(Cell::get)
+        .expect("pq_check_connection: FeBeWaitSet not created");
 
     // It's OK to modify the socket event filter without restoring, because
     // all FeBeWaitSet socket wait sites do the same.
@@ -2014,7 +2038,7 @@ pub fn pq_check_connection() -> PgResult<bool> {
                 // A latch event might be preventing other events from being
                 // reported. Reset it and poll again. (No code expects latches
                 // to survive across CHECK_FOR_INTERRUPTS().)
-                backend_storage_ipc_latch_seams::reset_latch_my_latch::call();
+                backend_storage_ipc_latch_seams::reset_latch::call(latch);
                 continue 'retry;
             }
         }
