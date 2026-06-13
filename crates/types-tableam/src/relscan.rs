@@ -8,14 +8,20 @@
 
 use core::any::Any;
 use core::sync::atomic::AtomicU64;
+use std::boxed::Box;
 use std::sync::Mutex;
+use std::vec::Vec as StdVec;
 
+use types_datum::Datum;
 use types_core::primitive::{BlockNumber, InvalidBlockNumber};
 use types_rel::Relation;
 use types_snapshot::SnapshotData;
 use types_storage::RelFileLocator;
+use types_tuple::heaptuple::{HeapTuple, IndexTuple, ItemPointerData, TupleDescData};
 
+use crate::genam::IndexScanInstrumentation;
 use crate::scankey::ScanKeyData;
+use crate::tableam::IndexFetchTableData;
 
 /* ----------------------------------------------------------------
  * access/tableam.h: ScanOptions flags (TableScanDescData.rs_flags)
@@ -149,4 +155,128 @@ pub struct ParallelBlockTableScanWorkerData {
     pub phsw_chunk_remaining: u32,
     /// `phsw_chunk_size` — chunk size in blocks.
     pub phsw_chunk_size: u32,
+}
+
+/* ----------------------------------------------------------------
+ * access/relscan.h: IndexScanDescData
+ * ---------------------------------------------------------------- */
+
+/// `IndexScanDescData` (`access/relscan.h`) — the generic index-scan
+/// descriptor. The AM allocates it in `ambeginscan` and embeds it in its own
+/// scan state; the AM-private tail (`opaque`) rides in `am_private`. The index
+/// relation is the open handle; the heap relation, snapshot, and heap-fetch
+/// descriptor are filled in by the `index_beginscan*` wrappers.
+pub struct IndexScanDescData<'mcx> {
+    /* scan parameters */
+    /// `Relation heapRelation` — heap relation descriptor, or `None`.
+    pub heap_relation: Option<Relation<'mcx>>,
+    /// `Relation indexRelation` — index relation descriptor.
+    pub index_relation: Relation<'mcx>,
+    /// `struct SnapshotData *xs_snapshot` — snapshot to see (`None` until set
+    /// by the begin wrapper).
+    pub xs_snapshot: Option<SnapshotData>,
+    /// `int numberOfKeys` — number of index qualifier conditions.
+    pub number_of_keys: i32,
+    /// `int numberOfOrderBys` — number of ordering operators.
+    pub number_of_order_bys: i32,
+    /// `struct ScanKeyData *keyData` — array of index qualifier descriptors.
+    pub key_data: StdVec<types_scan::scankey::ScanKeyData>,
+    /// `struct ScanKeyData *orderByData` — array of ordering op descriptors.
+    pub order_by_data: StdVec<types_scan::scankey::ScanKeyData>,
+    /// `bool xs_want_itup` — caller requests index tuples.
+    pub xs_want_itup: bool,
+    /// `bool xs_temp_snap` — unregister snapshot at scan end?
+    pub xs_temp_snap: bool,
+
+    /* signaling to index AM about killing index tuples */
+    /// `bool kill_prior_tuple` — last-returned tuple is dead.
+    pub kill_prior_tuple: bool,
+    /// `bool ignore_killed_tuples` — do not return killed entries.
+    pub ignore_killed_tuples: bool,
+    /// `bool xactStartedInRecovery` — prevents killing/seeing killed tuples.
+    pub xact_started_in_recovery: bool,
+
+    /// `void *opaque` — access-method-specific info, owned by the AM.
+    pub opaque: Option<Box<dyn Any>>,
+
+    /// `struct IndexScanInstrumentation *instrument` — instrumentation
+    /// counters maintained by the AM (`None` until set by the begin wrapper).
+    pub instrument: Option<IndexScanInstrumentation>,
+
+    /* index-only-scan result data filled by amgettuple */
+    /// `IndexTuple xs_itup` — index tuple returned by the AM.
+    pub xs_itup: IndexTuple<'mcx>,
+    /// `struct TupleDescData *xs_itupdesc` — rowtype descriptor of `xs_itup`.
+    pub xs_itupdesc: Option<Box<TupleDescData<'mcx>>>,
+    /// `HeapTuple xs_hitup` — index data returned by the AM, as a HeapTuple.
+    pub xs_hitup: HeapTuple<'mcx>,
+    /// `struct TupleDescData *xs_hitupdesc` — rowtype descriptor of `xs_hitup`.
+    pub xs_hitupdesc: Option<Box<TupleDescData<'mcx>>>,
+
+    /// `ItemPointerData xs_heaptid` — the result TID.
+    pub xs_heaptid: ItemPointerData,
+    /// `bool xs_heap_continue` — T if must keep walking, potential further
+    /// results.
+    pub xs_heap_continue: bool,
+    /// `IndexFetchTableData *xs_heapfetch` — table-AM index-fetch state
+    /// (`None` until [`crate::tableam`]'s `index_fetch_begin`).
+    pub xs_heapfetch: Option<Box<IndexFetchTableData<'mcx>>>,
+
+    /// `bool xs_recheck` — T means scan keys must be rechecked.
+    pub xs_recheck: bool,
+
+    /* ordering-operator result data */
+    /// `Datum *xs_orderbyvals` — ORDER BY expression values of the last
+    /// returned tuple.
+    pub xs_orderbyvals: StdVec<Datum>,
+    /// `bool *xs_orderbynulls`.
+    pub xs_orderbynulls: StdVec<bool>,
+    /// `bool xs_recheckorderby`.
+    pub xs_recheckorderby: bool,
+
+    /// `struct ParallelIndexScanDescData *parallel_scan` — parallel-scan
+    /// information, in shared memory (`None` for non-parallel scans).
+    pub parallel_scan: Option<std::sync::Arc<ParallelIndexScanDescData>>,
+}
+
+/// `IndexScanDesc` — `IndexScanDescData *`.
+pub type IndexScanDesc<'mcx> = Box<IndexScanDescData<'mcx>>;
+
+/// `ParallelIndexScanDescData` (`access/relscan.h`) — shared state for a
+/// parallel index scan, living in DSM in C. The serialized snapshot C stores
+/// in the flexible `ps_snapshot_data[]` tail is the byte buffer here; the
+/// instrumentation and AM-specific regions C places at `ps_offset_ins` /
+/// `ps_offset_am` are carried as owned regions.
+pub struct ParallelIndexScanDescData {
+    /// `RelFileLocator ps_locator` — physical table relation to scan.
+    pub ps_locator: RelFileLocator,
+    /// `RelFileLocator ps_indexlocator` — physical index relation to scan.
+    pub ps_indexlocator: RelFileLocator,
+    /// `Size ps_offset_ins` — offset to `SharedIndexScanInstrumentation`.
+    pub ps_offset_ins: usize,
+    /// `Size ps_offset_am` — offset to am-specific structure.
+    pub ps_offset_am: usize,
+    /// `char ps_snapshot_data[FLEXIBLE_ARRAY_MEMBER]` — serialized snapshot.
+    pub ps_snapshot_data: StdVec<u8>,
+    /// The `SharedIndexScanInstrumentation` region C places at
+    /// `ps_offset_ins` (present when `index_parallelscan_initialize` was
+    /// called with `instrument=true`).
+    pub shared_instrument: Option<crate::genam::SharedIndexScanInstrumentation>,
+    /// The AM-specific region C places at `ps_offset_am` (present when the AM
+    /// has an `aminitparallelscan`).
+    pub am_specific: Option<StdVec<u8>>,
+}
+
+impl Default for ParallelIndexScanDescData {
+    fn default() -> Self {
+        ParallelIndexScanDescData {
+            ps_locator: RelFileLocator::default(),
+            ps_indexlocator: RelFileLocator::default(),
+            ps_offset_ins: 0,
+            ps_offset_am: 0,
+            ps_snapshot_data: StdVec::new(),
+            shared_instrument: None,
+            am_specific: None,
+        }
+    }
 }

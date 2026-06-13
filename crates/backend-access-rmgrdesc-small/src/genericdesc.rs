@@ -37,3 +37,18 @@ pub fn generic_desc(buf: &mut PgString<'_>, record: &DecodedXLogRecord<'_>) -> P
 pub fn generic_identify(_info: uint8) -> Option<&'static str> {
     Some("Generic")
 }
+
+/// Adapter installed into the rmgr-table `generic_desc` seam: extracts the decoded
+/// record from the dispatcher's `XLogReaderState` (C's `record->record`) and
+/// renders it. The reader is always positioned on a decoded record when the
+/// rmgr table invokes `rm_desc`.
+pub fn generic_desc_seam(
+    buf: &mut PgString<'_>,
+    record: &types_wal::rmgr::XLogReaderState<'_>,
+) -> PgResult<()> {
+    let record = record
+        .record
+        .as_ref()
+        .expect("generic_desc called without a decoded record");
+    generic_desc(buf, record)
+}
