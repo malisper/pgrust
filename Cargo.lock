@@ -2372,7 +2372,10 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-nodes",
  "types-ri-triggers",
+ "types-tableam",
+ "types-tuple",
 ]
 
 [[package]]
@@ -2533,6 +2536,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execIndexing-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execMain-seams"
 version = "0.0.0"
 dependencies = [
@@ -2544,6 +2558,7 @@ dependencies = [
  "types-portal",
  "types-rel",
  "types-scan",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -2654,6 +2669,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-rel",
 ]
 
 [[package]]
@@ -3087,6 +3103,44 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-sortsupport",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-executor-nodeModifyTable"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-tableam",
+ "backend-access-transam-xact-seams",
+ "backend-catalog-indexing-seams",
+ "backend-commands-trigger-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execIndexing-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execPartition-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execReplication-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeModifyTable-seams",
+ "backend-nodes-core-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-util-var-seams",
+ "backend-rewrite-rewritehandler-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-miscinit-seams",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-rel",
+ "types-snapshot",
+ "types-tableam",
  "types-tuple",
 ]
 
@@ -3595,6 +3649,16 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-pathnodes",
+]
+
+[[package]]
+name = "backend-optimizer-util-var-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -4525,6 +4589,7 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-nodes",
+ "types-rel",
 ]
 
 [[package]]
@@ -7178,6 +7243,7 @@ dependencies = [
  "backend-executor-nodeForeignscan",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeModifyTable",
  "backend-executor-nodeSeqscan",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",

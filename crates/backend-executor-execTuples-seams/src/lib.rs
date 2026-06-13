@@ -399,3 +399,28 @@ seam_core::seam!(
         bool,
     )>
 );
+
+seam_core::seam!(
+    /// `ExecMaterializeSlot(slot)` (execTuples.c, via the slot ops): force the
+    /// slot to materialize its own copy of the tuple's data (so later changes
+    /// to the source storage cannot affect it). Fallible: materializing can
+    /// `palloc` (OOM).
+    pub fn exec_materialize_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `execute_attr_map_slot(attrMap, in_slot, out_slot)` (tupconvert.c):
+    /// remap `in_slot`'s attributes through `attr_map` into `out_slot` and
+    /// return `out_slot`. The conversion map is the one ExecGetChildToRootMap
+    /// stored on the source `ResultRelInfo`'s `ri_ChildToRootMap`; the owner
+    /// reads it from there. Fallible on `palloc` (OOM).
+    pub fn execute_attr_map_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        in_slot: types_nodes::SlotId,
+        out_slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);

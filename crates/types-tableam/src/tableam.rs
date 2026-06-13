@@ -42,6 +42,22 @@ pub use LockTupleMode::{
     LockTupleExclusive, LockTupleKeyShare, LockTupleNoKeyExclusive, LockTupleShare,
 };
 
+/// `LockWaitPolicy` (`nodes/lockoptions.h`) — what to do when a row to be
+/// locked is already locked by another transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LockWaitPolicy {
+    /// Wait for the lock to become available (default).
+    LockWaitBlock = 0,
+    /// Skip rows that can't be locked (SKIP LOCKED).
+    LockWaitSkip,
+    /// Raise an error if a row can't be locked (NOWAIT).
+    LockWaitError,
+}
+
+/// `TUPLE_LOCK_FLAG_*` (`access/tableam.h`) — `table_tuple_lock` flags.
+pub const TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS: u8 = 1 << 0;
+pub const TUPLE_LOCK_FLAG_FIND_LAST_VERSION: u8 = 1 << 1;
+
 /// `TM_Result` (`access/tableam.h`) — result codes for `table_tuple_update`
 /// and friends.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,5 +248,20 @@ pub struct TableAmRoutine {
         tmfd: &mut TM_FailureData,
         lockmode: &mut LockTupleMode,
         update_indexes: &mut TU_UpdateIndexes,
+    ) -> PgResult<TM_Result>,
+
+    /// `tuple_lock(rel, tid, snapshot, slot, cid, mode, wait_policy, flags,
+    /// tmfd)` — lock a tuple in the given mode, fetching it into `slot`.
+    #[allow(clippy::type_complexity)]
+    pub tuple_lock: fn(
+        rel: &Relation<'_>,
+        tid: &ItemPointerData,
+        snapshot: &Snapshot,
+        slot: &mut TupleTableSlot,
+        cid: CommandId,
+        mode: LockTupleMode,
+        wait_policy: LockWaitPolicy,
+        flags: u8,
+        tmfd: &mut TM_FailureData,
     ) -> PgResult<TM_Result>,
 }

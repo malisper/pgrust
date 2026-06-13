@@ -395,3 +395,99 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<u32>
 );
+
+seam_core::seam!(
+    /// `ExecPrepareExpr(node, estate)` (execExpr.c): compile a single
+    /// expression tree into an executable `ExprState` for use *outside* a
+    /// normal executor node (parent = NULL), switching into the EState's
+    /// per-query context first. Used by `ExecInitGenerated` to prepare the
+    /// stored-generated-column generation expressions. Allocated in the
+    /// per-query context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_prepare_expr<'mcx>(
+        node: &types_nodes::primnodes::Expr,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>
+);
+
+seam_core::seam!(
+    /// `ExecProject(resultRelInfo->ri_projectNew)` driven from a result
+    /// relation (the UPDATE/INSERT "new tuple" build in nodeModifyTable):
+    /// project through the relation's `ri_projectNew` projection, wiring its
+    /// econtext's `ecxt_outertuple = plan_slot` and (for UPDATE)
+    /// `ecxt_scantuple = old_slot`, and returning the projection's output slot
+    /// (`ri_newTupleSlot`). The projection lives on the pooled `ResultRelInfo`,
+    /// so the owner reads it by id. Fallible on `ereport(ERROR)`.
+    pub fn exec_project_new_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        plan_slot: types_nodes::SlotId,
+        old_slot: Option<types_nodes::SlotId>,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecBuildUpdateProjection(targetList, evalTargetList, targetColnos,
+    /// relDesc, econtext, slot, parent)` (execExpr.c): build the UPDATE
+    /// "new tuple" projection for a result relation, storing it on the pooled
+    /// `ResultRelInfo` (`ri_projectNew`, with `ri_projectNewInfoValid` set).
+    /// The `update_colnos` map relation columns to subplan output columns.
+    /// Allocated in the per-query context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_build_update_projection<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        update_colnos: &[i32],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `foreach(ll, wcoList) { wcoExpr = ExecInitQual(wco->qual, &mtstate->ps);
+    /// wcoExprs = lappend(wcoExprs, wcoExpr); }` then `ri_WithCheckOptions =
+    /// wcoList; ri_WithCheckOptionExprs = wcoExprs;` (nodeModifyTable.c /
+    /// execExpr.c): compile every WITH CHECK OPTION constraint qual in `wco_list`
+    /// against `mtstate->ps` and store the list + the compiled expr states on
+    /// the pooled `ResultRelInfo`. The `WithCheckOption` node's `qual`
+    /// extraction and `ExecInitQual` compilation are owned by the rewrite/
+    /// execExpr units; the parse-node `qual` is not modeled in the trimmed
+    /// `Node` enum, so the whole per-rel compile is routed here. Fallible on
+    /// OOM / `ereport(ERROR)`.
+    pub fn exec_init_with_check_options<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        wco_list: &[types_nodes::nodes::Node<'mcx>],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecBuildProjectionInfo(rlist, econtext, slot, &mtstate->ps,
+    /// resultRelInfo->ri_RelationDesc->rd_att)` (execExpr.c): build the
+    /// RETURNING projection for one result relation from its RETURNING target
+    /// list `rlist` and the shared result slot/econtext set up on `mtstate->ps`
+    /// (`ps_ResultTupleSlot` / `ps_ExprContext`), storing the compiled
+    /// projection on the pooled `ResultRelInfo.ri_projectReturning` and the
+    /// list on `ri_returningList`. Allocated in the per-query context; fallible
+    /// on OOM / `ereport(ERROR)` (unsupported expression shapes).
+    pub fn exec_build_returning_projection<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        rlist: &[types_nodes::TargetEntry<'mcx>],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecProject(resultRelInfo->ri_projectReturning)` (executor.h): form the
+    /// RETURNING projection for a result relation, returning its output slot
+    /// id. The caller (nodeModifyTable's `ExecProcessReturning`) has already
+    /// wired the projection's `pi_exprContext` slots
+    /// (`ecxt_scantuple`/`ecxt_outertuple`/`ecxt_oldtuple`/`ecxt_newtuple`) and
+    /// its `pi_state.flags` (the `EEO_FLAG_*` OLD/NEW bits); the owner just
+    /// evaluates the compiled projection. The projection lives on the pooled
+    /// `ResultRelInfo`, so the owner reads it by id. Can `ereport(ERROR)` from
+    /// a projection expression.
+    pub fn exec_project_returning<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);

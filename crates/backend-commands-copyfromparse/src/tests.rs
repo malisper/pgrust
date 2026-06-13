@@ -64,6 +64,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
             reltablespace: 0,
             relfilenode: 0,
             relisshared: false,
+            relhasindex: false,
             relhassubclass: false,
             relpersistence: b'p',
             relkind: b'r',

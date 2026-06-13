@@ -240,3 +240,26 @@ seam_core::seam!(
         orstronger: bool,
     ) -> bool
 );
+
+seam_core::seam!(
+    /// `LockTuple(relation, tid, lockmode)` (lmgr.c): acquire a heavyweight
+    /// tuple-tag lock (used for the in-place-update tuple lock during UPDATE
+    /// of a relation that needs it). This lock is held until transaction end
+    /// and released by the transaction's resource owner, so it is taken
+    /// imperatively rather than as a scope guard (mirroring the C).
+    pub fn lock_tuple(
+        relid: Oid,
+        tid: types_tuple::heaptuple::ItemPointerData,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `UnlockTuple(relation, tid, lockmode)` (lmgr.c): release the
+    /// heavyweight tuple-tag lock taken by [`lock_tuple`].
+    pub fn unlock_tuple(
+        relid: Oid,
+        tid: types_tuple::heaptuple::ItemPointerData,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);

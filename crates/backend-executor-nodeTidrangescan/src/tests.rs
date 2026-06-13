@@ -101,7 +101,7 @@ fn install() {
     // process-lived context so the returned `PgBox<'mcx, ExprState>` outlives
     // any per-test `'mcx`.
     exec_init_expr::set(|_tidstate, _node, _qual_index, _side| {
-        mcx::alloc_in(expr_state_mcx(), ExprState)
+        mcx::alloc_in(expr_state_mcx(), ExprState::default())
     });
 }
 
@@ -157,7 +157,7 @@ fn set_bounds<'mcx>(
     for &(exprtype, inclusive) in bounds {
         v.push(TidOpExpr {
             exprtype,
-            exprstate: Some(mcx::alloc_in(mcx, ExprState).unwrap()),
+            exprstate: Some(mcx::alloc_in(mcx, ExprState::default()).unwrap()),
             inclusive,
         });
     }
@@ -171,6 +171,8 @@ fn make_expr_context<'mcx>(mcx: mcx::Mcx<'mcx>) -> types_nodes::execnodes::ExprC
         ecxt_scantuple: None,
         ecxt_innertuple: None,
         ecxt_outertuple: None,
+        ecxt_oldtuple: None,
+        ecxt_newtuple: None,
         ecxt_per_query_memory: mcx,
         ecxt_per_tuple_memory: mcx.context().new_child("ExprContext"),
         ecxt_aggvalues: mcx::PgVec::new_in(mcx),

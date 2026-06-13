@@ -218,6 +218,8 @@ fn CreateExprContextInternal<'mcx>(
         ecxt_scantuple: None,
         ecxt_innertuple: None,
         ecxt_outertuple: None,
+        ecxt_oldtuple: None,
+        ecxt_newtuple: None,
         ecxt_per_query_memory: per_query,
         // Create working memory for expression evaluation in this context:
         // AllocSetContextCreate(estate->es_query_cxt, "ExprContext", sizes).
@@ -299,6 +301,8 @@ pub fn CreateStandaloneExprContext<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ExprContext
         ecxt_scantuple: None,
         ecxt_innertuple: None,
         ecxt_outertuple: None,
+        ecxt_oldtuple: None,
+        ecxt_newtuple: None,
         ecxt_per_query_memory: mcx,
         // Create working memory for expression evaluation in this context.
         ecxt_per_tuple_memory: mcx.context().new_child("ExprContext"),

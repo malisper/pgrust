@@ -15,3 +15,16 @@ seam_core::seam!(
         query: Query,
     ) -> PgResult<mcx::PgVec<'mcx, Query>>
 );
+
+seam_core::seam!(
+    /// `build_column_default(rel, attrno)` (rewriteHandler.c): build the
+    /// default-value expression tree for the 1-based column `attrno` of `rel`,
+    /// or `None` (the C `NULL`) when the column has no default. For a generated
+    /// column this is the GENERATED-AS expression. The result expression is
+    /// allocated in `mcx`; reading the catalog default can `ereport(ERROR)`.
+    pub fn build_column_default<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: types_rel::Relation<'mcx>,
+        attrno: i32,
+    ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Expr>>>
+);

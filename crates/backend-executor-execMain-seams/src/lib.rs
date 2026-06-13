@@ -280,3 +280,122 @@ seam_core::seam!(
         ereport_on_violation: bool,
     ) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `resultRelInfo->ri_FdwRoutine->ExecForeignUpdate(estate, resultRelInfo,
+    /// slot, planSlot)` (fdwapi): dispatch an UPDATE to the foreign-table FDW
+    /// via the per-relation `FdwRoutine` vtable carried on the pooled
+    /// `ResultRelInfo`. Returns the (possibly replaced) result slot, or
+    /// `Ok(None)` for the FDW "do nothing". Resolved when the fdwapi type
+    /// lands; owner-coverage placeholder until then.
+    pub fn exec_foreign_update<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+        plan_slot: Option<types_nodes::SlotId>,
+    ) -> types_error::PgResult<Option<types_nodes::SlotId>>
+);
+
+seam_core::seam!(
+    /// `ExecPartitionCheckEmitError(resultRelInfo, slot, estate)` (execMain.c):
+    /// build and raise the partition-constraint-violation error for `slot`.
+    /// Always `ereport(ERROR)`s (only called when the constraint is known to
+    /// have failed).
+    pub fn exec_partition_check_emit_error<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecConstraints(resultRelInfo, slot, estate)` (execMain.c): check the
+    /// not-null and CHECK constraints of the target relation against `slot`,
+    /// `ereport(ERROR)`ing on the first violation.
+    pub fn exec_constraints<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecWithCheckOptions(kind, resultRelInfo, slot, estate)` (execMain.c):
+    /// evaluate the WITH CHECK OPTION / RLS policies of the given `kind`
+    /// (`WCOKind` enum value) on `slot`, `ereport(ERROR)`ing on a violation.
+    /// Skips WCOs of other kinds.
+    pub fn exec_with_check_options<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        kind: i32,
+        result_rel_info: types_nodes::RriId,
+        slot: types_nodes::SlotId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecGetReturningSlot(estate, relInfo)` (execMain.c): get (lazily
+    /// creating) the per-relation slot used to hold a tuple for RETURNING.
+    pub fn exec_get_returning_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecGetChildToRootMap(resultRelInfo)` (execMain.c): compute lazily the
+    /// tuple-conversion map from the child partition rowtype to the root's.
+    /// `Ok(true)` means a conversion is needed and the map now lives on the
+    /// pooled `ResultRelInfo` (`ri_ChildToRootMap`); `Ok(false)` is the C
+    /// `NULL` map (rowtypes already match).
+    pub fn exec_get_child_to_root_map<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `ExecGetAncestorResultRels(estate, resultRelInfo)` (execMain.c): return
+    /// the chain of ancestor `ResultRelInfo`s (root-ward, inclusive of the
+    /// root) for a partition's `ResultRelInfo`, lazily opening them.
+    pub fn exec_get_ancestor_result_rels<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_nodes::RriId>>
+);
+
+seam_core::seam!(
+    /// `ExecUpdateLockMode(estate, relinfo)` (execMain.c): determine the
+    /// row-lock mode needed for an UPDATE of `relinfo`, based on which columns
+    /// the update touches vs. the relation's key columns.
+    pub fn exec_update_lock_mode<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<types_tableam::tableam::LockTupleMode>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQual(epqstate, relation, rti, inputslot)` (execMain.c): run the
+    /// EvalPlanQual recheck for a concurrently-updated tuple, returning the
+    /// re-projected slot that still passes the quals, or `Ok(None)` when the
+    /// row no longer qualifies. The EPQ state lives on the owning
+    /// `ModifyTableState`; the owner reads `es_snapshot` etc. off the estate.
+    pub fn eval_plan_qual<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        rti: types_core::primitive::Index,
+        inputslot: types_nodes::SlotId,
+    ) -> types_error::PgResult<Option<types_nodes::SlotId>>
+);
+
+seam_core::seam!(
+    /// `EvalPlanQualSlot(epqstate, relation, rti)` (execMain.c): get (lazily
+    /// creating) the EPQ test slot for the given range-table relation.
+    pub fn eval_plan_qual_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        rti: types_core::primitive::Index,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);

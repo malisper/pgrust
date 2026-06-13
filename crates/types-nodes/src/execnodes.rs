@@ -32,7 +32,7 @@ use types_tuple::heaptuple::TupleDescData;
 use types_tuple::tupconvert::TupleConversionMap;
 
 use crate::bitmapset::Bitmapset;
-use crate::execexpr::{ProjectionInfo, SubPlanState};
+use crate::execexpr::{ExprState, ProjectionInfo, SubPlanState};
 use crate::executor::{TupleSlotKind, TupleTableSlot};
 use crate::instrument::Instrumentation;
 use crate::nodeindexscan::PlannedStmt;
@@ -167,6 +167,12 @@ pub struct ExprContext<'mcx> {
     pub ecxt_innertuple: Option<SlotId>,
     /// `TupleTableSlot *ecxt_outertuple` — outer tuple of current join.
     pub ecxt_outertuple: Option<SlotId>,
+    /// `TupleTableSlot *ecxt_oldtuple` — the OLD row for RETURNING (and the
+    /// MERGE/ON CONFLICT old-tuple slot). `None` is the C `NULL`.
+    pub ecxt_oldtuple: Option<SlotId>,
+    /// `TupleTableSlot *ecxt_newtuple` — the NEW row for RETURNING. `None` is
+    /// the C `NULL`.
+    pub ecxt_newtuple: Option<SlotId>,
     /// `MemoryContext ecxt_per_query_memory` — the owning EState's per-query
     /// context (or the creating caller's context for a standalone context).
     pub ecxt_per_query_memory: Mcx<'mcx>,
@@ -251,10 +257,27 @@ impl Default for IndexInfo {
     }
 }
 
+/// `TriggerDesc` (utils/reltrigger.h), trimmed to the per-event "is there at
+/// least one trigger of this kind" flags the executor consults before firing.
+/// The `triggers[]` array + transition-table flags land with the trigger
+/// owner; nodeModifyTable only reads these row-level booleans.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TriggerDesc {
+    pub trig_insert_before_row: bool,
+    pub trig_insert_instead_row: bool,
+    pub trig_update_before_row: bool,
+    pub trig_update_instead_row: bool,
+    pub trig_delete_before_row: bool,
+    pub trig_delete_instead_row: bool,
+}
+
 /// `ResultRelInfo` (execnodes.h), trimmed to the fields ports consume. Lives
 /// in the EState's [`EStateData::es_result_rel_pool`], addressed by [`RriId`].
 #[derive(Debug, Default)]
 pub struct ResultRelInfo<'mcx> {
+    /// `TriggerDesc *ri_TrigDesc` — triggers to be fired, if any. `None` is the
+    /// C `NULL` (relation has no triggers).
+    pub ri_TrigDesc: Option<PgBox<'mcx, TriggerDesc>>,
     /// `Index ri_RangeTableIndex` — the rangetable index, or 0 for a
     /// trigger-only target relation not in the range table.
     pub ri_RangeTableIndex: Index,
@@ -300,6 +323,53 @@ pub struct ResultRelInfo<'mcx> {
     /// `TupleConversionMap *ri_RootToChildMap` (+ its computed flag).
     pub ri_RootToChildMap: Option<PgBox<'mcx, TupleConversionMap<'mcx>>>,
     pub ri_RootToChildMapValid: bool,
+    /// `ExprState **ri_GeneratedExprsI` — per-column stored-generated-column
+    /// expression states for INSERT/MERGE (1-based attno - 1 indexed, parallel
+    /// to the relation's columns). A `None` element is a column with no stored
+    /// generation expression. `None` for the whole field is the C `NULL` (not
+    /// yet initialized).
+    pub ri_GeneratedExprsI: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState>>>>,
+    /// `ExprState **ri_GeneratedExprsU` — same, for UPDATE.
+    pub ri_GeneratedExprsU: Option<PgVec<'mcx, Option<PgBox<'mcx, ExprState>>>>,
+    /// `int ri_NumGeneratedNeededI` — number of stored generated columns to
+    /// compute for INSERT/MERGE.
+    pub ri_NumGeneratedNeededI: i32,
+    /// `int ri_NumGeneratedNeededU` — same, for UPDATE.
+    pub ri_NumGeneratedNeededU: i32,
+    /// `ProjectionInfo *ri_projectReturning` — the compiled RETURNING
+    /// projection (built by `ExecBuildProjectionInfo`). `None` is the C `NULL`.
+    pub ri_projectReturning: Option<PgBox<'mcx, ProjectionInfo>>,
+    /// `ri_TrigDesc->trig_update_before_row` — BEFORE ROW UPDATE triggers
+    /// exist.
+    pub ri_trig_update_before_row: bool,
+    /// `ri_TrigDesc->trig_update_instead_row` — INSTEAD OF ROW UPDATE triggers
+    /// exist (a view).
+    pub ri_trig_update_instead_row: bool,
+    /// `ri_TrigDesc->trig_update_after_row` — AFTER ROW UPDATE triggers exist.
+    pub ri_trig_update_after_row: bool,
+    /// `bool` proxy for `ri_TrigDesc != NULL` — the relation has any triggers.
+    pub ri_has_trigdesc: bool,
+    /// `FdwRoutine *ri_FdwRoutine != NULL` — the relation is a foreign table
+    /// handled by an FDW (the routine vtable lands with the fdwapi type).
+    pub ri_has_fdw_routine: bool,
+    /// `ProjectionInfo *ri_projectReturning != NULL` — a RETURNING projection
+    /// has been built for this relation.
+    pub ri_has_project_returning: bool,
+    /// `List *ri_WithCheckOptions != NIL` — WITH CHECK OPTION constraints
+    /// apply (RLS / updatable views).
+    pub ri_has_with_check_options: bool,
+    /// `bool ri_needLockTagTuple` — UPDATE/DELETE needs a tuple-level heavy
+    /// lock (in-place update tuple lock) on this relation.
+    pub ri_needLockTagTuple: bool,
+    /// `bool ri_projectNewInfoValid` — `ri_projectNew` / `ri_newTupleSlot` /
+    /// `ri_oldTupleSlot` have been initialized.
+    pub ri_projectNewInfoValid: bool,
+    /// `TupleTableSlot *ri_oldTupleSlot` — old-tuple slot for UPDATE
+    /// projection (id into `es_tupleTable`).
+    pub ri_oldTupleSlot: Option<SlotId>,
+    /// `TupleTableSlot *ri_newTupleSlot` — new-tuple slot (UPDATE/INSERT
+    /// projection output).
+    pub ri_newTupleSlot: Option<SlotId>,
 }
 
 /// `ExecProcNodeMtd` — the per-node execution callback stored in
@@ -383,23 +453,11 @@ pub struct ScanStateData<'mcx> {
     pub ss_ScanTupleSlot: Option<SlotId>,
 }
 
-/// `ModifyTableState` (execnodes.h), trimmed to the fields the partition
-/// tuple-routing port consumes. Owned by `nodeModifyTable.c`; the rest of its
-/// fields land with that port.
-#[derive(Debug)]
-pub struct ModifyTableState<'mcx> {
-    /// `PlanState ps` — its first field is `NodeTag`; `ps.plan` is the
-    /// `ModifyTable` plan node, `ps.state` the EState (threaded explicitly in
-    /// the owned model), `ps.ps_ResultTupleSlot`/`ps.ps_ExprContext` reused for
-    /// per-partition projections.
-    pub ps: PlanStateData<'mcx>,
-    /// `ResultRelInfo *resultRelInfo` — per-subplan result rels (ids into the
-    /// EState pool); `resultRelInfo[0]` is the "first" relation execPartition
-    /// maps attnos against.
-    pub resultRelInfo: PgVec<'mcx, RriId>,
-    /// `ResultRelInfo *rootResultRelInfo` — the partitioned-table root target.
-    pub rootResultRelInfo: Option<RriId>,
-}
+// `ModifyTableState` (execnodes.h) is the full owned struct defined in
+// `crate::modifytable` (landed with the `nodeModifyTable.c` port) and
+// re-exported at `types_nodes::ModifyTableState`. execPartition's tuple-routing
+// port consumes its `ps` / `resultRelInfo` / `rootResultRelInfo` fields, which
+// remain present in the full definition.
 
 /// The resolved outcome of `fetch_cursor_param_value`'s live-state core:
 /// reading `econtext->ecxt_param_list_info->params[paramId - 1]` (calling the
@@ -534,6 +592,11 @@ pub struct EStateData<'mcx> {
     /// stack/owner alias; `None` is the C `NULL`. Lands with its first consumer
     /// (the index/heap scan ports), per docs/types.md rule 3.
     pub es_snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
+    /// `Snapshot es_crosscheck_snapshot` — crosscheck time qual for RI (used by
+    /// `table_tuple_update`/`table_tuple_delete`). Shared pointer, modeled like
+    /// `es_snapshot` as an `Rc<SnapshotData>` alias; `None` is the C
+    /// `InvalidSnapshot`.
+    pub es_crosscheck_snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
     /// `struct EPQState *es_epq_active` — if not `None`, the EvalPlanQual
     /// recheck state this EState belongs to (C: a pointer to the active
     /// `EPQState`). The owned model holds the real `EPQState`; scan nodes read
@@ -650,8 +713,10 @@ impl<'mcx> EStateData<'mcx> {
         EStateData {
             // estate->es_direction = ForwardScanDirection;
             es_direction: ForwardScanDirection,
-            // es_snapshot = InvalidSnapshot; es_epq_active = NULL;
+            // es_snapshot = InvalidSnapshot; es_crosscheck_snapshot = InvalidSnapshot;
+            // es_epq_active = NULL;
             es_snapshot: None,
+            es_crosscheck_snapshot: None,
             es_epq_active: None,
             // es_range_table = NIL; es_range_table_size = 0;
             es_range_table: PgVec::new_in(mcx),

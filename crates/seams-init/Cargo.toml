@@ -31,6 +31,7 @@ backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }
 backend-executor-nodeMaterial = { path = "../backend-executor-nodeMaterial" }
 backend-executor-nodeMergejoin = { path = "../backend-executor-nodeMergejoin" }
+backend-executor-nodeModifyTable = { path = "../backend-executor-nodeModifyTable" }
 backend-executor-nodeForeignscan = { path = "../backend-executor-nodeForeignscan" }
 backend-executor-nodeSeqscan = { path = "../backend-executor-nodeSeqscan" }
 backend-libpq-pqcomm = { path = "../backend-libpq-pqcomm" }

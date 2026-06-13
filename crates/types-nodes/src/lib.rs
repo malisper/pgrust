@@ -23,6 +23,7 @@ pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
+pub mod modifytable;
 pub mod nodeappend;
 pub mod nodeforeigncustom;
 pub mod nodehashjoin;
@@ -49,12 +50,17 @@ pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
     CurrentOfTid, EPQState, EStateData, EcxtId, ExecProcNodeMtd, ExecRowMark, ExprContext,
-    ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, ModifyTableState, Opaque,
+    ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, Opaque,
     ParamExecData,
     PlanStateData, ResultRelInfo, RowMarkType, RriId, RunningCursorState, ScanDirection,
     ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, T_MaterialState,
 };
 pub use primnodes::CurrentOfExpr;
+pub use modifytable::{
+    EPQState as ModifyTableEPQState, MergeAction, MergeActionState, MergeMatchKind, ModifyTable,
+    ModifyTableState, OnConflictSetState, OverridingKind, PartitionTupleRouting, ResultRelHash,
+    TransitionCaptureState,
+};
 pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
