@@ -87,7 +87,7 @@ fn deescape_quoted_string_matches_postgres_rules() {
 fn parse_config_fp_accepts_assignments_and_comments() {
     let mut vars = Vec::new();
     let ok = ParseConfigFp(
-        "shared_buffers = 128MB # comment\ncustom.name 'value'\nport 5432\n",
+        "shared_buffers = 128MB # comment\ncustom.name 'value'\nport 5432\n".as_bytes(),
         Path::new("/tmp/postgresql.conf"),
         0,
         ERROR,
@@ -162,7 +162,7 @@ fn parse_config_file_handles_include_dir_in_sorted_order() {
 fn parse_errors_are_recorded_below_error() {
     let mut vars = Vec::new();
     let ok = ParseConfigFp(
-        "good = 1\nbad = \n",
+        "good = 1\nbad = \n".as_bytes(),
         Path::new("/tmp/postgresql.conf"),
         0,
         WARNING,
@@ -178,7 +178,7 @@ fn parse_errors_are_recorded_below_error() {
 #[test]
 fn parse_errors_throw_at_error_level() {
     let error = ParseConfigFp(
-        "bad = \n",
+        "bad = \n".as_bytes(),
         Path::new("/tmp/postgresql.conf"),
         0,
         ERROR,
@@ -192,7 +192,7 @@ fn parse_errors_throw_at_error_level() {
 fn qualified_id_is_allowed_for_name_but_not_value() {
     let mut vars = Vec::new();
     let ok = ParseConfigFp(
-        "custom.name = on\nbad = custom.value\n",
+        "custom.name = on\nbad = custom.value\n".as_bytes(),
         Path::new("/tmp/postgresql.conf"),
         0,
         WARNING,
@@ -202,6 +202,29 @@ fn qualified_id_is_allowed_for_name_but_not_value() {
     assert!(!ok);
     assert_eq!(vars[0].name.as_deref(), Some("custom.name"));
     assert_eq!(vars[1].errmsg.as_deref(), Some("syntax error"));
+}
+
+#[test]
+fn parses_non_utf8_bytes() {
+    // The flex scanner is `%option 8bit`; high-bit bytes \200-\377 are valid
+    // `LETTER`s. A latin-1 value (0xE9 = é) must parse, not be rejected as
+    // unreadable.
+    let mut vars = Vec::new();
+    let contents: &[u8] = b"name = caf\xe9\n";
+    let ok = ParseConfigFp(
+        contents,
+        Path::new("/tmp/postgresql.conf"),
+        0,
+        WARNING,
+        &mut vars,
+    )
+    .unwrap();
+    assert!(ok);
+    assert_eq!(vars.len(), 1);
+    assert_eq!(vars[0].name.as_deref(), Some("name"));
+    // The 0xE9 byte classifies as an unquoted-string LETTER and is stored
+    // lossily (the ConfigVariable value is a UTF-8 String).
+    assert!(vars[0].value.as_deref().unwrap().starts_with("caf"));
 }
 
 #[test]

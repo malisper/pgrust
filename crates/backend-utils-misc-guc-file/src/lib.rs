@@ -188,7 +188,10 @@ pub fn ParseConfigFile(
         return Ok(false);
     }
 
-    let contents = match std::fs::read_to_string(&abs_path) {
+    // The flex scanner is `%option 8bit` and reads the file as raw bytes, so a
+    // config file that is not valid UTF-8 (high-bit bytes are valid `LETTER`s,
+    // \200-\377) must still parse. Read bytes, not a UTF-8 `String`.
+    let contents = match std::fs::read(&abs_path) {
         Ok(contents) => contents,
         // AllocateFile() == NULL: a strict include fails, a non-strict one is
         // silently skipped (the include_if_exists case).
@@ -231,8 +234,12 @@ pub fn ParseConfigFile(
 /// `ParseConfigFp` — parse already-read configuration file `contents` line by
 /// line (the flex scanner's `yylex` driven by the parser), appending settings
 /// to `variables` and recursing for `include*` directives.
+///
+/// `contents` is a raw byte slice: the flex scanner is `%option 8bit` and the
+/// `LETTER` class includes `\200-\377`, so the input is not required to be
+/// valid UTF-8.
 pub fn ParseConfigFp(
-    contents: &str,
+    contents: &[u8],
     config_file: &Path,
     depth: i32,
     elevel: ErrorLevel,
@@ -490,12 +497,27 @@ fn guc_name_compare(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
-/// Split file contents into logical lines (the flex `\n` token boundaries).
-fn logical_lines(contents: &str) -> Vec<&str> {
+/// Split file contents into logical lines on the flex `\n` token boundaries,
+/// stripping a trailing `\r` (flex eats `\r` as whitespace). Mirrors
+/// `str::lines` but over raw bytes so non-UTF-8 input parses.
+fn logical_lines(contents: &[u8]) -> Vec<&[u8]> {
     if contents.is_empty() {
         return Vec::new();
     }
-    contents.lines().collect()
+    let mut lines = Vec::new();
+    for line in contents.split(|&b| b == b'\n') {
+        // `split` yields a trailing empty element when `contents` ends in `\n`;
+        // skip it so a final newline doesn't add a spurious empty line (matches
+        // `str::lines`).
+        lines.push(line);
+    }
+    if contents.last() == Some(&b'\n') {
+        lines.pop();
+    }
+    lines
+        .into_iter()
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .collect()
 }
 
 // ----------------------------------------------------------------------------
@@ -537,19 +559,18 @@ enum ParseLineError {
 }
 
 struct Lexer<'a> {
-    line: &'a str,
+    line: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(line: &'a str) -> Self {
+    fn new(line: &'a [u8]) -> Self {
         Self { line, pos: 0 }
     }
 
     fn next_token(&mut self) -> Option<Token> {
         self.skip_ws();
-        let rest = &self.line[self.pos..];
-        let first = rest.as_bytes().first().copied()?;
+        let first = self.line.get(self.pos).copied()?;
         if first == b'#' {
             // comment: eat to end of line (GUC_EOL)
             self.pos = self.line.len();
@@ -569,7 +590,7 @@ impl<'a> Lexer<'a> {
         // Longest non-delimiter run, then classify against the token regexes.
         let start = self.pos;
         while self.pos < self.line.len() {
-            let b = self.line.as_bytes()[self.pos];
+            let b = self.line[self.pos];
             if matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b'#' | b'=') {
                 break;
             }
@@ -586,14 +607,15 @@ impl<'a> Lexer<'a> {
         }
         Some(Token {
             kind: classify_token(text),
-            text: text.to_owned(),
+            text: String::from_utf8_lossy(text).into_owned(),
         })
+        // NB: `classify_token` runs on the raw bytes (so high-bit `LETTER`s
+        // \200-\377 classify correctly); `text` is only lossy-stringified for
+        // storage in the `ConfigVariable`.
     }
 
     fn skip_ws(&mut self) {
-        while self.pos < self.line.len()
-            && matches!(self.line.as_bytes()[self.pos], b' ' | b'\t' | b'\r')
-        {
+        while self.pos < self.line.len() && matches!(self.line[self.pos], b' ' | b'\t' | b'\r') {
             self.pos += 1;
         }
     }
@@ -603,20 +625,20 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         self.pos += 1;
         while self.pos < self.line.len() {
-            match self.line.as_bytes()[self.pos] {
+            match self.line[self.pos] {
                 b'\\' => {
                     // \\. — a backslash escapes the next byte
                     self.pos = (self.pos + 2).min(self.line.len());
                 }
                 b'\'' => {
                     self.pos += 1;
-                    if self.pos < self.line.len() && self.line.as_bytes()[self.pos] == b'\'' {
+                    if self.pos < self.line.len() && self.line[self.pos] == b'\'' {
                         // '' — doubled quote stays inside the string
                         self.pos += 1;
                     } else {
                         return Token {
                             kind: TokenKind::String,
-                            text: self.line[start..self.pos].to_owned(),
+                            text: String::from_utf8_lossy(&self.line[start..self.pos]).into_owned(),
                         };
                     }
                 }
@@ -667,7 +689,7 @@ fn parse_line(
     Ok(Some((name, value)))
 }
 
-fn classify_token(text: &str) -> TokenKind {
+fn classify_token(text: &[u8]) -> TokenKind {
     // flex picks the longest match, breaking ties by rule order: ID,
     // QUALIFIED_ID, STRING, UNQUOTED_STRING, INTEGER, REAL. ID and
     // QUALIFIED_ID are disjoint; an all-letter token is ID, a LETTER.LETTER
@@ -687,16 +709,15 @@ fn classify_token(text: &str) -> TokenKind {
     }
 }
 
-fn is_id(text: &str) -> bool {
-    let mut bytes = text.bytes();
-    let Some(first) = bytes.next() else {
+fn is_id(text: &[u8]) -> bool {
+    let Some((first, rest)) = text.split_first() else {
         return false;
     };
-    is_letter(first) && bytes.all(is_letter_or_digit)
+    is_letter(*first) && rest.iter().copied().all(is_letter_or_digit)
 }
 
-fn is_qualified_id(text: &str) -> bool {
-    let mut parts = text.split('.');
+fn is_qualified_id(text: &[u8]) -> bool {
+    let mut parts = text.split(|&b| b == b'.');
     let Some(left) = parts.next() else {
         return false;
     };
@@ -706,46 +727,47 @@ fn is_qualified_id(text: &str) -> bool {
     parts.next().is_none() && is_id(left) && is_id(right)
 }
 
-fn is_unquoted_string(text: &str) -> bool {
-    let mut bytes = text.bytes();
-    let Some(first) = bytes.next() else {
+fn is_unquoted_string(text: &[u8]) -> bool {
+    let Some((first, rest)) = text.split_first() else {
         return false;
     };
-    is_letter(first)
-        && bytes.all(|b| is_letter_or_digit(b) || matches!(b, b'-' | b'.' | b':' | b'/'))
+    is_letter(*first)
+        && rest
+            .iter()
+            .all(|&b| is_letter_or_digit(b) || matches!(b, b'-' | b'.' | b':' | b'/'))
 }
 
-fn is_integer(text: &str) -> bool {
+fn is_integer(text: &[u8]) -> bool {
     let Some(text) = strip_sign(text) else {
         return false;
     };
-    let (digits, unit_start) = if let Some(rest) = text.strip_prefix("0x") {
-        let len = rest.bytes().take_while(|b| b.is_ascii_hexdigit()).count();
+    let (digits, unit_start) = if let Some(rest) = text.strip_prefix(b"0x") {
+        let len = rest.iter().take_while(|b| b.is_ascii_hexdigit()).count();
         (len > 0, 2 + len)
     } else {
-        let len = text.bytes().take_while(|b| b.is_ascii_digit()).count();
+        let len = text.iter().take_while(|b| b.is_ascii_digit()).count();
         (len > 0, len)
     };
-    digits && text[unit_start..].bytes().all(|b| b.is_ascii_alphabetic())
+    digits && text[unit_start..].iter().all(|b| b.is_ascii_alphabetic())
 }
 
-fn is_real(text: &str) -> bool {
+fn is_real(text: &[u8]) -> bool {
     let Some(text) = strip_sign(text) else {
         return false;
     };
-    let Some(dot) = text.find('.') else {
+    let Some(dot) = text.iter().position(|&b| b == b'.') else {
         return false;
     };
-    if !text[..dot].bytes().all(|b| b.is_ascii_digit()) {
+    if !text[..dot].iter().all(|b| b.is_ascii_digit()) {
         return false;
     }
     let after_dot = &text[dot + 1..];
-    let exponent_at = after_dot.find(['e', 'E']);
+    let exponent_at = after_dot.iter().position(|&b| b == b'e' || b == b'E');
     let (fraction, exponent) = match exponent_at {
         Some(pos) => (&after_dot[..pos], Some(&after_dot[pos + 1..])),
         None => (after_dot, None),
     };
-    if !fraction.bytes().all(|b| b.is_ascii_digit()) {
+    if !fraction.iter().all(|b| b.is_ascii_digit()) {
         return false;
     }
     match exponent {
@@ -753,16 +775,16 @@ fn is_real(text: &str) -> bool {
             let Some(exponent) = strip_sign(exponent) else {
                 return false;
             };
-            !exponent.is_empty() && exponent.bytes().all(|b| b.is_ascii_digit())
+            !exponent.is_empty() && exponent.iter().all(|b| b.is_ascii_digit())
         }
         None => true,
     }
 }
 
-fn strip_sign(text: &str) -> Option<&str> {
+fn strip_sign(text: &[u8]) -> Option<&[u8]> {
     let text = text
-        .strip_prefix('-')
-        .or_else(|| text.strip_prefix('+'))
+        .strip_prefix(b"-")
+        .or_else(|| text.strip_prefix(b"+"))
         .unwrap_or(text);
     (!text.is_empty()).then_some(text)
 }
