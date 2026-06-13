@@ -245,7 +245,11 @@ fn control() -> *mut dsm_control_header {
 /// `LWLockAcquire(DynamicSharedMemoryControlLock, LW_EXCLUSIVE)` — guard
 /// scope, so the lock can never leak across an error return.
 fn acquire_control_lock() -> PgResult<MainLWLockGuard> {
-    LWLockAcquireMain(DYNAMIC_SHARED_MEMORY_CONTROL_LOCK, LW_EXCLUSIVE)
+    LWLockAcquireMain(
+        DYNAMIC_SHARED_MEMORY_CONTROL_LOCK,
+        LW_EXCLUSIVE,
+        backend_utils_init_small_seams::my_proc_number::call(),
+    )
 }
 
 /// `dsm_main_space_begin` viewed as the region's `FreePageManager *`, as in C.

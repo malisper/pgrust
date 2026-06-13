@@ -1,9 +1,10 @@
 //! Trimmed copy of the src-idiomatic `types::storage` module: the LWLock
 //! handle and its supporting pieces.
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use types_core::{uint16, uint32, uint8, Oid, ProcNumber, RelFileNumber, TransactionId, INVALID_PROC_NUMBER};
+use types_core::{uint16, uint32, Oid, ProcNumber, RelFileNumber, TransactionId, INVALID_PROC_NUMBER};
 
 /// `enum LWLockMode` (`storage/lwlock.h:112`).
 #[repr(u32)]
@@ -71,15 +72,27 @@ impl pg_atomic_uint64 {
     }
 }
 
-/// `LWLockWaitState` (`storage/lwlock.h`) — the `PGPROC.lwWaiting` state byte
-/// set and read by the LWLock wait-list machinery.
-pub type LWLockWaitState = uint8;
-/// not currently waiting / woken up
-pub const LW_WS_NOT_WAITING: LWLockWaitState = 0;
-/// currently waiting
-pub const LW_WS_WAITING: LWLockWaitState = 1;
-/// removed from waitlist, but not yet signaled
-pub const LW_WS_PENDING_WAKEUP: LWLockWaitState = 2;
+/// `enum LWLockWaitState` (`storage/lwlock.h:28`) — the `PGPROC.lwWaiting`
+/// state set and read by the LWLock wait-list machinery.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum LWLockWaitState {
+    /// not currently waiting / woken up
+    LW_WS_NOT_WAITING = 0,
+    /// currently waiting
+    LW_WS_WAITING = 1,
+    /// removed from waitlist, but not yet signalled
+    LW_WS_PENDING_WAKEUP = 2,
+}
+
+pub use LWLockWaitState::*;
+
+impl Default for LWLockWaitState {
+    /// C's zero value (`LW_WS_NOT_WAITING`), for zero-initialized PGPROCs.
+    fn default() -> Self {
+        LW_WS_NOT_WAITING
+    }
+}
 
 /// `proclist_node` (`storage/proclist_types.h`) — a node in a doubly-linked
 /// list of PGPROCs identified by pgprocno. A node not in any list has
@@ -109,6 +122,42 @@ impl Default for proclist_head {
     }
 }
 
+/// The `waiters` field of an [`LWLock`]: a `proclist_head` that, per
+/// lwlock.c's protocol, is mutated only while the wait-list spinlock bit
+/// (`LW_FLAG_LOCKED`) is held in the lock's `state` word. Backends share
+/// `&LWLock` handles, so the head lives in an `UnsafeCell`; the runtime
+/// exclusion that makes `ptr()` access sound is the `LW_FLAG_LOCKED` bit,
+/// exactly as in C.
+#[derive(Debug, Default)]
+pub struct LWLockWaitList {
+    cell: UnsafeCell<proclist_head>,
+}
+
+// SAFETY: cross-thread access is serialized by the owning LWLock's
+// LW_FLAG_LOCKED spinlock bit (lwlock.c's wait-list protocol).
+unsafe impl Sync for LWLockWaitList {}
+
+impl LWLockWaitList {
+    pub const fn new(head: proclist_head) -> Self {
+        Self {
+            cell: UnsafeCell::new(head),
+        }
+    }
+
+    /// Raw pointer to the list head. Dereferencing requires holding the
+    /// owning lock's `LW_FLAG_LOCKED` bit (or otherwise having exclusive
+    /// access, e.g. single-threaded initialization).
+    pub fn ptr(&self) -> *mut proclist_head {
+        self.cell.get()
+    }
+
+    /// Exclusive-access view (used by `LWLockInitialize`, which legitimately
+    /// holds `&mut LWLock`).
+    pub fn get_mut(&mut self) -> &mut proclist_head {
+        self.cell.get_mut()
+    }
+}
+
 /// `LWLock` (`storage/lwlock.h`): tranche id, atomic lock state, and the list
 /// of waiting PGPROCs. Shmem-resident and concurrently accessed, so (like its
 /// atomic `state`) it is neither `Copy` nor `Clone` — a copied lock would be a
@@ -117,7 +166,7 @@ impl Default for proclist_head {
 pub struct LWLock {
     pub tranche: uint16,
     pub state: pg_atomic_uint32,
-    pub waiters: proclist_head,
+    pub waiters: LWLockWaitList,
 }
 
 /// `LWLOCK_PADDED_SIZE` (`storage/lwlock.h`) — `PG_CACHE_LINE_SIZE`.

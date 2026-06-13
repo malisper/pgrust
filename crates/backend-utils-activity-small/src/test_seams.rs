@@ -217,10 +217,12 @@ fn install_seams() {
         let e = env();
         e.lwlock_inits.set(e.lwlock_inits.get() + 1);
     });
-    lwlock::lwlock_acquire::set(|lock, mode| {
+    lwlock::lwlock_acquire::set(|lock, mode, _my_proc_number| {
         env().lwlock_acquires.borrow_mut().push(mode);
         Ok(lwlock::LWLockGuard::new(lock, true))
     });
+
+    backend_utils_init_small_seams::my_proc_number::set(|| 0);
     lwlock::lwlock_release::set(|_lock| {
         let e = env();
         e.lwlock_releases.set(e.lwlock_releases.get() + 1);

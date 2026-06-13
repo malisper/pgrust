@@ -59,7 +59,7 @@ backend-storage-ipc-standby-seams = { path = "../backend-storage-ipc-standby-sea
 backend-storage-lmgr-condition-variable-seams = { path = "../backend-storage-lmgr-condition-variable-seams" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
-backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }

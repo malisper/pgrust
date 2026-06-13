@@ -8,7 +8,12 @@
 //! `LWLockReleaseAll()` in abort cleanup; here the guard's `Drop` is that
 //! backstop). Release where C releases mid-function is the explicit
 //! [`LWLockGuard::release`].
+//!
+//! The main-array (by-offset) surface — `LWLockAcquireMain`,
+//! `LWLockReleaseAll` — is a direct dependency on the ported owner crate, not
+//! a seam (no dependency cycle requires one).
 
+use types_core::ProcNumber;
 use types_error::PgResult;
 use types_storage::{LWLock, LWLockMode};
 
@@ -21,10 +26,13 @@ seam_core::seam!(
     /// `LWLockAcquire(LWLock *lock, LWLockMode mode)` — acquire the lock,
     /// returning a guard that releases it on drop (`was_free` carries the C
     /// return value: true if the lock was free, false if it had to wait).
+    /// `my_proc_number` is the caller's `MyProcNumber` (the C ambient
+    /// per-backend global, passed explicitly per the no-ambient-seams rule).
     /// `Err` carries the C `elog(ERROR, "too many LWLocks taken")`.
     pub fn lwlock_acquire<'l>(
         lock: &'l LWLock,
         mode: LWLockMode,
+        my_proc_number: ProcNumber,
     ) -> PgResult<LWLockGuard<'l>>
 );
 
@@ -74,24 +82,3 @@ impl Drop for LWLockGuard<'_> {
         }
     }
 }
-
-seam_core::seam!(
-    /// `LWLockAcquire(&MainLWLockArray[lock_offset].lock, mode)` — acquire one
-    /// of the individual built-in locks (`lwlocklist.h` offsets, e.g.
-    /// `types_storage::DYNAMIC_SHARED_MEMORY_CONTROL_LOCK`). `MainLWLockArray`
-    /// lives in main shared memory owned by `lwlock.c`, so the lock is named
-    /// by offset rather than by reference.
-    pub fn lwlock_acquire_main(lock_offset: usize, mode: LWLockMode) -> PgResult<bool>
-);
-
-seam_core::seam!(
-    /// `LWLockRelease(&MainLWLockArray[lock_offset].lock)` — release a
-    /// built-in lock previously taken via [`lwlock_acquire_main`].
-    pub fn lwlock_release_main(lock_offset: usize) -> PgResult<()>
-);
-
-seam_core::seam!(
-    /// `LWLockReleaseAll()` — release all LWLocks held by this backend; used
-    /// during error recovery and at shmem exit.
-    pub fn lwlock_release_all()
-);

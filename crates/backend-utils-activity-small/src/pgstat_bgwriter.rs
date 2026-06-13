@@ -16,6 +16,7 @@ use crate::changecount::{
     pgstat_end_changecount_write,
 };
 use backend_storage_lmgr_lwlock_seams::{lwlock_acquire, lwlock_initialize};
+use backend_utils_init_small_seams::my_proc_number;
 use backend_utils_activity_pgstat_seams::{
     assert_is_up, shmem_is_shutdown, snapshot_fixed, with_shmem_bgwriter, with_snapshot_bgwriter,
 };
@@ -115,7 +116,7 @@ pub fn pgstat_bgwriter_reset_all_cb(ts: TimestampTz) -> PgResult<()> {
     with_shmem_bgwriter::call(&mut |stats_shmem: &mut PgStatShared_BgWriter| {
         res = (|| {
             // see explanation above PgStatShared_BgWriter for the reset protocol
-            let guard = lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE)?;
+            let guard = lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE, my_proc_number::call())?;
             {
                 // pgstat_copy_changecounted_stats(&stats_shmem->reset_offset,
                 //                                 &stats_shmem->stats, sizeof(...),
@@ -152,7 +153,7 @@ pub fn pgstat_bgwriter_snapshot_cb() -> PgResult<()> {
                 &stats_shmem.changecount,
             );
 
-            let guard = lwlock_acquire::call(&stats_shmem.lock, LW_SHARED)?;
+            let guard = lwlock_acquire::call(&stats_shmem.lock, LW_SHARED, my_proc_number::call())?;
             // memcpy(&reset, reset_offset, sizeof(stats_shmem->stats));
             let reset = stats_shmem.reset_offset;
             guard.release()?;

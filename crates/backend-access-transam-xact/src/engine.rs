@@ -29,7 +29,7 @@ use backend_storage_ipc_procarray_seams as procarray_seams;
 use backend_storage_ipc_standby_seams as standby_seams;
 use backend_storage_lmgr_condition_variable_seams as condvar_seams;
 use backend_storage_lmgr_lock_seams as lock_seams;
-use backend_storage_lmgr_lwlock_seams as lwlock_seams;
+use backend_storage_lmgr_lwlock as lwlock;
 use backend_utils_activity_status_seams as status_seams;
 use backend_utils_activity_waitevent_seams as waitevent_seams;
 use backend_utils_activity_xact_seams as pgstat_xact_seams;
@@ -810,8 +810,9 @@ fn AbortTransaction() -> PgResult<()> {
     AtAbort_ResourceOwner();
 
     // Release any LW locks we might be holding as quickly as possible
-    // (regular locks are held till we finish aborting).
-    lwlock_seams::lwlock_release_all::call();
+    // (regular locks are held till we finish aborting). The abort path
+    // swallows the release error, as C's error-recovery LWLockReleaseAll does.
+    let _ = lwlock::LWLockReleaseAll();
 
     // Clear wait information and command progress indicator.
     waitevent_seams::pgstat_report_wait_end::call();
@@ -2162,7 +2163,7 @@ fn AbortSubTransaction() -> PgResult<()> {
     AtSubAbort_ResourceOwner();
 
     // Release any LW locks we might be holding as quickly as possible.
-    lwlock_seams::lwlock_release_all::call();
+    let _ = lwlock::LWLockReleaseAll();
 
     waitevent_seams::pgstat_report_wait_end::call();
     backend_utils_activity_small::backend_progress::pgstat_progress_end_command();
