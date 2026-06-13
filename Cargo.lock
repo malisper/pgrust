@@ -458,6 +458,7 @@ dependencies = [
 name = "backend-access-rmgrdesc-small"
 version = "0.0.0"
 dependencies = [
+ "backend-rmgrdesc-small-seams",
  "mcx",
  "types-core",
  "types-error",
