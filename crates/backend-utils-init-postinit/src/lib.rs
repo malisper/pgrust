@@ -1026,7 +1026,7 @@ pub fn InitPostgres(
         backend_utils_init_miscinit_seams::validate_pg_version::call(fullpath.as_str())?;
     }
 
-    backend_utils_init_miscinit_seams::set_database_path::call(fullpath.as_str())?;
+    backend_utils_init_miscinit_seams::set_database_path_once::call(fullpath.as_str())?;
 
     // It's now possible to do real access to the system catalogs.
     backend_utils_cache_relcache_seams::relation_cache_initialize_phase3::call()?;

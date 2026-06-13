@@ -16,8 +16,14 @@ types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }
+types-scan = { path = "../types-scan" }
+types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
+backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-commands-tsearchcmds-seams = { path = "../backend-commands-tsearchcmds-seams" }

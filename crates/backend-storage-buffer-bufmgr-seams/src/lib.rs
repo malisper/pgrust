@@ -133,3 +133,66 @@ seam_core::seam!(
     /// carries its `ereport` surface.
     pub fn init_buffer_manager_access() -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// XLOG-replay buffer primitives consumed by xlogutils.c's redo fetchers.
+// The relation Page lives behind the buffer-manager boundary; xlogutils
+// crosses it by `Buffer` id rather than exposing a `Page` pointer.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// The buffer-acquisition body of `XLogReadBufferExtended` (xlogutils.c):
+    /// the recent-buffer fast path, `smgropen`/`smgrcreate`/`smgrnblocks`, and
+    /// the `ReadBufferWithoutRelcache` vs. `ExtendBufferedRelTo` branch — all
+    /// of which are bufmgr/smgr operations. Returns the pinned buffer, or
+    /// `InvalidBuffer` (0) for the RBM_NORMAL / RBM_NORMAL_NO_LOG missing-page
+    /// case (the caller re-applies the in-crate `log_invalid_page`
+    /// bookkeeping). `Err` carries the smgr/read `ereport(ERROR)`s.
+    pub fn xlog_read_buffer_extended(
+        rlocator: types_storage::RelFileLocator,
+        forknum: types_core::primitive::ForkNumber,
+        blkno: types_core::primitive::BlockNumber,
+        mode: types_storage::ReadBufferMode,
+        recent_buffer: types_storage::Buffer,
+    ) -> types_error::PgResult<types_storage::Buffer>
+);
+
+seam_core::seam!(
+    /// `PageIsNew(BufferGetPage(buffer))` (bufpage.h) — whether the buffer's
+    /// page is all-zeroes (`pd_upper == 0`).
+    pub fn page_is_new(buffer: types_storage::Buffer) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `PageSetLSN(BufferGetPage(buffer), lsn)` (bufpage.h) — stamp the page
+    /// LSN.
+    pub fn page_set_lsn(
+        buffer: types_storage::Buffer,
+        lsn: types_core::XLogRecPtr,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PageGetLSN(BufferGetPage(buffer))` (bufpage.h) — the page LSN.
+    pub fn page_get_lsn(
+        buffer: types_storage::Buffer,
+    ) -> types_error::PgResult<types_core::XLogRecPtr>
+);
+
+seam_core::seam!(
+    /// `FlushOneBuffer(buffer)` (bufmgr.c) — write a single buffer to disk
+    /// (used to keep unlogged-relation init forks in sync). `Err` carries the
+    /// I/O `ereport(ERROR)`s.
+    pub fn flush_one_buffer(buffer: types_storage::Buffer) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE)` (bufmgr.c).
+    pub fn lock_buffer_exclusive(buffer: types_storage::Buffer) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockBufferForCleanup(buffer)` (bufmgr.c) — acquire a cleanup
+    /// (super-exclusive) lock on the buffer.
+    pub fn lock_buffer_for_cleanup(buffer: types_storage::Buffer) -> types_error::PgResult<()>
+);

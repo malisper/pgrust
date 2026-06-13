@@ -89,6 +89,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Set the `DatabasePath` global (globals.c, owned via miscinit) to `path`.
+    /// `ProcessCommittedInvalidationMessages` uses this during recovery to set
+    /// `DatabasePath` directly (the comment in inval.c calls it "a quick hack")
+    /// rather than [`set_database_path_once`] (`SetDatabasePath`), which is
+    /// one-shot for normal backends.
+    pub fn set_database_path(path: &str)
+);
+
+seam_core::seam!(
+    /// Clear the `DatabasePath` global back to NULL (pairs with
+    /// [`set_database_path`] in the recovery hack of
+    /// `ProcessCommittedInvalidationMessages`).
+    pub fn clear_database_path()
+);
+
+seam_core::seam!(
     /// `GetBackendTypeDesc(backendType)` (miscinit.c): the human-readable
     /// process-type description string for `backendType` (a static table
     /// lookup; the C returns a `const char *` into static text). Infallible.
@@ -261,8 +277,12 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `SetDatabasePath(path)` (miscinit.c): record the database directory
-    /// path globally. `Err` carries its OOM surface.
-    pub fn set_database_path(path: &str) -> types_error::PgResult<()>
+    /// path globally, copying `path` into `TopMemoryContext`. This is the
+    /// one-shot setter normal backends call once during `InitPostgres`; it is
+    /// distinct from [`set_database_path`]/[`clear_database_path`], which are
+    /// the inval.c recovery quick-hack that pokes `DatabasePath` directly.
+    /// `Err` carries its OOM surface (the `MemoryContextStrdup`).
+    pub fn set_database_path_once(path: &str) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(

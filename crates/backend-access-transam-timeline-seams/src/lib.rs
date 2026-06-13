@@ -37,6 +37,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tliOfPointInHistory(ptr, history)` (timeline.c) — the timeline of the
+    /// last LSN on the segment containing `ptr`, looked up in the already-read
+    /// `history` (newest first, as returned by `read_timeline_history`).
+    pub fn tli_of_point_in_history(
+        ptr: XLogRecPtr,
+        history: &[TimeLineHistoryEntry],
+    ) -> PgResult<TimeLineID>
+);
+
+seam_core::seam!(
     /// `tliSwitchPoint(tli, history, *nextTLI)` (timeline.c) — find the LSN at
     /// which `tli` ended; returns `(switchpoint, next_tli)` (`next_tli`
     /// mirrors the non-NULL `*nextTLI` out-param, the timeline `tli` switched

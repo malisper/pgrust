@@ -208,3 +208,11 @@ seam_core::seam!(
     /// (none expected; OS errno is returned in [`AccessResult::Other`]).
     pub fn access_f_ok(path: &str) -> types_error::PgResult<AccessResult>
 );
+
+seam_core::seam!(
+    /// `BasicOpenFile(path, O_RDONLY | PG_BINARY)` (fd.c) — open a file
+    /// outside the virtual-fd pool. `Ok(fd)` on success; `Err(errno)` carries
+    /// the `errno` the C caller inspects (e.g. `ENOENT`) to choose its
+    /// `ereport` message.
+    pub fn basic_open_file(path: &str) -> Result<i32, i32>
+);
