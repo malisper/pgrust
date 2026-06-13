@@ -19,3 +19,10 @@ types-selfuncs = { path = "../types-selfuncs" }
 types-array = { path = "../types-array" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# Owner seam crates this unit consumes (panic until their owners land):
+#  - syscache.c SearchSysCache* / GetSysCacheOid* probes
+#  - nodes list_member_oid (transform helpers)
+#  - format_type.c format_type_be (get_cast_oid error message)
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-nodes-copyfuncs-pc-seams = { path = "../backend-nodes-copyfuncs-pc-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
