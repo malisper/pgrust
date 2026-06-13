@@ -4,8 +4,12 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+use mcx::Mcx;
 use types_core::Oid;
+use types_core::SubTransactionId;
 use types_error::PgResult;
+use types_storage::lock::LOCKMODE;
+use types_tuple::access::RangeVar;
 
 seam_core::seam!(
     /// `get_ts_config_oid(names, missing_ok)` (namespace.c): the OID of a
@@ -14,4 +18,59 @@ seam_core::seam!(
     /// `ERRCODE_UNDEFINED_OBJECT` (`Err`); with `missing_ok = true` it is
     /// `Ok(InvalidOid)`.
     pub fn get_ts_config_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_namespace_oid(nspname, missing_ok)` (namespace.c): the
+    /// namespace's OID; with `missing_ok = false` a missing schema raises
+    /// `ERRCODE_UNDEFINED_SCHEMA`, carried on `Err`.
+    pub fn get_namespace_oid(nspname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `RangeVarGetRelid(relation, lockmode, missing_ok)` (namespace.h macro
+    /// over `RangeVarGetRelidExtended` with no callback and `RVR_MISSING_OK`
+    /// per `missing_ok`). `mcx` is the C current context the lookup's
+    /// transient catalog copies are made in.
+    pub fn range_var_get_relid(
+        mcx: Mcx<'_>,
+        relation: &RangeVar,
+        lockmode: LOCKMODE,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `LookupExplicitNamespace(nspname, missing_ok)` (namespace.c): resolve
+    /// an explicit schema name and verify USAGE rights.
+    pub fn lookup_explicit_namespace(nspname: &str, missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `RangeVarGetRelid(makeRangeVarFromNameList(textToQualifiedNameList(name)),
+    /// lockmode, missing_ok)` — the SQL-function idiom for resolving a
+    /// possibly-qualified relation name text to its OID without holding a lock
+    /// (callers that lack privileges to lock it). With `missing_ok = false` a
+    /// missing relation raises `ERRCODE_UNDEFINED_TABLE`, carried on `Err`.
+    pub fn range_var_get_relid_from_text(
+        mcx: Mcx<'_>,
+        name: &str,
+        lockmode: LOCKMODE,
+        missing_ok: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `AtEOXact_Namespace(isCommit, parallel)` — end-of-xact temp-namespace
+    /// and search-path cleanup.
+    pub fn at_eoxact_namespace(is_commit: bool, parallel: bool)
+);
+
+seam_core::seam!(
+    /// `AtEOSubXact_Namespace(isCommit, mySubid, parentSubid)`.
+    pub fn at_eosubxact_namespace(
+        is_commit: bool,
+        my_subid: SubTransactionId,
+        parent_subid: SubTransactionId,
+    )
 );

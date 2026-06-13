@@ -1,6 +1,7 @@
 //! Seam declarations for the `backend-storage-lmgr-lock` unit
 //! (`storage/lmgr/lock.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
+extern crate alloc;
 
 seam_core::seam!(
     /// `lock_twophase_recover(xid, info, recdata, len)` — re-acquire a prepared
@@ -141,3 +142,112 @@ pub fn lock_acquire(
         held: result != types_storage::lock::LOCKACQUIRE_NOT_AVAIL,
     })
 }
+
+seam_core::seam!(
+    /// `LockAcquire(locktag, lockmode, sessionLock, dontWait)` — can
+    /// `ereport(ERROR)` (out of shared memory, deadlock).
+    pub fn lock_acquire(
+        locktag: &types_storage::LOCKTAG,
+        lockmode: types_storage::LOCKMODE,
+        session_lock: bool,
+        dont_wait: bool,
+    ) -> types_error::PgResult<types_storage::LockAcquireResult>
+);
+
+seam_core::seam!(
+    /// `LockRelease(locktag, lockmode, sessionLock)` — false (with a WARNING)
+    /// when the lock was not held.
+    pub fn lock_release(
+        locktag: &types_storage::LOCKTAG,
+        lockmode: types_storage::LOCKMODE,
+        session_lock: bool,
+    ) -> bool
+);
+
+seam_core::seam!(
+    /// `GetLockConflicts(locktag, lockmode, countp)` — VXIDs of transactions
+    /// holding conflicting locks; the C terminator is dropped and `countp`
+    /// folds into the length. The result array is allocated in `mcx` (C
+    /// reuses a TopMemoryContext-static array; the owner copies into the
+    /// caller's context instead).
+    pub fn get_lock_conflicts<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        locktag: &types_storage::LOCKTAG,
+        lockmode: types_storage::LOCKMODE,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_storage::VirtualTransactionId>>
+);
+
+seam_core::seam!(
+    /// `GetRunningTransactionLocks(*nlocks)` — every held AccessExclusiveLock
+    /// with an assigned xid, for snapshot logging. C pallocs the array in the
+    /// caller's context (the caller pfrees it), so the seam takes the target
+    /// context.
+    pub fn get_running_transaction_locks<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_storage::xl_standby_lock>>
+);
+
+seam_core::seam!(
+    /// `VirtualXactLock(vxid, wait)` — true if the vxid has ended (or its
+    /// lock was acquired); false when `wait == false` and it is still around.
+    pub fn virtual_xact_lock(
+        vxid: types_storage::VirtualTransactionId,
+        wait: bool,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `VirtualXactLockTableInsert(vxid)`.
+    pub fn virtual_xact_lock_table_insert(
+        vxid: types_storage::VirtualTransactionId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `VirtualXactLockTableCleanup()`.
+    pub fn virtual_xact_lock_table_cleanup() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AtPrepare_Locks()` — collect lock data for the 2PC state file;
+    /// errors out for cases 2PC cannot handle (e.g. session locks).
+    pub fn at_prepare_locks() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `PostPrepare_Locks(xid)` — transfer the prepared transaction's locks
+    /// to a dummy PGPROC.
+    pub fn post_prepare_locks(
+        xid: types_core::primitive::TransactionId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)` — release all
+    /// locks this backend holds in the given lock method. Used by the logical
+    /// apply worker on exit to drop session-level locks; can `ereport` on a
+    /// corrupt lock table, carried on `Err`.
+    pub fn lock_release_all(
+        lockmethodid: u8,
+        all_locks: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetLocksMethodTable(lock)` (lock.c) — the conflict/naming table for the
+    /// lock method of `lock`. The deadlock detector reads `numLockModes`,
+    /// `conflictTab[mode]`, and (via `GetLockmodeName`) `lockModeNames[mode]`.
+    pub fn get_lock_method_table(
+        space: &types_deadlock::LockSpace,
+        lock: types_deadlock::LockId,
+    ) -> types_deadlock::LockMethodData
+);
+
+seam_core::seam!(
+    /// `GetLockmodeName(lockmethodid, mode)` (lock.c) — the display name of a
+    /// lock mode, used by the deadlock report.
+    pub fn get_lockmode_name(
+        lockmethodid: types_storage::lock::LOCKMETHODID,
+        mode: types_storage::lock::LOCKMODE,
+    ) -> alloc::string::String
+);

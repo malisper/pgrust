@@ -1,0 +1,752 @@
+//! `backend-access-transam-xlog` — an idiomatic Rust port of the WAL engine
+//! `src/backend/access/transam/xlog.c` (PostgreSQL 18.3).
+//!
+//! ## What is grounded 1:1 in this crate
+//!
+//! The pure *arithmetic* and *codec* core of xlog.c is ported faithfully,
+//! function for function:
+//!
+//!   * byte-pos <-> LSN arithmetic ([`XLogBytePosToRecPtr`],
+//!     [`XLogBytePosToEndRecPtr`], [`XLogRecPtrToBytePos`], the
+//!     [`UsableBytesInPage`]/[`UsableBytesInSegment`] helpers).
+//!   * segment/file-name arithmetic + codec (`xlog_internal.h` macros and the
+//!     WAL file-name / path / sidecar codec).
+//!   * checkpoint-distance arithmetic ([`CalculateCheckpointSegments`]).
+//!   * the `WalConfig` predicate macros (the xlog.h inline predicates).
+//!   * validity predicates ([`XLogRecPtrIsInvalid`], [`IsValidWalSegSize`],
+//!     [`check_wal_segment_size`]).
+//!   * the WAL-retention horizon arithmetic ([`retention`]).
+//!   * the `CheckPoint` <-> on-disk byte image codec ([`checkpoint`]).
+//!   * the checkpoint state machine ([`checkpoint::CreateCheckPoint`],
+//!     [`checkpoint::CheckPointGuts`], [`checkpoint::CreateRestartPoint`]) and
+//!     the XLOG-rmgr redo dispatch ([`redo::xlog_redo`]).
+//!
+//! ## The deferred hard core: the XLogCtl shmem WAL-write / fsync DRIVER
+//!
+//! xlog.c's insertion-lock shmem driver (`XLogWrite`, `AdvanceXLInsertBuffer`,
+//! `StartupXLOG`, the `XLogCtl` shmem readers, the control-file disk I/O) is the
+//! known hard core. It requires the not-yet-ported shared-memory / fd / spinlock
+//! substrate (`ShmemInitStruct`, `fd.c`, spinlocks). Per the project rule (a
+//! callee crate that is not ported yet is the only acceptable missing piece),
+//! those driver legs and every genuinely cross-subsystem read/call cross the
+//! seams in [`seam`]; they panic loudly until the owning subsystem lands. This
+//! crate's OWN logic — all of the arithmetic, codecs, the checkpoint/redo
+//! control flow — is present and complete. See `DESIGN_DEBT.md` (`xlog-driver`).
+
+#![no_std]
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::String;
+
+use backend_utils_error::{PgError, PgResult};
+
+use types_core::{
+    pg_time_t, FullTransactionId, MultiXactId, MultiXactOffset, Oid, Size, TimeLineID,
+    TransactionId, XLogRecPtr, XLogSegNo,
+};
+use types_datum::Datum;
+use types_wal::xlog_consts::{
+    ArchiveMode, RecoveryState, WALAvailability, WalCompression, WalLevel, WalSyncMethod,
+    DEFAULT_XLOG_SEG_SIZE, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, WAL_SEG_MAX_SIZE,
+    WAL_SEG_MIN_SIZE, XLOGDIR, XLOG_BLCKSZ, XLOG_FNAME_LEN,
+};
+
+pub mod checkpoint;
+pub use checkpoint::{
+    checkpoint_to_bytes, CheckPointGuts as DoCheckPointGuts, CheckpointState, CheckpointStats,
+    CreateCheckPoint as DoCreateCheckPoint, CreateRestartPoint as DoCreateRestartPoint,
+    SIZE_OF_CHECK_POINT,
+};
+
+pub mod redo;
+pub use redo::xlog_redo;
+
+pub mod retention;
+
+/// `.partial` / `.history` / `.backup` sidecar suffixes (`xlog_internal.h`).
+pub const XLOG_FILE_SUFFIX_PARTIAL: &str = ".partial";
+pub const TL_HISTORY_SUFFIX: &str = ".history";
+pub const BACKUP_HISTORY_SUFFIX: &str = ".backup";
+
+/// `InvalidXLogRecPtr` (`access/xlogdefs.h`).
+pub const InvalidXLogRecPtr: XLogRecPtr = 0;
+
+// ===========================================================================
+// WalConfig — the WAL-related GUC values + the xlog.h predicate macros.
+// ===========================================================================
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalConfig {
+    pub wal_segment_size: i32,
+    pub min_wal_size_mb: i32,
+    pub max_wal_size_mb: i32,
+    pub wal_keep_size_mb: i32,
+    pub max_slot_wal_keep_size_mb: i32,
+    pub XLOGbuffers: i32,
+    pub XLogArchiveTimeout: i32,
+    pub wal_retrieve_retry_interval: i32,
+    pub EnableHotStandby: bool,
+    pub fullPageWrites: bool,
+    pub wal_log_hints: bool,
+    pub wal_compression: WalCompression,
+    pub wal_init_zero: bool,
+    pub wal_recycle: bool,
+    pub log_checkpoints: bool,
+    pub CommitDelay: i32,
+    pub CommitSiblings: i32,
+    pub track_wal_io_timing: bool,
+    pub wal_decode_buffer_size: i32,
+    pub XLogArchiveMode: ArchiveMode,
+    pub wal_sync_method: WalSyncMethod,
+    pub wal_level: WalLevel,
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        Self {
+            wal_segment_size: DEFAULT_XLOG_SEG_SIZE,
+            min_wal_size_mb: 80,
+            max_wal_size_mb: 1024,
+            wal_keep_size_mb: 0,
+            max_slot_wal_keep_size_mb: -1,
+            XLOGbuffers: -1,
+            XLogArchiveTimeout: 0,
+            wal_retrieve_retry_interval: 5000,
+            EnableHotStandby: false,
+            fullPageWrites: true,
+            wal_log_hints: false,
+            wal_compression: WalCompression::None,
+            wal_init_zero: true,
+            wal_recycle: true,
+            log_checkpoints: true,
+            CommitDelay: 0,
+            CommitSiblings: 5,
+            track_wal_io_timing: false,
+            wal_decode_buffer_size: 512,
+            XLogArchiveMode: ArchiveMode::Off,
+            wal_sync_method: WalSyncMethod::OpenDsync,
+            wal_level: WalLevel::Replica,
+        }
+    }
+}
+
+impl WalConfig {
+    /// `XLogArchivingActive()` (xlog.h): `XLogArchiveMode > ARCHIVE_MODE_OFF`.
+    pub fn XLogArchivingActive(&self) -> bool {
+        self.XLogArchiveMode > ArchiveMode::Off
+    }
+
+    /// `XLogArchivingAlways()` (xlog.h): `XLogArchiveMode == ARCHIVE_MODE_ALWAYS`.
+    pub fn XLogArchivingAlways(&self) -> bool {
+        self.XLogArchiveMode == ArchiveMode::Always
+    }
+
+    /// `XLogIsNeeded()` (xlog.h): `wal_level >= WAL_LEVEL_REPLICA`.
+    pub fn XLogIsNeeded(&self) -> bool {
+        self.wal_level >= WalLevel::Replica
+    }
+
+    /// `XLogHintBitIsNeeded()` (xlog.h): `DataChecksumsEnabled() || wal_log_hints`.
+    pub fn XLogHintBitIsNeeded(&self, data_checksums_enabled: bool) -> bool {
+        data_checksums_enabled || self.wal_log_hints
+    }
+
+    /// `XLogStandbyInfoActive()` (xlog.h): `wal_level >= WAL_LEVEL_REPLICA`.
+    pub fn XLogStandbyInfoActive(&self) -> bool {
+        self.wal_level >= WalLevel::Replica
+    }
+
+    /// `XLogLogicalInfoActive()` (xlog.h): `wal_level >= WAL_LEVEL_LOGICAL`.
+    pub fn XLogLogicalInfoActive(&self) -> bool {
+        self.wal_level >= WalLevel::Logical
+    }
+}
+
+// ===========================================================================
+// Pure validity predicates.
+// ===========================================================================
+
+/// `XLogRecPtrIsInvalid(record)` == `record == InvalidXLogRecPtr` (== 0).
+pub fn XLogRecPtrIsInvalid(record: XLogRecPtr) -> bool {
+    record == 0
+}
+
+/// `IsValidWalSegSize(size)` (xlog_internal.h).
+pub fn IsValidWalSegSize(size: i32) -> bool {
+    size > 0 && (size & (size - 1)) == 0 && (WAL_SEG_MIN_SIZE..=WAL_SEG_MAX_SIZE).contains(&size)
+}
+
+/// `check_wal_segment_size(*newval, ...)` (xlog.c) — the GUC check hook.
+pub fn check_wal_segment_size(newval: i32) -> Result<(), &'static str> {
+    if !IsValidWalSegSize(newval) {
+        return Err("The WAL segment size must be a power of two between 1 MB and 1 GB.");
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// Segment / byte arithmetic — the xlog_internal.h macros, ported 1:1.
+// ===========================================================================
+
+/// `XLogSegmentsPerXLogId(wal_segsz_bytes)` == `0x100000000 / wal_segsz_bytes`.
+pub fn XLogSegmentsPerXLogId(wal_segsz_bytes: i32) -> u64 {
+    0x1_0000_0000_u64 / wal_segsz_bytes as u64
+}
+
+/// `XLogSegNoOffsetToRecPtr(segno, offset, wal_segsz_bytes, dest)`.
+pub fn XLogSegNoOffsetToRecPtr(segno: XLogSegNo, offset: u32, wal_segsz_bytes: i32) -> XLogRecPtr {
+    segno
+        .wrapping_mul(wal_segsz_bytes as u64)
+        .wrapping_add(offset as u64)
+}
+
+/// `XLogSegmentOffset(xlogptr, wal_segsz_bytes)`.
+pub fn XLogSegmentOffset(xlogptr: XLogRecPtr, wal_segsz_bytes: i32) -> u32 {
+    (xlogptr & (wal_segsz_bytes as u64 - 1)) as u32
+}
+
+/// `XLByteToSeg(xlrp, logSegNo, wal_segsz_bytes)`.
+pub fn XLByteToSeg(xlrp: XLogRecPtr, wal_segsz_bytes: i32) -> XLogSegNo {
+    xlrp / wal_segsz_bytes as u64
+}
+
+/// `XLByteToPrevSeg(xlrp, logSegNo, wal_segsz_bytes)`.
+pub fn XLByteToPrevSeg(xlrp: XLogRecPtr, wal_segsz_bytes: i32) -> XLogSegNo {
+    xlrp.wrapping_sub(1) / wal_segsz_bytes as u64
+}
+
+/// `XLogMBVarToSegs(mbvar, wal_segsz_bytes)`.
+pub fn XLogMBVarToSegs(mbvar: i32, wal_segsz_bytes: i32) -> i32 {
+    mbvar / (wal_segsz_bytes / (1024 * 1024))
+}
+
+/// `ConvertToXSegs(x, segsize)` == `XLogMBVarToSegs(x, segsize)` (xlog.c:628).
+pub fn ConvertToXSegs(x: i32, wal_segsz_bytes: i32) -> i32 {
+    XLogMBVarToSegs(x, wal_segsz_bytes)
+}
+
+/// `XLByteInSeg(xlrp, logSegNo, wal_segsz_bytes)`.
+pub fn XLByteInSeg(xlrp: XLogRecPtr, log_seg_no: XLogSegNo, wal_segsz_bytes: i32) -> bool {
+    XLByteToSeg(xlrp, wal_segsz_bytes) == log_seg_no
+}
+
+/// `XLByteInPrevSeg(xlrp, logSegNo, wal_segsz_bytes)`.
+pub fn XLByteInPrevSeg(xlrp: XLogRecPtr, log_seg_no: XLogSegNo, wal_segsz_bytes: i32) -> bool {
+    XLByteToPrevSeg(xlrp, wal_segsz_bytes) == log_seg_no
+}
+
+/// `XRecOffIsValid(xlrp)` == `xlrp % XLOG_BLCKSZ >= SizeOfXLogShortPHD`.
+pub fn XRecOffIsValid(xlrp: XLogRecPtr) -> bool {
+    (xlrp % XLOG_BLCKSZ as u64) as usize >= SIZE_OF_XLOG_SHORT_PHD
+}
+
+// ===========================================================================
+// "Usable byte position" helpers + the byte-pos <-> LSN conversions.
+// ===========================================================================
+
+/// `UsableBytesInPage` (xlog.c:622) == `XLOG_BLCKSZ - SizeOfXLogShortPHD`.
+pub const fn UsableBytesInPage() -> u64 {
+    (XLOG_BLCKSZ - SIZE_OF_XLOG_SHORT_PHD) as u64
+}
+
+/// `UsableBytesInSegment` (computed in `XLOGShmemInit`, xlog.c).
+pub fn UsableBytesInSegment(wal_segsz_bytes: i32) -> u64 {
+    (wal_segsz_bytes as u64 / XLOG_BLCKSZ as u64) * UsableBytesInPage()
+        - (SIZE_OF_XLOG_LONG_PHD - SIZE_OF_XLOG_SHORT_PHD) as u64
+}
+
+/// `XLogBytePosToRecPtr(bytepos)` (xlog.c).
+pub fn XLogBytePosToRecPtr(bytepos: u64, wal_segsz_bytes: i32) -> XLogRecPtr {
+    let usable_in_seg = UsableBytesInSegment(wal_segsz_bytes);
+    let usable_in_page = UsableBytesInPage();
+
+    let fullsegs = bytepos / usable_in_seg;
+    let mut bytesleft = bytepos % usable_in_seg;
+
+    let seg_offset: u64;
+    if bytesleft < (XLOG_BLCKSZ - SIZE_OF_XLOG_LONG_PHD) as u64 {
+        seg_offset = bytesleft + SIZE_OF_XLOG_LONG_PHD as u64;
+    } else {
+        let mut off = XLOG_BLCKSZ as u64;
+        bytesleft -= (XLOG_BLCKSZ - SIZE_OF_XLOG_LONG_PHD) as u64;
+
+        let fullpages = bytesleft / usable_in_page;
+        bytesleft %= usable_in_page;
+
+        off += fullpages * XLOG_BLCKSZ as u64 + bytesleft + SIZE_OF_XLOG_SHORT_PHD as u64;
+        seg_offset = off;
+    }
+
+    XLogSegNoOffsetToRecPtr(fullsegs, seg_offset as u32, wal_segsz_bytes)
+}
+
+/// `XLogBytePosToEndRecPtr(bytepos)` (xlog.c).
+pub fn XLogBytePosToEndRecPtr(bytepos: u64, wal_segsz_bytes: i32) -> XLogRecPtr {
+    let usable_in_seg = UsableBytesInSegment(wal_segsz_bytes);
+    let usable_in_page = UsableBytesInPage();
+
+    let fullsegs = bytepos / usable_in_seg;
+    let mut bytesleft = bytepos % usable_in_seg;
+
+    let seg_offset: u64;
+    if bytesleft < (XLOG_BLCKSZ - SIZE_OF_XLOG_LONG_PHD) as u64 {
+        if bytesleft == 0 {
+            seg_offset = 0;
+        } else {
+            seg_offset = bytesleft + SIZE_OF_XLOG_LONG_PHD as u64;
+        }
+    } else {
+        let mut off = XLOG_BLCKSZ as u64;
+        bytesleft -= (XLOG_BLCKSZ - SIZE_OF_XLOG_LONG_PHD) as u64;
+
+        let fullpages = bytesleft / usable_in_page;
+        bytesleft %= usable_in_page;
+
+        if bytesleft == 0 {
+            off += fullpages * XLOG_BLCKSZ as u64 + bytesleft;
+        } else {
+            off += fullpages * XLOG_BLCKSZ as u64 + bytesleft + SIZE_OF_XLOG_SHORT_PHD as u64;
+        }
+        seg_offset = off;
+    }
+
+    XLogSegNoOffsetToRecPtr(fullsegs, seg_offset as u32, wal_segsz_bytes)
+}
+
+/// `XLogRecPtrToBytePos(ptr)` (xlog.c) — inverse of [`XLogBytePosToRecPtr`].
+pub fn XLogRecPtrToBytePos(ptr: XLogRecPtr, wal_segsz_bytes: i32) -> u64 {
+    let usable_in_seg = UsableBytesInSegment(wal_segsz_bytes);
+    let usable_in_page = UsableBytesInPage();
+
+    let fullsegs = XLByteToSeg(ptr, wal_segsz_bytes);
+
+    let fullpages = (XLogSegmentOffset(ptr, wal_segsz_bytes) as u64) / XLOG_BLCKSZ as u64;
+    let offset = ptr % XLOG_BLCKSZ as u64;
+
+    let mut result: u64;
+    if fullpages == 0 {
+        result = fullsegs * usable_in_seg;
+        if offset > 0 {
+            result += offset - SIZE_OF_XLOG_LONG_PHD as u64;
+        }
+    } else {
+        result = fullsegs * usable_in_seg
+            + (XLOG_BLCKSZ - SIZE_OF_XLOG_LONG_PHD) as u64
+            + (fullpages - 1) * usable_in_page;
+        if offset > 0 {
+            result += offset - SIZE_OF_XLOG_SHORT_PHD as u64;
+        }
+    }
+
+    result
+}
+
+// ===========================================================================
+// WAL file-name / path / sidecar-name codec (xlog_internal.h + xlog.c).
+// ===========================================================================
+
+fn is_upper_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte)
+}
+
+fn parse_hex_u32(s: &str) -> PgResult<u32> {
+    u32::from_str_radix(s, 16).map_err(|_| PgError::error("invalid WAL file name"))
+}
+
+/// `XLogFileName(fname, tli, logSegNo, wal_segsz_bytes)` (xlog_internal.h).
+pub fn XLogFileName(tli: TimeLineID, log_seg_no: XLogSegNo, wal_segsz_bytes: i32) -> String {
+    let segments = XLogSegmentsPerXLogId(wal_segsz_bytes);
+    format!(
+        "{tli:08X}{:08X}{:08X}",
+        log_seg_no / segments,
+        log_seg_no % segments
+    )
+}
+
+/// `XLogFileNameById(fname, tli, log, seg)` (xlog_internal.h).
+pub fn XLogFileNameById(tli: TimeLineID, log: u32, seg: u32) -> String {
+    format!("{tli:08X}{log:08X}{seg:08X}")
+}
+
+/// `IsXLogFileName(fname)` (xlog_internal.h): 24 upper-hex chars.
+pub fn IsXLogFileName(fname: &str) -> bool {
+    fname.len() == XLOG_FNAME_LEN && fname.bytes().all(is_upper_hex)
+}
+
+/// `IsPartialXLogFileName(fname)` (xlog_internal.h).
+pub fn IsPartialXLogFileName(fname: &str) -> bool {
+    fname.len() == XLOG_FNAME_LEN + XLOG_FILE_SUFFIX_PARTIAL.len()
+        && fname[..XLOG_FNAME_LEN].bytes().all(is_upper_hex)
+        && &fname[XLOG_FNAME_LEN..] == XLOG_FILE_SUFFIX_PARTIAL
+}
+
+/// `XLogFromFileName(fname, tli, logSegNo, wal_segsz_bytes)` (xlog_internal.h).
+pub fn XLogFromFileName(fname: &str, wal_segsz_bytes: i32) -> PgResult<(TimeLineID, XLogSegNo)> {
+    if !IsXLogFileName(fname) {
+        return Err(PgError::error("invalid WAL file name"));
+    }
+    let tli = parse_hex_u32(&fname[0..8])?;
+    let log = parse_hex_u32(&fname[8..16])?;
+    let seg = parse_hex_u32(&fname[16..24])?;
+    Ok((
+        tli,
+        log as u64 * XLogSegmentsPerXLogId(wal_segsz_bytes) + seg as u64,
+    ))
+}
+
+/// `XLogFilePath(path, tli, logSegNo, wal_segsz_bytes)` (xlog_internal.h).
+pub fn XLogFilePath(tli: TimeLineID, log_seg_no: XLogSegNo, wal_segsz_bytes: i32) -> String {
+    format!("{XLOGDIR}/{}", XLogFileName(tli, log_seg_no, wal_segsz_bytes))
+}
+
+/// `TLHistoryFileName(fname, tli)` (xlog_internal.h).
+pub fn TLHistoryFileName(tli: TimeLineID) -> String {
+    format!("{tli:08X}{TL_HISTORY_SUFFIX}")
+}
+
+/// `IsTLHistoryFileName(fname)` (xlog_internal.h).
+pub fn IsTLHistoryFileName(fname: &str) -> bool {
+    fname.len() == 8 + TL_HISTORY_SUFFIX.len()
+        && fname[..8].bytes().all(is_upper_hex)
+        && &fname[8..] == TL_HISTORY_SUFFIX
+}
+
+/// `TLHistoryFilePath(path, tli)` (xlog_internal.h).
+pub fn TLHistoryFilePath(tli: TimeLineID) -> String {
+    format!("{XLOGDIR}/{}", TLHistoryFileName(tli))
+}
+
+/// `StatusFilePath(path, xlog, suffix)` (xlog_internal.h).
+pub fn StatusFilePath(xlog: &str, suffix: &str) -> String {
+    format!("{XLOGDIR}/archive_status/{xlog}{suffix}")
+}
+
+/// `BackupHistoryFileName(...)` (xlog_internal.h).
+pub fn BackupHistoryFileName(
+    tli: TimeLineID,
+    log_seg_no: XLogSegNo,
+    startpoint: XLogRecPtr,
+    wal_segsz_bytes: i32,
+) -> String {
+    let segments = XLogSegmentsPerXLogId(wal_segsz_bytes);
+    format!(
+        "{tli:08X}{:08X}{:08X}.{:08X}{BACKUP_HISTORY_SUFFIX}",
+        log_seg_no / segments,
+        log_seg_no % segments,
+        XLogSegmentOffset(startpoint, wal_segsz_bytes)
+    )
+}
+
+/// `IsBackupHistoryFileName(fname)` (xlog_internal.h).
+pub fn IsBackupHistoryFileName(fname: &str) -> bool {
+    fname.len() > XLOG_FNAME_LEN
+        && fname[..XLOG_FNAME_LEN].bytes().all(is_upper_hex)
+        && fname.ends_with(BACKUP_HISTORY_SUFFIX)
+}
+
+/// `BackupHistoryFilePath(...)` (xlog_internal.h).
+pub fn BackupHistoryFilePath(
+    tli: TimeLineID,
+    log_seg_no: XLogSegNo,
+    startpoint: XLogRecPtr,
+    wal_segsz_bytes: i32,
+) -> String {
+    format!(
+        "{XLOGDIR}/{}",
+        BackupHistoryFileName(tli, log_seg_no, startpoint, wal_segsz_bytes)
+    )
+}
+
+// ===========================================================================
+// Checkpoint-distance arithmetic (xlog.c:CalculateCheckpointSegments).
+// ===========================================================================
+
+/// `CalculateCheckpointSegments()` (xlog.c).
+pub fn CalculateCheckpointSegments(
+    max_wal_size_mb: i32,
+    wal_segsz_bytes: i32,
+    checkpoint_completion_target: f64,
+) -> i32 {
+    let target = ConvertToXSegs(max_wal_size_mb, wal_segsz_bytes) as f64
+        / (1.0 + checkpoint_completion_target);
+
+    let mut checkpoint_segments = target as i32;
+    if checkpoint_segments < 1 {
+        checkpoint_segments = 1;
+    }
+    checkpoint_segments
+}
+
+/// `assign_max_wal_size(newval, extra)` (xlog.c:2224) — the GUC assign hook:
+/// set `max_wal_size_mb` then recompute `CheckPointSegments`. The owning GUC
+/// state holds `max_wal_size_mb`/`CheckPointCompletionTarget`/`CheckPointSegments`;
+/// this returns the recomputed segment count to publish.
+pub fn assign_max_wal_size(newval: i32, wal_segsz_bytes: i32, checkpoint_completion_target: f64) -> i32 {
+    CalculateCheckpointSegments(newval, wal_segsz_bytes, checkpoint_completion_target)
+}
+
+/// `assign_checkpoint_completion_target(newval, extra)` (xlog.c:2231) — set
+/// `CheckPointCompletionTarget` then recompute `CheckPointSegments`.
+pub fn assign_checkpoint_completion_target(newval: f64, max_wal_size_mb: i32, wal_segsz_bytes: i32) -> i32 {
+    CalculateCheckpointSegments(max_wal_size_mb, wal_segsz_bytes, newval)
+}
+
+/// `XLogCheckpointNeeded(new_segno)` (xlog.c:2304) — whether enough xlog space
+/// has been consumed since the last checkpoint REDO that a new checkpoint is
+/// needed. `redo_rec_ptr`/`checkpoint_segments` are the (driver-owned)
+/// `RedoRecPtr` and `CheckPointSegments`; the arithmetic is grounded here.
+pub fn XLogCheckpointNeeded(
+    new_segno: XLogSegNo,
+    redo_rec_ptr: XLogRecPtr,
+    checkpoint_segments: i32,
+    wal_segsz_bytes: i32,
+) -> bool {
+    let old_segno = XLByteToSeg(redo_rec_ptr, wal_segsz_bytes);
+    new_segno >= old_segno.wrapping_add((checkpoint_segments - 1) as u64)
+}
+
+// ===========================================================================
+// WAL-buffer count auto-tune + the wal_buffers GUC check hook (xlog.c).
+// ===========================================================================
+
+/// `XLOGChooseNumBuffers()` (xlog.c:4681) — auto-tuned WAL buffer count:
+/// `NBuffers / 32`, clamped to `[8, wal_segment_size / XLOG_BLCKSZ]`.
+pub fn XLOGChooseNumBuffers(NBuffers: i32, wal_segsz_bytes: i32) -> i32 {
+    let mut xbuffers = NBuffers / 32;
+    if xbuffers > wal_segsz_bytes / XLOG_BLCKSZ as i32 {
+        xbuffers = wal_segsz_bytes / XLOG_BLCKSZ as i32;
+    }
+    if xbuffers < 8 {
+        xbuffers = 8;
+    }
+    xbuffers
+}
+
+/// `check_wal_buffers(*newval, ...)` (xlog.c:4697) — the GUC check hook. `-1`
+/// requests auto-tune (left as `-1` until `XLOGShmemSize` if `XLOGbuffers` is
+/// still `-1`, else substituted with [`XLOGChooseNumBuffers`]); manual values
+/// below 4 blocks are silently clamped to 4. Returns the (possibly rewritten)
+/// value; the hook never rejects.
+pub fn check_wal_buffers(newval: i32, XLOGbuffers: i32, NBuffers: i32, wal_segsz_bytes: i32) -> i32 {
+    let mut v = newval;
+    if v == -1 {
+        if XLOGbuffers == -1 {
+            return v;
+        }
+        v = XLOGChooseNumBuffers(NBuffers, wal_segsz_bytes);
+    }
+    if v < 4 {
+        v = 4;
+    }
+    v
+}
+
+// ===========================================================================
+// get_sync_bit — the WalSyncMethod -> open(2) sync-flag mapping (xlog.c:8678).
+// ===========================================================================
+
+/// `get_sync_bit(method)` (xlog.c:8678) — the open(2) flag bits for a
+/// `wal_sync_method`. The platform `O_SYNC`/`O_DSYNC` values and the
+/// already-computed `o_direct_flag` (which depends on `io_direct_flags` /
+/// `AmWalReceiverProcess`, a driver concern) are supplied by the caller; the
+/// branch logic — the `!enableFsync` short-circuit, the fsync/fdatasync/
+/// writethrough no-extra-bit arms, the open/open_dsync arms, and the
+/// unrecognized-method `elog(ERROR)` default — is grounded here.
+pub fn get_sync_bit(
+    method: WalSyncMethod,
+    o_direct_flag: i32,
+    enable_fsync: bool,
+    o_sync: i32,
+    o_dsync: i32,
+) -> PgResult<i32> {
+    if !enable_fsync {
+        return Ok(o_direct_flag);
+    }
+    match method {
+        WalSyncMethod::Fsync | WalSyncMethod::FsyncWritethrough | WalSyncMethod::Fdatasync => {
+            Ok(o_direct_flag)
+        }
+        WalSyncMethod::Open => Ok(o_sync | o_direct_flag),
+        WalSyncMethod::OpenDsync => Ok(o_dsync | o_direct_flag),
+    }
+}
+
+// ===========================================================================
+// The XLogCtl shmem-write / WAL-write / fsync DRIVER + cross-subsystem getters.
+//
+// These are xlog.c's OWN driver functions whose bodies operate the `XLogCtl`
+// shared-memory region, the open WAL segment files, and the control file. They
+// require the not-yet-ported shared-memory / fd / spinlock substrate
+// (`ShmemInitStruct`, fd.c, spinlocks). Per the project rule, a code path may
+// panic because a callee's crate isn't ported yet — so each entry point panics
+// loudly with its name and the `xlog-driver` debt tag, never a silent stub.
+// The arithmetic/codec each would consult is grounded above. See DESIGN_DEBT.md.
+// ===========================================================================
+
+macro_rules! xlog_driver_deferred {
+    ($( $(#[$attr:meta])* pub fn $name:ident ( $($arg:ident : $argty:ty),* $(,)? ) $(-> $ret:ty)? ; )+) => {
+        $(
+            $(#[$attr])*
+            pub fn $name ( $($arg : $argty),* ) $(-> $ret)? {
+                $( let _ = &$arg; )*
+                panic!(concat!(
+                    "xlog driver not ported (xlog-driver debt): ",
+                    stringify!($name),
+                    " requires the XLogCtl shmem / fd / spinlock substrate"
+                ))
+            }
+        )+
+    };
+}
+
+xlog_driver_deferred! {
+    /// `XLOGShmemSize()` — size of the `XLogCtl` shmem region.
+    pub fn XLOGShmemSize() -> Size;
+    /// `XLOGShmemInit()` — allocate + initialise the `XLogCtl` shmem region.
+    pub fn XLOGShmemInit();
+    /// `XLogFlush(record)` — ensure WAL is flushed at least up to `record`.
+    pub fn XLogFlush(record: XLogRecPtr);
+    /// `XLogBackgroundFlush()` — opportunistic flush from the walwriter.
+    pub fn XLogBackgroundFlush() -> bool;
+    /// `XLogNeedsFlush(record)` — whether `record` still needs flushing.
+    pub fn XLogNeedsFlush(record: XLogRecPtr) -> bool;
+    /// `StartupXLOG()` — the recovery + WAL-engine startup driver.
+    pub fn StartupXLOG();
+    /// `ShutdownXLOG(code, arg)` — the WAL-engine shutdown driver.
+    pub fn ShutdownXLOG(code: i32, arg: Datum);
+    /// `XLogPutNextOid(nextOid)` — log the next-OID checkpoint hint.
+    pub fn XLogPutNextOid(next_oid: Oid);
+    /// `RequestXLogSwitch(mark_unimportant)` — force a WAL segment switch.
+    pub fn RequestXLogSwitch(mark_unimportant: bool) -> XLogRecPtr;
+    /// `XLogRestorePoint(rpName)` — log a named restore point.
+    pub fn XLogRestorePoint(rp_name: &str) -> XLogRecPtr;
+    /// `UpdateFullPageWrites()` — toggle full-page-writes, logging the change.
+    pub fn UpdateFullPageWrites();
+    /// `CheckXLogRemoved(segno, tli)` — error if a needed segment was removed.
+    pub fn CheckXLogRemoved(segno: XLogSegNo, tli: TimeLineID);
+    /// `XLogShutdownWalRcv()` — stop the walreceiver.
+    pub fn XLogShutdownWalRcv();
+    /// `SetWalWriterSleeping(sleeping)` — publish the walwriter idle state.
+    pub fn SetWalWriterSleeping(sleeping: bool);
+    /// `XLogFileInit(logsegno, logtli)` — create/recycle a WAL segment.
+    pub fn XLogFileInit(logsegno: XLogSegNo, logtli: TimeLineID) -> i32;
+    /// `XLogFileOpen(segno, tli)` — open an existing WAL segment for write.
+    pub fn XLogFileOpen(segno: XLogSegNo, tli: TimeLineID) -> i32;
+
+    // --- XLogCtl shmem READ accessors ---
+    /// `GetRedoRecPtr()` — the latest checkpoint REDO pointer (shmem read).
+    pub fn GetRedoRecPtr() -> XLogRecPtr;
+    /// `GetInsertRecPtr()` — approximate WAL insert position (shmem read).
+    pub fn GetInsertRecPtr() -> XLogRecPtr;
+    /// `GetFlushRecPtr(*insertTLI)` — last flushed position + timeline.
+    pub fn GetFlushRecPtr() -> (XLogRecPtr, TimeLineID);
+    /// `GetXLogInsertRecPtr()` — exact WAL insert position (shmem read).
+    pub fn GetXLogInsertRecPtr() -> XLogRecPtr;
+    /// `GetXLogWriteRecPtr()` — last written (not flushed) position.
+    pub fn GetXLogWriteRecPtr() -> XLogRecPtr;
+    /// `GetLastImportantRecPtr()` — start of the last important WAL record.
+    pub fn GetLastImportantRecPtr() -> XLogRecPtr;
+    /// `GetWALInsertionTimeLine()` — the WAL insertion timeline (shmem read).
+    pub fn GetWALInsertionTimeLine() -> TimeLineID;
+    /// `GetWALInsertionTimeLineIfSet()` — the insertion timeline, or 0 if unset.
+    pub fn GetWALInsertionTimeLineIfSet() -> TimeLineID;
+    /// `GetFullPageWriteInfo(*RedoRecPtr_p, *doPageWrites_p)` (shmem read).
+    pub fn GetFullPageWriteInfo() -> (XLogRecPtr, bool);
+    /// `RecoveryInProgress()` — whether the server is still in recovery.
+    pub fn RecoveryInProgress() -> bool;
+    /// `GetRecoveryState()` — crash / archive / done recovery state.
+    pub fn GetRecoveryState() -> RecoveryState;
+    /// `XLogInsertAllowed()` — whether WAL insertion is permitted right now.
+    pub fn XLogInsertAllowed() -> bool;
+    /// `GetSystemIdentifier()` — the cluster's 64-bit system identifier.
+    pub fn GetSystemIdentifier() -> u64;
+    /// `GetMockAuthenticationNonce()` — the control-file mock-auth nonce.
+    pub fn GetMockAuthenticationNonce() -> Option<alloc::vec::Vec<u8>>;
+    /// `DataChecksumsEnabled()` — whether data-page checksums are on.
+    pub fn DataChecksumsEnabled() -> bool;
+    /// `GetDefaultCharSignedness()` — the cluster's default `char` signedness.
+    pub fn GetDefaultCharSignedness() -> bool;
+    /// `GetFakeLSNForUnloggedRel()` — a monotonically-increasing fake LSN.
+    pub fn GetFakeLSNForUnloggedRel() -> XLogRecPtr;
+    /// `XLogGetLastRemovedSegno()` — highest WAL segment removed so far.
+    pub fn XLogGetLastRemovedSegno() -> XLogSegNo;
+    /// `XLogGetOldestSegno(tli)` — oldest WAL segment still present on `tli`.
+    pub fn XLogGetOldestSegno(tli: TimeLineID) -> XLogSegNo;
+    /// `GetLastSegSwitchData(*lastSwitchLSN)` — time + LSN of last seg switch.
+    pub fn GetLastSegSwitchData() -> (pg_time_t, XLogRecPtr);
+    /// `GetOldestRestartPoint(*oldrecptr, *oldtli)` — the oldest restartpoint.
+    pub fn GetOldestRestartPoint() -> (XLogRecPtr, TimeLineID);
+    /// `GetActiveWalLevelOnStandby()` — the wal_level a standby replays with.
+    pub fn GetActiveWalLevelOnStandby() -> WalLevel;
+    /// `XLogGetReplicationSlotMinimumLSN()` — the slots' minimum required LSN.
+    pub fn XLogGetReplicationSlotMinimumLSN() -> XLogRecPtr;
+    /// `XLogSetReplicationSlotMinimumLSN(lsn)` — publish the slots' minimum LSN.
+    pub fn XLogSetReplicationSlotMinimumLSN(lsn: XLogRecPtr);
+    /// `XLogSetAsyncXactLSN(asyncXactLSN)` — record an async commit's LSN.
+    pub fn XLogSetAsyncXactLSN(async_xact_lsn: XLogRecPtr);
+    /// `LocalProcessControlFile(reset)` — read+process `global/pg_control`.
+    pub fn LocalProcessControlFile(reset: bool);
+    /// `InitializeWalConsistencyChecking()` — finalise the deferred GUC.
+    pub fn InitializeWalConsistencyChecking();
+
+    // --- BootStrapXLOG + its cross-subsystem in-memory updates ---
+    /// `BootStrapXLOG(data_checksum_version)` — create the initial WAL +
+    /// control file during `initdb`.
+    pub fn BootStrapXLOG(data_checksum_version: u32);
+    /// `TransamVariables->nextXid/nextOid; oidCount = 0` (xlog.c:5158-5160).
+    pub fn SetTransamVariablesAtBootstrap(next_xid: FullTransactionId, next_oid: Oid);
+    /// `MultiXactSetNextMXact(nextMulti, nextMultiOffset)` (multixact.c).
+    pub fn MultiXactSetNextMXact(next_multi: MultiXactId, next_multi_offset: MultiXactOffset);
+    /// `AdvanceOldestClogXid(oldestXid)` (clog.c).
+    pub fn AdvanceOldestClogXid(oldest_xid: TransactionId);
+    /// `SetTransactionIdLimit(oldestXid, oldestXidDB)` (varsup.c).
+    pub fn SetTransactionIdLimit(oldest_xid: TransactionId, oldest_xid_db: Oid);
+    /// `SetMultiXactIdLimit(oldestMulti, oldestMultiDB, is_startup)` (multixact.c).
+    pub fn SetMultiXactIdLimit(oldest_multi: MultiXactId, oldest_multi_db: Oid, is_startup: bool);
+    /// `SetCommitTsLimit(oldestXact, newestXact)` (commit_ts.c).
+    pub fn SetCommitTsLimit(oldest_xact: TransactionId, newest_xact: TransactionId);
+}
+
+/// `GetWALAvailability(targetLSN)` — classify a WAL position's retention state.
+/// The pure classification is [`retention::GetWALAvailability`]; this
+/// process-singleton entry reads `XLogCtl`/GUC posture, which is the deferred
+/// driver (DESIGN_DEBT.md `xlog-driver`).
+pub fn GetWALAvailability(target_lsn: XLogRecPtr) -> WALAvailability {
+    let _ = target_lsn;
+    panic!("xlog driver not ported (xlog-driver debt): GetWALAvailability entry requires XLogCtl/GUC posture; use retention::GetWALAvailability with the values supplied")
+}
+
+/// `SetConfigOption(...)` as called from `ReadControlFile` (guc.c). Deferred to
+/// the GUC subsystem (DESIGN_DEBT.md `xlog-driver`).
+pub fn SetConfigOptionInternal(name: &str, value: &str) {
+    let _ = (name, value);
+    panic!("xlog driver not ported (xlog-driver debt): SetConfigOptionInternal requires the GUC subsystem")
+}
+
+/// `CreateCheckPoint(flags)` — the process-singleton checkpoint entry point.
+/// The faithful body is [`checkpoint::CreateCheckPoint`], which operates on an
+/// owned [`checkpoint::CheckpointState`]; the process-singleton state holder and
+/// its cross-subsystem providers are the deferred driver (DESIGN_DEBT.md).
+pub fn CreateCheckPoint(flags: i32) -> bool {
+    let _ = flags;
+    panic!("xlog driver not ported (xlog-driver debt): CreateCheckPoint process-singleton requires the XLogCtl shmem substrate; use checkpoint::CreateCheckPoint with an owned CheckpointState")
+}
+
+/// `CreateRestartPoint(flags)` — the process-singleton restartpoint entry point.
+pub fn CreateRestartPoint(flags: i32) -> bool {
+    let _ = flags;
+    panic!("xlog driver not ported (xlog-driver debt): CreateRestartPoint process-singleton requires the XLogCtl shmem substrate; use checkpoint::CreateRestartPoint with an owned CheckpointState")
+}
+
+/// This crate exposes no inward seams its consumers call across a cycle on the
+/// current frontier; `init_seams()` is therefore a no-op. (When a ported
+/// consumer needs an xlog function across a cycle, declare it in
+/// `backend-access-transam-xlog-seams` and install it here.)
+pub fn init_seams() {}
+
+#[cfg(test)]
+mod tests;

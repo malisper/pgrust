@@ -109,3 +109,39 @@ seam_core::seam!(
         body: &mut dyn FnMut(&types_scan::backend_access_index_genam::SysScanRow<'_>) -> PgResult<bool>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// As [`systable_scan_foreach`], but `body` additionally receives a
+    /// `recheck` closure standing in for `systable_recheck_tuple(scan, tup)`
+    /// on the current row (genam.c): after acquiring a lock on a candidate
+    /// object, the caller rechecks that the row it is processing is still
+    /// live and matches, returning `Ok(false)` (the C `false`) if it should be
+    /// skipped. The recheck must touch the scan's live state, which only the
+    /// owner holds, so it crosses as a callback the owner answers in place.
+    /// `Err` from `body`, `recheck`, or the scan machinery propagates after
+    /// the owner ends the scan.
+    pub fn systable_scan_foreach_recheckable(
+        rel: &types_rel::RelationData<'_>,
+        index_id: Oid,
+        keys: &[ScanKeyInit],
+        body: &mut dyn FnMut(
+            &types_scan::backend_access_index_genam::SysScanRow<'_>,
+            &mut dyn FnMut() -> PgResult<bool>,
+        ) -> PgResult<bool>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `BuildIndexValueDescription(indexRelation, values, isnull)` (genam.c):
+    /// build a "(key_names) = (key_values)" description of an index entry,
+    /// or `Ok(None)` when the current user lacks rights to see the key values
+    /// (the C NULL). `values`/`isnull` are `FormIndexDatum` outputs (the raw
+    /// index-AM input). The string is allocated in `mcx`; key out-functions
+    /// can `ereport(ERROR)`, carried on `Err`.
+    pub fn build_index_value_description<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index_relation: &types_rel::Relation<'_>,
+        values: &[types_datum::Datum],
+        isnull: &[bool],
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);

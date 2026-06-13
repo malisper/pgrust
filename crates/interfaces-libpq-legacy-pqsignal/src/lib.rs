@@ -77,6 +77,23 @@ mod tests {
     fn a_handler(_signo: i32) {}
 
     #[test]
+    fn handler_disposition_round_trips_through_sigaction() {
+        // Install a concrete handler on a benign signal (SIGURG: unused
+        // elsewhere in the test process, and distinct from the SIGWINCH the
+        // sentinel test uses, since dispositions are process-wide); the next
+        // install must report it back as the same typed fn(i32).
+        let original = pqsignal(libc::SIGURG, SigHandler::Handler(a_handler));
+        let prev = pqsignal(libc::SIGURG, SigHandler::Default);
+        assert_eq!(prev, SigDisposition::Handler(a_handler));
+        pqsignal(
+            libc::SIGURG,
+            original
+                .as_handler()
+                .expect("previous disposition is reinstallable"),
+        );
+    }
+
+    #[test]
     fn invalid_signal_returns_sig_err() {
         // sigaction(2) rejects signal 0 / out-of-range signals: C returns
         // SIG_ERR, the port returns SigDisposition::Error.

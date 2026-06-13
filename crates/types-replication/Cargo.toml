@@ -9,4 +9,3 @@ name = "types_replication"
 path = "src/lib.rs"
 
 [dependencies]
-types-core = { path = "../types-core" }

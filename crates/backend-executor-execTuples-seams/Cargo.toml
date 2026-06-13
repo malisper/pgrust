@@ -14,3 +14,5 @@ types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 mcx = { path = "../mcx" }
 types-tuple = { path = "../types-tuple" }
+types-core = { path = "../types-core" }
+types-datum = { path = "../types-datum" }

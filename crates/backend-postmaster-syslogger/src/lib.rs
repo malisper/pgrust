@@ -1391,9 +1391,43 @@ fn truncate_to_cstr_capacity(s: &mut String, cap: usize) {
     s.truncate(end);
 }
 
-/// Install this crate's implementations into its seam crate.
+/// Install this crate's implementations into its seam crate, plus its GUC
+/// storage variables into the GUC tables' slots.
 pub fn init_seams() {
+    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+
     backend_postmaster_syslogger_seams::write_syslogger_file::set(crate::write_syslogger_file);
+
+    vars::Logging_collector.install(GucVarAccessors {
+        get: config::logging_collector,
+        set: config::set_logging_collector,
+    });
+    vars::Log_RotationAge.install(GucVarAccessors {
+        get: config::log_rotation_age,
+        set: config::set_log_rotation_age,
+    });
+    vars::Log_RotationSize.install(GucVarAccessors {
+        get: config::log_rotation_size,
+        set: config::set_log_rotation_size,
+    });
+    // log_directory / log_filename boot to non-NULL values, and GUC string
+    // storage can never go back to NULL afterwards (guc_tables.h).
+    vars::Log_directory.install(GucVarAccessors {
+        get: || Some(config::log_directory()),
+        set: |v| config::set_log_directory(v.unwrap_or_default()),
+    });
+    vars::Log_filename.install(GucVarAccessors {
+        get: || Some(config::log_filename()),
+        set: |v| config::set_log_filename(v.unwrap_or_default()),
+    });
+    vars::Log_truncate_on_rotation.install(GucVarAccessors {
+        get: config::log_truncate_on_rotation,
+        set: config::set_log_truncate_on_rotation,
+    });
+    vars::Log_file_mode.install(GucVarAccessors {
+        get: config::log_file_mode,
+        set: config::set_log_file_mode,
+    });
 }
 
 #[cfg(test)]

@@ -19,6 +19,20 @@ use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
 };
 
 seam_core::seam!(
+    /// `pgstat_count_index_tuples(rel, n)` (pgstat.h macro): add `n` to the
+    /// relation's pending `t_tuples_returned` counter (only when
+    /// `rel->pgstat_info` is set). The per-relation pending stats live in
+    /// pgstat; the macro never errors.
+    pub fn pgstat_count_index_tuples(index_oid: types_core::primitive::Oid, n: i64)
+);
+
+seam_core::seam!(
+    /// `pgstat_count_heap_fetch(rel)` (pgstat.h macro): increment the
+    /// relation's pending `t_tuples_fetched` counter.
+    pub fn pgstat_count_heap_fetch(index_oid: types_core::primitive::Oid)
+);
+
+seam_core::seam!(
     /// Run `f` on `&pgStatLocal.shmem->archiver`.
     pub fn with_shmem_archiver(f: &mut dyn FnMut(&mut PgStatShared_Archiver))
 );
@@ -102,10 +116,7 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// elog.c's FATAL path lets the cumulative stats system know the session
-    /// terminated abnormally: `if (pgStatSessionEndCause == DISCONNECT_NORMAL)
-    /// pgStatSessionEndCause = DISCONNECT_FATAL;` (the global lives in
-    /// `pgstat.c`). Only marks the session as terminated by fatal error if
-    /// there is no other known cause.
-    pub fn pgstat_set_session_end_cause_fatal()
+    /// `pgstat_report_stat(force)` (pgstat.c) — flush pending stats; returns
+    /// the soonest time another flush could be useful (0 if idle).
+    pub fn pgstat_report_stat(force: bool) -> types_error::PgResult<i64>
 );

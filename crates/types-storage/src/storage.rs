@@ -1,9 +1,26 @@
 //! Trimmed copy of the src-idiomatic `types::storage` module: the LWLock
 //! handle and its supporting pieces.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
-use types_core::{uint16, uint32, Oid, ProcNumber, RelFileNumber, uint8, INVALID_PROC_NUMBER};
+use types_core::{uint16, uint32, uint64, uint8, Oid, ProcNumber, RelFileNumber, Size, TransactionId, INVALID_PROC_NUMBER};
+
+/// `Buffer` (`storage/buf.h`) — a shared-buffer-pool index (or, when
+/// negative, a local-buffer index). Zero is `InvalidBuffer`.
+pub type Buffer = i32;
+
+/// `InvalidBuffer` (`storage/buf.h`).
+pub const InvalidBuffer: Buffer = 0;
+
+/// `BufferIsValid(bufnum)` (`storage/bufmgr.h`).
+#[inline]
+pub fn BufferIsValid(bufnum: Buffer) -> bool {
+    bufnum != InvalidBuffer
+}
+
+/// `LocationIndex` (`storage/bufpage.h`) — a byte offset within a page.
+pub type LocationIndex = uint16;
 
 /// `enum LWLockMode` (`storage/lwlock.h:112`).
 #[repr(u32)]
@@ -69,17 +86,94 @@ impl pg_atomic_uint64 {
     pub fn read(&self) -> types_core::uint64 {
         self.value.load(Ordering::Relaxed)
     }
+
+    /// `pg_atomic_write_u64(ptr, val)`.
+    pub fn write(&self, value: types_core::uint64) {
+        self.value.store(value, Ordering::Relaxed);
+    }
 }
 
-/// `LWLockWaitState` (`storage/lwlock.h`) — the `PGPROC.lwWaiting` state byte
-/// set and read by the LWLock wait-list machinery.
-pub type LWLockWaitState = uint8;
-/// not currently waiting / woken up
-pub const LW_WS_NOT_WAITING: LWLockWaitState = 0;
-/// currently waiting
-pub const LW_WS_WAITING: LWLockWaitState = 1;
-/// removed from waitlist, but not yet signaled
-pub const LW_WS_PENDING_WAKEUP: LWLockWaitState = 2;
+/// A PostgreSQL spinlock word (`slock_t`, `storage/s_lock.h`).
+///
+/// Acquired with an atomic test-and-set ([`Spinlock::tas`]) and released with
+/// a fence-ordered store of zero ([`Spinlock::unlock`]). `#[repr(transparent)]`
+/// over an `AtomicI32` so the in-memory layout matches the `int`-width
+/// `slock_t`. The word-level primitives live here (like the `pg_atomic_*`
+/// types above) so shmem-resident structs can embed the lock word; the
+/// contended-acquire backoff loop (`s_lock.c`) lives in the
+/// `backend-storage-lmgr-s-lock` crate.
+#[repr(transparent)]
+#[derive(Debug, Default)]
+pub struct Spinlock {
+    word: AtomicI32,
+}
+
+impl Spinlock {
+    /// A new, free spinlock.
+    pub const fn new() -> Self {
+        Self {
+            word: AtomicI32::new(0),
+        }
+    }
+
+    /// `S_INIT_LOCK`/`S_UNLOCK` — store zero, releasing the lock.
+    ///
+    /// `Release` ordering keeps loads and stores issued before the unlock
+    /// from being reordered past it, matching PostgreSQL's `S_UNLOCK` fence
+    /// requirement (`__sync_lock_release` semantics).
+    pub fn unlock(&self) {
+        self.word.store(0, Ordering::Release);
+    }
+
+    /// `S_LOCK_FREE(lock)` — true when `*lock == 0`.
+    pub fn is_free(&self) -> bool {
+        self.word.load(Ordering::Relaxed) == 0
+    }
+
+    /// `tas(lock)` — atomically set the word to 1 and return the previous
+    /// value (0 if the lock was free and is now ours, nonzero if held).
+    ///
+    /// `Acquire` ordering keeps loads and stores issued after the TAS from
+    /// being reordered before it, matching PostgreSQL's `TAS` fence
+    /// requirement (`__sync_lock_test_and_set` semantics).
+    pub fn tas(&self) -> i32 {
+        self.word.swap(1, Ordering::Acquire)
+    }
+
+    /// `TAS_SPIN(lock)` — `*(lock) ? 1 : TAS(lock)`.
+    ///
+    /// On x86_64 and aarch64 it is a win to do a non-locking read of the word
+    /// before attempting the (more expensive) atomic TAS while spinning.
+    pub fn tas_spin(&self) -> i32 {
+        if self.word.load(Ordering::Relaxed) != 0 {
+            1
+        } else {
+            self.tas()
+        }
+    }
+}
+
+/// `enum LWLockWaitState` (`storage/lwlock.h:28`) — the `PGPROC.lwWaiting`
+/// state set and read by the LWLock wait-list machinery.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum LWLockWaitState {
+    /// not currently waiting / woken up
+    LW_WS_NOT_WAITING = 0,
+    /// currently waiting
+    LW_WS_WAITING = 1,
+    /// removed from waitlist, but not yet signalled
+    LW_WS_PENDING_WAKEUP = 2,
+}
+
+pub use LWLockWaitState::*;
+
+impl Default for LWLockWaitState {
+    /// C's zero value (`LW_WS_NOT_WAITING`), for zero-initialized PGPROCs.
+    fn default() -> Self {
+        LW_WS_NOT_WAITING
+    }
+}
 
 /// `proclist_node` (`storage/proclist_types.h`) — a node in a doubly-linked
 /// list of PGPROCs identified by pgprocno. A node not in any list has
@@ -109,6 +203,42 @@ impl Default for proclist_head {
     }
 }
 
+/// The `waiters` field of an [`LWLock`]: a `proclist_head` that, per
+/// lwlock.c's protocol, is mutated only while the wait-list spinlock bit
+/// (`LW_FLAG_LOCKED`) is held in the lock's `state` word. Backends share
+/// `&LWLock` handles, so the head lives in an `UnsafeCell`; the runtime
+/// exclusion that makes `ptr()` access sound is the `LW_FLAG_LOCKED` bit,
+/// exactly as in C.
+#[derive(Debug, Default)]
+pub struct LWLockWaitList {
+    cell: UnsafeCell<proclist_head>,
+}
+
+// SAFETY: cross-thread access is serialized by the owning LWLock's
+// LW_FLAG_LOCKED spinlock bit (lwlock.c's wait-list protocol).
+unsafe impl Sync for LWLockWaitList {}
+
+impl LWLockWaitList {
+    pub const fn new(head: proclist_head) -> Self {
+        Self {
+            cell: UnsafeCell::new(head),
+        }
+    }
+
+    /// Raw pointer to the list head. Dereferencing requires holding the
+    /// owning lock's `LW_FLAG_LOCKED` bit (or otherwise having exclusive
+    /// access, e.g. single-threaded initialization).
+    pub fn ptr(&self) -> *mut proclist_head {
+        self.cell.get()
+    }
+
+    /// Exclusive-access view (used by `LWLockInitialize`, which legitimately
+    /// holds `&mut LWLock`).
+    pub fn get_mut(&mut self) -> &mut proclist_head {
+        self.cell.get_mut()
+    }
+}
+
 /// `LWLock` (`storage/lwlock.h`): tranche id, atomic lock state, and the list
 /// of waiting PGPROCs. Shmem-resident and concurrently accessed, so (like its
 /// atomic `state`) it is neither `Copy` nor `Clone` — a copied lock would be a
@@ -117,7 +247,7 @@ impl Default for proclist_head {
 pub struct LWLock {
     pub tranche: uint16,
     pub state: pg_atomic_uint32,
-    pub waiters: proclist_head,
+    pub waiters: LWLockWaitList,
 }
 
 /// `LWLOCK_PADDED_SIZE` (`storage/lwlock.h`) — `PG_CACHE_LINE_SIZE`.
@@ -138,6 +268,10 @@ const _: () = assert!(core::mem::size_of::<LWLockPadded>() == LWLOCK_PADDED_SIZE
 /// `MAX_BACKENDS_BITS` / `MAX_BACKENDS` (`storage/procnumber.h`).
 pub const MAX_BACKENDS_BITS: i32 = 18;
 pub const MAX_BACKENDS: uint32 = (1_u32 << MAX_BACKENDS_BITS) - 1;
+
+/// `PROC_IS_AUTOVACUUM` (`storage/proc.h`) — `statusFlags` bit: this backend
+/// is an autovacuum worker.
+pub const PROC_IS_AUTOVACUUM: uint8 = 0x01;
 
 /// `ProcSignalReason` (`storage/procsignal.h`) — reasons for signaling a
 /// Postgres child process over the multiplexed SIGUSR1 channel.
@@ -188,12 +322,31 @@ pub const NUM_INDIVIDUAL_LWLOCKS: i32 = 54;
 /// control lock in `MainLWLockArray` (`&MainLWLockArray[34].lock`).
 pub const DYNAMIC_SHARED_MEMORY_CONTROL_LOCK: usize = 34;
 
-/// `ProcArrayLock` (`lwlocklist.h` offset 4).
+/// `DSMRegistryLock` (`lwlocklist.h`, `PG_LWLOCK(50, DSMRegistry)`): offset of
+/// the DSM-registry lock in `MainLWLockArray` (`&MainLWLockArray[50].lock`).
+pub const DSM_REGISTRY_LOCK: usize = 50;
+/// `ProcArrayLock` (`lwlocklist.h`): `PG_LWLOCK(4, ProcArray)`.
 pub const PROC_ARRAY_LOCK: usize = 4;
-/// `ReplicationSlotAllocationLock` (`lwlocklist.h` offset 36).
+/// `ReplicationSlotAllocationLock` — `PG_LWLOCK(36, ReplicationSlotAllocation)`.
 pub const REPLICATION_SLOT_ALLOCATION_LOCK: usize = 36;
-/// `ReplicationSlotControlLock` (`lwlocklist.h` offset 37).
+/// `ReplicationSlotControlLock` — `PG_LWLOCK(37, ReplicationSlotControl)`.
 pub const REPLICATION_SLOT_CONTROL_LOCK: usize = 37;
+/// `ShmemIndexLock` (`lwlocklist.h`): offset of the shmem-index lock in
+/// `MainLWLockArray` (`PG_LWLOCK(1, ShmemIndex)`).
+pub const SHMEM_INDEX_LOCK: usize = 1;
+
+/// Possible values for `huge_pages` and `huge_pages_status`
+/// (`storage/pg_shmem.h`).
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HugePagesStatus {
+    HUGE_PAGES_OFF = 0,
+    HUGE_PAGES_ON = 1,
+    /// Only for `huge_pages`.
+    HUGE_PAGES_TRY = 2,
+    /// Only for `huge_pages_status`.
+    HUGE_PAGES_UNKNOWN = 3,
+}
 
 /// `dsm_handle` (`storage/dsm_impl.h`) — a "name" for a dynamic shared memory
 /// segment.
@@ -201,6 +354,73 @@ pub type dsm_handle = uint32;
 
 /// `DSM_HANDLE_INVALID` (`(dsm_handle) 0`).
 pub const DSM_HANDLE_INVALID: dsm_handle = 0;
+
+/// `dsa_handle` (`utils/dsa.h`, `typedef dsm_handle dsa_handle`) — a "name" for
+/// a DSA area that can be passed between cooperating backends.
+pub type dsa_handle = dsm_handle;
+
+/// `dsa_pointer` (`utils/dsa.h`) — a relative pointer within a DSA area
+/// (`uint64` on 64-bit pointer width).
+pub type dsa_pointer = uint64;
+
+/// `InvalidDsaPointer` (`utils/dsa.h`) — `((dsa_pointer) 0)`.
+pub const INVALID_DSA_POINTER: dsa_pointer = 0;
+
+/// `dshash_table_handle` (`lib/dshash.h`, `typedef dsa_pointer
+/// dshash_table_handle`) — a handle to a dshash table passed between backends.
+pub type dshash_table_handle = dsa_pointer;
+
+/// `dsa_area` (`utils/dsa.h`) — opaque backend-local handle to a DSA area. The
+/// area's internals are owned by the `dsa.c` substrate; consumers only hold
+/// and pass the pointer, so the body stays opaque.
+#[repr(C)]
+pub struct DsaArea {
+    _private: [u8; 0],
+}
+
+/// `dshash_table` (`lib/dshash.h`) — opaque backend-local handle to a dshash
+/// table. The table's internals are owned by the `dshash.c` substrate;
+/// consumers only hold and pass the pointer, so the body stays opaque.
+#[repr(C)]
+pub struct DshashTable {
+    _private: [u8; 0],
+}
+
+/// Which built-in key-handling helper set a [`DshashParameters`] selects. The C
+/// `dshash_parameters` carries raw `compare`/`hash`/`copy` function pointers,
+/// but "function pointers can't be shared between backends" (`dshash.h`), so
+/// every backend supplies the same set by value; the two built-in sets
+/// `dshash.c` owns are the NUL-terminated-string helpers and the fixed-width
+/// `memcmp`/`hash_bytes`/`memcpy` helpers. This selector names the set without
+/// crossing the seam with the foreign function pointers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DshashKeyKind {
+    /// `dshash_strcmp` / `dshash_strhash` / `dshash_strcpy` — fixed-width
+    /// NUL-terminated string keys occupying the first `key_size` bytes of the
+    /// entry.
+    String,
+    /// `dshash_memcmp` / `dshash_memhash` / `dshash_memcpy` — fixed-width binary
+    /// keys (the first `key_size` bytes of the entry compared/hashed/copied as
+    /// raw bytes). Used e.g. by the logical-replication launcher's
+    /// `last_start_times` table keyed by `sizeof(Oid)`.
+    Binary,
+}
+
+/// `dshash_parameters` (`lib/dshash.h`) — the parameters to create or attach a
+/// dshash table. `tranche_id` is only consulted on create. The compare/hash/
+/// copy function pointers are conveyed by [`DshashKeyKind`] (see its docs).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DshashParameters {
+    /// `key_size` — size of the key (initial bytes of the entry).
+    pub key_size: Size,
+    /// `entry_size` — total size of an entry.
+    pub entry_size: Size,
+    /// The built-in key-helper set (`compare_function`/`hash_function`/
+    /// `copy_function`).
+    pub key_kind: DshashKeyKind,
+    /// `tranche_id` — the LWLock tranche for the table's partition locks.
+    pub tranche_id: i32,
+}
 
 /// `PGShmemHeader` (`storage/pg_shmem.h`) — standard header for all Postgres
 /// shared memory segments, resident at the start of the main segment.
@@ -287,21 +507,10 @@ pub const LWTRANCHE_PARALLEL_VACUUM_DSA: i32 = LWTRANCHE_XACT_SLRU + 1;
 pub const LWTRANCHE_AIO_URING_COMPLETION: i32 = LWTRANCHE_PARALLEL_VACUUM_DSA + 1;
 pub const LWTRANCHE_FIRST_USER_DEFINED: i32 = LWTRANCHE_AIO_URING_COMPLETION + 1;
 
-/// `LOCKMODE` (`storage/lockdefs.h`) — a relation/object lock level.
-pub type LOCKMODE = i32;
-pub const NoLock: LOCKMODE = 0;
-pub const AccessShareLock: LOCKMODE = 1;
-pub const RowShareLock: LOCKMODE = 2;
-pub const RowExclusiveLock: LOCKMODE = 3;
-pub const ShareUpdateExclusiveLock: LOCKMODE = 4;
-pub const ShareLock: LOCKMODE = 5;
-pub const ShareRowExclusiveLock: LOCKMODE = 6;
-pub const ExclusiveLock: LOCKMODE = 7;
-pub const AccessExclusiveLock: LOCKMODE = 8;
 
 /// `RelFileLocator` (`storage/relfilelocator.h`) — the physical identity of a
 /// relation: tablespace, database, and relfilenumber.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct RelFileLocator {
     /// `spcOid` — tablespace.
     pub spcOid: Oid,
@@ -311,8 +520,119 @@ pub struct RelFileLocator {
     pub relNumber: RelFileNumber,
 }
 
+/// `ReadBufferMode` (`storage/bufmgr.h`) — mirrors the C enum exactly,
+/// including discriminant order, so it round-trips byte-for-byte across seams.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub enum ReadBufferMode {
+    /// `RBM_NORMAL`.
+    Normal = 0,
+    /// `RBM_ZERO_AND_LOCK`.
+    ZeroAndLock,
+    /// `RBM_ZERO_AND_CLEANUP_LOCK`.
+    ZeroAndCleanupLock,
+    /// `RBM_ZERO_ON_ERROR`.
+    ZeroOnError,
+    /// `RBM_NORMAL_NO_LOG`.
+    NormalNoLog,
+}
+
 /// `RelFileLocatorEquals(locator1, locator2)` (`storage/relfilelocator.h`).
 #[inline]
 pub fn RelFileLocatorEquals(a: &RelFileLocator, b: &RelFileLocator) -> bool {
     a == b
+}
+
+/// `VirtualTransactionId` (`storage/lock.h`).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct VirtualTransactionId {
+    pub procNumber: ProcNumber,
+    pub localTransactionId: types_core::LocalTransactionId,
+}
+
+impl VirtualTransactionId {
+    /// `SetInvalidVirtualTransactionId(vxid)`.
+    pub const fn invalid() -> Self {
+        Self {
+            procNumber: INVALID_PROC_NUMBER,
+            localTransactionId: 0,
+        }
+    }
+
+    /// `VirtualTransactionIdIsValid(vxid)` —
+    /// `LocalTransactionIdIsValid((vxid).localTransactionId)`.
+    pub const fn is_valid(self) -> bool {
+        self.localTransactionId != 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `storage/standby.h` / `storage/procarray.h` running-xacts vocabulary.
+// ---------------------------------------------------------------------------
+
+/// `subxids_array_status` (`storage/standby.h`).
+pub type subxids_array_status = u32;
+pub const SUBXIDS_IN_ARRAY: subxids_array_status = 0;
+pub const SUBXIDS_MISSING: subxids_array_status = 1;
+pub const SUBXIDS_IN_SUBTRANS: subxids_array_status = 2;
+
+/// `RunningTransactionsData` (`storage/standby.h`). The C `xids` pointer
+/// (length `xcnt + subxcnt`) is context-allocated (C builds it in
+/// TopMemoryContext / the current context), so it is a `PgVec` carrying its
+/// allocator lifetime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunningTransactionsData<'mcx> {
+    pub xcnt: i32,
+    pub subxcnt: i32,
+    pub subxid_status: subxids_array_status,
+    pub nextXid: TransactionId,
+    pub oldestRunningXid: TransactionId,
+    pub oldestDatabaseRunningXid: TransactionId,
+    pub latestCompletedXid: TransactionId,
+    pub xids: mcx::PgVec<'mcx, TransactionId>,
+}
+
+/// Handle to the LWLocks `GetRunningTransactionData` (`procarray.c`) holds
+/// while its caller's callback runs: the C contract "returns with
+/// ProcArrayLock and XidGenLock held" becomes a with-locks callback shape.
+/// The owner releases every lock still held when the callback returns —
+/// success and error path alike — so no lock is ever held across `?` without
+/// a guard.
+pub trait RunningTransactionLocksHeld {
+    /// `LWLockRelease(ProcArrayLock)` before the callback finishes — the
+    /// hot-standby (`wal_level < logical`) path in `LogStandbySnapshot`.
+    /// `Err` carries the C `elog(ERROR, "lock ... is not held")`.
+    fn release_proc_array_lock(&mut self) -> types_error::PgResult<()>;
+}
+
+/// `xl_standby_lock` (`storage/standbydefs.h`): one logged
+/// AccessExclusiveLock — 12 bytes, no padding.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct xl_standby_lock {
+    /// xid of the holding transaction.
+    pub xid: TransactionId,
+    /// `InvalidOid` when locking a shared relation.
+    pub dbOid: Oid,
+    pub relOid: Oid,
+}
+
+/// `shm_toc_estimator` (`storage/shm_toc.h`) — transient sizing accumulator
+/// for `shm_toc_estimate`; lives in backend-local memory, not the segment.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct shm_toc_estimator {
+    /// `Size space_for_chunks`.
+    pub space_for_chunks: Size,
+    /// `Size number_of_keys`.
+    pub number_of_keys: Size,
+}
+
+/// `PrefetchBufferResult` (`storage/bufmgr.h`) — the result of
+/// `PrefetchBuffer`/`PrefetchSharedBuffer`: a buffer the block was already
+/// found in (`InvalidBuffer` when none), and whether an I/O was initiated.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PrefetchBufferResult {
+    /// `Buffer recent_buffer` — the block's buffer if already cached.
+    pub recent_buffer: types_core::Buffer,
+    /// `bool initiated_io` — whether a prefetch was started.
+    pub initiated_io: bool,
 }

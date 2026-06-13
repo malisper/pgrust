@@ -4,6 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
+use types_signal::SigDisposition;
+
 seam_core::seam!(
     /// `pqsignal(signo, func)` (`src/port/pqsignal.c`) — install a signal
     /// handler via `sigaction` with `SA_RESTART` (plus `SA_NOCLDSTOP` for

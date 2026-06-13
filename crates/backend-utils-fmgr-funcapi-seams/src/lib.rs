@@ -8,6 +8,11 @@
 
 #![allow(non_snake_case)]
 
+use mcx::Mcx;
+use types_core::Oid;
+use types_error::PgResult;
+use types_namespace::FuncArgInfo;
+
 seam_core::seam!(
     /// `InitMaterializedSRF(fcinfo, flags)` (funcapi.c) — set up the calling
     /// function's materialize-mode tuplestore and descriptor in the
@@ -32,4 +37,37 @@ seam_core::seam!(
         values: &[types_datum::Datum],
         nulls: &[bool],
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `get_func_arg_info(proctup, &p_argtypes, &p_argnames, &p_argmodes)`
+    /// (funcapi.c) for the pg_proc row of `func_oid` (the C caller holds the
+    /// tuple; the owned marshal re-fetches it by OID). The arrays are
+    /// allocated in `mcx` (C: palloc in the current context). `Err` carries
+    /// cache-lookup / deform `elog(ERROR)`s and OOM from the copies.
+    pub fn get_func_arg_info<'mcx>(
+        mcx: Mcx<'mcx>,
+        func_oid: Oid,
+    ) -> PgResult<FuncArgInfo<'mcx>>
+);
+
+seam_core::seam!(
+    /// `PG_ARGISNULL(0) ? None : Some(PG_GETARG_OID(0))` against the call
+    /// frame: read the optional leading `Oid` argument of a SQL-callable
+    /// function (used by `pg_stat_get_subscription`'s subid filter). fmgr owns
+    /// the trimmed `args`/`isnull` arrays, so the read is seamed.
+    pub fn srf_arg0_oid<'mcx>(
+        fcinfo: &types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    ) -> Option<Oid>
+);
+
+seam_core::seam!(
+    /// `CStringGetTextDatum(s)` (builtins.h / varlena): build a `text *`
+    /// Datum from a C string, allocated in `mcx` (C: the current context). Used
+    /// by `pg_stat_get_subscription` for the worker-type text column. `Err`
+    /// carries OOM.
+    pub fn cstring_get_text_datum<'mcx>(
+        mcx: Mcx<'mcx>,
+        s: &str,
+    ) -> PgResult<types_datum::Datum>
 );

@@ -36,6 +36,13 @@ use types_tuple::heaptuple::TupleDescData;
 pub struct FormData_pg_class<'mcx> {
     /// `NameData relname` — name of the relation.
     pub relname: PgString<'mcx>,
+    /// `Oid relnamespace` — OID of the namespace containing this relation
+    /// (`RelationGetNamespace`).
+    pub relnamespace: Oid,
+    /// `Oid relowner` — the relation's owning role OID.
+    pub relowner: Oid,
+    /// `bool relrowsecurity` — row-level security is enabled on the relation.
+    pub relrowsecurity: bool,
     /// `int32 relpages` — page-count estimate from pg_class.
     pub relpages: i32,
     /// `float4 reltuples` — row-count estimate (negative: never vacuumed).
@@ -52,21 +59,31 @@ pub struct FormData_pg_class<'mcx> {
     pub relkind: u8,
     /// `bool relispopulated` — matview currently holds query results.
     pub relispopulated: bool,
+    /// `char relreplident` — replica identity setting, see
+    /// `REPLICA_IDENTITY_*` (types-tuple `access`).
+    pub relreplident: u8,
     /// `bool relispartition` — is the relation a partition?
     pub relispartition: bool,
 }
 
-/// `StdRdOptions` (`utils/rel.h`), trimmed: the parsed heap reloptions the
-/// ports consume. `None` on [`RelationData::rd_options`] is the C NULL
+/// `FormData_pg_index` (`catalog/pg_index.h`), trimmed to the fields ports
+/// consume (the `rd_index` payload of an index's relcache entry).
+#[derive(Clone, Copy, Debug)]
+pub struct FormData_pg_index {
+    /// `int16 indnkeyatts` — number of key columns in the index
+    /// (`IndexRelationGetNumberOfKeyAttributes`).
+    pub indnkeyatts: i16,
+    /// `bool indimmediate` — is uniqueness enforced immediately?
+    pub indimmediate: bool,
+}
+
+/// `StdRdOptions` (`utils/rel.h`): the parsed heap reloptions the reloptions
+/// parser builds and `RelationData::rd_options` carries. Re-exported from
+/// `types-reloptions`, the designated home of the parsed option-struct
+/// vocabulary. `None` on [`RelationData::rd_options`] is the C NULL
 /// `rd_options` (no reloptions set); when present, the parse filled every
 /// field (defaults included), as in C.
-#[derive(Clone, Copy, Debug)]
-pub struct StdRdOptions {
-    /// `int fillfactor`.
-    pub fillfactor: i32,
-    /// `int toast_tuple_target`.
-    pub toast_tuple_target: i32,
-}
+pub use types_reloptions::StdRdOptions;
 
 /// `RelationData` (`utils/rel.h`), trimmed: the consumed slice of a relcache
 /// entry, copied into the opening caller's memory context. (`rd_tableam` is
@@ -88,6 +105,9 @@ pub struct RelationData<'mcx> {
     pub rd_att: PgBox<'mcx, TupleDescData<'mcx>>,
     /// `bytea *rd_options` — parsed reloptions (trimmed), or `None`.
     pub rd_options: Option<StdRdOptions>,
+    /// `Form_pg_index rd_index` — the pg_index row (trimmed); `None` (the C
+    /// NULL) for non-index relations.
+    pub rd_index: Option<FormData_pg_index>,
 }
 
 impl<'mcx> RelationData<'mcx> {

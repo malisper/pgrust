@@ -10,3 +10,52 @@ seam_core::seam!(
     /// parse/apply paths can `ereport(ERROR)`.
     pub fn process_config_file(context: types_guc::GucContext) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `NewGUCNestLevel()` (guc.c): open a new GUC nesting level and return
+    /// it (`++GUCNestLevel`). Infallible.
+    pub fn new_guc_nest_level() -> i32
+);
+
+seam_core::seam!(
+    /// `AtEOXact_GUC(isCommit, nestLevel)` (guc.c): pop GUC stack entries at
+    /// transaction / subtransaction / nest-level end, restoring or
+    /// propagating values. Restore paths allocate and can `ereport`.
+    pub fn at_eoxact_guc(is_commit: bool, nest_level: i32) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GUC_check_errdetail(fmt, ...)` (guc.h): record errdetail for the
+    /// in-progress GUC check-hook failure (`GUC_check_errdetail_string`).
+    /// Plain backend-local state write.
+    pub fn guc_check_errdetail(detail: String)
+);
+
+seam_core::seam!(
+    /// `AtStart_GUC()` (guc.c) — sanity-reset GUC nesting at transaction
+    /// start.
+    pub fn at_start_guc()
+);
+
+seam_core::seam!(
+    /// Read the `log_transaction_sample_rate` GUC
+    /// (`double log_xact_sample_rate`, guc_tables.c).
+    pub fn log_xact_sample_rate() -> f64
+);
+
+seam_core::seam!(
+    /// `set_config_with_handle(name, get_config_handle(name), value, context,
+    /// PGC_S_SESSION, srole, GUC_ACTION_SAVE, true, 0, false)` as called by
+    /// `fmgr_security_definer` for each of a function's `proconfig` SET items.
+    /// The handle lookup (`get_config_handle`) is folded in (owner-side). C
+    /// varies only `context` (`PGC_SUSET` when the current user is superuser,
+    /// else `PGC_USERSET`) and `srole` (`GetUserId()`); source / action /
+    /// changeVal / elevel / is_reload are fixed for this caller. Apply paths
+    /// allocate and can `ereport(ERROR)`, carried on `Err`.
+    pub fn set_config_with_handle(
+        name: &str,
+        value: &str,
+        context: types_guc::GucContext,
+        srole: types_core::Oid,
+    ) -> types_error::PgResult<()>
+);

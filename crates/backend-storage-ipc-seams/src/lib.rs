@@ -35,13 +35,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `before_shmem_exit(function, arg)` (`storage/ipc/ipc.c`): register a
-    /// callback to run early in `shmem_exit`, before the `on_shmem_exit`
-    /// callbacks, while shared memory is still accessible. The `Err` is the C
-    /// `ereport(FATAL)` past `MAX_ON_EXITS`; callbacks carry the same
-    /// `PgResult` failure surface.
+    /// `before_shmem_exit(function, arg)` (ipc.c): register a callback to run
+    /// early in shmem exit. C `ereport(FATAL)`s when the callback table is
+    /// full, carried on `Err`. The callback's `PgResult` mirrors a C callback
+    /// that can `ereport(ERROR)`.
     pub fn before_shmem_exit(
-        function: fn(code: i32, arg: types_datum::Datum) -> types_error::PgResult<()>,
+        callback: fn(code: i32, arg: types_datum::Datum) -> types_error::PgResult<()>,
         arg: types_datum::Datum,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `check_on_shmem_exit_lists_are_empty()` (`storage/ipc/ipc.c`) — assert
+    /// that no `on_shmem_exit` handlers have been registered yet (the
+    /// startup-packet safety check). `ereport(FATAL)` on violation, which
+    /// terminates inside the owner; modeled infallible at the boundary.
+    pub fn check_on_shmem_exit_lists_are_empty()
 );

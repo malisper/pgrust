@@ -10,6 +10,5 @@ path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
+types-startup = { path = "../types-startup" }
 types-core = { path = "../types-core" }
-types-error = { path = "../types-error" }
-types-replication = { path = "../types-replication" }

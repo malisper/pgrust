@@ -10,5 +10,5 @@ path = "src/lib.rs"
 
 [dependencies]
 seam-core = { path = "../seam-core" }
-types-error = { path = "../types-error" }
 types-condvar = { path = "../types-condvar" }
+types-error = { path = "../types-error" }

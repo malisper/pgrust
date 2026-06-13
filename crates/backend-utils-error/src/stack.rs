@@ -256,7 +256,7 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
 
         // Let the cumulative stats system know. (Only marks the session as
         // terminated by fatal error if there is no other known cause.)
-        backend_utils_activity_pgstat_seams::pgstat_set_session_end_cause_fatal::call();
+        backend_utils_activity_stat_seams::pgstat_set_session_end_cause_fatal::call();
 
         // Normal process-exit cleanup, exit code 1 for FATAL termination.
         backend_storage_ipc_seams::proc_exit::call(

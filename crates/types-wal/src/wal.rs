@@ -2,7 +2,8 @@
 
 use mcx::PgVec;
 use types_core::{
-    pg_crc32c, uint16, uint32, uint8, Oid, RelFileNumber, RmgrId, TransactionId, XLogRecPtr,
+    pg_crc32c, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, Oid, RelFileNumber,
+    RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr,
 };
 
 /// `WalLevel` enum (`access/xlog.h`): the level of information written to WAL.
@@ -25,8 +26,23 @@ pub const MAX_XLINFO_TYPES: usize = 16;
 /// so custom rmgr ids 128..=255 (`RM_MIN/MAX_CUSTOM_ID`) index in bounds.
 pub const RM_MAX_ID: usize = u8::MAX as usize;
 
+/// `RM_XLOG_ID` — the XLOG resource manager (rmgrlist.h entry 0).
+pub const RM_XLOG_ID: RmgrId = 0;
+
 /// `RM_XACT_ID` — the Transaction resource manager (rmgrlist.h entry 1).
 pub const RM_XACT_ID: RmgrId = 1;
+
+/// `RM_SMGR_ID` — the Storage resource manager (rmgrlist.h entry 2).
+pub const RM_SMGR_ID: RmgrId = 2;
+
+/// `RM_DBASE_ID` — the Database resource manager (rmgrlist.h entry 4).
+pub const RM_DBASE_ID: RmgrId = 4;
+
+/// `RM_RELMAP_ID` — the RelMap resource manager (rmgrlist.h entry 7).
+pub const RM_RELMAP_ID: RmgrId = 7;
+
+/// `BKPBLOCK_WILL_INIT` (access/xlogrecord.h) — redo will re-init the page.
+pub const BKPBLOCK_WILL_INIT: uint8 = 0x40;
 
 /// `RelFileLocator` (storage/relfilelocator.h) — the physical identity of a
 /// relation: tablespace, database, relfilenumber.
@@ -115,6 +131,11 @@ impl XLogRecord {
         self.xl_info
     }
 
+    /// `XLogRecGetXid` — `xl_xid`.
+    pub const fn xid(&self) -> TransactionId {
+        self.xl_xid
+    }
+
     /// `XLogRecGetRmid` — `xl_rmid`.
     pub const fn rmid(&self) -> RmgrId {
         self.xl_rmid
@@ -128,6 +149,16 @@ impl XLogRecord {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DecodedBkpBlock<'a> {
     in_use: bool,
+    /// Identity of the block: `RelFileLocator rlocator; ForkNumber forknum;
+    /// BlockNumber blkno` (the `XLogRecGetBlockTagExtended` triple).
+    rlocator: RelFileLocator,
+    forknum: ForkNumber,
+    blkno: BlockNumber,
+    /// `Buffer prefetch_buffer` — buffer the prefetcher found the block in
+    /// (`InvalidBuffer` when none); read by `XLogReadBufferForRedoExtended`.
+    prefetch_buffer: Buffer,
+    /// `uint8 flags` — the `BKPBLOCK_*` header flag bits.
+    flags: uint8,
     has_image: bool,
     apply_image: bool,
     bimg_len: uint16,
@@ -146,11 +177,72 @@ impl<'a> DecodedBkpBlock<'a> {
     ) -> Self {
         Self {
             in_use,
+            rlocator: RelFileLocator::new(0, 0, 0),
+            forknum: ForkNumber::MAIN_FORKNUM,
+            blkno: 0,
+            prefetch_buffer: 0,
+            flags: 0,
             has_image,
             apply_image,
             bimg_len,
             data,
         }
+    }
+
+    /// Set the block-reference identity fields (`rlocator`/`forknum`/`blkno`/
+    /// `flags`), builder-style.
+    pub const fn with_block_ref(
+        mut self,
+        rlocator: RelFileLocator,
+        forknum: ForkNumber,
+        blkno: BlockNumber,
+        flags: uint8,
+    ) -> Self {
+        self.rlocator = rlocator;
+        self.forknum = forknum;
+        self.blkno = blkno;
+        self.flags = flags;
+        self
+    }
+
+    /// `block->in_use`.
+    pub const fn in_use(&self) -> bool {
+        self.in_use
+    }
+
+    /// `block->rlocator`.
+    pub const fn rlocator(&self) -> RelFileLocator {
+        self.rlocator
+    }
+
+    /// `block->forknum`.
+    pub const fn forknum(&self) -> ForkNumber {
+        self.forknum
+    }
+
+    /// `block->blkno`.
+    pub const fn blkno(&self) -> BlockNumber {
+        self.blkno
+    }
+
+    /// `block->flags` — the `BKPBLOCK_*` bits.
+    pub const fn flags(&self) -> uint8 {
+        self.flags
+    }
+
+    /// `block->has_image`.
+    pub const fn has_image(&self) -> bool {
+        self.has_image
+    }
+
+    /// `block->prefetch_buffer`.
+    pub const fn prefetch_buffer(&self) -> Buffer {
+        self.prefetch_buffer
+    }
+
+    /// `block->prefetch_buffer = buffer` — the prefetcher's write-back.
+    pub fn set_prefetch_buffer(&mut self, buffer: Buffer) {
+        self.prefetch_buffer = buffer;
     }
 
     /// The FPI bytes this block contributes: `bimg_len` when the block is in
@@ -177,6 +269,9 @@ pub struct DecodedXLogRecord<'mcx> {
     /// `XLogRecGetData` — the record's main data.
     main_data: &'mcx [u8],
     blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>>,
+    /// `DecodedXLogRecord.record_origin` — the replication origin decoded from
+    /// the record (`XLogRecGetOrigin`); `InvalidRepOriginId` when none.
+    record_origin: RepOriginId,
 }
 
 impl<'mcx> DecodedXLogRecord<'mcx> {
@@ -191,11 +286,29 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
             header,
             main_data,
             blocks,
+            record_origin: types_core::InvalidRepOriginId,
         }
+    }
+
+    /// Set `record_origin` (`XLogRecGetOrigin`), builder-style; the decoder
+    /// fills it from the record's origin block-data when present.
+    pub const fn with_origin(mut self, origin: RepOriginId) -> Self {
+        self.record_origin = origin;
+        self
     }
 
     pub const fn header(&self) -> &XLogRecord {
         &self.header
+    }
+
+    /// `XLogRecGetXid(record)` — `record->header.xl_xid`.
+    pub const fn xid(&self) -> TransactionId {
+        self.header.xid()
+    }
+
+    /// `XLogRecGetOrigin(record)` — `record->record_origin`.
+    pub const fn record_origin(&self) -> RepOriginId {
+        self.record_origin
     }
 
     pub fn blocks(&self) -> &[DecodedBkpBlock<'mcx>] {
@@ -222,6 +335,19 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
         self.blocks.get(block_id).filter(|b| b.in_use)
     }
 
+    /// `XLogRecMaxBlockId(record)` — the highest block id in the record
+    /// (`record->max_block_id`); `-1` when no blocks are registered. The block
+    /// array is sized `0..=max_block_id`, so this is `blocks.len() - 1`.
+    pub fn max_block_id(&self) -> i32 {
+        self.blocks.len() as i32 - 1
+    }
+
+    /// `XLogRecHasBlockRef(record, block_id)` — whether the block id is in
+    /// range and the entry is in use.
+    pub fn has_block_ref(&self, block_id: usize) -> bool {
+        self.block(block_id).is_some()
+    }
+
     /// `XLogRecHasBlockData(record, block_id)`.
     pub fn has_block_data(&self, block_id: usize) -> bool {
         self.block(block_id).is_some_and(|b| b.data.is_some())
@@ -244,3 +370,102 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
     }
 }
 
+/// The trimmed `XLogReaderState` view handed to an rmgr `rm_redo` entry
+/// point: `XLogRecGetInfo(record)`, `XLogRecGetData(record)` (with
+/// `XLogRecGetDataLen` folded into the slice), and
+/// `XLogRecHasAnyBlockRefs(record)`. All rmgr redo seams share this shape;
+/// the dispatcher marshals it from the decoded record.
+#[derive(Clone, Copy, Debug)]
+pub struct RedoRecord<'a> {
+    /// The raw `xl_info` byte (rmgr bits plus `XLR_INFO_MASK` bits).
+    pub info: uint8,
+    /// The record's main data.
+    pub data: &'a [u8],
+    /// Whether any block references are present.
+    pub has_any_block_refs: bool,
+}
+
+/// `RM_STANDBY_ID` — the Standby resource manager (rmgrlist.h entry 8).
+pub const RM_STANDBY_ID: RmgrId = 8;
+
+/// `RM_GENERIC_ID` — the Generic-WAL resource manager (rmgrlist.h entry 20).
+pub const RM_GENERIC_ID: RmgrId = 20;
+
+/// `XLOG_MARK_UNIMPORTANT` (access/xlog.h) — record flag: not important for
+/// durability decisions (checkpoint / archive-timeout triggering).
+pub const XLOG_MARK_UNIMPORTANT: uint8 = 0x02;
+
+// `WalLevel` and `ArchiveMode` are the canonical enums in `xlog_consts` (main's
+// single source, re-exported at the crate root); the launcher/walreceiver ports
+// use those. No duplicate definition here.
+
+
+/// `ReplicationSlotInvalidationCause` (replication/slot.h) — bitmask of
+/// invalidation causes.
+pub type ReplicationSlotInvalidationCause = u32;
+pub const RS_INVAL_NONE: ReplicationSlotInvalidationCause = 0;
+pub const RS_INVAL_WAL_REMOVED: ReplicationSlotInvalidationCause = 1 << 0;
+pub const RS_INVAL_HORIZON: ReplicationSlotInvalidationCause = 1 << 1;
+pub const RS_INVAL_WAL_LEVEL: ReplicationSlotInvalidationCause = 1 << 2;
+pub const RS_INVAL_IDLE_TIMEOUT: ReplicationSlotInvalidationCause = 1 << 3;
+
+/// One entry of a parsed timeline-history file (`TimeLineHistoryEntry`,
+/// `access/timeline.h`): the LSN range over which `tli` was the current
+/// timeline (`begin <= lsn < end`; `end == InvalidXLogRecPtr` for the latest).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimeLineHistoryEntry {
+    pub tli: TimeLineID,
+    pub begin: XLogRecPtr,
+    pub end: XLogRecPtr,
+}
+
+impl TimeLineHistoryEntry {
+    pub const fn new(tli: TimeLineID, begin: XLogRecPtr, end: XLogRecPtr) -> Self {
+        Self { tli, begin, end }
+    }
+}
+
+/// `XLR_SPECIAL_REL_UPDATE` (`access/xlogrecord.h`) — flag bit in `xl_info`:
+/// the record modifies relation files outside the buffer manager's view.
+pub const XLR_SPECIAL_REL_UPDATE: uint8 = 0x01;
+
+/// `XLOG_INCLUDE_ORIGIN` (`access/xloginsert.h`) — record flag: include the
+/// replication origin in the record.
+pub const XLOG_INCLUDE_ORIGIN: uint8 = 0x01;
+
+/// The header facts of the record most recently decoded by `XLogReadAhead`
+/// (access/xlogreader.c), copied out for the WAL prefetcher: in C the
+/// prefetcher holds the `DecodedXLogRecord *` itself; the record lives in the
+/// reader's decode queue, so the cross-cycle seam hands back these `Copy`
+/// projections of it (`lsn`, `header.xl_rmid`, `header.xl_info`,
+/// `max_block_id`) and the block references are re-read through the reader.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadAheadRecordInfo {
+    /// `record->lsn` — the record's start LSN.
+    pub lsn: XLogRecPtr,
+    /// `record->header.xl_rmid`.
+    pub xl_rmid: RmgrId,
+    /// `record->header.xl_info`.
+    pub xl_info: uint8,
+    /// `record->max_block_id` — highest block_id in use (-1 if none).
+    pub max_block_id: i32,
+}
+
+/// The outcome of `XLogNextRecord(reader, &errmsg)` (access/xlogreader.c):
+/// the C function returns the next `DecodedXLogRecord *` off the decode queue
+/// (becoming `reader->record`, readable there), or NULL with `*errmsg`
+/// pointing into the reader's `errormsg_buf`.
+#[derive(Debug)]
+pub enum XLogNextRecordResult<'a> {
+    /// A record was returned; `lsn` is `record->lsn` (the record itself is
+    /// the reader's current record).
+    Record {
+        /// `record->lsn`.
+        lsn: XLogRecPtr,
+    },
+    /// NULL — no record ready; `errmsg` is the deferred error text, if any.
+    NoRecord {
+        /// `*errmsg` (borrowed from the reader's `errormsg_buf`).
+        errmsg: Option<&'a str>,
+    },
+}

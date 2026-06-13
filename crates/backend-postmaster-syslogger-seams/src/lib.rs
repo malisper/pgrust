@@ -9,3 +9,9 @@ seam_core::seam!(
     /// `write_stderr`, never `ereport`).
     pub fn write_syslogger_file(data: &[u8], dest: i32)
 );
+
+seam_core::seam!(
+    /// `SysLoggerMain(startup_data, startup_data_len)` (`src/backend/postmaster/syslogger.c`): child entry
+    /// point invoked by `postmaster_child_launch`; never returns.
+    pub fn sys_logger_main(startup_data: &types_startup::StartupData) -> !
+);

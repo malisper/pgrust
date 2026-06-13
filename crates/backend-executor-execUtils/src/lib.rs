@@ -123,6 +123,9 @@ pub fn init_seams() {
     backend_executor_execUtils_seams::exec_create_scan_slot_from_outer_plan::set(
         ExecCreateScanSlotFromOuterPlan,
     );
+    backend_executor_execUtils_seams::exec_assign_expr_context::set(ExecAssignExprContext);
+    backend_executor_execUtils_seams::create_expr_context::set(CreateExprContext);
+    backend_executor_execUtils_seams::exec_assign_projection_info::set(ExecAssignProjectionInfo);
 }
 
 // ===========================================================================
@@ -903,7 +906,7 @@ pub fn executor_errposition(estate: Option<&EStateData<'_>>, location: i32) -> P
         return Ok(0);
     };
     // Convert offset to character number
-    let pos = mbutils_seams::pg_mbstrlen_with_len::call(source_text.as_str(), location) + 1;
+    let pos = mbutils_seams::pg_mbstrlen_with_len::call(source_text.as_bytes(), location) + 1;
     // And pass it to the ereport mechanism
     backend_utils_error::errposition(pos)?;
     Ok(0)

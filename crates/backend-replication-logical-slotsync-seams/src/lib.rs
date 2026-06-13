@@ -1,9 +1,9 @@
 //! Seam declarations for the `backend-replication-logical-slotsync` unit
 //! (`replication/logical/slotsync.c`) — slotsync's external surface, called
-//! across dependency cycles by its (not-yet-ported) cycle partners:
-//! xlogrecovery.c (`ShutDownSlotSync`), the postmaster (`ValidateSlotSyncParams`,
+//! across dependency cycles by its cycle partners: xlogrecovery.c
+//! (`ShutDownSlotSync`), the postmaster (`ValidateSlotSyncParams`,
 //! `SlotSyncWorkerCanRestart`, `ReplSlotSyncWorkerMain`, `SlotSyncShmem*`),
-//! walsender/logical.c (`IsSyncingReplicationSlots`), and slotfuncs.c
+//! walsender/logical.c/slot.c (`IsSyncingReplicationSlots`), and slotfuncs.c
 //! (`SyncReplicationSlots`, `CheckAndGetDbnameFromConninfo`).
 //!
 //! The slotsync crate installs every one of these from its `init_seams()`.
@@ -12,7 +12,7 @@
 
 use types_core::primitive::Size;
 use types_error::PgResult;
-use types_replication::WrConnHandle;
+use types_walreceiver::WalReceiverConn;
 
 seam_core::seam!(
     /// `ShutDownSlotSync()` — stop the slot-sync worker / SQL sync during
@@ -34,15 +34,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `IsSyncingReplicationSlots()` — is the current process performing slot
-    /// synchronization? Infallible.
+    /// `bool IsSyncingReplicationSlots(void)` (slotsync.c) — is the current
+    /// process performing slot synchronization? Infallible.
     pub fn is_syncing_replication_slots() -> bool
 );
 
 seam_core::seam!(
     /// `SyncReplicationSlots(wrconn)` — synchronize failover slots over the
     /// given primary connection (the SQL `pg_sync_replication_slots()` path).
-    pub fn sync_replication_slots(wrconn: WrConnHandle) -> PgResult<()>
+    pub fn sync_replication_slots(wrconn: WalReceiverConn) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -52,9 +52,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ReplSlotSyncWorkerMain(startup_data, startup_data_len)` — the slot-sync
-    /// worker entry point. `startup_data_len` must be 0.
-    pub fn repl_slot_sync_worker_main(startup_data_len: usize) -> PgResult<()>
+    /// `ReplSlotSyncWorkerMain(startup_data, startup_data_len)` (slotsync.c):
+    /// child entry point invoked by `postmaster_child_launch`; never returns.
+    pub fn repl_slot_sync_worker_main(startup_data: &types_startup::StartupData) -> !
 );
 
 seam_core::seam!(

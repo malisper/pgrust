@@ -30,7 +30,7 @@ seam_core::seam!(
     pub fn toast_open_indexes<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         toastrel: types_core::Oid,
-        lock: types_storage::storage::LOCKMODE,
+        lock: types_storage::lock::LOCKMODE,
     ) -> types_error::PgResult<(mcx::PgVec<'mcx, types_core::Oid>, i32)>
 );
 
@@ -41,8 +41,23 @@ seam_core::seam!(
     /// `pfree(toastidxs)`). `Err` carries the relation-close error surface.
     pub fn toast_close_indexes(
         toastidxs: &[types_core::Oid],
-        lock: types_storage::storage::LOCKMODE,
+        lock: types_storage::lock::LOCKMODE,
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `toast_compress_datum(value, cmethod)` (toast_internals.c): try to
+    /// compress the varlena `value` (its verbatim on-disk bytes, header
+    /// included) with the given compression method (`InvalidCompressionMethod`
+    /// == -1 means use the type default). Returns `Some(compressed bytes in
+    /// mcx)` on a worthwhile compression, or `None` (C's
+    /// `PointerGetDatum(NULL)`) when compression did not shrink the value
+    /// enough. `Err` carries OOM and the unsupported-method `elog(ERROR)`.
+    pub fn toast_compress_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        value: &[u8],
+        cmethod: i8,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
 );
 
 seam_core::seam!(

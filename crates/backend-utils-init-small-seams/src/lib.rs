@@ -79,10 +79,6 @@ seam_core::seam!(
     pub fn resume_interrupts()
 );
 
-// `MyDatabaseId` / `MyDatabaseTableSpace` deliberately have no getter seams:
-// per the no-ambient-global-seams rule, consumers take the value as an
-// explicit parameter and read it off this unit's state when it lands.
-
 seam_core::seam!(
     /// Write `MyBackendType` (globals.c, declared in miscadmin.h): processes
     /// assign their own type at startup (e.g. `MyBackendType = B_LOGGER` in
@@ -101,4 +97,84 @@ seam_core::seam!(
     /// `NBuffers` (globals.c): the `shared_buffers` GUC — number of shared
     /// buffers. Pure read of backend-local state.
     pub fn nbuffers() -> i32
+);
+
+seam_core::seam!(
+    /// `MyDatabaseId` (globals.c).
+    pub fn my_database_id() -> types_core::Oid
+);
+
+seam_core::seam!(
+    /// `MyDatabaseTableSpace` (globals.c).
+    pub fn my_database_table_space() -> types_core::Oid
+);
+
+seam_core::seam!(
+    /// `DatabasePath` (globals.c): the path to the current database's data
+    /// directory, set up at backend startup. Returns an owned copy of the
+    /// backend-global string (the caller uses it transiently). `Err` carries
+    /// the OOM surface of copying the global.
+    pub fn database_path() -> types_error::PgResult<String>
+);
+
+seam_core::seam!(
+    /// Read `IsPostmasterEnvironment` (`globals.c`).
+    pub fn is_postmaster_environment() -> bool
+);
+
+seam_core::seam!(
+    /// `MyPMChildSlot = child_slot` (`globals.c`): record the `PMChildFlags`
+    /// array index reserved for this child process.
+    pub fn set_my_pm_child_slot(child_slot: i32)
+);
+
+seam_core::seam!(
+    /// `MyClientSocket = palloc(...); memcpy(...)` (`globals.c` global): store
+    /// this child's inherited client socket.
+    pub fn set_my_client_socket(client_sock: types_net::ClientSocket)
+);
+
+seam_core::seam!(
+    /// `*MyClientSocket` (`globals.c` global): the inherited accepted client
+    /// socket, copied out. `None` when `MyClientSocket == NULL`. Pure read of
+    /// process-identity state.
+    pub fn my_client_socket() -> Option<types_net::ClientSocket>
+);
+
+seam_core::seam!(
+    /// `START_CRIT_SECTION()` — increment `CritSectionCount` (globals.c);
+    /// while non-zero any ERROR escalates to PANIC.
+    pub fn start_critical_section()
+);
+
+seam_core::seam!(
+    /// `END_CRIT_SECTION()` — decrement `CritSectionCount`.
+    pub fn end_critical_section()
+);
+
+seam_core::seam!(
+    /// Read `ExitOnAnyError` (globals.c).
+    pub fn exit_on_any_error() -> bool
+);
+
+seam_core::seam!(
+    /// Write `ExitOnAnyError` (BeginInternalSubTransaction forces FATAL exit
+    /// on error around its body).
+    pub fn set_exit_on_any_error(value: bool)
+);
+
+seam_core::seam!(
+    /// `MyBackendType` (globals.c, declared in miscadmin.h) — this process's
+    /// identity, assigned once at startup (the `AmStartupProcess()` /
+    /// `AmWalReceiverProcess()` macros are `MyBackendType == B_*` tests).
+    /// Process-identity read, same class as `my_proc_pid`.
+    pub fn my_backend_type() -> types_core::init::BackendType
+);
+
+seam_core::seam!(
+    /// `IsBinaryUpgrade` (globals.c / miscadmin.h): true during a
+    /// `pg_upgrade`-driven binary upgrade. The launcher refuses to register the
+    /// logical-replication launcher in this mode. Pure read of backend-local
+    /// state.
+    pub fn is_binary_upgrade() -> bool
 );

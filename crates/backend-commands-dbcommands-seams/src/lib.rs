@@ -7,6 +7,10 @@
 
 #![allow(non_snake_case)]
 
+use mcx::{Mcx, PgString};
+use types_core::Oid;
+use types_error::PgResult;
+
 seam_core::seam!(
     /// `dbase_redo(record)` (dbcommands.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
@@ -14,8 +18,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `get_database_oid(dbname, missing_ok)` (dbcommands.c) — look up a
-    /// database's OID by name. Returns `InvalidOid` when `missing_ok` and the
-    /// database does not exist; `ereport(ERROR)`s otherwise (carried on `Err`).
-    pub fn get_database_oid(dbname: &str, missing_ok: bool) -> types_error::PgResult<types_core::primitive::Oid>
+    /// `get_database_name(dbid)` (dbcommands.c): the database's name copied
+    /// out of the syscache into `mcx` (C: `pstrdup` in the current context),
+    /// or `None` if there is no such database. `Err` includes OOM from the
+    /// copy.
+    pub fn get_database_name<'mcx>(mcx: Mcx<'mcx>, dbid: Oid) -> PgResult<Option<PgString<'mcx>>>
 );
