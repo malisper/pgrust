@@ -37,3 +37,17 @@ seam_core::seam!(
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn advance_next_full_xid_past_xid(xid: TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `VarsupShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn varsup_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `VarsupShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn varsup_shmem_init() -> types_error::PgResult<()>
+);

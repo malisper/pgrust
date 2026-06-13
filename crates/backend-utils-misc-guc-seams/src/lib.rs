@@ -127,3 +127,16 @@ seam_core::seam!(
     /// `""` when unset. Backend-local GUC state.
     pub fn cluster_name() -> String
 );
+
+seam_core::seam!(
+    /// `GetConfigOption(name, missing_ok, restrict_privileged)` (guc.c) — read
+    /// the current string value of a GUC. ipci.c
+    /// `CreateSharedMemoryAndSemaphores` asserts `huge_pages_status !=
+    /// "unknown"`. `None` is the C `NULL`/missing return. Owner unported;
+    /// scaffolded slot.
+    pub fn get_config_option(
+        name: String,
+        missing_ok: bool,
+        restrict_privileged: bool,
+    ) -> Option<String>
+);

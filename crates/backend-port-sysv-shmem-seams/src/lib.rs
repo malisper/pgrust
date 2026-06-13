@@ -25,3 +25,14 @@ seam_core::seam!(
     /// return `(0, 0)`).
     pub fn get_huge_page_size() -> (usize, i32)
 );
+
+seam_core::seam!(
+    /// `PGSharedMemoryCreate(Size size, PGShmemHeader **shim)` (sysv_shmem.c) —
+    /// create the main shared-memory segment. Returns the segment header
+    /// `seghdr` and sets `*shim`. Both are genuinely shared memory (raw
+    /// pointers, opacity inherited). `Err` carries the `ereport(FATAL)` on
+    /// failure. Owner unported; scaffolded slot.
+    pub fn pg_shared_memory_create(
+        size: types_core::Size,
+    ) -> types_error::PgResult<(*mut types_storage::PGShmemHeader, *mut types_storage::PGShmemHeader)>
+);

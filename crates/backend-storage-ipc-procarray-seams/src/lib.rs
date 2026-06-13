@@ -280,3 +280,17 @@ seam_core::seam!(
     /// the horizon to catalog tables. Called with `ProcArrayLock` held.
     pub fn get_oldest_safe_decoding_transaction_id(catalog_only: bool) -> TransactionId
 );
+
+seam_core::seam!(
+    /// `ProcArrayShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
+    /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
+    /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn proc_array_shmem_size() -> types_error::PgResult<types_core::Size>
+);
+
+seam_core::seam!(
+    /// `ProcArrayShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
+    /// this subsystem's shared-memory structures. `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
+    pub fn proc_array_shmem_init() -> types_error::PgResult<()>
+);
