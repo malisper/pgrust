@@ -32,6 +32,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecGetResultSlotOps(planstate, &isfixed)` (execUtils.c): the slot-ops
+    /// class of the node's result slot, returning BOTH the ops token and the
+    /// `isfixed` out-flag the C writes through the pointer. Unlike the
+    /// `exec_get_result_slot_ops` declaration in `execTuples-seams` (which only
+    /// returns the ops and is the `resultopsset && resultops` fast path), this
+    /// mirrors the full C function — including the `ps_ResultTupleSlot`
+    /// `TTS_FIXED` fallback for the `!resultopsset` case — so it needs `estate`
+    /// to resolve the result slot. Used by nodeLimit, which copies the child's
+    /// `resultops`/`resultopsfixed` onto its own `ps`.
+    pub fn exec_get_result_slot_ops_isfixed<'mcx>(
+        planstate: &types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &types_nodes::EStateData<'mcx>,
+    ) -> (types_nodes::TupleSlotKind, bool)
+);
+
+seam_core::seam!(
     /// `CreateExprContext(estate)` (execUtils.c): create a fresh standalone
     /// `ExprContext` in the EState's pool, returning its id. Allocates in the
     /// per-query context (plus a child per-tuple context), so fallible on OOM.
