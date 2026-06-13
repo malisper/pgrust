@@ -2872,6 +2872,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeForeignscan"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execMain-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeForeignscan-seams",
+ "backend-foreign-foreign-seams",
+ "backend-nodes-core-seams",
+ "backend-storage-ipc-shm-toc-seams",
+ "backend-tcop-postgres-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-nodeForeignscan-seams"
 version = "0.0.0"
 dependencies = [
@@ -3332,6 +3355,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-foreigncmds",
+ "types-nodes",
 ]
 
 [[package]]
@@ -4813,6 +4837,15 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+]
+
+[[package]]
+name = "backend-storage-ipc-shm-toc-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -7142,6 +7175,7 @@ dependencies = [
  "backend-executor-execPartition",
  "backend-executor-execUtils",
  "backend-executor-instrument",
+ "backend-executor-nodeForeignscan",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeSeqscan",

@@ -38,6 +38,7 @@ pub const T_TableFuncScan: NodeTag = NodeTag(350);
 pub const T_CteScan: NodeTag = NodeTag(351);
 pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 pub const T_WorkTableScan: NodeTag = NodeTag(353);
+pub const T_ForeignScan: NodeTag = NodeTag(354);
 pub const T_TidRangeScan: NodeTag = NodeTag(346);
 pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
@@ -135,6 +136,8 @@ pub enum Node<'mcx> {
     TidRangeScan(crate::nodetidrangescan::TidRangeScan<'mcx>),
     /// `T_SeqScan`.
     SeqScan(crate::nodeseqscan::SeqScan<'mcx>),
+    /// `T_ForeignScan`.
+    ForeignScan(crate::nodeforeigncustom::ForeignScan<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -154,6 +157,7 @@ impl<'mcx> Node<'mcx> {
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
             Node::TidRangeScan(_) => T_TidRangeScan,
             Node::SeqScan(_) => T_SeqScan,
+            Node::ForeignScan(_) => T_ForeignScan,
         }
     }
 
@@ -173,6 +177,7 @@ impl<'mcx> Node<'mcx> {
             Node::Hash(h) => &h.plan,
             Node::TidRangeScan(t) => &t.scan.plan,
             Node::SeqScan(s) => &s.scan.plan,
+            Node::ForeignScan(f) => &f.scan.plan,
         }
     }
 
@@ -198,6 +203,7 @@ impl<'mcx> Node<'mcx> {
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
             Node::TidRangeScan(t) => Ok(Node::TidRangeScan(t.clone_in(mcx)?)),
             Node::SeqScan(s) => Ok(Node::SeqScan(s.clone_in(mcx)?)),
+            Node::ForeignScan(f) => Ok(Node::ForeignScan(f.clone_in(mcx)?)),
         }
     }
 }

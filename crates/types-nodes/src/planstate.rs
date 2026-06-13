@@ -46,6 +46,8 @@ pub enum PlanStateNode<'mcx> {
     HashJoin(PgBox<'mcx, HashJoinState<'mcx>>),
     /// `T_SeqScanState`.
     SeqScan(PgBox<'mcx, crate::nodeseqscan::SeqScanState<'mcx>>),
+    /// `T_ForeignScanState`.
+    ForeignScan(PgBox<'mcx, crate::nodeforeigncustom::ForeignScanState<'mcx>>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
@@ -63,6 +65,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(_) => T_NestLoopState,
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
+            PlanStateNode::ForeignScan(_) => crate::nodes::T_ForeignScanState,
         }
     }
 
@@ -81,6 +84,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(m) => &m.js.ps,
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
+            PlanStateNode::ForeignScan(f) => &f.ss.ps,
         }
     }
 
@@ -98,6 +102,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::NestLoop(m) => &mut m.js.ps,
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
+            PlanStateNode::ForeignScan(f) => &mut f.ss.ps,
         }
     }
 
@@ -110,6 +115,8 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             // `SeqScanState` begins with a `ScanState`.
             PlanStateNode::SeqScan(s) => Some(&s.ss),
+            // `ForeignScanState` begins with a `ScanState`.
+            PlanStateNode::ForeignScan(f) => Some(&f.ss),
             // The remaining variants are join / non-relation-scan nodes (the C
             // `search_plan_tree` `default:` / join cases). Relation-scan
             // variants add their own arm here as their executor units land.
