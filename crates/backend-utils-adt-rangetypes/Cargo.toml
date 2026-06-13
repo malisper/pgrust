@@ -17,4 +17,7 @@ types-datum = { path = "../types-datum" }
 types-fmgr = { path = "../types-fmgr" }
 types-cache = { path = "../types-cache" }
 types-rangetypes = { path = "../types-rangetypes" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 backend-utils-adt-rangetypes-seams = { path = "../backend-utils-adt-rangetypes-seams" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
