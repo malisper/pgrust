@@ -32,6 +32,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DatumGetCString(OidFunctionCall1(typmodout, Int32GetDatum(typmod)))`
+    /// (the `printTypmod` invocation shape in format_type.c): call a type's
+    /// `typmodout` proc on a single `int4` typmod and return the resulting
+    /// cstring, copied into `mcx`. `Err` carries the strict-null
+    /// `elog(ERROR, "function %u returned NULL")` and whatever the proc raises.
+    pub fn typmod_out<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        typmodout: Oid,
+        typmod: i32,
+    ) -> PgResult<mcx::PgString<'mcx>>
+);
+
+seam_core::seam!(
     /// `fmgr_info(functionId, &finfo)` (fmgr.c), lookup half only: resolve
     /// the function and fail exactly where C would (`elog(ERROR, "cache
     /// lookup failed for function %u")`, unsupported language, etc.). The
