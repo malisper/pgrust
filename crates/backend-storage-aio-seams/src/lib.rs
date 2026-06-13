@@ -14,6 +14,14 @@ seam_core::seam!(
     pub fn pgaio_error_cleanup()
 );
 
+seam_core::seam!(
+    /// `pgaio_closing_fd(fd)` (`storage/aio/aio.c`) — called just before a
+    /// kernel file descriptor is closed so the AIO subsystem can wait out any
+    /// in-flight IOs that still reference it. `fd` is the raw kernel
+    /// descriptor about to be closed.
+    pub fn pgaio_closing_fd(fd: i32)
+);
+
 // === read_stream (read_stream.c) ===========================================
 
 /// Opaque token standing in for C's `ReadStream *` while the read-stream
