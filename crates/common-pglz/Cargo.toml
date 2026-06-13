@@ -11,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
+common-pglz-seams = { path = "../common-pglz-seams" }

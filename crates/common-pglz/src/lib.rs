@@ -577,6 +577,30 @@ fn hist_idx(input: &[u8], pos: usize, mask: usize) -> usize {
     (value as usize) & mask
 }
 
+/// Seam adapter for `common_pglz_seams::pglz_decompress_to_slice`.
+///
+/// The seam contract returns `PgResult<Option<usize>>`, where `None` is C's
+/// `-1` (corrupt input) — the caller then raises its own `ereport`. This is a
+/// pure, allocation-free byte transform, so the `PgResult` here is always
+/// `Ok`; we marshal the in-crate `Result<usize, PglzError>` into it.
+fn seam_pglz_decompress_to_slice(
+    source: &[u8],
+    dest: &mut [u8],
+    check_complete: bool,
+) -> PgResult<Option<usize>> {
+    match pglz_decompress_to_slice(source, dest, check_complete) {
+        Ok(len) => Ok(Some(len)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Install this crate's seams. Contains only `set()` calls; `init_all()` in
+/// `seams-init` invokes it at startup.
+pub fn init_seams() {
+    common_pglz_seams::pglz_decompress_to_slice::set(seam_pglz_decompress_to_slice);
+    common_pglz_seams::pglz_maximum_compressed_size::set(pglz_maximum_compressed_size);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

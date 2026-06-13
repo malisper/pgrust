@@ -8296,6 +8296,7 @@ dependencies = [
 name = "common-pglz"
 version = "0.0.0"
 dependencies = [
+ "common-pglz-seams",
  "mcx",
  "types-error",
 ]
@@ -8595,6 +8596,7 @@ dependencies = [
  "backend-utils-misc-sampling",
  "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
+ "common-pglz",
  "interfaces-libpq-legacy-pqsignal",
 ]
 
