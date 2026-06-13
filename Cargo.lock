@@ -2277,6 +2277,7 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -3115,6 +3116,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-fmgr-dfmgr"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-file-fd-seams",
+ "backend-utils-init-small",
+ "common-path-seams",
+ "mcx",
+ "port-dynloader-seams",
+ "seam-core",
+ "types-core",
+ "types-dfmgr",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-fmgr-fmgr-seams"
 version = "0.0.0"
 dependencies = [
@@ -3405,6 +3421,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-path-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+]
+
+[[package]]
 name = "contrib-earthdistance"
 version = "0.0.0"
 dependencies = [
@@ -3462,6 +3485,15 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "port-dynloader-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-dfmgr",
  "types-error",
 ]
 
@@ -3581,6 +3613,7 @@ dependencies = [
  "backend-utils-cache-syscache",
  "backend-utils-cache-ts-cache",
  "backend-utils-error",
+ "backend-utils-fmgr-dfmgr",
  "backend-utils-init-small",
  "backend-utils-mb-wstrcmp",
  "backend-utils-mb-wstrncmp",
@@ -3677,6 +3710,14 @@ dependencies = [
 [[package]]
 name = "types-dest"
 version = "0.0.0"
+
+[[package]]
+name = "types-dfmgr"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "types-core",
+]
 
 [[package]]
 name = "types-error"

@@ -7,6 +7,13 @@
 use types_core::SubTransactionId;
 
 seam_core::seam!(
+    /// `pg_file_exists(name)` (`storage/file/fd.c`) — true if the path exists
+    /// and is not a directory. May `ereport(ERROR)` for an access error other
+    /// than `ENOENT`/`ENOTDIR`/`EACCES`, surfaced as `Err`.
+    pub fn pg_file_exists(name: &str) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `MakePGDirectory(directoryName)` (`storage/file/fd.c`) —
     /// `mkdir(directoryName, pg_dir_create_mode)`. Returns the `mkdir`
     /// result (`0` on success, `-1` with errno set on failure); infallible
