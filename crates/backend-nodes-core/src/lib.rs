@@ -51,12 +51,16 @@ pub mod value_core;
 /// (`make_const_node`, `make_and_boolexpr`, `make_type_name_from_name_list`)
 /// are installed here too.
 ///
-/// `tbm_add_tuple` (in the same seams crate) and every seam in
-/// `backend-nodes-core-tidbitmap-seams` / `-params-seams` / `-read-seams` /
-/// `-nodeFuncs-seams` stay UNINSTALLED (they panic on call) until their
+/// The **tidbitmap** family is also filled: `tbm_add_tuple` (in the same seams
+/// crate) and the `backend-nodes-core-tidbitmap-seams` surface are installed via
+/// [`tidbitmap::init_seams`]. Every seam in `-params-seams` / `-read-seams` /
+/// `-nodeFuncs-seams` stays UNINSTALLED (they panic on call) until their
 /// families are filled — `mirror-pg-and-panic`.
 pub fn init_seams() {
     use backend_nodes_core_seams as seams;
+
+    // tidbitmap family: tbm_add_tuple + the tidbitmap-seams surface.
+    tidbitmap::init_seams();
 
     seams::bms_is_member::set(bitmapset::bms_is_member);
     seams::bms_add_member::set(bitmapset::bms_add_member);

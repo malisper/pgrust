@@ -4223,17 +4223,18 @@ dependencies = [
 name = "backend-nodes-core"
 version = "0.0.0"
 dependencies = [
- "backend-access-common-detoast-seams",
  "backend-nodes-core-seams",
- "backend-nodes-makefuncs-seams",
+ "backend-nodes-core-tidbitmap-seams",
  "common-hashfn",
  "mcx",
  "seam-core",
  "types-core",
  "types-datum",
  "types-error",
+ "types-execparallel",
  "types-nodes",
- "types-parsenodes",
+ "types-storage",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
