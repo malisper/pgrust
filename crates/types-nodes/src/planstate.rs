@@ -45,6 +45,8 @@ pub enum PlanStateNode<'mcx> {
     Memoize(PgBox<'mcx, crate::nodememoize::MemoizeScanState<'mcx>>),
     /// `T_IndexOnlyScanState`.
     IndexOnlyScan(PgBox<'mcx, crate::nodeindexonlyscan::IndexOnlyScanState<'mcx>>),
+    /// `T_BitmapIndexScanState`.
+    BitmapIndexScan(PgBox<'mcx, crate::nodebitmapindexscan::BitmapIndexScanState<'mcx>>),
     /// `T_LimitState`.
     Limit(PgBox<'mcx, crate::nodelimit::LimitStateData<'mcx>>),
     /// `T_SortState`.
@@ -75,6 +77,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SetOp(_) => T_SetOpState,
             PlanStateNode::Memoize(_) => T_MemoizeState,
             PlanStateNode::IndexOnlyScan(_) => T_IndexOnlyScanState,
+            PlanStateNode::BitmapIndexScan(_) => crate::execstate_tags::T_BitmapIndexScanState,
             PlanStateNode::Limit(_) => T_LimitState,
             PlanStateNode::Sort(_) => T_SortState,
             PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
@@ -98,6 +101,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SetOp(s) => &s.ps,
             PlanStateNode::Memoize(m) => &m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &m.ss.ps,
+            PlanStateNode::BitmapIndexScan(m) => &m.ss.ps,
             PlanStateNode::Limit(m) => &m.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &t.ss.ps,
@@ -120,6 +124,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SetOp(s) => &mut s.ps,
             PlanStateNode::Memoize(m) => &mut m.ss.ps,
             PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
+            PlanStateNode::BitmapIndexScan(m) => &mut m.ss.ps,
             PlanStateNode::Limit(m) => &mut m.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
@@ -142,6 +147,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `ForeignScanState` begins with a `ScanState`.
             PlanStateNode::ForeignScan(f) => Some(&f.ss),
+            // `BitmapIndexScanState` begins with a `ScanState`.
+            PlanStateNode::BitmapIndexScan(b) => Some(&b.ss),
             // The remaining variants are join / non-relation-scan nodes (the C
             // `search_plan_tree` `default:` / join cases). Relation-scan
             // variants add their own arm here as their executor units land.

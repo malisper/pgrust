@@ -1870,8 +1870,20 @@ pub fn tbm_iterate(
 
 /// Install this family's inward seams. Called from
 /// [`crate::init_seams`] once the family is filled.
+/// Seam bridge for `tbm_create` — the real constructor is infallible here (it
+/// registers the inner bitmap in the backend-local registry), so the fallible
+/// seam signature always succeeds.
+fn provide_tbm_create(
+    maxbytes: usize,
+    dsa: Option<DsaAreaHandle>,
+) -> PgResult<types_tidbitmap::TIDBitmap> {
+    Ok(tbm_create(maxbytes, dsa))
+}
+
 pub fn init_seams() {
     backend_nodes_core_seams::tbm_add_tuple::set(provide_tbm_add_tuple);
+
+    backend_nodes_core_tidbitmap_seams::tbm_create::set(provide_tbm_create);
 
     backend_nodes_core_tidbitmap_seams::tbm_prepare_shared_iterate::set(
         provide_tbm_prepare_shared_iterate,

@@ -13,6 +13,15 @@ use types_execparallel::DsaAreaHandle;
 use types_tidbitmap::{dsa_pointer, TBMIterator, TIDBitmap};
 
 seam_core::seam!(
+    /// `tbm_create(maxbytes, dsa)` (tidbitmap.c): create a new, initially-empty
+    /// bitmap that will use at most `maxbytes` of work memory. When `dsa` is
+    /// `Some` the bitmap is shared (created in the given DSA area, e.g. the
+    /// executor's `es_query_dsa`); `None` is a backend-private bitmap. Allocates,
+    /// so fallible on OOM.
+    pub fn tbm_create(maxbytes: usize, dsa: Option<DsaAreaHandle>) -> PgResult<TIDBitmap>
+);
+
+seam_core::seam!(
     /// `tbm_prepare_shared_iterate(tbm)` (tidbitmap.c): prepare the bitmap for
     /// shared iteration across parallel workers, returning the `dsa_pointer` of
     /// the shared iterator state. Allocates in the DSA, so fallible on OOM.

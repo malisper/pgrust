@@ -585,6 +585,7 @@ dependencies = [
  "types-scan",
  "types-snapshot",
  "types-storage",
+ "types-tidbitmap",
  "types-tuple",
 ]
 
@@ -3651,6 +3652,31 @@ dependencies = [
  "seam-core",
  "types-error",
  "types-execparallel",
+]
+
+[[package]]
+name = "backend-executor-nodeBitmapIndexscan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-index-indexam-seams",
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-instrument-seams",
+ "backend-executor-nodeBitmapIndexscan-seams",
+ "backend-executor-nodeIndexscan-seams",
+ "backend-nodes-core-tidbitmap-seams",
+ "backend-storage-ipc-shm_toc-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
+ "types-tidbitmap",
 ]
 
 [[package]]
@@ -9871,6 +9897,7 @@ dependencies = [
  "backend-executor-nodeAgg",
  "backend-executor-nodeAppend",
  "backend-executor-nodeBitmapHeapscan",
+ "backend-executor-nodeBitmapIndexscan",
  "backend-executor-nodeForeignscan",
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
@@ -10368,6 +10395,7 @@ dependencies = [
  "types-snapshot",
  "types-sortsupport",
  "types-storage",
+ "types-tidbitmap",
  "types-tuple",
 ]
 

@@ -27,6 +27,7 @@ pub mod list;
 pub mod modifytable;
 pub mod nodeagg;
 pub mod nodeappend;
+pub mod nodebitmapindexscan;
 pub mod nodeforeigncustom;
 pub mod nodehash;
 pub mod nodehashjoin;
