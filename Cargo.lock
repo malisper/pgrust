@@ -3999,6 +3999,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-datum",
+ "types-deadlock",
  "types-error",
  "types-storage",
  "types-stringinfo",

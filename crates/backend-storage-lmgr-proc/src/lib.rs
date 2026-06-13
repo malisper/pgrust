@@ -1,10 +1,9 @@
 //! Per-process shared-memory slot management (`storage/lmgr/proc.c`).
 //!
-//! SCAFFOLD STAGE. This crate owns the `PGPROC` array and the cluster-wide
-//! `ProcGlobal` (`PROC_HDR`) header, the proc freelists, the lock wait queue,
-//! and the deadlock-check / lock-error-cleanup bracket around a `ProcSleep`.
-//! proc.c is large, so it is split into family modules that mirror the C file
-//! one-to-one:
+//! This crate owns the `PGPROC` array and the cluster-wide `ProcGlobal`
+//! (`PROC_HDR`) header, the proc freelists, the lock wait queue, and the
+//! deadlock-check / lock-error-cleanup bracket around a `ProcSleep`. proc.c is
+//! large, so it is split into family modules that mirror the C file one-to-one:
 //!
 //! - [`proc_shmem`]     — shmem sizing + `InitProcGlobal` (the one-time setup
 //!   of the `PGPROC` array, the dense `ProcGlobal` mirror arrays, and the four

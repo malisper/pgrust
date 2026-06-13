@@ -13,7 +13,7 @@ use types_core::{
 
 use crate::ilist::{dlist_head, dlist_node};
 use crate::latch::Latch;
-use crate::lock::{LOCK, LOCKMASK, LOCKMODE, PROCLOCK};
+use crate::lock::{LOCKMASK, LOCKMODE, LOCKTAG};
 
 /// `Buffer` (`storage/buf.h`) — a shared-buffer-pool index (or, when
 /// negative, a local-buffer index). Zero is `InvalidBuffer`.
@@ -729,7 +729,11 @@ pub struct PGPROC {
     /// `dlist_node links` — list link if process is in a list.
     pub links: dlist_node,
     /// `dlist_head *procgloballist` — procglobal list that owns this PGPROC.
-    pub procgloballist: Option<Box<dlist_head>>,
+    /// In C this is a pointer to one of `ProcGlobal`'s four freelist heads;
+    /// modeled here as the [`FreeListId`] naming that head (no invented
+    /// pointer). `None` for slots that belong to no freelist (auxiliary and
+    /// prepared-xact dummy PGPROCs).
+    pub procgloballist: Option<FreeListId>,
 
     /// `PGSemaphore sem` — ONE semaphore to sleep on (`PGSemaphore` =
     /// `PGSemaphoreData *` in C).
@@ -780,10 +784,15 @@ pub struct PGPROC {
     pub cvWaitLink: proclist_node,
 
     /// `LOCK *waitLock` — Lock object we're sleeping on (NULL if not waiting).
-    pub waitLock: Option<Box<LOCK>>,
-    /// `PROCLOCK *waitProcLock` — Per-holder info for awaited lock (NULL if
-    /// not waiting).
-    pub waitProcLock: Option<Box<PROCLOCK>>,
+    /// The `LOCK` itself is lock.c-owned shmem; proc.c's wait-queue machinery
+    /// only ever needs the lock's identity, so it is modeled by its [`LOCKTAG`]
+    /// (no invented `LOCK` box). `None` when not waiting.
+    pub waitLock: Option<LOCKTAG>,
+    /// `PROCLOCK *waitProcLock` — Per-holder info for awaited lock (NULL if not
+    /// waiting). The `PROCLOCK` is lock.c-owned; proc.c needs only the holding
+    /// backend's identity, modeled by its [`ProcNumber`]. `None` when not
+    /// waiting.
+    pub waitProcLock: Option<ProcNumber>,
     /// `LOCKMODE waitLockMode` — type of lock we're waiting for.
     pub waitLockMode: LOCKMODE,
     /// `LOCKMASK heldLocks` — bitmask for lock types already held on this
@@ -859,12 +868,90 @@ pub struct PGPROC {
     /// lock.
     pub fpLocalTransactionId: LocalTransactionId,
 
-    /// `PGPROC *lockGroupLeader` — lock group leader, if I'm a member.
-    pub lockGroupLeader: Option<Box<PGPROC>>,
-    /// `dlist_head lockGroupMembers` — list of members, if I'm a leader.
-    pub lockGroupMembers: dlist_head,
-    /// `dlist_node lockGroupLink` — my member link, if I'm a member.
+    /// `PGPROC *lockGroupLeader` — lock group leader, if I'm a member. In C a
+    /// `PGPROC *` into the shared array; modeled here as the leader's
+    /// [`ProcNumber`] (no invented box), `None` when not in a group.
+    pub lockGroupLeader: Option<ProcNumber>,
+    /// `dlist_head lockGroupMembers` — list of members, if I'm a leader. The
+    /// intrusive `dlist` is realized over the arena as a [`ProcFreeList`] of
+    /// member `ProcNumber`s (threaded in C through each member's
+    /// `lockGroupLink`).
+    pub lockGroupMembers: ProcFreeList,
+    /// `dlist_node lockGroupLink` — my member link, if I'm a member. Kept for
+    /// C field-layout fidelity; membership itself lives in the leader's
+    /// `lockGroupMembers` list above.
     pub lockGroupLink: dlist_node,
+}
+
+/// Identifies which of the four `PROC_HDR` freelists owns (or should receive) a
+/// `PGPROC`. In C `PGPROC.procgloballist` is a `dlist_head *` that always points
+/// at exactly one of `ProcGlobal`'s four named freelist heads; this enum names
+/// that head directly (no invented pointer), so `InitProcess`/`ProcKill` can map
+/// it back to the head to pop/push.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FreeListId {
+    /// `&ProcGlobal->freeProcs`.
+    Regular,
+    /// `&ProcGlobal->autovacFreeProcs`.
+    Autovac,
+    /// `&ProcGlobal->bgworkerFreeProcs`.
+    Bgworker,
+    /// `&ProcGlobal->walsenderFreeProcs`.
+    Walsender,
+}
+
+/// An intrusive `dlist` of `PGPROC`s over the arena (`ProcGlobal->allProcs`) —
+/// the realization of a `dlist_head` whose members are `PGPROC`s. Used for the
+/// four `PROC_HDR` freelists (threaded through `proc->links`) and for a leader's
+/// `lockGroupMembers` (threaded through `proc->lockGroupLink`). In C these are
+/// intrusive `dlist`s; reached over an index-addressed arena, the membership is
+/// modeled as an ordered list of `ProcNumber`s (the same index-link realization
+/// the deadlock detector uses for its arena lists).
+/// `dlist_push_head`/`dlist_push_tail`/`dlist_pop_head_node`/`dlist_delete` map
+/// onto front/back insertion, front removal, and removal by value.
+#[derive(Clone, Debug, Default)]
+pub struct ProcFreeList {
+    /// Members in list order (front = list head, the slot `dlist_pop_head_node`
+    /// returns next).
+    pub members: alloc::collections::VecDeque<ProcNumber>,
+}
+
+impl ProcFreeList {
+    pub const fn new() -> Self {
+        Self {
+            members: alloc::collections::VecDeque::new(),
+        }
+    }
+
+    /// `dlist_push_tail(list, &proc->links)`.
+    pub fn push_tail(&mut self, procno: ProcNumber) {
+        self.members.push_back(procno);
+    }
+
+    /// `dlist_push_head(list, &proc->links)`.
+    pub fn push_head(&mut self, procno: ProcNumber) {
+        self.members.push_front(procno);
+    }
+
+    /// `dlist_container(PGPROC, links, dlist_pop_head_node(list))`, or `None`
+    /// when the list is empty (`dlist_is_empty`).
+    pub fn pop_head(&mut self) -> Option<ProcNumber> {
+        self.members.pop_front()
+    }
+
+    /// `dlist_is_empty(list)`.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// `dlist_delete(&proc->links)` — remove `procno` from this list (a no-op if
+    /// absent, matching a `dlist_delete` of a node already detached only insofar
+    /// as the membership set is concerned).
+    pub fn remove(&mut self, procno: ProcNumber) {
+        if let Some(pos) = self.members.iter().position(|&p| p == procno) {
+            self.members.remove(pos);
+        }
+    }
 }
 
 /// `PROC_HDR` (`storage/proc.h`): the single cluster-wide process-table
@@ -888,16 +975,16 @@ pub struct PROC_HDR {
     /// `uint32 allProcCount` — Length of `allProcs` array.
     pub allProcCount: uint32,
     /// `dlist_head freeProcs` — Head of list of free PGPROC structures.
-    pub freeProcs: dlist_head,
+    pub freeProcs: ProcFreeList,
     /// `dlist_head autovacFreeProcs` — Head of list of autovacuum & special
     /// worker free PGPROC structures.
-    pub autovacFreeProcs: dlist_head,
+    pub autovacFreeProcs: ProcFreeList,
     /// `dlist_head bgworkerFreeProcs` — Head of list of bgworker free PGPROC
     /// structures.
-    pub bgworkerFreeProcs: dlist_head,
+    pub bgworkerFreeProcs: ProcFreeList,
     /// `dlist_head walsenderFreeProcs` — Head of list of walsender free PGPROC
     /// structures.
-    pub walsenderFreeProcs: dlist_head,
+    pub walsenderFreeProcs: ProcFreeList,
     /// `pg_atomic_uint32 procArrayGroupFirst` — First pgproc waiting for group
     /// XID clear.
     pub procArrayGroupFirst: pg_atomic_uint32,
@@ -987,7 +1074,7 @@ impl PGPROC {
             fpVXIDLock: false,
             fpLocalTransactionId: 0,
             lockGroupLeader: None,
-            lockGroupMembers: dlist_head::new(),
+            lockGroupMembers: ProcFreeList::new(),
             lockGroupLink: dlist_node::new(),
         }
     }
@@ -1006,10 +1093,10 @@ impl PROC_HDR {
             subxidStates: Vec::new(),
             statusFlags: Vec::new(),
             allProcCount: 0,
-            freeProcs: dlist_head::new(),
-            autovacFreeProcs: dlist_head::new(),
-            bgworkerFreeProcs: dlist_head::new(),
-            walsenderFreeProcs: dlist_head::new(),
+            freeProcs: ProcFreeList::new(),
+            autovacFreeProcs: ProcFreeList::new(),
+            bgworkerFreeProcs: ProcFreeList::new(),
+            walsenderFreeProcs: ProcFreeList::new(),
             procArrayGroupFirst: pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32),
             clogGroupFirst: pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32),
             walwriterProc: INVALID_PROC_NUMBER,

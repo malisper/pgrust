@@ -32,191 +32,188 @@ use types_storage::lock::{DeadLockState, LOCKMODE, LOCKTAG};
 use types_storage::storage::PGPROC;
 
 /// Which of the four `ProcGlobal` freelists supplies / receives a `PGPROC`,
-/// matching the by-class partitioning `InitProcGlobal` builds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FreeList {
-    /// `&ProcGlobal->freeProcs`.
-    Regular,
-    /// `&ProcGlobal->autovacFreeProcs`.
-    Autovac,
-    /// `&ProcGlobal->bgworkerFreeProcs`.
-    Bgworker,
-    /// `&ProcGlobal->walsenderFreeProcs`.
-    Walsender,
-}
+/// matching the by-class partitioning `InitProcGlobal` builds. Re-exported from
+/// the owned `PROC_HDR` layout in `types-storage`.
+pub(crate) use types_storage::storage::FreeListId as FreeList;
 
 // ---- ProcGlobal / MyProc substrate (owned by proc_shmem) ----
+//
+// These are this unit's OWN state: the `PROC_HDR` (`ProcGlobal`) value built by
+// `InitProcGlobal` (held in `proc_shmem`'s `PROC_GLOBAL` thread-local) and the
+// per-backend `MyProc` / `MyProcNumber` / `MyProcPid`. Each accessor is a thin
+// read/write of that owned storage via `proc_shmem`.
 
 /// `ProcGlobal != NULL`.
 pub(crate) fn proc_global_is_set() -> bool {
-    todo!("proc_shmem: ProcGlobal != NULL")
+    crate::proc_shmem::proc_global_initialized()
 }
 
-/// `AuxiliaryProcs != NULL`.
+/// `AuxiliaryProcs != NULL`. `AuxiliaryProcs` is `&ProcGlobal->allProcs[
+/// MaxBackends]`, so it exists exactly when `ProcGlobal` is built.
 pub(crate) fn auxiliary_procs_is_set() -> bool {
-    todo!("proc_shmem: AuxiliaryProcs != NULL")
+    crate::proc_shmem::proc_global_initialized()
 }
 
 /// `MyProc != NULL`.
 pub(crate) fn my_proc_is_set() -> bool {
-    todo!("proc_shmem: MyProc != NULL")
+    crate::proc_shmem::my_proc_is_set()
 }
 
 /// `MyProc = GetPGProcByNumber(procno)`.
-pub(crate) fn set_my_proc(_procno: ProcNumber) {
-    todo!("proc_shmem: MyProc = GetPGProcByNumber(procno)")
+pub(crate) fn set_my_proc(procno: ProcNumber) {
+    crate::proc_shmem::set_my_proc_number(procno);
 }
 
 /// `MyProc = NULL`.
 pub(crate) fn clear_my_proc() {
-    todo!("proc_shmem: MyProc = NULL")
+    crate::proc_shmem::clear_my_proc();
 }
 
-/// `&*MyProc`.
-pub(crate) fn my_proc_ref() -> &'static PGPROC {
-    todo!("proc_shmem: &*MyProc")
-}
-
-/// `&mut *MyProc`.
-pub(crate) fn my_proc_mut() -> &'static mut PGPROC {
-    todo!("proc_shmem: &mut *MyProc")
+/// Run `f` with mutable access to `*MyProc` (`&mut *MyProc`). Replaces the
+/// former `my_proc_mut() -> &'static mut PGPROC`: the borrow is scoped to the
+/// closure, so no `&'static mut` escapes.
+pub(crate) fn with_my_proc<R>(f: impl FnOnce(&mut PGPROC) -> R) -> R {
+    crate::proc_shmem::with_my_proc(f)
 }
 
 /// `MyProcNumber` (proc.c backend-local global).
 pub(crate) fn my_proc_number() -> ProcNumber {
-    todo!("proc_shmem: MyProcNumber")
+    crate::proc_shmem::my_proc_number()
 }
 
 /// `MyProcNumber = procno` (`GetNumberFromPGProc(MyProc)`).
-pub(crate) fn set_my_proc_number(_procno: ProcNumber) {
-    todo!("proc_shmem: MyProcNumber = procno")
+pub(crate) fn set_my_proc_number(procno: ProcNumber) {
+    crate::proc_shmem::set_my_proc_number(procno);
 }
 
-/// `MyProcPid` (proc.c backend-local global).
+/// `MyProcPid` — the backend's PID. Declared in `globals.c` (miscinit), not
+/// proc.c, so it is read through the init-small owner's seam (matching how
+/// `proc_waitqueue` reads it). Class-B panic-through until that owner lands.
 pub(crate) fn my_proc_pid() -> i32 {
-    todo!("proc_shmem: MyProcPid")
+    backend_utils_init_small_seams::my_proc_pid::call()
 }
 
 /// `GetPGProcByNumber(procno)->procgloballist` mapped to a [`FreeList`].
-pub(crate) fn proc_globallist_of(_procno: ProcNumber) -> FreeList {
-    todo!("proc_shmem: GetPGProcByNumber(procno)->procgloballist")
+pub(crate) fn proc_globallist_of(procno: ProcNumber) -> FreeList {
+    crate::proc_shmem::proc_globallist_of(procno)
 }
 
 /// `dlist_container(PGPROC, links, dlist_pop_head_node(<list>))` — pop the head
 /// of the chosen freelist, or `None` if it is empty. Caller holds
 /// `ProcStructLock`.
-pub(crate) fn freelist_pop_head(_list: FreeList) -> Option<ProcNumber> {
-    todo!("proc_shmem: dlist_pop_head_node(procgloballist)")
+pub(crate) fn freelist_pop_head(list: FreeList) -> Option<ProcNumber> {
+    crate::proc_shmem::freelist_pop_head(list)
 }
 
 /// `dlist_push_head(<list>, &GetPGProcByNumber(procno)->links)`. Caller holds
 /// `ProcStructLock`.
-pub(crate) fn freelist_push_head(_list: FreeList, _procno: ProcNumber) {
-    todo!("proc_shmem: dlist_push_head(procgloballist, &proc->links)")
+pub(crate) fn freelist_push_head(list: FreeList, procno: ProcNumber) {
+    crate::proc_shmem::freelist_push_head(list, procno);
 }
 
 /// `dlist_push_tail(<list>, &GetPGProcByNumber(procno)->links)`. Caller holds
 /// `ProcStructLock`.
-pub(crate) fn freelist_push_tail(_list: FreeList, _procno: ProcNumber) {
-    todo!("proc_shmem: dlist_push_tail(procgloballist, &proc->links)")
+pub(crate) fn freelist_push_tail(list: FreeList, procno: ProcNumber) {
+    crate::proc_shmem::freelist_push_tail(list, procno);
 }
 
 /// Iterator over `ProcGlobal->freeProcs` (`dlist_foreach` in `HaveNFreeProcs`),
 /// yielding once per entry. Caller holds `ProcStructLock`.
 pub(crate) fn freelist_regular_iter() -> impl Iterator<Item = ProcNumber> {
-    // The real freelist representation is owned by proc_shmem; until it lands
-    // a walk over it cannot be produced.
-    todo!("proc_shmem: dlist_foreach(&ProcGlobal->freeProcs)");
-    #[allow(unreachable_code)]
-    core::iter::empty()
+    crate::proc_shmem::freelist_regular_snapshot().into_iter()
 }
 
 /// `SpinLockAcquire(ProcStructLock)`.
 pub(crate) fn spin_lock_acquire_proc_struct_lock() {
-    todo!("proc_shmem: SpinLockAcquire(ProcStructLock)")
+    todo!("s_lock: SpinLockAcquire(ProcStructLock)")
 }
 
 /// `SpinLockRelease(ProcStructLock)`.
 pub(crate) fn spin_lock_release_proc_struct_lock() {
-    todo!("proc_shmem: SpinLockRelease(ProcStructLock)")
+    todo!("s_lock: SpinLockRelease(ProcStructLock)")
 }
 
 /// `ProcGlobal->spins_per_delay`.
 pub(crate) fn proc_global_spins_per_delay() -> i32 {
-    todo!("proc_shmem: ProcGlobal->spins_per_delay")
+    crate::proc_shmem::spins_per_delay()
 }
 
 /// `ProcGlobal->spins_per_delay = value`.
-pub(crate) fn set_proc_global_spins_per_delay(_value: i32) {
-    todo!("proc_shmem: ProcGlobal->spins_per_delay = value")
+pub(crate) fn set_proc_global_spins_per_delay(value: i32) {
+    crate::proc_shmem::set_spins_per_delay(value);
 }
 
 /// `ProcGlobal->startupBufferPinWaitBufId`.
 pub(crate) fn proc_global_startup_buffer_pin_wait_buf_id() -> i32 {
-    todo!("proc_shmem: ProcGlobal->startupBufferPinWaitBufId")
+    crate::proc_shmem::startup_buffer_pin_wait_buf_id()
 }
 
 /// `ProcGlobal->startupBufferPinWaitBufId = bufid`.
-pub(crate) fn set_proc_global_startup_buffer_pin_wait_buf_id(_bufid: i32) {
-    todo!("proc_shmem: ProcGlobal->startupBufferPinWaitBufId = bufid")
+pub(crate) fn set_proc_global_startup_buffer_pin_wait_buf_id(bufid: i32) {
+    crate::proc_shmem::set_startup_buffer_pin_wait_buf_id(bufid);
 }
 
 /// Index of the first `AuxiliaryProcs[i]` with `pid == 0`, or `None`. Caller
 /// holds `ProcStructLock`.
 pub(crate) fn auxiliary_proc_find_free() -> Option<i32> {
-    todo!("proc_shmem: first AuxiliaryProcs[proctype] with pid == 0")
+    crate::proc_shmem::auxiliary_proc_find_free()
 }
 
 /// `GetNumberFromPGProc(&AuxiliaryProcs[proctype])`.
-pub(crate) fn auxiliary_proc_procno(_proctype: i32) -> ProcNumber {
-    todo!("proc_shmem: GetNumberFromPGProc(&AuxiliaryProcs[proctype])")
+pub(crate) fn auxiliary_proc_procno(proctype: i32) -> ProcNumber {
+    crate::proc_shmem::auxiliary_proc_procno(proctype)
 }
 
 // ---- per-PGPROC field access on a slot by proc number (owned by proc_shmem) ----
 
 /// `GetPGProcByNumber(procno)->pid`.
-pub(crate) fn proc_pid(_procno: ProcNumber) -> i32 {
-    todo!("proc_shmem: GetPGProcByNumber(procno)->pid")
+pub(crate) fn proc_pid(procno: ProcNumber) -> i32 {
+    crate::proc_shmem::with_proc_by_number(procno, |p| p.pid)
 }
 
 /// `GetPGProcByNumber(procno)->pid = pid`.
-pub(crate) fn set_proc_pid(_procno: ProcNumber, _pid: i32) {
-    todo!("proc_shmem: GetPGProcByNumber(procno)->pid = pid")
+pub(crate) fn set_proc_pid(procno: ProcNumber, pid: i32) {
+    crate::proc_shmem::with_proc_by_number(procno, |p| p.pid = pid);
 }
 
 /// `GetPGProcByNumber(procno)->vxid.procNumber = value`.
-pub(crate) fn set_proc_vxid_proc_number(_procno: ProcNumber, _value: ProcNumber) {
-    todo!("proc_shmem: GetPGProcByNumber(procno)->vxid.procNumber = value")
+pub(crate) fn set_proc_vxid_proc_number(procno: ProcNumber, value: ProcNumber) {
+    crate::proc_shmem::with_proc_by_number(procno, |p| p.vxid.procNumber = value);
 }
 
 /// `GetPGProcByNumber(procno)->vxid.lxid = value`.
-pub(crate) fn set_proc_vxid_lxid(_procno: ProcNumber, _value: LocalTransactionId) {
-    todo!("proc_shmem: GetPGProcByNumber(procno)->vxid.lxid = value")
+pub(crate) fn set_proc_vxid_lxid(procno: ProcNumber, value: LocalTransactionId) {
+    crate::proc_shmem::with_proc_by_number(procno, |p| p.vxid.lxid = value);
 }
 
 /// `GetPGProcByNumber(procno)->lockGroupLeader` as a proc number, or `None`.
-pub(crate) fn proc_lock_group_leader(_procno: ProcNumber) -> Option<ProcNumber> {
-    todo!("proc_shmem: GetPGProcByNumber(procno)->lockGroupLeader")
+pub(crate) fn proc_lock_group_leader(procno: ProcNumber) -> Option<ProcNumber> {
+    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupLeader)
 }
 
 /// `GetPGProcByNumber(procno)->lockGroupLeader = leader`.
-pub(crate) fn set_proc_lock_group_leader(_procno: ProcNumber, _leader: Option<ProcNumber>) {
-    todo!("proc_shmem: GetPGProcByNumber(procno)->lockGroupLeader = leader")
+pub(crate) fn set_proc_lock_group_leader(procno: ProcNumber, leader: Option<ProcNumber>) {
+    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupLeader = leader);
 }
 
 /// `dlist_is_empty(&GetPGProcByNumber(procno)->lockGroupMembers)`.
-pub(crate) fn proc_lock_group_members_is_empty(_procno: ProcNumber) -> bool {
-    todo!("proc_shmem: dlist_is_empty(&GetPGProcByNumber(procno)->lockGroupMembers)")
+pub(crate) fn proc_lock_group_members_is_empty(procno: ProcNumber) -> bool {
+    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupMembers.members.is_empty())
 }
 
-/// `dlist_delete(&GetPGProcByNumber(procno)->lockGroupLink)`.
-pub(crate) fn dlist_delete_lock_group_link(_procno: ProcNumber) {
-    todo!("proc_shmem: dlist_delete(&GetPGProcByNumber(procno)->lockGroupLink)")
+/// `dlist_delete(&GetPGProcByNumber(procno)->lockGroupLink)` — remove `procno`
+/// from its leader's `lockGroupMembers` list.
+pub(crate) fn dlist_delete_lock_group_link(procno: ProcNumber) {
+    crate::proc_shmem::dlist_delete_lock_group_link(procno);
 }
 
-/// `lockAwaited != NULL` (proc.c backend-local global; see proc_waitqueue).
+/// `lockAwaited != NULL`. `lockAwaited` is a `LOCALLOCK *` into lock.c's local
+/// lock table; proc.c reaches it (here and in `LockErrorCleanup`) through lock.c
+/// seams, where `get_awaited_lock_hashcode()` returns `-1` for a NULL
+/// `lockAwaited`. Class-B (lock.c-owned), consistent with the sibling
+/// `grant_awaited_lock` / `reset_awaited_lock` ops.
 pub(crate) fn lock_awaited_is_set() -> bool {
-    todo!("proc.c: lockAwaited != NULL")
+    backend_storage_lmgr_lock_seams::get_awaited_lock_hashcode::call() != -1
 }
 
 // ---- backend-class predicates (miscadmin.h) ----

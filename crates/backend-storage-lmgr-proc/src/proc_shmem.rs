@@ -25,8 +25,9 @@ use types_core::{Oid, ProcNumber, Size, TransactionId, INVALID_PROC_NUMBER};
 use types_error::PgResult;
 use types_storage::latch::LatchHandle;
 use types_storage::storage::{
-    XidCacheStatus, FP_LOCK_SLOTS_PER_GROUP, LWTRANCHE_LOCK_FASTPATH, NUM_AUXILIARY_PROCS,
-    NUM_LOCK_PARTITIONS, NUM_SPECIAL_WORKER_PROCS, PGPROC, PROC_HDR, PROC_WAIT_STATUS_OK,
+    FreeListId, ProcFreeList, XidCacheStatus, FP_LOCK_SLOTS_PER_GROUP, LWTRANCHE_LOCK_FASTPATH,
+    NUM_AUXILIARY_PROCS, NUM_LOCK_PARTITIONS, NUM_SPECIAL_WORKER_PROCS, PGPROC, PROC_HDR,
+    PROC_WAIT_STATUS_OK,
 };
 
 use backend_storage_ipc_shmem_seams as shmem;
@@ -140,10 +141,18 @@ thread_local! {
     static PROC_GLOBAL: RefCell<Option<PROC_HDR>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// `ProcNumber MyProcNumber` (proc.c backend-local global): the slot number
+    /// of this backend's `PGPROC` in `ProcGlobal->allProcs`, or
+    /// `INVALID_PROC_NUMBER` when none is claimed. In C `MyProc` is the
+    /// `PGPROC *`; an arena index is the faithful realization (no raw pointer
+    /// escapes), so `MyProc != NULL` becomes `MY_PROC_NUMBER.is_some()`.
+    static MY_PROC_NUMBER: RefCell<Option<ProcNumber>> = const { RefCell::new(None) };
+}
+
 /// Run `f` with mutable access to the cluster-wide `ProcGlobal` (`PROC_HDR`),
 /// panicking when it has not yet been built by [`InitProcGlobal`] (mirroring
 /// proc.c's `Assert(ProcGlobal != NULL)`).
-#[allow(dead_code)]
 pub(crate) fn with_proc_global<R>(f: impl FnOnce(&mut PROC_HDR) -> R) -> R {
     PROC_GLOBAL.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -155,9 +164,195 @@ pub(crate) fn with_proc_global<R>(f: impl FnOnce(&mut PROC_HDR) -> R) -> R {
 }
 
 /// Whether [`InitProcGlobal`] has already built `ProcGlobal`.
-#[allow(dead_code)]
 pub(crate) fn proc_global_initialized() -> bool {
     PROC_GLOBAL.with(|cell| cell.borrow().is_some())
+}
+
+// ---- per-backend MyProc / MyProcNumber / MyProcPid (proc.c backend-locals) ----
+
+/// `MyProc != NULL`.
+pub(crate) fn my_proc_is_set() -> bool {
+    MY_PROC_NUMBER.with(|c| c.borrow().is_some())
+}
+
+/// `MyProc = GetPGProcByNumber(procno); MyProcNumber = procno`. (The single
+/// `MyProcNumber` backs both `MyProc` and `MyProcNumber` in C, since `MyProc`
+/// is just `&allProcs[MyProcNumber]`.)
+pub(crate) fn set_my_proc_number(procno: ProcNumber) {
+    MY_PROC_NUMBER.with(|c| *c.borrow_mut() = Some(procno));
+}
+
+/// `MyProc = NULL` / `MyProcNumber = INVALID_PROC_NUMBER`.
+pub(crate) fn clear_my_proc() {
+    MY_PROC_NUMBER.with(|c| *c.borrow_mut() = None);
+}
+
+/// `GetNumberFromPGProc(MyProc)` — panics if `MyProc == NULL`.
+pub(crate) fn my_proc_number() -> ProcNumber {
+    MY_PROC_NUMBER.with(|c| c.borrow().expect("MyProc is NULL (no PGPROC claimed)"))
+}
+
+/// Run `f` with mutable access to this backend's claimed `PGPROC`
+/// (`&mut *MyProc`), without ever handing out a `&'static mut`. Panics when
+/// `MyProc == NULL` or `ProcGlobal` is unbuilt, mirroring the C deref of a
+/// `MyProc` that must be non-NULL at the call site.
+pub(crate) fn with_my_proc<R>(f: impl FnOnce(&mut PGPROC) -> R) -> R {
+    let procno = my_proc_number();
+    with_proc_by_number(procno, f)
+}
+
+/// Run `f` with shared access to this backend's claimed `PGPROC` (`&*MyProc`).
+pub(crate) fn with_my_proc_ref<R>(f: impl FnOnce(&PGPROC) -> R) -> R {
+    let procno = my_proc_number();
+    with_proc_global(|pg| f(&pg.allProcs[procno as usize]))
+}
+
+/// Run `f` with mutable access to `GetPGProcByNumber(procno)` over the owned
+/// arena.
+pub(crate) fn with_proc_by_number<R>(procno: ProcNumber, f: impl FnOnce(&mut PGPROC) -> R) -> R {
+    with_proc_global(|pg| f(&mut pg.allProcs[procno as usize]))
+}
+
+/// `GetNumberFromPGProc(proc)` — the slot index of `proc` in
+/// `ProcGlobal->allProcs`, the same `proc - ProcGlobal->allProcs` pointer
+/// arithmetic the C macro performs. `proc` must point into the owned arena;
+/// panics otherwise (a caller bug, mirroring the undefined behaviour of the C
+/// macro on a foreign pointer).
+pub(crate) fn proc_number_of(proc: &PGPROC) -> ProcNumber {
+    with_proc_global(|pg| {
+        let base = pg.allProcs.as_ptr();
+        let p = proc as *const PGPROC;
+        let off = (p as usize)
+            .checked_sub(base as usize)
+            .map(|bytes| bytes / core::mem::size_of::<PGPROC>())
+            .filter(|&i| i < pg.allProcs.len());
+        off.expect("GetNumberFromPGProc: PGPROC is not an element of ProcGlobal->allProcs")
+            as ProcNumber
+    })
+}
+
+// ---- freelist operations over ProcGlobal's four heads ----
+
+/// Borrow the [`ProcFreeList`] head named by `list`.
+fn freelist_of(pg: &mut PROC_HDR, list: FreeListId) -> &mut ProcFreeList {
+    match list {
+        FreeListId::Regular => &mut pg.freeProcs,
+        FreeListId::Autovac => &mut pg.autovacFreeProcs,
+        FreeListId::Bgworker => &mut pg.bgworkerFreeProcs,
+        FreeListId::Walsender => &mut pg.walsenderFreeProcs,
+    }
+}
+
+/// `GetPGProcByNumber(procno)->procgloballist` mapped to its [`FreeListId`].
+/// Panics if the slot belongs to no freelist (aux / prepared-xact dummy), which
+/// would be a caller bug (the C deref of a NULL `procgloballist`).
+pub(crate) fn proc_globallist_of(procno: ProcNumber) -> FreeListId {
+    with_proc_global(|pg| {
+        pg.allProcs[procno as usize]
+            .procgloballist
+            .expect("PGPROC has no procgloballist (not a freelist-managed slot)")
+    })
+}
+
+/// `dlist_container(PGPROC, links, dlist_pop_head_node(<list>))`.
+pub(crate) fn freelist_pop_head(list: FreeListId) -> Option<ProcNumber> {
+    with_proc_global(|pg| freelist_of(pg, list).pop_head())
+}
+
+/// `dlist_push_head(<list>, &GetPGProcByNumber(procno)->links)`.
+pub(crate) fn freelist_push_head(list: FreeListId, procno: ProcNumber) {
+    with_proc_global(|pg| freelist_of(pg, list).push_head(procno));
+}
+
+/// `dlist_push_tail(<list>, &GetPGProcByNumber(procno)->links)`.
+pub(crate) fn freelist_push_tail(list: FreeListId, procno: ProcNumber) {
+    with_proc_global(|pg| freelist_of(pg, list).push_tail(procno));
+}
+
+/// A snapshot of `ProcGlobal->freeProcs` in list order, for `HaveNFreeProcs`'s
+/// `dlist_foreach`. (A snapshot — rather than a live iterator — avoids holding
+/// the `ProcGlobal` borrow across the caller's loop; the caller holds
+/// `ProcStructLock`, so the list cannot change underneath it.)
+pub(crate) fn freelist_regular_snapshot() -> Vec<ProcNumber> {
+    with_proc_global(|pg| pg.freeProcs.members.iter().copied().collect())
+}
+
+// ---- ProcGlobal scalar fields ----
+
+pub(crate) fn spins_per_delay() -> i32 {
+    with_proc_global(|pg| pg.spins_per_delay)
+}
+
+pub(crate) fn set_spins_per_delay(value: i32) {
+    with_proc_global(|pg| pg.spins_per_delay = value);
+}
+
+pub(crate) fn startup_buffer_pin_wait_buf_id() -> i32 {
+    with_proc_global(|pg| pg.startupBufferPinWaitBufId)
+}
+
+pub(crate) fn set_startup_buffer_pin_wait_buf_id(bufid: i32) {
+    with_proc_global(|pg| pg.startupBufferPinWaitBufId = bufid);
+}
+
+/// `ProcGlobal->statusFlags[pgxactoff]`.
+pub(crate) fn status_flags(pgxactoff: i32) -> u8 {
+    with_proc_global(|pg| pg.statusFlags[pgxactoff as usize])
+}
+
+// ---- AuxiliaryProcs (= &allProcs[MaxBackends..][..NUM_AUXILIARY_PROCS]) ----
+
+/// `GetNumberFromPGProc(&AuxiliaryProcs[proctype])` — the absolute slot number
+/// of auxiliary entry `proctype`. In C `AuxiliaryProcs = &allProcs[MaxBackends]`.
+pub(crate) fn auxiliary_proc_procno(proctype: i32) -> ProcNumber {
+    globals::max_backends::call() + proctype
+}
+
+/// `GetNumberFromPGProc(&PreparedXactProcs[i])` — the absolute slot number of
+/// prepared-xact dummy `i`. In C `PreparedXactProcs = &allProcs[MaxBackends +
+/// NUM_AUXILIARY_PROCS]`, the dummy PGPROCs following the regular + auxiliary
+/// slots.
+pub(crate) fn prepared_xact_procno(i: i32) -> ProcNumber {
+    globals::max_backends::call() + NUM_AUXILIARY_PROCS + i
+}
+
+/// Index (`proctype`) of the first `AuxiliaryProcs[i]` with `pid == 0`, or
+/// `None`. Caller holds `ProcStructLock`.
+pub(crate) fn auxiliary_proc_find_free() -> Option<i32> {
+    let base = globals::max_backends::call();
+    with_proc_global(|pg| {
+        (0..NUM_AUXILIARY_PROCS)
+            .find(|&proctype| pg.allProcs[(base + proctype) as usize].pid == 0)
+    })
+}
+
+// ---- lock-group membership over the arena ----
+
+/// `dlist_push_head(&GetPGProcByNumber(leader)->lockGroupMembers,
+/// &GetPGProcByNumber(member)->lockGroupLink)`.
+pub(crate) fn lock_group_members_push_head(leader: ProcNumber, member: ProcNumber) {
+    with_proc_by_number(leader, |p| p.lockGroupMembers.push_head(member));
+}
+
+/// `dlist_push_tail(&GetPGProcByNumber(leader)->lockGroupMembers,
+/// &GetPGProcByNumber(member)->lockGroupLink)`.
+pub(crate) fn lock_group_members_push_tail(leader: ProcNumber, member: ProcNumber) {
+    with_proc_by_number(leader, |p| p.lockGroupMembers.push_tail(member));
+}
+
+/// A snapshot of `GetPGProcByNumber(leader)->lockGroupMembers` in list order.
+pub(crate) fn lock_group_members_snapshot(leader: ProcNumber) -> Vec<ProcNumber> {
+    with_proc_by_number(leader, |p| p.lockGroupMembers.members.iter().copied().collect())
+}
+
+/// `dlist_delete(&GetPGProcByNumber(member)->lockGroupLink)` — unlink `member`
+/// from its leader's `lockGroupMembers` list. The leader is `member`'s own
+/// `lockGroupLeader` (every member, including the leader itself, records it).
+pub(crate) fn dlist_delete_lock_group_link(member: ProcNumber) {
+    let leader = with_proc_by_number(member, |p| p.lockGroupLeader);
+    if let Some(leader) = leader {
+        with_proc_by_number(leader, |p| p.lockGroupMembers.remove(member));
+    }
 }
 
 /// `InitProcGlobal(void)` — postmaster-time setup: build the `PGPROC` array,
@@ -243,17 +438,18 @@ pub fn InitProcGlobal(_mcx: Mcx<'_>) -> PgResult<()> {
         // free list); prepared-xact PGPROCs are added by TwoPhaseShmemInit().
         //
         // The freelist owning this PGPROC is recorded on the proc itself
-        // (procgloballist); InitProcess pops by recomputing the same class.
-        if (i as i32) < max_connections {
+        // (procgloballist); InitProcess pops by recomputing the same class. The
+        // C does `dlist_push_tail(<freelist>, &proc->links); proc->procgloballist
+        // = <freelist>;` for each slot — here the membership is threaded onto the
+        // chosen head's index-ordered list and the head is named by FreeListId.
+        let freelist = if (i as i32) < max_connections {
             // PGPROC for normal backend, add to freeProcs list.
-            proc.procgloballist =
-                Some(Box::new(proc_global.freeProcs.clone()));
+            Some(FreeListId::Regular)
         } else if (i as i32)
             < max_connections + autovacuum_worker_slots + NUM_SPECIAL_WORKER_PROCS
         {
             // PGPROC for AV or special worker, add to autovacFreeProcs list.
-            proc.procgloballist =
-                Some(Box::new(proc_global.autovacFreeProcs.clone()));
+            Some(FreeListId::Autovac)
         } else if (i as i32)
             < max_connections
                 + autovacuum_worker_slots
@@ -261,12 +457,23 @@ pub fn InitProcGlobal(_mcx: Mcx<'_>) -> PgResult<()> {
                 + max_worker_processes
         {
             // PGPROC for bgworker, add to bgworkerFreeProcs list.
-            proc.procgloballist =
-                Some(Box::new(proc_global.bgworkerFreeProcs.clone()));
+            Some(FreeListId::Bgworker)
         } else if (i as i32) < max_backends {
             // PGPROC for walsender, add to walsenderFreeProcs list.
-            proc.procgloballist =
-                Some(Box::new(proc_global.walsenderFreeProcs.clone()));
+            Some(FreeListId::Walsender)
+        } else {
+            // Auxiliary / prepared-xact dummy PGPROCs are not on a freelist.
+            None
+        };
+        proc.procgloballist = freelist;
+        if let Some(list) = freelist {
+            let procno = i as ProcNumber;
+            match list {
+                FreeListId::Regular => proc_global.freeProcs.push_tail(procno),
+                FreeListId::Autovac => proc_global.autovacFreeProcs.push_tail(procno),
+                FreeListId::Bgworker => proc_global.bgworkerFreeProcs.push_tail(procno),
+                FreeListId::Walsender => proc_global.walsenderFreeProcs.push_tail(procno),
+            }
         }
 
         // Initialize myProcLocks[] shared memory queues. (Already dlist_init'd

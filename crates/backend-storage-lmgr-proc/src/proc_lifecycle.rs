@@ -174,10 +174,8 @@ pub fn InitProcess(_mcx: Mcx<'_>) -> PgResult<()> {
 
     // Initialize all fields of MyProc, except for those previously
     // initialized by InitProcGlobal.
-    {
-        let proc = seam::my_proc_mut();
-        init_my_proc_common(proc, my_procno, seam::am_regular_backend_process());
-    }
+    let am_regular_backend = seam::am_regular_backend_process();
+    seam::with_my_proc(|proc| init_my_proc_common(proc, my_procno, am_regular_backend));
 
     // Acquire ownership of the PGPROC's latch and repoint the process latch
     // (which so far points at the process-local one) to the shared one.
@@ -265,8 +263,7 @@ pub fn InitAuxiliaryProcess(_mcx: Mcx<'_>) -> PgResult<()> {
     // INVALID_PROC_NUMBER for vxid.procNumber, sets isRegularBackend = false,
     // and (unlike a regular backend) does not init the sync-rep / group-XID /
     // wait-event / clog-group fields.
-    {
-        let proc = seam::my_proc_mut();
+    seam::with_my_proc(|proc| {
         proc.links = Default::default();
         proc.waitStatus = PROC_WAIT_STATUS_OK;
         proc.fpVXIDLock = false;
@@ -287,7 +284,7 @@ pub fn InitAuxiliaryProcess(_mcx: Mcx<'_>) -> PgResult<()> {
         proc.waitProcLock = None;
         proc.waitStart.write(0);
         // USE_ASSERT_CHECKING: myProcLocks partitions must be empty — omitted.
-    }
+    });
 
     // Acquire ownership of the PGPROC's latch and repoint the process latch.
     seam::own_latch(aux_procno);
@@ -516,84 +513,75 @@ pub fn IsWaitingForLock() -> bool {
     seam::lock_awaited_is_set()
 }
 
-/// Helper used by `InitProcess`/`ProcKill`: a borrow of this backend's claimed
-/// `PGPROC` slot. (Kept here so the lifecycle module owns `MyProc` access.)
-#[allow(dead_code)]
-pub(crate) fn my_proc() -> &'static PGPROC {
-    seam::my_proc_ref()
-}
-
 // ---- MyProc / PGPROC-array owner accessors --------------------------------
 //
 // `MyProc` and the `ProcGlobal->allProcs[]` array (and the intrusive
-// `lockGroupMembers` lists threaded through it) are owned by this crate but
-// are stood up by `InitProcess` / `proc_shmem::InitProcGlobal`, which have not
-// landed. proc_misc's lock-group logic reaches that state through these
-// accessors (the `my_proc()` convention); each panics until the owner state
-// lands, exactly as the C `MyProc`/`ProcGlobal` globals are undefined before
-// `InitProcGlobal`.
+// `lockGroupMembers` lists threaded through it) are owned by this crate and are
+// stood up by `proc_shmem::InitProcGlobal` / `InitProcess`. proc_misc's
+// lock-group logic reaches that owned state through these accessors, each a thin
+// read/write over `proc_shmem`'s `ProcGlobal->allProcs` / `MyProc`.
 
 /// `GetNumberFromPGProc(MyProc)` (`MyProcNumber`) — this backend's slot index.
-#[allow(dead_code)]
 pub(crate) fn my_proc_number() -> ProcNumber {
-    todo!("proc.c: GetNumberFromPGProc(MyProc)")
+    seam::my_proc_number()
 }
 
-/// `GetNumberFromPGProc(proc)` — the slot index of an arbitrary `PGPROC`
-/// (pointer arithmetic against `ProcGlobal->allProcs` in C).
+/// `GetNumberFromPGProc(proc)` — the slot index of an arbitrary `PGPROC`,
+/// computed by pointer arithmetic against `ProcGlobal->allProcs` exactly as the
+/// C macro does. `proc` must point into the owned arena.
 #[allow(dead_code)]
-pub(crate) fn proc_number_of(_proc: &PGPROC) -> ProcNumber {
-    todo!("proc.c: GetNumberFromPGProc(proc)")
+pub(crate) fn proc_number_of(proc: &PGPROC) -> ProcNumber {
+    crate::proc_shmem::proc_number_of(proc)
 }
 
 /// `GetPGProcByNumber(procno)->lockGroupLeader == GetPGProcByNumber(leaderno)`
 /// — whether the proc in slot `procno` has slot `leaderno` as its lock-group
 /// leader.
-#[allow(dead_code)]
-pub(crate) fn proc_lock_group_leader_is(_procno: ProcNumber, _leaderno: ProcNumber) -> bool {
-    todo!("proc.c: GetPGProcByNumber(procno)->lockGroupLeader == GetPGProcByNumber(leaderno)")
+pub(crate) fn proc_lock_group_leader_is(procno: ProcNumber, leaderno: ProcNumber) -> bool {
+    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupLeader == Some(leaderno))
 }
 
 /// `GetPGProcByNumber(procno)->lockGroupLeader == NULL`.
-#[allow(dead_code)]
-pub(crate) fn proc_lock_group_leader_is_none(_procno: ProcNumber) -> bool {
-    todo!("proc.c: GetPGProcByNumber(procno)->lockGroupLeader == NULL")
+pub(crate) fn proc_lock_group_leader_is_none(procno: ProcNumber) -> bool {
+    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupLeader.is_none())
 }
 
 /// `MyProc->lockGroupLeader = GetPGProcByNumber(leaderno)`.
-#[allow(dead_code)]
-pub(crate) fn set_my_proc_lock_group_leader(_leaderno: ProcNumber) {
-    todo!("proc.c: MyProc->lockGroupLeader = GetPGProcByNumber(leaderno)")
+pub(crate) fn set_my_proc_lock_group_leader(leaderno: ProcNumber) {
+    let my_procno = seam::my_proc_number();
+    crate::proc_shmem::with_proc_by_number(my_procno, |p| p.lockGroupLeader = Some(leaderno));
 }
 
 /// `dlist_push_head(&GetPGProcByNumber(leaderno)->lockGroupMembers,
 ///  &GetPGProcByNumber(memberno)->lockGroupLink)`.
-#[allow(dead_code)]
-pub(crate) fn lock_group_members_push_head(_leaderno: ProcNumber, _memberno: ProcNumber) {
-    todo!("proc.c: dlist_push_head(&leader->lockGroupMembers, &member->lockGroupLink)")
+pub(crate) fn lock_group_members_push_head(leaderno: ProcNumber, memberno: ProcNumber) {
+    crate::proc_shmem::lock_group_members_push_head(leaderno, memberno);
 }
 
 /// `dlist_push_tail(&GetPGProcByNumber(leaderno)->lockGroupMembers,
 ///  &GetPGProcByNumber(memberno)->lockGroupLink)`.
-#[allow(dead_code)]
-pub(crate) fn lock_group_members_push_tail(_leaderno: ProcNumber, _memberno: ProcNumber) {
-    todo!("proc.c: dlist_push_tail(&leader->lockGroupMembers, &member->lockGroupLink)")
+pub(crate) fn lock_group_members_push_tail(leaderno: ProcNumber, memberno: ProcNumber) {
+    crate::proc_shmem::lock_group_members_push_tail(leaderno, memberno);
 }
 
 /// `dlist_foreach(iter, &GetPGProcByNumber(leaderno)->lockGroupMembers)` —
 /// iterate the slot indices of every member of `leaderno`'s lock group
 /// (`dlist_container(PGPROC, lockGroupLink, iter.cur)`).
 #[allow(dead_code)]
-pub(crate) fn lock_group_members_iter(_leaderno: ProcNumber) -> Vec<ProcNumber> {
-    todo!("proc.c: walk GetPGProcByNumber(leaderno)->lockGroupMembers")
+pub(crate) fn lock_group_members_iter(leaderno: ProcNumber) -> Vec<ProcNumber> {
+    crate::proc_shmem::lock_group_members_snapshot(leaderno)
 }
 
 /// The `holdMask` of every `PROCLOCK` on
-/// `GetPGProcByNumber(procno)->myProcLocks[partition]`.
+/// `GetPGProcByNumber(procno)->myProcLocks[partition]`. The `myProcLocks`
+/// partitions hold `PROCLOCK`s, which are lock.c-owned shmem records; walking
+/// them belongs to lock.c (a Class-B panic-through). Only reachable from the
+/// dead reclaimed `proc_misc::lock_group_held_locks` (JoinWaitQueue uses the
+/// `lock::lock_group_held_locks` seam instead).
 #[allow(dead_code)]
 pub(crate) fn my_proc_locks_hold_masks(
     _procno: ProcNumber,
     _partition: usize,
 ) -> Vec<LOCKMASK> {
-    todo!("proc.c: hold masks on GetPGProcByNumber(procno)->myProcLocks[partition]")
+    todo!("lock.c: hold masks on GetPGProcByNumber(procno)->myProcLocks[partition] (PROCLOCKs)")
 }
