@@ -17,6 +17,19 @@ use types_array::ArrayElementDatum;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 
 seam_core::seam!(
+    /// `(fcinfo->flinfo->fn_oid, fcinfo->flinfo->fn_expr)` — the function OID
+    /// and call-expression node `get_call_result_type` (funcapi.c) hands to
+    /// `internal_get_result_type`. Both live on the `FmgrInfo` frame the fmgr
+    /// owner widens (the trimmed `FunctionCallInfoBaseData` here has no
+    /// `flinfo`), so the read is seamed. `fn_expr` is `None` for the C `NULL`
+    /// (no call expression — polymorphics then unresolvable); the borrow lives
+    /// in the call's context. Pure read, no allocation.
+    pub fn fn_oid_and_expr<'mcx>(
+        fcinfo: &'mcx FunctionCallInfoBaseData<'mcx>,
+    ) -> (types_core::Oid, Option<&'mcx types_nodes::nodes::Node<'mcx>>)
+);
+
+seam_core::seam!(
     /// The call's current memory context (C: `CurrentMemoryContext` at fmgr
     /// dispatch). `convert_*` helpers behind the `has_*_privilege` family
     /// allocate their transient name-list / `RangeVar` / pstrdup'd outputs in
@@ -41,6 +54,62 @@ seam_core::seam!(
     /// `PG_GETARG_INT16(n)` (fmgr.h): decode argument `n` as an `int2`
     /// (`AttrNumber` at the column-privilege call sites).
     pub fn pg_getarg_int16(fcinfo: &mut FunctionCallInfoBaseData<'_>, n: usize) -> AttrNumber
+);
+
+seam_core::seam!(
+    /// `PG_NARGS()` (fmgr.h): the number of arguments in the call frame
+    /// (`fcinfo->nargs`). Pure read of the widened frame. Used by
+    /// `extract_variadic_args` for the non-VARIADIC argument count.
+    pub fn pg_nargs(fcinfo: &FunctionCallInfoBaseData<'_>) -> i32
+);
+
+seam_core::seam!(
+    /// `PG_ARGISNULL(n)` (fmgr.h): the per-argument NULL flag
+    /// (`fcinfo->args[n].isnull`) of the widened frame.
+    pub fn pg_argisnull(fcinfo: &FunctionCallInfoBaseData<'_>, n: usize) -> bool
+);
+
+seam_core::seam!(
+    /// `PG_GETARG_DATUM(n)` (fmgr.h): the raw argument `Datum`
+    /// (`fcinfo->args[n].value`) of the widened frame, taken as given with no
+    /// detoasting. Used by `extract_variadic_args` for the VARIADIC array
+    /// argument and the as-given non-VARIADIC datums.
+    pub fn pg_getarg_datum(fcinfo: &FunctionCallInfoBaseData<'_>, n: usize) -> Datum
+);
+
+seam_core::seam!(
+    /// `PG_GETARG_POINTER(n)` interpreted as the `cstring` an `unknown`-typed
+    /// literal arrives as (fmgr.h / funcapi.c `extract_variadic_args`): read
+    /// argument `n` as a NUL-terminated C string and return its text. Only the
+    /// fmgr owner can dereference the pointer-shaped `Datum` of the widened
+    /// frame.
+    pub fn pg_getarg_cstring<'mcx>(
+        fcinfo: &FunctionCallInfoBaseData<'mcx>,
+        n: usize,
+    ) -> &'mcx str
+);
+
+seam_core::seam!(
+    /// `get_fn_expr_variadic(fcinfo->flinfo)` (fmgr.h): whether the function
+    /// was called with an explicit VARIADIC argument (the flattened
+    /// `fn_expr`-derived flag). The fmgr owner reads it from the widened
+    /// frame's `flinfo`.
+    pub fn get_fn_expr_variadic(fcinfo: &FunctionCallInfoBaseData<'_>) -> bool
+);
+
+seam_core::seam!(
+    /// `get_fn_expr_argtype(fcinfo->flinfo, argnum)` (fmgr.h): the actual
+    /// declared type OID of call-expression argument `argnum`, or `InvalidOid`
+    /// when not determinable. Derived from the widened frame's `flinfo`.
+    pub fn get_fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData<'_>, argnum: i32) -> Oid
+);
+
+seam_core::seam!(
+    /// `get_fn_expr_arg_stable(fcinfo->flinfo, argnum)` (fmgr.h): whether
+    /// call-expression argument `argnum` is a stable constant (so an
+    /// `unknown`-typed literal can be coerced to `text`). Derived from the
+    /// widened frame's `flinfo`.
+    pub fn get_fn_expr_arg_stable(fcinfo: &FunctionCallInfoBaseData<'_>, argnum: i32) -> bool
 );
 
 seam_core::seam!(

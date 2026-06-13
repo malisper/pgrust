@@ -4108,6 +4108,7 @@ dependencies = [
 name = "backend-nodes-nodeFuncs-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -6682,6 +6683,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-namespace",
  "types-nodes",
  "types-tuple",
 ]
@@ -7661,6 +7663,40 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-ri-triggers",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-fmgr-funcapi"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-access-common-toastdesc-seams",
+ "backend-access-common-tupdesc",
+ "backend-access-common-tupdesc-seams",
+ "backend-catalog-namespace-seams",
+ "backend-commands-functioncmds-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-namespace",
+ "types-nodes",
+ "types-rel",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -8824,6 +8860,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-fmgr-core",
  "backend-utils-fmgr-dfmgr",
+ "backend-utils-fmgr-funcapi",
  "backend-utils-hash-dynahash",
  "backend-utils-init-miscinit",
  "backend-utils-init-postinit",

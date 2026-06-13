@@ -16,7 +16,7 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use mcx::PgString;
-use types_namespace::{CatalogObjectName, OperRow, ProcRow};
+use types_namespace::{CatalogObjectName, FuncProcAttrs, OperRow, ProcRow};
 use types_cache::AuthIdRow;
 use types_partition::PartrelTupleData;
 
@@ -382,6 +382,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, funcid)` projected to the [`FuncProcAttrs`]
+    /// (`Form_pg_proc` `GETSTRUCT` scalars + the `SysCacheGetAttr` array
+    /// columns `proallargtypes` / `proargmodes` / `proargnames` /
+    /// `protrftypes`, each detoasted and deconstructed). `Ok(None)` on a cache
+    /// miss (`!HeapTupleIsValid`); the funcapi caller raises its own
+    /// `cache lookup failed for function %u` `elog(ERROR)`, as in C. The
+    /// shape-validity checks (and the `elog`s for malformed arrays) stay on
+    /// the funcapi consumer; the seam only projects.
+    pub fn proc_arg_attrs<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<FuncProcAttrs<'mcx>>>
+);
+
+seam_core::seam!(
     /// `SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_proargnames, &isnull)`
     /// null test for the pg_proc row of `funcid` (`MatchNamedCall`'s probe;
     /// the C caller holds the tuple, the owned marshal re-fetches it by
@@ -494,6 +509,21 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         function_id: Oid,
     ) -> PgResult<Option<types_fmgr::ProcInfo<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid))` projected to the
+    /// `pg_proc` facts `internal_get_result_type` (funcapi.c) reads to classify
+    /// a function's result type: `prorettype`/`proretset`/`pronargs`/
+    /// `proargtypes` (the declared input-type `oidvector`) and `NameStr(proname)`
+    /// for the error message. `Ok(None)` on a cache miss (`!HeapTupleIsValid`) —
+    /// the caller raises `cache lookup failed for function %u`, as in C. The
+    /// `proargtypes` vector and `proname` are copied into the caller's `Mcx`;
+    /// `Err` includes OOM from the copy.
+    pub fn lookup_proc_result_info<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<types_fmgr::ProcResultInfo<'mcx>>>
 );
 
 seam_core::seam!(

@@ -460,3 +460,38 @@ seam_core::seam!(
         which: ArrayIoFuncSelector,
     ) -> PgResult<ArrayElementIoData>
 );
+
+// ---------------------------------------------------------------------------
+// Type-classification / range / collation lookups driven by
+// `utils/fmgr/funcapi.c` polymorphic resolution
+// (backend-utils-fmgr-funcapi). All are lsyscache.c lookups.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `get_range_subtype(rangeOid)` (lsyscache.c): the element/subtype OID of a
+    /// range type, or `InvalidOid` (0) if `rangeOid` is not a range type. `Err`
+    /// carries the catcache failure surface.
+    pub fn get_range_subtype(range_oid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_range_multirange(rangeOid)` (lsyscache.c): the multirange type OID
+    /// associated with a range type, or `InvalidOid` (0). `Err` carries the
+    /// catcache failure surface.
+    pub fn get_range_multirange(range_oid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_typcollation(typid)` (lsyscache.c): the type's collation OID
+    /// (`pg_type.typcollation`), or `InvalidOid` if the type is not collatable.
+    /// A missing type is the C `elog(ERROR, "cache lookup failed for type %u")`,
+    /// carried on `Err`.
+    pub fn get_typcollation(typid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `get_typtype(typid)` (lsyscache.c): the type's `pg_type.typtype` char
+    /// (`TYPTYPE_*`), or `0` ('\0') if the type does not exist. `Err` carries
+    /// the catcache failure surface.
+    pub fn get_typtype(typid: Oid) -> PgResult<u8>
+);

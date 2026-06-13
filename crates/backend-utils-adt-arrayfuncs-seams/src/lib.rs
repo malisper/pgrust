@@ -17,6 +17,7 @@ use types_datum::array_build::ArrayBuildStateAny;
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_nodes::{EStateData, EcxtId};
+use types_namespace::{CharArrayDatum, OidArrayDatum, TextArrayDatum};
 
 /// The `ArrayBuildStateAny *` threaded between the array-accumulation seams.
 /// `None` is the C `NULL` (no accumulator yet / empty result).
@@ -174,4 +175,42 @@ seam_core::seam!(
         elmbyval: bool,
         elmalign: core::ffi::c_char,
     ) -> PgResult<PgVec<'mcx, (Datum, bool)>>
+);
+
+seam_core::seam!(
+    /// `DatumGetArrayTypeP(arraydatum)` (detoast) then project the `ArrayType`
+    /// header (`ARR_NDIM` / `ARR_DIMS[0]` / `ARR_HASNULL` / `ARR_ELEMTYPE`) and
+    /// read `ARR_DATA_PTR` as a C `Oid[]` (the funcapi `build_function_result_*`
+    /// path reads OID arrays directly, not via `deconstruct_array`). The
+    /// shape-validity checks and the `elog(ERROR)` stay on the funcapi caller;
+    /// the seam only detoasts and projects. `values` is the `dim0` raw Oids.
+    pub fn oid_array_datum<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: Datum,
+    ) -> PgResult<OidArrayDatum<'mcx>>
+);
+
+seam_core::seam!(
+    /// `DatumGetArrayTypeP(arraydatum)` (detoast) then project the `ArrayType`
+    /// header plus `ARR_DATA_PTR` read as a C `"char"[]` (the funcapi path reads
+    /// `proargmodes` directly as `char[]`). The shape-validity checks and the
+    /// `elog(ERROR)` stay on the funcapi caller; the seam only detoasts and
+    /// projects.
+    pub fn char_array_datum<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: Datum,
+    ) -> PgResult<CharArrayDatum<'mcx>>
+);
+
+seam_core::seam!(
+    /// `DatumGetArrayTypeP(arraydatum)` (detoast) then project the `ArrayType`
+    /// header plus the elements deconstructed via
+    /// `deconstruct_array_builtin(arr, TEXTOID, &elems, NULL, &nelems)` and each
+    /// run through `TextDatumGetCString` (the funcapi path's per-element name
+    /// reads). The shape-validity checks and the `elog(ERROR)` stay on the
+    /// funcapi caller; the seam only detoasts, deconstructs and stringifies.
+    pub fn text_array_datum<'mcx>(
+        mcx: Mcx<'mcx>,
+        arraydatum: Datum,
+    ) -> PgResult<TextArrayDatum<'mcx>>
 );
