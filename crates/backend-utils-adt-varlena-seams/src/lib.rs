@@ -20,6 +20,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `text_to_cstring(t)` (varlena.c), reached via the `TextDatumGetCString(d)`
+    /// macro (`text_to_cstring((text *) DatumGetPointer(d))`): detoast the
+    /// `text` varlena `d` points at and copy its payload out as a NUL-free
+    /// `String` in `mcx` (C: palloc in the caller's current context). `Err`
+    /// carries detoast/OOM `ereport(ERROR)`.
+    pub fn text_to_cstring<'mcx>(
+        mcx: Mcx<'mcx>,
+        d: types_datum::Datum,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
     /// `SplitIdentifierString(rawstring, ',', &namelist)` (varlena.c) for the
     /// comma separator: parse a comma-separated list of identifiers,
     /// downcasing and dequoting per identifier rules. `Ok(None)` is the C

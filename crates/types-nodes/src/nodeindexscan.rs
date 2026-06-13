@@ -90,6 +90,30 @@ impl Plan<'_> {
     }
 }
 
+/// `Scan` (nodes/plannodes.h) — the base every scan plan node embeds first:
+///
+/// ```c
+/// typedef struct Scan { Plan plan; Index scanrelid; } Scan;
+/// ```
+#[derive(Debug, Default)]
+pub struct Scan<'mcx> {
+    /// `Plan plan` — the abstract plan-node base.
+    pub plan: Plan<'mcx>,
+    /// `Index scanrelid` — relid is index into the range table.
+    pub scanrelid: types_core::primitive::Index,
+}
+
+impl Scan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
+    /// allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Scan<'b>> {
+        Ok(Scan {
+            plan: self.plan.clone_in(mcx)?,
+            scanrelid: self.scanrelid,
+        })
+    }
+}
+
 /// `PlannedStmt` (nodes/plannodes.h), trimmed to the fields ports consume.
 #[derive(Debug, Default)]
 pub struct PlannedStmt<'mcx> {

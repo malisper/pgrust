@@ -22,6 +22,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `getTypeInputInfo(type, &typInput, &typIOParam)` (lsyscache.c): look up
+    /// the type's input conversion function OID and its typioparam, returned as
+    /// `(typInput, typIOParam)`. A missing type or one without a usable input
+    /// function is the C `ereport(ERROR)` (`cache lookup failed` / `no input
+    /// function available for type`), carried on `Err`.
+    pub fn get_type_input_info(typ: Oid) -> PgResult<(Oid, Oid)>
+);
+
+seam_core::seam!(
     /// `get_opclass_input_type(opclass)` (lsyscache.c): the opclass's
     /// `opcintype`. A missing opclass is the C `elog(ERROR, "cache lookup
     /// failed for opclass %u")`, carried on `Err`.

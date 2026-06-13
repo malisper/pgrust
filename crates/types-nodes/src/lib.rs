@@ -26,6 +26,7 @@ pub mod nodeforeigncustom;
 pub mod nodeindexscan;
 pub mod nodemergejoin;
 pub mod nodes;
+pub mod nodetablefuncscan;
 pub mod parsenodes;
 pub mod pathnodes;
 pub mod planstate;
@@ -49,6 +50,10 @@ pub use pathnodes::PathNode;
 pub use executor::{TupleSlotKind, TupleTableSlot};
 pub use funcapi::Tuplestorestate;
 pub use nodeforeigncustom::{Material, MaterialState};
+pub use nodetablefuncscan::{
+    TableFuncRoutineKind, TableFuncScan, TableFuncScanState, T_TableFuncScanState,
+};
+pub use primnodes::{TableFunc, TableFuncType, TFT_JSON_TABLE, TFT_XMLTABLE};
 pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
 pub use planstate::PlanStateNode;
 pub use primnodes::{Expr, TargetEntry, Var};

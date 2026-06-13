@@ -140,6 +140,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-access-common-toastdesc-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-access-gin-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -1411,6 +1422,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-execScan-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-nodes",
+]
+
+[[package]]
 name = "backend-executor-execTuples-seams"
 version = "0.0.0"
 dependencies = [
@@ -1670,12 +1690,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeTableFuncscan"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-toastdesc-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-tablefuncRoutine-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-sort-storage-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-spi-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-executor-tablefuncRoutine-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -3356,8 +3412,10 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-datum",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -3549,6 +3607,7 @@ dependencies = [
  "backend-executor-instrument",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMergejoin",
+ "backend-executor-nodeTableFuncscan",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",

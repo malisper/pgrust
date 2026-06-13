@@ -9,6 +9,32 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
+    /// `ExecInitResultTypeTL(planstate)` (execTuples.c): build the node's
+    /// result tuple descriptor from its plan's target list
+    /// (`ExecTypeFromTL`) and store it in `planstate.ps_ResultTupleDesc`.
+    /// Allocates the descriptor in the per-query context (fallible on OOM).
+    pub fn exec_init_result_type_tl<'mcx>(
+        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `scanstate->ss_ScanTupleSlot->tts_tupleDescriptor` (tuptable.h): the
+    /// scan slot's tuple descriptor, copied into `mcx` (C reads the shared
+    /// pointer). The slot payload model is not yet landed, so the owning unit
+    /// installs this when the slot carries a descriptor.
+    ///
+    /// PROVISIONAL: re-sign when the slot payload model lands (the descriptor
+    /// will then be lent, not copied).
+    pub fn exec_scan_slot_descriptor<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        scanstate: &types_nodes::execnodes::ScanStateData<'mcx>,
+        estate: &types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
     /// `slot_getallattrs(slot)` (tuptable.h, via execTuples.c's
     /// `slot_getsomeattrs`) plus the subsequent `slot->tts_values[i]` /
     /// `slot->tts_isnull[i]` reads: fully deconstruct the slot and return its

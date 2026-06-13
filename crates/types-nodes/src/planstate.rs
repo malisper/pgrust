@@ -10,6 +10,7 @@ use crate::nodes::NodeTag;
 use crate::execnodes::PlanStateData;
 use crate::execnodes::T_MaterialState;
 use crate::nodemergejoin::T_MergeJoinState;
+use crate::nodetablefuncscan::T_TableFuncScanState;
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
 /// discriminant. The state tree is context-allocated (C: `makeNode` in the
@@ -21,6 +22,8 @@ pub enum PlanStateNode<'mcx> {
     Material(PgBox<'mcx, crate::nodeforeigncustom::MaterialState<'mcx>>),
     /// `T_MergeJoinState`.
     MergeJoin(PgBox<'mcx, crate::nodemergejoin::MergeJoinStateData<'mcx>>),
+    /// `T_TableFuncScanState`.
+    TableFuncScan(PgBox<'mcx, crate::nodetablefuncscan::TableFuncScanState<'mcx>>),
 }
 
 impl<'mcx> PlanStateNode<'mcx> {
@@ -29,6 +32,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Material(_) => T_MaterialState,
             PlanStateNode::MergeJoin(_) => T_MergeJoinState,
+            PlanStateNode::TableFuncScan(_) => T_TableFuncScanState,
         }
     }
 
@@ -38,6 +42,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Material(m) => &m.ss.ps,
             PlanStateNode::MergeJoin(m) => &m.js.ps,
+            PlanStateNode::TableFuncScan(t) => &t.ss.ps,
         }
     }
 
@@ -46,6 +51,7 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Material(m) => &mut m.ss.ps,
             PlanStateNode::MergeJoin(m) => &mut m.js.ps,
+            PlanStateNode::TableFuncScan(t) => &mut t.ss.ps,
         }
     }
 }
