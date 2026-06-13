@@ -57,3 +57,16 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tidbitmap::TIDBitmap>>
 );
+
+seam_core::seam!(
+    /// `ExecSetTupleBound(tuples_needed, child_node)` (execProcnode.c): inform
+    /// a node (and applicable descendants) that it will not need to produce
+    /// more than `tuples_needed` tuples. A negative bound means "no limit".
+    /// The dispatch recurses into child nodes that may allocate, so it is
+    /// fallible (OOM / `ereport(ERROR)`).
+    pub fn exec_set_tuple_bound<'mcx>(
+        tuples_needed: types_core::int64,
+        child: &mut types_nodes::PlanStateNode<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);

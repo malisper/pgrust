@@ -65,8 +65,10 @@ use nodes::{
 };
 
 /// `WAIT_EVENT_PARALLEL_BITMAP_SCAN` (utils/wait_event.h) — the wait-event the
-/// parallel bitmap-scan condition-variable sleep reports.
-const WAIT_EVENT_PARALLEL_BITMAP_SCAN: u32 = 0x06000000 | 18;
+/// parallel bitmap-scan condition-variable sleep reports. This is an
+/// `PG_WAIT_IPC` (`0x08000000`) class event at index 38, i.e.
+/// `0x08000000 | 38 == 134217766` (matching c2rust).
+const WAIT_EVENT_PARALLEL_BITMAP_SCAN: u32 = 0x08000000 | 38;
 
 // ===========================================================================
 //                              Scan Support

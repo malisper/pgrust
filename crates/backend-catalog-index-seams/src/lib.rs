@@ -33,3 +33,14 @@ seam_core::seam!(
         [bool; types_core::fmgr::INDEX_MAX_KEYS as usize],
     )>
 );
+
+seam_core::seam!(
+    /// `index_build(heapRelation, indexRelation, indexInfo, isreindex=false,
+    /// parallel=false)` (index.c) as called from bootstrap's `build_indices`:
+    /// scan the heap and fill the index. `Err` carries the build error surface.
+    pub fn index_build(
+        heap: &types_rel::Relation<'_>,
+        index: &types_rel::Relation<'_>,
+        index_info: &types_nodes::execnodes::IndexInfo,
+    ) -> types_error::PgResult<()>
+);
