@@ -4104,6 +4104,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-nodes-extensible"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-xact-seams",
+ "backend-nodes-extensible-seams",
+ "backend-utils-error",
+ "backend-utils-hash-dynahash",
+ "common-hashfn-seams",
+ "types-core",
+ "types-error",
+ "types-extensible",
+ "types-hash",
+]
+
+[[package]]
+name = "backend-nodes-extensible-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-extensible",
+]
+
+[[package]]
 name = "backend-nodes-makefuncs-seams"
 version = "0.0.0"
 dependencies = [
@@ -8971,6 +8995,7 @@ dependencies = [
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
+ "backend-nodes-extensible",
  "backend-port-atomics",
  "backend-postmaster-autovacuum",
  "backend-postmaster-bgworker",
@@ -9285,6 +9310,13 @@ name = "types-explain"
 version = "0.0.0"
 dependencies = [
  "mcx",
+]
+
+[[package]]
+name = "types-extensible"
+version = "0.0.0"
+dependencies = [
+ "types-core",
 ]
 
 [[package]]
