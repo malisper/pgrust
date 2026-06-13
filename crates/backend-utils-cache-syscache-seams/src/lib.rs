@@ -563,6 +563,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
+    /// + `NameStr(GETSTRUCT(Form_pg_attribute)->attname)` + `ReleaseSysCache`
+    /// (the raw `ATTNUM` cache read behind `get_attname`, lsyscache.c). Returns
+    /// the attribute's name copied into `mcx` (C: the `pstrdup` is the caller's,
+    /// so the installer only copies the `NameData` bytes out of the cache
+    /// entry). `Ok(None)` on a cache miss (`!HeapTupleIsValid`); unlike the
+    /// `*AttNum` syscache helper this raw read does NOT filter dropped columns,
+    /// matching `get_attname`. `Err` carries OOM from the copy.
+    pub fn search_attnum_attname<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: types_core::AttrNumber,
+    ) -> PgResult<Option<PgString<'mcx>>>
+);
+
+seam_core::seam!(
     /// `GetSysCacheHashValue1(DATABASEOID, ObjectIdGetDatum(dbid))`
     /// (`utils/adt/acl.c` `initialize_acl`): the syscache hash value of the
     /// `pg_database` row keyed by `dbid`, cached to filter `DATABASEOID`
