@@ -154,6 +154,51 @@ fn unlock(tag: LockTag) -> PgResult<()> {
 }
 
 seam_core::seam!(
+    /// `LockRelationForExtension(rel, ExclusiveLock)` (lmgr.c): take the
+    /// relation-extension lock. On success the lock is held by the returned
+    /// guard; releasing the guard is `UnlockRelationForExtension`. Acquisition
+    /// can `ereport(ERROR)`, carried on `Err`.
+    pub fn lock_relation_for_extension<'mcx>(
+        rel: &types_rel::Relation<'mcx>,
+    ) -> PgResult<RelationExtensionLockGuard>
+);
+
+seam_core::seam!(
+    /// `UnlockRelationForExtension(rel, ExclusiveLock)` (lmgr.c) — the release
+    /// half, reached only through [`RelationExtensionLockGuard`].
+    pub fn unlock_relation_for_extension(relid: Oid) -> PgResult<()>
+);
+
+/// A held relation-extension lock. Releasing it (explicitly or on unwind)
+/// delegates to `UnlockRelationForExtension`. Constructed by the lmgr owner
+/// when installing `lock_relation_for_extension`.
+#[derive(Debug)]
+pub struct RelationExtensionLockGuard(Option<Oid>);
+
+impl RelationExtensionLockGuard {
+    /// Guard for a lock just acquired on the relation with this OID.
+    pub fn new(relid: Oid) -> Self {
+        RelationExtensionLockGuard(Some(relid))
+    }
+
+    /// Explicit early release — the C `UnlockRelationForExtension`.
+    pub fn release(mut self) -> PgResult<()> {
+        match self.0.take() {
+            Some(relid) => unlock_relation_for_extension::call(relid),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for RelationExtensionLockGuard {
+    fn drop(&mut self) {
+        if let Some(relid) = self.0.take() {
+            let _ = unlock_relation_for_extension::call(relid);
+        }
+    }
+}
+
+seam_core::seam!(
     /// `XactLockTableInsert(xid)` — take ExclusiveLock on the transaction
     /// XID. Lock acquisition can `ereport(ERROR)` (out of shared memory).
     pub fn xact_lock_table_insert(xid: TransactionId) -> PgResult<()>

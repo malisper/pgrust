@@ -360,6 +360,11 @@ pub const RM_GENERIC_ID: RmgrId = 20;
 /// durability decisions (checkpoint / archive-timeout triggering).
 pub const XLOG_MARK_UNIMPORTANT: uint8 = 0x02;
 
+// `WalLevel` and `ArchiveMode` are the canonical enums in `xlog_consts` (main's
+// single source, re-exported at the crate root); the launcher/walreceiver ports
+// use those. No duplicate definition here.
+
+
 /// `ReplicationSlotInvalidationCause` (replication/slot.h) — bitmask of
 /// invalidation causes.
 pub type ReplicationSlotInvalidationCause = u32;
