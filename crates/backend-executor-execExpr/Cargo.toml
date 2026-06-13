@@ -42,3 +42,15 @@ backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 # bitmapset owns bms_add_member/bms_is_member — ExecBuildUpdateProjection builds
 # the assignedCols set to drive the old-column copy-over loop.
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+# ExecInitFunc's permission check: object_aclcheck(ProcedureRelationId, funcid,
+# GetUserId(), ACL_EXECUTE) + aclcheck_error (catalog ACL owner), GetUserId
+# (miscinit owner), InvokeFunctionExecuteHook (objectaccess owner).
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+backend-catalog-objectaccess = { path = "../backend-catalog-objectaccess" }
+# types_acl (AclMode/AclResult/ACL_EXECUTE), the ProcedureRelationId catalog OID
+# and OBJECT_FUNCTION object type for the ACL check, and pgstat_track_functions /
+# TRACK_FUNC_* for the strict×fusage opcode selection.
+types-acl = { path = "../types-acl" }
+types-parsenodes = { path = "../types-parsenodes" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

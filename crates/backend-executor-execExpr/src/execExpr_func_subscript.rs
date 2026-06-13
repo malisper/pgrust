@@ -312,18 +312,16 @@ pub fn eval_testexpr_switch_context<'mcx>(
 // `Datum *resv`/`bool *resnull` pointers through `ExecInitExprRec`, and these
 // routines recurse into *distinct* output cells (`&fcinfo->args[i].value`,
 // `&sbsrefstate->upperindex[i]`, `&sbsrefstate->replacevalue`, …). The owned
-// keystone models a step's output as `ExprEvalStep::{resvalue,resnull}:
-// Option<PgBox<Datum/bool>>` where `None` means "the ExprState's own
-// resvalue/resnull"; it grew a `ResultCellId`/`ResultCellArena`, but
-// `ExprEvalStep`'s result fields are not yet keyed off that arena, so a step
-// cannot yet *name* a distinct cell, and execExpr-core's `exec_init_expr_rec`
-// neither takes a result-cell target nor is exported. Per "mirror PG and
-// panic", these routines carry the full faithful C structure for the logic this
-// family owns (the aclcheck/strict classification, the sbsrefstate layout, the
-// jump backpatching, the param-set/subplan step emission) and route the
-// recursive-descent-into-a-distinct-cell points — execExpr-core's own,
-// not-yet-landed `ExecInitExprRec` result-cell-target model — to a loud panic,
-// exactly as `exec_init_expr_rec` already does for OpExpr/FuncExpr.
+// keystone models each such cell as a `ResultCellId` into the `ExprState`'s
+// `ResultCellArena`, allocated by `new_result_cell` and named on the step;
+// `exec_init_expr_rec` takes that target and is crate-exported. `ExecInitFunc`
+// below uses exactly this: a fresh arena cell per argument (recursed into for a
+// non-Const arg, written directly for a Const) recorded in `Func.arg_cells`.
+// `ExecInitSubscriptingRef` still parks on a genuine cross-unit owner
+// (`getSubscriptingRoutines`), and `ExecInitSubPlanExpr` on nodeSubplan; those
+// keep the full faithful C structure for the logic this family owns and route
+// only the genuinely-unported owner calls to a loud panic ("mirror PG and
+// panic").
 
 /// `#define FUNC_MAX_ARGS 100` (pg_config_manual.h).
 const FUNC_MAX_ARGS: i32 = types_core::primitive::FUNC_MAX_ARGS as i32;
@@ -374,14 +372,16 @@ pub(crate) fn is_assignment_indirection_expr(expr: Option<&Expr>) -> bool {
 ///
 /// [`Func`]: types_nodes::execexpr::ExprEvalStepData::Func
 pub(crate) fn exec_init_func<'mcx>(
-    _mcx: mcx::Mcx<'mcx>,
-    _scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
-    _node: &Expr,
+    mcx: mcx::Mcx<'mcx>,
+    scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
+    node: &Expr,
     args: &[Expr],
-    _funcid: types_core::Oid,
-    _inputcollid: types_core::Oid,
-    _state: &mut ExprState<'mcx>,
+    funcid: types_core::Oid,
+    inputcollid: types_core::Oid,
+    state: &mut ExprState<'mcx>,
 ) -> PgResult<()> {
+    use types_nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ResultCell};
+
     // C: int nargs = list_length(args);
     let nargs = args.len() as i32;
 
@@ -391,36 +391,29 @@ pub(crate) fn exec_init_func<'mcx>(
     //        aclcheck_error(aclresult, OBJECT_FUNCTION, get_func_name(funcid));
     //    InvokeFunctionExecuteHook(funcid);
     //
-    // The catalog ACL check needs GetUserId() (backend-utils-init-miscinit;
-    // no usable wiring here — nodeAgg's identical object_aclcheck on the
-    // aggregate funcid panics on GetUserId() for the same reason), and the
-    // object-access hook is the objectaccess owner's. Both precede fmgr_info in
-    // C; the genuine structural blocker below (fmgr_info producing the FmgrInfo
-    // the step must carry) makes the ordering moot. Per "mirror PG and panic",
-    // route loudly at the first unported owner the C reaches.
-    //
-    // C: scratch->d.func.finfo = palloc0(sizeof(FmgrInfo));
-    //    scratch->d.func.fcinfo_data = palloc0(SizeForFunctionCallInfo(nargs));
-    //    fmgr_info(funcid, flinfo);  fmgr_info_set_expr((Node *) node, flinfo);
-    //    InitFunctionCallInfoData(*fcinfo, flinfo, nargs, inputcollid, NULL, NULL);
-    //    scratch->d.func.fn_addr = flinfo->fn_addr;  scratch->d.func.nargs = nargs;
-    //
-    // `fmgr_info` resolves funcid through the pg_proc syscache into a `FmgrInfo`
-    // that embeds the C function pointer (`fn_addr`); the fmgr-fmgr seam crate
-    // states a `FmgrInfo` cannot cross the seam (it carries the resolved native
-    // address), so no `FmgrInfo`-producing seam is exported. Without `flinfo`
-    // the step's `fn_addr`/`finfo`/`fcinfo_data` cannot be filled, the
-    // `fn_retset` set-returning check cannot be made, and — critically — the
-    // strict/fusage opcode selection below reads `flinfo->fn_strict` /
-    // `flinfo->fn_stats`, so it too is unreachable until the FmgrInfo lands.
-    //
-    // The per-argument descent (each non-Const arg → its own
-    // `fcinfo->args[i]` cell via the result-cell arena) and the strict/fusage
-    // opcode selection are this unit's own logic and fully expressible against
-    // the landed arena (`new_result_cell` / `exec_init_expr_rec`) +
-    // `Func.arg_cells`; they are written below the FmgrInfo gate but cannot run
-    // before the catalog/fmgr owners land. Faithful structure; genuine
-    // cross-unit blocker.
+    // GetUserId() (miscinit), object_aclcheck/aclcheck_error (catalog ACL) and
+    // the function-execute object-access hook (objectaccess) are cross-unit
+    // owners, each routed through its seam.
+    let aclresult = backend_catalog_aclchk_seams::object_aclcheck::call(
+        types_parsenodes::ProcedureRelationId,
+        funcid,
+        backend_utils_init_miscinit_seams::get_user_id::call(),
+        types_acl::ACL_EXECUTE,
+    )?;
+    if aclresult != types_acl::ACLCHECK_OK {
+        // C: aclcheck_error(aclresult, OBJECT_FUNCTION, get_func_name(funcid));
+        let funcname = backend_utils_cache_lsyscache_seams::get_func_name::call(mcx, funcid)?
+            .map(|s| s.to_string());
+        backend_catalog_aclchk_seams::aclcheck_error::call(
+            aclresult,
+            types_nodes::parsenodes::OBJECT_FUNCTION,
+            funcname,
+        )?;
+    }
+    // C: InvokeFunctionExecuteHook(funcid);
+    backend_catalog_objectaccess::invoke_function_execute_hook(funcid)?;
+
+    // C: Safety check on nargs (parser should already have caught this).
     if nargs > FUNC_MAX_ARGS {
         // C: ereport(ERROR, errcode(ERRCODE_TOO_MANY_ARGUMENTS),
         //            errmsg_plural("cannot pass more than %d argument(s) to a function",
@@ -431,16 +424,138 @@ pub(crate) fn exec_init_func<'mcx>(
         .with_sqlstate(types_error::ERRCODE_TOO_MANY_ARGUMENTS));
     }
 
-    panic!(
-        "execExpr-func-subscript: ExecInitFunc — object_aclcheck(ProcedureRelationId, funcid, \
-         GetUserId(), ACL_EXECUTE) needs GetUserId() (backend-utils-init-miscinit) and the \
-         function-execute object-access hook; and fmgr_info(funcid) -> FmgrInfo + \
-         InitFunctionCallInfoData (backend-utils-fmgr) cannot cross the fmgr seam (a resolved \
-         FmgrInfo embeds the native fn_addr), so the step's finfo/fcinfo_data/fn_addr and the \
-         strict/fusage opcode (which reads flinfo->fn_strict/fn_stats) cannot be filled. The \
-         per-arg fcinfo result-cell descent and opcode selection are this unit's own logic and \
-         land once the fmgr_info FmgrInfo-producing seam is exported."
-    );
+    // C: scratch->d.func.finfo = palloc0(sizeof(FmgrInfo));
+    //    scratch->d.func.fcinfo_data = palloc0(SizeForFunctionCallInfo(nargs));
+    //    flinfo = scratch->d.func.finfo;  fcinfo = scratch->d.func.fcinfo_data;
+    //
+    // C: fmgr_info(funcid, flinfo);  fmgr_info_set_expr((Node *) node, flinfo);
+    //
+    // `fmgr_info` resolves funcid through the fmgr seam into the (trimmed)
+    // FmgrInfo carrying fn_oid/fn_strict/fn_retset/fn_stats/fn_addr. The C
+    // FmgrInfo embeds the native call address; the seam returns fn_addr as an
+    // opaque address word (0 = unresolved), and the owned interpreter
+    // re-dispatches by fn_oid at call time (the fmgr-seam contract), so the
+    // step's typed `fn_addr: Option<PGFunction>` stays None — the Func step
+    // carries `finfo` (with fn_oid) for the interpreter to re-resolve.
+    // `fmgr_info_set_expr` would stash the call node on flinfo->fn_expr (used by
+    // polymorphic-type resolution at call time); the trimmed FmgrInfo has no
+    // fn_expr field, so that store is dropped here (inherited trim).
+    let _ = node;
+    let flinfo = backend_utils_fmgr_fmgr_seams::fmgr_info::call(mcx, funcid)?;
+
+    // C: InitFunctionCallInfoData(*fcinfo, flinfo, nargs, inputcollid, NULL, NULL);
+    //    scratch->d.func.fn_addr = flinfo->fn_addr;  scratch->d.func.nargs = nargs;
+    //
+    // The owned FunctionCallInfoBaseData is trimmed (the fmgr owner widens it
+    // with flinfo/nargs/fncollation/args[]); the arguments the C threads into
+    // fcinfo->args[i] are carried instead by the Func step's `arg_cells`
+    // (one ResultCellId per arg), which the interpreter gathers into the call
+    // frame immediately before dispatch. We allocate the palloc0 fcinfo frame
+    // (defaulted) so the step shape matches C; inputcollid is recorded by the
+    // owner when it widens the frame.
+    let _ = inputcollid;
+    let fcinfo_data = mcx::alloc_in(
+        mcx,
+        types_nodes::fmgr::FunctionCallInfoBaseData::default(),
+    )?;
+
+    // C: We only support non-set functions here.
+    //    if (flinfo->fn_retset) ereport(ERROR, ERRCODE_FEATURE_NOT_SUPPORTED,
+    //        "set-valued function called in context that cannot accept a set");
+    if flinfo.fn_retset {
+        return Err(types_error::PgError::error(
+            "set-valued function called in context that cannot accept a set",
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    // C: Build code to evaluate arguments directly into the fcinfo struct.
+    //    argno = 0;
+    //    foreach(lc, args) {
+    //        Expr *arg = (Expr *) lfirst(lc);
+    //        if (IsA(arg, Const)) {
+    //            Const *con = (Const *) arg;
+    //            fcinfo->args[argno].value = con->constvalue;
+    //            fcinfo->args[argno].isnull = con->constisnull;
+    //        } else {
+    //            ExecInitExprRec(arg, state, &fcinfo->args[argno].value,
+    //                            &fcinfo->args[argno].isnull);
+    //        }
+    //        argno++;
+    //    }
+    //
+    // In the owned model each argument gets its own result cell; the cell id is
+    // recorded in `arg_cells[argno]` (the interpreter gathers these into the
+    // call frame). A non-Const arg compiles a step sequence that writes its
+    // cell each round; a Const arg (the C optimization that avoids re-evaluating
+    // constants every round) emits no step — its value is written directly into
+    // the cell, where it persists (the cell is never reused), exactly like C's
+    // one-time write into fcinfo->args[argno].
+    let mut arg_cells = mcx::vec_with_capacity_in(mcx, nargs as usize)?;
+    for arg in args {
+        let cell = crate::execExpr_core::new_result_cell(mcx, state)?;
+        if let Expr::Const(con) = arg {
+            // C: fcinfo->args[argno].value = con->constvalue;
+            //    fcinfo->args[argno].isnull = con->constisnull;
+            state.result_cells.set(
+                cell,
+                ResultCell {
+                    value: con.constvalue,
+                    isnull: con.constisnull,
+                },
+            );
+        } else {
+            // C: ExecInitExprRec(arg, state, &fcinfo->args[argno].value,
+            //                    &fcinfo->args[argno].isnull);
+            crate::execExpr_core::exec_init_expr_rec(mcx, arg, state, cell)?;
+        }
+        arg_cells.push(cell);
+    }
+
+    // C: Insert appropriate opcode depending on strictness and stats level.
+    //    if (pgstat_track_functions <= flinfo->fn_stats) {
+    //        if (flinfo->fn_strict && nargs > 0) {
+    //            if (nargs == 1) opcode = EEOP_FUNCEXPR_STRICT_1;
+    //            else if (nargs == 2) opcode = EEOP_FUNCEXPR_STRICT_2;
+    //            else opcode = EEOP_FUNCEXPR_STRICT;
+    //        } else opcode = EEOP_FUNCEXPR;
+    //    } else {
+    //        if (flinfo->fn_strict && nargs > 0) opcode = EEOP_FUNCEXPR_STRICT_FUSAGE;
+    //        else opcode = EEOP_FUNCEXPR_FUSAGE;
+    //    }
+    let track_functions = backend_utils_misc_guc_tables::vars::pgstat_track_functions.read();
+    let opcode = if track_functions <= i32::from(flinfo.fn_stats) {
+        if flinfo.fn_strict && nargs > 0 {
+            // Choose nargs-optimized implementation if available.
+            match nargs {
+                1 => ExprEvalOp::EEOP_FUNCEXPR_STRICT_1,
+                2 => ExprEvalOp::EEOP_FUNCEXPR_STRICT_2,
+                _ => ExprEvalOp::EEOP_FUNCEXPR_STRICT,
+            }
+        } else {
+            ExprEvalOp::EEOP_FUNCEXPR
+        }
+    } else if flinfo.fn_strict && nargs > 0 {
+        ExprEvalOp::EEOP_FUNCEXPR_STRICT_FUSAGE
+    } else {
+        ExprEvalOp::EEOP_FUNCEXPR_FUSAGE
+    };
+
+    // Stamp the scratch step (the caller pushes it). `make_ro` is false for an
+    // ordinary FuncExpr/OpExpr (only NULLIF sets it; that arm lives in the
+    // core dispatch). `fn_addr` stays None — the interpreter re-resolves by
+    // `finfo.fn_oid` (the fmgr-seam contract).
+    scratch.opcode = opcode;
+    scratch.d = ExprEvalStepData::Func {
+        finfo: Some(mcx::alloc_in(mcx, flinfo)?),
+        fcinfo_data: Some(fcinfo_data),
+        arg_cells: Some(arg_cells),
+        fn_addr: None,
+        nargs,
+        make_ro: false,
+    };
+
+    Ok(())
 }
 
 /// `ExecInitSubPlanExpr(subplan, state, resv, resnull)` (execExpr.c:2820) —
