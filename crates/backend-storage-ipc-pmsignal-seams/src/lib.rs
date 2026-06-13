@@ -50,6 +50,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SendPostmasterSignal(PMSIGNAL_START_AUTOVAC_LAUNCHER)` (pmsignal.c) —
+    /// set the shared `PMSignalFlags` slot and `kill(PostmasterPid, SIGUSR1)`
+    /// so the postmaster starts an autovacuum-launcher iteration. Narrow seam
+    /// for the single reason varsup.c sends (XID wraparound pressure).
+    pub fn send_postmaster_signal_start_autovac()
+);
+
+seam_core::seam!(
     /// `RegisterPostmasterChildActive()` (pmsignal.c): mark this child's
     /// `PMChild` slot ACTIVE in the postmaster's `PMSignalState`. Called from
     /// `InitProcess` / `InitAuxiliaryProcess` once a `PGPROC` is claimed. C is
