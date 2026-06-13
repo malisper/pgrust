@@ -25,11 +25,22 @@ use crate::scankey::ScanKeyData;
 pub type Snapshot = Option<SnapshotData>;
 
 /// `LockTupleMode` (`nodes/lockoptions.h`).
-pub type LockTupleMode = i32;
-pub const LockTupleKeyShare: LockTupleMode = 0;
-pub const LockTupleShare: LockTupleMode = 1;
-pub const LockTupleNoKeyExclusive: LockTupleMode = 2;
-pub const LockTupleExclusive: LockTupleMode = 3;
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LockTupleMode {
+    /// `SELECT FOR KEY SHARE`
+    LockTupleKeyShare = 0,
+    /// `SELECT FOR SHARE`
+    LockTupleShare,
+    /// `SELECT FOR NO KEY UPDATE`, and UPDATEs that don't modify key columns
+    LockTupleNoKeyExclusive,
+    /// `SELECT FOR UPDATE`, UPDATEs that modify key columns, and DELETE
+    LockTupleExclusive,
+}
+
+pub use LockTupleMode::{
+    LockTupleExclusive, LockTupleKeyShare, LockTupleNoKeyExclusive, LockTupleShare,
+};
 
 /// `TM_Result` (`access/tableam.h`) — result codes for `table_tuple_update`
 /// and friends.
@@ -132,6 +143,10 @@ pub struct TableAmRoutine {
     pub index_fetch_begin:
         for<'mcx> fn(rel: &Relation<'mcx>) -> PgResult<Box<IndexFetchTableData<'mcx>>>,
 
+    /// `index_fetch_reset(data)` — release resources (buffer pins) held by
+    /// the index fetch, without ending it.
+    pub index_fetch_reset: fn(data: &mut IndexFetchTableData<'_>) -> PgResult<()>,
+
     /// `index_fetch_end(scan)` — release index-fetch resources.
     pub index_fetch_end: fn(scan: Box<IndexFetchTableData<'_>>) -> PgResult<()>,
 
@@ -145,6 +160,31 @@ pub struct TableAmRoutine {
         slot: &mut TupleTableSlot,
         call_again: &mut bool,
         all_dead: Option<&mut bool>,
+    ) -> PgResult<bool>,
+
+    /// `scan_end(scan)` — release resources and deallocate the scan
+    /// descriptor.
+    pub scan_end: fn(scan: TableScanDesc<'_>) -> PgResult<()>,
+
+    /// `scan_rescan(scan, key, set_params, allow_strat, allow_sync,
+    /// allow_pagemode)` — restart a relation scan, optionally with new params.
+    pub scan_rescan: fn(
+        scan: &mut TableScanDescData<'_>,
+        key: Option<&[ScanKeyData]>,
+        set_params: bool,
+        allow_strat: bool,
+        allow_sync: bool,
+        allow_pagemode: bool,
+    ) -> PgResult<()>,
+
+    /// `tuple_fetch_row_version(rel, tid, snapshot, slot)` — fetch the tuple at
+    /// `tid` into `slot`, after a visibility test against `snapshot`; returns
+    /// true if a visible tuple was found.
+    pub tuple_fetch_row_version: fn(
+        rel: &Relation<'_>,
+        tid: &ItemPointerData,
+        snapshot: &Snapshot,
+        slot: &mut TupleTableSlot,
     ) -> PgResult<bool>,
 
     /// `tuple_tid_valid(scan, tid)` — is `tid` potentially valid (within the

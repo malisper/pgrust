@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod bitmapset;
+pub mod copy_query;
 pub mod execexpr;
 pub mod execnodes;
 pub mod execstate_tags;
@@ -22,8 +23,10 @@ pub mod fmgr;
 pub mod funcapi;
 pub mod instrument;
 pub mod jointype;
+pub mod nodeappend;
 pub mod nodeforeigncustom;
 pub mod nodehashjoin;
+pub mod nodeindexonlyscan;
 pub mod nodeindexscan;
 pub mod nodelimit;
 pub mod nodememoize;
@@ -35,6 +38,7 @@ pub mod nodesort;
 pub mod nodetablefuncscan;
 pub mod nodetidrangescan;
 pub mod parsenodes;
+pub mod partition;
 pub mod pathnodes;
 pub mod portalcmds;
 pub mod planstate;
@@ -44,21 +48,33 @@ pub mod queryenvironment;
 pub use bitmapset::Bitmapset;
 pub use execexpr::SubPlanState;
 pub use execnodes::{
-    EStateData, EcxtId, ExecProcNodeMtd, ExprContext, ExprContextCallbackFunction,
-    ExprContext_CB, Opaque, ParamExecData, PlanStateData, ResultRelInfo, RriId,
-    ScanDirection, ScanDirectionIsForward, ScanStateData, SlotId, T_MaterialState,
+    CurrentOfTid, EPQStateHandle, EStateData, EcxtId, ExecProcNodeMtd, ExecRowMark, ExprContext,
+    ExprContextCallbackFunction, ExprContext_CB, FetchedCursorParam, ModifyTableState, Opaque,
+    ParamExecData,
+    PlanStateData, ResultRelInfo, RowMarkType, RriId, RunningCursorState, ScanDirection,
+    ScanDirectionIsForward, ScanStateData, ScanTidOutcome, SlotId, T_MaterialState,
 };
+pub use primnodes::CurrentOfExpr;
 pub use instrument::Instrumentation;
 pub use jointype::{
     Join, JoinStateData, JoinType, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI, JOIN_SEMI,
 };
 pub use nodemergeappend::{
-    BinaryHeap, MergeAppend, MergeAppendStateData, PartitionPruneState, T_MergeAppend,
+    BinaryHeap, MergeAppend, MergeAppendStateData, T_MergeAppend,
     T_MergeAppendState,
 };
 pub use nodelimit::{
     Limit, LimitOption, LimitStateCond, LimitStateData, LIMIT_OPTION_COUNT, LIMIT_OPTION_WITH_TIES,
+};
+pub use nodeindexonlyscan::{
+    IndexOnlyScan, IndexOnlyScanState, IndexRuntimeKeyInfo, IndexScanDesc, IndexScanDescData,
+    IndexScanInstrumentation, ParallelIndexScanDesc, ParallelIndexScanDescData, Scan,
+    SharedIndexScanInstrumentation, Buffer, InvalidBuffer,
+};
+pub use nodeappend::{
+    Append, AppendChooseStrategy, AppendStateData, AsyncRequestData, ParallelAppendState,
+    T_Append, T_AppendState,
 };
 pub use nodemergejoin::{MergeJoin, MergeJoinClauseData, MergeJoinStateData};
 pub use nodesort::{
@@ -83,6 +99,11 @@ pub use nodehashjoin::{
     HashJoin, HashJoinState, HashJoinTableData, T_HashJoin, T_HashJoinState,
 };
 pub use parsenodes::{RTEPermissionInfo, RangeTblEntry};
+pub use partition::{
+    PartitionBoundInfo, PartitionBoundInfoData, PartitionDesc, PartitionDescData, PartitionKey,
+    PartitionKeyData, PartitionPruneContext, PartitionPruneState, PartitionPruningData,
+    PartitionRangeDatumKind, PartitionStrategy, PartitionedRelPruningData,
+};
 pub use planstate::PlanStateNode;
 pub use queryenvironment::{
     EphemeralNameRelationType, EphemeralNamedRelation, EphemeralNamedRelationData,

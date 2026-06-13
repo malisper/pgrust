@@ -23,7 +23,8 @@
 //! points instead.
 
 use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::primitive::{Index, Oid};
+use types_core::primitive::{AttrNumber, Index, Oid};
+use types_core::fmgr::INDEX_MAX_KEYS;
 use types_core::xact::CommandId;
 use types_error::PgResult;
 use types_datum::Datum;
@@ -64,6 +65,13 @@ pub struct EcxtId(pub u32);
 /// [`EStateData::es_result_rel_pool`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RriId(pub u32);
+
+/// Opaque token for a live `EPQState *` (`nodes/execnodes.h`), owned by the
+/// EvalPlanQual machinery (execMain). Scan nodes hold it only to test for
+/// presence and to index its `relsubs_*` arrays through the owner's seams;
+/// the full struct lands when EvalPlanQual is ported.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EPQStateHandle(pub usize);
 
 /// An opaque handle to a genuinely AM/extension-opaque object the executor
 /// only stores and hands back (`JitContext`, `PartitionDirectory` — types C
@@ -148,10 +156,58 @@ pub struct ParamExecData {
 }
 
 /// `IndexInfo` (execnodes.h), trimmed to the fields ports consume.
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// `ii_IndexAttrNumbers` is the C `AttrNumber ii_IndexAttrNumbers[INDEX_MAX_KEYS]`,
+/// fixed-size here.
+#[derive(Clone, Copy, Debug)]
 pub struct IndexInfo {
+    /// `int ii_NumIndexAttrs` — total number of columns in the index.
+    pub ii_NumIndexAttrs: i32,
+    /// `int ii_NumIndexKeyAttrs` — number of key columns in the index.
+    pub ii_NumIndexKeyAttrs: i32,
+    /// `AttrNumber ii_IndexAttrNumbers[INDEX_MAX_KEYS]` — heap-attribute
+    /// numbers of the index's columns (0 for an expression column).
+    pub ii_IndexAttrNumbers: [AttrNumber; INDEX_MAX_KEYS as usize],
     /// `bool ii_Unique` — is it a unique index?
     pub ii_Unique: bool,
+    /// `bool ii_NullsNotDistinct` — does a unique index treat NULLs as not
+    /// distinct?
+    pub ii_NullsNotDistinct: bool,
+    /// `bool ii_ReadyForInserts` — is the index ready for inserts?
+    pub ii_ReadyForInserts: bool,
+    /// `bool ii_CheckedUnchanged` — HOT/summarizing-unchanged checked for the
+    /// current tuple?
+    pub ii_CheckedUnchanged: bool,
+    /// `bool ii_IndexUnchanged` — is the current tuple unchanged wrt this
+    /// index?
+    pub ii_IndexUnchanged: bool,
+    /// `bool ii_Concurrent` — built with CONCURRENTLY?
+    pub ii_Concurrent: bool,
+    /// `bool ii_BrokenHotChain` — was a broken HOT chain seen during build?
+    pub ii_BrokenHotChain: bool,
+    /// `int ii_ParallelWorkers` — number of parallel workers for the build.
+    pub ii_ParallelWorkers: i32,
+    /// `Oid ii_Am` — the index access method's OID.
+    pub ii_Am: Oid,
+}
+
+impl Default for IndexInfo {
+    fn default() -> Self {
+        IndexInfo {
+            ii_NumIndexAttrs: 0,
+            ii_NumIndexKeyAttrs: 0,
+            ii_IndexAttrNumbers: [0; INDEX_MAX_KEYS as usize],
+            ii_Unique: false,
+            ii_NullsNotDistinct: false,
+            ii_ReadyForInserts: false,
+            ii_CheckedUnchanged: false,
+            ii_IndexUnchanged: false,
+            ii_Concurrent: false,
+            ii_BrokenHotChain: false,
+            ii_ParallelWorkers: 0,
+            ii_Am: Oid::default(),
+        }
+    }
 }
 
 /// `ResultRelInfo` (execnodes.h), trimmed to the fields ports consume. Lives
@@ -186,6 +242,10 @@ pub struct ResultRelInfo<'mcx> {
     pub ri_ReturningSlot: Option<SlotId>,
     /// `TupleTableSlot *ri_AllNullSlot` — all-NULL slot for RETURNING.
     pub ri_AllNullSlot: Option<SlotId>,
+    /// `TupleTableSlot *ri_PartitionTupleSlot` — non-NULL if the relation is a
+    /// partition whose rowtype differs from the root partitioned table's; used
+    /// to convert tuples for the partition's own layout. `None` is the C NULL.
+    pub ri_PartitionTupleSlot: Option<SlotId>,
     /// `Bitmapset *ri_extraUpdatedCols` — generated columns updated.
     pub ri_extraUpdatedCols: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `bool ri_extraUpdatedCols_valid`.
@@ -268,23 +328,185 @@ pub struct PlanStateData<'mcx> {
 pub struct ScanStateData<'mcx> {
     /// `PlanState ps` — its first field is `NodeTag`.
     pub ps: PlanStateData<'mcx>,
+    /// `Relation ss_currentRelation` — the relation this scan node is scanning,
+    /// or `None` (C `NULL`, e.g. a ForeignScan/CustomScan with no
+    /// currentRelation). Aliases the executor-owned open (no release authority).
+    pub ss_currentRelation: Option<types_rel::Relation<'mcx>>,
+    /// `struct TableScanDescData *ss_currentScanDesc` — the table scan
+    /// descriptor (`NULL` for index-only scans, which carry no heap scan). The
+    /// table-AM scan-descriptor type lives above this crate's layer, so the
+    /// owned handle rides opaquely; consumers that need it resolve it through
+    /// the table-AM owner.
+    pub ss_currentScanDesc: Option<Opaque>,
     /// `TupleTableSlot *ss_ScanTupleSlot` — id into `es_tupleTable`.
     pub ss_ScanTupleSlot: Option<SlotId>,
 }
 
+/// `ModifyTableState` (execnodes.h), trimmed to the fields the partition
+/// tuple-routing port consumes. Owned by `nodeModifyTable.c`; the rest of its
+/// fields land with that port.
+#[derive(Debug)]
+pub struct ModifyTableState<'mcx> {
+    /// `PlanState ps` — its first field is `NodeTag`; `ps.plan` is the
+    /// `ModifyTable` plan node, `ps.state` the EState (threaded explicitly in
+    /// the owned model), `ps.ps_ResultTupleSlot`/`ps.ps_ExprContext` reused for
+    /// per-partition projections.
+    pub ps: PlanStateData<'mcx>,
+    /// `ResultRelInfo *resultRelInfo` — per-subplan result rels (ids into the
+    /// EState pool); `resultRelInfo[0]` is the "first" relation execPartition
+    /// maps attnos against.
+    pub resultRelInfo: PgVec<'mcx, RriId>,
+    /// `ResultRelInfo *rootResultRelInfo` — the partitioned-table root target.
+    pub rootResultRelInfo: Option<RriId>,
+}
+
+/// The resolved outcome of `fetch_cursor_param_value`'s live-state core:
+/// reading `econtext->ecxt_param_list_info->params[paramId - 1]` (calling the
+/// dynamic `paramFetch` hook when present) and, for an OID-valid non-NULL param,
+/// classifying its `ptype`. `None` (the C falls through to "no value found") is
+/// the `Option` wrapper in the seam return.
+#[derive(Debug)]
+pub enum FetchedCursorParam<'mcx> {
+    /// `prm->ptype == REFCURSOROID` — the decoded `refcursor` text value
+    /// (`TextDatumGetCString`, palloc'd in the caller's `mcx`).
+    RefCursor(PgString<'mcx>),
+    /// `prm->ptype` is some other valid OID (caller raises datatype_mismatch).
+    WrongType(Oid),
+}
+
+/// The per-scan-type TID extraction outcome (`execCurrentOf` plain-scan
+/// strategy, after `search_plan_tree` found the scan node and the
+/// `TupIsNull`/`pending_rescan` "inactive" test passed). C digs the TID out of
+/// the scan's current physical tuple — `xs_heaptid` for an `IndexOnlyScanState`,
+/// else the scan tuple's `SelfItemPointerAttributeNumber` via `slot_getsysattr`
+/// (with the `USE_ASSERT_CHECKING` tableoid cross-check).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScanTidOutcome {
+    /// A valid physical TID was extracted (C `*current_tid = ...; return true`).
+    Tid(types_tuple::heaptuple::ItemPointerData),
+    /// The scan provided no physical tuple / null self-ctid — the C raises the
+    /// "not a simply updatable scan" error (the caller turns this into that
+    /// `ereport`, matching the C).
+    NotUpdatable,
+}
+
+/// `execCurrentOf`'s result: the C `bool` return plus the `*current_tid`
+/// out-parameter. `Found` is the C `return true` (a row of the target table is
+/// currently scanned); `NotOnThisTable` is `return false` (the cursor is valid
+/// for the table but is not currently scanning a row of *this* table — a legal
+/// inheritance case). The `ereport(ERROR)` paths surface as `Err`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CurrentOfTid {
+    /// A row was identified; carries the row's TID.
+    Found(types_tuple::heaptuple::ItemPointerData),
+    /// The cursor is not currently scanning a row of this table.
+    NotOnThisTable,
+}
+
+/// A borrowed view of a *running* cursor's live executor state, lent by the
+/// portal/executor owner (`GetPortalByName` + its `QueryDesc`) to a consumer
+/// (`execCurrentOf`) for the duration of a callback. C reaches the portal's
+/// `strategy`/`atStart`/`atEnd` scalar fields and, through `queryDesc`, the live
+/// `EState` (rowmarks, range table) and `PlanState` tree. Lending a borrow (not
+/// returning `&'static mut`) keeps the foreign owner in control of the state's
+/// lifetime, per the seam rules.
+#[derive(Debug)]
+pub struct RunningCursorState<'a, 'mcx> {
+    /// `portal->strategy` — the C `PortalStrategy` code (`PORTAL_ONE_SELECT`
+    /// etc.). Modeled as the raw `u32` the portal owner stores.
+    pub strategy: u32,
+    /// `queryDesc != NULL && queryDesc->estate != NULL` — false for a held
+    /// cursor or a non-SELECT with no live query.
+    pub has_live_query: bool,
+    /// `portal->atStart` — cursor is before the first row.
+    pub at_start: bool,
+    /// `portal->atEnd` — cursor is after the last row.
+    pub at_end: bool,
+    /// `queryDesc->estate` — the live executor state (rowmarks, range table,
+    /// slot pool). `None` when `has_live_query` is false.
+    pub estate: Option<&'a EStateData<'mcx>>,
+    /// `queryDesc->planstate` — the root of the live plan-state tree. `None`
+    /// when `has_live_query` is false.
+    pub planstate: Option<&'a PlanStateNode<'mcx>>,
+}
+
+/// `RowMarkType` (nodes/plannodes.h) — the kind of row-marking a
+/// FOR UPDATE/SHARE (or referential) rowmark requires.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RowMarkType {
+    /// `ROW_MARK_EXCLUSIVE` — obtain exclusive tuple lock.
+    Exclusive = 0,
+    /// `ROW_MARK_NOKEYEXCLUSIVE` — obtain no-key exclusive tuple lock.
+    NoKeyExclusive = 1,
+    /// `ROW_MARK_SHARE` — obtain shared tuple lock.
+    Share = 2,
+    /// `ROW_MARK_KEYSHARE` — obtain keyshare tuple lock.
+    KeyShare = 3,
+    /// `ROW_MARK_REFERENCE` — reference the row (no lock).
+    Reference = 4,
+    /// `ROW_MARK_COPY` — physically copy the row value.
+    Copy = 5,
+}
+
+impl RowMarkType {
+    /// `RowMarkRequiresRowShareLock(marktype)` (nodes/plannodes.h):
+    /// `((marktype) <= ROW_MARK_KEYSHARE)`.
+    #[inline]
+    pub fn requires_row_share_lock(self) -> bool {
+        (self as u32) <= (RowMarkType::KeyShare as u32)
+    }
+}
+
+/// `ExecRowMark` (execnodes.h) — runtime state for a FOR [KEY] UPDATE/SHARE (or
+/// referential) row mark, trimmed to the fields consumed so far. The unconsumed
+/// C fields (`relation`, `rti`, `prti`, `rowmarkId`, `strength`, `waitPolicy`,
+/// `ermActive`, `ermExtra`) land with their first consumer (docs/types.md rule
+/// 3).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecRowMark {
+    /// `Oid relid` — its OID (or `InvalidOid`, if subquery).
+    pub relid: Oid,
+    /// `RowMarkType markType` — see `RowMarkType`.
+    pub markType: RowMarkType,
+    /// `ItemPointerData curCtid` — ctid of currently locked tuple, if any.
+    pub curCtid: types_tuple::heaptuple::ItemPointerData,
+}
+
+impl Default for RowMarkType {
+    fn default() -> Self {
+        RowMarkType::Exclusive
+    }
+}
+
 /// `EState` (execnodes.h) — working storage for one Executor invocation,
 /// trimmed to the fields ports consume (unconsumed C fields — `es_snapshot`,
-/// `es_crosscheck_snapshot`, `es_rowmarks`, `es_junkFilter`,
-/// `es_param_list_info`, `es_queryEnv` — are trimmed outright and land with
-/// their first consumer, per docs/types.md rule 3).
+/// `es_crosscheck_snapshot`, `es_junkFilter`, `es_param_list_info`,
+/// `es_queryEnv` — are trimmed outright and land with their first consumer,
+/// per docs/types.md rule 3).
 #[derive(Debug)]
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
     pub es_direction: ScanDirection,
+    /// `Snapshot es_snapshot` — time qual to use. The C `Snapshot` is a shared
+    /// pointer, modeled as the shared `Rc<SnapshotData>` the active-snapshot
+    /// stack/owner alias; `None` is the C `NULL`. Lands with its first consumer
+    /// (the index/heap scan ports), per docs/types.md rule 3.
+    pub es_snapshot: Option<alloc::rc::Rc<types_snapshot::SnapshotData>>,
+    /// `struct EPQState *es_epq_active` — if not `None`, the EvalPlanQual
+    /// recheck state this EState belongs to. The full `EPQState` is owned by
+    /// the EvalPlanQual machinery (execMain), so it rides as an opaque handle
+    /// here; scan nodes read its `relsubs_*` arrays through the EvalPlanQual
+    /// owner's seams.
+    pub es_epq_active: Option<EPQStateHandle>,
     /// `List *es_range_table` — the query's range table.
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
     pub es_range_table_size: usize,
+    /// `ExecRowMark **es_rowmarks` — per-RTE `ExecRowMark`s (indexed by RT
+    /// index − 1), with `None` entries for RTEs that have no rowmark. Empty =
+    /// the C `NULL` (no FOR UPDATE/SHARE in the query).
+    pub es_rowmarks: PgVec<'mcx, Option<ExecRowMark>>,
     /// `Relation *es_relations` — array of per-RTE open relations, `None`
     /// until opened. Parallel to `es_range_table`. These handles own the
     /// opens: EState teardown (or abort-path drop) releases them.
@@ -295,6 +517,19 @@ pub struct EStateData<'mcx> {
     pub es_plannedstmt: Option<PgBox<'mcx, PlannedStmt<'mcx>>>,
     /// `List *es_part_prune_infos` — `PlannedStmt.partPruneInfos`.
     pub es_part_prune_infos: PgVec<'mcx, Opaque>,
+    /// `List *es_part_prune_states` — the `PartitionPruneState`s built by
+    /// `ExecDoInitialPruning`, parallel to `es_part_prune_infos`. Each is a
+    /// `PgBox` because the consuming plan node (e.g. `MergeAppendState`) takes
+    /// ownership of its entry (C aliases the same object the list holds; the
+    /// owned model moves it out of the pool with `.take()`, leaving a `None`
+    /// tombstone so the parallel indexing with `es_part_prune_infos` /
+    /// `es_part_prune_results` stays stable).
+    pub es_part_prune_states:
+        PgVec<'mcx, Option<PgBox<'mcx, crate::partition::PartitionPruneState<'mcx>>>>,
+    /// `List *es_part_prune_results` — per-pruneinfo bitmapset of subplans that
+    /// survived initial pruning (a `None` element is the C `NULL`), parallel to
+    /// `es_part_prune_infos`.
+    pub es_part_prune_results: PgVec<'mcx, Option<PgBox<'mcx, Bitmapset<'mcx>>>>,
     /// `CommandId es_output_cid` — the inserted/updated tuples' cmin/cmax.
     pub es_output_cid: CommandId,
     /// `ResultRelInfo **es_result_relations` — per-RTE result-rel info (ids
@@ -359,6 +594,11 @@ pub struct EStateData<'mcx> {
     /// EState (C: caller-owned nodes aliased from the lists above), addressed
     /// by [`RriId`].
     pub es_result_rel_pool: PgVec<'mcx, ResultRelInfo<'mcx>>,
+    /// `struct dsa_area *es_query_dsa` — the per-query DSA area for parallel
+    /// execution, a live [`DsaAreaHandle`] into the DSA subsystem; `None` is
+    /// the C `NULL` (no parallel workers). Consumed first by
+    /// `nodeBitmapHeapscan`'s parallel-scan DSM setup.
+    pub es_query_dsa: Option<types_execparallel::DsaAreaHandle>,
 }
 
 impl<'mcx> EStateData<'mcx> {
@@ -370,9 +610,14 @@ impl<'mcx> EStateData<'mcx> {
         EStateData {
             // estate->es_direction = ForwardScanDirection;
             es_direction: ForwardScanDirection,
+            // es_snapshot = InvalidSnapshot; es_epq_active = NULL;
+            es_snapshot: None,
+            es_epq_active: None,
             // es_range_table = NIL; es_range_table_size = 0;
             es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,
+            // es_rowmarks = NULL;
+            es_rowmarks: PgVec::new_in(mcx),
             // es_relations = NULL;
             es_relations: PgVec::new_in(mcx),
             // es_rteperminfos = NIL; es_plannedstmt = NULL;
@@ -380,6 +625,9 @@ impl<'mcx> EStateData<'mcx> {
             es_plannedstmt: None,
             // es_part_prune_infos = NIL;
             es_part_prune_infos: PgVec::new_in(mcx),
+            // es_part_prune_states = NIL; es_part_prune_results = NIL;
+            es_part_prune_states: PgVec::new_in(mcx),
+            es_part_prune_results: PgVec::new_in(mcx),
             // es_output_cid = (CommandId) 0;
             es_output_cid: 0,
             // es_result_relations = NULL; the relation lists = NIL;
@@ -423,6 +671,8 @@ impl<'mcx> EStateData<'mcx> {
             es_unpruned_relids: None,
             es_partition_directory: Opaque(None),
             es_result_rel_pool: PgVec::new_in(mcx),
+            // es_query_dsa = NULL;
+            es_query_dsa: None,
         }
     }
 

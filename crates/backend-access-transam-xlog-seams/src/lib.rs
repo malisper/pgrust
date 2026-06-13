@@ -27,6 +27,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `XLogArchiveLibrary` (xlog.c GUC string): the configured archive
+    /// library name, "" when unset. Returns an owned copy of the current
+    /// value (the C bare read is a `char *` global; pgarch copies it via
+    /// `pstrdup` before reload). Infallible.
+    pub fn xlog_archive_library() -> alloc::string::String
+);
+
+seam_core::seam!(
+    /// `XLogArchiveCommand` (xlog.c GUC string): the configured archive shell
+    /// command, "" when unset. Returns an owned copy of the current value.
+    /// Infallible.
+    pub fn xlog_archive_command() -> alloc::string::String
+);
+
+seam_core::seam!(
     /// `int wal_level` (xlog.c GUC) — the effective `wal_level` value.
     pub fn wal_level() -> WalLevel
 );
@@ -146,6 +161,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `log_recovery_conflict_waits` (the GUC, owned by xlog.c) — whether the
+    /// startup process should log long recovery-conflict waits.
+    pub fn log_recovery_conflict_waits() -> bool
+);
+
+seam_core::seam!(
+    /// `GetFlushRecPtr(*insertTLI)` (xlog.c) — the LSN up to which WAL is
+    /// flushed, with the corresponding insert timeline. Returns `(lsn, tli)`.
+    pub fn get_flush_rec_ptr() -> (XLogRecPtr, TimeLineID)
+);
+
+seam_core::seam!(
+    /// `GetWALInsertionTimeLineIfSet()` (xlog.c) — the insert TLI once it has
+    /// been initialized in shared memory, else `0` (the C `InvalidTimeLineID`
+    /// / 0 sentinel before recovery finishes).
+    pub fn get_wal_insertion_timeline_if_set() -> TimeLineID
+);
+
+seam_core::seam!(
     /// `XLogRecPtr GetRedoRecPtr(void)` (xlog.c) — the current redo pointer.
     pub fn get_redo_rec_ptr() -> XLogRecPtr
 );
@@ -212,4 +246,55 @@ seam_core::seam!(
         segno: XLogSegNo,
         tli: TimeLineID
     ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XLogGetOldestSegno(tli)` (xlog.c) — the oldest WAL segment number that
+    /// still exists on disk for `tli`, or `0` if none.
+    pub fn xlog_get_oldest_segno(tli: TimeLineID) -> XLogSegNo
+);
+
+// ---------------------------------------------------------------------------
+// Local WAL read, consumed by xlogutils.c's read_local_xlog_page page-read
+// callback. (The flush position uses the `get_flush_rec_ptr` seam above.)
+// ---------------------------------------------------------------------------
+
+/// The `WALReadError` fields needed by `WALReadRaiseError`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalReadErrorInfo {
+    /// `wre_errno`.
+    pub wre_errno: i32,
+    /// `wre_off` — the offset within the segment at which the read failed.
+    pub wre_off: i32,
+    /// `wre_req` — the number of bytes requested.
+    pub wre_req: i32,
+    /// `wre_read` — the number of bytes actually read (<0 error, 0 short).
+    pub wre_read: i32,
+    /// `wre_seg.ws_segno`.
+    pub wre_seg_segno: XLogSegNo,
+    /// `wre_seg.ws_tli`.
+    pub wre_seg_tli: TimeLineID,
+}
+
+/// Outcome of `WALRead`, mirroring the C `bool`-return plus `WALReadError`
+/// out-parameter contract consumed by `WALReadRaiseError`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WalReadOutcome {
+    /// `WALRead` returned true; the read bytes (the C writes them through the
+    /// borrowed `cur_page` pointer; the owned model returns them).
+    Ok(Vec<u8>),
+    /// `WALRead` returned false; the populated `WALReadError` to be raised.
+    Error(WalReadErrorInfo),
+}
+
+seam_core::seam!(
+    /// `WALRead(state, cur_page, targetPagePtr, count, tli, &errinfo)` (xlog.c)
+    /// — read `count` bytes of WAL at `target_page_ptr` on timeline `tli`. On
+    /// success returns `WalReadOutcome::Ok(bytes)` with the `count` valid
+    /// bytes; on failure returns `WalReadOutcome::Error(errinfo)`.
+    pub fn wal_read(
+        target_page_ptr: XLogRecPtr,
+        count: i32,
+        tli: TimeLineID,
+    ) -> WalReadOutcome
 );

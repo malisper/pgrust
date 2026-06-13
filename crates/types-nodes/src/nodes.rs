@@ -44,6 +44,23 @@ pub const T_Material: NodeTag = NodeTag(360);
 pub const T_Sort: NodeTag = NodeTag(362);
 pub const T_Limit: NodeTag = NodeTag(373);
 
+// Executor-state node tags (nodes/nodetags.h), copied as ports consume them
+// (`T_MaterialState`/`T_MergeJoinState` live with their state structs). The
+// values are PostgreSQL 18.3's generated enumeration order.
+pub const T_ResultState: NodeTag = NodeTag(394);
+pub const T_AppendState: NodeTag = NodeTag(397);
+pub const T_SeqScanState: NodeTag = NodeTag(403);
+pub const T_SampleScanState: NodeTag = NodeTag(404);
+pub const T_IndexScanState: NodeTag = NodeTag(405);
+pub const T_IndexOnlyScanState: NodeTag = NodeTag(406);
+pub const T_BitmapHeapScanState: NodeTag = NodeTag(408);
+pub const T_TidScanState: NodeTag = NodeTag(409);
+pub const T_TidRangeScanState: NodeTag = NodeTag(410);
+pub const T_SubqueryScanState: NodeTag = NodeTag(411);
+pub const T_ForeignScanState: NodeTag = NodeTag(418);
+pub const T_CustomScanState: NodeTag = NodeTag(419);
+pub const T_LimitState: NodeTag = NodeTag(437);
+
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
@@ -70,12 +87,29 @@ pub use CmdType::{
     CMD_UTILITY,
 };
 
+/// `OnConflictAction` (nodes/nodes.h) — what to do at ON CONFLICT. Values
+/// verified against PostgreSQL 18.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum OnConflictAction {
+    /// No "ON CONFLICT" clause.
+    ONCONFLICT_NONE = 0,
+    /// ON CONFLICT ... DO NOTHING.
+    ONCONFLICT_NOTHING = 1,
+    /// ON CONFLICT ... DO UPDATE.
+    ONCONFLICT_UPDATE = 2,
+}
+
+pub use OnConflictAction::{ONCONFLICT_NONE, ONCONFLICT_NOTHING, ONCONFLICT_UPDATE};
+
 /// A plan-tree node (`Plan *` in C). The `NodeTag` is the enum discriminant.
 /// Carries the allocator lifetime of the context the plan tree lives in;
 /// copying allocates, so it goes through the fallible [`Node::clone_in`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Node<'mcx> {
+    /// `T_Append`.
+    Append(crate::nodeappend::Append<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeAppend`.
@@ -84,6 +118,8 @@ pub enum Node<'mcx> {
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
     /// `T_Memoize`.
     Memoize(crate::nodememoize::Memoize<'mcx>),
+    /// `T_IndexOnlyScan`.
+    IndexOnlyScan(crate::nodeindexonlyscan::IndexOnlyScan<'mcx>),
     /// `T_Limit`.
     Limit(crate::nodelimit::Limit<'mcx>),
     /// `T_Sort`.
@@ -104,10 +140,12 @@ impl<'mcx> Node<'mcx> {
     /// `nodeTag(node)` — the C node tag of the concrete plan node.
     pub fn tag(&self) -> NodeTag {
         match self {
+            Node::Append(_) => T_Append,
             Node::Material(_) => T_Material,
             Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
             Node::Memoize(_) => crate::nodememoize::T_Memoize,
+            Node::IndexOnlyScan(_) => T_IndexOnlyScan,
             Node::Limit(_) => T_Limit,
             Node::Sort(_) => T_Sort,
             Node::TableFuncScan(_) => T_TableFuncScan,
@@ -121,10 +159,12 @@ impl<'mcx> Node<'mcx> {
     /// `&((Plan *) node)->...` — the embedded `Plan` base.
     pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
         match self {
+            Node::Append(a) => &a.plan,
             Node::Material(m) => &m.plan,
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
             Node::Memoize(m) => &m.plan,
+            Node::IndexOnlyScan(m) => &m.scan.plan,
             Node::Limit(m) => &m.plan,
             Node::Sort(s) => &s.plan,
             Node::TableFuncScan(t) => &t.scan.plan,
@@ -144,10 +184,12 @@ impl<'mcx> Node<'mcx> {
     /// (C: `copyObject` shape). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
+            Node::Append(a) => Ok(Node::Append(a.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
             Node::Memoize(m) => Ok(Node::Memoize(m.clone_in(mcx)?)),
+            Node::IndexOnlyScan(m) => Ok(Node::IndexOnlyScan(m.clone_in(mcx)?)),
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
             Node::TableFuncScan(t) => Ok(Node::TableFuncScan(t.clone_in(mcx)?)),
