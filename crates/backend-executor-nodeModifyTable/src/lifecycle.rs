@@ -26,17 +26,6 @@ const MERGE_UPDATE: i32 = 0x02;
 /// `MERGE_DELETE` (execnodes.h).
 const MERGE_DELETE: i32 = 0x04;
 
-/// A loud failure for an operation owned by a neighbor unit that is not yet
-/// ported and whose seam/type surface is not modeled here (the trimmed
-/// `ResultRelInfo`/`EPQState` drops the relevant fields, and no `-seams`
-/// declaration for the callee is wired into this crate). It surfaces as an
-/// `Err` so the executor's error path runs, mirroring the C `ereport(ERROR)`.
-fn unported(what: &str) -> PgError {
-    PgError::error(alloc::format!(
-        "backend-executor-nodeModifyTable::lifecycle: unported neighbor operation: {what}"
-    ))
-}
-
 /// `ExecCheckPlanOutput(resultRel, targetList)` — verify that the ModifyTable
 /// subplan's targetlist matches the result relation's tuple descriptor
 /// (`ereport(ERROR)` on a mismatch — a planner/executor invariant violation).
@@ -496,18 +485,51 @@ pub fn ExecComputeStoredGenerated<'mcx>(
 /// `mt_transition_capture` (and, for INSERT ON CONFLICT UPDATE,
 /// `mt_oc_transition_capture`) via `MakeTransitionCaptureState`, reading the
 /// root target's `ri_TrigDesc`. `MakeTransitionCaptureState` is owned by
-/// trigger.c — the trigger seam crate declares only the AfterTrigger* xact
-/// entry points and the BR/AR row-trigger calls, not this constructor — so this
-/// is an unported callee.
+/// trigger.c (genuinely unported) and is reached through the trigger seam
+/// crate; the assignments into `mt_transition_capture` /
+/// `mt_oc_transition_capture` and the CMD_INSERT+ONCONFLICT_UPDATE decision are
+/// this unit's own control flow.
 pub fn ExecSetupTransitionCaptureState<'mcx>(
     mcx: Mcx<'mcx>,
     mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = (mcx, mtstate, estate);
-    Err(unported(
-        "ExecSetupTransitionCaptureState: MakeTransitionCaptureState (trigger.c) not declared",
-    ))
+    // ResultRelInfo *targetRelInfo = mtstate->rootResultRelInfo;
+    let target_rel_info = mtstate
+        .rootResultRelInfo
+        .expect("ExecSetupTransitionCaptureState: rootResultRelInfo is NULL");
+
+    // Check for transition tables on the directly targeted relation.
+    //   mtstate->mt_transition_capture =
+    //       MakeTransitionCaptureState(targetRelInfo->ri_TrigDesc,
+    //                                  RelationGetRelid(targetRelInfo->ri_RelationDesc),
+    //                                  mtstate->operation);
+    mtstate.mt_transition_capture = backend_commands_trigger_seams::make_transition_capture_state::call(
+        mcx,
+        estate,
+        target_rel_info,
+        mtstate.operation,
+    )?;
+
+    // if (plan->operation == CMD_INSERT && plan->onConflictAction == ONCONFLICT_UPDATE)
+    //     mtstate->mt_oc_transition_capture =
+    //         MakeTransitionCaptureState(targetRelInfo->ri_TrigDesc,
+    //                                    RelationGetRelid(targetRelInfo->ri_RelationDesc),
+    //                                    CMD_UPDATE);
+    if mtstate.operation == CmdType::CMD_INSERT
+        && mtstate.onConflictAction
+            == types_nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
+    {
+        mtstate.mt_oc_transition_capture =
+            backend_commands_trigger_seams::make_transition_capture_state::call(
+                mcx,
+                estate,
+                target_rel_info,
+                CmdType::CMD_UPDATE,
+            )?;
+    }
+
+    Ok(())
 }
 
 /// `ExecPrepareTupleRouting(mtstate, estate, proute, targetRelInfo, slot,
@@ -763,40 +785,56 @@ pub fn ExecReScanModifyTable<'mcx>(node: &mut ModifyTableState<'mcx>) -> PgResul
 /// Mirrors `fireBSTriggers` (nodeModifyTable.c): a switch on `node->operation`
 /// firing `ExecBSInsertTriggers` / `ExecBSUpdateTriggers` /
 /// `ExecBSDeleteTriggers` on `node->rootResultRelInfo` (and both INSERT+UPDATE
-/// for ON CONFLICT UPDATE; the MERGE subcommand mask for CMD_MERGE). Those
-/// before-statement trigger entry points are owned by trigger.c and are not
-/// declared in the trigger seam crate (which carries only the AfterTrigger*
-/// xact hooks and BR/AR row-trigger calls); they are unported callees. The
-/// operation dispatch (the unit's own control flow) is mirrored exactly, with
-/// each fire reached as an unported callee.
+/// for ON CONFLICT UPDATE; the MERGE subcommand mask for CMD_MERGE). The
+/// before-statement trigger entry points are owned by trigger.c (genuinely
+/// unported); each fire goes through the trigger seam crate. The operation
+/// dispatch (the unit's own control flow) is mirrored exactly.
 pub fn fireBSTriggers<'mcx>(
     node: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = estate;
-    let _root_result_rel_info = node.rootResultRelInfo;
+    // ResultRelInfo *resultRelInfo = node->rootResultRelInfo;
+    let result_rel_info = node
+        .rootResultRelInfo
+        .expect("fireBSTriggers: rootResultRelInfo is NULL");
 
     match node.operation {
         CmdType::CMD_INSERT => {
-            exec_bs_insert_triggers()?;
+            backend_commands_trigger_seams::exec_bs_insert_triggers::call(estate, result_rel_info)?;
             if node.onConflictAction
                 == types_nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
             {
-                exec_bs_update_triggers()?;
+                backend_commands_trigger_seams::exec_bs_update_triggers::call(
+                    estate,
+                    result_rel_info,
+                )?;
             }
             Ok(())
         }
-        CmdType::CMD_UPDATE => exec_bs_update_triggers(),
-        CmdType::CMD_DELETE => exec_bs_delete_triggers(),
+        CmdType::CMD_UPDATE => {
+            backend_commands_trigger_seams::exec_bs_update_triggers::call(estate, result_rel_info)
+        }
+        CmdType::CMD_DELETE => {
+            backend_commands_trigger_seams::exec_bs_delete_triggers::call(estate, result_rel_info)
+        }
         CmdType::CMD_MERGE => {
             if node.mt_merge_subcommands & MERGE_INSERT != 0 {
-                exec_bs_insert_triggers()?;
+                backend_commands_trigger_seams::exec_bs_insert_triggers::call(
+                    estate,
+                    result_rel_info,
+                )?;
             }
             if node.mt_merge_subcommands & MERGE_UPDATE != 0 {
-                exec_bs_update_triggers()?;
+                backend_commands_trigger_seams::exec_bs_update_triggers::call(
+                    estate,
+                    result_rel_info,
+                )?;
             }
             if node.mt_merge_subcommands & MERGE_DELETE != 0 {
-                exec_bs_delete_triggers()?;
+                backend_commands_trigger_seams::exec_bs_delete_triggers::call(
+                    estate,
+                    result_rel_info,
+                )?;
             }
             Ok(())
         }
@@ -811,16 +849,18 @@ pub fn fireBSTriggers<'mcx>(
 /// firing `ExecASInsertTriggers` / `ExecASUpdateTriggers` /
 /// `ExecASDeleteTriggers` on `node->rootResultRelInfo`, threading
 /// `mt_transition_capture` / `mt_oc_transition_capture` (and the MERGE
-/// subcommand mask for CMD_MERGE). Those after-statement trigger entry points
-/// are owned by trigger.c and are not declared in the trigger seam crate; they
-/// are unported callees. The operation dispatch (the unit's own control flow)
-/// is mirrored exactly, with each fire reached as an unported callee.
+/// subcommand mask for CMD_MERGE). The after-statement trigger entry points are
+/// owned by trigger.c (genuinely unported); each fire goes through the trigger
+/// seam crate. The operation dispatch (the unit's own control flow) is mirrored
+/// exactly.
 pub fn fireASTriggers<'mcx>(
     node: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let _ = estate;
-    let _root_result_rel_info = node.rootResultRelInfo;
+    // ResultRelInfo *resultRelInfo = node->rootResultRelInfo;
+    let result_rel_info = node
+        .rootResultRelInfo
+        .expect("fireASTriggers: rootResultRelInfo is NULL");
 
     match node.operation {
         CmdType::CMD_INSERT => {
@@ -828,22 +868,63 @@ pub fn fireASTriggers<'mcx>(
                 == types_nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
             {
                 // ExecASUpdateTriggers(..., node->mt_oc_transition_capture)
-                exec_as_update_triggers()?;
+                let tc = node.mt_oc_transition_capture.as_deref_mut();
+                backend_commands_trigger_seams::exec_as_update_triggers::call(
+                    estate,
+                    result_rel_info,
+                    tc,
+                )?;
             }
             // ExecASInsertTriggers(..., node->mt_transition_capture)
-            exec_as_insert_triggers()
+            let tc = node.mt_transition_capture.as_deref_mut();
+            backend_commands_trigger_seams::exec_as_insert_triggers::call(
+                estate,
+                result_rel_info,
+                tc,
+            )
         }
-        CmdType::CMD_UPDATE => exec_as_update_triggers(),
-        CmdType::CMD_DELETE => exec_as_delete_triggers(),
+        CmdType::CMD_UPDATE => {
+            // ExecASUpdateTriggers(..., node->mt_transition_capture)
+            let tc = node.mt_transition_capture.as_deref_mut();
+            backend_commands_trigger_seams::exec_as_update_triggers::call(
+                estate,
+                result_rel_info,
+                tc,
+            )
+        }
+        CmdType::CMD_DELETE => {
+            // ExecASDeleteTriggers(..., node->mt_transition_capture)
+            let tc = node.mt_transition_capture.as_deref_mut();
+            backend_commands_trigger_seams::exec_as_delete_triggers::call(
+                estate,
+                result_rel_info,
+                tc,
+            )
+        }
         CmdType::CMD_MERGE => {
             if node.mt_merge_subcommands & MERGE_DELETE != 0 {
-                exec_as_delete_triggers()?;
+                let tc = node.mt_transition_capture.as_deref_mut();
+                backend_commands_trigger_seams::exec_as_delete_triggers::call(
+                    estate,
+                    result_rel_info,
+                    tc,
+                )?;
             }
             if node.mt_merge_subcommands & MERGE_UPDATE != 0 {
-                exec_as_update_triggers()?;
+                let tc = node.mt_transition_capture.as_deref_mut();
+                backend_commands_trigger_seams::exec_as_update_triggers::call(
+                    estate,
+                    result_rel_info,
+                    tc,
+                )?;
             }
             if node.mt_merge_subcommands & MERGE_INSERT != 0 {
-                exec_as_insert_triggers()?;
+                let tc = node.mt_transition_capture.as_deref_mut();
+                backend_commands_trigger_seams::exec_as_insert_triggers::call(
+                    estate,
+                    result_rel_info,
+                    tc,
+                )?;
             }
             Ok(())
         }
@@ -851,44 +932,7 @@ pub fn fireASTriggers<'mcx>(
     }
 }
 
-/// `ExecBSInsertTriggers(estate, relinfo)` (trigger.c) — fire BEFORE STATEMENT
-/// INSERT triggers. Owned by trigger.c, not declared in the trigger seam crate;
-/// unported callee.
-fn exec_bs_insert_triggers() -> PgResult<()> {
-    Err(unported("ExecBSInsertTriggers (trigger.c) not declared"))
-}
-
-/// `ExecBSUpdateTriggers(estate, relinfo)` (trigger.c) — fire BEFORE STATEMENT
-/// UPDATE triggers. Owned by trigger.c, not declared in the trigger seam crate;
-/// unported callee.
-fn exec_bs_update_triggers() -> PgResult<()> {
-    Err(unported("ExecBSUpdateTriggers (trigger.c) not declared"))
-}
-
-/// `ExecBSDeleteTriggers(estate, relinfo)` (trigger.c) — fire BEFORE STATEMENT
-/// DELETE triggers. Owned by trigger.c, not declared in the trigger seam crate;
-/// unported callee.
-fn exec_bs_delete_triggers() -> PgResult<()> {
-    Err(unported("ExecBSDeleteTriggers (trigger.c) not declared"))
-}
-
-/// `ExecASInsertTriggers(estate, relinfo, transition_capture)` (trigger.c) —
-/// fire AFTER STATEMENT INSERT triggers. Owned by trigger.c, not declared in
-/// the trigger seam crate; unported callee.
-fn exec_as_insert_triggers() -> PgResult<()> {
-    Err(unported("ExecASInsertTriggers (trigger.c) not declared"))
-}
-
-/// `ExecASUpdateTriggers(estate, relinfo, transition_capture)` (trigger.c) —
-/// fire AFTER STATEMENT UPDATE triggers. Owned by trigger.c, not declared in
-/// the trigger seam crate; unported callee.
-fn exec_as_update_triggers() -> PgResult<()> {
-    Err(unported("ExecASUpdateTriggers (trigger.c) not declared"))
-}
-
-/// `ExecASDeleteTriggers(estate, relinfo, transition_capture)` (trigger.c) —
-/// fire AFTER STATEMENT DELETE triggers. Owned by trigger.c, not declared in
-/// the trigger seam crate; unported callee.
-fn exec_as_delete_triggers() -> PgResult<()> {
-    Err(unported("ExecASDeleteTriggers (trigger.c) not declared"))
-}
+// The BEFORE/AFTER STATEMENT trigger entry points (ExecBSInsertTriggers,
+// ExecASInsertTriggers, …) are owned by trigger.c (genuinely unported) and are
+// reached through `backend_commands_trigger_seams` directly from `fireBSTriggers`
+// / `fireASTriggers` above — no in-crate stand-ins.
