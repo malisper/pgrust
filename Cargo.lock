@@ -4292,6 +4292,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-tqueue"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execTuples-seams",
+ "backend-executor-tqueue-seams",
+ "backend-storage-ipc-shm-mq-seams",
+ "backend-utils-error",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-dest",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-parallel",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-tqueue-seams"
 version = "0.0.0"
 dependencies = [
@@ -9871,6 +9890,7 @@ dependencies = [
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
  "backend-executor-nodeSubplan",
+ "backend-executor-tqueue",
  "backend-foreign-foreign",
  "backend-lib-dshash",
  "backend-libpq-pqcomm",
