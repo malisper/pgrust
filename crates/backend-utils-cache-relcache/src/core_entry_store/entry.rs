@@ -289,6 +289,12 @@ pub struct RelationData {
     pub rd_exclstrats: Vec<u16>,
     /// `Oid *rd_indcollation` — per-column index collation OIDs.
     pub rd_indcollation: Vec<Oid>,
+    /// `bytea **rd_opcoptions` — parsed AM/opclass per-column index options,
+    /// cached in `rd_indexcxt`. `None` is the C NULL (not yet computed); when
+    /// present it has one entry per attribute, each `None` (the C NULL element)
+    /// when that column has no parsed options. The parsed `bytea` payload is
+    /// opaque opclass vocabulary, carried as the owned bytes.
+    pub rd_opcoptions: Option<Vec<Option<Vec<u8>>>>,
 
     /// `Oid rd_toastoid` — CLUSTER/rewrite toast-OID hack; `InvalidOid` off.
     pub rd_toastoid: Oid,

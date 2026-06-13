@@ -8,6 +8,8 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
+use types_core::primitive::Oid;
+use types_core::ProcNumber;
 use types_error::PgResult;
 use types_storage::RelFileLocator;
 
@@ -66,6 +68,58 @@ seam_core::seam!(
     /// the physical files a finished prepared transaction was supposed to
     /// delete. Can `ereport(ERROR)`, carried on `Err`.
     pub fn drop_relation_files(rels: &[types_wal::RelFileLocator]) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `RelationDropStorage(relation)` (storage.c): schedule the relation's
+    /// current main-fork storage (named by `rlocator`/`backend`) for unlink at
+    /// transaction commit (adds it to `pendingDeletes`). Used by
+    /// `RelationSetNewRelfilenumber` when *not* in binary-upgrade mode. The
+    /// relcache owns the relation entry, so its physical identity is passed
+    /// explicitly. `Err` carries its `ereport(ERROR)`s.
+    pub fn relation_drop_storage(rlocator: RelFileLocator, backend: ProcNumber) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// The binary-upgrade old-storage drop in `RelationSetNewRelfilenumber`
+    /// (relcache.c): `srel = smgropen(rlocator, backend);
+    /// smgrdounlinkall(&srel, 1, false); smgrclose(srel)` — immediately (not at
+    /// commit) unlink the relation's existing files, as required during
+    /// `pg_upgrade`. The relcache owns the relation entry, so its physical
+    /// identity is passed explicitly. `Err` carries its `ereport(ERROR)`s.
+    pub fn smgr_unlink_relation_now(rlocator: RelFileLocator, backend: ProcNumber) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `srel = RelationCreateStorage(newrlocator, persistence, true);
+    /// smgrclose(srel)` (storage.c), as called by `RelationSetNewRelfilenumber`
+    /// for a `RELKIND_HAS_STORAGE` but non-table-AM relation: create the main
+    /// fork of the new relfilenumber's storage and close the transient smgr
+    /// handle. `Err` carries its `ereport(ERROR)`s.
+    pub fn relation_create_storage_main_fork(
+        newrlocator: RelFileLocator,
+        relpersistence: i8,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// The pg_class-update leg of `RelationSetNewRelfilenumber` (relcache.c) for
+    /// a non-mapped relation: `table_open(pg_class)`,
+    /// `SearchSysCacheLockedCopy1(RELOID, relid)`, set
+    /// `relfilenode = new_relfilenumber` and (for non-sequence relkinds) reset
+    /// `relpages/reltuples/relallvisible/relallfrozen`, set
+    /// `relfrozenxid/relminmxid/relpersistence`, then `CatalogTupleUpdate` +
+    /// `UnlockTuple` + `heap_freetuple` + `table_close`. The whole pg_class
+    /// tuple lifecycle is the catalog owner's; the relcache passes the already
+    /// dispatched-on values. `Err` carries its `ereport(ERROR)`s.
+    pub fn update_pg_class_relfilenumber(
+        relid: Oid,
+        new_relfilenumber: Oid,
+        relpersistence: i8,
+        relkind: i8,
+        freeze_xid: u32,
+        minmulti: u32,
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

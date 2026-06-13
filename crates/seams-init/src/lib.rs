@@ -475,6 +475,7 @@ mod recurrence_guard {
     const CONTRACT_RECONCILE_PENDING: &[(&str, &str)] = &[
         ("backend_access_common_reloptions", "index_build_local_reloptions"),
         ("backend_access_heap_heaptoast", "heap_tuple_header_get_datum"),
+        ("backend_access_table_tableam", "table_relation_set_new_filelocator"),
         ("backend_access_transam_parallel", "initializing_parallel_worker"),
         ("backend_access_transam_xact", "define_savepoint"),
         ("backend_access_transam_xact", "set_xact_iso_level_read_committed"),

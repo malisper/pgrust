@@ -16,4 +16,5 @@ types-nodes = { path = "../types-nodes" }
 types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
+types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
