@@ -30,3 +30,6 @@ backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-sea
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-lib-hyperloglog-seams = { path = "../backend-lib-hyperloglog-seams" }
 common-hashfn-seams = { path = "../common-hashfn-seams" }
+types-wchar = { path = "../types-wchar" }
+common-unicode-norm-bitfields = { path = "../common-unicode-norm-bitfields" }
+common-unicode-category-seams = { path = "../common-unicode-category-seams" }

@@ -7359,10 +7359,11 @@ name = "backend-utils-adt-varlena"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
- "backend-libpq-pqformat",
  "backend-utils-adt-pg-locale-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-mb-mbutils-seams",
+ "common-unicode-category-seams",
+ "common-unicode-norm-bitfields",
  "mcx",
  "seam-core",
  "types-core",
@@ -7370,7 +7371,7 @@ dependencies = [
  "types-error",
  "types-locale",
  "types-sortsupport",
- "types-stringinfo",
+ "types-wchar",
 ]
 
 [[package]]
@@ -8895,6 +8896,14 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+]
+
+[[package]]
+name = "common-unicode-category-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
 ]
 
 [[package]]
