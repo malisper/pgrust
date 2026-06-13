@@ -49,33 +49,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `ExecStoreMinimalTuple(mtup, slot, shouldFree)` (execTuples.c): store
-    /// the minimal tuple in the slot (a `MINIMALTUPLE` slot;
-    /// `tts_minimal_store_tuple`). The slot is addressed by pool id. The tuple
-    /// is read into the slot's context (C: `shouldFree` controls whether the
-    /// passed tuple is `pfree`d after copying; the gather caller passes
-    /// `false`). Wrong slot class is the C `elog(ERROR)`, carried on `Err`;
-    /// storing can also allocate, so fallible on OOM.
-    pub fn exec_store_minimal_tuple<'mcx>(
-        estate: &mut types_nodes::EStateData<'mcx>,
-        mtup: types_tuple::heaptuple::MinimalTuple<'mcx>,
-        slot: types_nodes::SlotId,
-        should_free: bool,
-    ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
-    /// `ExecInitResultTypeTL(planstate)` (execTuples.c): set the node's result
-    /// tuple descriptor from its plan targetlist
-    /// (`ExecTypeFromTL(planstate->plan->targetlist)`), storing it in
-    /// `planstate.ps_ResultTupleDesc`. Building the descriptor allocates, so
-    /// fallible on OOM.
-    pub fn exec_init_result_type_tl<'mcx>(
-        planstate: &mut types_nodes::execnodes::PlanStateData<'mcx>,
-    ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
     /// `ExecCopySlot(dstslot, srcslot)` (tuptable.h): copy the source slot's
     /// tuple into the destination slot (`dstslot->tts_ops->copyslot`). The
     /// copy allocates in `mcx`, the destination slot's memory context (C:
@@ -171,25 +144,6 @@ seam_core::seam!(
     pub fn exec_drop_single_tuple_table_slot(
         slot: types_nodes::TupleTableSlot,
     ) -> types_error::PgResult<()>
-);
-
-seam_core::seam!(
-    /// `slot_getattr(slot, attnum, &isnull)` (tuptable.h, via execTuples.c's
-    /// `slot_getsomeattrs`): fetch a user attribute (`attnum >= 1`) of the
-    /// slot's current tuple as `(value, isnull)`, materializing the slot up to
-    /// `attnum` if needed. This is the bare-`Datum` accessor the merge/set
-    /// comparison loops read (C: `slot_getallattrs` then `tts_values[i]` /
-    /// `tts_isnull[i]`). Deforming can detoast/allocate, so the call is
-    /// fallible.
-    ///
-    /// PROVISIONAL: `TupleTableSlot` is currently trimmed to its header bits
-    /// (no descriptor/values payload), so this contract cannot yet be
-    /// implemented as promised. It must be re-signed when the slot payload
-    /// model lands (same caveat as `slot_getallattrs` / `exec_copy_slot`).
-    pub fn slot_getattr(
-        slot: &types_nodes::TupleTableSlot,
-        attnum: types_core::AttrNumber,
-    ) -> types_error::PgResult<(types_datum::Datum, bool)>
 );
 
 seam_core::seam!(

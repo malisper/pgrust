@@ -20,14 +20,14 @@ pub fn init_all() {
     backend_access_transam_xlogstats::init_seams();
     backend_catalog_namespace::init_seams();
     backend_catalog_pg_depend::init_seams();
+    backend_commands_matview::init_seams();
+    backend_commands_functioncmds::init_seams();
     backend_executor_execAmi::init_seams();
     backend_executor_execParallel::init_seams();
     backend_executor_execUtils::init_seams();
     backend_executor_instrument::init_seams();
-    backend_executor_nodeGather::init_seams();
     backend_executor_nodeMaterial::init_seams();
     backend_executor_nodeMergejoin::init_seams();
-    backend_executor_nodeSetOp::init_seams();
     backend_libpq_pqcomm::init_seams();
     backend_libpq_pqformat::init_seams();
     backend_libpq_pqsignal::init_seams();

@@ -39,10 +39,8 @@ pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 pub const T_WorkTableScan: NodeTag = NodeTag(353);
 pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
-pub const T_Gather: NodeTag = NodeTag(368);
 pub const T_Material: NodeTag = NodeTag(360);
 pub const T_Sort: NodeTag = NodeTag(362);
-pub const T_SetOp: NodeTag = NodeTag(371);
 
 /// `CmdType` (nodes/nodes.h) — values verified against PostgreSQL 18.3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -76,16 +74,10 @@ pub use CmdType::{
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Node<'mcx> {
-    /// `T_Result`.
-    Result(crate::noderesult::Result<'mcx>),
     /// `T_Material`.
     Material(crate::nodeforeigncustom::Material<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
-    /// `T_SetOp`.
-    SetOp(crate::nodesetop::SetOp<'mcx>),
-    /// `T_Gather`.
-    Gather(crate::nodegather::Gather<'mcx>),
     /// `T_HashJoin`.
     HashJoin(crate::nodehashjoin::HashJoin<'mcx>),
     /// `T_Hash` — the inner child of a HashJoin.
@@ -96,11 +88,8 @@ impl<'mcx> Node<'mcx> {
     /// `nodeTag(node)` — the C node tag of the concrete plan node.
     pub fn tag(&self) -> NodeTag {
         match self {
-            Node::Result(_) => T_Result,
             Node::Material(_) => T_Material,
             Node::MergeJoin(_) => T_MergeJoin,
-            Node::SetOp(_) => T_SetOp,
-            Node::Gather(_) => T_Gather,
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
         }
@@ -109,11 +98,8 @@ impl<'mcx> Node<'mcx> {
     /// `&((Plan *) node)->...` — the embedded `Plan` base.
     pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
         match self {
-            Node::Result(m) => &m.plan,
             Node::Material(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
-            Node::SetOp(s) => &s.plan,
-            Node::Gather(m) => &m.plan,
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
         }
@@ -124,20 +110,12 @@ impl<'mcx> Node<'mcx> {
         self.plan_head().lefttree.as_deref()
     }
 
-    /// `innerPlan(node)` (plannodes.h) — `node->plan.righttree`.
-    pub fn inner_plan(&self) -> Option<&Node<'mcx>> {
-        self.plan_head().righttree.as_deref()
-    }
-
     /// Deep copy of the node (and its plan subtree) into `mcx`
     /// (C: `copyObject` shape). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {
         match self {
-            Node::Result(m) => Ok(Node::Result(m.clone_in(mcx)?)),
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
-            Node::SetOp(s) => Ok(Node::SetOp(s.clone_in(mcx)?)),
-            Node::Gather(m) => Ok(Node::Gather(m.clone_in(mcx)?)),
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
         }

@@ -12,5 +12,3 @@ path = "src/lib.rs"
 seam-core = { path = "../seam-core" }
 types-execparallel = { path = "../types-execparallel" }
 types-error = { path = "../types-error" }
-types-tuple = { path = "../types-tuple" }
-mcx = { path = "../mcx" }

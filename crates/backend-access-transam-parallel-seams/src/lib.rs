@@ -68,14 +68,8 @@ seam_core::seam!(pub fn reinitialize_parallel_dsm(pcxt: ParallelContextHandle) -
 seam_core::seam!(pub fn wait_for_parallel_workers_to_finish(pcxt: ParallelContextHandle) -> PgResult<()>);
 /// `DestroyParallelContext(pcxt)`.
 seam_core::seam!(pub fn destroy_parallel_context(pcxt: ParallelContextHandle) -> PgResult<()>);
-/// `LaunchParallelWorkers(pcxt)` — register the parallel workers (it may
-/// launch fewer than requested, or none; the launched count lands in
-/// `pcxt->nworkers_launched`). Registration can `ereport(ERROR)`.
-seam_core::seam!(pub fn launch_parallel_workers(pcxt: ParallelContextHandle) -> PgResult<()>);
 /// `pcxt->nworkers`.
 seam_core::seam!(pub fn pcxt_nworkers(pcxt: ParallelContextHandle) -> i32);
-/// `pcxt->nworkers_to_launch`.
-seam_core::seam!(pub fn pcxt_nworkers_to_launch(pcxt: ParallelContextHandle) -> i32);
 /// `pcxt->nworkers_launched`.
 seam_core::seam!(pub fn pcxt_nworkers_launched(pcxt: ParallelContextHandle) -> i32);
 /// `&pcxt->estimator`.
