@@ -494,7 +494,7 @@ pub const LWTRANCHE_FIRST_USER_DEFINED: i32 = LWTRANCHE_AIO_URING_COMPLETION + 1
 
 /// `RelFileLocator` (`storage/relfilelocator.h`) — the physical identity of a
 /// relation: tablespace, database, and relfilenumber.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct RelFileLocator {
     /// `spcOid` — tablespace.
     pub spcOid: Oid,
@@ -502,6 +502,23 @@ pub struct RelFileLocator {
     pub dbOid: Oid,
     /// `relNumber` — relation storage number.
     pub relNumber: RelFileNumber,
+}
+
+/// `ReadBufferMode` (`storage/bufmgr.h`) — mirrors the C enum exactly,
+/// including discriminant order, so it round-trips byte-for-byte across seams.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub enum ReadBufferMode {
+    /// `RBM_NORMAL`.
+    Normal = 0,
+    /// `RBM_ZERO_AND_LOCK`.
+    ZeroAndLock,
+    /// `RBM_ZERO_AND_CLEANUP_LOCK`.
+    ZeroAndCleanupLock,
+    /// `RBM_ZERO_ON_ERROR`.
+    ZeroOnError,
+    /// `RBM_NORMAL_NO_LOG`.
+    NormalNoLog,
 }
 
 /// `RelFileLocatorEquals(locator1, locator2)` (`storage/relfilelocator.h`).

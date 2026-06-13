@@ -213,3 +213,55 @@ seam_core::seam!(
         tli: TimeLineID
     ) -> types_error::PgResult<()>
 );
+
+// ---------------------------------------------------------------------------
+// Flush position + local WAL read, consumed by xlogutils.c's
+// read_local_xlog_page page-read callback.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `GetFlushRecPtr(&insertTLI)` (xlog.c) — the position up to which WAL
+    /// has been flushed, with the current insert timeline. Returns
+    /// `(read_upto, currTLI)`.
+    pub fn get_flush_rec_ptr() -> (XLogRecPtr, TimeLineID)
+);
+
+/// The `WALReadError` fields needed by `WALReadRaiseError`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalReadErrorInfo {
+    /// `wre_errno`.
+    pub wre_errno: i32,
+    /// `wre_off` — the offset within the segment at which the read failed.
+    pub wre_off: i32,
+    /// `wre_req` — the number of bytes requested.
+    pub wre_req: i32,
+    /// `wre_read` — the number of bytes actually read (<0 error, 0 short).
+    pub wre_read: i32,
+    /// `wre_seg.ws_segno`.
+    pub wre_seg_segno: XLogSegNo,
+    /// `wre_seg.ws_tli`.
+    pub wre_seg_tli: TimeLineID,
+}
+
+/// Outcome of `WALRead`, mirroring the C `bool`-return plus `WALReadError`
+/// out-parameter contract consumed by `WALReadRaiseError`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WalReadOutcome {
+    /// `WALRead` returned true; the read bytes (the C writes them through the
+    /// borrowed `cur_page` pointer; the owned model returns them).
+    Ok(Vec<u8>),
+    /// `WALRead` returned false; the populated `WALReadError` to be raised.
+    Error(WalReadErrorInfo),
+}
+
+seam_core::seam!(
+    /// `WALRead(state, cur_page, targetPagePtr, count, tli, &errinfo)` (xlog.c)
+    /// — read `count` bytes of WAL at `target_page_ptr` on timeline `tli`. On
+    /// success returns `WalReadOutcome::Ok(bytes)` with the `count` valid
+    /// bytes; on failure returns `WalReadOutcome::Error(errinfo)`.
+    pub fn wal_read(
+        target_page_ptr: XLogRecPtr,
+        count: i32,
+        tli: TimeLineID,
+    ) -> WalReadOutcome
+);
