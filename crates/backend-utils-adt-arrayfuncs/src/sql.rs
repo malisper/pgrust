@@ -1264,10 +1264,25 @@ fn datum_as_byte_window<'a>(_value: Datum) -> &'a [u8] {
 mod iterator_tests {
     use super::*;
     use mcx::MemoryContext;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `array_get_n_items` is a process-global seam (`OnceLock`-backed). The
+    /// `if !is_installed() { set(..) }` guard below is check-then-act: under
+    /// parallel `cargo test`, two tests can both observe "not installed" and
+    /// race — one hits `set`-twice ("seam installed twice"), or a `call`
+    /// observes the slot mid-install ("seam not installed"). Each test that
+    /// installs/uses this seam holds this lock for its full body so
+    /// install->use is atomic w.r.t. the sibling tests.
+    static SEAM_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn lock_arrayutils_seams() -> MutexGuard<'static, ()> {
+        SEAM_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Install the pure `arrayutils.c` integer-math seams the iterator drives
     /// (`ArrayGetNItems`), with the faithful overflow-checked product. Idempotent
     /// across tests via the seam's set-once semantics tolerating re-set.
+    /// Callers must hold [`lock_arrayutils_seams`] for the duration.
     fn install_arrayutils_seams() {
         // ArrayGetNItems(ndim, dims): product of dims (bounded by MaxArraySize in
         // C; the small fixtures here never approach it). `set` is set-once, so
@@ -1301,6 +1316,7 @@ mod iterator_tests {
 
     #[test]
     fn element_iteration_int4() {
+        let _guard = lock_arrayutils_seams();
         install_arrayutils_seams();
         let ctx = MemoryContext::new("array_iterate_test");
         let mcx = ctx.mcx();
@@ -1331,6 +1347,7 @@ mod iterator_tests {
 
     #[test]
     fn invalid_slice_ndim_errors() {
+        let _guard = lock_arrayutils_seams();
         install_arrayutils_seams();
         let ctx = MemoryContext::new("array_iterate_test2");
         let mcx = ctx.mcx();
