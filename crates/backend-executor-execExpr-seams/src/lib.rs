@@ -84,6 +84,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The `SlotId` (into the EState slot pool) of the named projection's
+    /// result slot — `node->proj*->pi_state.resultslot`. The slot is
+    /// execExpr-owned (created by `ExecBuildProjectionInfo`); its id is exposed
+    /// here so the canonical execGrouping `TupleHashTable` operations
+    /// (`LookupTupleHashEntry` / `FindTupleHashEntry`) can be driven over the
+    /// just-projected tuple. Infallible (the slot exists once the projection
+    /// was built at init).
+    pub fn sub_proj_result_slot_id<'mcx>(
+        node: &SubPlanState<'mcx>,
+        estate: &EStateData<'mcx>,
+        which: ProjectionKind,
+    ) -> types_nodes::SlotId
+);
+
+seam_core::seam!(
     /// `ExecClearTuple(node->proj*->pi_state.resultslot)` (executor.h): clear
     /// the named projection's result slot. Infallible per the C (no allocation).
     pub fn sub_clear_proj_result_slot<'mcx>(
@@ -412,6 +427,197 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecProject(projInfo)` (executor.h) of an explicitly-supplied
+    /// `ProjectionInfo` (rather than one read off a `PlanState`): form the
+    /// projected result tuple using `proj_info` and its expression context,
+    /// returning the id of the slot the projection wrote (the C returned
+    /// `TupleTableSlot *`). Used for the MERGE per-action `mas_proj`
+    /// projections, which live on the `MergeActionState`, not a node's
+    /// `ps_ProjInfo`. Fallible on `ereport(ERROR)` from a projection expression.
+    pub fn exec_project_info<'mcx>(
+        proj_info: &types_nodes::execexpr::ProjectionInfo,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// The per-result-relation MergeActionState build of `ExecInitMerge`
+    /// (nodeModifyTable.c L3727-3851), and the equivalent inner block of
+    /// `ExecInitPartitionInfo`: for each `MergeAction` in `merge_action_list`,
+    /// `makeNode(MergeActionState)`, compile `mas_whenqual = ExecInitQual(
+    /// action->qual)`, append it into `resultRelInfo->ri_MergeActions[
+    /// action->matchKind]`, and build the per-command projection — for
+    /// CMD_INSERT `ExecCheckPlanOutput(rootRelInfo)` + `ExecBuildProjectionInfo(
+    /// action->targetList, ..., tgtslot, tgtdesc)` (the root slot/desc, or
+    /// `mt_root_tuple_slot` for a partitioned root), for CMD_UPDATE
+    /// `ExecBuildUpdateProjection(action->targetList, action->updateColnos,
+    /// relationDesc, ri_newTupleSlot)` — accumulating the `MERGE_INSERT/UPDATE/
+    /// DELETE` bits into `mtstate->mt_merge_subcommands`. The `ExecInitQual` /
+    /// projection builders over an explicit target list/slot/desc, the
+    /// `MergeAction`/`MergeActionState` node construction, and (for a
+    /// partitioned root) the `ExecSetupPartitionTupleRouting` + `mt_root_tuple_slot`
+    /// create are owned by execExpr/execPartition. `is_root_relation` selects
+    /// whether this is the canonical (root) rel build (using root slot/desc for
+    /// INSERT). Fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_init_merge_actions_for_rel<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        root_result_rel_info: types_nodes::RriId,
+        merge_action_list: &[types_nodes::modifytable::MergeAction<'mcx>],
+        econtext: types_nodes::EcxtId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ri_MergeJoinCondition = ExecInitQual((List *) joinCondition,
+    /// &mtstate->ps)` (nodeModifyTable.c): compile the MERGE join condition for
+    /// `result_rel_info` and store the compiled `ExprState` on its pooled
+    /// `ResultRelInfo.ri_MergeJoinCondition`. The `joinCondition` is the plan
+    /// node's `mergeJoinConditions` entry (a `Node` list, `None` = NULL = the
+    /// always-true condition). `ExecInitQual` and the `Node`→qual-list
+    /// extraction are owned by execExpr. Fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_init_merge_join_condition<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        join_condition: Option<&types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The inherited-root WITH CHECK OPTION / RETURNING setup of `ExecInitMerge`
+    /// (nodeModifyTable.c L3853-3958): when the MERGE targets an inherited
+    /// (non-partitioned) table with INSERT actions, the root `ResultRelInfo` is
+    /// not in the `resultRelInfo[]` array, so initialize its WCO constraints and
+    /// RETURNING projection here — taking the first plan WCO/RETURNING list as
+    /// reference, `build_attrmap_by_name` + `map_variable_attnos` it to the
+    /// root's attnos when the root and first result rel differ, `ExecInitQual`
+    /// each WCO qual into `ri_WithCheckOptions`/`ri_WithCheckOptionExprs`, and
+    /// `ExecBuildProjectionInfo` the RETURNING list into `ri_returningList`/
+    /// `ri_projectReturning`. Reads the `ModifyTable` plan node's WCO/RETURNING
+    /// lists (the owner interprets them) and the rewrite attmap machinery. A
+    /// no-op unless the root differs from `resultRelInfo[0]`, the root is not
+    /// partitioned, and `MERGE_INSERT` is among the subcommands. Fallible on
+    /// OOM / `ereport(ERROR)`.
+    pub fn exec_init_merge_inherited_root<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        root_result_rel_info: types_nodes::RriId,
+        first_result_rel: types_nodes::RriId,
+        econtext: types_nodes::EcxtId,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The WITH CHECK OPTION map-and-build of `ExecInitPartitionInfo`
+    /// (execPartition.c L549-614): take `ref_wco_list` (the first plan's WCO
+    /// list), `build_attrmap_by_name(partrel, firstResultRel)` +
+    /// `map_variable_attnos(.., firstVarno, 0, attmap, partrel reltype)` it into
+    /// the leaf partition's attribute numbers, `ExecInitQual` each
+    /// `WithCheckOption.qual`, and store `ri_WithCheckOptions` /
+    /// `ri_WithCheckOptionExprs` on the leaf `ResultRelInfo` (id into the EState
+    /// pool). The `leaf_part_rri` and `first_result_rel` give the partition's and
+    /// reference relation's tupdescs (read off the pool). The attmap build,
+    /// `map_variable_attnos` rewrite, and `ExecInitQual` are execExpr/rewrite-
+    /// owned. Allocated in the per-query context; fallible on OOM /
+    /// `ereport(ERROR)`.
+    pub fn partition_init_with_check_options<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        leaf_part_rri: types_nodes::RriId,
+        first_result_rel: types_nodes::RriId,
+        first_varno: types_core::primitive::Index,
+        ref_wco_list: &[types_nodes::nodes::Node<'mcx>],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The RETURNING map-and-build of `ExecInitPartitionInfo` (execPartition.c
+    /// L616-679): take `ref_returning_list` (the first plan's RETURNING list),
+    /// `build_attrmap_by_name(partrel, firstResultRel)` +
+    /// `map_variable_attnos(.., firstVarno, 0, attmap, partrel reltype)` it into
+    /// the leaf partition's attribute numbers, store `ri_returningList`, and
+    /// build `ri_projectReturning` via `ExecBuildProjectionInfo` using
+    /// `mtstate->ps.ps_ResultTupleSlot` / `ps_ExprContext` and the partition's
+    /// tupdesc. The attmap/rewrite/projection-build machinery is execExpr/
+    /// rewrite-owned. Allocated in the per-query context; fallible on OOM /
+    /// `ereport(ERROR)`.
+    pub fn partition_init_returning<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        leaf_part_rri: types_nodes::RriId,
+        first_result_rel: types_nodes::RriId,
+        first_varno: types_core::primitive::Index,
+        ref_returning_list: &[types_nodes::primnodes::TargetEntry<'mcx>],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The ON CONFLICT DO UPDATE `OnConflictSetState` build of
+    /// `ExecInitPartitionInfo` (execPartition.c L730-862): `makeNode(
+    /// OnConflictSetState)`, create the per-partition `oc_Existing` slot
+    /// (`table_slot_create(partrel)`), then `ExecGetRootToChildMap(leaf_part_rri)`
+    /// — when the map is `NULL` (rowtype matches root) reuse the root
+    /// `ri_onConflict`'s `oc_ProjSlot` / `oc_ProjInfo` / `oc_WhereClause`;
+    /// otherwise translate `on_conflict_set` twice (`map_variable_attnos` over
+    /// `INNER_VAR` then `firstVarno`, with `build_attrmap_by_name(partrel,
+    /// firstResultRel)`), `adjust_partition_colnos(on_conflict_cols)` to the
+    /// partition, `table_slot_create(partrel)` the projection slot, build the
+    /// UPDATE SET projection via `ExecBuildUpdateProjection`, and (when
+    /// `on_conflict_where` is non-NULL) map+`ExecInitQual` the WHERE clause.
+    /// Stores the built `OnConflictSetState` on `leaf_part_rri.ri_onConflict`.
+    /// All the slot create / attmap / projection / qual machinery is execExpr/
+    /// tableam/rewrite-owned. Allocated in the per-query context; fallible on
+    /// OOM / `ereport(ERROR)`.
+    pub fn partition_init_on_conflict_update<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        leaf_part_rri: types_nodes::RriId,
+        root_result_rel_info: types_nodes::RriId,
+        first_result_rel: types_nodes::RriId,
+        first_varno: types_core::primitive::Index,
+        on_conflict_set: &[types_nodes::primnodes::TargetEntry<'mcx>],
+        on_conflict_cols: &[i32],
+        on_conflict_where: Option<&types_nodes::nodes::Node<'mcx>>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The per-partition MERGE action map-and-build of `ExecInitPartitionInfo`
+    /// (execPartition.c L933-981): mirrors `exec_init_merge_actions_for_rel` but
+    /// for a leaf partition rel reached by tuple routing. Build
+    /// `build_attrmap_by_name(partrel, firstResultRel)`, map the join condition
+    /// `map_variable_attnos(ref_join_condition, firstVarno, attmap)` and
+    /// `ExecInitQual` it into `ri_MergeJoinCondition`, then for each
+    /// `MergeAction` in `ref_merge_action_list`: copy it, build the
+    /// `MergeActionState` (CMD_INSERT `ExecBuildProjectionInfo` over the
+    /// partition's `ri_newTupleSlot`; CMD_UPDATE
+    /// `adjust_partition_colnos_using_map(action->updateColnos, attmap)` +
+    /// `ExecBuildUpdateProjection`), map+`ExecInitQual` the action's `qual` into
+    /// `mas_whenqual`, and append into `ri_MergeActions[matchKind]`. The
+    /// `ExecInitMergeTupleSlots` gate (`!ri_projectNewInfoValid`) is the caller's;
+    /// the attmap/rewrite/projection/qual machinery is execExpr/rewrite-owned.
+    /// Allocated in the per-query context; fallible on OOM / `ereport(ERROR)`.
+    pub fn partition_init_merge_actions<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        leaf_part_rri: types_nodes::RriId,
+        first_result_rel: types_nodes::RriId,
+        first_varno: types_core::primitive::Index,
+        econtext: types_nodes::EcxtId,
+        ref_join_condition: Option<&types_nodes::nodes::Node<'mcx>>,
+        ref_merge_action_list: &[types_nodes::modifytable::MergeAction<'mcx>],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecProject(node->js.ps.ps_ProjInfo)` (executor.h): form the projection
     /// into the node's result slot, returning its slot id. Can `ereport(ERROR)`.
     pub fn exec_hashjoin_project<'mcx>(
@@ -430,4 +636,100 @@ seam_core::seam!(
         isnull: &mut bool,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `ExecPrepareExpr(node, estate)` (execExpr.c): compile a single
+    /// expression tree into an executable `ExprState` for use *outside* a
+    /// normal executor node (parent = NULL), switching into the EState's
+    /// per-query context first. Used by `ExecInitGenerated` to prepare the
+    /// stored-generated-column generation expressions. Allocated in the
+    /// per-query context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_prepare_expr<'mcx>(
+        node: &types_nodes::primnodes::Expr,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState>>
+);
+
+seam_core::seam!(
+    /// `ExecProject(resultRelInfo->ri_projectNew)` driven from a result
+    /// relation (the UPDATE/INSERT "new tuple" build in nodeModifyTable):
+    /// project through the relation's `ri_projectNew` projection, wiring its
+    /// econtext's `ecxt_outertuple = plan_slot` and (for UPDATE)
+    /// `ecxt_scantuple = old_slot`, and returning the projection's output slot
+    /// (`ri_newTupleSlot`). The projection lives on the pooled `ResultRelInfo`,
+    /// so the owner reads it by id. Fallible on `ereport(ERROR)`.
+    pub fn exec_project_new_tuple<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        plan_slot: types_nodes::SlotId,
+        old_slot: Option<types_nodes::SlotId>,
+    ) -> types_error::PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecBuildUpdateProjection(targetList, evalTargetList, targetColnos,
+    /// relDesc, econtext, slot, parent)` (execExpr.c): build the UPDATE
+    /// "new tuple" projection for a result relation, storing it on the pooled
+    /// `ResultRelInfo` (`ri_projectNew`, with `ri_projectNewInfoValid` set).
+    /// The `update_colnos` map relation columns to subplan output columns.
+    /// Allocated in the per-query context; fallible on OOM / `ereport(ERROR)`.
+    pub fn exec_build_update_projection<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        update_colnos: &[i32],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `foreach(ll, wcoList) { wcoExpr = ExecInitQual(wco->qual, &mtstate->ps);
+    /// wcoExprs = lappend(wcoExprs, wcoExpr); }` then `ri_WithCheckOptions =
+    /// wcoList; ri_WithCheckOptionExprs = wcoExprs;` (nodeModifyTable.c /
+    /// execExpr.c): compile every WITH CHECK OPTION constraint qual in `wco_list`
+    /// against `mtstate->ps` and store the list + the compiled expr states on
+    /// the pooled `ResultRelInfo`. The `WithCheckOption` node's `qual`
+    /// extraction and `ExecInitQual` compilation are owned by the rewrite/
+    /// execExpr units; the parse-node `qual` is not modeled in the trimmed
+    /// `Node` enum, so the whole per-rel compile is routed here. Fallible on
+    /// OOM / `ereport(ERROR)`.
+    pub fn exec_init_with_check_options<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        wco_list: &[types_nodes::nodes::Node<'mcx>],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecBuildProjectionInfo(rlist, econtext, slot, &mtstate->ps,
+    /// resultRelInfo->ri_RelationDesc->rd_att)` (execExpr.c): build the
+    /// RETURNING projection for one result relation from its RETURNING target
+    /// list `rlist` and the shared result slot/econtext set up on `mtstate->ps`
+    /// (`ps_ResultTupleSlot` / `ps_ExprContext`), storing the compiled
+    /// projection on the pooled `ResultRelInfo.ri_projectReturning` and the
+    /// list on `ri_returningList`. Allocated in the per-query context; fallible
+    /// on OOM / `ereport(ERROR)` (unsupported expression shapes).
+    pub fn exec_build_returning_projection<'mcx>(
+        mtstate: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+        rlist: &[types_nodes::TargetEntry<'mcx>],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecProject(resultRelInfo->ri_projectReturning)` (executor.h): form the
+    /// RETURNING projection for a result relation, returning its output slot
+    /// id. The caller (nodeModifyTable's `ExecProcessReturning`) has already
+    /// wired the projection's `pi_exprContext` slots
+    /// (`ecxt_scantuple`/`ecxt_outertuple`/`ecxt_oldtuple`/`ecxt_newtuple`) and
+    /// its `pi_state.flags` (the `EEO_FLAG_*` OLD/NEW bits); the owner just
+    /// evaluates the compiled projection. The projection lives on the pooled
+    /// `ResultRelInfo`, so the owner reads it by id. Can `ereport(ERROR)` from
+    /// a projection expression.
+    pub fn exec_project_returning<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        result_rel_info: types_nodes::RriId,
+    ) -> types_error::PgResult<types_nodes::SlotId>
 );

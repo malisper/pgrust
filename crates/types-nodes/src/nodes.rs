@@ -28,6 +28,7 @@ impl core::fmt::Display for NodeTag {
 // Plan-node tags (nodes/nodetags.h), copied as ports consume them. The values
 // are PostgreSQL 18.3's generated enumeration order.
 pub const T_Result: NodeTag = NodeTag(331);
+pub const T_SeqScan: NodeTag = NodeTag(339);
 pub const T_Append: NodeTag = NodeTag(334);
 pub const T_MergeAppend: NodeTag = NodeTag(335);
 pub const T_IndexScan: NodeTag = NodeTag(341);
@@ -37,6 +38,7 @@ pub const T_TableFuncScan: NodeTag = NodeTag(350);
 pub const T_CteScan: NodeTag = NodeTag(351);
 pub const T_NamedTuplestoreScan: NodeTag = NodeTag(352);
 pub const T_WorkTableScan: NodeTag = NodeTag(353);
+pub const T_ForeignScan: NodeTag = NodeTag(354);
 pub const T_TidRangeScan: NodeTag = NodeTag(346);
 pub const T_CustomScan: NodeTag = NodeTag(355);
 pub const T_MergeJoin: NodeTag = NodeTag(358);
@@ -117,6 +119,8 @@ pub enum Node<'mcx> {
     MergeAppend(crate::nodemergeappend::MergeAppend<'mcx>),
     /// `T_MergeJoin`.
     MergeJoin(crate::nodemergejoin::MergeJoin<'mcx>),
+    /// `T_Memoize`.
+    Memoize(crate::nodememoize::Memoize<'mcx>),
     /// `T_IndexOnlyScan`.
     IndexOnlyScan(crate::nodeindexonlyscan::IndexOnlyScan<'mcx>),
     /// `T_Limit`.
@@ -133,6 +137,10 @@ pub enum Node<'mcx> {
     Hash(crate::nodehashjoin::Hash<'mcx>),
     /// `T_TidRangeScan`.
     TidRangeScan(crate::nodetidrangescan::TidRangeScan<'mcx>),
+    /// `T_SeqScan`.
+    SeqScan(crate::nodeseqscan::SeqScan<'mcx>),
+    /// `T_ForeignScan`.
+    ForeignScan(crate::nodeforeigncustom::ForeignScan<'mcx>),
 }
 
 impl<'mcx> Node<'mcx> {
@@ -143,6 +151,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(_) => T_Material,
             Node::MergeAppend(_) => T_MergeAppend,
             Node::MergeJoin(_) => T_MergeJoin,
+            Node::Memoize(_) => crate::nodememoize::T_Memoize,
             Node::IndexOnlyScan(_) => T_IndexOnlyScan,
             Node::Limit(_) => T_Limit,
             Node::Sort(_) => T_Sort,
@@ -151,6 +160,8 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(_) => crate::nodehashjoin::T_HashJoin,
             Node::Hash(_) => crate::nodehashjoin::T_Hash,
             Node::TidRangeScan(_) => T_TidRangeScan,
+            Node::SeqScan(_) => T_SeqScan,
+            Node::ForeignScan(_) => T_ForeignScan,
         }
     }
 
@@ -161,6 +172,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(m) => &m.plan,
             Node::MergeAppend(m) => &m.plan,
             Node::MergeJoin(m) => &m.join.plan,
+            Node::Memoize(m) => &m.plan,
             Node::IndexOnlyScan(m) => &m.scan.plan,
             Node::Limit(m) => &m.plan,
             Node::Sort(s) => &s.plan,
@@ -169,6 +181,8 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(h) => &h.join.plan,
             Node::Hash(h) => &h.plan,
             Node::TidRangeScan(t) => &t.scan.plan,
+            Node::SeqScan(s) => &s.scan.plan,
+            Node::ForeignScan(f) => &f.scan.plan,
         }
     }
 
@@ -185,6 +199,7 @@ impl<'mcx> Node<'mcx> {
             Node::Material(m) => Ok(Node::Material(m.clone_in(mcx)?)),
             Node::MergeAppend(m) => Ok(Node::MergeAppend(m.clone_in(mcx)?)),
             Node::MergeJoin(m) => Ok(Node::MergeJoin(m.clone_in(mcx)?)),
+            Node::Memoize(m) => Ok(Node::Memoize(m.clone_in(mcx)?)),
             Node::IndexOnlyScan(m) => Ok(Node::IndexOnlyScan(m.clone_in(mcx)?)),
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
@@ -193,6 +208,8 @@ impl<'mcx> Node<'mcx> {
             Node::HashJoin(h) => Ok(Node::HashJoin(h.clone_in(mcx)?)),
             Node::Hash(h) => Ok(Node::Hash(h.clone_in(mcx)?)),
             Node::TidRangeScan(t) => Ok(Node::TidRangeScan(t.clone_in(mcx)?)),
+            Node::SeqScan(s) => Ok(Node::SeqScan(s.clone_in(mcx)?)),
+            Node::ForeignScan(f) => Ok(Node::ForeignScan(f.clone_in(mcx)?)),
         }
     }
 }

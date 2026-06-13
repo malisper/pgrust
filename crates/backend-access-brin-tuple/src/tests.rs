@@ -106,6 +106,7 @@ fn make_index_rel<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> types_rel::Relatio
             reltablespace: 0,
             relfilenode: 0,
             relisshared: false,
+            relhasindex: false,
             relhassubclass: false,
             relpersistence: b'p',
             relkind: b'i',

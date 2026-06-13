@@ -40,13 +40,15 @@ use backend_executor_execExpr_seams as exec_expr;
 use backend_executor_execGrouping_seams as exec_grouping;
 use backend_executor_execProcnode_seams as exec_procnode;
 use backend_executor_execTuples_seams as exec_tuples;
+use backend_executor_execUtils_seams as executils;
+use backend_access_common_tupdesc_seams as tupdesc;
 use backend_nodes_core_seams as bms;
 use backend_optimizer_path_costsize_seams as costsize;
 use backend_tcop_postgres_seams as tcop;
 use backend_utils_adt_arrayfuncs_seams as arrayfuncs;
+use backend_utils_fmgr_fmgr_seams as fmgr;
 
 use exec_expr::ProjectionKind;
-use exec_grouping::HashTableKind;
 use mcx::{vec_with_capacity_in, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
@@ -57,6 +59,7 @@ use types_nodes::primnodes::SubLinkType;
 use types_nodes::{Bitmapset, EStateData, EcxtId};
 
 type Astate<'mcx> = arrayfuncs::ArrayBuildStateAnyHandle<'mcx>;
+type HashTable<'mcx> = types_nodes::nodeagg::TupleHashTable<'mcx>;
 
 // ===========================================================================
 // postgres.h inline helpers (pure node-layer).
@@ -142,8 +145,7 @@ fn ExecHashSubPlan<'mcx>(
 
     // If first time through or we need to rescan the subplan, build the hash
     // table.  (node->hashtable == NULL || planstate->chgParam != NULL)
-    let need_build = !exec_grouping::hash_table_present::call(node, HashTableKind::Main)
-        || planstate_chgparam_set(node);
+    let need_build = node.hashtable.is_none() || planstate_chgparam_set(node);
     if need_build {
         buildSubPlanHash(node, econtext, estate)?;
     }
@@ -163,15 +165,15 @@ fn ExecHashSubPlan<'mcx>(
 
     let havehashrows = node.havehashrows;
     let havenullrows = node.havenullrows;
-    let has_hashnulls = exec_grouping::hash_table_present::call(node, HashTableKind::Nulls);
+    let has_hashnulls = node.hashnulls.is_some();
 
     // If the LHS is all non-null, probe for an exact match in the main hash
     // table.  If we find one, TRUE. Otherwise scan the partly-null table for an
     // UNKNOWN; otherwise FALSE.
     if slotNoNulls(node, estate, ProjectionKind::Left)? {
-        if havehashrows && exec_grouping::find_tuple_hash_entry_main::call(node, estate)? {
+        if havehashrows && find_tuple_hash_entry_main(node, estate)? {
             result = true;
-        } else if havenullrows && findPartialMatch(node, estate, HashTableKind::Nulls)? {
+        } else if havenullrows && findPartialMatch(node, estate, true)? {
             *isNull = true;
         }
     }
@@ -182,9 +184,9 @@ fn ExecHashSubPlan<'mcx>(
         *isNull = true;
     }
     // Scan partly-null table first, since more likely to get a match.
-    else if havenullrows && findPartialMatch(node, estate, HashTableKind::Nulls)? {
+    else if havenullrows && findPartialMatch(node, estate, true)? {
         *isNull = true;
-    } else if havehashrows && findPartialMatch(node, estate, HashTableKind::Main)? {
+    } else if havehashrows && findPartialMatch(node, estate, false)? {
         *isNull = true;
     }
 
@@ -193,7 +195,9 @@ fn ExecHashSubPlan<'mcx>(
     exec_expr::sub_clear_proj_result_slot::call(node, estate, ProjectionKind::Left)?;
 
     // Also must reset the hashtempcxt after each hashtable lookup.
-    exec_grouping::reset_hashtempcxt::call(node);
+    if let Some(c) = node.hashtempcxt.as_mut() {
+        c.reset();
+    }
 
     Ok(BoolGetDatum(result))
 }
@@ -410,7 +414,9 @@ fn buildSubPlanHash<'mcx>(
     // If we already had any hash tables, reset 'em; otherwise create empty hash
     // table(s).  The input slot for each hash table is the ExecProject() result,
     // so we use TTSOpsVirtual for the input ops.
-    exec_grouping::reset_hashtablecxt::call(node);
+    if let Some(c) = node.hashtablecxt.as_mut() {
+        c.reset();
+    }
     node.havehashrows = false;
     node.havenullrows = false;
 
@@ -421,10 +427,11 @@ fn buildSubPlanHash<'mcx>(
         nbuckets = 1;
     }
 
-    if exec_grouping::hash_table_present::call(node, HashTableKind::Main) {
-        exec_grouping::reset_tuple_hash_table::call(node, HashTableKind::Main)?;
+    if node.hashtable.is_some() {
+        exec_grouping::reset_tuple_hash_table::call(node.hashtable.as_mut().unwrap())?;
     } else {
-        exec_grouping::build_tuple_hash_table::call(node, estate, HashTableKind::Main, nbuckets)?;
+        let ht = build_subplan_hash_table(node, estate, nbuckets)?;
+        node.hashtable = Some(ht);
     }
 
     if !unknownEqFalse {
@@ -437,15 +444,14 @@ fn buildSubPlanHash<'mcx>(
             }
         }
 
-        if exec_grouping::hash_table_present::call(node, HashTableKind::Nulls) {
-            exec_grouping::reset_tuple_hash_table::call(node, HashTableKind::Nulls)?;
+        if node.hashnulls.is_some() {
+            exec_grouping::reset_tuple_hash_table::call(node.hashnulls.as_mut().unwrap())?;
         } else {
-            exec_grouping::build_tuple_hash_table::call(
-                node, estate, HashTableKind::Nulls, nbuckets,
-            )?;
+            let ht = build_subplan_hash_table(node, estate, nbuckets)?;
+            node.hashnulls = Some(ht);
         }
     } else {
-        exec_grouping::clear_hashnulls::call(node);
+        node.hashnulls = None;
     }
 
     // The C switches to the per-query context (econtext->ecxt_per_query_memory
@@ -476,10 +482,22 @@ fn buildSubPlanHash<'mcx>(
 
         // If result contains any nulls, store separately or not at all.
         if slotNoNulls(node, estate, ProjectionKind::Right)? {
-            exec_grouping::lookup_tuple_hash_entry::call(node, estate, HashTableKind::Main)?;
+            let slot = exec_expr::sub_proj_result_slot_id::call(node, estate, ProjectionKind::Right);
+            exec_grouping::lookup_tuple_hash_entry::call(
+                node.hashtable.as_mut().unwrap(),
+                slot,
+                estate,
+                &mut |_e, _add| {},
+            )?;
             node.havehashrows = true;
-        } else if exec_grouping::hash_table_present::call(node, HashTableKind::Nulls) {
-            exec_grouping::lookup_tuple_hash_entry::call(node, estate, HashTableKind::Nulls)?;
+        } else if node.hashnulls.is_some() {
+            let slot = exec_expr::sub_proj_result_slot_id::call(node, estate, ProjectionKind::Right);
+            exec_grouping::lookup_tuple_hash_entry::call(
+                node.hashnulls.as_mut().unwrap(),
+                slot,
+                estate,
+                &mut |_e, _add| {},
+            )?;
             node.havenullrows = true;
         }
 
@@ -487,7 +505,9 @@ fn buildSubPlanHash<'mcx>(
         reset_inner_expr_context(node, estate)?;
 
         // Also must reset the hashtempcxt after each hashtable lookup.
-        exec_grouping::reset_hashtempcxt::call(node);
+        if let Some(c) = node.hashtempcxt.as_mut() {
+            c.reset();
+        }
     }
 
     // Clear the projRight result slot before any chance of a sub-query context
@@ -495,6 +515,73 @@ fn buildSubPlanHash<'mcx>(
     exec_expr::sub_clear_proj_result_slot::call(node, estate, ProjectionKind::Right)?;
 
     Ok(())
+}
+
+/// `BuildTupleHashTable(node->parent, node->descRight, &TTSOpsVirtual, ncols,
+/// node->keyColIdx, node->tab_eq_funcoids, node->tab_hash_funcs,
+/// node->tab_collations, nbuckets, 0, node->planstate->state->es_query_cxt,
+/// node->hashtablecxt, node->hashtempcxt, false)` (buildSubPlanHash). Both the
+/// main and the nulls table are built with identical arguments (only `nbuckets`
+/// differs), so the call is factored here.
+///
+/// The input descriptor is `node->descRight`; the C `BuildTupleHashTable` makes
+/// its own `CreateTupleDescCopy`, so we hand it a fresh copy and keep the node's
+/// `descRight` intact for the second build.
+fn build_subplan_hash_table<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    nbuckets: i64,
+) -> PgResult<alloc::boxed::Box<HashTable<'mcx>>> {
+    let mcx = estate.es_query_cxt;
+    let ncols = node.numCols;
+
+    // node->descRight (input row type); copy it for the table to own.
+    let desc_src = node
+        .descRight
+        .as_deref()
+        .ok_or_else(|| elog_internal("subplan descRight is NULL"))?;
+    let input_desc = Some(tupdesc::create_tupledesc_copy::call(mcx, desc_src)?);
+
+    let key_col_idx = node.keyColIdx.as_deref().unwrap_or(&[]);
+    let tab_eq_funcoids = node.tab_eq_funcoids.as_deref().unwrap_or(&[]);
+    let tab_hash_funcs = node.tab_hash_funcs.as_deref().unwrap_or(&[]);
+    let tab_collations = node.tab_collations.as_deref().unwrap_or(&[]);
+
+    // C: BuildTupleHashTable(node->parent, ..., es_query_cxt /*metacxt*/,
+    //    node->hashtablecxt /*tablecxt*/, node->hashtempcxt /*tempcxt*/, false).
+    // The seam borrows these three contexts (matching C's pointer aliasing): the
+    // node keeps owning `hashtablecxt`/`hashtempcxt` and resets them itself, and
+    // both the main and the nulls table alias the SAME caller-owned pair.
+    //   metacxt  = &estate->es_query_cxt's MemoryContext
+    //   tablecxt = &node->hashtablecxt
+    //   tempcxt  = &node->hashtempcxt
+    let metacxt = estate.es_query_cxt.context();
+    let tablecxt = node
+        .hashtablecxt
+        .as_ref()
+        .ok_or_else(|| elog_internal("subplan hashtablecxt is NULL"))?;
+    let tempcxt = node
+        .hashtempcxt
+        .as_ref()
+        .ok_or_else(|| elog_internal("subplan hashtempcxt is NULL"))?;
+
+    exec_grouping::build_tuple_hash_table::call(
+        mcx,
+        None, // C node->parent (PlanState) is not carried in the owned model.
+        input_desc,
+        types_nodes::TupleSlotKind::Virtual,
+        ncols,
+        key_col_idx,
+        tab_eq_funcoids,
+        tab_hash_funcs,
+        tab_collations,
+        nbuckets,
+        0,
+        metacxt,
+        tablecxt,
+        tempcxt,
+        false,
+    )
 }
 
 /// `execTuplesUnequal` — return true if two tuples are definitely unequal in the
@@ -507,11 +594,22 @@ fn buildSubPlanHash<'mcx>(
 fn execTuplesUnequal<'mcx>(
     node: &mut SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    which: HashTableKind,
+    is_nulls: bool,
     num_cols: i32,
 ) -> PgResult<bool> {
-    // Reset (and conceptually switch into) the table's temp/eval context.
-    exec_grouping::reset_hash_eval_context::call(node, which);
+    // The hashtable whose tableslot holds the entry being compared (slot2 in
+    // the C) and whose keyColIdx/tab_collations/tempcxt drive the comparison.
+    let ht = subplan_hash_table_mut(node, is_nulls);
+
+    // Reset (and conceptually switch into) the table's temp/eval context
+    // (`hashtable->tempcxt`).
+    if let Some(c) = ht.tempcxt.as_mut() {
+        c.reset();
+    }
+    // hashtable->tableslot — where findPartialMatch stored the scanned entry.
+    let tableslot = ht
+        .tableslot
+        .ok_or_else(|| elog_internal("subplan hashtable has no tableslot"))?;
 
     let mut result = false;
 
@@ -524,22 +622,30 @@ fn execTuplesUnequal<'mcx>(
         }
 
         // att = matchColIdx[i] (= hashtable->keyColIdx[i]).
-        let att = exec_grouping::hash_table_key_col_idx::call(node, which, i);
+        let att = subplan_hash_table_ref(node, is_nulls).keyColIdx.as_ref().unwrap()[i as usize];
 
         let attr1 = exec_expr::proj_left_slot_getattr::call(node, estate, att)?;
         if attr1.isnull {
             continue; // can't prove anything here
         }
 
-        let attr2 = exec_grouping::tableslot_getattr::call(node, which, att)?;
+        // attr2 = slot_getattr(hashtable->tableslot, att, &isNull2);
+        let attr2 = exec_tuples::slot_getattr_by_id::call(estate, tableslot, att)?;
         if attr2.isnull {
             continue; // can't prove anything here
         }
 
         // Apply the type-specific equality function.
-        let collation = exec_grouping::hash_table_collation::call(node, which, i);
-        if !DatumGetBool(exec_grouping::cur_eq_func_call2coll::call(
-            node, which, i, collation, attr1.value, attr2.value,
+        //   FunctionCall2Coll(&eqfunctions[i], collations[i], attr1, attr2)
+        // eqfunctions are node->cur_eq_funcs (the caller-provided cross-type
+        // functions); collations are hashtable->tab_collations.
+        let collation = subplan_hash_table_ref(node, is_nulls).tab_collations.as_ref().unwrap()[i as usize];
+        let fn_oid = node.cur_eq_funcs.as_ref().unwrap()[i as usize].fn_oid;
+        if !DatumGetBool(fmgr::function_call2_coll::call(
+            fn_oid,
+            collation,
+            attr1.value,
+            attr2.value,
         )?) {
             result = true; // they are unequal
             break;
@@ -557,30 +663,83 @@ fn execTuplesUnequal<'mcx>(
 fn findPartialMatch<'mcx>(
     node: &mut SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    which: HashTableKind,
+    is_nulls: bool,
 ) -> PgResult<bool> {
-    let num_cols = exec_grouping::hash_table_num_cols::call(node, which);
+    // int numCols = hashtable->numCols;
+    let num_cols = subplan_hash_table_ref(node, is_nulls).numCols;
 
-    exec_grouping::init_tuple_hash_iterator::call(node, which)?;
+    // InitTupleHashIterator(hashtable, &hashiter);
+    let iter = exec_grouping::init_tuple_hash_iterator::call(subplan_hash_table_mut(node, is_nulls));
+    node.hashiter = iter;
+
     loop {
         // entry = ScanTupleHashTable(...); if NULL break;
         // ExecStoreMinimalTuple(TupleHashEntryGetTuple(entry), tableslot, false)
         // is folded into scan_tuple_hash_table, which returns whether an entry
         // was produced (and, if so, stored its tuple in the table's tableslot).
-        let produced = exec_grouping::scan_tuple_hash_table::call(node, which)?;
+        let mut iter = node.hashiter;
+        let produced = exec_grouping::scan_tuple_hash_table::call(
+            subplan_hash_table_mut(node, is_nulls),
+            &mut iter,
+            estate,
+            &mut |_e, _add| {},
+        )?;
+        node.hashiter = iter;
         if !produced {
             break;
         }
 
         tcop::check_for_interrupts::call()?;
 
-        if !execTuplesUnequal(node, estate, which, num_cols)? {
-            exec_grouping::term_tuple_hash_iterator::call(node, which);
+        if !execTuplesUnequal(node, estate, is_nulls, num_cols)? {
+            exec_grouping::term_tuple_hash_iterator::call(&mut node.hashiter);
             return Ok(true);
         }
     }
     // No TermTupleHashIterator call needed here.
     Ok(false)
+}
+
+/// `FindTupleHashEntry(node->hashtable, slot, node->cur_eq_comp,
+/// node->lhs_hash_expr) != NULL` (ExecHashSubPlan) — probe the main table for an
+/// exact match of the projected LHS tuple.
+fn find_tuple_hash_entry_main<'mcx>(
+    node: &mut SubPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    // slot = projLeft result slot; the canonical seam takes its SlotId.
+    let slot = exec_expr::sub_proj_result_slot_id::call(node, estate, ProjectionKind::Left);
+    // Borrow the table mutably alongside the two compiled ExprStates; these are
+    // disjoint fields, so destructure to take simultaneous disjoint borrows.
+    let SubPlanState { hashtable, cur_eq_comp, lhs_hash_expr, .. } = node;
+    let ht = hashtable.as_mut().unwrap();
+    exec_grouping::find_tuple_hash_entry::call(ht, slot, cur_eq_comp, lhs_hash_expr, estate)
+}
+
+/// `&mut *node->hashtable` or `&mut *node->hashnulls`, selected by `is_nulls`.
+#[inline]
+fn subplan_hash_table_mut<'a, 'mcx>(
+    node: &'a mut SubPlanState<'mcx>,
+    is_nulls: bool,
+) -> &'a mut HashTable<'mcx> {
+    if is_nulls {
+        node.hashnulls.as_mut().unwrap()
+    } else {
+        node.hashtable.as_mut().unwrap()
+    }
+}
+
+/// `&*node->hashtable` or `&*node->hashnulls`, selected by `is_nulls`.
+#[inline]
+fn subplan_hash_table_ref<'a, 'mcx>(
+    node: &'a SubPlanState<'mcx>,
+    is_nulls: bool,
+) -> &'a HashTable<'mcx> {
+    if is_nulls {
+        node.hashnulls.as_ref().unwrap()
+    } else {
+        node.hashtable.as_ref().unwrap()
+    }
 }
 
 /// `slotAllNulls` — is the (projection result) slot completely NULL?
@@ -668,8 +827,19 @@ pub fn ExecInitSubPlan<'mcx>(
     // If we are going to hash the subquery output, initialize relevant stuff.
     // (We don't create the hashtable until needed.)
     if useHashTable {
-        // Memory contexts for the hash table(s) + a short-lived exprcontext.
-        exec_grouping::create_hash_contexts::call(&mut sstate, estate)?;
+        // Memory contexts for the hash table(s) + a short-lived exprcontext
+        // (nodeSubplan.c:897-907). The C creates two AllocSet children of
+        // CurrentMemoryContext (here the per-query context) plus a fresh
+        // ExprContext.
+        //   sstate->hashtablecxt = AllocSetContextCreate(CurrentMemoryContext,
+        //       "Subplan HashTable Context", ALLOCSET_DEFAULT_SIZES);
+        //   sstate->hashtempcxt = AllocSetContextCreate(CurrentMemoryContext,
+        //       "Subplan HashTable Temp Context", ALLOCSET_SMALL_SIZES);
+        //   sstate->innerecontext = CreateExprContext(estate);
+        sstate.hashtablecxt = Some(estate.es_query_cxt.context().new_child("Subplan HashTable Context"));
+        sstate.hashtempcxt =
+            Some(estate.es_query_cxt.context().new_child("Subplan HashTable Temp Context"));
+        sstate.innerecontext = Some(executils::create_expr_context::call(estate)?);
 
         // Combining-operator list classification:
         //   IsA(testexpr, OpExpr)   -> one combining operator

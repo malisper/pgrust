@@ -17,12 +17,17 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+#![allow(clippy::result_large_err)]
+
 use mcx::{Mcx, PgString, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
 use types_foreigncmds::{
     DefElem, FdwOwnerRow, FdwUpdateRow, ForeignDataWrapper, ForeignServer, ImportForeignSchemaStmt,
     ImportRawStmt, RawStmtHandle, ServerOwnerRow, ServerUpdateRow,
+};
+use types_nodes::{
+    AsyncRequest, EStateData, FdwRoutine, ForeignScanState, ParallelContext, ParallelWorkerContext,
 };
 
 /* ---- read accessors (foreign/foreign.c) ---- */
@@ -307,4 +312,187 @@ seam_core::seam!(
         serverid: Oid,
         options: Option<&[DefElem<'mcx>]>,
     ) -> PgResult<()>
+);
+
+// ===========================================================================
+// FDW-routine lookup (foreign/foreign.c) and FDW-provider callbacks
+// (foreign/fdwapi.h) — reached by backend-executor-nodeForeignscan.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// foreign/foreign.c — FDW handler-table lookup.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `GetFdwRoutineForRelation(relation, makecopy)` (foreign.c): resolve the
+    /// FDW handler table for the relation `node.ss.ss_currentRelation`
+    /// (already opened), returning the trimmed presence table. Reads the
+    /// relcache / `pg_foreign_*` catalogs (fallible: `ereport(ERROR)` on a bad
+    /// handler).
+    pub fn get_fdw_routine_for_relation<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<FdwRoutine>
+);
+
+seam_core::seam!(
+    /// `GetFdwRoutineByServerId(serverid)` (foreign.c): resolve the FDW handler
+    /// table from the foreign-server OID (used when `scanrelid == 0`, i.e. a
+    /// pushed-down join with no base relation). Fallible.
+    pub fn get_fdw_routine_by_server_id(serverid: Oid) -> PgResult<FdwRoutine>
+);
+
+// ---------------------------------------------------------------------------
+// FDW-provider callbacks (fdwapi.h). The provider stores per-scan state in
+// `node.fdw_state` and writes result tuples into the node's scan slot
+// (`node.ss.ss_ScanTupleSlot`, addressed in the EState slot pool).
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `node->fdwroutine->BeginForeignScan(node, eflags)`.
+    pub fn begin_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        eflags: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->fdwroutine->BeginDirectModify(node, eflags)`.
+    pub fn begin_direct_modify<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        eflags: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `slot = node->fdwroutine->IterateForeignScan(node)` (SELECT): the FDW
+    /// stores the next tuple into the node's scan slot and the seam returns
+    /// whether a tuple is available (the C `!TupIsNull(slot)`).
+    pub fn iterate_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `slot = node->fdwroutine->IterateDirectModify(node)`. Same convention as
+    /// [`iterate_foreign_scan`].
+    pub fn iterate_direct_modify<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `node->fdwroutine->ReScanForeignScan(node)`.
+    pub fn rescan_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->fdwroutine->EndForeignScan(node)`.
+    pub fn end_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->fdwroutine->EndDirectModify(node)`.
+    pub fn end_direct_modify<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->fdwroutine->RecheckForeignScan(node, slot)` — recheck a tuple in
+    /// an EvalPlanQual recheck (the node has verified the callback is present).
+    /// Returns the FDW's verdict; the FDW may replace the slot's tuple in place.
+    pub fn recheck_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `slot->tts_tableOid = RelationGetRelid(node->ss.ss_currentRelation)`:
+    /// stamp the `tableoid` system column into the FDW-returned scan slot, only
+    /// when `plan->fsSystemCol` and the slot is non-empty. Reads the relid from
+    /// the relcache entry and writes the slot payload (slot-owned), so it is
+    /// reached through this seam until the slot payload model lands.
+    pub fn stamp_scan_slot_tableoid<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
+);
+
+// --- parallel DSM callbacks ---
+
+seam_core::seam!(
+    /// `node->pscan_len = node->fdwroutine->EstimateDSMForeignScan(node, pcxt)`.
+    pub fn estimate_dsm_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        pcxt: &mut ParallelContext,
+    ) -> PgResult<usize>
+);
+
+seam_core::seam!(
+    /// `node->fdwroutine->InitializeDSMForeignScan(node, pcxt, coordinate)` —
+    /// the coordinate is the DSM chunk `shm_toc_allocate` returned (storage-
+    /// owned); the provider initializes it and the node inserts it into the TOC.
+    pub fn initialize_dsm_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        pcxt: &mut ParallelContext,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->fdwroutine->ReInitializeDSMForeignScan(node, pcxt, coordinate)`.
+    pub fn reinitialize_dsm_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        pcxt: &mut ParallelContext,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->fdwroutine->InitializeWorkerForeignScan(node, pwcxt->toc, coordinate)`.
+    pub fn initialize_worker_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        pwcxt: &mut ParallelWorkerContext,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `node->fdwroutine->ShutdownForeignScan(node)` (the node verified the
+    /// callback is present).
+    pub fn shutdown_foreign_scan<'mcx>(
+        node: &mut ForeignScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
+);
+
+// --- async-execution callbacks ---
+//
+// The three async entry points take `AsyncRequest *areq` and reach the
+// requestee's `fdwroutine` via `node = (ForeignScanState *) areq->requestee`.
+// In the owned tree the requestee is reached inside the seam.
+
+seam_core::seam!(
+    /// `((ForeignScanState *) areq->requestee)->fdwroutine->ForeignAsyncRequest(areq)`.
+    pub fn foreign_async_request(areq: &mut AsyncRequest) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `...->fdwroutine->ForeignAsyncConfigureWait(areq)`.
+    pub fn foreign_async_configure_wait(areq: &mut AsyncRequest) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `...->fdwroutine->ForeignAsyncNotify(areq)`.
+    pub fn foreign_async_notify(areq: &mut AsyncRequest) -> PgResult<()>
 );

@@ -3184,6 +3184,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-executor-nodeMemoize"
+version = "0.0.0"
+dependencies = [
+ "backend-access-transam-parallel-seams",
+ "backend-executor-execAmi-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execParallel-support-seams",
+ "backend-executor-execProcnode-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-executor-nodeHash-seams",
+ "backend-executor-nodeMemoize-seams",
+ "backend-nodes-core-seams",
+ "backend-tcop-postgres-seams",
+ "backend-utils-adt-datum-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-execparallel",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-executor-nodeMemoize-seams"
 version = "0.0.0"
 dependencies = [
@@ -5936,6 +5963,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-datum",
+ "types-error",
 ]
 
 [[package]]
@@ -7674,6 +7702,7 @@ dependencies = [
  "backend-executor-nodeHash",
  "backend-executor-nodeHashjoin",
  "backend-executor-nodeMaterial",
+ "backend-executor-nodeMemoize",
  "backend-executor-nodeMergejoin",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",

@@ -71,6 +71,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bms_nonempty_difference(a, b)` (bitmapset.c): is there a member of `a`
+    /// that is not in `b`? Computes `a - b` and reports whether it is nonempty
+    /// without materializing the difference; a `None` set is the C NULL (empty).
+    /// Infallible (no allocation).
+    pub fn bms_nonempty_difference(
+        a: Option<&types_nodes::Bitmapset<'_>>,
+        b: Option<&types_nodes::Bitmapset<'_>>,
+    ) -> bool
+);
+
+seam_core::seam!(
     /// `bms_copy(a)` (bitmapset.c): a palloc'd duplicate of `a` (a `None` input
     /// is the C NULL, copied as `None`). Allocates in `mcx`, so fallible on OOM.
     pub fn bms_copy<'mcx>(
@@ -88,6 +99,17 @@ seam_core::seam!(
         a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
         b: Option<&types_nodes::Bitmapset<'_>>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `bms_del_member(a, x)` (bitmapset.c): remove `x` from the set,
+    /// recycling the input (the C clears the bit in place and returns `a`,
+    /// shrinking `nwords` if trailing words become zero; a `None` input is
+    /// the C NULL set, returned unchanged). No allocation, so infallible.
+    pub fn bms_del_member<'mcx>(
+        a: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>,
+        x: i32,
+    ) -> Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>
 );
 
 // === tidbitmap (tidbitmap.c) ===============================================

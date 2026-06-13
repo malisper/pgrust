@@ -197,6 +197,76 @@ seam_core::seam!(
 );
 
 // ---------------------------------------------------------------------------
+// logtape.c — the logical-tape spill surface the hash-agg spill path drives.
+// `LogicalTapeSet *` / `LogicalTape *` cross as the opaque handles from
+// `types_nodes::nodeagg`; the owner names the concrete state when it lands.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `LogicalTapeSetCreate(preallocate, fileset, worker)` (logtape.c):
+    /// create a tape set. The hash-agg path passes no `SharedFileSet`
+    /// (non-parallel spill) — `fileset = NULL`, `worker = -1`. The set is
+    /// pallocked in the caller's context, so creation is fallible on OOM.
+    pub fn logical_tape_set_create<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        preallocate: bool,
+        worker: i32,
+    ) -> types_error::PgResult<types_nodes::nodeagg::LogicalTapeSetHandle>
+);
+
+seam_core::seam!(
+    /// `LogicalTapeSetClose(lts)` (logtape.c): destroy the tape set and its
+    /// underlying `BufFile`. Infallible (close paths do not `ereport(ERROR)`).
+    pub fn logical_tape_set_close(lts: types_nodes::nodeagg::LogicalTapeSetHandle)
+);
+
+seam_core::seam!(
+    /// `LogicalTapeSetBlocks(lts)` (logtape.c): number of blocks used by the
+    /// set (the agg disk-usage metric reads this).
+    pub fn logical_tape_set_blocks(lts: types_nodes::nodeagg::LogicalTapeSetHandle) -> i64
+);
+
+seam_core::seam!(
+    /// `LogicalTapeCreate(lts)` (logtape.c): allocate a new tape in the set.
+    pub fn logical_tape_create<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        lts: types_nodes::nodeagg::LogicalTapeSetHandle,
+    ) -> types_error::PgResult<types_nodes::nodeagg::LogicalTapeHandle>
+);
+
+seam_core::seam!(
+    /// `LogicalTapeClose(lt)` (logtape.c): release a single tape.
+    pub fn logical_tape_close(lt: types_nodes::nodeagg::LogicalTapeHandle)
+);
+
+seam_core::seam!(
+    /// `LogicalTapeWrite(lt, ptr, size)` (logtape.c): append `data` to the
+    /// tape. Flushing a full block can `ereport(ERROR)` on a write failure.
+    pub fn logical_tape_write(
+        lt: types_nodes::nodeagg::LogicalTapeHandle,
+        data: &[u8],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LogicalTapeRewindForRead(lt, buffer_size)` (logtape.c): switch the
+    /// tape from writing to reading, with the given read buffer size.
+    pub fn logical_tape_rewind_for_read(
+        lt: types_nodes::nodeagg::LogicalTapeHandle,
+        buffer_size: usize,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `LogicalTapeRead(lt, ptr, size)` (logtape.c): read up to `dst.len()`
+    /// bytes from the tape; returns the number of bytes actually read.
+    pub fn logical_tape_read(
+        lt: types_nodes::nodeagg::LogicalTapeHandle,
+        dst: &mut [u8],
+    ) -> types_error::PgResult<usize>
+);
+
+// ---------------------------------------------------------------------------
 //  Handle-threaded SharedTuplestore surface (nodeHash / parallel hash build).
 //  Same C functions as above; the `SharedTuplestoreAccessor *` is carried as
 //  the opaque `SharedTuplestoreAccessorHandle` token.
