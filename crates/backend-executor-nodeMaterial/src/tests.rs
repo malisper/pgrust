@@ -176,14 +176,14 @@ fn supply_rows<'mcx>(
 
 fn mock_exec_init_node<'mcx>(
     mcx: Mcx<'mcx>,
-    node: Option<&Node<'_>>,
+    node: Option<&'mcx Node<'mcx>>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<Option<PgBox<'mcx, PlanStateNode<'mcx>>>> {
     match node {
         None => Ok(None),
-        Some(Node::Material(m)) => {
-            let state = ExecInitMaterial(m, estate, eflags)?;
+        Some(node @ Node::Material(_)) => {
+            let state = ExecInitMaterial(node, estate, eflags)?;
             Ok(Some(alloc_in(mcx, PlanStateNode::Material(state))?))
         }
         Some(_) => unreachable!("only Material nodes exist"),
@@ -274,15 +274,16 @@ fn install_mocks() {
     });
 }
 
-/// Init a material state in `estate` and splice in a leaf child that produces
-/// rows from the thread-local supply.
+/// Init a material state in `estate` for `plan` (a `Node::Material` owned by
+/// the caller, since the state tree aliases it) and splice in a leaf child
+/// that produces rows from the thread-local supply.
 fn init_with_leaf_child<'mcx>(
+    plan: &'mcx Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgBox<'mcx, MaterialState<'mcx>> {
     let mcx = estate.es_query_cxt;
-    let mat = Material::default();
-    let mut matstate = ExecInitMaterial(&mat, estate, eflags).unwrap();
+    let mut matstate = ExecInitMaterial(plan, estate, eflags).unwrap();
     let mut leaf = MaterialState::default();
     leaf.ss.ps.ExecProcNode = Some(supply_rows);
     matstate.ss.ps.lefttree = Some(
@@ -295,22 +296,22 @@ fn init_with_leaf_child<'mcx>(
 fn init_material_accounting_is_exact() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
+    let plan = Node::Material(Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mat = Material::default();
 
-    let matstate = ExecInitMaterial(&mat, &mut estate, EXEC_FLAG_REWIND).unwrap();
+    let matstate = ExecInitMaterial(&plan, &mut estate, EXEC_FLAG_REWIND).unwrap();
 
     assert_eq!(matstate.eflags, EXEC_FLAG_REWIND);
     assert!(matstate.ss.ps.ps_ResultTupleSlot.is_some());
     assert!(matstate.ss.ss_ScanTupleSlot.is_some());
     assert!(matstate.ss.ps.lefttree.is_none());
     assert!(matstate.tuplestorestate.is_none());
-    // Every charged byte is identifiable: the state box, the owned plan-node
-    // copy, and the slot pool's backing storage.
+    // Every charged byte is identifiable: the state box and the slot pool's
+    // backing storage. The plan back-link aliases the caller's plan node
+    // (C: matstate->ss.ps.plan = (Plan *) node), so no plan copy is charged.
     assert_eq!(
         ctx.used(),
         size_of::<MaterialState<'static>>()
-            + size_of::<Node<'static>>()
             + estate.es_tupleTable.capacity() * size_of::<TupleTableSlot>()
     );
 }
@@ -319,9 +320,9 @@ fn init_material_accounting_is_exact() {
 fn backward_eflag_adds_rewind_and_shields_child() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
+    let plan = Node::Material(Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mat = Material::default();
-    let matstate = ExecInitMaterial(&mat, &mut estate, EXEC_FLAG_BACKWARD).unwrap();
+    let matstate = ExecInitMaterial(&plan, &mut estate, EXEC_FLAG_BACKWARD).unwrap();
     assert_eq!(matstate.eflags, EXEC_FLAG_BACKWARD | EXEC_FLAG_REWIND);
 }
 
@@ -329,8 +330,9 @@ fn backward_eflag_adds_rewind_and_shields_child() {
 fn eflags_zero_passes_rows_through_without_tuplestore() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
+    let plan = Node::Material(Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut node = init_with_leaf_child(&mut estate, 0);
+    let mut node = init_with_leaf_child(&plan, &mut estate, 0);
     SUPPLY.with(|c| c.set(1));
 
     assert!(ExecMaterial(&mut node, &mut estate).unwrap());
@@ -351,8 +353,9 @@ fn eflags_zero_passes_rows_through_without_tuplestore() {
 fn rewind_materializes_then_replays_without_rereading_subplan() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
+    let plan = Node::Material(Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut node = init_with_leaf_child(&mut estate, EXEC_FLAG_REWIND);
+    let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND);
     SUPPLY.with(|c| c.set(2));
 
     let used_before_store = ctx.used();
@@ -382,8 +385,9 @@ fn rewind_materializes_then_replays_without_rereading_subplan() {
 fn backward_scan_reads_back_from_store() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
+    let plan = Node::Material(Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut node = init_with_leaf_child(&mut estate, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD);
+    let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD);
     SUPPLY.with(|c| c.set(2));
 
     assert!(ExecMaterial(&mut node, &mut estate).unwrap());
@@ -400,8 +404,9 @@ fn backward_scan_reads_back_from_store() {
 fn mark_and_restore_copy_read_pointers() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
+    let plan = Node::Material(Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut node = init_with_leaf_child(&mut estate, EXEC_FLAG_REWIND | EXEC_FLAG_MARK);
+    let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND | EXEC_FLAG_MARK);
     SUPPLY.with(|c| c.set(2));
 
     assert!(ExecMaterial(&mut node, &mut estate).unwrap());
@@ -425,8 +430,9 @@ fn mark_and_restore_copy_read_pointers() {
 fn rescan_with_changed_params_drops_store_and_rescans_child() {
     install_mocks();
     let ctx = MemoryContext::new("per-query");
+    let plan = Node::Material(Material::default());
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut node = init_with_leaf_child(&mut estate, EXEC_FLAG_REWIND);
+    let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND);
     SUPPLY.with(|c| c.set(1));
 
     assert!(ExecMaterial(&mut node, &mut estate).unwrap());
@@ -469,8 +475,9 @@ fn all_bytes_return_on_drop() {
     let ctx = MemoryContext::new("per-query");
     let live_before = LIVE_STORES.with(|c| c.get());
     {
+        let plan = Node::Material(Material::default());
         let mut estate = EStateData::new_in(ctx.mcx());
-        let mut node = init_with_leaf_child(&mut estate, EXEC_FLAG_REWIND);
+        let mut node = init_with_leaf_child(&plan, &mut estate, EXEC_FLAG_REWIND);
         SUPPLY.with(|c| c.set(2));
         assert!(ExecMaterial(&mut node, &mut estate).unwrap());
         assert!(ExecMaterial(&mut node, &mut estate).unwrap());

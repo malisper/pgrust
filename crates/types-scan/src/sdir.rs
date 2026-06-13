@@ -1,7 +1,28 @@
 //! `ScanDirection` (`access/sdir.h`).
 
-pub type ScanDirection = i32;
+/// `ScanDirection` (`access/sdir.h`). The C values (-1/0/1) are preserved so
+/// `ScanDirectionCombine`-style arithmetic stays expressible via `as i32`.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ScanDirection {
+    BackwardScanDirection = -1,
+    NoMovementScanDirection = 0,
+    ForwardScanDirection = 1,
+}
 
-pub const BackwardScanDirection: ScanDirection = -1;
-pub const NoMovementScanDirection: ScanDirection = 0;
-pub const ForwardScanDirection: ScanDirection = 1;
+pub use ScanDirection::{BackwardScanDirection, ForwardScanDirection, NoMovementScanDirection};
+
+/// `ScanDirectionIsForward(direction)` (sdir.h).
+pub const fn ScanDirectionIsForward(direction: ScanDirection) -> bool {
+    matches!(direction, ForwardScanDirection)
+}
+
+/// `ScanDirectionIsBackward(direction)` (sdir.h).
+pub const fn ScanDirectionIsBackward(direction: ScanDirection) -> bool {
+    matches!(direction, BackwardScanDirection)
+}
+
+/// `ScanDirectionIsNoMovement(direction)` (sdir.h).
+pub const fn ScanDirectionIsNoMovement(direction: ScanDirection) -> bool {
+    matches!(direction, NoMovementScanDirection)
+}

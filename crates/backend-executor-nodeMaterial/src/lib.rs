@@ -35,12 +35,7 @@ use types_nodes::{
     EStateData, Material, MaterialState, PlanStateNode, SlotId, TupleSlotKind,
 };
 
-/// `EXEC_FLAG_REWIND` (executor.h) — expect rescan.
-const EXEC_FLAG_REWIND: i32 = 0x0004;
-/// `EXEC_FLAG_BACKWARD` (executor.h) — need backward scan.
-const EXEC_FLAG_BACKWARD: i32 = 0x0008;
-/// `EXEC_FLAG_MARK` (executor.h) — need mark/restore.
-const EXEC_FLAG_MARK: i32 = 0x0010;
+use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 
 /// Install this crate's implementations into its seam slots.
 ///
@@ -207,26 +202,33 @@ fn exec_material_node<'mcx>(
 /// The state tree is allocated in `estate.es_query_cxt` (C: `makeNode` in the
 /// per-query context current during `ExecInitNode`), so initialization is
 /// fallible on OOM.
+///
+/// Takes the enclosing plan-tree [`Node`](types_nodes::nodes::Node) (the C
+/// `Material *` is the same pointer, via struct embedding): the state's plan
+/// back-link aliases the shared, read-only plan tree exactly as C's
+/// `matstate->ss.ps.plan = (Plan *) node` does. Panics if the node is not a
+/// `Material` (the C `castNode`).
 pub fn ExecInitMaterial<'mcx>(
-    node: &Material<'_>,
+    node: &'mcx types_nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     mut eflags: i32,
 ) -> PgResult<PgBox<'mcx, MaterialState<'mcx>>> {
     let mcx = estate.es_query_cxt;
+
+    let material: &'mcx Material<'mcx> = match node {
+        types_nodes::nodes::Node::Material(m) => m,
+        other => panic!("castNode(Material, node) failed: {other:?}"),
+    };
 
     // create state structure
     //
     // makeNode(MaterialState); matstate->ss.ps.plan = (Plan *) node;
     // matstate->ss.ps.state = estate; matstate->ss.ps.ExecProcNode = ExecMaterial;
     //
-    // The plan back-link holds an owned copy of the (read-only at execution
-    // time) plan node; the EState back-link is the threaded `estate`
-    // parameter.
+    // The plan back-link aliases the caller's (read-only at execution time)
+    // plan node; the EState back-link is the threaded `estate` parameter.
     let mut matstate = alloc_in(mcx, MaterialState::default())?;
-    matstate.ss.ps.plan = Some(alloc_in(
-        mcx,
-        types_nodes::nodes::Node::Material(node.clone_in(mcx)?),
-    )?);
+    matstate.ss.ps.plan = Some(node);
     matstate.ss.ps.ExecProcNode = Some(exec_material_node);
 
     // We must have a tuplestore buffering the subplan output to do backward
@@ -260,7 +262,7 @@ pub fn ExecInitMaterial<'mcx>(
 
     // outerPlan = outerPlan(node);
     // outerPlanState(matstate) = ExecInitNode(outerPlan, estate, eflags);
-    let outerPlan = node.plan.lefttree.as_deref();
+    let outerPlan = material.plan.lefttree.as_deref();
     matstate.ss.ps.lefttree = execProcnode::exec_init_node::call(mcx, outerPlan, estate, eflags)?;
 
     // Initialize result type and slot. No need to initialize projection info

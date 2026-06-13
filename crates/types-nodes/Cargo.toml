@@ -11,5 +11,6 @@ path = "src/lib.rs"
 [dependencies]
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
+types-scan = { path = "../types-scan" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
