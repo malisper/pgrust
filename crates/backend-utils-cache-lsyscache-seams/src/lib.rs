@@ -36,6 +36,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `getBaseType(typid)` (lsyscache.c): resolve a domain type to its base
+    /// type (the identity for non-domains). A missing pg_type row along the
+    /// domain chain is the C `elog(ERROR, "cache lookup failed for type
+    /// %u")`, carried on `Err`.
+    pub fn get_base_type(typid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `get_namespace_name(nspid)` (lsyscache.c): the namespace's name,
     /// copied out of the syscache into `mcx` (C: `pstrdup`). A missing
     /// namespace is `Ok(None)` (C: NULL). `Err` includes OOM from the copy.

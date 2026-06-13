@@ -23,6 +23,16 @@ pub const RELPERSISTENCE_PERMANENT: u8 = b'p';
 pub const RELPERSISTENCE_UNLOGGED: u8 = b'u';
 pub const RELPERSISTENCE_TEMP: u8 = b't';
 
+/* `pg_class.relreplident` values (`catalog/pg_class.h`). */
+pub const REPLICA_IDENTITY_DEFAULT: u8 = b'd';
+pub const REPLICA_IDENTITY_NOTHING: u8 = b'n';
+pub const REPLICA_IDENTITY_FULL: u8 = b'f';
+pub const REPLICA_IDENTITY_INDEX: u8 = b'i';
+
+/* `pg_attribute.attgenerated` values (`catalog/pg_attribute.h`). */
+pub const ATTRIBUTE_GENERATED_STORED: i8 = b's' as i8;
+pub const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;
+
 /* ----------------------------------------------------------------
  * nodes/primnodes.h: RangeVar
  * ---------------------------------------------------------------- */
