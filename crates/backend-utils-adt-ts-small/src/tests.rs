@@ -24,13 +24,20 @@ use crate::util::{qt2qtn, qtn2qt, QTNEq, QTNSort, QTNTernary};
 const QI_SIZE: usize = 12;
 
 /// Install the recursion / interrupt guard seams as no-ops, once per process.
+///
+/// These seams are process-global (`OnceLock`-backed). A bare
+/// `if !is_installed() { set(..) }` is check-then-act: under parallel
+/// `cargo test` two tests can both observe "not installed" and both call
+/// `set`, and the second `set` panics ("seam installed twice"). `Once`
+/// makes the install atomic and blocks every caller until it completes, so
+/// install->use is race-free across all tests in this binary.
 fn install_seams() {
-    if !tcop::check_stack_depth::is_installed() {
+    use std::sync::Once;
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
         tcop::check_stack_depth::set(|| Ok(()));
-    }
-    if !tcop::check_for_interrupts::is_installed() {
         tcop::check_for_interrupts::set(|| Ok(()));
-    }
+    });
 }
 
 /// A simple spec for building test tsqueries.

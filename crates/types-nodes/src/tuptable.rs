@@ -13,7 +13,11 @@
 //! base, land here as [`SlotData`] — the live slot type the executor stores
 //! in `EState::es_tupleTable`.
 //!
-//! Mirroring C exactly (tuptable.h):
+//! Mirroring C exactly (tuptable.h); the body-bearing `HeapTuple`/`MinimalTuple`
+//! fields are carried as the [`FormedTuple`]/[`FormedMinimalTuple`] carriers
+//! (header + owned data-area bytes) the form/deform owner already produces, and
+//! the `tts_values` array element is the [`TupleValue`] by-value/by-reference
+//! enum (so a by-reference `Datum` is faithfully a pointer into owned bytes):
 //!
 //! * `VirtualTupleTableSlot { TupleTableSlot base; char *data; }`
 //! * `HeapTupleTableSlot   { TupleTableSlot base; HeapTuple tuple; uint32 off;
@@ -35,10 +39,10 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::primitive::{AttrNumber, Oid, Size};
-use types_datum::Datum;
 use types_error::PgResult;
 use types_storage::buf::Buffer;
-use types_tuple::heaptuple::{HeapTuple, HeapTupleData, ItemPointerData, MinimalTuple, TupleDesc};
+use types_tuple::backend_access_common_heaptuple::{FormedMinimalTuple, FormedTuple, TupleValue};
+use types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};
 
 use crate::executor::{TupleSlotKind, TupleTableSlot, TTS_FLAG_EMPTY};
 
@@ -66,8 +70,14 @@ pub struct SlotBase<'mcx> {
     pub tts_nvalid: AttrNumber,
     /// `TupleDesc tts_tupleDescriptor` — slot's tuple descriptor.
     pub tts_tupleDescriptor: TupleDesc<'mcx>,
-    /// `Datum *tts_values` — current per-attribute values.
-    pub tts_values: PgVec<'mcx, Datum>,
+    /// `Datum *tts_values` — current per-attribute values. Each element is a
+    /// [`TupleValue`] (`ByVal(Datum)` / `ByRef(bytes)`), faithfully modelling C's
+    /// `Datum *` where a by-reference `Datum` is a pointer into owned bytes:
+    /// `ByRef` carries the verbatim on-disk bytes (the same model the form/deform
+    /// owner produces/consumes), so the array can hold a by-reference column.
+    /// `slot_getattr`/`slot_getsysattr` project a single `Datum` back out
+    /// (`ByVal` directly, `ByRef` via the owner's pointer-bytes convention).
+    pub tts_values: PgVec<'mcx, TupleValue<'mcx>>,
     /// `bool *tts_isnull` — current per-attribute isnull flags.
     pub tts_isnull: PgVec<'mcx, bool>,
 }
@@ -116,8 +126,13 @@ pub struct VirtualTupleTableSlot<'mcx> {
 pub struct HeapTupleTableSlot<'mcx> {
     /// `TupleTableSlot base;`
     pub base: SlotBase<'mcx>,
-    /// `HeapTuple tuple;` — physical tuple.
-    pub tuple: HeapTuple<'mcx>,
+    /// `HeapTuple tuple;` — physical tuple. Carried as the body-bearing
+    /// [`FormedTuple`] (header `PgBox` + `data: PgVec<u8>` user-data bytes), the
+    /// faithful idiomatic stand-in for C's `HeapTuple` pointing at a contiguous
+    /// `HeapTupleHeaderData + (char*)tup + t_hoff` data area, which the
+    /// header-only [`HeapTuple`](types_tuple::heaptuple::HeapTuple) lacks. `None`
+    /// when no tuple is stored.
+    pub tuple: Option<FormedTuple<'mcx>>,
     /// `uint32 off;` — saved state for `slot_deform_heap_tuple`.
     pub off: u32,
     /// `HeapTupleData tupdata;` — optional workspace for storing tuple.
@@ -138,11 +153,20 @@ pub struct BufferHeapTupleTableSlot<'mcx> {
 pub struct MinimalTupleTableSlot<'mcx> {
     /// `TupleTableSlot base;`
     pub base: SlotBase<'mcx>,
-    /// `HeapTuple tuple;` — tuple wrapper (points at `minhdr`).
-    pub tuple: HeapTuple<'mcx>,
-    /// `MinimalTuple mintuple;` — minimal tuple, or NULL if none.
-    pub mintuple: MinimalTuple<'mcx>,
-    /// `HeapTupleData minhdr;` — workspace for minimal-tuple-only case.
+    /// `HeapTuple tuple;` — tuple wrapper (points at `minhdr`). Carried as the
+    /// body-bearing [`FormedTuple`] view over the minimal body (its `t_data`
+    /// header sits `MINIMAL_TUPLE_OFFSET` before the body bytes), so
+    /// `slot_deform`/`get_heap_tuple` see `(char*)tup + t_hoff` data. `None`
+    /// until the wrapper is set up.
+    pub tuple: Option<FormedTuple<'mcx>>,
+    /// `MinimalTuple mintuple;` — minimal tuple, or NULL if none. Carried as the
+    /// body-bearing [`FormedMinimalTuple`] (header `PgBox` + `data` body bytes)
+    /// that `heap_form_minimal_tuple`/`heap_copy_minimal_tuple`/
+    /// `minimal_tuple_from_heap_tuple` already return.
+    pub mintuple: Option<FormedMinimalTuple<'mcx>>,
+    /// `HeapTupleData minhdr;` — workspace for minimal-tuple-only case (the
+    /// header `tuple` points into; `minhdr.t_data` is `MINIMAL_TUPLE_OFFSET`
+    /// before the minimal body).
     pub minhdr: HeapTupleData<'mcx>,
     /// `uint32 off;` — saved state for `slot_deform_heap_tuple`.
     pub off: u32,
