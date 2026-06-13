@@ -581,7 +581,7 @@ fn heap_getattr<'mcx>(
         .as_ref()
         .expect("heap_getattr: tuple has no t_data");
     if attnum > HeapTupleHeaderGetNatts(header) as i32 {
-        return Ok(getmissingattr(tupdesc, attnum));
+        return getmissingattr(mcx, tupdesc, attnum);
     }
     if heap_attisnull(&tup.tuple, attnum, Some(tupdesc)) {
         return Ok((TupleValue::ByVal(Datum::null()), true));

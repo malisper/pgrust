@@ -34,7 +34,6 @@ name = "backend-access-common-heaptuple"
 version = "0.0.0"
 dependencies = [
  "backend-access-heap-heaptoast-seams",
- "backend-utils-adt-misc2-seams",
  "mcx",
  "types-core",
  "types-datum",
@@ -1007,14 +1006,6 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-core",
- "types-error",
-]
-
-[[package]]
-name = "backend-utils-adt-misc2-seams"
-version = "0.0.0"
-dependencies = [
- "seam-core",
  "types-error",
 ]
 

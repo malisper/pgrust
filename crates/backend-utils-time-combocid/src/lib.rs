@@ -20,11 +20,11 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgHashMap, PgVec};
-use types_core::{CommandId, Size};
+use types_core::{CommandId, Size, TransactionId};
 use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use types_tuple::heaptuple::{
     HeapTupleHeaderData, HeapTupleHeaderGetRawCommandId, HeapTupleHeaderGetRawXmin,
-    HeapTupleHeaderXminCommitted, HEAP_COMBOCID, HEAP_MOVED,
+    HeapTupleHeaderXminCommitted, HEAP_COMBOCID, HEAP_MOVED, HEAP_XMIN_FROZEN,
 };
 
 /// Install this crate's seam implementations. This unit owns no seams.
@@ -81,14 +81,32 @@ impl<'mcx> ComboCidState<'mcx> {
  * the originating one, use HeapTupleHeaderGetRawCommandId() directly.
  */
 
+/// `FrozenTransactionId` (`access/transam.h:33`).
+const FROZEN_TRANSACTION_ID: TransactionId = 2;
+
+/// `HeapTupleHeaderGetXmin(tup)` (`access/htup_details.h:329`):
+/// `HeapTupleHeaderXminFrozen(tup) ? FrozenTransactionId : raw xmin`.
+#[inline]
+fn HeapTupleHeaderGetXmin(tup: &HeapTupleHeaderData<'_>) -> TransactionId {
+    if (tup.t_infomask & HEAP_XMIN_FROZEN) == HEAP_XMIN_FROZEN {
+        FROZEN_TRANSACTION_ID
+    } else {
+        HeapTupleHeaderGetRawXmin(tup)
+    }
+}
+
 /// `HeapTupleHeaderGetCmin(tup)`.
-///
-/// C also asserts `TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin
-/// (tup))`; that debug-only cross-subsystem check is not replicated.
 pub fn HeapTupleHeaderGetCmin(state: &ComboCidState<'_>, tup: &HeapTupleHeaderData<'_>) -> CommandId {
     let cid = HeapTupleHeaderGetRawCommandId(tup);
 
     debug_assert!((tup.t_infomask & HEAP_MOVED) == 0);
+    // Assert(TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tup)))
+    debug_assert!(
+        backend_access_transam_xact_seams::transaction_id_is_current_transaction_id::call(
+            HeapTupleHeaderGetXmin(tup)
+        ),
+        "HeapTupleHeaderGetCmin: tuple was not inserted by the current transaction"
+    );
 
     if (tup.t_infomask & HEAP_COMBOCID) != 0 {
         GetRealCmin(state, cid)
@@ -101,8 +119,9 @@ pub fn HeapTupleHeaderGetCmin(state: &ComboCidState<'_>, tup: &HeapTupleHeaderDa
 ///
 /// C also asserts `CritSectionCount > 0 || TransactionIdIsCurrentTransactionId
 /// (HeapTupleHeaderGetUpdateXid(tup))` (weakened inside critical sections
-/// because `GetUpdateXid()` can allocate when xmax is a multixact); that
-/// debug-only cross-subsystem check is not replicated.
+/// because `GetUpdateXid()` can allocate when xmax is a multixact); that check
+/// is waived here because `HeapTupleHeaderGetUpdateXid`'s multixact resolution
+/// (`access/heap/heapam.c`'s `HeapTupleGetUpdateXid`) is unported.
 pub fn HeapTupleHeaderGetCmax(state: &ComboCidState<'_>, tup: &HeapTupleHeaderData<'_>) -> CommandId {
     let cid = HeapTupleHeaderGetRawCommandId(tup);
 

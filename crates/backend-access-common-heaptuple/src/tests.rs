@@ -805,6 +805,118 @@ fn heap_expand_tuple_appends_nulls_for_absent_attrs() {
     assert!(cols[2].1);
 }
 
+/// A descriptor whose trailing attributes carry missing-value defaults
+/// (`atthasmissing` + `constr->missing`), as ALTER TABLE .. ADD COLUMN ..
+/// DEFAULT leaves behind.
+fn tupdesc_with_missing<'mcx>(
+    mcx: Mcx<'mcx>,
+    attrs: &[CompactAttribute],
+    missing: &[types_tuple::heaptuple::AttrMissing<'mcx>],
+) -> TupleDescData<'mcx> {
+    let mut td = tupdesc(mcx, attrs);
+    for (i, m) in missing.iter().enumerate() {
+        if m.am_present {
+            td.compact_attrs[i].atthasmissing = true;
+        }
+    }
+    let mut miss_vec = mcx::vec_with_capacity_in(mcx, missing.len()).unwrap();
+    for m in missing {
+        miss_vec.push(m.clone_in(mcx).unwrap());
+    }
+    td.constr = Some(
+        mcx::alloc_in(
+            mcx,
+            types_tuple::heaptuple::TupleConstr {
+                defval: PgVec::new_in(mcx),
+                check: PgVec::new_in(mcx),
+                missing: miss_vec,
+                num_defval: 0,
+                num_check: 0,
+                has_not_null: false,
+                has_generated_stored: false,
+                has_generated_virtual: false,
+            },
+        )
+        .unwrap(),
+    );
+    td
+}
+
+#[test]
+fn deform_returns_byref_missing_value() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    // Tuple was formed with one int4; the descriptor has grown a varlena column
+    // whose missing-value default is a by-reference varlena.
+    let src = heap_form_tuple(
+        mcx,
+        &tupdesc(mcx, &[byval(4, 4)]),
+        &[TupleValue::ByVal(Datum::from_i32(5))],
+        &[false],
+    )
+    .expect("form src");
+
+    let default_vl = varlena_4b(b"fallback");
+    let missing = [
+        types_tuple::heaptuple::AttrMissing {
+            am_present: false,
+            am_value: TupleValue::ByVal(Datum::null()),
+        },
+        types_tuple::heaptuple::AttrMissing {
+            am_present: true,
+            am_value: byref(mcx, &default_vl),
+        },
+    ];
+    let td = tupdesc_with_missing(mcx, &[byval(4, 4), varlena()], &missing);
+
+    let cols = heap_deform_tuple(mcx, &src.tuple, &td, &src.data).expect("deform");
+    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(5)), false));
+    // The by-ref missing value comes back as its bytes (C: the cached
+    // TopMemoryContext datumCopy; here an owned copy in mcx), not NULL.
+    assert!(!cols[1].1);
+    match &cols[1].0 {
+        TupleValue::ByRef(b) => assert_eq!(&b[..], &default_vl[..]),
+        other => panic!("expected ByRef missing value, got {other:?}"),
+    }
+
+    // getmissingattr directly agrees.
+    let (val, isnull) = crate::getmissingattr(mcx, &td, 2).expect("getmissingattr");
+    assert!(!isnull);
+    assert_eq!(val.as_ref_bytes(), &default_vl[..]);
+}
+
+#[test]
+fn expand_tuple_fills_byref_missing_value() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let src = heap_form_tuple(
+        mcx,
+        &tupdesc(mcx, &[byval(4, 4)]),
+        &[TupleValue::ByVal(Datum::from_i32(7))],
+        &[false],
+    )
+    .expect("form src");
+
+    let default_vl = varlena_4b(&vec![b'd'; 130]); // not short-packable
+    let missing = [
+        types_tuple::heaptuple::AttrMissing {
+            am_present: false,
+            am_value: TupleValue::ByVal(Datum::null()),
+        },
+        types_tuple::heaptuple::AttrMissing {
+            am_present: true,
+            am_value: byref(mcx, &default_vl),
+        },
+    ];
+    let td = tupdesc_with_missing(mcx, &[byval(4, 4), varlena()], &missing);
+
+    let expanded = crate::heap_expand_tuple(mcx, &src, &td).expect("expand");
+    let cols = heap_deform_tuple(mcx, &expanded.tuple, &td, &expanded.data).expect("deform");
+    assert_eq!(cols[0], (TupleValue::ByVal(Datum::from_i32(7)), false));
+    assert!(!cols[1].1);
+    assert_eq!(cols[1].0.as_ref_bytes(), &default_vl[..]);
+}
+
 #[test]
 fn minimal_expand_tuple_appends_nulls() {
     let ctx = MemoryContext::new("test");
@@ -1039,8 +1151,8 @@ mod flat_codec {
         assert!(cols[1].1, "column 2 is NULL");
     }
 
-    /// minimal_tuple_from_heap_tuple over the t_user_data-carrying heap tuple
-    /// yields the same flat blob as forming the minimal tuple directly.
+    /// minimal_tuple_from_heap_tuple over the FormedTuple carrier yields the
+    /// same flat blob as forming the minimal tuple directly.
     #[test]
     fn from_heap_tuple_matches_direct_form() {
         let ctx = MemoryContext::new("test");
@@ -1052,7 +1164,7 @@ mod flat_codec {
         ];
         let isnull = vec![false, false];
 
-        let heap = crate::heap_form_tuple_heaptuple(mcx, &td, &values, &isnull).expect("form heap");
+        let heap = crate::heap_form_tuple(mcx, &td, &values, &isnull).expect("form heap");
         let via_heap = minimal_tuple_from_heap_tuple_flat(mcx, &heap).expect("from heap");
 
         let direct = heap_form_minimal_tuple_flat(mcx, &td, &values, &isnull).expect("form minimal");
@@ -1096,20 +1208,17 @@ mod flat_codec {
             Err(MinimalTupleFlatError::BadHoff { .. })
         ));
 
-        // Heap tuple without its user-data bytes cannot be encoded.
-        let formed = crate::heap_form_tuple(
+        // Heap tuple whose data area disagrees with t_len cannot be encoded.
+        let mut formed = crate::heap_form_tuple(
             mcx,
             &td,
             &[TupleValue::ByVal(Datum::from_i32(1))],
             &[false],
         )
         .expect("form");
-        let headless = types_tuple::heaptuple::HeapTupleData {
-            t_user_data: None,
-            ..(*formed.tuple).clone()
-        };
+        formed.data.truncate(formed.data.len() - 1);
         assert!(matches!(
-            minimal_tuple_from_heap_tuple_flat(mcx, &headless),
+            minimal_tuple_from_heap_tuple_flat(mcx, &formed),
             Err(MinimalTupleFlatError::UserDataLength { .. })
         ));
     }

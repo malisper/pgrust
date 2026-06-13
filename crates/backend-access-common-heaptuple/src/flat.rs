@@ -34,13 +34,13 @@ use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgVec};
 use types_error::PgError;
 
 use types_tuple::heaptuple::{
-    HeapTupleData, MinimalTupleData, TupleDescData, BITMAPLEN, HEAP_HASNULL, HEAP_NATTS_MASK,
+    MinimalTupleData, TupleDescData, BITMAPLEN, HEAP_HASNULL, HEAP_NATTS_MASK,
     MINIMAL_TUPLE_OFFSET,
 };
 
 use crate::{
-    heap_tuple_from_minimal_tuple, DeformedColumn, FormedMinimalTuple, HeapTupleError, TupleValue,
-    SIZEOF_MINIMAL_TUPLE_HEADER,
+    heap_tuple_from_minimal_tuple, DeformedColumn, FormedMinimalTuple, FormedTuple,
+    HeapTupleError, TupleValue, SIZEOF_MINIMAL_TUPLE_HEADER,
 };
 
 /// A structural inconsistency found while decoding (or assembling) a flat
@@ -59,10 +59,10 @@ pub enum MinimalTupleFlatError {
     /// `HEAP_HASNULL` is set but the null bitmap (`BITMAPLEN(natts)` bytes)
     /// does not fit between the fixed header and the data offset.
     BitmapOverrun { natts: u16, t_hoff: u8 },
-    /// (encode from `HeapTupleData`) the tuple has no `t_data` header.
+    /// (encode from a heap tuple) the tuple has no `t_data` header.
     MissingHeader,
-    /// (encode from `HeapTupleData`) the carried `t_user_data` byte count does
-    /// not match `t_len - t_hoff` (or is absent while data is expected).
+    /// (encode from a heap tuple) the carried [`FormedTuple::data`] byte count
+    /// does not match `t_len - t_hoff`.
     UserDataLength { expected: usize, actual: usize },
     /// An `ereport(ERROR)` from the allocation path (out of memory in the
     /// target context).
@@ -213,33 +213,34 @@ pub fn heap_form_minimal_tuple_flat<'mcx>(
 /// `minimal_tuple_from_heap_tuple(htup, 0)` returning the flat blob — the
 /// shape the tuplestore/tuplesort boundary consumes.
 ///
-/// The heap tuple must carry its column bytes (`t_user_data`, the model used by
-/// `heap_form_tuple_heaptuple` / the page-write path); the byte count must be
-/// exactly `t_len - t_hoff`.  C copies `(char *) htup->t_data +
-/// MINIMAL_TUPLE_OFFSET` for `t_len - MINIMAL_TUPLE_OFFSET` bytes and rewrites
-/// `t_len`; structurally that is: drop the t_choice/t_ctid region, keep the
-/// shared `t_infomask2 .. t_bits` tail + pad + data.
+/// The heap tuple is the [`FormedTuple`] carrier (owned header + column bytes
+/// in [`FormedTuple::data`]); the byte count must be exactly `t_len - t_hoff`.
+/// C copies `(char *) htup->t_data + MINIMAL_TUPLE_OFFSET` for
+/// `t_len - MINIMAL_TUPLE_OFFSET` bytes and rewrites `t_len`; structurally
+/// that is: drop the t_choice/t_ctid region, keep the shared
+/// `t_infomask2 .. t_bits` tail + pad + data.
 pub fn minimal_tuple_from_heap_tuple_flat<'mcx>(
     mcx: Mcx<'mcx>,
-    htup: &HeapTupleData<'_>,
+    htup: &FormedTuple<'_>,
 ) -> Result<PgVec<'mcx, u8>, MinimalTupleFlatError> {
     let header = htup
+        .tuple
         .t_data
         .as_ref()
         .ok_or(MinimalTupleFlatError::MissingHeader)?;
 
     // Assert(htup->t_len > MINIMAL_TUPLE_OFFSET);
-    if (htup.t_len as usize) <= MINIMAL_TUPLE_OFFSET
-        || (header.t_hoff as usize) > htup.t_len as usize
+    if (htup.tuple.t_len as usize) <= MINIMAL_TUPLE_OFFSET
+        || (header.t_hoff as usize) > htup.tuple.t_len as usize
     {
         return Err(MinimalTupleFlatError::BadHoff {
             t_hoff: header.t_hoff,
-            t_len: htup.t_len,
+            t_len: htup.tuple.t_len,
         });
     }
 
-    let expected = htup.t_len as usize - header.t_hoff as usize;
-    let data: &[u8] = htup.t_user_data.as_deref().unwrap_or(&[]);
+    let expected = htup.tuple.t_len as usize - header.t_hoff as usize;
+    let data: &[u8] = &htup.data;
     if data.len() != expected {
         return Err(MinimalTupleFlatError::UserDataLength {
             expected,
@@ -247,7 +248,7 @@ pub fn minimal_tuple_from_heap_tuple_flat<'mcx>(
         });
     }
 
-    let len = htup.t_len as usize - MINIMAL_TUPLE_OFFSET;
+    let len = htup.tuple.t_len as usize - MINIMAL_TUPLE_OFFSET;
     let mtup = FormedMinimalTuple {
         tuple: alloc_in(
             mcx,
