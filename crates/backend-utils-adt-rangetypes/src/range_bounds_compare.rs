@@ -531,3 +531,34 @@ pub fn range_overright_internal(
 
     Ok(false)
 }
+
+/// Inward seam shape for `bounds_adjacent`.
+///
+/// The seam carries no `mcx` because its only allocation is the transient probe
+/// range C builds in `CurrentMemoryContext` to test emptiness for a discrete
+/// subtype; that probe never escapes (only its `RANGE_EMPTY` flag is read). We
+/// mirror that by running the real `bounds_adjacent` against a private scratch
+/// context that is dropped on return.
+pub fn bounds_adjacent_seam(
+    typcache: &TypeCacheEntry,
+    bound_a: RangeBound,
+    bound_b: RangeBound,
+) -> PgResult<bool> {
+    let scratch = mcx::MemoryContext::new_bump("bounds_adjacent probe");
+    bounds_adjacent(scratch.mcx(), typcache, bound_a, bound_b)
+}
+
+/// Inward seam shape for `range_adjacent_internal`.
+///
+/// As with `bounds_adjacent`, the seam omits `mcx` because the only allocation
+/// is the transient probe range used to decide adjacency for a discrete
+/// subtype, which never escapes the call. Run the real kernel against a private
+/// scratch context dropped on return.
+pub fn range_adjacent_internal_seam(
+    typcache: &TypeCacheEntry,
+    r1: RangeTypeP<'_>,
+    r2: RangeTypeP<'_>,
+) -> PgResult<bool> {
+    let scratch = mcx::MemoryContext::new_bump("range_adjacent probe");
+    range_adjacent_internal(scratch.mcx(), typcache, r1, r2)
+}
