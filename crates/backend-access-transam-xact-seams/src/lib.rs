@@ -44,6 +44,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsInParallelMode()` (xact.c): true when the current transaction (or
+    /// subtransaction) has entered parallel mode
+    /// (`CurrentTransactionState->parallelModeLevel != 0`). Pure read of
+    /// backend-local transaction state; cannot `ereport`.
+    pub fn is_in_parallel_mode() -> bool
+);
+
+seam_core::seam!(
     /// `GetCurrentCommandId(used)` (xact.c): the current command id; with
     /// `used` true the caller intends to use it to mark inserted/updated/
     /// deleted tuples, which is forbidden in parallel mode — that check
@@ -137,4 +145,34 @@ seam_core::seam!(
     /// backend inserted; read after the commit/abort emit for
     /// `replorigin_session_advance`. Pure read of backend-local state.
     pub fn xact_last_rec_end() -> types_core::XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `RequireTransactionBlock(isTopLevel, stmtType)` (xact.c) — `ereport`s if
+    /// the statement is not running inside a transaction block (so it would
+    /// have no user-visible effect). The C arg is `const char *stmtType`.
+    pub fn require_transaction_block(is_top_level: bool, stmt_type: &str) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `IsTransactionOrTransactionBlock()` (xact.c): true when in a
+    /// transaction or transaction block. Pure read of backend-local state.
+    pub fn is_transaction_or_transaction_block() -> bool
+);
+
+seam_core::seam!(
+    /// `GetTopTransactionIdIfAny()` (xact.c): the top transaction's xid, or
+    /// `InvalidTransactionId` if none assigned. Pure read of backend-local
+    /// state.
+    pub fn get_top_transaction_id_if_any() -> types_core::TransactionId
+);
+
+seam_core::seam!(
+    /// Set the `CheckXidAlive` global (xact.c) — `ResetLogicalStreamingState`.
+    pub fn set_check_xid_alive(xid: types_core::TransactionId)
+);
+
+seam_core::seam!(
+    /// Set the `bsysscan` global (xact.c) — `ResetLogicalStreamingState`.
+    pub fn set_bsysscan(value: bool)
 );

@@ -48,3 +48,17 @@ seam_core::seam!(
     /// unexpected record info, carried on `Err`.
     pub fn logicalmsg_decode(ctx: &mut types_wal::rmgr::LogicalDecodingContext<'_>, buf: &mut types_wal::rmgr::XLogRecordBuffer<'_, '_>) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `LogicalDecodingProcessRecord(ctx, reader)` (decode.c): top-level
+    /// dispatch of one decoded record through the rmgr `rm_decode` callbacks.
+    /// `ctx` is the live decoding context the runtime resolves from the
+    /// reader. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn LogicalDecodingProcessRecord(reader: types_logical::XLogReaderHandle) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Read `ctx->processing_required` off the live ctx held by the runtime
+    /// (set as a side effect of `LogicalDecodingProcessRecord`).
+    pub fn ctx_processing_required() -> bool
+);

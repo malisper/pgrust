@@ -1,6 +1,9 @@
-//! Seam declarations for the `backend-partitioning-core` unit's
-//! `partitioning/partbounds.c` boundary — the partition-bound search routines
-//! `execPartition.c`'s `get_partition_for_tuple` calls.
+//! Seam declarations for the `backend-partitioning-partbounds` unit
+//! (`partitioning/partbounds.c`).
+//!
+//! Includes the partition-bound search routines `execPartition.c`'s
+//! `get_partition_for_tuple` calls, and the `relpartbound`-to-qual builder
+//! reached from partcache.
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
@@ -10,12 +13,15 @@
 //! the caller passes the owned `PartitionKeyData` / `PartitionBoundInfoData`
 //! views; the support functions dispatch by their stored lookup key.
 
+use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_datum::Datum;
 use types_error::PgResult;
+use types_nodes::nodes::Node;
 use types_nodes::partition::{
     PartitionBoundInfoData, PartitionKeyData, PartitionRangeDatumKind,
 };
+use types_rel::RelationData;
 
 seam_core::seam!(
     /// `compute_partition_hash_value(partnatts, partsupfunc, partcollation,
@@ -80,4 +86,21 @@ seam_core::seam!(
         last_datum: Datum,
         value: Datum,
     ) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// The `relpartbound`-to-qual leg of `generate_partition_qual`
+    /// (partcache.c): `SearchSysCache1(RELOID, relid)` (→ `elog(ERROR, "cache
+    /// lookup failed for relation %u")` as `Err`), `SysCacheGetAttr(RELOID,
+    /// ..., relpartbound, &isnull)`, and when not null `castNode(
+    /// PartitionBoundSpec, stringToNode(TextDatumGetCString(boundDatum)))`
+    /// then `get_qual_from_partbound(parent, bound)` (partbounds.c). Returns
+    /// the implicit-AND qual list `my_qual` (empty when `relpartbound` is
+    /// null), allocated in `mcx`. `Err` carries the cache-lookup failure, the
+    /// bound-parse errors, and OOM.
+    pub fn qual_from_partbound<'mcx, 'p>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        parent: &RelationData<'p>,
+    ) -> PgResult<PgVec<'mcx, Node<'mcx>>>
 );

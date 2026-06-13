@@ -34,6 +34,7 @@ pub fn init_all() {
     backend_postmaster_interrupt::init_seams();
     backend_postmaster_launch_backend::init_seams();
     backend_postmaster_startup::init_seams();
+    backend_replication_logical_logical::init_seams();
     backend_postmaster_syslogger::init_seams();
     backend_replication_logical_conflict::init_seams();
     backend_replication_logical_proto::init_seams();
@@ -44,6 +45,7 @@ pub fn init_all() {
     backend_storage_ipc_shm_toc::init_seams();
     backend_storage_ipc_standby::init_seams();
     backend_storage_lmgr_condition_variable::init_seams();
+    backend_storage_lmgr_deadlock::init_seams();
     backend_storage_lmgr_lwlock::init_seams();
     backend_storage_lmgr_s_lock::init_seams();
     backend_storage_page_checksum::init_seams();
@@ -53,6 +55,7 @@ pub fn init_all() {
     backend_utils_activity_xact::init_seams();
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_regexp::init_seams();
+    backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_cache_attoptcache::init_seams();
     backend_utils_cache_relfilenumbermap::init_seams();
     backend_utils_cache_spccache::init_seams();

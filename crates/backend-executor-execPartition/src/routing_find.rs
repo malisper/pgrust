@@ -745,7 +745,7 @@ pub(crate) fn ExecBuildSlotPartitionKeyDescription<'mcx>(
                 backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::call(
                     mcx, foutoid, values[i],
                 )?;
-            val_bytes = out.iter().copied().collect();
+            val_bytes = out.as_bytes().to_vec();
             val = &val_bytes;
         }
 

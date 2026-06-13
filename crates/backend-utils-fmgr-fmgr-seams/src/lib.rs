@@ -67,18 +67,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `OidOutputFunctionCall(functionId, val)` (fmgr.c), raw-`Datum` form:
-    /// one-shot lookup + call of a type's text output function on a bare
-    /// `Datum` (the caller has the value as a `Datum`, not a typed
-    /// `TupleValue` — e.g. the partition-key values in
-    /// `ExecBuildSlotPartitionKeyDescription`). The output function decodes the
-    /// `Datum` per its own known type. The C `char *` result crosses as its
-    /// NUL-excluded bytes allocated in `mcx`. `Err` carries the lookup
-    /// failure, the strict-null `elog`, and whatever the output function
-    /// raises.
+    /// `OidInputFunctionCall(functionId, str, typioparam, typmod)` (fmgr.c) as
+    /// used by bootstrap's `InsertOneValue`: one-shot lookup + call of a type's
+    /// text input function on the NUL-terminated C string `str_` (`typmod` is
+    /// `-1` at bootstrap). Returns the resulting `Datum`. `Err` carries invalid
+    /// input syntax, cache-lookup failure, and OOM.
+    pub fn oid_input_function_call(
+        function_id: Oid,
+        str_: &str,
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    /// `OidOutputFunctionCall(functionId, val)` (fmgr.c), raw-`Datum` form used
+    /// by bootstrap's `InsertOneValue` DEBUG4 trace: one-shot lookup + call of
+    /// a type's text output function on the bare `Datum` it just built (the
+    /// typed `TupleValue` form is unavailable there). The C `char *` result
+    /// crosses as its NUL-excluded bytes in `mcx`. `Err` carries the lookup
+    /// failure, the strict-null `elog`, and whatever the output function raises.
     pub fn oid_output_function_call_datum<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
         val: Datum,
-    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+    ) -> PgResult<mcx::PgString<'mcx>>
 );

@@ -4,6 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
+use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::parsenodes::DropBehavior;
@@ -30,6 +31,46 @@ seam_core::seam!(
         class_id: Oid,
         object_id: Oid,
         object_sub_id: i32,
+        behavior: DropBehavior,
+        flags: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `AcquireDeletionLock(&object, flags)` (dependency.c): take the
+    /// appropriate lock (AccessExclusiveLock on a relation, else a generic
+    /// object lock) before deleting, so the object can't disappear underneath
+    /// us. Returns whether a lock was actually taken (`AcquireDeletionLock`
+    /// only locks relations and generic objects; it is a no-op for objects of
+    /// classes it doesn't lock). The interim release contract is the paired
+    /// [`release_deletion_lock`]; can `ereport(ERROR)`, carried on `Err`.
+    pub fn acquire_deletion_lock(object: &ObjectAddress, flags: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ReleaseDeletionLock(&object)` (dependency.c): release the lock taken
+    /// by [`acquire_deletion_lock`] for an object we decided not to delete
+    /// after all. Can `elog(WARNING/ERROR)` on a lock-table inconsistency,
+    /// carried on `Err`.
+    pub fn release_deletion_lock(object: &ObjectAddress) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `sort_object_addresses(addrs)` (dependency.c): sort the collected
+    /// addresses into approximate reverse creation order, for stable deletion
+    /// reporting. The owned model passes the whole address list; the owner
+    /// sorts it in place. Infallible.
+    pub fn sort_object_addresses(addrs: &mut [ObjectAddress])
+);
+
+seam_core::seam!(
+    /// `performMultipleDeletions(objects, behavior, flags)` (dependency.c):
+    /// delete the given set of objects and everything that depends on them, in
+    /// dependency order. The owned model passes the collected address list as
+    /// a slice (the C `ObjectAddresses` collection). Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn perform_multiple_deletions(
+        objects: &[ObjectAddress],
         behavior: DropBehavior,
         flags: i32,
     ) -> PgResult<()>

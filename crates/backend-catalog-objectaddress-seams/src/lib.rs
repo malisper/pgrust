@@ -12,14 +12,17 @@ use types_nodes::parsenodes::ObjectType;
 seam_core::seam!(
     /// `getObjectDescription(object, missing_ok)` (objectaddress.c): a
     /// human-readable description of the object, palloc'd in the caller's
-    /// current context (here: `mcx`). With `missing_ok = false` a vanished
+    /// current context (here: `mcx`). Returns `Ok(None)` for the C NULL —
+    /// which arises either when `missing_ok = true` and the object vanished,
+    /// or when the per-class format function returns an empty buffer (an
+    /// object dropped concurrently). With `missing_ok = false` a vanished
     /// object raises (`Err`); the description machinery's catalog lookups can
     /// `ereport(ERROR)` too. `Err` includes OOM from the copy.
     pub fn get_object_description<'mcx>(
         mcx: Mcx<'mcx>,
         object: &ObjectAddress,
         missing_ok: bool,
-    ) -> PgResult<PgString<'mcx>>
+    ) -> PgResult<Option<PgString<'mcx>>>
 );
 
 seam_core::seam!(
