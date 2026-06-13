@@ -16,3 +16,19 @@ pub const STANDBY_SNAPSHOT_READY: HotStandbyState = 3;
 pub fn in_hot_standby(standby_state: HotStandbyState) -> bool {
     standby_state >= STANDBY_SNAPSHOT_PENDING
 }
+
+/// `typedef enum { ... } XLogRedoAction` (`access/xlogutils.h`) — result codes
+/// for `XLogReadBufferForRedo[Extended]`. Discriminants follow the C enum
+/// declaration order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub enum XLogRedoAction {
+    /// `BLK_NEEDS_REDO` — changes from the WAL record need to be applied.
+    BlkNeedsRedo = 0,
+    /// `BLK_DONE` — block is already up-to-date.
+    BlkDone = 1,
+    /// `BLK_RESTORED` — block was restored from a full-page image.
+    BlkRestored = 2,
+    /// `BLK_NOTFOUND` — block was not found (and hence does not need replay).
+    BlkNotFound = 3,
+}
