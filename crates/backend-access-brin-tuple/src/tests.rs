@@ -97,6 +97,8 @@ fn make_index_rel<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> types_rel::Relatio
         rd_rel: FormData_pg_class {
             relname: mcx::PgString::from_str_in("brinidx", mcx).unwrap(),
             relnamespace: 0,
+            relowner: 0,
+            relrowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             relallvisible: 0,

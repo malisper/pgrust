@@ -275,8 +275,9 @@ pub struct PlanStateData<'mcx> {
 pub struct ScanStateData<'mcx> {
     /// `PlanState ps` — its first field is `NodeTag`.
     pub ps: PlanStateData<'mcx>,
-    /// `Relation ss_currentRelation` — the scan's base relation (an alias
-    /// handle of the relation `es_relations` owns). `None` is the C `NULL`.
+    /// `Relation ss_currentRelation` — the relation this scan node is scanning,
+    /// or `None` (C `NULL`, e.g. a ForeignScan/CustomScan with no
+    /// currentRelation). Aliases the executor-owned open (no release authority).
     pub ss_currentRelation: Option<types_rel::Relation<'mcx>>,
     /// `struct TableScanDescData *ss_currentScanDesc` — the table scan
     /// descriptor (`NULL` for index-only scans, which carry no heap scan). The
@@ -288,11 +289,130 @@ pub struct ScanStateData<'mcx> {
     pub ss_ScanTupleSlot: Option<SlotId>,
 }
 
+/// The resolved outcome of `fetch_cursor_param_value`'s live-state core:
+/// reading `econtext->ecxt_param_list_info->params[paramId - 1]` (calling the
+/// dynamic `paramFetch` hook when present) and, for an OID-valid non-NULL param,
+/// classifying its `ptype`. `None` (the C falls through to "no value found") is
+/// the `Option` wrapper in the seam return.
+#[derive(Debug)]
+pub enum FetchedCursorParam<'mcx> {
+    /// `prm->ptype == REFCURSOROID` — the decoded `refcursor` text value
+    /// (`TextDatumGetCString`, palloc'd in the caller's `mcx`).
+    RefCursor(PgString<'mcx>),
+    /// `prm->ptype` is some other valid OID (caller raises datatype_mismatch).
+    WrongType(Oid),
+}
+
+/// The per-scan-type TID extraction outcome (`execCurrentOf` plain-scan
+/// strategy, after `search_plan_tree` found the scan node and the
+/// `TupIsNull`/`pending_rescan` "inactive" test passed). C digs the TID out of
+/// the scan's current physical tuple — `xs_heaptid` for an `IndexOnlyScanState`,
+/// else the scan tuple's `SelfItemPointerAttributeNumber` via `slot_getsysattr`
+/// (with the `USE_ASSERT_CHECKING` tableoid cross-check).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScanTidOutcome {
+    /// A valid physical TID was extracted (C `*current_tid = ...; return true`).
+    Tid(types_tuple::heaptuple::ItemPointerData),
+    /// The scan provided no physical tuple / null self-ctid — the C raises the
+    /// "not a simply updatable scan" error (the caller turns this into that
+    /// `ereport`, matching the C).
+    NotUpdatable,
+}
+
+/// `execCurrentOf`'s result: the C `bool` return plus the `*current_tid`
+/// out-parameter. `Found` is the C `return true` (a row of the target table is
+/// currently scanned); `NotOnThisTable` is `return false` (the cursor is valid
+/// for the table but is not currently scanning a row of *this* table — a legal
+/// inheritance case). The `ereport(ERROR)` paths surface as `Err`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CurrentOfTid {
+    /// A row was identified; carries the row's TID.
+    Found(types_tuple::heaptuple::ItemPointerData),
+    /// The cursor is not currently scanning a row of this table.
+    NotOnThisTable,
+}
+
+/// A borrowed view of a *running* cursor's live executor state, lent by the
+/// portal/executor owner (`GetPortalByName` + its `QueryDesc`) to a consumer
+/// (`execCurrentOf`) for the duration of a callback. C reaches the portal's
+/// `strategy`/`atStart`/`atEnd` scalar fields and, through `queryDesc`, the live
+/// `EState` (rowmarks, range table) and `PlanState` tree. Lending a borrow (not
+/// returning `&'static mut`) keeps the foreign owner in control of the state's
+/// lifetime, per the seam rules.
+#[derive(Debug)]
+pub struct RunningCursorState<'a, 'mcx> {
+    /// `portal->strategy` — the C `PortalStrategy` code (`PORTAL_ONE_SELECT`
+    /// etc.). Modeled as the raw `u32` the portal owner stores.
+    pub strategy: u32,
+    /// `queryDesc != NULL && queryDesc->estate != NULL` — false for a held
+    /// cursor or a non-SELECT with no live query.
+    pub has_live_query: bool,
+    /// `portal->atStart` — cursor is before the first row.
+    pub at_start: bool,
+    /// `portal->atEnd` — cursor is after the last row.
+    pub at_end: bool,
+    /// `queryDesc->estate` — the live executor state (rowmarks, range table,
+    /// slot pool). `None` when `has_live_query` is false.
+    pub estate: Option<&'a EStateData<'mcx>>,
+    /// `queryDesc->planstate` — the root of the live plan-state tree. `None`
+    /// when `has_live_query` is false.
+    pub planstate: Option<&'a PlanStateNode<'mcx>>,
+}
+
+/// `RowMarkType` (nodes/plannodes.h) — the kind of row-marking a
+/// FOR UPDATE/SHARE (or referential) rowmark requires.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RowMarkType {
+    /// `ROW_MARK_EXCLUSIVE` — obtain exclusive tuple lock.
+    Exclusive = 0,
+    /// `ROW_MARK_NOKEYEXCLUSIVE` — obtain no-key exclusive tuple lock.
+    NoKeyExclusive = 1,
+    /// `ROW_MARK_SHARE` — obtain shared tuple lock.
+    Share = 2,
+    /// `ROW_MARK_KEYSHARE` — obtain keyshare tuple lock.
+    KeyShare = 3,
+    /// `ROW_MARK_REFERENCE` — reference the row (no lock).
+    Reference = 4,
+    /// `ROW_MARK_COPY` — physically copy the row value.
+    Copy = 5,
+}
+
+impl RowMarkType {
+    /// `RowMarkRequiresRowShareLock(marktype)` (nodes/plannodes.h):
+    /// `((marktype) <= ROW_MARK_KEYSHARE)`.
+    #[inline]
+    pub fn requires_row_share_lock(self) -> bool {
+        (self as u32) <= (RowMarkType::KeyShare as u32)
+    }
+}
+
+/// `ExecRowMark` (execnodes.h) — runtime state for a FOR [KEY] UPDATE/SHARE (or
+/// referential) row mark, trimmed to the fields consumed so far. The unconsumed
+/// C fields (`relation`, `rti`, `prti`, `rowmarkId`, `strength`, `waitPolicy`,
+/// `ermActive`, `ermExtra`) land with their first consumer (docs/types.md rule
+/// 3).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecRowMark {
+    /// `Oid relid` — its OID (or `InvalidOid`, if subquery).
+    pub relid: Oid,
+    /// `RowMarkType markType` — see `RowMarkType`.
+    pub markType: RowMarkType,
+    /// `ItemPointerData curCtid` — ctid of currently locked tuple, if any.
+    pub curCtid: types_tuple::heaptuple::ItemPointerData,
+}
+
+impl Default for RowMarkType {
+    fn default() -> Self {
+        RowMarkType::Exclusive
+    }
+}
+
 /// `EState` (execnodes.h) — working storage for one Executor invocation,
 /// trimmed to the fields ports consume (unconsumed C fields — `es_snapshot`,
-/// `es_crosscheck_snapshot`, `es_rowmarks`, `es_junkFilter`,
-/// `es_param_list_info`, `es_queryEnv` — are trimmed outright and land with
-/// their first consumer, per docs/types.md rule 3).
+/// `es_crosscheck_snapshot`, `es_junkFilter`, `es_param_list_info`,
+/// `es_queryEnv` — are trimmed outright and land with their first consumer,
+/// per docs/types.md rule 3).
 #[derive(Debug)]
 pub struct EStateData<'mcx> {
     /// `ScanDirection es_direction` — current scan direction.
@@ -312,6 +432,10 @@ pub struct EStateData<'mcx> {
     pub es_range_table: PgVec<'mcx, RangeTblEntry>,
     /// `Index es_range_table_size` — size of the range table.
     pub es_range_table_size: usize,
+    /// `ExecRowMark **es_rowmarks` — per-RTE `ExecRowMark`s (indexed by RT
+    /// index − 1), with `None` entries for RTEs that have no rowmark. Empty =
+    /// the C `NULL` (no FOR UPDATE/SHARE in the query).
+    pub es_rowmarks: PgVec<'mcx, Option<ExecRowMark>>,
     /// `Relation *es_relations` — array of per-RTE open relations, `None`
     /// until opened. Parallel to `es_range_table`. These handles own the
     /// opens: EState teardown (or abort-path drop) releases them.
@@ -403,6 +527,8 @@ impl<'mcx> EStateData<'mcx> {
             // es_range_table = NIL; es_range_table_size = 0;
             es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,
+            // es_rowmarks = NULL;
+            es_rowmarks: PgVec::new_in(mcx),
             // es_relations = NULL;
             es_relations: PgVec::new_in(mcx),
             // es_rteperminfos = NIL; es_plannedstmt = NULL;
