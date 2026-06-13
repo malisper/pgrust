@@ -1432,6 +1432,10 @@ pub fn init_seams() {
 
     backend_postmaster_syslogger_seams::write_syslogger_file::set(crate::write_syslogger_file);
     backend_postmaster_syslogger_seams::sys_logger_main::set(sys_logger_main_entry);
+    // The plain `logging_collector` seam (read by signalfuncs.c's
+    // pg_rotate_logfile) mirrors the `Logging_collector` GUC; install it to the
+    // same accessor backing the GUC get/set pair below.
+    backend_postmaster_syslogger_seams::logging_collector::set(config::logging_collector);
 
     vars::Logging_collector.install(GucVarAccessors {
         get: config::logging_collector,
