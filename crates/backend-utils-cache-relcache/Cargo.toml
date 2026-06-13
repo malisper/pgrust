@@ -59,3 +59,10 @@ backend-access-transam-parallel-seams = { path = "../backend-access-transam-para
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+# smgr (RelationGetNumberOfBlocks), bitmapset encode (identity key), fmgr
+# resolve (index_getprocinfo lazy init), ruleutils (opclass name in the
+# missing-options error).
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }

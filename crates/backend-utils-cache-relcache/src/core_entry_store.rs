@@ -9,6 +9,7 @@
 pub mod entry;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use backend_utils_error::{ereport, PgResult};
 use types_error::ERROR;
@@ -35,6 +36,40 @@ struct RelIdCacheEnt {
     reloid: Oid,
     /// `Relation reldesc` — the C `Relation` pointer into the owned descriptor.
     reldesc: *mut RelationData,
+}
+
+/* ==========================================================================
+ * Owned per-entry partition-cache payloads (`rd_partkey` / `rd_partcheck`).
+ *
+ * In C these are node-vocabulary pointers (`PartitionKey rd_partkey`, `List
+ * *rd_partcheck`) allocated in the entry's own `rd_partkeycxt`/`rd_partcheckcxt`
+ * children of `CacheMemoryContext`, preserved across relcache rebuilds. The
+ * owned model holds a lifetime-free deep copy keyed by relation OID (the cache
+ * memory is process-lived; this map is the long-lived store). Reads re-project
+ * a fresh copy into the caller's `mcx` (the partcache `copyObject` contract).
+ *
+ * `PartitionKeyData`'s sub-arrays and `partexprs` (`Expr`) are all lifetime-free
+ * (`Expr` owns its children via `Box`/`Vec`), so the whole key copies by value.
+ * `rd_partcheck` is a `List*` of `Expr`-derived CHECK quals; we hold them as the
+ * lifetime-free `Expr` subtrees (the `Node::Expr` cast in reverse).
+ * ======================================================================== */
+
+/// Lifetime-free mirror of `PartitionKeyData` (the relcache-owned cache slot).
+pub(crate) struct OwnedPartitionKey {
+    pub(crate) strategy: types_partition::PartitionStrategy,
+    pub(crate) partnatts: i16,
+    pub(crate) partattrs: Vec<types_core::primitive::AttrNumber>,
+    pub(crate) partexprs: Vec<types_nodes::primnodes::Expr>,
+    pub(crate) partopfamily: Vec<Oid>,
+    pub(crate) partopcintype: Vec<Oid>,
+    pub(crate) partsupfunc: Vec<types_core::fmgr::FmgrInfo>,
+    pub(crate) partcollation: Vec<Oid>,
+    pub(crate) parttypid: Vec<Oid>,
+    pub(crate) parttypmod: Vec<i32>,
+    pub(crate) parttyplen: Vec<i16>,
+    pub(crate) parttypbyval: Vec<bool>,
+    pub(crate) parttypalign: Vec<i8>,
+    pub(crate) parttypcoll: Vec<Oid>,
 }
 
 /* ==========================================================================
@@ -75,10 +110,18 @@ pub(crate) struct RelcacheState {
     pub(crate) critical_relcaches_built: bool,
     /// `criticalSharedRelcachesBuilt`.
     pub(crate) critical_shared_relcaches_built: bool,
+
+    /// `relation->rd_partkey` cache slots (the relcache-owned partition keys,
+    /// keyed by relation OID; C: `rd_partkey` in `rd_partkeycxt`).
+    pub(crate) partkey: HashMap<Oid, OwnedPartitionKey>,
+    /// `relation->rd_partcheck` cache slots + the `rd_partcheckvalid` flag
+    /// (keyed by relation OID; C: `rd_partcheck` in `rd_partcheckcxt`). An empty
+    /// `Vec` with `valid = true` is the C NIL (no qual) case.
+    pub(crate) partcheck: HashMap<Oid, (bool, Vec<types_nodes::primnodes::Expr>)>,
 }
 
 impl RelcacheState {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             id_cache: std::ptr::null_mut(),
             in_progress_list: Vec::new(),
@@ -87,12 +130,14 @@ impl RelcacheState {
             relcache_invals_received: 0,
             critical_relcaches_built: false,
             critical_shared_relcaches_built: false,
+            partkey: HashMap::new(),
+            partcheck: HashMap::new(),
         }
     }
 }
 
 thread_local! {
-    pub(crate) static STATE: RefCell<RelcacheState> = const { RefCell::new(RelcacheState::new()) };
+    pub(crate) static STATE: RefCell<RelcacheState> = RefCell::new(RelcacheState::new());
 }
 
 /// Run `f` with mutable access to the per-backend relcache state.
@@ -436,4 +481,149 @@ pub(crate) fn rd_backend_of(rel: *mut RelationData) -> ProcNumber {
 pub(crate) fn rd_create_subid_of(rel: *mut RelationData) -> SubTransactionId {
     // SAFETY: live `Relation` pointer.
     unsafe { (*rel).rd_createSubid }
+}
+
+/* ==========================================================================
+ * Partition-cache slot read/write (`rd_partkey` / `rd_partcheck`).
+ *
+ * The partcache owner builds the key/qual in the caller's `mcx`; the relcache
+ * owner copies it into the long-lived store (C: `rd_partkeycxt` /
+ * `rd_partcheckcxt`) and re-projects a fresh copy on each read (the partcache
+ * `copyObject` contract). `Expr`/`PartitionKeyData` sub-arrays are lifetime-free
+ * so the deep copy is a by-value field clone.
+ * ======================================================================== */
+
+/// Helper: copy a `PgVec<T: Copy>` into an owned `Vec<T>`.
+fn copy_vec<T: Copy>(v: &mcx::PgVec<'_, T>) -> Vec<T> {
+    v.iter().copied().collect()
+}
+
+/// Helper: re-project an owned `&[T: Copy]` into a fresh `PgVec` in `mcx`.
+fn project_vec<'mcx, T: Copy>(mcx: mcx::Mcx<'mcx>, src: &[T]) -> mcx::PgVec<'mcx, T> {
+    let mut out = mcx::PgVec::new_in(mcx);
+    out.extend_from_slice(src);
+    out
+}
+
+/// `relation->rd_partkey = key` (the relcache copy into `rd_partkeycxt`). Stores
+/// a lifetime-free deep copy keyed by `relid` and sets the entry's presence flag.
+#[allow(unsafe_code)]
+pub(crate) fn set_partkey(
+    relid: Oid,
+    key: &types_partition::PartitionKeyData<'_>,
+) -> PgResult<()> {
+    let owned = OwnedPartitionKey {
+        strategy: key.strategy,
+        partnatts: key.partnatts,
+        partattrs: copy_vec(&key.partattrs),
+        partexprs: key.partexprs.iter().cloned().collect(),
+        partopfamily: copy_vec(&key.partopfamily),
+        partopcintype: copy_vec(&key.partopcintype),
+        partsupfunc: copy_vec(&key.partsupfunc),
+        partcollation: copy_vec(&key.partcollation),
+        parttypid: copy_vec(&key.parttypid),
+        parttypmod: copy_vec(&key.parttypmod),
+        parttyplen: copy_vec(&key.parttyplen),
+        parttypbyval: copy_vec(&key.parttypbyval),
+        parttypalign: copy_vec(&key.parttypalign),
+        parttypcoll: copy_vec(&key.parttypcoll),
+    };
+    with_state(|st| {
+        st.partkey.insert(relid, owned);
+    });
+    // `relation->rd_partkeyvalid`/presence flag on the entry.
+    if let Some(rd) = cache_lookup(relid) {
+        // SAFETY: live cache-owned descriptor.
+        unsafe { (*rd).rd_has_partkey = true };
+    }
+    Ok(())
+}
+
+/// `relation->rd_partkey` read — re-project a fresh copy into `mcx`, or `None`
+/// when the slot has not been built (C NULL).
+pub(crate) fn get_partkey<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<types_partition::PartitionKeyData<'mcx>>> {
+    with_state(|st| {
+        let Some(owned) = st.partkey.get(&relid) else {
+            return Ok(None);
+        };
+        let mut partexprs = mcx::PgVec::new_in(mcx);
+        for e in &owned.partexprs {
+            partexprs.push(e.clone());
+        }
+        Ok(Some(types_partition::PartitionKeyData {
+            strategy: owned.strategy,
+            partnatts: owned.partnatts,
+            partattrs: project_vec(mcx, &owned.partattrs),
+            partexprs,
+            partopfamily: project_vec(mcx, &owned.partopfamily),
+            partopcintype: project_vec(mcx, &owned.partopcintype),
+            partsupfunc: project_vec(mcx, &owned.partsupfunc),
+            partcollation: project_vec(mcx, &owned.partcollation),
+            parttypid: project_vec(mcx, &owned.parttypid),
+            parttypmod: project_vec(mcx, &owned.parttypmod),
+            parttyplen: project_vec(mcx, &owned.parttyplen),
+            parttypbyval: project_vec(mcx, &owned.parttypbyval),
+            parttypalign: project_vec(mcx, &owned.parttypalign),
+            parttypcoll: project_vec(mcx, &owned.parttypcoll),
+        }))
+    })
+}
+
+/// `relation->rd_partcheck = copyObject(result); rd_partcheckvalid = true`
+/// (the relcache copy into `rd_partcheckcxt`). `partcheck` is a list of
+/// `Expr`-derived CHECK quals (the `Node::Expr` cast); a non-`Expr` `Node` is a
+/// contract violation.
+pub(crate) fn set_partcheck(
+    relid: Oid,
+    partcheck: &mcx::PgVec<'_, types_nodes::nodes::Node<'_>>,
+) -> PgResult<()> {
+    let mut owned: Vec<types_nodes::primnodes::Expr> = Vec::with_capacity(partcheck.len());
+    for node in partcheck.iter() {
+        match node {
+            types_nodes::nodes::Node::Expr(e) => owned.push(e.clone()),
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!(
+                        "rd_partcheck entry is not an expression node (tag {:?})",
+                        other.tag()
+                    ))
+                    .into_error());
+            }
+        }
+    }
+    with_state(|st| {
+        st.partcheck.insert(relid, (true, owned));
+    });
+    if let Some(rd) = cache_lookup(relid) {
+        // SAFETY: live cache-owned descriptor.
+        #[allow(unsafe_code)]
+        unsafe {
+            (*rd).rd_partcheckvalid = true
+        };
+    }
+    Ok(())
+}
+
+/// `relation->rd_partcheck` read + `rd_partcheckvalid` — returns `(valid,
+/// copyObject(rd_partcheck))`. When the slot is absent the cache is stale
+/// (`valid = false`, empty list) and the caller rebuilds.
+pub(crate) fn get_partcheck<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<(bool, mcx::PgVec<'mcx, types_nodes::nodes::Node<'mcx>>)> {
+    with_state(|st| {
+        let mut out = mcx::PgVec::new_in(mcx);
+        match st.partcheck.get(&relid) {
+            Some((valid, exprs)) => {
+                for e in exprs {
+                    out.push(types_nodes::nodes::Node::Expr(e.clone()));
+                }
+                Ok((*valid, out))
+            }
+            None => Ok((false, out)),
+        }
+    })
 }

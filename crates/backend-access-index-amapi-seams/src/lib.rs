@@ -122,3 +122,22 @@ seam_core::seam!(
     /// `Err` carries the handler-load `ereport`s.
     pub fn index_am_consistent_ordering(amoid: types_core::Oid) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `index->rd_indam->amclusterable` projected off the AM's
+    /// `IndexAmRoutine`: whether the AM supports CLUSTER (relcache reads this
+    /// scalar flag for `cluster.c`'s validity check). The owning amapi unit
+    /// loads the AM handler (`GetIndexAmRoutineByAmId(amoid, false)`) and reads
+    /// the flag; the trimmed in-cache `IndexAmRoutine` vtable does not carry it.
+    /// `Err` carries the handler-load `ereport`s.
+    pub fn index_am_clusterable(amoid: types_core::Oid) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `index->rd_indam->amcanorder` projected off the AM's `IndexAmRoutine`:
+    /// whether the AM supports ordered (ASC/DESC) scans. The owning amapi unit
+    /// loads the AM handler and reads the flag; the trimmed in-cache
+    /// `IndexAmRoutine` vtable does not carry it. `Err` carries the handler-load
+    /// `ereport`s.
+    pub fn index_am_canorder(amoid: types_core::Oid) -> types_error::PgResult<bool>
+);
