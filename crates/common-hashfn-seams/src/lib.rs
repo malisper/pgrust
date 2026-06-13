@@ -11,6 +11,22 @@
 use types_core::{uint32, Size};
 
 seam_core::seam!(
+    /// `Datum hash_any(const unsigned char *k, int keylen)` (`common/hashfn.c`)
+    /// — hash an arbitrary byte run to a 32-bit value (`DatumGetUInt32` of the
+    /// result). The key is a read-only byte image (`const void *` over
+    /// `keylen` bytes). Pure computation; infallible.
+    pub fn hash_bytes(k: &[u8]) -> u32
+);
+
+seam_core::seam!(
+    /// `Datum hash_any_extended(const unsigned char *k, int keylen, uint64
+    /// seed)` (`common/hashfn.c`) — hash an arbitrary byte run to a 64-bit
+    /// value with a seed (`DatumGetUInt64` of the result). Pure computation;
+    /// infallible.
+    pub fn hash_bytes_extended(k: &[u8], seed: u64) -> u64
+);
+
+seam_core::seam!(
     /// `hash_bytes_uint32(k)` (`common/hashfn.c`): hash a 32-bit value to a
     /// 32-bit value (the murmur-style mixer behind `hash_uint32`).
     pub fn hash_bytes_uint32(k: u32) -> u32

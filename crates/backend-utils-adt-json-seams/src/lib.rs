@@ -12,3 +12,18 @@ seam_core::seam!(
         str: &str,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `char *JsonEncodeDateTime(char *buf, Datum value, Oid typid, const int
+    /// *tzp)` (json.c) — render a date/time `value` of type `typid` to its
+    /// canonical JSON text. Reached from `jsonb_util.c`'s `convertJsonbScalar`
+    /// `jbvDatetime` arm, which always passes a non-NULL `&tz`, so `tzp`
+    /// marshals to `Some(tz)`. The C writes into a caller buffer and returns
+    /// it; here the rendered text is returned as an allocated `String`. `Err`
+    /// carries the encode `ereport(ERROR)`.
+    pub fn json_encode_datetime(
+        value: types_datum::Datum,
+        typid: types_core::Oid,
+        tzp: Option<i32>,
+    ) -> types_error::PgResult<String>
+);

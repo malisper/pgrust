@@ -115,6 +115,7 @@ pub fn init_all() {
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_format_type::init_seams();
+    backend_utils_adt_jsonb_util::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_numutils::init_seams();
     backend_utils_adt_pg_locale_icu::init_seams();
