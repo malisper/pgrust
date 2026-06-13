@@ -121,14 +121,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `pg_strncoll(arg1, len1, arg2, len2, locale)` (pg_locale.c): collation-aware
-    /// 3-way comparison of two byte runs under the (non-C) collation `collid`,
-    /// returning the libc/ICU `strcoll`-style sign. The lengths are implicit in the
-    /// slice lengths. C resolves `locale` from `collid` via the permanent cache;
-    /// this seam takes the OID and lets pg_locale.c reach its own cache. `Err`
-    /// carries the provider's `ereport(ERROR)` surface (e.g. encoding conversion
-    /// failure) plus the collation-resolve surface.
-    pub fn pg_strncoll(arg1: &[u8], arg2: &[u8], collid: Oid) -> PgResult<i32>
+    /// `pg_strncoll(arg1, len1, arg2, len2, locale)` (pg_locale.c): collation
+    /// comparison of two byte ranges under the resolved locale identified by
+    /// `collid`. C passes the `pg_locale_t` cache pointer directly; the layered
+    /// `PgLocale` flag core does not carry the provider-specific `info` union,
+    /// so this seam re-keys by `collid` (the owner re-resolves the same cache
+    /// entry `pg_newlocale_from_collation` built). Returns the libc/ICU
+    /// `strncoll` sign result (`<0`, `0`, `>0`). The non-greedy / greedy
+    /// substring search and the nondeterministic-collation comparators are the
+    /// callers. Argument order follows the crate convention (`collid` first,
+    /// matching `pg_strcoll`). `Err` carries the provider's `ereport(ERROR)`
+    /// surface (e.g. an encoding conversion failure inside ICU).
+    pub fn pg_strncoll(collid: Oid, arg1: &[u8], arg2: &[u8]) -> PgResult<i32>
 );
 
 seam_core::seam!(

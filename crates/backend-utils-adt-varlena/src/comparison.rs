@@ -70,7 +70,7 @@ pub fn varstr_cmp(arg1: &[u8], arg2: &[u8], collid: Oid) -> PgResult<i32> {
     }
 
     // C: result = pg_strncoll(arg1, len1, arg2, len2, mylocale);
-    let mut result = locale::pg_strncoll::call(arg1, arg2, collid)?;
+    let mut result = locale::pg_strncoll::call(collid, arg1, arg2)?;
 
     // C: Break tie if necessary.
     //   if (result == 0 && mylocale->deterministic) {
