@@ -4,7 +4,23 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
-use types_core::{uint16, uint32, uint8, Oid, ProcNumber, RelFileNumber, Size, TransactionId, INVALID_PROC_NUMBER};
+use types_core::{uint16, uint32, uint64, uint8, Oid, ProcNumber, RelFileNumber, Size, TransactionId, INVALID_PROC_NUMBER};
+
+/// `Buffer` (`storage/buf.h`) — a shared-buffer-pool index (or, when
+/// negative, a local-buffer index). Zero is `InvalidBuffer`.
+pub type Buffer = i32;
+
+/// `InvalidBuffer` (`storage/buf.h`).
+pub const InvalidBuffer: Buffer = 0;
+
+/// `BufferIsValid(bufnum)` (`storage/bufmgr.h`).
+#[inline]
+pub fn BufferIsValid(bufnum: Buffer) -> bool {
+    bufnum != InvalidBuffer
+}
+
+/// `LocationIndex` (`storage/bufpage.h`) — a byte offset within a page.
+pub type LocationIndex = uint16;
 
 /// `enum LWLockMode` (`storage/lwlock.h:112`).
 #[repr(u32)]
@@ -69,6 +85,11 @@ impl pg_atomic_uint64 {
     /// `pg_atomic_read_u64(ptr)`.
     pub fn read(&self) -> types_core::uint64 {
         self.value.load(Ordering::Relaxed)
+    }
+
+    /// `pg_atomic_write_u64(ptr, val)`.
+    pub fn write(&self, value: types_core::uint64) {
+        self.value.store(value, Ordering::Relaxed);
     }
 }
 
@@ -248,6 +269,10 @@ const _: () = assert!(core::mem::size_of::<LWLockPadded>() == LWLOCK_PADDED_SIZE
 pub const MAX_BACKENDS_BITS: i32 = 18;
 pub const MAX_BACKENDS: uint32 = (1_u32 << MAX_BACKENDS_BITS) - 1;
 
+/// `PROC_IS_AUTOVACUUM` (`storage/proc.h`) — `statusFlags` bit: this backend
+/// is an autovacuum worker.
+pub const PROC_IS_AUTOVACUUM: uint8 = 0x01;
+
 /// `ProcSignalReason` (`storage/procsignal.h`) — reasons for signaling a
 /// Postgres child process over the multiplexed SIGUSR1 channel.
 #[repr(u32)]
@@ -297,12 +322,89 @@ pub const NUM_INDIVIDUAL_LWLOCKS: i32 = 54;
 /// control lock in `MainLWLockArray` (`&MainLWLockArray[34].lock`).
 pub const DYNAMIC_SHARED_MEMORY_CONTROL_LOCK: usize = 34;
 
+/// `DSMRegistryLock` (`lwlocklist.h`, `PG_LWLOCK(50, DSMRegistry)`): offset of
+/// the DSM-registry lock in `MainLWLockArray` (`&MainLWLockArray[50].lock`).
+pub const DSM_REGISTRY_LOCK: usize = 50;
+/// `ProcArrayLock` (`lwlocklist.h`): `PG_LWLOCK(4, ProcArray)`.
+pub const PROC_ARRAY_LOCK: usize = 4;
+/// `ReplicationSlotAllocationLock` — `PG_LWLOCK(36, ReplicationSlotAllocation)`.
+pub const REPLICATION_SLOT_ALLOCATION_LOCK: usize = 36;
+/// `ReplicationSlotControlLock` — `PG_LWLOCK(37, ReplicationSlotControl)`.
+pub const REPLICATION_SLOT_CONTROL_LOCK: usize = 37;
+
 /// `dsm_handle` (`storage/dsm_impl.h`) — a "name" for a dynamic shared memory
 /// segment.
 pub type dsm_handle = uint32;
 
 /// `DSM_HANDLE_INVALID` (`(dsm_handle) 0`).
 pub const DSM_HANDLE_INVALID: dsm_handle = 0;
+
+/// `dsa_handle` (`utils/dsa.h`, `typedef dsm_handle dsa_handle`) — a "name" for
+/// a DSA area that can be passed between cooperating backends.
+pub type dsa_handle = dsm_handle;
+
+/// `dsa_pointer` (`utils/dsa.h`) — a relative pointer within a DSA area
+/// (`uint64` on 64-bit pointer width).
+pub type dsa_pointer = uint64;
+
+/// `InvalidDsaPointer` (`utils/dsa.h`) — `((dsa_pointer) 0)`.
+pub const INVALID_DSA_POINTER: dsa_pointer = 0;
+
+/// `dshash_table_handle` (`lib/dshash.h`, `typedef dsa_pointer
+/// dshash_table_handle`) — a handle to a dshash table passed between backends.
+pub type dshash_table_handle = dsa_pointer;
+
+/// `dsa_area` (`utils/dsa.h`) — opaque backend-local handle to a DSA area. The
+/// area's internals are owned by the `dsa.c` substrate; consumers only hold
+/// and pass the pointer, so the body stays opaque.
+#[repr(C)]
+pub struct DsaArea {
+    _private: [u8; 0],
+}
+
+/// `dshash_table` (`lib/dshash.h`) — opaque backend-local handle to a dshash
+/// table. The table's internals are owned by the `dshash.c` substrate;
+/// consumers only hold and pass the pointer, so the body stays opaque.
+#[repr(C)]
+pub struct DshashTable {
+    _private: [u8; 0],
+}
+
+/// Which built-in key-handling helper set a [`DshashParameters`] selects. The C
+/// `dshash_parameters` carries raw `compare`/`hash`/`copy` function pointers,
+/// but "function pointers can't be shared between backends" (`dshash.h`), so
+/// every backend supplies the same set by value; the two built-in sets
+/// `dshash.c` owns are the NUL-terminated-string helpers and the fixed-width
+/// `memcmp`/`hash_bytes`/`memcpy` helpers. This selector names the set without
+/// crossing the seam with the foreign function pointers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DshashKeyKind {
+    /// `dshash_strcmp` / `dshash_strhash` / `dshash_strcpy` — fixed-width
+    /// NUL-terminated string keys occupying the first `key_size` bytes of the
+    /// entry.
+    String,
+    /// `dshash_memcmp` / `dshash_memhash` / `dshash_memcpy` — fixed-width binary
+    /// keys (the first `key_size` bytes of the entry compared/hashed/copied as
+    /// raw bytes). Used e.g. by the logical-replication launcher's
+    /// `last_start_times` table keyed by `sizeof(Oid)`.
+    Binary,
+}
+
+/// `dshash_parameters` (`lib/dshash.h`) — the parameters to create or attach a
+/// dshash table. `tranche_id` is only consulted on create. The compare/hash/
+/// copy function pointers are conveyed by [`DshashKeyKind`] (see its docs).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DshashParameters {
+    /// `key_size` — size of the key (initial bytes of the entry).
+    pub key_size: Size,
+    /// `entry_size` — total size of an entry.
+    pub entry_size: Size,
+    /// The built-in key-helper set (`compare_function`/`hash_function`/
+    /// `copy_function`).
+    pub key_kind: DshashKeyKind,
+    /// `tranche_id` — the LWLock tranche for the table's partition locks.
+    pub tranche_id: i32,
+}
 
 /// `PGShmemHeader` (`storage/pg_shmem.h`) — standard header for all Postgres
 /// shared memory segments, resident at the start of the main segment.

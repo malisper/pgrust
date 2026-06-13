@@ -88,15 +88,61 @@ seam_core::seam!(
     /// of the individual built-in locks (`lwlocklist.h` offsets, e.g.
     /// `types_storage::DYNAMIC_SHARED_MEMORY_CONTROL_LOCK`). `MainLWLockArray`
     /// lives in main shared memory owned by `lwlock.c`, so the lock is named
-    /// by offset rather than by reference.
-    pub fn lwlock_acquire_main(lock_offset: usize, mode: LWLockMode) -> PgResult<bool>
+    /// by offset rather than by reference. Returns a [`MainLWLockGuard`] that
+    /// releases the lock on drop (AGENTS.md "Locks and held resources": a lock
+    /// held across a `?` needs a `Drop` backstop, matching C's
+    /// `LWLockReleaseAll()` in abort cleanup); `was_free` carries the C return
+    /// value. `Err` carries the C `elog(ERROR, "too many LWLocks taken")`.
+    pub fn lwlock_acquire_main(lock_offset: usize, mode: LWLockMode) -> PgResult<MainLWLockGuard>
 );
 
 seam_core::seam!(
     /// `LWLockRelease(&MainLWLockArray[lock_offset].lock)` — release a
-    /// built-in lock previously taken via [`lwlock_acquire_main`].
+    /// built-in lock previously taken via [`lwlock_acquire_main`]. Reached only
+    /// through [`MainLWLockGuard`] (`release()` or `Drop`); consumers never
+    /// call it directly.
     pub fn lwlock_release_main(lock_offset: usize) -> PgResult<()>
 );
+
+/// The held-lock token returned by [`lwlock_acquire_main`]: `Drop` releases
+/// the built-in lock (the silent abort path, C's `LWLockReleaseAll`);
+/// [`Self::release`] is the explicit release at the point where C calls
+/// `LWLockRelease`, surfacing its error.
+#[derive(Debug)]
+pub struct MainLWLockGuard {
+    lock_offset: Option<usize>,
+    /// The C `LWLockAcquire` return value: true if the lock was free.
+    pub was_free: bool,
+}
+
+impl MainLWLockGuard {
+    /// Wrap a just-acquired built-in lock. Called by the owner's installed
+    /// implementation (and test fixtures); consumers only ever receive one.
+    pub fn new(lock_offset: usize, was_free: bool) -> Self {
+        MainLWLockGuard {
+            lock_offset: Some(lock_offset),
+            was_free,
+        }
+    }
+
+    /// `LWLockRelease(&MainLWLockArray[offset].lock)` at the C call site,
+    /// consuming the guard and surfacing any release error.
+    pub fn release(mut self) -> PgResult<()> {
+        let offset = self
+            .lock_offset
+            .take()
+            .expect("MainLWLockGuard released twice");
+        lwlock_release_main::call(offset)
+    }
+}
+
+impl Drop for MainLWLockGuard {
+    fn drop(&mut self) {
+        if let Some(offset) = self.lock_offset.take() {
+            let _ = lwlock_release_main::call(offset);
+        }
+    }
+}
 
 seam_core::seam!(
     /// `LWLockReleaseAll()` — release all LWLocks held by this backend; used
@@ -118,6 +164,29 @@ seam_core::seam!(
     /// `LWLockAcquire(TwoPhaseStateLock, exclusive ? LW_EXCLUSIVE : LW_SHARED)`.
     pub fn lock_twophase_state(exclusive: bool) -> PgResult<()>
 );
+
+// ---- RelationMappingLock (the named LWLock interlocking pg_filenode.map) ----
+//
+// relmapper.c acquires `RelationMappingLock` in LW_SHARED (read) or
+// LW_EXCLUSIVE (write/checkpoint) and releases it mid-function at points C
+// chooses. The lock lives in `MainLWLockArray` owned by lwlock.c. As with
+// `TwoPhaseStateLock`, a guard form is preferred per AGENTS.md "Locks and held
+// resources"; until lwlock.c hands back a guard for the named locks, the
+// explicit acquire/release pair is recorded in DESIGN_DEBT.
+
+seam_core::seam!(
+    /// `LWLockAcquire(RelationMappingLock, exclusive ? LW_EXCLUSIVE : LW_SHARED)`.
+    pub fn lock_relation_mapping(exclusive: bool) -> PgResult<()>
+);
+seam_core::seam!(
+    /// `LWLockRelease(RelationMappingLock)`.
+    pub fn unlock_relation_mapping() -> PgResult<()>
+);
+seam_core::seam!(
+    /// `LWLockHeldByMeInMode(RelationMappingLock, LW_EXCLUSIVE)` — the
+    /// assertion predicate at the top of `write_relmap_file`. Pure read.
+    pub fn relation_mapping_lock_held_by_me_exclusive() -> bool
+);
 seam_core::seam!(
     /// `LWLockRelease(TwoPhaseStateLock)`.
     pub fn unlock_twophase_state() -> PgResult<()>
@@ -126,4 +195,18 @@ seam_core::seam!(
     /// `LWLockHeldByMeInMode(TwoPhaseStateLock, LW_EXCLUSIVE)` — the assertion
     /// predicate guarding the redo/scan entry points. Pure read.
     pub fn twophase_state_held_exclusive() -> bool
+);
+
+seam_core::seam!(
+    /// `LWLockHeldByMe(&MainLWLockArray[lock_offset].lock)` — does this backend
+    /// hold the built-in lock at `lock_offset` (in any mode)? Used in
+    /// `Assert`s; the lock is named by offset since `MainLWLockArray` is
+    /// lwlock.c-owned shared memory.
+    pub fn lwlock_held_by_me_main(lock_offset: usize) -> bool
+);
+
+seam_core::seam!(
+    /// `LWLockHeldByMeInMode(&MainLWLockArray[lock_offset].lock, mode)` — does
+    /// this backend hold the built-in lock at `lock_offset` in exactly `mode`?
+    pub fn lwlock_held_by_me_in_mode_main(lock_offset: usize, mode: LWLockMode) -> bool
 );
