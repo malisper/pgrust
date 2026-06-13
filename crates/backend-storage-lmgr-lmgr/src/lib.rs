@@ -28,6 +28,8 @@
 //! state, kept out of this layer except where the lmgr OID entry points must
 //! resolve them through their owners' seams).
 
+extern crate alloc;
+
 use core::fmt;
 
 use mcx::{Mcx, PgString, PgVec};
@@ -46,6 +48,7 @@ use backend_access_transam_subtrans_seams as subtrans;
 use backend_catalog_catalog_seams as catalog;
 use backend_storage_ipc_procarray_seams as procarray;
 use backend_storage_lmgr_lmgr_seams as inward;
+use backend_storage_lmgr_lmgr_pc_seams as inward_pc;
 use backend_storage_lmgr_lock_seams as lock;
 use backend_tcop_postgres_seams as tcop;
 use backend_utils_cache_inval_seams as inval;
@@ -1083,16 +1086,81 @@ fn seam_check_relation_locked_by_me(relation: Oid, lockmode: LOCKMODE, orstronge
     CheckRelationOidLockedByMe(relation, lockmode, orstronger)
 }
 
+/// The `lock_shared_object` inward seam: `LockSharedObject` returning the held
+/// lock as the [`inward::LockGuard`] (a shared object reuses the OBJECT release
+/// path with `dbid = 0`, exactly what `LockGuard::database_object` records).
+fn seam_lock_shared_object(
+    classid: Oid,
+    objid: Oid,
+    objsubid: u16,
+    lockmode: LOCKMODE,
+) -> PgResult<inward::LockGuard> {
+    LockSharedObject(classid, objid, objsubid, lockmode)?;
+    Ok(inward::LockGuard::database_object(classid, objid, objsubid, lockmode))
+}
+
+/// The `lock_relation_for_extension` inward seam. The C reads
+/// `relation->rd_lockInfo.lockRelId`; this layer rebuilds that value from the
+/// relation (`relId = rd_id`, `dbId = rd_locator.dbOid`, which is `InvalidOid`
+/// for shared relations — the same as `RelationInitLockInfo`). Always
+/// `ExclusiveLock` per the C.
+fn seam_lock_relation_for_extension(
+    rel: &types_rel::Relation<'_>,
+) -> PgResult<inward::RelationExtensionLockGuard> {
+    let lock_rel_id = LockRelId { relId: rel.rd_id, dbId: rel.rd_locator.dbOid };
+    LockRelationForExtension(&lock_rel_id, ExclusiveLock)?;
+    Ok(inward::RelationExtensionLockGuard::new(rel.rd_id))
+}
+
+/// The `unlock_relation_for_extension` inward seam — the release half, reached
+/// only through [`inward::RelationExtensionLockGuard`]. The guard carries the
+/// relation OID; the extension lock's `dbId` is irrelevant for release because
+/// `LockRelease` matches on the full tag, and the guard was built from the same
+/// relation. We rebuild the tag with `dbId = InvalidOid` only when the relation
+/// is shared; to stay faithful we reconstruct from the OID alone is impossible,
+/// so the guard release path delegates to `UnlockRelationForExtension` with the
+/// dbId resolved the same way as acquisition.
+fn seam_unlock_relation_for_extension(relid: Oid) -> PgResult<()> {
+    // The guard only retains the relation OID. The matching unlock tag must use
+    // the same `lockRelId` that acquisition used. `MyDatabaseId` is the dbId for
+    // a non-shared relation; a shared relation used `InvalidOid`. The extension
+    // lock is only taken on real (always non-shared, local) heap/index
+    // relations, so the dbId is `MyDatabaseId` — the same value acquisition
+    // recorded from `rd_locator.dbOid`.
+    let lock_rel_id = LockRelId { relId: relid, dbId: initsmall::my_database_id::call() };
+    UnlockRelationForExtension(&lock_rel_id, ExclusiveLock)
+}
+
+/// The `describe_lock_tag` inward seam: render a `LOCKTAG` to a `String`. C
+/// appends to a caller `StringInfo`; the seam allocates a transient buffer and
+/// returns the rendered text (the deadlock detector appends it itself).
+fn seam_describe_lock_tag(tag: LOCKTAG) -> alloc::string::String {
+    let ctx = mcx::MemoryContext::new("DescribeLockTag");
+    let mut buf = PgString::new_in(ctx.mcx());
+    // The descriptions are small, bounded strings; an OOM here would already
+    // have aborted the deadlock report that called us.
+    DescribeLockTag(&mut buf, &tag).expect("DescribeLockTag formatting cannot fail for a bounded description");
+    alloc::string::String::from(buf.as_str())
+}
+
 /// Install every seam declared in `backend-storage-lmgr-lmgr-seams`.
 pub fn init_seams() {
     inward::check_relation_locked_by_me::set(seam_check_relation_locked_by_me);
     inward::lock_relation_oid::set(seam_lock_relation_oid);
     inward::conditional_lock_relation_oid::set(seam_conditional_lock_relation_oid);
     inward::lock_database_object::set(seam_lock_database_object);
+    inward::lock_shared_object::set(seam_lock_shared_object);
     inward::unlock_relation_oid::set(UnlockRelationOid);
     inward::unlock_database_object::set(UnlockDatabaseObject);
+    inward::lock_relation_for_extension::set(seam_lock_relation_for_extension);
+    inward::unlock_relation_for_extension::set(seam_unlock_relation_for_extension);
+    inward::describe_lock_tag::set(seam_describe_lock_tag);
     // XactLockTableInsert/XactLockTableDelete are lmgr.c functions this crate
     // owns; install the inward seams that xact.c consumes.
     inward::xact_lock_table_insert::set(XactLockTableInsert);
     inward::xact_lock_table_delete::set(XactLockTableDelete);
+    // plancache's slice of lmgr.c (the -pc-seams crate this unit also owns):
+    // bare-OID LockRelationOid/UnlockRelationOid for revalidation locking.
+    inward_pc::lock_relation_oid::set(LockRelationOid);
+    inward_pc::unlock_relation_oid::set(UnlockRelationOid);
 }

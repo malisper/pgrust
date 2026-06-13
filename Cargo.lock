@@ -3936,6 +3936,7 @@ dependencies = [
  "backend-access-transam-subtrans-seams",
  "backend-catalog-catalog-seams",
  "backend-storage-ipc-procarray-seams",
+ "backend-storage-lmgr-lmgr-pc-seams",
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-tcop-postgres-seams",
@@ -3946,6 +3947,7 @@ dependencies = [
  "port-pgsleep-seams",
  "types-core",
  "types-error",
+ "types-rel",
  "types-storage",
  "types-stringinfo",
 ]

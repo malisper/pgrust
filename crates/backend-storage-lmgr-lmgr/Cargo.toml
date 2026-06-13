@@ -14,9 +14,11 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-stringinfo = { path = "../types-stringinfo" }
+types-rel = { path = "../types-rel" }
 
 # Inward seams this crate owns and installs.
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-storage-lmgr-lmgr-pc-seams = { path = "../backend-storage-lmgr-lmgr-pc-seams" }
 
 # Outward seams (owners not yet ported, or cyclic).
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
