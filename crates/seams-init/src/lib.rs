@@ -122,6 +122,7 @@ pub fn init_all() {
     backend_utils_activity_small::init_seams();
     backend_utils_activity_waitevent::init_seams();
     backend_utils_activity_xact::init_seams();
+    backend_utils_adt_misc2::init_seams();
     backend_utils_adt_acl::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
@@ -475,16 +476,8 @@ mod recurrence_guard {
         ("backend_access_transam_xlog", "xlog_shmem_init"),
         ("backend_access_transam_xlog", "xlog_shmem_size"),
         ("backend_access_transam_xlogprefetcher", "xlog_prefetch_shmem_size"),
-        ("backend_catalog_namespace", "make_range_var_from_name_list"),
         ("backend_commands_functioncmds", "format_type_be"),
         ("backend_commands_user", "is_reserved_name"),
-        // execExprInterp owns the dispatch loop; `exec_eval_expr_switch_context`
-        // is declared `&ExprState` in the seam (C `ExecEvalExprSwitchContext`
-        // macro) but the owned `ExecInterpExprStillValid` entry needs
-        // `&mut ExprState` for the still-valid check + ExecJust*/ExecInterpExpr
-        // per-eval scratch mutation. Shared-vs-mut reconcile is the
-        // seam-contract-reconcile lane's job (DESIGN_DEBT). `ExecReadyInterpretedExpr`
-        // (`exec_ready_interpreted_expr`) matches `&mut` and IS installed.
         ("backend_executor_execExprInterp", "exec_eval_expr_switch_context"),
         ("backend_executor_execPartition", "exec_cleanup_tuple_routing"),
         ("backend_executor_execPartition", "exec_find_partition"),
@@ -512,9 +505,6 @@ mod recurrence_guard {
         ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_replication_logical_origin", "set_replorigin_session_origin_lsn"),
         ("backend_replication_logical_slotsync", "am_logical_slot_sync_worker_process"),
-        ("backend_postmaster_bgworker", "max_worker_processes"),
-        ("backend_postmaster_interrupt", "install_crash_exit_sigquit_handler"),
-        ("backend_postmaster_interrupt", "pqinitmask_set_blocksig"),
         ("backend_storage_ipc", "before_shmem_exit"),
         ("backend_storage_ipc", "check_on_shmem_exit_lists_are_empty"),
         ("backend_storage_ipc", "on_exit_reset"),
@@ -528,6 +518,7 @@ mod recurrence_guard {
         ("backend_tcop_backend_startup", "my_cancel_key"),
         ("backend_utils_adt_acl", "has_bypassrls_privilege"),
         ("backend_utils_adt_acl", "object_ownercheck"),
+        ("backend_utils_cache_typcache", "domain_check_input"),
         ("backend_utils_fmgr_dfmgr", "load_archive_module_init"),
         ("backend_utils_fmgr_dfmgr", "load_file"),
         ("backend_utils_fmgr_dfmgr", "shmem_request_hook"),
@@ -546,7 +537,6 @@ mod recurrence_guard {
         ("backend_utils_init_small", "post_auth_delay"),
         ("backend_utils_init_small", "reserved_connections"),
         ("backend_utils_init_small", "superuser_reserved_connections"),
-        ("backend_storage_lmgr_proc", "my_proc_latch"),
         ("backend_utils_misc_guc_file", "at_eoxact_guc"),
         ("backend_utils_misc_guc_file", "new_guc_nest_level"),
         ("backend_utils_misc_guc_file", "set_config_with_handle"),

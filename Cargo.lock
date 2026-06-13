@@ -1648,6 +1648,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-binary-upgrade-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-catalog-catalog"
 version = "0.0.0"
 dependencies = [
@@ -1807,6 +1816,7 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+ "types-namespace",
  "types-nodes",
  "types-storage",
  "types-tuple",
@@ -1852,6 +1862,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-storage",
 ]
 
 [[package]]
@@ -2788,6 +2799,16 @@ dependencies = [
 name = "backend-common-link-canary-seams"
 version = "0.0.0"
 dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-common-path-seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -4130,6 +4151,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+ "types-nodes",
 ]
 
 [[package]]
@@ -7023,6 +7045,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-expanded-methods-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-datum",
+ "types-error",
+]
+
+[[package]]
 name = "backend-utils-adt-format-type"
 version = "0.0.0"
 dependencies = [
@@ -7121,6 +7152,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-misc2"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-catalog-binary-upgrade-seams",
+ "backend-catalog-namespace-seams",
+ "backend-catalog-partition-seams",
+ "backend-common-path-seams",
+ "backend-libpq-hba-seams",
+ "backend-libpq-pqformat",
+ "backend-parser-parse-type-seams",
+ "backend-replication-slot-seams",
+ "backend-storage-file-fd-seams",
+ "backend-storage-lmgr-lock-seams",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-adt-datum-seams",
+ "backend-utils-adt-expanded-methods-seams",
+ "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-misc2-seams",
+ "backend-utils-adt-oid-seams",
+ "backend-utils-adt-regproc-seams",
+ "backend-utils-adt-ruleutils-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-miscinit-seams",
+ "backend-utils-init-small",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-stack-depth-seams",
+ "mcx",
+ "port-pgstrcasecmp",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-storage",
+ "types-stringinfo",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-misc2-seams"
 version = "0.0.0"
 dependencies = [
@@ -7191,6 +7267,15 @@ dependencies = [
 name = "backend-utils-adt-numutils"
 version = "0.0.0"
 dependencies = [
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-adt-oid-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
  "types-error",
 ]
 
@@ -8005,6 +8090,7 @@ dependencies = [
  "seam-core",
  "types-cache",
  "types-core",
+ "types-datum",
  "types-error",
  "types-rel",
  "types-tuple",
@@ -9371,6 +9457,7 @@ dependencies = [
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-format-type",
  "backend-utils-adt-json",
+ "backend-utils-adt-misc2",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-numeric",
  "backend-utils-adt-numutils",

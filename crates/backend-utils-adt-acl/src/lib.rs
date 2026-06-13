@@ -62,5 +62,6 @@ pub fn init_seams() {
     backend_utils_adt_acl_seams::check_can_set_role::set(role_membership::check_can_set_role);
     backend_utils_adt_acl_seams::has_privs_of_role::set(role_membership::has_privs_of_role);
     backend_utils_adt_acl_seams::get_rolespec_oid::set(role_membership::get_rolespec_oid);
+    backend_utils_adt_acl_seams::get_role_oid::set(role_membership::get_role_oid);
     backend_utils_adt_acl_seams::initialize_acl::set(role_membership::initialize_acl);
 }

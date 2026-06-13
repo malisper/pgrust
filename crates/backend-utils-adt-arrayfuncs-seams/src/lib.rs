@@ -146,6 +146,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `construct_array_builtin(datums, n, INT4OID)` (arrayfuncs.c): build a
+    /// 1-D `int4[]` array `Datum` from the given elements (duplicates kept, as
+    /// the `pg_blocking_pids` / `pg_safe_snapshot_blocking_pids` callers
+    /// require). An empty input still yields a valid empty array (the C
+    /// behaviour). The result varlena is allocated in `mcx`. `Err` carries OOM.
+    pub fn construct_int4_array<'mcx>(mcx: Mcx<'mcx>, elems: &[i32]) -> PgResult<Datum>
+);
+
+seam_core::seam!(
     /// `ARR_NDIM(DatumGetArrayTypeP(arraydatum))` (array.h): the number of
     /// dimensions of the array carried by `arraydatum`, after detoast. Thin
     /// accessor over the array header (used by the multirange constructor to
