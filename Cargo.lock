@@ -2072,6 +2072,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-storage-lmgr-condition-variable"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-ipc-latch-seams",
+ "backend-storage-lmgr-condition-variable-seams",
+ "backend-storage-lmgr-proc-seams",
+ "backend-storage-lmgr-s-lock",
+ "backend-tcop-postgres-seams",
+ "backend-utils-init-small-seams",
+ "portability-instr-time",
+ "types-condvar",
+ "types-core",
+ "types-error",
+ "types-storage",
+]
+
+[[package]]
 name = "backend-storage-lmgr-condition-variable-seams"
 version = "0.0.0"
 dependencies = [
@@ -2159,6 +2176,7 @@ dependencies = [
  "port-pgsleep-seams",
  "types-error",
  "types-pgstat",
+ "types-storage",
 ]
 
 [[package]]
@@ -2986,6 +3004,7 @@ dependencies = [
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-toc",
  "backend-storage-ipc-standby",
+ "backend-storage-lmgr-condition-variable",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-s-lock",
  "backend-storage-page-checksum",
@@ -3069,6 +3088,9 @@ dependencies = [
 [[package]]
 name = "types-condvar"
 version = "0.0.0"
+dependencies = [
+ "types-storage",
+]
 
 [[package]]
 name = "types-core"

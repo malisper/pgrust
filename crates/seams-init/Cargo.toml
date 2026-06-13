@@ -38,6 +38,7 @@ backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
 backend-storage-ipc-shm-mq = { path = "../backend-storage-ipc-shm-mq" }
 backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
 backend-storage-ipc-standby = { path = "../backend-storage-ipc-standby" }
+backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-condition-variable" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-page-checksum = { path = "../backend-storage-page-checksum" }

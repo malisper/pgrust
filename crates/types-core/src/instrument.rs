@@ -5,6 +5,9 @@
 /// Nanoseconds per second; the tick unit of [`instr_time`].
 pub const NS_PER_S: i64 = 1_000_000_000;
 
+/// `NS_PER_MS` (`portability/instr_time.h`) — nanoseconds per millisecond.
+pub const NS_PER_MS: i64 = 1_000_000;
+
 /// `instr_time` — a monotonic-clock reading or interval, in nanosecond ticks.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct instr_time {
@@ -30,6 +33,11 @@ impl instr_time {
         self.ticks += y.ticks;
     }
 
+    /// `INSTR_TIME_SUBTRACT(x, y)` — `x -= y`.
+    pub fn subtract(&mut self, y: instr_time) {
+        self.ticks -= y.ticks;
+    }
+
     /// `INSTR_TIME_ACCUM_DIFF(x, y, z)` — `x += (y - z)`.
     pub fn accum_diff(&mut self, y: instr_time, z: instr_time) {
         self.ticks += y.ticks - z.ticks;
@@ -38,6 +46,11 @@ impl instr_time {
     /// `INSTR_TIME_GET_DOUBLE(t)` — ticks (nanoseconds) to seconds.
     pub fn get_double(self) -> f64 {
         self.ticks as f64 / NS_PER_S as f64
+    }
+
+    /// `INSTR_TIME_GET_MILLISEC(t)` — ticks (nanoseconds) to milliseconds.
+    pub fn get_millisec(self) -> f64 {
+        self.ticks as f64 / NS_PER_MS as f64
     }
 }
 

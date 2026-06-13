@@ -2,7 +2,7 @@
 //! handle and its supporting pieces.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use types_core::{uint16, uint32, uint8, Oid, ProcNumber, RelFileNumber, Size, TransactionId, INVALID_PROC_NUMBER};
 
@@ -69,6 +69,66 @@ impl pg_atomic_uint64 {
     /// `pg_atomic_read_u64(ptr)`.
     pub fn read(&self) -> types_core::uint64 {
         self.value.load(Ordering::Relaxed)
+    }
+}
+
+/// A PostgreSQL spinlock word (`slock_t`, `storage/s_lock.h`).
+///
+/// Acquired with an atomic test-and-set ([`Spinlock::tas`]) and released with
+/// a fence-ordered store of zero ([`Spinlock::unlock`]). `#[repr(transparent)]`
+/// over an `AtomicI32` so the in-memory layout matches the `int`-width
+/// `slock_t`. The word-level primitives live here (like the `pg_atomic_*`
+/// types above) so shmem-resident structs can embed the lock word; the
+/// contended-acquire backoff loop (`s_lock.c`) lives in the
+/// `backend-storage-lmgr-s-lock` crate.
+#[repr(transparent)]
+#[derive(Debug, Default)]
+pub struct Spinlock {
+    word: AtomicI32,
+}
+
+impl Spinlock {
+    /// A new, free spinlock.
+    pub const fn new() -> Self {
+        Self {
+            word: AtomicI32::new(0),
+        }
+    }
+
+    /// `S_INIT_LOCK`/`S_UNLOCK` — store zero, releasing the lock.
+    ///
+    /// `Release` ordering keeps loads and stores issued before the unlock
+    /// from being reordered past it, matching PostgreSQL's `S_UNLOCK` fence
+    /// requirement (`__sync_lock_release` semantics).
+    pub fn unlock(&self) {
+        self.word.store(0, Ordering::Release);
+    }
+
+    /// `S_LOCK_FREE(lock)` — true when `*lock == 0`.
+    pub fn is_free(&self) -> bool {
+        self.word.load(Ordering::Relaxed) == 0
+    }
+
+    /// `tas(lock)` — atomically set the word to 1 and return the previous
+    /// value (0 if the lock was free and is now ours, nonzero if held).
+    ///
+    /// `Acquire` ordering keeps loads and stores issued after the TAS from
+    /// being reordered before it, matching PostgreSQL's `TAS` fence
+    /// requirement (`__sync_lock_test_and_set` semantics).
+    pub fn tas(&self) -> i32 {
+        self.word.swap(1, Ordering::Acquire)
+    }
+
+    /// `TAS_SPIN(lock)` — `*(lock) ? 1 : TAS(lock)`.
+    ///
+    /// On x86_64 and aarch64 it is a win to do a non-locking read of the word
+    /// before attempting the (more expensive) atomic TAS while spinning.
+    pub fn tas_spin(&self) -> i32 {
+        if self.word.load(Ordering::Relaxed) != 0 {
+            1
+        } else {
+            self.tas()
+        }
     }
 }
 

@@ -46,6 +46,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Read `GetPGProcByNumber(procno)->cvWaitLink` (the C
+    /// `proclist_node_get(procno, offsetof(PGPROC, cvWaitLink))`).
+    pub fn proc_cv_wait_link(procno: ProcNumber) -> proclist_node
+);
+
+seam_core::seam!(
+    /// Write `GetPGProcByNumber(procno)->cvWaitLink`.
+    pub fn set_proc_cv_wait_link(procno: ProcNumber, node: proclist_node)
+);
+
+seam_core::seam!(
+    /// `SetLatch(&GetPGProcByNumber(procno)->procLatch)` — wake the given
+    /// backend via its process latch. Infallible in C.
+    pub fn set_proc_latch(procno: ProcNumber)
+);
+
+seam_core::seam!(
     /// `PGSemaphoreLock(GetPGProcByNumber(procno)->sem)` — block the current
     /// backend on its wait semaphore until signaled.
     pub fn pg_semaphore_lock(procno: ProcNumber)

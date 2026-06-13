@@ -41,3 +41,23 @@ seam_core::seam!(
         wait_event_info: u32,
     ) -> types_error::PgResult<i32>
 );
+
+seam_core::seam!(
+    /// `ResetLatch(MyLatch)`: clear this backend's own process latch; the
+    /// latch crate resolves `MyLatch` (globals.c) when installing, like
+    /// [`set_latch_my_latch`]. Infallible in C.
+    pub fn reset_latch_my_latch()
+);
+
+seam_core::seam!(
+    /// `WaitLatch(MyLatch, wake_events, timeout, wait_event_info)`: sleep
+    /// until this backend's latch is set, the timeout (ms; -1 = none)
+    /// elapses, or another requested `WL_*` event occurs; returns the
+    /// bitmask of occurred events. The underlying `WaitEventSetWait` can
+    /// `elog(ERROR)` (kernel event-queue failure), hence the `PgResult`.
+    pub fn wait_latch_my_latch(
+        wake_events: u32,
+        timeout: i64,
+        wait_event_info: u32,
+    ) -> types_error::PgResult<u32>
+);

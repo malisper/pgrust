@@ -7,3 +7,6 @@ publish.workspace = true
 [lib]
 name = "types_condvar"
 path = "src/lib.rs"
+
+[dependencies]
+types-storage = { path = "../types-storage" }

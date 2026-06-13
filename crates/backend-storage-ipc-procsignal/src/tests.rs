@@ -60,24 +60,20 @@ fn install_seams_once() {
         });
 
         backend_storage_lmgr_condition_variable_seams::condition_variable_timed_sleep::set(
-            |cv, timeout_ms, _wait_event| {
-                let guard = cv.mutex.lock().unwrap();
-                let (_guard, timeout) = cv
-                    .condvar
-                    .wait_timeout(
-                        guard,
-                        std::time::Duration::from_millis(timeout_ms.min(50) as u64),
-                    )
-                    .unwrap();
-                Ok(timeout.timed_out())
+            |_cv, timeout_ms, _wait_event| {
+                // Single-threaded tests re-check the predicate after every
+                // (spurious) wakeup; burn a slice of the timeout and return.
+                std::thread::sleep(std::time::Duration::from_millis(
+                    timeout_ms.clamp(0, 10) as u64
+                ));
+                Ok(false)
             },
         );
         backend_storage_lmgr_condition_variable_seams::condition_variable_cancel_sleep::set(
             || false,
         );
-        backend_storage_lmgr_condition_variable_seams::condition_variable_broadcast::set(|cv| {
+        backend_storage_lmgr_condition_variable_seams::condition_variable_broadcast::set(|_cv| {
             ENV.with(|e| e.cv_broadcasts.set(e.cv_broadcasts.get() + 1));
-            cv.condvar.notify_all();
         });
 
         backend_storage_smgr_seams::process_barrier_smgr_release::set(|| {
