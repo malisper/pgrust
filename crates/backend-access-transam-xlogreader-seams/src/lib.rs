@@ -24,8 +24,11 @@
 
 extern crate alloc;
 
-use types_core::{Buffer, TimeLineID, XLogRecPtr};
+use alloc::string::String;
+use types_core::primitive::{BlockNumber, ForkNumber};
+use types_core::{Buffer, TimeLineID, XLogRecPtr, XLogSegNo};
 use types_error::PgResult;
+use types_storage::RelFileLocator;
 use types_wal::rmgr::XLogReaderState;
 use types_wal::{DecodedBkpBlock, ReadAheadRecordInfo};
 use types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
@@ -147,6 +150,134 @@ seam_core::seam!(
 seam_core::seam!(
     /// `reader->EndRecPtr`.
     pub fn reader_EndRecPtr(reader: XLogReaderHandle) -> XLogRecPtr
+);
+
+// ---------------------------------------------------------------------------
+// Decoded-record block accessors + reader field accessors consumed by
+// xlogutils.c's redo fetchers and read_local_xlog_page / DetermineTimeline.
+// The decoded record and the reader's seg/TLI/private fields live in the
+// xlogreader-owned `XLogReaderState`; xlogutils reaches them through these.
+// ---------------------------------------------------------------------------
+
+/// The block tag of a registered block, from `XLogRecGetBlockTagExtended`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XLogBlockTag {
+    /// `*rlocator` out-param.
+    pub rlocator: RelFileLocator,
+    /// `*forknum` out-param.
+    pub forknum: ForkNumber,
+    /// `*blknum` out-param.
+    pub blkno: BlockNumber,
+    /// `*prefetch_buffer` out-param.
+    pub prefetch_buffer: Buffer,
+}
+
+seam_core::seam!(
+    /// `XLogRecGetBlockTagExtended(record, block_id, &rlocator, &forknum,
+    /// &blknum, &prefetch_buffer)` (xlogreader.c) — `Some(tag)` when the block
+    /// reference exists, `None` (C `false`) for a bogus `block_id`.
+    pub fn xlog_rec_get_block_tag_extended(
+        record: &XLogReaderState<'_>,
+        block_id: u8,
+    ) -> PgResult<Option<XLogBlockTag>>
+);
+
+seam_core::seam!(
+    /// `XLogRecGetBlock(record, block_id)->flags` (xlogreader.h).
+    pub fn xlog_rec_get_block_flags(record: &XLogReaderState<'_>, block_id: u8) -> PgResult<u8>
+);
+
+seam_core::seam!(
+    /// `XLogRecBlockImageApply(record, block_id)` (xlogreader.h) — whether the
+    /// block's full-page image should be restored.
+    pub fn xlog_rec_block_image_apply(record: &XLogReaderState<'_>, block_id: u8) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `XLogRecHasBlockImage(record, block_id)` (xlogreader.h).
+    pub fn xlog_rec_has_block_image(record: &XLogReaderState<'_>, block_id: u8) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `RestoreBlockImage(record, block_id, BufferGetPage(buf))` (xlogreader.c)
+    /// — decompress/copy the FPI onto the buffer's page. The page is owned by
+    /// the bufmgr; the buffer id crosses the seam and the xlogreader side
+    /// dereferences the page. Returns `false` (with `record->errormsg_buf`
+    /// populated) on a decompress failure.
+    pub fn restore_block_image(
+        record: &XLogReaderState<'_>,
+        block_id: u8,
+        buf: Buffer,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `record->errormsg_buf` (xlogreader.c) — the reader's error text after a
+    /// failed `RestoreBlockImage`.
+    pub fn reader_errormsg_buf(record: &XLogReaderState<'_>) -> String
+);
+
+seam_core::seam!(
+    /// `state->readLen` (xlogreader.c) — bytes of the current page already read.
+    pub fn reader_read_len(reader: &XLogReaderState<'_>) -> u32
+);
+
+seam_core::seam!(
+    /// `state->seg.ws_segno` (xlogreader.c).
+    pub fn reader_seg_segno(reader: &XLogReaderState<'_>) -> XLogSegNo
+);
+
+seam_core::seam!(
+    /// `state->segoff` (xlogreader.c).
+    pub fn reader_segoff(reader: &XLogReaderState<'_>) -> u32
+);
+
+seam_core::seam!(
+    /// `state->segcxt.ws_segsize` (xlogreader.c) — the WAL segment size (a C
+    /// `int`).
+    pub fn reader_seg_size(reader: &XLogReaderState<'_>) -> i32
+);
+
+seam_core::seam!(
+    /// `state->currTLI` (xlogreader.c).
+    pub fn reader_curr_tli(reader: &XLogReaderState<'_>) -> TimeLineID
+);
+
+seam_core::seam!(
+    /// `state->currTLIValidUntil` (xlogreader.c).
+    pub fn reader_curr_tli_valid_until(reader: &XLogReaderState<'_>) -> XLogRecPtr
+);
+
+seam_core::seam!(
+    /// `state->currTLI = tli` (xlogreader.c).
+    pub fn reader_set_curr_tli(reader: &mut XLogReaderState<'_>, tli: TimeLineID)
+);
+
+seam_core::seam!(
+    /// `state->currTLIValidUntil = lsn` (xlogreader.c).
+    pub fn reader_set_curr_tli_valid_until(reader: &mut XLogReaderState<'_>, lsn: XLogRecPtr)
+);
+
+seam_core::seam!(
+    /// `state->nextTLI = tli` (xlogreader.c).
+    pub fn reader_set_next_tli(reader: &mut XLogReaderState<'_>, tli: TimeLineID)
+);
+
+seam_core::seam!(
+    /// `((ReadLocalXLogPageNoWaitPrivate *) state->private_data)->end_of_wal =
+    /// true` — flag the no-wait page-read caller that the end of WAL was
+    /// reached. The private struct is owned by the reader's allocator.
+    pub fn reader_set_private_end_of_wal(reader: &mut XLogReaderState<'_>)
+);
+
+seam_core::seam!(
+    /// `state->seg.ws_file = fd` (xlogreader.c).
+    pub fn reader_set_ws_file(reader: &mut XLogReaderState<'_>, fd: i32)
+);
+
+seam_core::seam!(
+    /// `close(state->seg.ws_file); state->seg.ws_file = -1` (xlogreader.c).
+    pub fn reader_close_ws_file(reader: &mut XLogReaderState<'_>)
 );
 
 // ---------------------------------------------------------------------------
