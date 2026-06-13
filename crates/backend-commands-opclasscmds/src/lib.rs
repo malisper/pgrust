@@ -64,7 +64,8 @@ use types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
 };
 use types_catalog::opclasscmds_catalog::{
-    Anum_pg_opclass_opcdefault, Anum_pg_opclass_opcintype, FormData_pg_amop, FormData_pg_amproc,
+    Anum_pg_opclass_opcdefault, Anum_pg_opclass_opcintype, Anum_pg_opclass_opcname,
+    FormData_pg_amop, FormData_pg_amproc,
     FormData_pg_opclass, FormData_pg_opfamily, OpclassAmNameNspIndexId,
 };
 use types_core::primitive::{Oid, OidIsValid};
@@ -587,6 +588,7 @@ pub fn DefineOpClass(mcx: Mcx<'_>, stmt: &CreateOpClassStmt) -> PgResult<ObjectA
             let opcintype = column_oid(row, Anum_pg_opclass_opcintype);
             let opcdefault = column_bool(row, Anum_pg_opclass_opcdefault);
             if opcintype == typeoid && opcdefault {
+                let existing_opcname = column_name(row, Anum_pg_opclass_opcname);
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_DUPLICATE_OBJECT)
                     .errmsg(format!(
@@ -594,7 +596,9 @@ pub fn DefineOpClass(mcx: Mcx<'_>, stmt: &CreateOpClassStmt) -> PgResult<ObjectA
                         typename_to_string::call(mcx, node_to_type_name(stmt.datatype.as_ref())?)?
                             .as_str()
                     ))
-                    .errdetail("Operator class already is the default.")
+                    .errdetail(format!(
+                        "Operator class \"{existing_opcname}\" already is the default."
+                    ))
                     .into_error());
             }
         }
@@ -1951,5 +1955,17 @@ fn column_bool(row: &[(TupleValue<'_>, bool)], attno: i16) -> bool {
     match &row[(attno - 1) as usize].0 {
         TupleValue::ByVal(d) => d.as_bool(),
         TupleValue::ByRef(_) => false,
+    }
+}
+
+/// Read a `NameData` column (`char[NAMEDATALEN]`, NUL-padded) from a deformed
+/// `systable_scan` row as a `String`, mirroring C's `NameStr(...)`.
+fn column_name(row: &[(TupleValue<'_>, bool)], attno: i16) -> String {
+    match &row[(attno - 1) as usize].0 {
+        TupleValue::ByRef(bytes) => {
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            String::from_utf8_lossy(&bytes[..end]).into_owned()
+        }
+        TupleValue::ByVal(_) => String::new(),
     }
 }
