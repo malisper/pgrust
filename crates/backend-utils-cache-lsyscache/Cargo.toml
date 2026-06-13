@@ -17,5 +17,10 @@ types-error = { path = "../types-error" }
 types-cache = { path = "../types-cache" }
 types-selfuncs = { path = "../types-selfuncs" }
 types-array = { path = "../types-array" }
+types-opclass = { path = "../types-opclass" }
+types-hash = { path = "../types-hash" }
 # Seam crate this unit OWNS (installs every decl from its own init_seams()).
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# Owner seam crates this unit's lookups route through until those owners land.
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }

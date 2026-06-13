@@ -592,3 +592,107 @@ seam_core::seam!(
         memberid: Oid,
     ) -> PgResult<Vec<types_cache::AuthMembersRow>>
 );
+
+/* ------------------------------------------------------------------------
+ *  pg_operator / pg_amop / pg_proc reads driven by lsyscache.c's
+ *  operator-and-opfamily helpers (backend-utils-cache-lsyscache's
+ *  `opfamily_operator` family). All are `SearchSysCache*(OPEROID / AMOPOPID /
+ *  AMOPSTRATEGY / PROCOID)` probes projected to the few fields the caller
+ *  reads off the `Form_pg_operator` / `Form_pg_amop` / `Form_pg_proc` struct.
+ * ------------------------------------------------------------------------ */
+
+/// `((Form_pg_amop) GETSTRUCT(tp))` projected to the fields lsyscache.c's
+/// operator helpers read (`get_op_opfamily_properties`,
+/// `get_ordering_op_properties`, `get_op_hash_functions`,
+/// `get_opfamily_member`). A copy out of the catcache, so it carries no
+/// lifetime.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AmopOpidRow {
+    /// `amopmethod` — the index access method OID.
+    pub amopmethod: Oid,
+    /// `amopfamily` — the operator family OID.
+    pub amopfamily: Oid,
+    /// `amopstrategy` — the strategy number.
+    pub amopstrategy: i16,
+    /// `amoplefttype` — the operator's left input type.
+    pub amoplefttype: Oid,
+    /// `amoprighttype` — the operator's right input type.
+    pub amoprighttype: Oid,
+    /// `amopopr` — the operator's OID.
+    pub amopopr: Oid,
+}
+
+seam_core::seam!(
+    /// `SearchSysCache1(OPEROID, ObjectIdGetDatum(opno))` +
+    /// `GETSTRUCT(Form_pg_operator)->oprcode` (`get_opcode`, lsyscache.c).
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller returns
+    /// `InvalidOid`. The installer owns the `ReleaseSysCache`.
+    pub fn oper_oprcode(opno: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(OPEROID, ObjectIdGetDatum(opno))` +
+    /// `GETSTRUCT(Form_pg_operator)->oprcom` (`get_commutator`, lsyscache.c).
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the caller returns
+    /// `InvalidOid`. The installer owns the `ReleaseSysCache`.
+    pub fn oper_oprcom(opno: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(OPEROID, ObjectIdGetDatum(opno))` +
+    /// `GETSTRUCT(Form_pg_operator)->(oprleft, oprright)` (`op_input_types`,
+    /// lsyscache.c). `Ok(None)` on a cache miss (`!HeapTupleIsValid`), so the
+    /// caller raises `cache lookup failed for operator %u`. The installer owns
+    /// the `ReleaseSysCache`.
+    pub fn oper_input_types(opno: Oid) -> PgResult<Option<(Oid, Oid)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache3(AMOPOPID, ObjectIdGetDatum(opno),
+    /// CharGetDatum(purpose), ObjectIdGetDatum(opfamily))` projected to
+    /// [`AmopOpidRow`] (`get_op_opfamily_properties` / `get_op_opfamily_sortfamily`,
+    /// lsyscache.c). `purpose` is `AMOP_SEARCH` (`'s'`) or `AMOP_ORDER`
+    /// (`'o'`). `Ok(None)` on a cache miss (`!HeapTupleIsValid`); the installer
+    /// owns the `ReleaseSysCache`.
+    pub fn amop_by_opr_purpose_family(
+        opno: Oid,
+        purpose: i8,
+        opfamily: Oid,
+    ) -> PgResult<Option<AmopOpidRow>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache4(AMOPSTRATEGY, ObjectIdGetDatum(opfamily),
+    /// ObjectIdGetDatum(lefttype), ObjectIdGetDatum(righttype),
+    /// Int16GetDatum(strategy))` projected to [`AmopOpidRow`]
+    /// (`get_opfamily_member`, lsyscache.c). `Ok(None)` on a cache miss
+    /// (`!HeapTupleIsValid`); the caller returns `InvalidOid`. The installer
+    /// owns the `ReleaseSysCache`.
+    pub fn amop_by_strategy_full(
+        opfamily: Oid,
+        lefttype: Oid,
+        righttype: Oid,
+        strategy: i16,
+    ) -> PgResult<Option<AmopOpidRow>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(opno))` member rows,
+    /// each projected to [`AmopOpidRow`] in catlist order
+    /// (`get_ordering_op_properties` / `get_op_hash_functions`, lsyscache.c).
+    /// The catlist is copied into `mcx`; `ReleaseSysCacheList` is subsumed by
+    /// returning the rows by value. `Err` carries OOM from the copy.
+    pub fn amop_list_by_opr<'mcx>(
+        mcx: Mcx<'mcx>,
+        opno: Oid,
+    ) -> PgResult<PgVec<'mcx, AmopOpidRow>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid))` +
+    /// `GETSTRUCT(Form_pg_proc)->proisstrict` (`func_strict`, lsyscache.c).
+    /// `Ok(None)` on a cache miss (`!HeapTupleIsValid`), so the caller raises
+    /// `cache lookup failed for function %u`. The installer owns the
+    /// `ReleaseSysCache`.
+    pub fn proc_isstrict(funcid: Oid) -> PgResult<Option<bool>>
+);
