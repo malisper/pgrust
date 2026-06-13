@@ -787,13 +787,25 @@ pub fn transformRelOptions(
     accept_oids_off: bool,
     is_reset: bool,
 ) -> PgResult<Option<Datum>> {
-    // no change if empty list
+    // no change if empty list. C: `return oldOptions;` — the input array
+    // verbatim (or `(Datum) 0` when there were none). The port's input is the
+    // raw `text[]` bytes, so re-hand them as a `Datum`: deconstruct then
+    // reconstruct preserves the array content exactly (reloptions are a flat
+    // `text[]`). `None` here mirrors the C `(Datum) 0` no-array case.
     if def_list.is_empty() {
-        // C returns oldOptions unchanged. With no constructed array we have no
-        // Datum to hand back, so represent the "keep old" / "(Datum) 0" cases
-        // directly: a present old array would have to be re-handed as its own
-        // Datum, which the caller already holds, so signal "no new array".
-        return Ok(None);
+        match old_options {
+            None => return Ok(None),
+            Some(old_options) => {
+                let oldoptions =
+                    backend_utils_adt_arrayfuncs_seams::deconstruct_text_array::call(mcx, old_options)?;
+                if oldoptions.is_empty() {
+                    return Ok(None);
+                }
+                let refs: Vec<&str> = oldoptions.iter().map(|s| s.as_str()).collect();
+                let datum = backend_utils_adt_arrayfuncs_seams::construct_text_array::call(mcx, &refs)?;
+                return Ok(Some(datum));
+            }
+        }
     }
 
     // We build the new array via the arrayfuncs construct seam.
