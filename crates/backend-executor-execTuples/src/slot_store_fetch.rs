@@ -58,9 +58,11 @@ pub fn ExecStoreHeapTuple<'mcx>(
     Ok(())
 }
 
-/// `ExecStoreBufferHeapTuple(tuple, slot, buffer)` (execTuples.c).
+/// `ExecStoreBufferHeapTuple(tuple, slot, buffer)` (execTuples.c). The on-disk
+/// heap tuple stored into a buffer slot is the body-bearing [`FormedTuple`]
+/// (its `t_data` lives in the pinned page), matching the slot's carrier.
 pub fn ExecStoreBufferHeapTuple<'mcx>(
-    tuple: HeapTuple<'mcx>,
+    tuple: FormedTuple<'mcx>,
     slot: &mut SlotData<'mcx>,
     buffer: Buffer,
 ) -> PgResult<()> {
@@ -75,10 +77,8 @@ pub fn ExecStoreBufferHeapTuple<'mcx>(
         ));
     };
 
-    let t_table_oid = tuple
-        .as_ref()
-        .map(|t| t.t_tableOid)
-        .unwrap_or_default();
+    // slot->tts_tableOid = tuple->t_tableOid; (read before the move).
+    let t_table_oid = tuple.tuple.t_tableOid;
 
     // tts_buffer_heap_store_tuple(slot, tuple, buffer, false);
     tts_buffer_heap_store_tuple(bslot, tuple, buffer, false);
@@ -90,7 +90,7 @@ pub fn ExecStoreBufferHeapTuple<'mcx>(
 
 /// `ExecStorePinnedBufferHeapTuple(tuple, slot, buffer)` (execTuples.c).
 pub fn ExecStorePinnedBufferHeapTuple<'mcx>(
-    tuple: HeapTuple<'mcx>,
+    tuple: FormedTuple<'mcx>,
     slot: &mut SlotData<'mcx>,
     buffer: Buffer,
 ) -> PgResult<()> {
@@ -105,10 +105,8 @@ pub fn ExecStorePinnedBufferHeapTuple<'mcx>(
         ));
     };
 
-    let t_table_oid = tuple
-        .as_ref()
-        .map(|t| t.t_tableOid)
-        .unwrap_or_default();
+    // slot->tts_tableOid = tuple->t_tableOid; (read before the move).
+    let t_table_oid = tuple.tuple.t_tableOid;
 
     // tts_buffer_heap_store_tuple(slot, tuple, buffer, true);
     tts_buffer_heap_store_tuple(bslot, tuple, buffer, true);
@@ -320,7 +318,7 @@ pub fn ExecFetchSlotHeapTuple<'mcx>(
             Ok((tup, false))
         }
         SlotData::BufferHeap(bslot) => {
-            let tup = tts_buffer_heap_get_heap_tuple(bslot)?;
+            let tup = tts_buffer_heap_get_heap_tuple(mcx, bslot)?;
             Ok((tup, false))
         }
     }
@@ -451,19 +449,66 @@ pub fn ExecCopySlotMinimalTupleExtra<'mcx>(
 ///
 /// This is a `TupleTableSlotOps`-family callback (it lives next to the other
 /// `tts_buffer_heap_*` ops, and its only callers are these `ExecStore*`
-/// storers). The slot-ops vtable family owns it and its buffer-manager seam
-/// routing; the scaffold did not surface it, so it is routed through that owner
-/// and panics until it lands.
-fn tts_buffer_heap_store_tuple<'mcx>(
-    _slot: &mut types_nodes::tuptable::BufferHeapTupleTableSlot<'mcx>,
-    _tuple: HeapTuple<'mcx>,
-    _buffer: Buffer,
-    _transfer_pin: bool,
+/// storers). The expanded slot payload model carries the stored on-disk tuple as
+/// the body-bearing [`FormedTuple`] (`bslot->base.tuple`), so the stored tuple is
+/// taken as a `FormedTuple` (the on-disk image, whose data still lives in the
+/// pinned page). The buffer pin management is the load-bearing logic and routes
+/// through the real `ReleaseBuffer`/`IncrBufferRefCount` bufmgr seams.
+pub(crate) fn tts_buffer_heap_store_tuple<'mcx>(
+    slot: &mut types_nodes::tuptable::BufferHeapTupleTableSlot<'mcx>,
+    tuple: FormedTuple<'mcx>,
+    buffer: Buffer,
+    transfer_pin: bool,
 ) {
-    panic!(
-        "execTuples.c tts_buffer_heap_store_tuple: buffer-heap store callback (incl. \
-         ReleaseBuffer/IncrBufferRefCount pin management) is owned by the slot_ops_vtables family"
-    )
+    use types_nodes::tuptable::TTS_FLAG_SHOULDFREE;
+
+    // if (TTS_SHOULDFREE(slot)) {
+    //     /* materialized slot shouldn't have a buffer to release */
+    //     Assert(!BufferIsValid(bslot->buffer));
+    //     heap_freetuple(bslot->base.tuple);
+    //     slot->tts_flags &= ~TTS_FLAG_SHOULDFREE; }
+    if slot.base.base.should_free() {
+        debug_assert!(!BufferIsValid(slot.buffer));
+        // heap_freetuple(bslot->base.tuple): dropping the owned tuple frees it.
+        slot.base.tuple = None;
+        slot.base.base.header.tts_flags &= !TTS_FLAG_SHOULDFREE;
+    }
+
+    // slot->tts_flags &= ~TTS_FLAG_EMPTY;
+    slot.base.base.mark_not_empty();
+    // slot->tts_nvalid = 0;
+    slot.base.base.tts_nvalid = 0;
+    // slot->tts_tid = tuple->t_self; (read before the tuple is moved in).
+    slot.base.base.header.tts_tid = tuple.tuple.t_self;
+    // bslot->base.tuple = tuple;
+    slot.base.tuple = Some(tuple);
+    // bslot->base.off = 0;
+    slot.base.off = 0;
+
+    // /*
+    //  * If tuple is on a disk page, keep the page pinned as long as we hold a
+    //  * pointer into it. ... This is coded to optimize the case where the slot
+    //  * previously held a tuple on the same disk page ...
+    //  */
+    // if (bslot->buffer != buffer) {
+    if slot.buffer != buffer {
+        //     if (BufferIsValid(bslot->buffer)) ReleaseBuffer(bslot->buffer);
+        if BufferIsValid(slot.buffer) {
+            backend_storage_buffer_bufmgr_seams::release_buffer::call(slot.buffer);
+        }
+        //     bslot->buffer = buffer;
+        slot.buffer = buffer;
+        //     if (!transfer_pin && BufferIsValid(buffer)) IncrBufferRefCount(buffer);
+        if !transfer_pin && BufferIsValid(buffer) {
+            backend_storage_buffer_bufmgr_seams::incr_buffer_ref_count::call(buffer);
+        }
+    } else if transfer_pin && BufferIsValid(buffer) {
+        // } else if (transfer_pin && BufferIsValid(buffer)) {
+        //     /* In transfer_pin mode the caller won't know about the same-page
+        //      * optimization, so we gotta release its pin. */
+        //     ReleaseBuffer(buffer); }
+        backend_storage_buffer_bufmgr_seams::release_buffer::call(buffer);
+    }
 }
 
 /// `slot->tts_tupleDescriptor->natts` — the slot descriptor's attribute count.
