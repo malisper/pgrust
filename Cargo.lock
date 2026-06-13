@@ -2043,10 +2043,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-misc-stack-depth-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+]
+
+[[package]]
+name = "backend-utils-mmgr-freepage"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-misc-stack-depth-seams",
+ "backend-utils-mmgr-freepage-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-freepage",
+]
+
+[[package]]
 name = "backend-utils-mmgr-freepage-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+ "types-error",
  "types-freepage",
 ]
 
@@ -2267,6 +2288,7 @@ dependencies = [
  "backend-utils-misc-pg-rusage",
  "backend-utils-misc-queryenvironment",
  "backend-utils-misc-sampling",
+ "backend-utils-mmgr-freepage",
  "backend-utils-time-combocid",
  "interfaces-libpq-legacy-pqsignal",
 ]
