@@ -40,3 +40,18 @@ pub fn commit_ts_identify(info: uint8) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// Adapter installed into the rmgr-table `commit_ts_desc` seam: extracts the decoded
+/// record from the dispatcher's `XLogReaderState` (C's `record->record`) and
+/// renders it. The reader is always positioned on a decoded record when the
+/// rmgr table invokes `rm_desc`.
+pub fn commit_ts_desc_seam(
+    buf: &mut PgString<'_>,
+    record: &types_wal::rmgr::XLogReaderState<'_>,
+) -> PgResult<()> {
+    let record = record
+        .record
+        .as_ref()
+        .expect("commit_ts_desc called without a decoded record");
+    commit_ts_desc(buf, record)
+}
