@@ -8679,6 +8679,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-string"
+version = "0.0.0"
+dependencies = [
+ "common-string-seams",
+ "mcx",
+ "types-error",
+]
+
+[[package]]
 name = "common-string-seams"
 version = "0.0.0"
 dependencies = [
@@ -9032,6 +9041,7 @@ dependencies = [
  "common-hashfn",
  "common-ip",
  "common-pglz",
+ "common-string",
  "interfaces-libpq-legacy-pqsignal",
  "port-crc32c",
  "port-pgsleep",
