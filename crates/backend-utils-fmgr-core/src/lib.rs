@@ -30,7 +30,7 @@ use types_core::{InvalidOid, Oid, TransactionId};
 use types_datum::{Datum, NullableDatum};
 use types_tuple::heaptuple::ItemPointerData;
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_FUNCTION,
 };
 use types_fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
@@ -191,6 +191,12 @@ pub fn function_call_invoke_with_expr(
         | FmgrResolution::CLanguage(b) => invoke_pgfunction(&b.func, fcinfo),
         FmgrResolution::SecurityDefiner { fn_oid } => {
             fmgr_security_definer(mcx, *fn_oid, fn_expr, fcinfo)
+        }
+        // C: fn_addr == fmgr_sql; the body lives in executor/functions.c. The
+        // call frame is dispatched across the owner's seam (panics "seam not
+        // installed" until executor/functions.c lands).
+        FmgrResolution::Sql { fn_oid } => {
+            backend_executor_functions_seams::fmgr_sql::call(mcx, *fn_oid, fcinfo)
         }
     }
 }
@@ -628,15 +634,14 @@ pub fn fmgr_info_cxt_security(
             FmgrResolution::CLanguage(loaded.func)
         }
         ProcLanguage::Sql => {
-            // C: fn_addr = fmgr_sql; fn_stats = TRACK_FUNC_PL. The SQL-function
-            // body lives in executor/functions.c, not fmgr.c; only this
-            // assignment is here. The SQL leg reports unsupported until that
-            // owner lands.
+            // C: finfo->fn_addr = fmgr_sql; finfo->fn_stats = TRACK_FUNC_PL;
+            // (fmgr.c:250-252). fmgr.c only installs the `fmgr_sql` call handler
+            // here — its body lives in executor/functions.c. The owned model
+            // captures the resolution; `function_call_invoke` dispatches to the
+            // `fmgr_sql` seam (the executor/functions.c owner) at call time,
+            // mirroring how the secdef leg installs `fmgr_security_definer`.
             finfo.fn_stats = TRACK_FUNC_PL;
-            return Err(unsupported(
-                "SQL-language function (fmgr_sql) not supported",
-                function_id,
-            ));
+            FmgrResolution::Sql { fn_oid: function_id }
         }
         ProcLanguage::Other => {
             // C: fmgr_info_other_lang(functionId, finfo, procedureTuple);
@@ -770,12 +775,6 @@ fn fmgr_info_c_lang(function_id: Oid, proc: &ProcInfo) -> PgResult<LoadedCFunc> 
             "unrecognized function API version: {v}"
         ))),
     }
-}
-
-fn unsupported(what: &str, function_id: Oid) -> PgError {
-    PgError::error(what.to_string())
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .with_detail(format!("function {function_id}"))
 }
 
 /// Port of the static `fmgr_info_other_lang`: read `lanplcallfoid` from the

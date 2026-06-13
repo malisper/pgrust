@@ -330,8 +330,14 @@ pub const DYNAMIC_SHARED_MEMORY_CONTROL_LOCK: usize = 34;
 /// `DSMRegistryLock` (`lwlocklist.h`, `PG_LWLOCK(50, DSMRegistry)`): offset of
 /// the DSM-registry lock in `MainLWLockArray` (`&MainLWLockArray[50].lock`).
 pub const DSM_REGISTRY_LOCK: usize = 50;
+/// `OidGenLock` (`lwlocklist.h`): `PG_LWLOCK(2, OidGen)`.
+pub const OID_GEN_LOCK: usize = 2;
+/// `XidGenLock` (`lwlocklist.h`): `PG_LWLOCK(3, XidGen)`.
+pub const XID_GEN_LOCK: usize = 3;
 /// `ProcArrayLock` (`lwlocklist.h`): `PG_LWLOCK(4, ProcArray)`.
 pub const PROC_ARRAY_LOCK: usize = 4;
+/// `XactTruncationLock` (`lwlocklist.h`): `PG_LWLOCK(44, XactTruncation)`.
+pub const XACT_TRUNCATION_LOCK: usize = 44;
 /// `ReplicationSlotAllocationLock` — `PG_LWLOCK(36, ReplicationSlotAllocation)`.
 pub const REPLICATION_SLOT_ALLOCATION_LOCK: usize = 36;
 /// `ReplicationSlotControlLock` — `PG_LWLOCK(37, ReplicationSlotControl)`.
@@ -339,6 +345,13 @@ pub const REPLICATION_SLOT_CONTROL_LOCK: usize = 37;
 /// `ShmemIndexLock` (`lwlocklist.h`): offset of the shmem-index lock in
 /// `MainLWLockArray` (`PG_LWLOCK(1, ShmemIndex)`).
 pub const SHMEM_INDEX_LOCK: usize = 1;
+
+/// `SInvalReadLock` (`lwlocklist.h`, `PG_LWLOCK(5, SInvalRead)`): offset of the
+/// shared-invalidation read lock in `MainLWLockArray`.
+pub const SINVAL_READ_LOCK: usize = 5;
+/// `SInvalWriteLock` (`lwlocklist.h`, `PG_LWLOCK(6, SInvalWrite)`): offset of
+/// the shared-invalidation write lock in `MainLWLockArray`.
+pub const SINVAL_WRITE_LOCK: usize = 6;
 
 /// `WaitEventCustomLock` (`lwlocklist.h`, `PG_LWLOCK(48, WaitEventCustom)`):
 /// offset of the custom-wait-event lock in `MainLWLockArray`.

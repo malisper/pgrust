@@ -110,7 +110,7 @@ fn seam_slot_getallattrs<'mcx>(
     _mcx: Mcx<'mcx>,
     _slot: &TupleTableSlot,
 ) -> PgResult<mcx::PgVec<'mcx, DeformedColumn<'mcx>>> {
-    todo!("execTuples.c slot_getallattrs — needs the slot payload model (tts_values/tts_isnull)")
+    panic!("execTuples.c slot_getallattrs — needs the slot payload model (tts_values/tts_isnull)")
 }
 
 /// Seam `exec_init_result_tuple_slot_tl` — `ExecInitResultTupleSlotTL`.
@@ -131,7 +131,7 @@ fn seam_exec_init_result_tuple_slot_tl<'mcx>(
 /// which the trimmed pool header does not carry. Stays seam-and-panic until the
 /// slot payload model lands.
 fn seam_exec_clear_tuple(_slot: &mut TupleTableSlot) -> PgResult<()> {
-    todo!("execTuples.c ExecClearTuple — needs the slot payload model (tts_ops->clear)")
+    panic!("execTuples.c ExecClearTuple — needs the slot payload model (tts_ops->clear)")
 }
 
 /// Seam `exec_copy_slot` — `ExecCopySlot` (provisional contract; see seam doc).
@@ -143,7 +143,7 @@ fn seam_exec_copy_slot<'mcx>(
     _dstslot: &mut TupleTableSlot,
     _srcslot: &TupleTableSlot,
 ) -> PgResult<()> {
-    todo!("execTuples.c ExecCopySlot — needs the slot payload model (tts_ops->copyslot)")
+    panic!("execTuples.c ExecCopySlot — needs the slot payload model (tts_ops->copyslot)")
 }
 
 /// Seam `exec_init_result_slot` — `ExecInitResultSlot`.
@@ -213,7 +213,7 @@ fn seam_exec_set_slot_descriptor<'mcx>(
     _slot: SlotId,
     _tupdesc: TupleDesc<'mcx>,
 ) -> PgResult<()> {
-    todo!("execTuples.c ExecSetSlotDescriptor — needs the slot payload model (tts_values/tts_isnull)")
+    panic!("execTuples.c ExecSetSlotDescriptor — needs the slot payload model (tts_values/tts_isnull)")
 }
 
 /// Seam `exec_store_all_null_tuple` — `ExecStoreAllNullTuple`.
@@ -225,7 +225,7 @@ fn seam_exec_store_all_null_tuple<'mcx>(
     _estate: &mut EStateData<'mcx>,
     _slot: SlotId,
 ) -> PgResult<()> {
-    todo!("execTuples.c ExecStoreAllNullTuple — needs the slot payload model (tts_values/tts_isnull)")
+    panic!("execTuples.c ExecStoreAllNullTuple — needs the slot payload model (tts_values/tts_isnull)")
 }
 
 /// Seam `make_single_tuple_table_slot` — `MakeSingleTupleTableSlot`.
@@ -260,7 +260,7 @@ fn seam_slot_getsysattr(
     _slot: &TupleTableSlot,
     _attnum: AttrNumber,
 ) -> PgResult<(Datum, bool)> {
-    todo!("execTuples.c slot_getsysattr — needs the slot payload model (tts_ops->getsysattr)")
+    panic!("execTuples.c slot_getsysattr — needs the slot payload model (tts_ops->getsysattr)")
 }
 
 /// Seam `exec_init_null_tuple_slot` — `ExecInitNullTupleSlot`.

@@ -23,6 +23,8 @@ backend-utils-adt-rangetypes-seams = { path = "../backend-utils-adt-rangetypes-s
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-adt-numeric-seams = { path = "../backend-utils-adt-numeric-seams" }
 common-hashfn-seams = { path = "../common-hashfn-seams" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

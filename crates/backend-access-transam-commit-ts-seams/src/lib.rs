@@ -64,3 +64,11 @@ seam_core::seam!(
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
     pub fn commit_ts_shmem_init() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExtendCommitTs(newestXact)` (commit_ts.c): zero the commit-ts page
+    /// that would hold `newestXact` if it is the first XID of a new page,
+    /// while the caller holds `XidGenLock`. The SLRU page write can
+    /// `ereport(ERROR)`, carried on `Err`. Owner unported; scaffolded slot.
+    pub fn extend_commit_ts(newest_xact: TransactionId) -> PgResult<()>
+);
