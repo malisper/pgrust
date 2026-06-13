@@ -6713,7 +6713,6 @@ dependencies = [
  "backend-libpq-pqformat",
  "backend-libpq-pqsignal",
  "backend-port-atomics",
- "backend-postmaster-bgworker",
  "backend-postmaster-interrupt",
  "backend-postmaster-launch-backend",
  "backend-postmaster-pgarch",
