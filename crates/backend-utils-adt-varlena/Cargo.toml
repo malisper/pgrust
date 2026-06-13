@@ -20,3 +20,5 @@ backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" 
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-lib-hyperloglog-seams = { path = "../backend-lib-hyperloglog-seams" }
+common-hashfn-seams = { path = "../common-hashfn-seams" }

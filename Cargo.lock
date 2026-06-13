@@ -7359,9 +7359,11 @@ name = "backend-utils-adt-varlena"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
+ "backend-lib-hyperloglog-seams",
  "backend-utils-adt-pg-locale-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-mb-mbutils-seams",
+ "common-hashfn-seams",
  "mcx",
  "seam-core",
  "types-core",
