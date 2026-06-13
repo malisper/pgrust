@@ -17,3 +17,4 @@ types-cache = { path = "../types-cache" }
 types-rangetypes = { path = "../types-rangetypes" }
 backend-utils-adt-multirangetypes-seams = { path = "../backend-utils-adt-multirangetypes-seams" }
 backend-utils-adt-rangetypes-seams = { path = "../backend-utils-adt-rangetypes-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }

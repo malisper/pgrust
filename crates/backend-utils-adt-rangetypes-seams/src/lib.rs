@@ -239,6 +239,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `bounds_adjacent(typcache, boundA, boundB)` (rangetypes.c): whether the
+    /// upper bound `boundA` and the lower bound `boundB` are adjacent (no points
+    /// between them and they do not overlap). For a discrete subtype this builds
+    /// a probe range with `make_range` and tests emptiness. `Err` carries the
+    /// subtype `cmp`/`canonical`'s `ereport(ERROR)`s and OOM.
+    pub fn bounds_adjacent(
+        typcache: &TypeCacheEntry,
+        bound_a: RangeBound,
+        bound_b: RangeBound,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `range_split_internal(typcache, r1, r2, &output1, &output2)`
     /// (rangetypes.c): if `r2` splits `r1`, returns `Some((left, right))` (the
     /// two surrounding ranges, allocated in `mcx`); else `None`. `Err` carries
